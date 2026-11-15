@@ -2,7 +2,6 @@ using LibVLCSharp.Shared.Structures;
 
 namespace MeowFilm.Media;
 
-public sealed record NativePlaybackScope(string OwnerId, string Identity, long Generation);
 public sealed record NativeMediaTrack(int Id, string Name);
 
 /// <summary>

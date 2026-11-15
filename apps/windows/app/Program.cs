@@ -20,7 +20,9 @@ internal static class Program
                 System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
             return;
         }
-        NativePlayback? playback = null;
+        NativeAudioPlayback? musicPlayback = null;
+        NativePlayback? filmPlayback = null;
+        AppPlaybackCoordinator? playbackCoordinator = null;
         FilmRuleService? pendingRules = null;
         FilmSourceService? pendingSources = null;
         FilmMetadataService? pendingMetadata = null;
@@ -32,7 +34,11 @@ internal static class Program
             AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces),
             (runtime, storage, capabilities) =>
             {
-                playback = new NativePlayback();
+                playbackCoordinator = new(
+                    () => musicPlayback?.StopAsync() ?? Task.CompletedTask,
+                    () => filmPlayback?.StopAsync() ?? Task.CompletedTask);
+                musicPlayback = new NativeAudioPlayback(acquireOutput: playbackCoordinator.AcquireMusicAsync);
+                filmPlayback = new NativePlayback(acquireOutput: playbackCoordinator.AcquireFilmAsync);
                 var cacheRoot = AppDataPaths.Current.Caches;
                 cacheStore = new CacheDocumentStore(() =>
                 {
@@ -40,13 +46,13 @@ internal static class Program
                     return new LocalDocumentStore(cacheRoot, AppIdentity.CacheNamespaces,
                         protectedNamespaces: AppIdentity.CacheProtectedNamespaces);
                 });
-                capabilities.Add(new MusicCapability(runtime, storage, playback,
+                capabilities.Add(new MusicCapability(runtime, storage, musicPlayback,
                     Path.Combine(cacheRoot, "music-audio"), cacheStore));
                 pendingRules = new FilmRuleService(runtime);
                 pendingSources = new FilmSourceService(runtime, storage);
                 pendingMetadata = new FilmMetadataService(runtime);
                 var capture = runtime as IRuntimeConnectionSource ?? throw new InvalidOperationException("RUNTIME_CAPTURE_UNAVAILABLE");
-                capabilities.Add(new FilmCapability(pendingRules, pendingSources, runtime, storage, playback,
+                capabilities.Add(new FilmCapability(pendingRules, pendingSources, runtime, storage, filmPlayback,
                     capture.CaptureConnectionAsync, pendingMetadata));
                 // The completed module owns these services. On a constructor
                 // failure the App resource callback still owns the partial pair.
@@ -89,10 +95,21 @@ internal static class Program
                     }
                     finally
                     {
-                        if (playback is not null)
+                        try
                         {
-                            await playback.DisposeAsync();
-                            playback = null;
+                            if (musicPlayback is not null)
+                            {
+                                await musicPlayback.DisposeAsync();
+                                musicPlayback = null;
+                            }
+                        }
+                        finally
+                        {
+                            if (filmPlayback is not null)
+                            {
+                                await filmPlayback.DisposeAsync();
+                                filmPlayback = null;
+                            }
                         }
                     }
                 }
@@ -126,7 +143,8 @@ internal static class Program
                 var settings = shell.MediaControls ?? throw new InvalidOperationException("MEDIA_CONTROLS_MISSING");
                 var attachment = pendingMediaAttachment = new AppMediaWindowAttachment(window, settings);
                 music.AttachDesktopLyricsOwner(window, shell.RestoreFromTray);
-                var systemMedia = new AppSystemMediaAttachment(window, playback!, film,
+                var systemMedia = new AppSystemMediaAttachment(window, musicPlayback!, filmPlayback!, film,
+                    () => playbackCoordinator!.ActiveOwner,
                     [new("music", _ => music.StepAsync(true), _ => music.StepAsync(false),
                         Play: _ => music.ResumePlaybackAsync()),
                      new("film", _ => film.StepAsync(true), _ => film.StepAsync(false), Kind: SystemPlaybackKind.Video,

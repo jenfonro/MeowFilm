@@ -4,8 +4,8 @@
 
 共同切换及故障意图见[歌曲资料与智能播放](../common/music/smart-playback.md#准备提交与故障)。
 
-- `NativePlayback` 是 App 内唯一媒体播放 owner；手动换源可临时准备第二个静音暂停实例。Media 只拥有原生输入、播放状态、作用域、重开及交接能力，不选择歌曲、平台、录音、质量或脚本实例。
-- 音乐能力拥有账号、质量策略、兼容录音、内置与网络源候选及恢复预算。恢复决定必须在能力层完成，再把一个已经核验的 HTTP(S) 输入交给 Media。
+- 音乐 `NativeAudioPlayback` 是独立音乐播放 owner；视频仍由 `NativePlayback` 管理。两端复用中性 occurrence／continuation／read lease 契约，不复用解码器或输出。手动换源可临时准备第二个不输出的音乐 PCM 实例。播放内核只拥有原生输入、播放状态、作用域、重开及交接能力，不选择歌曲、平台、录音、质量或脚本实例。
+- 音乐能力拥有账号、质量策略、兼容录音、内置与网络源候选及恢复预算。恢复决定必须在能力层完成，再把已经核验的 HTTP(S) 输入或授权 read lease 交给音乐播放 owner。
 - System Media 只转发当前 owner 的播放命令，不创建第二播放器，也不持有恢复策略。
 
 ## 2. `INativePlaybackContinuation`
@@ -17,6 +17,7 @@ bool PauseRequested
 string? LastErrorCode
 NativePlaybackContinuation? CaptureContinuation()
 Task ReopenAsync(continuation, uri, headers, token)
+Task ReopenReadAsync(continuation, lease, token)
 ```
 
 `NativePlaybackContinuation` 是不可持久化的单次内存能力，绑定：
@@ -30,9 +31,9 @@ Task ReopenAsync(continuation, uri, headers, token)
 
 ## 3. 原子重开
 
-- `ReopenAsync` 只接受 HTTP(S) URI 和显式请求头集合；新输入继续经过实际 URI、重定向、Range 和表示一致性解析；不作 Origin／回环／URL 图准入。
+- 音乐恢复通过 `ReopenAsync` 提交已核验的 HTTP(S) URI 和显式请求头集合，或通过 `ReopenReadAsync` 转移授权 read lease；HTTP(S) 新输入继续经过实际 URI、重定向、Range 和表示一致性解析，不作 Origin／回环／URL 图准入。
 - 重开不得改变 owner 或媒体 identity。generation 必须与被捕获的当前输入一致，迟到 capability 以 `Superseded` 失败。
-- 旧原生实例释放后才创建新实例。新实例以暂停状态准备，先恢复位置，再读取准备结束时最新的暂停意图决定是否继续播放。
+- 旧输入释放后才发布新实例。音乐先打开解码器并确认真实 PCM，再恢复倍率及位置，随后准备该位置的有界 PCM，最后读取最新的暂停意图决定是否允许 WASAPI 输出。
 - 准备、seek、调用方取消和授权撤销共用同一取消边界。重开失败不把错误输入标记为当前成功来源。
 - read lease、resource lease 和不透明本地输入没有普通 URL 重取权限；它们不能通过 continuation 绕过原授权或改成未经核验的网络输入。
 
@@ -55,10 +56,10 @@ Task ReopenAsync(continuation, uri, headers, token)
 
 脚本在线请求仅因内部 25 秒期限届满而取消时返回 `TIMEOUT`，可作为该候选不可用继续选择，不能使其他已成功的内置候选失效。普通调用方取消、源撤销或质量取消仍为 `CANCELLED`，即使同时到达内部期限也不转换为 `TIMEOUT`。
 
-## 5. 手动无缝交接
+## 5. 手动换源交接
 
-- `INativePlaybackHandoff` 将准备与提交分开：HTTP(S) 输入或完整文件 read lease 在静音暂停实例中打开，旧流继续播放；准备失败或取消只释放新实例。
-- 能力层在提交前重新检查排除、来源授权与实际媒体时长。原生层保留 ready 之后的输入失败，最终提交仍须复核；seek setter 成功不等于定位完成，15 秒预算内读取原生时钟确认与旧流最新位置相差不超过 250 毫秒。提交继承暂停意图、倍速及音量，旧流先静音再允许新流输出。
+- `INativePlaybackHandoff` 将准备与提交分开：HTTP(S) 输入或完整文件 read lease 在不输出的候选解码／PCM 实例中打开，旧流继续播放；准备失败或取消只释放新实例。
+- 能力层在提交前重新检查排除、来源授权与实际媒体时长。原生层保留 ready 之后的输入失败，最终提交仍须复核；音乐 seek 经 FFmpeg 时间戳定位、解码 flush 和前置样本裁剪，不以字节偏移或 setter 返回冒充输出位置；提交前按 donor 最新时钟重建候选 PCM。提交继承暂停意图、倍速及音量，旧输出实际退出后才允许新流输出；不承诺相邻曲目无缝或交叉淡入淡出。
 - `StopOutputForHandoffAsync` 停止已拒绝输出但保留逻辑 occurrence 和控制意图，供错源排除后的静音准备使用。内容故障可保留同代待交接实例；撤权、换歌或明确停止仍撤销它。
 - 换曲、停止、关闭或第二次选择取消旧准备；准备实例不跨播放代次保留。真实听感及双路输出需设备验证，不能用接口单测或编译替代。
 

@@ -147,7 +147,7 @@ public static class FFmpegVideoKernelTests
             object? pending = null;
             try
             {
-                await player.OpenReadAsync("music", "continuation", first, "fixture");
+                await player.OpenReadAsync("film", "continuation", first, "fixture");
                 await Decoded(player); await player.PauseAsync();
                 var point = player.CaptureContinuation()!;
                 var previous = Session(player);
@@ -690,14 +690,14 @@ public static class FFmpegVideoKernelTests
             Check(player.Identity == second.Identity && player.HasMedia && releases == 1 && rejected.Requests.IsEmpty,
                 "stale donor fails before network and releases only its unaccepted capability");
         });
-        yield return Test("late film commit and discard cannot adopt a prepared music replacement", async () =>
+        yield return Test("late runtime commit and discard cannot adopt a prepared read replacement", async () =>
         {
             await using var video = Fixture("progressive");
             using var runtime = new CancellationTokenSource(); using var scope = new CancellationTokenSource();
             await using var authority = Authority(runtime.Token);
             await using var player = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
-            await player.OpenReadAsync("music", "song", new RuntimeMediaTests.WaveLease(), "fixture");
-            await Until(() => player.HasMedia, "music donor");
+            await player.OpenReadAsync("film", "read-fixture", new RuntimeMediaTests.WaveLease(), "fixture");
+            await Until(() => player.HasMedia, "read donor");
             var film = Intent();
             await player.PrepareRuntimeMediaAsync(film,
                 authority.CreateLease(ResourceId, video.Uri(RootPath), scope.Token), Input("progressive"));
@@ -710,8 +710,8 @@ public static class FFmpegVideoKernelTests
             Check(!wrongCommit && replacement.Disposals == 0 && ReferenceEquals(prepared, Field(player, "_handoffSession")),
                 "film callbacks are bound to their own retired preparation");
             await player.CommitHandoffAsync(() => { }, default);
-            Check(player.OwnerId == "music" && player.Identity == "song" && player.HasMedia,
-                "only music's normal commit publishes its candidate");
+            Check(player.OwnerId == "film" && player.Identity == "read-fixture" && player.HasMedia,
+                "only the read input's normal commit publishes its candidate");
         });
         yield return Test("redirected HLS manifest resolves children against actual response location", async () =>
         {
@@ -976,11 +976,11 @@ public static class FFmpegVideoKernelTests
             await Reject(() => player.CommitHandoffAsync(() => stalePublished = true, default));
             await player.DiscardHandoffAsync();
             using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
-            var rejectedMusic = new RuntimeMediaTests.WaveLease();
-            await Reject(() => player.PrepareReadHandoffAsync(rejectedMusic, cancelled.Token));
+            var rejectedRead = new RuntimeMediaTests.WaveLease();
+            await Reject(() => player.PrepareReadHandoffAsync(rejectedRead, cancelled.Token));
             Check(!stalePublished && ReferenceEquals(prepared, Field(player, "_handoffSession")),
-                "late runtime and music callbacks cannot commit or discard another owner's input");
-            Check(rejectedMusic.Disposals == 1, "an already cancelled preparation releases only its own input");
+                "late runtime and ordinary read callbacks cannot commit or discard another owner's input");
+            Check(rejectedRead.Disposals == 1, "an already cancelled preparation releases only its own input");
             await player.CommitRuntimeMediaAsync(nextIntent, () => { }, default);
             Check(player.HasMedia && oldReleases == 1 && player.ObservedVideoOutput is { DisplayedPictures: > 0 }, "only latest candidate publishes");
         });

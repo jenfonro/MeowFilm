@@ -54,6 +54,28 @@ test('rejects duplicate evaluated project references', t => {
   assert.throws(f.verify, /duplicate project reference/);
 });
 
+test('independent audio core rejects video project and transitive VLC dependencies', t => {
+  const f = fixture(t);
+  const audio = join(dirname(dirname(f.app)), 'src/MeowFilm.Audio/MeowFilm.Audio.csproj');
+  mkdirSync(dirname(audio), { recursive: true });
+  writeFileSync(audio, '<Project/>');
+  const entry = {
+    Properties: { MSBuildProjectName: 'MeowFilm.Audio', AssemblyName: 'MeowFilm.Audio' },
+    Items: {
+      ProjectReference: [{ FullPath: f.core }],
+      PackageReference: [{ Identity: 'NAudio.Wasapi' }],
+    },
+  };
+  f.entries.set(audio, entry);
+  f.entries.get(f.app).Items.ProjectReference.push({ FullPath: audio });
+  assert.ok(f.verify().application.projects.includes('MeowFilm.Audio'));
+  entry.Items.ProjectReference.push({ FullPath: f.feature });
+  assert.throws(f.verify, /shared project depends|audio core depends/);
+  entry.Items.ProjectReference.pop();
+  f.entries.get(f.core).Items.PackageReference = [{ Identity: 'LibVLCSharp' }];
+  assert.throws(f.verify, /audio core depends on a video engine/);
+});
+
 test('published output matches evaluated projects and managed runtime assets', t => {
   const policy = fixture(t).verify(), names = policy.application.assemblies;
   const target = 'net10.0/win-x64';

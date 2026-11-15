@@ -80,7 +80,7 @@ public static class AppCompositionTests
                 RuntimeBundle.Verify(Path.Combine(Required("MEOWFILM_TEST_RUNTIME_ROOT"), "aggregate"),
                     AppIdentity.RuntimeId, AppIdentity.ScriptModules), AppIdentity.ScriptModules,
                 Path.Combine(data, "script-runtime"), token));
-        await using var playback = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
+        await using var playback = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
         await using var music = new MusicCapability(runtime, store, playback);
         var lifecycle = new AppShutdown([music], []);
         try
@@ -138,7 +138,7 @@ public static class AppCompositionTests
         {
             await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
             await using var runtime = StartupRuntime();
-            await using var playback = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
+            await using var playback = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
             var application = new MusicNativeApplication(store, runtime);
             await using var music = new MusicCapability(application, store, playback);
             var lifecycle = new AppShutdown([music], []);
@@ -215,7 +215,7 @@ public static class AppCompositionTests
             ("value", JsonNode.Parse(value))))));
         var fingerprint = await store.WriteAsync(MusicLibraryOwner.DocumentNamespace, LJ.Bytes(document), DocumentFingerprint.Missing);
         await using var runtime = StartupRuntime();
-        await using var playback = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
+        await using var playback = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
         var application = new MusicNativeApplication(store, runtime);
         await using var music = new MusicCapability(application, store, playback);
         var messages = new List<string>();

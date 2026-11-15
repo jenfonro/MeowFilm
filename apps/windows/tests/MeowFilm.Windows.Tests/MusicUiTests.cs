@@ -970,7 +970,7 @@ public static partial class MusicUiTests
                 Equal(0, f.Playback.Opens.Count);
             }
             var root = NewRoot(); await using var store = new LocalDocumentStore(root, ["music.files.v2"]);
-            await using var native = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
+            await using var native = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
             var runtime = new FailedApplication(); var module = new MusicCapability(runtime, store, native);
             await Failure(() => module.InitializeAsync(default), "STORAGE_UNAVAILABLE");
             Equal(0, module.Playlists.Count); Equal("", module.Status); True(!native.HasMedia, "no phantom media");
@@ -1391,7 +1391,7 @@ public static partial class MusicUiTests
         public readonly PlaybackProbe Playback;
         public readonly Dialogs Dialogs;
         private Fixture(PlaybackProbe playback, Dialogs dialogs) { Playback = playback; Dialogs = dialogs; }
-        public static async Task<Fixture> Create(string? root = null, bool persistent = false, NativePlayback? native = null,
+        public static async Task<Fixture> Create(string? root = null, bool persistent = false, NativeAudioPlayback? native = null,
             IMusicPlayback? output = null, bool withPlaybackCache = false, IMusicPlaybackFeedback? feedback = null)
         {
             root ??= NewRoot();

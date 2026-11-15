@@ -55,7 +55,7 @@ internal static class NativeRuntimeModules
             }
 
             // Reuse an already loaded/partially initialized root, not a fresh default search.
-            Core.Initialize(bound ?? requested);
+            LibVLCSharp.Shared.Core.Initialize(bound ?? requested);
             loaded = ReadLoadedRuntime();
             if (!loaded.Complete || loaded.Root is null ||
                 bound is not null && !SameRoot(bound, loaded.Root) ||

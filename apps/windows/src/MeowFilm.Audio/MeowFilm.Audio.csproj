@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AudioKernelRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..\..\.cache\windows-audio-kernel'))</AudioKernelRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../MeowFilm.Core/MeowFilm.Core.csproj" />
+    <PackageReference Include="NAudio.Core" Version="[3.3.0]" />
+    <PackageReference Include="NAudio.Wasapi" Version="[3.3.0]" />
+    <PackageReference Include="FFmpeg.AutoGen" Version="[9.0.1.1]" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="$(AudioKernelRoot)\output\AudioKernelBuild.g.cs" />
+    <Content Include="$(AudioKernelRoot)\output\avutil-61.dll;$(AudioKernelRoot)\output\swresample-7.dll;$(AudioKernelRoot)\output\avcodec-63.dll;$(AudioKernelRoot)\output\avformat-63.dll;$(AudioKernelRoot)\output\avfilter-12.dll">
+      <Link>audio-kernel\win-x64\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="$(AudioKernelRoot)\output\build-receipt.json">
+      <Link>audio-kernel\win-x64\build-receipt.json</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+  <Target Name="BuildAudioKernel" BeforeTargets="BeforeBuild" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Exec Command="powershell -NoProfile -File &quot;$(MSBuildThisFileDirectory)..\..\..\..\scripts\windows\build-audio-kernel.ps1&quot; -Configuration $(Configuration)" />
+  </Target>
+</Project>

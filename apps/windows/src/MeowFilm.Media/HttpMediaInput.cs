@@ -94,7 +94,7 @@ public sealed class HttpMediaInput : MediaInput
         CancellationToken token, bool allowAdaptive)
     {
         options ??= new NativeHttpMediaOptions();
-        var copy = ValidateRequest(uri, headers, allowAdaptive);
+        var copy = NativeHttpMediaPolicy.ValidateRequest(uri, headers, allowAdaptive);
         token.ThrowIfCancellationRequested();
         var input = new HttpMediaInput(uri, copy, options, options.CreateClient(), token);
         input._allowAdaptive = allowAdaptive;
@@ -115,7 +115,7 @@ public sealed class HttpMediaInput : MediaInput
             if (allowAdaptive && manifest) input.DemuxName = "adaptive";
             else
             {
-                RejectAdaptivePath(input._uri);
+                NativeHttpMediaPolicy.RejectAdaptivePath(input._uri);
                 CheckContentType(input._response!, false);
                 input.DemuxName = Probe(prefix);
             }
@@ -124,48 +124,11 @@ public sealed class HttpMediaInput : MediaInput
         catch (Exception error)
         {
             bool cancelled = input._lifetime.IsCancellationRequested;
-            var code = Classify(error);
+            var code = NativeHttpMediaPolicy.Classify(error);
             input.Dispose();
             if (cancelled) throw new OperationCanceledException(token);
             throw new PlaybackException(code);
         }
-    }
-
-    internal static Dictionary<string, string> ValidateRequest(Uri uri,
-        IReadOnlyDictionary<string, string> headers, bool allowAdaptive = false)
-    {
-        NativeHttpMediaOptions.ValidateSyntax(uri);
-        if (!allowAdaptive) RejectAdaptivePath(uri);
-        if (headers is null || headers.Count > 32) throw new PlaybackException(PlaybackError.InvalidHeaders);
-        var copy = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        int size = 0;
-        foreach (var (name, value) in headers)
-        {
-            if (string.IsNullOrEmpty(name) || name.Length > 128 || value is null || value.Length > 8192 ||
-                name.Any(c => !char.IsAsciiLetterOrDigit(c) && !"!#$%&'*+-.^_`|~".Contains(c)) ||
-                value.Any(c => c < 0x20 || c > 0x7e) ||
-                !copy.TryAdd(name, value) || (size += name.Length + value.Length) > 16384)
-                throw new PlaybackException(PlaybackError.InvalidHeaders);
-            if (name.Equals("Host", StringComparison.OrdinalIgnoreCase) ||
-                name.Equals("Range", StringComparison.OrdinalIgnoreCase) ||
-                name.Equals("Accept-Encoding", StringComparison.OrdinalIgnoreCase) ||
-                name.StartsWith("If-", StringComparison.OrdinalIgnoreCase) ||
-                name.StartsWith("Content-", StringComparison.OrdinalIgnoreCase) ||
-                name.StartsWith("Proxy-", StringComparison.OrdinalIgnoreCase) ||
-                name.StartsWith("Sec-", StringComparison.OrdinalIgnoreCase) ||
-                new[] { "Connection", "Keep-Alive", "TE", "Trailer", "Transfer-Encoding", "Upgrade", "Expect" }
-                    .Contains(name, StringComparer.OrdinalIgnoreCase))
-                throw new PlaybackException(PlaybackError.UnsupportedHeaders);
-        }
-        return copy;
-    }
-
-    private static void RejectAdaptivePath(Uri uri)
-    {
-        string path = Uri.UnescapeDataString(uri.AbsolutePath);
-        if (new[] { ".m3u8", ".m3u", ".mpd", ".ism", ".isml" }
-            .Any(extension => path.EndsWith(extension, StringComparison.OrdinalIgnoreCase)))
-            throw new PlaybackException(PlaybackError.UnsupportedAdaptive);
     }
 
     private static void CheckContentType(HttpResponseMessage response, bool allowAdaptive = false)
@@ -188,7 +151,7 @@ public sealed class HttpMediaInput : MediaInput
         {
             token.ThrowIfCancellationRequested();
             NativeHttpMediaOptions.ValidateSyntax(_uri);
-            if (!_allowAdaptive) RejectAdaptivePath(_uri);
+            if (!_allowAdaptive) NativeHttpMediaPolicy.RejectAdaptivePath(_uri);
             if (!visited.Add(_uri.AbsoluteUri)) throw new PlaybackException(PlaybackError.HttpRedirectFailed);
             using var request = new HttpRequestMessage(HttpMethod.Get, _uri)
             {
@@ -322,7 +285,7 @@ public sealed class HttpMediaInput : MediaInput
             }
             catch (Exception error)
             {
-                if (!_lifetime.IsCancellationRequested) Fail(Classify(error));
+                if (!_lifetime.IsCancellationRequested) Fail(NativeHttpMediaPolicy.Classify(error));
                 return -1; // No exception or credential-bearing native diagnostic crosses the callback ABI.
             }
         }
@@ -349,7 +312,7 @@ public sealed class HttpMediaInput : MediaInput
             }
             catch (Exception error)
             {
-                if (!_lifetime.IsCancellationRequested) Fail(Classify(error));
+                if (!_lifetime.IsCancellationRequested) Fail(NativeHttpMediaPolicy.Classify(error));
                 return false;
             }
         }
@@ -398,22 +361,6 @@ public sealed class HttpMediaInput : MediaInput
         if (Interlocked.CompareExchange(ref _error, code, null) is not null) return;
         Cancel();
         Failed?.Invoke(code); // Internal subscriber only posts to the owner, never calls libVLC here.
-    }
-
-    internal static string Classify(Exception error)
-    {
-        // Transport exceptions can be wrapped by HttpClient. Only extract our fixed code;
-        // no URI/response/header/exception body or inner exception is published.
-        for (Exception? current = error; current is not null; current = current.InnerException)
-            if (current is PlaybackException known) return known.Code;
-        return error switch
-        {
-            OperationCanceledException => PlaybackError.HttpDeadline,
-            HttpRequestException { HttpRequestError: HttpRequestError.SecureConnectionError } => PlaybackError.HttpTlsFailed,
-            HttpRequestException { HttpRequestError: HttpRequestError.ResponseEnded } => PlaybackError.HttpTruncated,
-            HttpIOException { HttpRequestError: HttpRequestError.ResponseEnded } => PlaybackError.HttpTruncated,
-            _ => PlaybackError.HttpNetworkFailed
-        };
     }
 
     // Only a bounded manifest is materialized. Progressive bytes keep the existing callbacks.

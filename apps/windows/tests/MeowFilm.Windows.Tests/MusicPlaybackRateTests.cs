@@ -17,10 +17,9 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> PlaybackRateCases()
     {
-        yield return Case("native music rate reaches the actual shared libVLC input and survives a new local track", async () =>
+        yield return Case("native music rate reaches the independent audio input and survives a new local track", async () =>
         {
-            await using var native = new NativePlayback(nativeLibraryPath: Environment.GetEnvironmentVariable("MEOWFILM_TEST_VLC_ROOT"),
-                audioOutput: NativeAudioOutput.Dummy);
+            await using var native = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
             await using var f = await Fixture.Create(native: native);
             await f.PlayableCollection();
             foreach (string path in System.IO.Directory.GetFiles(f.Root, "*.wav")) WriteRateWave(path);
@@ -28,12 +27,12 @@ public static partial class MusicUiTests
             await Until(() => native.IsPlaying);
             string? old = native.Identity;
             await f.Module.ChangePlaybackRateAsync(1.7);
-            True(Math.Abs((await native.ReadTracksAsync())!.Rate - 1.7) < 0.001, "native SetRate/readback");
+            True(Math.Abs((await native.ReadRateAsync())!.RequestedRate - 1.7) < 0.001, "native SetRate/readback");
             True(Math.Abs(f.Module.AcceptedPlaybackRate!.Value - 1.7) < 0.001, "actual wrapper receipt");
             await f.Module.StepAsync(true);
             await Until(() => native.IsPlaying);
             True(native.Identity != old, "next occurrence");
-            True(Math.Abs((await native.ReadTracksAsync())!.Rate - 1.7) < 0.001, "same shared engine restores rate");
+            True(Math.Abs((await native.ReadRateAsync())!.RequestedRate - 1.7) < 0.001, "independent audio owner restores rate");
             True(!f.Module.EffectivePlaybackRateVerified, "dummy output is not measured system audio");
             Equal(0, f.Runtime.Calls.Count);
         });

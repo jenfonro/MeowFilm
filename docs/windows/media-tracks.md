@@ -1,6 +1,6 @@
 # Windows 原生音轨、字幕轨与倍速
 
-`NativePlayback` 直接拥有当前媒体的轨道、倍速与字幕延迟操作。页面只投影当前快照并提交用户意图，不保存另一份轨道状态。
+`NativePlayback` 直接拥有当前视频媒体的轨道、倍速与字幕延迟操作。音乐由独立 `NativeAudioPlayback` 的 `ReadRateAsync`／`SetRateAsync` 管理，不读取视频轨道快照，见[音乐核心](music-audio-core.md)。页面只投影当前快照并提交用户意图，不保存另一份轨道状态。
 
 ## 会话作用域
 

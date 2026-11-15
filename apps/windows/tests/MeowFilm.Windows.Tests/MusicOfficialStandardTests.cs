@@ -21,7 +21,7 @@ public static class MusicOfficialStandardTests
             f.Clock.Now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             await using var runtime = AudioPeer(1, f.Bytes.Length, "128k");
             var app = new MusicNativeApplication(f.Store, runtime);
-            await using var player = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
+            await using var player = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
             await using var module = new MusicCapability(app, f.Store, player, playbackCacheRoot: f.Root, cacheStore: f.CacheStore);
             await module.InitializeAsync(default);
             await module.ActivateQualitySettingsAsync();

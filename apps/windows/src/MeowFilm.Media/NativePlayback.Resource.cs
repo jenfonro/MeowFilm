@@ -79,7 +79,7 @@ internal sealed class MediaResourceSession(INativeMediaResourceLease lease) : IA
             Token = lifetime.Token;
             CheckCurrent();
             // Snapshot before any await; a later caller mutation cannot change the request.
-            Headers = HttpMediaInput.ValidateRequest(Address, lease.Headers, allowAdaptive: true);
+            Headers = NativeHttpMediaPolicy.ValidateRequest(Address, lease.Headers, allowAdaptive: true);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (PlaybackException) { throw; }

@@ -48,7 +48,7 @@ public static class MediaReadLeaseTests
             Released(rejected);
             using var cancel = new CancellationTokenSource(); cancel.Cancel();
             rejected = new Lease();
-            await Cancelled(() => player.OpenReadAsync("music", "next", rejected, "", cancel.Token));
+            await Cancelled(() => player.OpenReadAsync("other", "next", rejected, "", cancel.Token));
             Released(rejected);
             Check(ReferenceEquals(native, Player(player)) && player.OwnerId == "film" &&
                 active.DisposeCalls == 0, "invalid request does not replace decoder");
@@ -248,7 +248,7 @@ public static class MediaReadLeaseTests
             {
                 ended++; Released(first);
                 Check(Session(player) is null && !player.HasMedia, "retired before Ended");
-                next = player.OpenReadAsync("music", "queued", second, "");
+                next = player.OpenReadAsync("other", "queued", second, "");
             };
             await Open(player, first);
             await Until(() => next is not null, "natural end");
@@ -331,14 +331,14 @@ public static class MediaReadLeaseTests
             var old = Player(player); var tracks = (await player.ReadTracksAsync())!;
             var engine = Engine(player);
             var second = new Lease();
-            await player.OpenReadAsync("music", "same-identity", second, "");
+            await player.OpenReadAsync("other", "same-identity", second, "");
             await Until(() => player.IsPlaying, "replacement playing");
             Check(old.NativeReference == IntPtr.Zero && ReferenceEquals(engine, Engine(player)), "one reusable engine one decoder");
             Released(first);
             cancelled.Cancel(); first.Revoke();
             await Error(() => player.SetRateAsync(tracks.Scope, 2), PlaybackError.Superseded);
             await Task.Delay(100);
-            Check(player.OwnerId == "music" && player.Identity == "same-identity" && player.HasMedia &&
+            Check(player.OwnerId == "other" && player.Identity == "same-identity" && player.HasMedia &&
                 second.DisposeCalls == 0, "old generation isolated");
             await player.StopAsync(); await player.StopAsync();
             await player.DisposeAsync(); await player.DisposeAsync();
@@ -426,7 +426,7 @@ public static class MediaReadLeaseTests
             case "cancel": caller.Cancel(); break;
             case "revoke": lease.Revoke(); break;
             case "stop": await player.StopAsync().WaitAsync(TimeSpan.FromSeconds(8)); break;
-            case "replace": await player.OpenReadAsync("music", "replacement", replacement!, "").WaitAsync(TimeSpan.FromSeconds(8)); break;
+            case "replace": await player.OpenReadAsync("other", "replacement", replacement!, "").WaitAsync(TimeSpan.FromSeconds(8)); break;
             case "dispose": await player.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(8)); break;
         }
         if (preflight)

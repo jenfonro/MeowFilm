@@ -13,5 +13,6 @@
     <ProjectReference Include="../src/MeowFilm.AppHost/MeowFilm.AppHost.csproj" />
     <ProjectReference Include="../src/MeowFilm.Capabilities/MeowFilm.Capabilities.csproj" />
     <ProjectReference Include="../src/MeowFilm.SystemMedia/MeowFilm.SystemMedia.csproj" />
+    <ProjectReference Include="../src/MeowFilm.Audio/MeowFilm.Audio.csproj" />
   </ItemGroup>
 </Project>

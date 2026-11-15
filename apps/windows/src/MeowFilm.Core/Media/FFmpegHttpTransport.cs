@@ -28,7 +28,7 @@ internal sealed class FFmpegHttpTransport : IDisposable
         NativeHttpMediaOptions options, CancellationToken token)
     {
         _options = options;
-        _headers = HttpMediaInput.ValidateRequest(root, headers, allowAdaptive: true);
+        _headers = NativeHttpMediaPolicy.ValidateRequest(root, headers, allowAdaptive: true);
         _lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
         _client = options.CreateClient();
     }
@@ -74,15 +74,15 @@ internal sealed class FFmpegHttpTransport : IDisposable
         }
         catch (Exception error) { Fail(error); return -1; }
     }
-    internal int Read(IntPtr ignored, ulong handle, IntPtr buffer, int length)
+    internal int Read(IntPtr ignored, ulong handle, IntPtr buffer, int length, CancellationToken token = default)
     {
-        try { return ReaderFor(handle).Read(buffer, length); }
-        catch (Exception error) { Fail(error); return -1; }
+        try { return ReaderFor(handle).Read(buffer, length, token); }
+        catch (Exception error) { if (!token.IsCancellationRequested) Fail(error); return -1; }
     }
-    internal long Seek(IntPtr ignored, ulong handle, long offset, int whence)
+    internal long Seek(IntPtr ignored, ulong handle, long offset, int whence, CancellationToken token = default)
     {
-        try { return ReaderFor(handle).Seek(offset, whence); }
-        catch (Exception error) { Fail(error); return -1; }
+        try { return ReaderFor(handle).Seek(offset, whence, token); }
+        catch (Exception error) { if (!token.IsCancellationRequested) Fail(error); return -1; }
     }
     internal void Close(IntPtr ignored, ulong handle)
     {
@@ -112,15 +112,15 @@ internal sealed class FFmpegHttpTransport : IDisposable
                 throw new PlaybackException(PlaybackError.ReadFailed);
         }
     }
-    private CancellationTokenSource Deadline(TimeSpan timeout)
+    private CancellationTokenSource Deadline(TimeSpan timeout, CancellationToken token = default)
     {
-        var deadline = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        var deadline = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token, token);
         deadline.CancelAfter(timeout); return deadline;
     }
     private void Fail(Exception error)
     {
         if (Cancelled) return;
-        string code = HttpMediaInput.Classify(error);
+        string code = NativeHttpMediaPolicy.Classify(error);
         if (Interlocked.CompareExchange(ref _error, code, null) is not null) return;
         Cancel();
         try { Failed?.Invoke(code); }
@@ -180,9 +180,9 @@ internal sealed class FFmpegHttpTransport : IDisposable
                 throw new PlaybackException(PlaybackError.HttpInvalidRange);
             _owner = owner; Address = address; _position = start; _end = end;
         }
-        internal async Task OpenAsync(bool initial)
+        internal async Task OpenAsync(bool initial, CancellationToken operation = default)
         {
-            using var deadline = _owner.Deadline(_owner._options.RequestTimeout);
+            using var deadline = _owner.Deadline(_owner._options.RequestTimeout, operation);
             var token = deadline.Token;
             var visited = new HashSet<string>(StringComparer.Ordinal);
             for (int hop = 0; ; hop++)
@@ -267,23 +267,32 @@ internal sealed class FFmpegHttpTransport : IDisposable
                 return;
             }
         }
-        internal int Read(IntPtr output, int length)
+        internal int Read(IntPtr output, int length, CancellationToken token)
         {
             lock (_io)
             {
                 _owner._lifetime.Token.ThrowIfCancellationRequested();
+                token.ThrowIfCancellationRequested();
                 if (Volatile.Read(ref _disposed) != 0 || output == IntPtr.Zero || length <= 0)
                     throw new PlaybackException(PlaybackError.ReadFailed);
                 if (_end >= 0 && _position == _end || Length == _position) return 0;
-                if (_responseEnd is { } end && _position == end)
+                if (_body is null || _responseEnd is { } end && _position == end)
                 {
                     if (!CanSeek) throw new PlaybackException(PlaybackError.HttpTruncated);
-                    Abort(); OpenAsync(initial: false).GetAwaiter().GetResult();
+                    // AVIO can seek within its own buffer without a seek callback.
+                    // Resume at the last byte actually delivered to that buffer.
+                    Abort(); OpenAsync(initial: false, token).GetAwaiter().GetResult();
                 }
                 int count = Math.Min(length, BufferCapacity);
                 if (_responseEnd is { } limit) count = (int)Math.Min(count, limit - _position);
-                using var deadline = _owner.Deadline(_owner._options.ReadTimeout);
-                int read = _body!.ReadAsync(_buffer.AsMemory(0, count), deadline.Token).AsTask().GetAwaiter().GetResult();
+                using var deadline = _owner.Deadline(_owner._options.ReadTimeout, token);
+                int read;
+                try { read = _body!.ReadAsync(_buffer.AsMemory(0, count), deadline.Token).AsTask().GetAwaiter().GetResult(); }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    Abort();
+                    throw;
+                }
                 if (read == 0 && _responseEnd is { } expected && _position != expected)
                     throw new PlaybackException(PlaybackError.HttpTruncated);
                 Marshal.Copy(_buffer, 0, output, read);
@@ -292,11 +301,12 @@ internal sealed class FFmpegHttpTransport : IDisposable
                 return read;
             }
         }
-        internal long Seek(long offset, int whence)
+        internal long Seek(long offset, int whence, CancellationToken token)
         {
             lock (_io)
             {
                 _owner._lifetime.Token.ThrowIfCancellationRequested();
+                token.ThrowIfCancellationRequested();
                 if (!CanSeek || Length is not { } length) throw new PlaybackException(PlaybackError.NotSeekable);
                 long target = whence switch
                 {
@@ -305,13 +315,17 @@ internal sealed class FFmpegHttpTransport : IDisposable
                 };
                 if (target < 0 || target > length || _end >= 0 && target > _end)
                     throw new PlaybackException(PlaybackError.InvalidSeek);
-                if (target == _position) return target;
+                if (target == _position && _body is not null) return target;
                 Abort(); _position = target;
-                if (target != length && target != _end) OpenAsync(initial: false).GetAwaiter().GetResult();
+                if (target != length && target != _end) OpenAsync(initial: false, token).GetAwaiter().GetResult();
                 return target;
             }
         }
-        internal void Abort() => Interlocked.Exchange(ref _response, null)?.Dispose();
+        internal void Abort()
+        {
+            _body = null; // Read or seek must reopen at the retained byte position.
+            Interlocked.Exchange(ref _response, null)?.Dispose();
+        }
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;

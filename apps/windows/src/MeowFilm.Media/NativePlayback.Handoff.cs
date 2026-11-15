@@ -3,23 +3,6 @@ using LibVLCSharp.Shared;
 
 namespace MeowFilm.Media;
 
-/// <summary>
-/// Seamless source replacement: a new network input is opened paused and muted beside the
-/// playing one and positioned at the live time. Commit swaps them in one step; the old
-/// input keeps playing until then, and a failed or abandoned preparation never touches it.
-/// </summary>
-public interface INativePlaybackHandoff
-{
-    // Retire rejected output without replacing the logical occurrence or its controls.
-    Task StopOutputForHandoffAsync();
-    Task PrepareHandoffAsync(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken token);
-    Task PrepareReadHandoffAsync(INativeMediaReadLease lease, CancellationToken token);
-    double PreparedHandoffDurationSeconds { get; }
-    // Invokes the non-throwing provenance callback synchronously at publication, before events/release.
-    Task CommitHandoffAsync(Action committed, CancellationToken token);
-    Task DiscardHandoffAsync();
-}
-
 public sealed partial class NativePlayback : INativePlaybackHandoff
 {
     private Session? _handoffSession;
@@ -92,7 +75,7 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
                 if (uri?.Scheme is not ("http" or "https") || headers is null) throw Error(PlaybackError.InvalidRequest);
                 Validate(runtimeIntent?.OwnerId ?? _ownerId!, runtimeIntent?.Identity ?? _identity!, uri,
                     runtimeIntent?.Title ?? _title, headers);
-                requestHeaders = HttpMediaInput.ValidateRequest(uri, headers, true);
+                requestHeaders = NativeHttpMediaPolicy.ValidateRequest(uri, headers, true);
             }
             else readInput.Validate();
             token.ThrowIfCancellationRequested();
@@ -135,7 +118,7 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
                 catch (Exception error)
                 {
                     if (opening.IsCancellationRequested) throw new OperationCanceledException(opening.Token);
-                    throw Error(HttpMediaInput.Classify(error));
+                    throw Error(NativeHttpMediaPolicy.Classify(error));
                 }
                 var resolved = input.EffectiveUri;
                 input.Dispose(); input = null;
@@ -259,12 +242,13 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
             _runtimeHandoffIntent is not null && !prepared.RuntimeOutputReady ||
             _handoffPreparation is not { IsCompletedSuccessfully: true } ||
             _handoffReady is not { Task.IsCompletedSuccessfully: true } ||
-            _handoffOpening is not { IsCancellationRequested: false } ||
+            _handoffOpening is not { IsCancellationRequested: false } handoffOpening ||
             _handoffTarget is not { } target || !HandoffScopeCurrent(target))
         {
             await DiscardHandoffCoreAsync();
             throw Error(PlaybackError.Superseded);
         }
+        using var admission = CancellationTokenSource.CreateLinkedTokenSource(token, handoffOpening.Token);
         bool failed = false;
         TaskCompletionSource? commit = null;
         await _commands.WaitAsync(token);
@@ -284,6 +268,8 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
                     throw Error(PlaybackError.RateUnsupported);
                 prepared.Player.Volume = _volume;
             });
+            if (!CommitAllowed()) return false;
+            using var output = await AcquireOutputAsync(admission.Token);
             if (!CommitAllowed()) return false;
             long time = await SynchronizeHandoffAsync(prepared, target, failure, token);
             // Preparation yielded the dispatcher. Recheck cancellation and the latest intent
@@ -486,7 +472,7 @@ public sealed partial class NativePlayback : INativePlaybackHandoff
         var intent = _runtimeHandoffIntent;
         var preceding = _handoffRetirement is { IsCompletedSuccessfully: false } ? _handoffRetirement : null;
         // Admit the new owner before old resources asynchronously drain. A stale
-        // music callback must not invalidate a newer runtime preparation in that interval.
+        // ordinary handoff callback must not invalidate a newer runtime preparation in that interval.
         _runtimeHandoffWindow = null; _runtimeHandoffIntent = nextRuntimeIntent;
         _handoffOpening = null; _handoffSession = null; _handoffReady = null; _handoffFailure = null; _handoffTarget = null;
         _handoffPreparation = null;

@@ -5,8 +5,8 @@ using Microsoft.Win32;
 
 namespace MeowFilm.Capabilities;
 
-// Module-level seams for deterministic UI orchestration tests. Production always
-// wraps the App's one shared NativePlayback; this is not another media engine.
+// Module-level seams for deterministic UI orchestration tests. Production wraps
+// the App-owned independent native audio player.
 public interface IMusicPlayback : INotifyPropertyChanged
 {
     string? OwnerId { get; }
@@ -45,7 +45,7 @@ public interface IMusicPlaybackRate
     Task<MusicPlaybackRate> SetRateAsync(NativePlaybackScope scope, double rate, CancellationToken token = default);
 }
 
-internal sealed class NativeMusicPlayback(NativePlayback native) : IMusicPlayback, INativePlaybackContinuation,
+internal sealed class NativeMusicPlayback(NativeAudioPlayback native) : IMusicPlayback, INativePlaybackContinuation,
     IMusicPlaybackRate, INativePlaybackHandoff
 {
     public Task StopOutputForHandoffAsync() => native.StopOutputForHandoffAsync();
@@ -57,15 +57,13 @@ internal sealed class NativeMusicPlayback(NativePlayback native) : IMusicPlaybac
     public Task DiscardHandoffAsync() => native.DiscardHandoffAsync();
     public async Task<MusicPlaybackRate?> ReadRateAsync(CancellationToken token = default)
     {
-        var tracks = await native.ReadTracksAsync(token);
-        return tracks is null ? null : new(tracks.Scope, tracks.Rate);
+        var rate = await native.ReadRateAsync(token);
+        return rate is null ? null : new(rate.Scope, rate.RequestedRate);
     }
     public async Task<MusicPlaybackRate> SetRateAsync(NativePlaybackScope scope, double rate, CancellationToken token = default)
     {
-        await native.SetRateAsync(scope, rate, token);
-        var actual = await ReadRateAsync(token);
-        if (actual is null || actual.Scope != scope) throw new MusicOperationException(PlaybackError.Superseded);
-        return actual;
+        var actual = await native.SetRateAsync(scope, rate, token);
+        return new(actual.Scope, actual.RequestedRate);
     }
     public bool PauseRequested => native.PauseRequested;
     public string? LastErrorCode => native.LastErrorCode;

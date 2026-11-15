@@ -9,6 +9,7 @@
     <PackageReference Include="LibVLCSharp" Version="[3.10.2]" />
     <PackageReference Include="LibVLCSharp.WPF" Version="[3.10.2]" />
     <PackageReference Include="VideoLAN.LibVLC.Windows" Version="[3.0.24]" />
+    <ProjectReference Include="../MeowFilm.Core/MeowFilm.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="$(VideoKernelRoot)\output\VideoKernelBuild.g.cs" />

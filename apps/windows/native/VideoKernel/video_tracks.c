@@ -152,9 +152,7 @@ int mvk_add_tracks(demux_t *demux)
         format.i_profile = parameters->profile;
         format.i_level = parameters->level;
         if (parameters->extradata_size > 0) {
-            format.p_extra = malloc(parameters->extradata_size);
-            if (!format.p_extra) { es_format_Clean(&format); return VLC_ENOMEM; }
-            memcpy(format.p_extra, parameters->extradata, parameters->extradata_size);
+            format.p_extra = parameters->extradata;
             format.i_extra = parameters->extradata_size;
         }
         if (category == VIDEO_ES) {
@@ -184,11 +182,16 @@ int mvk_add_tracks(demux_t *demux)
             }
         }
         AVDictionaryEntry *language = av_dict_get(stream->metadata, "language", NULL, 0);
-        if (language) format.psz_language = strdup(language->value);
+        if (language) format.psz_language = language->value;
         AVDictionaryEntry *title = av_dict_get(stream->metadata, "title", NULL, 0);
-        if (title) format.psz_description = strdup(title->value);
+        if (title) format.psz_description = title->value;
         if (stream->disposition & AV_DISPOSITION_DEFAULT) format.i_priority = ES_PRIORITY_SELECTABLE_MIN + 1;
         tracks[i].es = es_out_Add(demux->out, &format);
+        /* es_out_Add copies synchronously; borrowed FFmpeg fields must not be freed by VLC's CRT. */
+        format.p_extra = NULL;
+        format.i_extra = 0;
+        format.psz_language = NULL;
+        format.psz_description = NULL;
         es_format_Clean(&format);
         if (!tracks[i].es) return VLC_EGENERIC;
         if (stream->disposition & AV_DISPOSITION_DEFAULT)
