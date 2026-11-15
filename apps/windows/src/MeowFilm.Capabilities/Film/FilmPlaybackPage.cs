@@ -309,7 +309,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     public string CurrentLabel => FilmJson.Text(FilmJson.Member(snapshot?.Current ?? default, "candidate"), "name");
     public string StatusText => connectionError.Length > 0 ? FilmPlaybackError.Message(connectionError, "连接失败") : FilmJson.Text(snapshot?.Raw ?? default, "stage") switch
     {
-        "loading" or "searching" => "匹配中…", "resolving" => "取址中…",
+        "loading" => "加载中…", "searching" => "匹配中…", "resolving" => "取址中…",
         "prepared" => "已准备", "pending" => "准备播放…", "playing" => IsPlaying ? "播放中" : "已暂停",
         "error" => FilmPlaybackError.Message(FilmJson.Text(snapshot?.Raw ?? default, "error"), "播放失败"),
         "unavailable" => "暂无可用片源", "ended" => "已结束", "stopped" => "已停止", _ => ""

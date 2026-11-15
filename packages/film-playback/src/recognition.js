@@ -190,9 +190,14 @@ function mapIndex(map, key) {
   return index;
 }
 
-/** Smart eligibility only. Ordinary menus keep the full raw search page. */
-export function matchesResults(rows, { target, rules, signal } = {}) {
-  return invokeRecognition(rules, { operation: 'recognition.matches', rows, target }, { signal });
+/** Content membership is independent of the currently requested season/file. */
+export function contentResults(rows, { target, rules, signal } = {}) {
+  return invokeRecognition(rules, { operation: 'recognition.content', rows, target }, { signal });
+}
+
+/** Smart eligibility for a particular metadata target. */
+export function matchesResults(rows, { target, contentIdentity, rules, signal } = {}) {
+  return invokeRecognition(rules, { operation: 'recognition.matches', rows, target, contentIdentity }, { signal });
 }
 
 export async function matchesResult(raw, options) {

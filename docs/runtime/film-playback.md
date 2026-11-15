@@ -200,6 +200,20 @@ group 仅移除已经不可授权的成员，仍可使用原范围内其余有�
 
 ### 晚到搜索交接
 
+当前卡片来源范围遵守[共同搜索契约](../common/film/search.md)。播放会话的`results`／
+snapshot `sources`是已准入来源，不是完整原始搜索页。
+Node在接纳初始结果、`search.update`和后续搜索页时统一核对内容归属；搜索owner已证明的
+typed成员、准确原始单源以及同目标历史／人工关联保留各自身份依据，不改为标题猜配。
+其他原始结果只留在既有data搜索缓存；搜索游标的前进／完成由原始页身份判断，
+不能因本页没有当前作品就提前宣告搜索结束。同内容分季不按当前播放季集从菜单删除，
+元数据智能播放仍另行核对该季集资格。客户端不再自行筛选来源。
+已准入的当前owner搜索结果可复用稳定卡片／可靠carrier的元数据内容身份，但不因此免除
+真实年份、季数、类型及显式provider ID冲突检查；未验证旧hint必须以当前详情重新证明。
+仅由历史／人工关联加入的目录不因此获得独立内容证明；编辑或撤销关联后，
+不能借用卡片身份继续智能选用旧目录，仍独立成立的搜索／typed成员证明不受影响。
+内容准入计算属于页面会话；开始播放另一文件只撤销播放目标计算，
+不取消在途的来源更新。停止或关闭页面仍撤销该会话全部计算。
+
 搜索页的 `search.update` 命令携带 `searchReference` 与当前 `sources`；
 装配层从 Node 搜索 owner 重读
 `{selectionId,revision,selectionMembers,sources,results,resultHints?,search,cacheEntries?,metadataTarget?,metadata?}`，

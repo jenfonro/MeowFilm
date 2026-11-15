@@ -17,7 +17,13 @@ public partial class FilmCard : UserControl
     private void Activate_Click(object sender, RoutedEventArgs e)
     {
         e.Handled = true;
-        if (DataContext is FilmCardItem item)
+        var item = DataContext switch
+        {
+            FilmCardItem card => card,
+            FilmSearchCardItem search => search.ToCard(),
+            _ => null
+        };
+        if (item is not null)
             Activated?.Invoke(this, new(item));
     }
 }

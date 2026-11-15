@@ -344,8 +344,8 @@ public static partial class MusicUiTests
         };
         try
         {
-            var first = f.Film.ReceiveSearchPlaybackAsync(f.Page.Cards[0]); await entered.Task;
-            await f.Film.ReceiveSearchPlaybackAsync(f.Page.Cards[1]);
+            var first = f.Film.ReceiveSearchPlaybackAsync(f.Page.Cards[0].ToCard()); await entered.Task;
+            await f.Film.ReceiveSearchPlaybackAsync(f.Page.Cards[1].ToCard());
             release.SetResult(FilmSearchConsumerRuntime.Success(SearchFixture.Handoff(Guid.Parse(f.Film.Search.Current!.Id),
                 "opaque:one", "竞态", new("opaque:one", "group", "旧选择", Members: FilmJson.Encode(new[] { new { sourceKey = a.Key, detailId = "1" } })), [a.Wire])));
             try { await first; throw new InvalidOperationException("Superseded handoff published"); }

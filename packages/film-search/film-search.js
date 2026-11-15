@@ -831,7 +831,7 @@ const enrichTMDBDetail = ({ item, payload: detail, today }) => {
   };
 };
 
-const buildDisplay = ({ siteItems, tmdbItems, siteOrder, searchCoverSite, rawListMode, previousOrder }) => {
+const buildDisplays = ({ siteItems, tmdbItems, siteOrder, searchCoverSite, previousOrder, previousRawOrder }) => {
   const seenSite = new Set();
   const sites = (Array.isArray(siteItems) ? siteItems : []).filter((item) => {
     const identity = siteItemIdentity(item);
@@ -858,67 +858,65 @@ const buildDisplay = ({ siteItems, tmdbItems, siteOrder, searchCoverSite, rawLis
     if (!groupKey) return;
     siteGroupCounts.set(groupKey, (siteGroupCounts.get(groupKey) || 0) + 1);
   });
-  let siteDisplay = sites.map((item) => {
+  const rawDisplay = sites.map((item) => {
     const groupKey = normalizeString(item.groupKey);
     const tmdbMatch = groupKey ? tmdbByGroup.get(groupKey) || null : null;
     const canAggregate = !!tmdbMatch || (groupKey && (siteGroupCounts.get(groupKey) || 0) > 1);
     return { ...mergeDisplayedSiteItem(item, tmdbMatch, { canAggregate }), displayKey: siteItemIdentity(item) };
   });
 
-  if (!rawListMode) {
-    siteDisplay = Array.from(groups.entries()).flatMap(([groupKey, group]) => {
-      const representative = group.representative;
-      if (!representative) return [];
-      const itemCount = group.items.length;
-      const tmdbMatch = tmdbByGroup.get(groupKey) || null;
-      const aggregateRemark = formatAggregateTVRemark({
-        tmdbMatch,
-        groupTitle: (tmdbMatch && tmdbMatch.title) || group.title || representative.title || '',
-        sources: group.items,
-      });
-      if (tmdbMatch) return [];
-      const displayKey = `group:${groupKey}`;
-      if (itemCount <= 1) {
-        return [{
-          ...mergeDisplayedSiteItem({
-            ...representative,
-            groupKey,
-            textBadge: aggregateRemark || representative.textBadge,
-            siteLabel: normalizeString(representative.siteLabel) || normalizeString(representative.siteName),
-          }, null, { canAggregate: false }),
-          displayKey,
-        }];
-      }
+  const siteDisplay = Array.from(groups.entries()).flatMap(([groupKey, group]) => {
+    const representative = group.representative;
+    if (!representative) return [];
+    const itemCount = group.items.length;
+    const tmdbMatch = tmdbByGroup.get(groupKey) || null;
+    const aggregateRemark = formatAggregateTVRemark({
+      tmdbMatch,
+      groupTitle: (tmdbMatch && tmdbMatch.title) || group.title || representative.title || '',
+      sources: group.items,
+    });
+    if (tmdbMatch) return [];
+    const displayKey = `group:${groupKey}`;
+    if (itemCount <= 1) {
       return [{
         ...mergeDisplayedSiteItem({
           ...representative,
-          id: `aggregate:${groupKey}`,
           groupKey,
           textBadge: aggregateRemark || representative.textBadge,
-          siteLabel: '聚合',
-          aggregateSourceCount: group.siteKeys.size,
-          aggregateItems: group.items.slice(),
-          aggregateKind: 'site',
-        }, null, { canAggregate: true }),
+          siteLabel: normalizeString(representative.siteLabel) || normalizeString(representative.siteName),
+        }, null, { canAggregate: false }),
         displayKey,
       }];
-    });
-  }
-
-  const byKey = new Map([
-    ...tmdb.map((item) => ({ ...item, displayKey: item.id })),
-    ...siteDisplay,
-  ].map((item) => [item.displayKey, item]));
-  const items = [];
-  (Array.isArray(previousOrder) ? previousOrder : []).forEach((key) => {
-    if (!byKey.has(key)) return;
-    items.push(byKey.get(key));
-    byKey.delete(key);
+    }
+    return [{
+      ...mergeDisplayedSiteItem({
+        ...representative,
+        id: `aggregate:${groupKey}`,
+        groupKey,
+        textBadge: aggregateRemark || representative.textBadge,
+        siteLabel: '聚合',
+        aggregateSourceCount: group.siteKeys.size,
+        aggregateItems: group.items.slice(),
+        aggregateKind: 'site',
+      }, null, { canAggregate: true }),
+      displayKey,
+    }];
   });
-  // Only new cards participate in this round's sorting.
-  const newItems = Array.from(byKey.values()).sort((left, right) => compareDisplayedResults(left, right, context));
-  for (const item of newItems) items.push(item);
-  return { items, order: items.map((item) => item.displayKey) };
+  const metadata = tmdb.map((item) => ({ ...item, displayKey: item.id }));
+  const ordered = (sites, previous) => {
+    const byKey = new Map([...metadata, ...sites].map((item) => [item.displayKey, item]));
+    const items = [];
+    (Array.isArray(previous) ? previous : []).forEach((key) => {
+      if (!byKey.has(key)) return;
+      items.push(byKey.get(key));
+      byKey.delete(key);
+    });
+    // Only new cards participate in this round's sorting.
+    const added = Array.from(byKey.values()).sort((left, right) => compareDisplayedResults(left, right, context));
+    for (const item of added) items.push(item);
+    return items;
+  };
+  return { cards: ordered(siteDisplay, previousOrder), rawCards: ordered(rawDisplay, previousRawOrder) };
 };
 
 globalThis.meowfilmProcess = (input) => {
@@ -927,7 +925,7 @@ globalThis.meowfilmProcess = (input) => {
     case 'tmdb': return mapTMDBSearch(input);
     case 'fallback': return { query: buildTrailingDigitsFallbackQuery(input.query) };
     case 'detail': return enrichTMDBDetail(input);
-    case 'display': return buildDisplay(input);
+    case 'display': return buildDisplays(input);
     default: throw new Error(`Unknown film-search operation: ${input.operation}`);
   }
 };

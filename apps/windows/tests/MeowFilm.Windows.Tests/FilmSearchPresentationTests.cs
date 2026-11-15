@@ -58,11 +58,11 @@ public static partial class MusicUiTests
             SearchLayout(root, width, 800); await Drain(); SearchLayout(root, width, 800);
             var cards = Visuals(f.Page.View).OfType<FilmCard>().ToArray();
             Equal(6, cards.Length);
-            var panel = Visuals(f.Page.View).OfType<AdaptiveCardPanel>().Single();
+            var panel = Visuals(f.Page.View).OfType<FilmSearchVirtualizingPanel>().Single();
             columnCounts.Add(cards.Count(card => card.TranslatePoint(new Point(), panel).Y < 1));
             foreach (var card in cards)
             {
-                var item = (FilmCardItem)card.DataContext;
+                var item = (FilmSearchCardItem)card.DataContext;
                 var poster = (Grid)card.FindName("PosterFrame");
                 var label = (Border)card.FindName("SiteLabel");
                 var subtitle = (TextBlock)card.FindName("Subtitle");

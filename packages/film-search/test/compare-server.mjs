@@ -286,11 +286,12 @@ for (const fixture of displayCases) {
         ...originalExpected.filter((item) => item.sourceKind === 'tmdb'),
         ...clone(reference.buildDisplayedResults({ ...state, tmdbItems: [] }, config, { rawListMode })),
       ] : originalExpected;
-      const actual = invoke({
+      const output = invoke({
         operation: 'display', query: fixture.query, aggregateRules: fixture.rules,
         siteItems, tmdbItems, siteOrder: sources.map((source) => source.siteKey),
-        searchCoverSite: preferred, rawListMode, previousOrder: [],
+        searchCoverSite: preferred, previousOrder: [], previousRawOrder: [],
       });
+      const actual = { items: rawListMode ? output.rawCards : output.cards };
       // First-call reference output clones cards before mutating its cached TMDB
       // objects. Compare all unaffected fields, and validate the corrected source
       // output separately against the reference's own aggregate function below.

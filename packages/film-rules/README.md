@@ -16,7 +16,8 @@ The iOS page keeps one draft per group and submits that page only. The Node docu
 | `process` | `request: {section,text,query?}`, `rules` | rule result for internal computation |
 | `preview` | same as `process` | rule result with exact `FilmRuleText` wire values |
 | `recognition.batch` | `rules`, `requests` | `{value: [...]}` |
-| `recognition.matches` | `rules`, `rows`, `target` | `{value: boolean[]}` |
+| `recognition.content` | `rules`, `rows`, stable content `target` | `{value: boolean[]}` for source-menu membership, independent of the selected season/file |
+| `recognition.matches` | `rules`, `rows`, `target`, optional owner-confirmed `contentIdentity` | `{value: boolean[]}` |
 | `recognition.candidates` | `rules`, normalized `detail`, `target`, `source` | `{value: [...]}` with per-file parsed text/coordinates/quality |
 
 Sections are `episode`, `movie`, `search`. Rules contain `episodeCleanRegexRules: string[]`, `episodeRules: {pattern,replace?,flags?}[]`, `movieRules` of the same shape, and `aggregateRegexRules: string[]`. Initial defaults contain two episode matching rows; restoring the episode section installs three. Saved empty groups remain empty across restart. Saving applies the page's JS trim, the reference handler's Unicode whitespace trim and response decoding; draft preview keeps draft semantics. Invalid regexes may be saved and produce the existing preview errors.
@@ -24,6 +25,10 @@ Sections are `episode`, `movie`, `search`. Rules contain `episodeCleanRegexRules
 The result retains `type/text`, `inputText`, `processedText`, `matched`, one-based `matchedRuleIndex`, `rewriteApplied`, nullable `rewrittenText`, `groupKey`, `trailingDigits`, `errors` and cumulative `previews`. Output selects `rewrittenText ?? processedText`. First-hit matching, search query-tail protection and deterministic resetting of `g`/`y` expressions are shared by preview and playback. Valid text is a string. A preview string with isolated UTF16 code units is represented by its complete UInt16 array, including nested errors/previews. Rule configuration itself uses Unicode scalar strings, as required by the HTTP bridge.
 
 Playback matching runs its full title chain in QuickJS: NFKC, Unicode case conversion, format controls, aliases, metadata identity, year and season checks, aggregate cleaning and canonical comparison. File-name/path season/episode extraction and regex-based quality inference run there in one detail batch. Node retains provider protocol decoding, accurate resource IDs, hashing, metadata coordinate mapping, scheduling and media ownership.
+
+Source-menu membership uses the same content identity and canonical title chain. Movies retain their stable year check; TV source membership is independent of the requested season's year/coordinates. Proven typed search members and exact source entries retain their owner-supplied identities. A content's other seasons may remain visible while smart selection separately checks the requested coordinates; unrelated search hits remain only in the data owner's raw-page cache.
+
+`contentIdentity: {kind,metadataProvider,metadataId}` confirms an admitted row's content, not a playable season or episode. Smart matching retains year, season, type and explicit provider-ID checks even with that identity. It is an internal owner fact, not a client playback-mode switch; unverified old hints cannot supply it.
 
 `recognition.batch` request kinds are `episode`, `season`, `movie`, `search`, `quality`, `metadata` and `match`. Most accept `{kind,text,query?}`. Metadata accepts `{kind:"metadata",record,contentKind:"movie"|"tv"}` and returns `{title,query,year,season}` with null for absent year/season. Matching accepts `{kind:"match",record,target}`. Batches preserve input order and the complete input list. No rule-count, string-length or result-count limit is introduced; native execution budgets remain resource boundaries.
 

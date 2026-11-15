@@ -74,6 +74,24 @@ public static class FilmPlaybackControlsTests
             Check(scene.Rig.Native.Stops == 1 && ReferenceEquals(frame.Parent, scene.Element<Grid>("HeroGrid")),
                 "closing the last explicit owner returns the same layout and waits for actual stop");
         });
+        yield return Test("playback status reports the actual phase while an older output remains active", async () =>
+        {
+            await using var scene = await Scene.Create();
+            await scene.Play();
+            var scope = scene.Rig.Native.Scope;
+            foreach (var (stage, label, status) in new[]
+            {
+                ("loading", "加载中...", "加载中…"), ("resolving", "正在获取播放地址...", "取址中…"),
+                ("pending", "正在准备媒体...", "准备播放…"), ("searching", "正在搜索片源...", "匹配中…")
+            })
+            {
+                scene.Rig.Runtime.Change(root => root["stage"] = stage);
+                await Until(() => scene.Rig.Page.PlayerStatusVisible && scene.Rig.Page.PlayerStatusText == label &&
+                    scene.Rig.Page.StatusText == status);
+                Check(scene.Rig.Session.HasOutput && scene.Rig.Native.Scope == scope,
+                    "loading or preparing a new selection does not relabel it as smart search or retire the old output");
+            }
+        });
         yield return Test("four actions use exact business commands and menu opening performs no request", async () =>
         {
             await using var scene = await Scene.Create();

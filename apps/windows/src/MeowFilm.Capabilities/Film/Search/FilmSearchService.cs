@@ -73,10 +73,7 @@ public sealed class FilmSearchService : IAsyncDisposable
                 new { query = session.Query, sources = session.SourceSnapshot }, connection.Revoked);
             // An accepted open still owns an allocated ID when its presentation
             // was stopped or retired while awaiting the receipt.
-            session.Bind(snapshot);
-            if (!session.Retired && !SameSources(session)) { Invalidate(session); return; }
-            if (!CanPublish(session)) return;
-            ApplySnapshot(session, snapshot);
+            await ApplySnapshotAsync(session, snapshot, opening: true);
             if (CanPublish(session)) Observe(session);
         }
         catch (Exception error) { if (!session.Retired && !closed) session.Fail(error); }
@@ -142,7 +139,7 @@ public sealed class FilmSearchService : IAsyncDisposable
                 snapshot = await session.Client.CallAsync("search.command", new { sessionId = session.Id, action = "resume" }, session.Connection.Revoked);
                 if (!CanResume()) return;
                 session.Stopped = false;
-                ApplySnapshot(session, snapshot, refresh: true);
+                await ApplySnapshotAsync(session, snapshot, refresh: true);
                 if (CanPublish(session) && session.Observing.IsCompleted) Observe(session);
             }
             finally { session.Control.Release(); }
@@ -165,13 +162,14 @@ public sealed class FilmSearchService : IAsyncDisposable
                 session.Connection!.Revoked);
             if (action == "stop")
             {
+                var prepared = await Task.Run(() => new FilmSearchPreparedSnapshot(snapshot, null, resolveImage, readDisplay: false));
                 if (!session.Retired && !closed)
                 {
-                    session.ApplyStopped(snapshot);
-                    if (!stopping) session.PublishReference(snapshot);
+                    session.ApplyStopped(prepared);
+                    if (!stopping) session.PublishReference(prepared);
                 }
             }
-            else ApplySnapshot(session, snapshot);
+            else await ApplySnapshotAsync(session, snapshot);
         }
         catch (Exception error) { if (!session.Retired && !closed) session.Fail(error); }
         finally { session.Control.Release(); session.Commanding = false; session.Notify(); }
@@ -190,7 +188,9 @@ public sealed class FilmSearchService : IAsyncDisposable
                 Math.Max(0, session.Revision), token))
             {
                 token.ThrowIfCancellationRequested();
-                ApplySnapshot(session, snapshot);
+                // Await the one preparation/commit before reading again. The existing
+                // HTTP mailbox coalesces frames received while this consumer is busy.
+                await ApplySnapshotAsync(session, snapshot);
             }
             if (!token.IsCancellationRequested) ObservationFailed(session, new FilmPlaybackException("DISCONNECTED"));
         }
@@ -211,14 +211,44 @@ public sealed class FilmSearchService : IAsyncDisposable
         if (requestStop) QueueStop(session);
     }
     private bool CanPublish(FilmSearchSession session) => !session.Retired && !session.Stopped && !closed && !stopping;
-    private void ApplySnapshot(FilmSearchSession session, JsonElement snapshot, bool refresh = false)
+    private async Task ApplySnapshotAsync(FilmSearchSession session, JsonElement snapshot,
+        bool refresh = false, bool opening = false)
     {
-        if (!session.Retired && !closed && FilmJson.Bool(snapshot, "invalidated")) { Invalidate(session); return; }
-        if (session.Retired || closed || stopping) return;
-        if (CanPublish(session)) session.Apply(snapshot, refresh);
-        // A retained playback selection may learn a newer Node reference while
-        // the stopped results page keeps its exact last display snapshot.
-        session.PublishReference(snapshot);
+        dispatcher.VerifyAccess();
+        if (opening)
+        {
+            var identity = await Task.Run(() => FilmSearchPreparedSnapshot.ReadIdentity(snapshot));
+            session.Bind(identity.Id, identity.Query);
+            if (!session.Retired && !SameSources(session)) { Invalidate(session); return; }
+            if (!CanPublish(session)) return;
+        }
+        long publication = session.Publication;
+        bool readDisplay = CanPublish(session);
+        var previous = session.Display;
+        while (true)
+        {
+            var prepared = await Task.Run(() => new FilmSearchPreparedSnapshot(snapshot, previous, resolveImage, readDisplay));
+            dispatcher.VerifyAccess();
+            if (!session.Retired && !closed && prepared.Invalidated) { Invalidate(session); return; }
+            if (session.Retired || closed || stopping) return;
+            session.Connection!.Revoked.ThrowIfCancellationRequested();
+            if (readDisplay && session.Publication == publication && CanPublish(session) &&
+                (prepared.Revision > session.Revision || refresh && prepared.Revision == session.Revision))
+            {
+                // A command receipt can race an SSE frame. Its edits must be based
+                // on the actual committed predecessor, never on an obsolete collection.
+                if (!ReferenceEquals(previous, session.Display))
+                {
+                    previous = session.Display;
+                    continue;
+                }
+                session.Apply(prepared, refresh);
+            }
+            // A retained playback selection may learn a newer Node reference while
+            // the stopped results page keeps its exact last display snapshot.
+            session.PublishReference(prepared);
+            return;
+        }
     }
     internal Task<FilmPlaybackRequest> HandoffAsync(FilmSearchContext context, CancellationToken token)
     {
@@ -259,7 +289,6 @@ public sealed class FilmSearchService : IAsyncDisposable
     {
         if (--session.Retainers == 0 && session.Retired) _ = ReleaseAsync(session);
     }
-    public string ResolveImage(string path) => resolveImage(path);
     public void InvalidateQuery(string query)
     {
         dispatcher.VerifyAccess();

@@ -31,6 +31,50 @@ final class FilmSearchSessionTests: XCTestCase {
         await service.close()
     }
 
+    func testSuccessfulSSEMoreAndRefreshDoNotRepublishAnAlreadyEmptyError() async throws {
+        let row = F.row(), rpc = FilmSearchRPCFixture(F.snapshot(hasMore: true, cards: [F.row()], raw: [F.row()]))
+        let service = filmSearchService(rpc), session = try service.session(for: "原查询")
+        var errors: [String?] = []
+        let subscription = session.$error.dropFirst().sink { errors.append($0?.code) }
+        await session.drain(); await rpc.awaitObservation()
+        try await rpc.emit(F.snapshot(2, loading: true, site: "loading", cards: [row], raw: [row]))
+        try await rpc.emit(F.snapshot(3, hasMore: true, cards: [row], raw: [row]))
+        await rpc.setNext([F.snapshot(4, cards: [row], raw: [row])])
+        session.loadMore(); await session.drain()
+        try await session.refresh(); await rpc.awaitObservation()
+        try await rpc.emit(F.snapshot(5, cards: [row], raw: [row]))
+        XCTAssertTrue(errors.isEmpty, "Successful receipts update the snapshot, not an unchanged error channel")
+        XCTAssertEqual(session.snapshot.sequence, 5)
+        XCTAssertEqual(session.snapshot.rawCards.map(\.value), [row])
+        subscription.cancel()
+        await service.close()
+    }
+
+    func testReconnectClearsARealErrorOnceWithoutNilPublicationsFromLaterSnapshots() async throws {
+        let row = F.row(), rpc = FilmSearchRPCFixture(F.snapshot(cards: [F.row()], raw: [F.row()]))
+        let service = filmSearchService(rpc), session = try service.session(for: "原查询")
+        await session.drain(); await rpc.awaitObservation()
+        let failed = expectation(description: "Observation disconnection is published")
+        var errors: [String?] = []
+        let subscription = session.$error.dropFirst().sink {
+            errors.append($0?.code)
+            if $0 != nil { failed.fulfill() }
+        }
+        await rpc.disconnect(); await fulfillment(of: [failed], timeout: 3)
+        XCTAssertEqual(session.error?.code, "OBSERVATION_CLOSED")
+        try await session.refresh(); await rpc.awaitObservation()
+        // Reconnect can acknowledge the same sequence; that still clears the
+        // transport failure without replacing the accepted search facts.
+        XCTAssertNil(session.error)
+        XCTAssertEqual(session.snapshot.sequence, 1)
+        try await rpc.emit(F.snapshot(2, cards: [row], raw: [row]))
+        try await rpc.emit(F.snapshot(2, cards: []))
+        XCTAssertEqual(errors, ["OBSERVATION_CLOSED", nil])
+        XCTAssertEqual(session.snapshot.cards.map(\.value), [row])
+        subscription.cancel()
+        await service.close()
+    }
+
     func testFailedEmptyUnavailableCancelledAndMalformedAreDistinctWithoutImplicitRetry() async throws {
         for (site, metadata, failed) in [("failed", "unavailable", true), ("completed", "completed", false),
             ("unavailable", "unavailable", true), ("cancelled", "cancelled", false)] {
