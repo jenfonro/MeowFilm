@@ -23,6 +23,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
     private readonly string? _nativeLibraryPath;
     private readonly NativeAudioOutput _audioOutput;
     private readonly NativeHttpMediaOptions _httpOptions;
+    private readonly Func<CancellationToken, Task<IDisposable>>? _acquireOutput;
     private readonly SemaphoreSlim _commands = new(1, 1);
     private LibVLC? _engine;
     private readonly object _engineGate = new();
@@ -44,14 +45,15 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
     private VideoOutputObservation? _videoOutput;
 
     public NativePlayback(Dispatcher? dispatcher = null, string? nativeLibraryPath = null,
-        NativeAudioOutput audioOutput = NativeAudioOutput.SystemDefault)
-        : this(dispatcher, nativeLibraryPath, audioOutput, new NativeHttpMediaOptions()) { }
+        NativeAudioOutput audioOutput = NativeAudioOutput.SystemDefault, Func<CancellationToken, Task<IDisposable>>? acquireOutput = null)
+        : this(dispatcher, nativeLibraryPath, audioOutput, new NativeHttpMediaOptions(), acquireOutput) { }
 
     /// <summary>HTTP resource deadlines shared by ordinary and owned media inputs.</summary>
     public NativePlayback(Dispatcher? dispatcher, string? nativeLibraryPath,
-        NativeAudioOutput audioOutput, NativeHttpMediaOptions httpOptions)
+        NativeAudioOutput audioOutput, NativeHttpMediaOptions httpOptions, Func<CancellationToken, Task<IDisposable>>? acquireOutput = null)
     {
         _httpOptions = httpOptions ?? throw Error(PlaybackError.InvalidRequest);
+        _acquireOutput = acquireOutput;
         _dispatcher = dispatcher ?? Dispatcher.CurrentDispatcher;
         if (!_dispatcher.CheckAccess() || Thread.CurrentThread.GetApartmentState() != ApartmentState.STA)
             throw Error(PlaybackError.WrongThread);
@@ -142,7 +144,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         var requestHeaders = resource is not null ||
             uri.Scheme is ("http" or "https") && (headers is not null || uri.UserInfo.Length != 0) ||
             AdaptiveManifest.HasManifestPath(uri)
-            ? HttpMediaInput.ValidateRequest(uri, headers ?? new Dictionary<string, string>(), true) : null;
+            ? NativeHttpMediaPolicy.ValidateRequest(uri, headers ?? new Dictionary<string, string>(), true) : null;
         token.ThrowIfCancellationRequested(); // Rejected requests never interrupt current playback.
         long generation;
         if (continuation is null)
@@ -190,7 +192,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
                     catch (Exception error)
                     {
                         if (opening.IsCancellationRequested) throw new OperationCanceledException(opening.Token);
-                        throw Error(HttpMediaInput.Classify(error));
+                        throw Error(NativeHttpMediaPolicy.Classify(error));
                     }
                     var resolved = unownedInput.EffectiveUri;
                     unownedInput.Dispose(); unownedInput = null;
@@ -200,8 +202,8 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
             }
             CheckRequest(generation, opening.Token);
             try { await Task.Run(EnsureEngine); }
-            catch (PlaybackException) { throw; }
-            catch { throw Error(PlaybackError.NativeUnavailable); }
+            catch (PlaybackException) { CheckRequest(generation, opening.Token); throw; }
+            catch { CheckRequest(generation, opening.Token); throw Error(PlaybackError.NativeUnavailable); }
             CheckRequest(generation, opening.Token);
             Set(ref _nativeVersion, _engine!.Version, nameof(NativeVersion));
             Session created;
@@ -234,6 +236,14 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
                 Post(() => Observe(CancelSessionAsync(created)));
             });
             CheckRequest(generation, opening.Token);
+            using var output = await AcquireOutputAsync(opening.Token);
+            CheckRequest(generation, opening.Token);
+            if (_pauseRequested && created.ContinuationReady is null)
+            {
+                created.Media.AddOption(":start-paused");
+                created.ContinuationReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                continuationReady = created.ContinuationReady.Task;
+            }
             bool accepted = await Task.Run(created.Player.Play);
             CheckRequest(generation, opening.Token);
             if (!accepted) throw Error(created.LastInputError ?? PlaybackError.OpenFailed);
@@ -359,6 +369,17 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
 
     private enum Command { Pause, Resume, Seek }
 
+    private async Task<IDisposable?> AcquireOutputAsync(CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (_acquireOutput is null) return null;
+        // The App may stop the other engine, which may itself be awaiting
+        // arbitration. Never hold this engine's gate across that callback.
+        _commands.Release();
+        try { return await _acquireOutput(token); }
+        finally { await _commands.WaitAsync(); }
+    }
+
     private async Task CommandAsync(Command command, double seconds = 0)
     {
         ThrowIfDisposed();
@@ -375,6 +396,13 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         {
             ThrowIfDisposed();
             if (!IsCurrent(session)) return;
+            if (command == Command.Resume && intent != _intentSequence) return;
+            using var output = command == Command.Resume ? await AcquireOutputAsync(session.OutputLifetime.Token) : null;
+            if (command == Command.Resume)
+            {
+                ThrowIfDisposed();
+                if (!IsCurrent(session) || intent != _intentSequence) return;
+            }
             await Task.Run(() =>
             {
                 switch (command)
@@ -406,6 +434,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
                 Set(ref _positionSeconds, position / 1000d, nameof(PositionSeconds));
             }
         }
+        catch (OperationCanceledException) when (!IsCurrent(session)) { return; }
         catch (PlaybackException) { throw; }
         catch { failure = PlaybackError.CommandFailed; }
         finally { _commands.Release(); }
@@ -558,7 +587,7 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         catch { failed = true; }
         try { if (session.Resource is not null) await session.Resource.DisposeAsync(); }
         catch { failed = true; }
-        finally { session.ProgressTimer = null; }
+        finally { session.ProgressTimer = null; session.OutputLifetime.Dispose(); }
         return failed;
     }
 
@@ -867,12 +896,13 @@ public sealed partial class NativePlayback : INotifyPropertyChanged, IAsyncDispo
         internal string? LastInputError => FFmpeg?.LastErrorCode ?? ReadInput?.LastErrorCode ??
             Input?.LastErrorCode ?? Adaptive?.LastErrorCode;
         internal CancellationTokenRegistration Cancellation;
+        internal readonly CancellationTokenSource OutputLifetime = new();
         internal int Cancelled;
         private int _valid = 1;
         internal bool Valid => Volatile.Read(ref _valid) != 0;
         internal void Invalidate()
         {
-            Interlocked.Exchange(ref _valid, 0);
+            if (Interlocked.Exchange(ref _valid, 0) != 0) OutputLifetime.Cancel();
             ContinuationReady?.TrySetCanceled(new CancellationToken(true));
             // Never wait on the IO lock here. A native command/Stop may already be joining Read.
             Input?.Cancel();

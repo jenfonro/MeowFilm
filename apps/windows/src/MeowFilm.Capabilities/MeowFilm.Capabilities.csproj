@@ -14,5 +14,6 @@
     <ProjectReference Include="../MeowFilm.Desktop/MeowFilm.Desktop.csproj" />
     <ProjectReference Include="../MeowFilm.Platform/MeowFilm.Platform.csproj" />
     <ProjectReference Include="../MeowFilm.Media/MeowFilm.Media.csproj" />
+    <ProjectReference Include="../MeowFilm.Audio/MeowFilm.Audio.csproj" />
   </ItemGroup>
 </Project>

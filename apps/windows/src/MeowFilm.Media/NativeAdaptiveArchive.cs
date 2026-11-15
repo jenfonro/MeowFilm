@@ -48,7 +48,7 @@ public sealed class NativeAdaptiveArchive : IAsyncDisposable
         if (maximumBytes is <= 0 or > ReadLeaseMediaInput.MaximumLength)
             throw new PlaybackException(PlaybackError.AdaptiveBudget);
         // Validate/copy headers using the same public playback boundary; never accept VLC options.
-        var safeHeaders = HttpMediaInput.ValidateRequest(resolvedAddress, headers, allowAdaptive: true);
+        var safeHeaders = NativeHttpMediaPolicy.ValidateRequest(resolvedAddress, headers, allowAdaptive: true);
         var plan = new NativeAdaptiveArchive(safeHeaders, options, token);
         try
         {

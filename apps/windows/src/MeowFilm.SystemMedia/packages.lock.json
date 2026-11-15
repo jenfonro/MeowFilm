@@ -20,11 +20,15 @@
         "resolved": "3.0.24",
         "contentHash": "U8SHuJr8eAC3x4+gEtOJD2heReo0tTWP3v21NunYNTzjmHpVp7qELs8phohqazxHMkaSIN8LufdIpAhldiLL/A=="
       },
+      "meowfilm.core": {
+        "type": "Project"
+      },
       "meowfilm.media": {
         "type": "Project",
         "dependencies": {
           "LibVLCSharp": "[3.10.2, 3.10.2]",
           "LibVLCSharp.WPF": "[3.10.2, 3.10.2]",
+          "MeowFilm.Core": "[1.0.0, )",
           "VideoLAN.LibVLC.Windows": "[3.0.24, 3.0.24]"
         }
       }

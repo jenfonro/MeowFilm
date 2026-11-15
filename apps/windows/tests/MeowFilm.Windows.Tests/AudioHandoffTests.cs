@@ -3,11 +3,12 @@ using System.IO;
 using System.Reflection;
 using System.Windows.Threading;
 using MeowFilm.Media;
-using static MeowFilm.Windows.Tests.AdaptiveMediaTests;
+using static MeowFilm.Windows.Tests.AudioCoreFixtures;
 
 namespace MeowFilm.Windows.Tests;
 
-public static class NativeHandoffAdmissionTests
+// Real FFmpeg music handoff with the explicit no-device Dummy output.
+public static class AudioHandoffTests
 {
     public static IEnumerable<TestCase> Cases()
     {
@@ -17,7 +18,7 @@ public static class NativeHandoffAdmissionTests
             var old = new WaveLease(); var next = new WaveLease();
             await native.OpenReadAsync("music", "same-entry", old, "fixture");
             await Decoded(native);
-            await native.SetRateAsync((await native.ReadTracksAsync())!.Scope, 1.6);
+            await native.SetRateAsync((await native.ReadRateAsync())!.Scope, 1.6);
             native.Volume = 37;
             await native.SeekAsync(18);
             await native.StopOutputForHandoffAsync();
@@ -31,7 +32,7 @@ public static class NativeHandoffAdmissionTests
             await native.CommitHandoffAsync(() => commits++, default);
             Check(commits == 1 && native.PauseRequested && !native.IsPlaying && native.Volume == 37 &&
                 Math.Abs(native.PositionSeconds - 18) <= .25 &&
-                Math.Abs((await native.ReadTracksAsync())!.Rate - 1.6) < .01,
+                Math.Abs((await native.ReadRateAsync())!.RequestedRate - 1.6) < .01,
                 "prepared replacement inherits position, latest pause, rate and volume");
             await native.StopAsync();
             Check(next.Disposals == 1, "replacement lease released");
@@ -68,7 +69,8 @@ public static class NativeHandoffAdmissionTests
             await Decoded(native);
             await native.SeekAsync(22);
             await native.PrepareReadHandoffAsync(next, default);
-            var input = Field(Session(native)!, "ReadInput")!;
+            var decoder = Field(Session(native)!, "Decoder")!;
+            var input = Field(decoder, "_input")!;
             // Inject the input's real terminal callback after native readiness.
             input.GetType().GetMethod("Fail", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .Invoke(input, [PlaybackError.ReadFailed]);
@@ -125,8 +127,17 @@ public static class NativeHandoffAdmissionTests
     }
 
     private static TestCase Test(string name, Func<Task> run) =>
-        new("native-handoff-admission: " + name, () => Sta(run));
-    private static NativePlayback Player() => new(Dispatcher.CurrentDispatcher, null, NativeAudioOutput.Dummy);
+        new("audio.handoff: " + name, () => Sta(run));
+    private static NativeAudioPlayback Player() => new(Dispatcher.CurrentDispatcher, audioOutput: NativeAudioOutput.Dummy);
+    private static Task Decoded(NativeAudioPlayback native) => AudioCoreFixtures.Until(() =>
+    {
+        if (native.LastErrorCode is { } error) throw new InvalidOperationException(error);
+        return native.IsPlaying && native.PositionSeconds > 0;
+    }, "rendered music PCM");
+    private static object? Session(NativeAudioPlayback native) => Field(native, "session");
+    private static object? Field(object instance, string name) =>
+        instance.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(instance) ??
+        instance.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(instance);
     private static void Check(bool condition, string message)
     { if (!condition) throw new InvalidOperationException(message); }
     private static async Task Until(Func<bool> condition)

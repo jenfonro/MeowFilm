@@ -121,6 +121,14 @@ public sealed partial class NativePlayback
                 Post(() => Observe(CancelSessionAsync(created)));
             });
             CheckReadRequest();
+            using var output = await AcquireOutputAsync(opening.Token);
+            CheckReadRequest();
+            if (_pauseRequested && created.ContinuationReady is null)
+            {
+                created.Media.AddOption(":start-paused");
+                created.ContinuationReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                continuationReady = created.ContinuationReady.Task;
+            }
             bool accepted = await Task.Run(created.Player.Play);
             CheckReadRequest();
             if (!accepted) throw Error(created.LastInputError ?? PlaybackError.OpenFailed);

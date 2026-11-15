@@ -201,7 +201,7 @@ internal sealed partial class AdaptiveHttpTransport : IDisposable
         {
             if (token.IsCancellationRequested || _lifetime.IsCancellationRequested)
                 throw new OperationCanceledException(token);
-            throw new PlaybackException(HttpMediaInput.Classify(error));
+            throw new PlaybackException(NativeHttpMediaPolicy.Classify(error));
         }
         finally
         {

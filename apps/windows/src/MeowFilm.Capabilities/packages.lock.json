@@ -20,6 +20,11 @@
         "resolved": "0.16.11",
         "contentHash": "OZfAVu88hl87BffQ+rlWCj/vLvAhhCK4QnFaoveeF/MY8SjHNSYBQ3qyUEWlPKNgBQGh1syXhCDg10vUnCsqkg=="
       },
+      "FFmpeg.AutoGen": {
+        "type": "Transitive",
+        "resolved": "9.0.1.1",
+        "contentHash": "+BLh0C8VET4aMUorxr/LMZAgmKl2PYSoY7Qm4PJ4eePx/LT2gIHkxOUnlGM91QETgfsnSZajHx9rK0d67ilpgw=="
+      },
       "LibVLCSharp": {
         "type": "Transitive",
         "resolved": "3.10.2",
@@ -31,6 +36,22 @@
         "contentHash": "jV7ThQIwaQxuLPLNWb1z7+qOGh6ctg/lBF5hVPfu+s+xI5HvtFEvCiYb8a88rEEd/g5WI/Llhy7ipeicAL5gsw==",
         "dependencies": {
           "LibVLCSharp": "3.10.2"
+        }
+      },
+      "NAudio.Core": {
+        "type": "Transitive",
+        "resolved": "3.3.0",
+        "contentHash": "xU3f1/5jBTfdjauhcPbjo0O1Ow+PVTPnjMo0KbV7twkWRcoY3GnVmA3mbUXxAePtJ2eUbWgteHWfFjOAvGovLg==",
+        "dependencies": {
+          "System.Numerics.Tensors": "9.0.0"
+        }
+      },
+      "NAudio.Wasapi": {
+        "type": "Transitive",
+        "resolved": "3.3.0",
+        "contentHash": "wUFqmyrTHde79yzt68g/akvtVG9KDnOVFJ0Aawr07zlbwcGOQo/IWO/NTw9YJTuESl9WGgncZitx/Q7JWQaaBA==",
+        "dependencies": {
+          "NAudio.Core": "3.3.0"
         }
       },
       "SkiaSharp": {
@@ -52,10 +73,24 @@
         "resolved": "4.155.0",
         "contentHash": "mTpojWcWzoB8mERp8Du9/T6KnBHo1nguYiLdy0AxjIsA6xHIDdo4xAU7FB6CxW9ATEkR77drNFTv84RuUDurvQ=="
       },
+      "System.Numerics.Tensors": {
+        "type": "Transitive",
+        "resolved": "9.0.0",
+        "contentHash": "hyJB4UlpAi19Xr9AXzu2NuagKC4lPfHObNMEAA0HmqFz2rX7wKgzeYzO/jM/eBHDhnUGFFEjk5cOoJaxqg5J4A=="
+      },
       "VideoLAN.LibVLC.Windows": {
         "type": "Transitive",
         "resolved": "3.0.24",
         "contentHash": "U8SHuJr8eAC3x4+gEtOJD2heReo0tTWP3v21NunYNTzjmHpVp7qELs8phohqazxHMkaSIN8LufdIpAhldiLL/A=="
+      },
+      "meowfilm.audio": {
+        "type": "Project",
+        "dependencies": {
+          "FFmpeg.AutoGen": "[9.0.1.1, 9.0.1.1]",
+          "MeowFilm.Core": "[1.0.0, )",
+          "NAudio.Core": "[3.3.0, 3.3.0]",
+          "NAudio.Wasapi": "[3.3.0, 3.3.0]"
+        }
       },
       "meowfilm.core": {
         "type": "Project"
@@ -73,6 +108,7 @@
         "dependencies": {
           "LibVLCSharp": "[3.10.2, 3.10.2]",
           "LibVLCSharp.WPF": "[3.10.2, 3.10.2]",
+          "MeowFilm.Core": "[1.0.0, )",
           "VideoLAN.LibVLC.Windows": "[3.0.24, 3.0.24]"
         }
       },

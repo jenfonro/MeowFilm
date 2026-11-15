@@ -55,6 +55,7 @@
 ### 媒体
 
 - [原生媒体播放](windows/media-playback.md)
+- [独立音乐核心](windows/music-audio-core.md)
 - [自适应媒体](windows/adaptive-media.md)
 - [HLS AES-128](windows/adaptive-encryption.md)
 - [Live HLS](windows/live-hls.md)

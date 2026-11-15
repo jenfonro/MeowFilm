@@ -1,16 +1,18 @@
 # Windows 原生媒体实现
 
-`MeowFilm.Media` 是当前 Windows App 唯一的媒体播放基础设施。原生音乐能力与 Node film 分别负责各自业务选择、授权资源和恢复状态；Media 只负责受控输入、共享原生播放 owner、媒体命令、轨道以及实际释放。
+Windows 音乐播放归独立的 `MeowFilm.Audio`，视频播放归 `MeowFilm.Media`；中性输入与作用域契约归 `MeowFilm.Core`。原生音乐能力与 Node film 分别负责各自业务选择、授权资源和恢复状态；两个内核只负责各自受控输入、原生播放、媒体命令及实际释放，视频另拥有轨道操作。
 
 ## 依赖和所有权
 
-- App 只创建一个 `NativePlayback` 作为共享播放 owner，不按页面、平台或内容类型创建独立 owner；两阶段交接的候选播放器也由它管理，不拥有第二套当前输出。
-- `NativePlayback` 在所属 WPF STA dispatcher 上创建；全部公开状态和事件回到该 dispatcher。
+- App 分别创建音乐 `NativeAudioPlayback` 和视频 `NativePlayback`；音乐使用 FFmpeg 音频解码、float PCM、NAudio 处理链及 WASAPI，视频保持 LibVLC。App 的显式输出准入协调二者互斥；候选输入由对应 owner 管理，不成为第二个当前输出。音乐实现见[独立音乐核心](music-audio-core.md)。
+- 两个 owner 均在所属 WPF STA dispatcher 上创建；全部公开状态和事件回到该 dispatcher。下文的 LibVLC、轨道和视频输入细节属于 `NativePlayback`，不适用于音乐 PCM 管线。
 - LibVLC engine 延迟创建并由播放器实例拥有。播放器替换、停止、自然结束、失败和关闭都经过同一串行命令门。
 - `OwnerId`、`Identity` 和内部 generation 共同标识当前会话。旧命令、旧回调、旧取消和旧资源不得作用于新会话。
 - Media 不选择平台来源、不读取账号、不运行 Node、不保存业务队列，也不提供下载管理。
 
 影视广格式路径保留锁定 libVLC 3.0.24 的解码／渲染，不替换播放器框架。`apps/windows/native/VideoKernel` 的私有 access-demux 插件使用锁定 FFmpeg 8.1.2（来源／配置见 `video-kernel.lock.json`）解复用及处理合法 ClearKey，再将 packet／codec 参数交给 VLC `es_out`；不转码、不伪造长度 remux、不整片落盘，也不创建新媒体 HTTP 服务。FFmpeg 禁用自有网络／协议，根与子 AVIO 经现有原生受控 HTTP 或准确 resource lease；key 只经私有内存传递，不进入 URL、MRL／公开 options、日志或普通事件。
+
+插件与 VLC 使用不同 CRT。轨道的 extradata、语言及标题只借用 FFmpeg 字段至同步深拷贝的 `es_out_Add`；返回后清空这些指针和 `i_extra`，再清理临时 format，不跨 CRT 转移分配／释放所有权。
 
 ## 输入边界
 
@@ -52,7 +54,7 @@
 - `PlaybackException` 只公开 `PlaybackError` 中的固定代码；不暴露 URI、路径、请求头、凭据、响应正文或原生日志。
 - 非当前离线归档和损坏输入明确失败且不被改写。
 
-当前私有 native DLL 已有独立构建证据，但八模块／VideoKernel 合并后的 Media C#、整 App 与真实媒体帧、ClearKey、seek、撤权排空仍无本轮有效平台通过结论；单独 DLL、旧音频测试或 UI 状态不能替代这些证据。影视业务及端侧接缝分别见[共同运行器契约](../runtime/film-playback.md)和[影视播放页](film-playback.md)。
+构建、定向测试和真实媒体输出的验证证据分别记录；音乐验证不能替代视频帧、ClearKey、硬件解码或整 App 验收。影视业务及端侧接缝分别见[共同运行器契约](../runtime/film-playback.md)和[影视播放页](film-playback.md)。
 
 ## 相关契约
 
@@ -63,3 +65,4 @@
 - `adaptive-encryption.md`
 - `media-tracks.md`
 - `system-media.md`
+- `music-audio-core.md`

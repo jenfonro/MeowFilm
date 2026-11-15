@@ -59,10 +59,11 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `native/VideoKernel/` — Apple 平台视频解码与 sample-buffer 输出；锁定 FFmpeg 源码及本地适配，不拥有业务或系统媒体会话
 - `apps/windows/app/` — Windows 应用入口与装配
 - `apps/windows/src/` — Windows 原生库
-  - `MeowFilm.Core` — 基础契约
+  - `MeowFilm.Core` — 基础契约、中性播放作用域／读取租约与受控 HTTP 输入机制
   - `MeowFilm.Platform` — 本地文档存储与敏感信息保护、私密启动管道、HTTP 子进程会话、文件授权
   - `MeowFilm.Desktop` — 窗口、导航、设置入口、主题、通知
-  - `MeowFilm.Media` — 媒体播放与自适应流
+  - `MeowFilm.Audio` — 独立音乐解码、PCM／DSP 与 WASAPI 输出
+  - `MeowFilm.Media` — 视频播放与自适应流
   - `MeowFilm.SystemMedia` — 系统媒体传输控件
   - `MeowFilm.AppHost` — 启动、注入与关闭
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）

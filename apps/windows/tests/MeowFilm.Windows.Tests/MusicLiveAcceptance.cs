@@ -76,7 +76,7 @@ internal static class MusicLiveAcceptance
         LocalDocumentStore? store = null, cacheBacking = null;
         CacheDocumentStore? cache = null;
         NodeRuntime? runtime = null;
-        NativePlayback? player = null;
+        NativeAudioPlayback? player = null;
         MusicNativeApplication? application = null;
         MusicCapability? module = null;
         Window? window = null;
@@ -101,8 +101,7 @@ internal static class MusicLiveAcceptance
             report.Record("live.runtime-pid", "PASS", count: runtime.ProcessId);
             var observed = new ObservedRuntime(runtime, report);
             application = new(store, observed, cache);
-            player = new(nativeLibraryPath: Environment.GetEnvironmentVariable("MEOWFILM_TEST_VLC_ROOT"),
-                audioOutput: NativeAudioOutput.SystemDefault);
+            player = new(audioOutput: NativeAudioOutput.SystemDefault);
             module = new(application, store, player, playbackCacheRoot: Path.Combine(data, "media"), cacheStore: cache);
 
             var layout = new Grid();
@@ -250,7 +249,7 @@ internal static class MusicLiveAcceptance
     }
 
     private static async Task<bool> LogoutAsync(MusicNativeApplication application, MusicCapability module,
-        NativePlayback player, Report report)
+        NativeAudioPlayback player, Report report)
     {
         bool stopped = await report.StepAsync("account.logout.stop", async () =>
         {
@@ -277,7 +276,7 @@ internal static class MusicLiveAcceptance
         return stopped && cleared && confirmed;
     }
 
-    private static async Task ExerciseWyAsync(string phase, MusicNativeApplication application, MusicCapability module, NativePlayback player,
+    private static async Task ExerciseWyAsync(string phase, MusicNativeApplication application, MusicCapability module, NativeAudioPlayback player,
         ObservedRuntime runtime, Report report, Window window)
     {
         if (!await report.StepAsync(phase + ".wy.home", () => HomeAsync(module, runtime, report, window, "wy", refresh: true)))
@@ -392,7 +391,7 @@ internal static class MusicLiveAcceptance
         return Cards(module).Count();
     }
 
-    private static async Task<int> PlayAsync(Func<Task> action, MusicCapability module, NativePlayback player, Report report)
+    private static async Task<int> PlayAsync(Func<Task> action, MusicCapability module, NativeAudioPlayback player, Report report)
     {
         await module.CancelRecommendationAsync();
         await player.StopAsync();

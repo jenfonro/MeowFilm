@@ -268,13 +268,10 @@ public static partial class MusicUiTests
             Equal(1, f.Module.Songs.Count);
             Equal(selected, f.Module.Songs.Single().Id);
         });
-        yield return Case("online native chain uses real libVLC with generated loopback WAV, not URL-success-as-played", async () =>
+        yield return Case("online native chain uses real FFmpeg audio decoding with generated loopback WAV, not URL-success-as-played", async () =>
         {
             await using var server = new MusicWaveServer();
-            var nativePath = Path.Combine(AppContext.BaseDirectory, "libvlc",
-                "win-" + System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant());
-            await using var native = new NativePlayback(dispatcher: null, nativeLibraryPath: nativePath, audioOutput: NativeAudioOutput.Dummy,
-                httpOptions: new NativeHttpMediaOptions());
+            await using var native = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
             await using var f = await Fixture.Create(native: native);
             await SetupOnline(f, JsonSerializer.Serialize(server.Url));
             var module = f.Module;
@@ -282,7 +279,7 @@ public static partial class MusicUiTests
             await Until(() => native.IsPlaying && native.DurationSeconds > 0 && f.Calls.Count("music.history.recordPlayed") > 0);
             Equal("music", native.OwnerId); True(native.DurationSeconds > 0, "native decoded generated audio");
             True(server.Requests > 0, "native requested bytes from controlled HTTP origin");
-            Console.WriteLine("Music native evidence: authored LX + generated WAV + libVLC dummy output; no upstream/account/speaker acceptance.");
+            Console.WriteLine("Music native evidence: authored LX + generated WAV + FFmpeg PCM + explicit dummy output; no upstream/account/speaker acceptance.");
         });
     }
     private static string TestScript(string result = "'https://media.invalid/' + info.musicInfo.songmid",

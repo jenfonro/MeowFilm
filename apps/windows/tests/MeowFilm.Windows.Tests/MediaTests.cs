@@ -75,11 +75,12 @@ public static class MediaTests
             typeof(string), typeof(CancellationToken)]);
         Check(open?.ReturnType == typeof(Task));
         Check(type.GetMethod("DisposeAsync")!.ReturnType == typeof(ValueTask));
-        Check(type.GetConstructor([typeof(Dispatcher), typeof(string), typeof(NativeAudioOutput)])!
-            .GetParameters().All(parameter => parameter.IsOptional));
+        var constructor = type.GetConstructor([typeof(Dispatcher), typeof(string), typeof(NativeAudioOutput),
+            typeof(Func<CancellationToken, Task<IDisposable>>)]);
+        Check(constructor is not null && constructor.GetParameters().All(parameter => parameter.IsOptional));
         foreach (string name in new[] { "Started", "Ended", "Failed" })
             Check(type.GetEvent(name)!.EventHandlerType == typeof(EventHandler));
-        Check(type.GetProperty("VideoView")!.PropertyType == typeof(FrameworkElement));
+        Check(type.GetProperty("VideoView")!.PropertyType == typeof(System.Windows.Controls.ContentControl));
         Check(type.GetProperty("Volume")!.CanWrite);
         return Task.CompletedTask;
     }
@@ -208,9 +209,9 @@ public static class MediaTests
         player.Failed += (_, _) => failed++;
         player.PropertyChanged += (_, args) => { if (args.PropertyName == nameof(player.PositionSeconds)) progress++; };
         Check(started == 0);
-        await Start(player, wave.Uri, "music", "fixture-1");
+        await Start(player, wave.Uri, "film", "fixture-1");
         Check(actualPlaying && started == 1 && player.IsPlaying && player.HasMedia);
-        Check(player.OwnerId == "music" && player.Identity == "fixture-1" && player.Title == "generated WAV");
+        Check(player.OwnerId == "film" && player.Identity == "fixture-1" && player.Title == "generated WAV");
         var native = ((VideoView)player.VideoView).MediaPlayer!;
         Check(native.Hwnd != IntPtr.Zero); // Even an unmounted audio-only fixture has no external-video fallback.
         await Eventually(() => player.DurationSeconds > 11.8 && player.PositionSeconds > 0.2);
@@ -270,14 +271,14 @@ public static class MediaTests
                 ended++;
                 if (ended == 1)
                 {
-                    Check(player.OwnerId == "music" && player.Identity == "queue-1");
-                    await player.OpenAsync("music", "queue-2", second.Uri, "generated WAV");
+                    Check(player.OwnerId == "film" && player.Identity == "queue-1");
+                    await player.OpenAsync("film", "queue-2", second.Uri, "generated WAV");
                 }
                 else done.TrySetResult();
             }
             catch (Exception error) { done.TrySetException(error); }
         };
-        await player.OpenAsync("music", "queue-1", first.Uri, "generated WAV");
+        await player.OpenAsync("film", "queue-1", first.Uri, "generated WAV");
         await done.Task.WaitAsync(TimeSpan.FromSeconds(12));
         Check(started == 2 && ended == 2 && releasedAtEnd);
         Check(player.Identity == "queue-2" && player.LastErrorCode is null);
@@ -312,7 +313,7 @@ public static class MediaTests
     {
         using var wave = new Wave(10);
         await using var player = New();
-        await Start(player, wave.Uri, "music", "keep");
+        await Start(player, wave.Uri, "film", "keep");
         var native = ((VideoView)player.VideoView).MediaPlayer;
         await ExpectCode(() => player.OpenAsync("video", "reject", new Uri("ftp://example.invalid/a"), ""), PlaybackError.UnsupportedUri);
         await ExpectCode(() => player.OpenAsync("video", "reject", new Uri("https://example.invalid/a"), "",
@@ -320,7 +321,7 @@ public static class MediaTests
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
         await ExpectCancelled(() => player.OpenAsync("video", "reject", wave.Uri, "", cancelled.Token));
-        Check(player.OwnerId == "music" && player.Identity == "keep" && player.IsPlaying);
+        Check(player.OwnerId == "film" && player.Identity == "keep" && player.IsPlaying);
         Check(ReferenceEquals(native, ((VideoView)player.VideoView).MediaPlayer));
     }
 
@@ -361,7 +362,7 @@ public static class MediaTests
         player.Started += (_, _) => identities.Add(player.Identity);
         player.Ended += (_, _) => ended++;
         player.Failed += (_, _) => failed++;
-        await Start(player, first.Uri, "music", "old", oldToken.Token);
+        await Start(player, first.Uri, "film", "old", oldToken.Token);
         var oldNative = ((VideoView)player.VideoView).MediaPlayer!;
         await Start(player, second.Uri, "video", "new");
         var newNative = ((VideoView)player.VideoView).MediaPlayer!;
@@ -380,7 +381,7 @@ public static class MediaTests
         await using var player = New();
         var identities = new List<string?>();
         player.Started += (_, _) => identities.Add(player.Identity);
-        var first = player.OpenAsync("music", "superseded", wave.Uri, "");
+        var first = player.OpenAsync("film", "superseded", wave.Uri, "");
         var last = player.OpenAsync("video", "latest", wave.Uri, "");
         await ExpectCancelled(() => first);
         await last;
@@ -388,7 +389,7 @@ public static class MediaTests
         Check(player.OwnerId == "video" && player.Identity == "latest");
         Check(identities.SequenceEqual(new[] { "latest" }));
         var stop = player.StopAsync();
-        var next = player.OpenAsync("music", "after-stop", wave.Uri, "");
+        var next = player.OpenAsync("film", "after-stop", wave.Uri, "");
         await Task.WhenAll(stop, next);
         await Eventually(() => player.Identity == "after-stop" && player.IsPlaying);
     }
@@ -422,7 +423,7 @@ public static class MediaTests
         player.Started += (_, _) => events++;
         player.Ended += (_, _) => events++;
         player.Failed += (_, _) => events++;
-        var opening = player.OpenAsync("music", "interrupted", wave.Uri, "");
+        var opening = player.OpenAsync("film", "interrupted", wave.Uri, "");
         var stopped = player.StopAsync();
         await ExpectCancelled(() => opening);
         await stopped;
@@ -443,7 +444,7 @@ public static class MediaTests
         player.Failed += (_, _) => events++;
         try
         {
-            var opening = player.OpenAsync("music", "closing", wave.Uri, "");
+            var opening = player.OpenAsync("film", "closing", wave.Uri, "");
             var disposed = player.DisposeAsync().AsTask();
             var disposedAgain = player.DisposeAsync().AsTask();
             await ExpectCancelled(() => opening);
@@ -891,7 +892,7 @@ public static class MediaTests
         int ended = 0, failed = 0;
         player.Ended += (_, _) => ended++;
         player.Failed += (_, _) => failed++;
-        await player.OpenAsync("music", "native-http", server.Uri("/media.wav"), "generated HTTP WAV", HttpHeaders());
+        await player.OpenAsync("film", "native-http", server.Uri("/media.wav"), "generated HTTP WAV", HttpHeaders());
         await Eventually(() => player.IsPlaying && player.DurationSeconds > 299);
         var native = ((VideoView)player.VideoView).MediaPlayer!;
         await player.PauseAsync();
@@ -925,7 +926,7 @@ public static class MediaTests
             player.Failed += (_, _) => failed++;
             try
             {
-                await player.OpenAsync("music", "blocked", server.Uri("/a"), "", HttpHeaders(), cancellation.Token);
+                await player.OpenAsync("film", "blocked", server.Uri("/a"), "", HttpHeaders(), cancellation.Token);
                 var native = ((VideoView)player.VideoView).MediaPlayer!;
                 await Task.Delay(150); // Native callback is waiting for the remaining declared body.
                 Check(player.HasMedia);
@@ -954,12 +955,12 @@ public static class MediaTests
         await using var server = new HttpFixture((_, _, token) => Task.Delay(Timeout.Infinite, token));
         using var wave = new Wave(4);
         await using var player = new NativePlayback(Dispatcher.CurrentDispatcher, NativePath(), NativeAudioOutput.Dummy, server.Options());
-        var opening = player.OpenAsync("music", "pending", server.Uri("/a"), "", HttpHeaders());
+        var opening = player.OpenAsync("film", "pending", server.Uri("/a"), "", HttpHeaders());
         await Eventually(() => server.Requests.Count == 1);
         await player.StopAsync().WaitAsync(TimeSpan.FromSeconds(2));
         await ExpectCancelled(() => opening);
         Check(!player.HasMedia);
-        var replaced = player.OpenAsync("music", "pending-again", server.Uri("/a"), "", HttpHeaders());
+        var replaced = player.OpenAsync("film", "pending-again", server.Uri("/a"), "", HttpHeaders());
         await Eventually(() => server.Requests.Count == 2);
         await Start(player, wave.Uri, identity: "latest");
         await ExpectCancelled(() => replaced);
@@ -979,7 +980,7 @@ public static class MediaTests
         int failed = 0, ended = 0;
         player.Failed += (_, _) => failed++;
         player.Ended += (_, _) => ended++;
-        await player.OpenAsync("music", "timeout", server.Uri("/a"), "", HttpHeaders());
+        await player.OpenAsync("film", "timeout", server.Uri("/a"), "", HttpHeaders());
         await Eventually(() => failed == 1);
         Check(ended == 0 && player.LastErrorCode == PlaybackError.HttpDeadline && !player.HasMedia);
         Check(((VideoView)player.VideoView).MediaPlayer is null);

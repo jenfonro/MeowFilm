@@ -8,7 +8,7 @@
 - `AdaptiveManifest` 解析根清单和允许的子清单，建立有界资源图；不把任意 playlist 直接交给原生内核继续发现网络资源。
 - `AdaptiveMediaSession` 拥有上游传输、解析结果、资源、密钥、临时 capability 服务、取消和实际释放。
 - 既有本地表示服务绑定临时 `127.0.0.1` 端口，无 Origin／Host／随机请求头准入；实际资源路由／Range 仍解析，未知路由为 404。
-- App 仍只有一个 `NativePlayback`、一个 LibVLC engine 和一个当前 `MediaPlayer`。
+- 视频仍由一个 `NativePlayback`、一个 LibVLC engine 和一个当前 `MediaPlayer` 管理；音乐使用独立音频核心，不进入本路径。
 
 ## 当前支持边界
 

@@ -28,6 +28,7 @@ export const licenseFiles = [
   'GCC-Runtime-Library-Exception-3.1.txt',
   'MinGW-w64-runtime-NOTICE.txt', 'winpthreads-LICENSE.txt',
   'WebView2-LICENSE.txt', 'WebView2-NOTICE.txt',
+  'NAudio-MIT.txt', 'FFmpeg.AutoGen-MIT.txt', 'dotnet-runtime-MIT.txt', 'FFmpeg-audio-NOTICES.txt',
 ];
 const INPUTS = licenseFiles.map(name => ({ sourcePath: `${SOURCE}/${name}`, path: name }));
 

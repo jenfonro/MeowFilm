@@ -59,7 +59,7 @@ public static class MediaOutputTests
             var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             playback.Started += (_, _) => started.TrySetResult();
             playback.VideoOutputObserved += (_, _) => events++;
-            await playback.OpenAsync("music", "synthetic-wave", new Uri(file), "合成音频");
+            await playback.OpenAsync("film", "synthetic-wave", new Uri(file), "合成音频");
             await started.Task.WaitAsync(TimeSpan.FromSeconds(8)); await Task.Delay(500);
             Check(events == 0 && playback.ObservedVideoOutput is null);
             await playback.StopAsync();

@@ -32,7 +32,7 @@ public static class MusicOfficialAudioTests
                 return MusicPlatformRuntimeFixture.Json(audio);
             };
             var app = new MusicNativeApplication(f.Store, runtime, f.CacheStore);
-            await using var player = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
+            await using var player = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
             await using var module = new MusicCapability(app, f.Store, new NativeMusicPlayback(player), new CacheDialogs(),
                 playbackCacheRoot: f.Root, cacheStore: f.CacheStore);
             await module.InitializeAsync(default);
