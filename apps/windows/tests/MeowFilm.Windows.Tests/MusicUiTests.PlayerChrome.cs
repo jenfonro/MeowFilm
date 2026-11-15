@@ -1154,6 +1154,7 @@ public static partial class MusicUiTests
                 root.Measure(new(1243, 848)); root.Arrange(new Rect(0, 0, 1243, 848)); root.UpdateLayout();
                 var ordinaryFooter = f.Module.PlayerView;
                 var ordinaryFooterHeight = ordinaryFooter.ActualHeight;
+                var ordinarySidebarWidth = ((Grid)shell.FindName("RootLayout")).ColumnDefinitions[0].ActualWidth;
 
                 await f.Module.ShowLyricsAsync();
                 await Until(() => f.Module.IsLyrics);
@@ -1192,7 +1193,7 @@ public static partial class MusicUiTests
                     var grid = (Grid)shell.FindName("RootLayout");
                     True(grid.Background is null, "player overlay does not repaint the shell");
                     Equal(Visibility.Visible, ((ScrollViewer)shell.FindName("SidebarScroll")).Visibility);
-                    True(Math.Abs(grid.ColumnDefinitions[0].ActualWidth - 203) < .5, "underlying sidebar keeps its layout");
+                    True(Math.Abs(grid.ColumnDefinitions[0].ActualWidth - ordinarySidebarWidth) < .5, "underlying sidebar keeps its layout");
                     Equal(new Thickness(0), root.BorderThickness);
                     True(ReferenceEquals(root.Background, shell.Background), "rounded edges do not expose normal white canvas");
                     var title = Visuals(detail).OfType<TextBlock>()
@@ -1258,7 +1259,7 @@ public static partial class MusicUiTests
                 var row = lyricList.ItemContainerGenerator.ContainerFromIndex(8) as FrameworkElement;
                 if (row is null) throw new InvalidOperationException("active lyric row is not realized after automatic centering");
                 var rowCenter = row.TranslatePoint(new Point(0, row.ActualHeight / 2), lyricScroll).Y;
-                var readingBand = lyricScroll.ActualHeight * .24;
+                var readingBand = lyricScroll.ViewportHeight / 2;
                 True(Math.Abs(rowCenter - readingBand) < 2,
                     $"active line reaches reference reading band: actual={rowCenter}, target={readingBand}, offset={centered}, " +
                     $"scrollable={lyricScroll.ScrollableHeight}, extent={lyricScroll.ExtentHeight}, viewport={lyricScroll.ViewportHeight}, row={row.ActualHeight}");
@@ -1278,7 +1279,7 @@ public static partial class MusicUiTests
                         recoveredRow = lyricList.ItemContainerGenerator.ContainerFromIndex(9) as FrameworkElement;
                         return recoveredRow is not null &&
                             Math.Abs(recoveredRow.TranslatePoint(new Point(0, recoveredRow.ActualHeight / 2), lyricScroll).Y -
-                                lyricScroll.ViewportHeight * .24) < 2;
+                                lyricScroll.ViewportHeight / 2) < 2;
                     });
                 }
                 catch (TimeoutException error)
@@ -1286,14 +1287,14 @@ public static partial class MusicUiTests
                     var actual = recoveredRow?.TranslatePoint(new Point(0, recoveredRow.ActualHeight / 2), lyricScroll).Y;
                     throw new TimeoutException($"Idle lyric recovery did not settle: font={detail.FontFamily.Source}, " +
                         $"index={f.Module.LyricDisplayIndex}, playing={f.Module.IsPlaying}, actual={actual}, " +
-                        $"target={lyricScroll.ViewportHeight * .24}, row={recoveredRow?.ActualHeight}, " +
+                        $"target={lyricScroll.ViewportHeight / 2}, row={recoveredRow?.ActualHeight}, " +
                         $"root={root.RenderSize}, detail={detail.RenderSize}, lyrics={lyricList.RenderSize}, " +
                         $"offset={lyricScroll.VerticalOffset}, extent={lyricScroll.ExtentHeight}, " +
                         $"viewport={lyricScroll.ViewportHeight}, scrollable={lyricScroll.ScrollableHeight}", error);
                 }
                 row = recoveredRow ?? throw new InvalidOperationException(
                     "active lyric row is not realized after manual-scroll recovery");
-                True(Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), lyricScroll).Y - lyricScroll.ActualHeight * .24) < 2,
+                True(Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), lyricScroll).Y - lyricScroll.ViewportHeight / 2) < 2,
                     "idle timeout resumes lyric following without a new media tick");
                 var playLine = (Button)detail.FindName("ConfirmLyric");
                 lyricList.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, -120)
@@ -1336,7 +1337,7 @@ public static partial class MusicUiTests
                     var row = list.ItemContainerGenerator.ContainerFromIndex(index) as FrameworkElement;
                     return row is null ? double.PositiveInfinity : Math.Abs(
                         row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y -
-                        scroll.ViewportHeight * .24);
+                        scroll.ViewportHeight / 2);
                 }
                 await f.Playback.SeekAsync(80);
                 for (var i = 1; i <= 3; i++)
@@ -1413,20 +1414,20 @@ public static partial class MusicUiTests
                     .Where(row => list.ItemContainerGenerator.IndexFromContainer(row) >= 0).ToArray();
                 True(rows.Length > 0 && rows.Length < Math.Min(count, 64),
                     $"realized lyric containers stay viewport bounded: {rows.Length}/{count}");
-                var anchor = .24;
+                var scroll = Visuals(list).OfType<ScrollViewer>().First();
                 foreach (var row in rows)
                 {
                     var first = ReferenceEquals(row.DataContext, f.Module.Lyrics[0]);
                     var last = ReferenceEquals(row.DataContext, f.Module.Lyrics[^1]);
-                    var top = first ? Math.Max(24, list.ActualHeight * anchor) : 0;
-                    var bottom = last ? Math.Max(24, list.ActualHeight * (1 - anchor)) : 0;
+                    var edgeSpace = Math.Max(0, (scroll.ViewportHeight - row.ActualHeight) / 2);
+                    var top = first ? edgeSpace : 0;
+                    var bottom = last ? edgeSpace : 0;
                     True(Math.Abs(row.Margin.Top - top) < .01 && Math.Abs(row.Margin.Bottom - bottom) < .01,
                         $"only actual edge items have space: index={list.ItemContainerGenerator.IndexFromContainer(row)}, " +
                         $"actual={row.Margin}, expected={top}/{bottom}");
                     if (seen.TryGetValue(row, out var prior) && !ReferenceEquals(prior, row.DataContext)) recycled = true;
                     seen[row] = row.DataContext;
                 }
-                var scroll = Visuals(list).OfType<ScrollViewer>().First();
                 True(Math.Abs(scroll.ViewportHeight - list.ActualHeight) < 1, "edge space never shrinks the viewport");
             }
             async Task Visit(int index)
@@ -1461,20 +1462,18 @@ public static partial class MusicUiTests
                     {
                         Layout();
                         var row = list.ItemContainerGenerator.ContainerFromIndex(index) as FrameworkElement;
-                        var anchor = .24;
                         return f.Module.LyricDisplayIndex == index && row is not null &&
                             Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y -
-                                scroll.ViewportHeight * anchor) < 2;
+                                scroll.ViewportHeight / 2) < 2;
                     });
                 }
                 catch (TimeoutException error)
                 {
                     var row = list.ItemContainerGenerator.ContainerFromIndex(index) as FrameworkElement;
-                    var anchor = .24;
                     throw new TimeoutException($"Lyric edge follow did not settle: count={list.Items.Count}, " +
                         $"index={index}, active={f.Module.LyricDisplayIndex}, playing={f.Module.IsPlaying}, " +
                         $"actual={row?.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y}, " +
-                        $"target={scroll.ViewportHeight * anchor}, margin={row?.Margin}, " +
+                        $"target={scroll.ViewportHeight / 2}, margin={row?.Margin}, " +
                         $"offset={scroll.VerticalOffset}, scrollable={scroll.ScrollableHeight}", error);
                 }
                 AssertEdges(f.Module.Lyrics.Count);
@@ -1503,6 +1502,7 @@ public static partial class MusicUiTests
                     Layout(); await Drain();
                     foreach (var index in new[] { 0, count - 1 }) await Visit(index);
                     await f.Module.StepAsync(true);
+                    await f.Module.RestoreLyricsAsync();
                     f.Module.Lyrics.Clear();
                     for (var index = 0; index < count; index++)
                         f.Module.Lyrics.Add(new(index * .1, "换歌歌词行 " + index, ""));

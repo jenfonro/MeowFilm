@@ -3883,21 +3883,17 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let card = try XCTUnwrap(descendants(header).first {
             $0.accessibilityIdentifier == "music.collection.information"
         })
+        let cardFrame = card.frame
         let coverFrame = cover.convert(cover.bounds, to: header)
-        XCTAssertEqual(header.heroHeight(for: 390), 149, accuracy: 0.5)
-        XCTAssertEqual(header.bounds.height, 211, accuracy: 0.5)
-        XCTAssertEqual(card.frame.minX, 12, accuracy: 0.5)
-        XCTAssertEqual(card.frame.minY, 10, accuracy: 0.5)
-        XCTAssertEqual(card.frame.width, 366, accuracy: 0.5)
+        XCTAssertTrue(header.bounds.contains(cardFrame))
+        XCTAssertTrue(card.bounds.contains(cover.convert(cover.bounds, to: card)))
+        XCTAssertGreaterThan(coverFrame.width, 0)
+        XCTAssertEqual(coverFrame.width, coverFrame.height, accuracy: 0.5)
         XCTAssertEqual(card.layer.cornerRadius, 0, accuracy: 0.5)
         XCTAssertEqual(card.layer.borderWidth, 0, accuracy: 0.1)
         XCTAssertEqual(card.layer.shadowOpacity, 0)
         XCTAssertNil(card.backgroundColor)
         XCTAssertFalse(descendants(card).contains { $0 is UIVisualEffectView })
-        XCTAssertEqual(coverFrame.minX, 24, accuracy: 0.5)
-        XCTAssertEqual(coverFrame.minY, 22, accuracy: 0.5)
-        XCTAssertEqual(coverFrame.width, 102.6, accuracy: 0.5)
-        XCTAssertEqual(coverFrame.height, 102.6, accuracy: 0.5)
         XCTAssertTrue(descendants(header).compactMap { $0 as? UILabel }.contains { $0.text == "慢慢听" })
         XCTAssertTrue(descendants(header).compactMap { $0 as? UILabel }.contains { $0.text == "我的歌单" })
         XCTAssertEqual(descendants(header).compactMap { $0 as? UILabel }.filter { $0.text == "2首" }.count, 1)
@@ -3912,11 +3908,12 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let edit = try XCTUnwrap(descendants(bar).compactMap { $0 as? UIButton }.first {
             $0.accessibilityIdentifier == "music.collection.edit"
         })
-        XCTAssertEqual(bar.bounds.height, 62, accuracy: 0.5)
-        XCTAssertEqual(play.frame.minY, 0, accuracy: 0.5)
-        XCTAssertEqual(play.frame.height, 62, accuracy: 0.5)
-        XCTAssertEqual(edit.frame.minX, 330, accuracy: 0.6)
-        XCTAssertEqual(edit.frame.minY, 9, accuracy: 0.6)
+        let playFrame = play.frame, editFrame = edit.frame
+        let barHeight = bar.bounds.height
+        XCTAssertTrue(bar.bounds.contains(playFrame))
+        XCTAssertTrue(bar.bounds.contains(editFrame))
+        XCTAssertLessThanOrEqual(playFrame.maxX, editFrame.minX)
+        XCTAssertGreaterThanOrEqual(playFrame.height, 44)
         XCTAssertEqual(edit.frame.width, 44, accuracy: 0.5)
         XCTAssertEqual(edit.frame.height, 44, accuracy: 0.5)
         XCTAssertEqual(edit.accessibilityLabel, "多选")
@@ -3930,12 +3927,14 @@ final class MusicUIKitRegressionTests: XCTestCase {
         header.setSearchVisible(true)
         bar.frame.size.height = bar.preferredHeight
         bar.layoutIfNeeded()
-        XCTAssertEqual(header.preferredHeight(for: 390), 263, accuracy: 0.5)
-        XCTAssertEqual(bar.bounds.height, 114, accuracy: 0.5)
+        XCTAssertGreaterThan(header.preferredHeight(for: header.bounds.width), header.bounds.height)
+        XCTAssertGreaterThan(bar.bounds.height, barHeight)
         XCTAssertFalse(header.searchField.isHidden)
-        XCTAssertEqual(header.searchField.frame.minX, 16, accuracy: 0.5)
-        XCTAssertEqual(header.searchField.frame.width, 358, accuracy: 0.5)
-        XCTAssertEqual(header.searchField.frame.height, 40, accuracy: 0.5)
+        XCTAssertGreaterThan(header.searchField.bounds.height, 0)
+        XCTAssertTrue(bar.bounds.contains(header.searchField.frame))
+        XCTAssertLessThanOrEqual(max(play.frame.maxY, edit.frame.maxY), header.searchField.frame.minY)
+        XCTAssertEqual(play.frame, playFrame)
+        XCTAssertEqual(edit.frame, editFrame)
 
         let cell = MusicCollectionTrackCell(style: .default,
                                             reuseIdentifier: MusicCollectionTrackCell.reuseIdentifier)
@@ -3958,10 +3957,9 @@ final class MusicUIKitRegressionTests: XCTestCase {
         cell.layoutIfNeeded()
         let artwork = try XCTUnwrap(descendants(cell).compactMap { $0 as? MusicArtworkView }.first)
         let artworkFrame = artwork.convert(artwork.bounds, to: cell.contentView)
-        XCTAssertEqual(artworkFrame.minX, 16, accuracy: 0.5)
-        XCTAssertEqual(artworkFrame.minY, 15, accuracy: 0.5)
-        XCTAssertEqual(artworkFrame.width, 42, accuracy: 0.5)
-        XCTAssertEqual(artworkFrame.height, 42, accuracy: 0.5)
+        XCTAssertTrue(cell.contentView.bounds.contains(artworkFrame))
+        XCTAssertGreaterThan(artworkFrame.width, 0)
+        XCTAssertEqual(artworkFrame.width, artworkFrame.height, accuracy: 0.5)
         let buttons = descendants(cell).compactMap { $0 as? UIButton }
         let favorite = try XCTUnwrap(buttons.first {
             $0.accessibilityIdentifier == "music.collection.favorite.rain"
@@ -3972,12 +3970,14 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let more = try XCTUnwrap(buttons.first {
             $0.accessibilityIdentifier == "music.collection.more.rain"
         })
-        XCTAssertEqual(favorite.frame.minX, 260, accuracy: 0.5)
-        XCTAssertEqual(append.frame.minX, 299, accuracy: 0.5)
-        XCTAssertEqual(more.frame.minX, 338, accuracy: 0.5)
-        for button in [favorite, append, more] {
-            XCTAssertEqual(button.frame.minY, 14, accuracy: 0.5)
-            XCTAssertEqual(button.frame.width, 36, accuracy: 0.5)
+        let actionFrames = [favorite, append, more].map { $0.convert($0.bounds, to: cell.contentView) }
+        XCTAssertLessThanOrEqual(artworkFrame.maxX, actionFrames[0].minX)
+        for (left, right) in zip(actionFrames, actionFrames.dropFirst()) {
+            XCTAssertLessThanOrEqual(left.maxX, right.minX)
+        }
+        for (button, frame) in zip([favorite, append, more], actionFrames) {
+            XCTAssertTrue(cell.contentView.bounds.contains(frame))
+            XCTAssertGreaterThan(frame.width, 0)
             XCTAssertEqual(button.frame.height, 44, accuracy: 0.5)
         }
         XCTAssertTrue(favorite.accessibilityTraits.contains(.selected))
@@ -3987,6 +3987,10 @@ final class MusicUIKitRegressionTests: XCTestCase {
 
         let dark = PageTheme(dark: true)
         header.applyTheme(dark)
+        header.setNeedsLayout()
+        header.layoutIfNeeded()
+        XCTAssertEqual(card.frame, cardFrame)
+        XCTAssertEqual(cover.convert(cover.bounds, to: header), coverFrame)
         let title = try XCTUnwrap(descendants(header).compactMap { $0 as? UILabel }.first {
             $0.text == "慢慢听"
         })

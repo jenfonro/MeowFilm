@@ -25,7 +25,7 @@ public static partial class MusicUiTests
             var list = (MusicLyricList)detail.FindName("LyricList");
             var scroll = Visuals(list).OfType<ScrollViewer>().First();
             double CenterError() => list.ItemContainerGenerator.ContainerFromIndex(20) is FrameworkElement row
-                ? Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y - scroll.ViewportHeight * .24)
+                ? Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y - scroll.ViewportHeight / 2)
                 : double.PositiveInfinity;
             await f.Playback.SeekAsync(40); await f.Playback.PauseAsync();
             await Until(() => CenterError() < 2);
@@ -92,7 +92,7 @@ public static partial class MusicUiTests
             var list = (MusicLyricList)detail.FindName("LyricList");
             var scroll = Visuals(list).OfType<ScrollViewer>().First();
             double CenterError(int index) => list.ItemContainerGenerator.ContainerFromIndex(index) is FrameworkElement row
-                ? Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y - scroll.ViewportHeight * .24)
+                ? Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y - scroll.ViewportHeight / 2)
                 : double.PositiveInfinity;
             await f.Playback.SeekAsync(80); await Until(() => CenterError(400) < 2);
             await Task.Delay(480); await Drain();
