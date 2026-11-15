@@ -183,7 +183,7 @@ Node 保管匿名设备及 prepare；Swift 账号 owner 保留 Keychain、安全
 
 `MusicNativeAudioFileCache.preparePlayback` 继续提供从起点增长的顺序文件，AVAssetResourceLoader 的读取／seek 不改变下载位置。音频本身沿原 256 MiB／30 天预算。实际播放调用展示资源续期；单音频淘汰不删共享图／健康歌词，显式全部播放缓存清理仍覆盖原种类。音乐业务文档的实际字节限制及 CAS 保留。
 
-生产音频缓存直接打开系统提供的 Caches 基目录，再逐级以 `openat`／`O_NOFOLLOW` 打开本应用缓存子目录，不逐个读取沙盒外的祖先目录。重开时沿同一基目录核对目录身份，保留私有权限、独占锁和真机 Data Protection 校验。
+生产音频缓存直接打开系统提供的 Caches 基目录，再逐级以 `openat`／`O_NOFOLLOW` 打开本应用缓存子目录，不逐个读取沙盒外的祖先目录。目录打开不提供 `/` 默认值，测试也必须显式传入已存在的私有基目录。重开时沿同一基目录核对目录身份，保留私有权限、独占锁和真机 Data Protection 校验。
 
 清理先撤销资源 revision／ready，晚在途不回填；正常重绑不续期。当前 loader 的冷读、取消、预算、磁盘失败、清理及系统媒体接线尚未取得本轮测试结果，静态描述不作为完成证明。
 
