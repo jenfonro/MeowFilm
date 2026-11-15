@@ -12,7 +12,7 @@
   <Setter Property="VerticalAlignment" Value="Center"/>
  </Style>
  <Style x:Key="MeowFilm.FilterGroup" TargetType="Border">
-  <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemHover}"/>
+  <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.FloatingSurface}"/>
   <Setter Property="CornerRadius" Value="18"/>
   <Setter Property="Padding" Value="3"/>
   <Style.Triggers>
@@ -47,11 +47,11 @@
   </ControlTemplate></Setter.Value></Setter>
   <Style.Triggers>
    <Trigger Property="IsMouseOver" Value="True">
-    <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemSelected}"/>
+    <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.InputSurface}"/>
     <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
    </Trigger>
    <Trigger Property="IsPressed" Value="True">
-    <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ItemSelected}"/>
+    <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.AccentSoft}"/>
    </Trigger>
    <Trigger Property="IsKeyboardFocused" Value="True">
     <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Focus}"/>
