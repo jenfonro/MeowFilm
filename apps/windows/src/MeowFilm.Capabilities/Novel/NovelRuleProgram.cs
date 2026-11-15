@@ -1,4 +1,3 @@
-using System.IO;
 using System.Text.Json;
 using MeowFilm.Core.Runtime;
 
@@ -39,11 +38,6 @@ public sealed class NovelRuleProgram(IRuntimeClient runtime) : IAsyncDisposable
         }, token);
     public async Task<bool> MatchUrlAsync(string pattern, string url, CancellationToken token = default) =>
         (await InvokeAsync(new { operation = "matchUrl", pattern, url }, token)).GetBoolean();
-    public async Task ValidateAsync(NovelRule rule, CancellationToken token = default)
-    {
-        var result = await InvokeAsync(new { operation = "validateRule", rule }, token);
-        if (!result.GetProperty("valid").GetBoolean()) throw new InvalidDataException("INVALID_RULE");
-    }
     public Task PrepareShutdownAsync()
     {
         lock (lifecycle) return preparation ??= work.PauseAsync();

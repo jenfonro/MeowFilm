@@ -25,12 +25,49 @@ final class FilmSourceProbeTests: XCTestCase {
         XCTAssertTrue(fallback.playbackResolved)
 
         let failed = SourcesRuntimeFixture()
-        await failed.setReply("home", .object(["statusCode": .number(503)]))
-        await failed.setReply("search", .object(["success": .bool(false), "message": .string("fixture failure")]))
+        await failed.failNext("invoke", code: "UPSTREAM_HTTP")
+        await failed.setReply("search", .string("invalid JSON"))
         let failure = try await probe(failed).run()
         XCTAssertEqual(failure.result, "invalid")
-        XCTAssertTrue(failure.steps.contains(.init("home", "failed", "HTTP_503")))
-        XCTAssertTrue(failure.steps.contains(.init("search", "failed", "fixture failure")))
+        XCTAssertTrue(failure.steps.contains(.init("home", "failed", "UPSTREAM_HTTP")))
+        XCTAssertTrue(failure.steps.contains(.init("search", "failed", "INVALID_RESPONSE")))
+    }
+
+    func testProbeConsumesSelectedResultsWithoutPrecheckingBusinessFlagsOrUnusedData() async throws {
+        let baselineRuntime = SourcesRuntimeFixture()
+        let baseline = try await probe(baselineRuntime).run()
+        let expectedCalls = await baselineRuntime.invocations
+        let responses: [(String, RuntimeObject)] = [
+            ("home", ["class": .array([.object(["type_id": .string("tv")])])]),
+            ("category", ["list": .array([.object(["vod_id": .string("v1")])])]),
+            ("detail", ["list": .array([.object(["vod_play_from": .string("线路"),
+                "vod_play_url": .string("第一集$episode#第二集$ignored")])])]),
+            ("play", ["url": .string("https://example.invalid/video.m3u8")]),
+            ("search", ["list": .array([.object(["vod_id": .string("v1")])])]),
+        ]
+        for nested in [false, true] {
+            let runtime = SourcesRuntimeFixture()
+            for (operation, result) in responses {
+                var body = result
+                body["statusCode"] = .number(503); body["success"] = .bool(false)
+                body["ok"] = .bool(false); body["error"] = .string("unused business field")
+                let value: RuntimeValue
+                if nested {
+                    value = .object(["data": .object(body), "error": .object(["extra": .bool(true)])])
+                } else {
+                    body["data"] = .object(["error": .string("unused branch"), "url": .array([.bool(false)])])
+                    value = .object(body)
+                }
+                await runtime.setReply(operation, value)
+            }
+            let result = try await probe(runtime).run()
+            XCTAssertEqual(result.result, baseline.result)
+            XCTAssertEqual(result.playbackResolved, baseline.playbackResolved)
+            XCTAssertEqual(result.steps, baseline.steps)
+            let actualCalls = await runtime.invocations
+            XCTAssertEqual(actualCalls.map(\.0), expectedCalls.map(\.0))
+            XCTAssertEqual(actualCalls.map(\.1), expectedCalls.map(\.1))
+        }
     }
 
     func testPlayFailureWithMetadataDoesNotTriggerSearchFallback() async throws {

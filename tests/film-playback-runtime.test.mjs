@@ -299,11 +299,11 @@ test('SSE disconnect and reconnect without credentials observe one live session 
   const external = { ...f, headers: () => ({
     Host: 'external.example.invalid', Origin: 'https://browser.example.invalid',
   }) };
-  for (const query of ['?extra=1', '?after=1&after=2', '?after=1.5']) {
+  for (const query of ['?after=1&after=2', '?after=1.5']) {
     const response = await fetch(`${f.app.baseUrl}/v1/film/events/${id}${query}`, { headers: f.headers() });
     assert.equal((await response.json()).code, 'INVALID_REQUEST');
   }
-  const events = await observation(external, id);
+  const events = await observation(external, id, '?extra=1&extra=2');
   assert.equal(events.headers.get('access-control-allow-origin'), '*');
   assert.match(events.headers.get('x-meow-request-id'), /^[0-9a-f-]{36}$/);
   const initial = await events.next();
@@ -311,7 +311,7 @@ test('SSE disconnect and reconnect without credentials observe one live session 
   await events.close();
   await f.command(id, 'play'); const attempt = await f.pending(id);
   await f.command(id, 'media.started', { attemptId: attempt.id });
-  const reconnected = await observation(external, id, `?after=${initial.sequence}`);
+  const reconnected = await observation(external, id, `?after=${initial.sequence}&extra=ignored`);
   const current = await reconnected.next();
   assert.equal(current.current.attemptId, attempt.id);
   assert.ok(current.sequence > initial.sequence);

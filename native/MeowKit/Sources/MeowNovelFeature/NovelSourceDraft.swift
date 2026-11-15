@@ -15,12 +15,10 @@ struct NovelSourceDraft {
             else if `protocol` == .qysg, let html = value.string { base = ["html": .string(html)] }
             else { throw NovelError.invalidResponse }
         } else {
-            base = ["bookSourceType": .number(0), "enabledCookieJar": .bool(true),
+            base = ["bookSourceType": .number(0), "enabled": .bool(true), "enabledCookieJar": .bool(true),
                     "enabledExplore": .bool(true)]
-            base[`protocol` == .yiciyuan ? "enable" : "enabled"] = .bool(true)
             switch `protocol` {
             case .legado: base["ruleSearch"] = .object([:])
-            case .yiciyuan: base["ruleSearchList"] = .string("")
             case .qysg: base["html"] = .string("")
             }
         }
@@ -62,11 +60,9 @@ struct NovelSourceDraft {
         return value.isEmpty ? fallback : !["false", "0"].contains(value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
     }
     mutating func setBool(_ key: String, _ value: Bool) { set(.init(path: key, label: key, kind: .bool), value ? "true" : "false") }
-    var enabledKey: String { `protocol` == .yiciyuan ? "enable" : "enabled" }
     var tabs: [NovelSourceTab] { NovelSourceFields.tabs(`protocol`) }
     var extensionFields: [NovelSourceField] {
-        let aliases = `protocol` == .yiciyuan ? ["enabled", "customOrder"] : []
-        let known = Set(tabs.flatMap(\.fields).map(\.path) + ["bookSourceType", enabledKey, "enabledExplore", "enabledCookieJar"] + aliases)
+        let known = Set(tabs.flatMap(\.fields).map(\.path) + ["bookSourceType", "enabled", "enabledExplore", "enabledCookieJar"])
         var fields: [NovelSourceField] = []
         for (key, value) in base where !known.contains(key) {
             if tabs.flatMap(\.fields).contains(where: { $0.path.hasPrefix(key + ".") }) {
@@ -84,7 +80,7 @@ struct NovelSourceDraft {
         var result = base
         let fields = tabs.flatMap(\.fields) + extensionFields + [
             .init(path: "bookSourceType", label: "内容类型", kind: .number),
-            .init(path: enabledKey, label: "启用", kind: .bool),
+            .init(path: "enabled", label: "启用", kind: .bool),
             .init(path: "enabledExplore", label: "发现", kind: .bool),
             .init(path: "enabledCookieJar", label: "CookieJar", kind: .bool)]
         for field in fields {
@@ -104,8 +100,6 @@ struct NovelSourceDraft {
             if parts.count == 1 { result[parts[0]] = value }
             else { var group = object(result[parts[0]]); group[parts[1]] = value; result[parts[0]] = .object(group) }
         }
-        if `protocol` == .yiciyuan, edits[NovelSourceField(path: enabledKey, label: "").id] != nil { result["enabled"] = result[enabledKey] }
-        if `protocol` == .yiciyuan, edits[NovelSourceField(path: "serialNumber", label: "").id] != nil { result["customOrder"] = result["serialNumber"] }
         for key in ["bookSourceName", "bookSourceUrl"] {
             let value = Self.text(result[key]).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !value.isEmpty else { throw NovelError.invalidRule([key == "bookSourceName" ? "请填写源名称" : "请填写源 URL"]) }

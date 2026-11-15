@@ -133,13 +133,13 @@ public sealed class NovelBookSession(NovelSourceService sources, NovelLibrary li
             title, blocks, clean.Rules, clean.Conversion);
     }
     private bool SettingsCurrent(IReadOnlyList<NovelRule> selected, string conversion) =>
-        conversion == library.Appearance.Conversion && selected.SequenceEqual(library.Rules);
+        conversion == library.Appearance.ReadingConversion && selected.SequenceEqual(library.Rules);
     private async Task<(string Title, NovelBlock[] Blocks, IReadOnlyList<NovelRule> Rules, string Conversion)> ProcessAsync(
         string title, NovelBlock[] blocks, NovelBook book, NovelSource source, CancellationToken token)
     {
         while (true)
         {
-            var selected = library.Rules; string conversion = library.Appearance.Conversion;
+            var selected = library.Rules; string conversion = library.Appearance.ReadingConversion;
             var clean = await rules.TransformAsync(title, blocks, book, source, selected, conversion, token);
             token.ThrowIfCancellationRequested();
             if (!sources.IsCurrent(source)) throw new OperationCanceledException(token);

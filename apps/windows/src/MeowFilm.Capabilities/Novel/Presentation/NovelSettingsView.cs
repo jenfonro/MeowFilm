@@ -91,13 +91,13 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
         string[] sorts = ["手动", "智能", "名称", "地址", "更新时间", "响应时间", "启用"];
         foreach (var (name, index) in sorts.Select((name, index) => (name, index))) sourceSort.ContextMenu.Items.Add(Item(name, () => { sort = index; RefreshSources(); }, sort == index));
         var protocols = new MenuItem { Header = "书源协议" }; protocols.Items.Add(Item("全部协议", () => { sourceProtocol = null; RefreshSources(); }, sourceProtocol is null));
-        foreach (string protocol in new[] { "legado", "yiciyuan", "qysg" }) protocols.Items.Add(Item(NovelSourceFields.Title(protocol), () => { sourceProtocol = protocol; RefreshSources(); }, sourceProtocol == protocol));
+        foreach (string protocol in new[] { "legado", "qysg" }) protocols.Items.Add(Item(NovelSourceFields.Title(protocol), () => { sourceProtocol = protocol; RefreshSources(); }, sourceProtocol == protocol));
         var menu = Menu(Item("分组管理", () => Run(ct => ManageGroupsAsync(true, ct))), protocols,
             Item("全部分组", () => { sourceGroup = null; sourceStatus = 0; RefreshSources(); }, sourceGroup is null && sourceStatus == 0));
         foreach (var (name, index) in new[] { "已启用", "已禁用", "已启用发现", "已禁用发现" }.Select((name, index) => (name, index))) menu.Items.Add(Item(name, () => { sourceGroup = null; sourceStatus = index + 1; RefreshSources(); }, sourceStatus == index + 1));
         foreach (string group in module.Sources.Sources.SelectMany(s => NovelGroups.Split(s.Group)).Distinct().Order(StringComparer.CurrentCulture)) menu.Items.Add(Item(group, () => { sourceGroup = group; sourceStatus = 0; RefreshSources(); }, sourceGroup == group));
         sourceGroups.ContextMenu = menu;
-        var create = new MenuItem { Header = "新建书源" }; foreach (string protocol in new[] { "legado", "yiciyuan", "qysg" }) create.Items.Add(Item(NovelSourceFields.Title(protocol), () => Run(ct => EditSourceAsync(null, protocol, ct))));
+        var create = new MenuItem { Header = "新建书源" }; foreach (string protocol in new[] { "legado", "qysg" }) create.Items.Add(Item(NovelSourceFields.Title(protocol), () => Run(ct => EditSourceAsync(null, protocol, ct))));
         sourceMore.ContextMenu = Menu(create, Item("本地导入", () => Run(ImportSourceFileAsync)), Item("网络导入", () => Run(ImportSourceUrlAsync)),
             Item("粘贴导入", () => Run(async ct => await PreviewSourcesAsync(this, await module.Sources.PreviewImportAsync(text: Clipboard.GetText(), token: ct), ct))),
             Item("导出书源", () => Run(ct => ExportSourcesAsync(module.Sources.Sources.Select(s => s.InstallationId).ToArray(), ct))));

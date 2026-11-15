@@ -109,7 +109,7 @@ final class FilmCategoryModelTests: XCTestCase {
         await failed.value
         XCTAssertEqual(model.items.map(\.id), ["old"])
         XCTAssertEqual(model.error, .runtime(code: "UPSTREAM_HTTP"))
-        let cache = try FilmMetadataCache(value: .object([
+        let cache = FilmMetadataCache(value: .object([
             "status": .string("stale"), "error": .object(["code": .string("NETWORK_ERROR")]),
             "components": .object([:])
         ]))
@@ -146,7 +146,7 @@ final class FilmCategoryModelTests: XCTestCase {
             await source.complete(2, .success(page(secondIDs, next: 48)))
             await more.value
             let original = model.items
-            let cache = try FilmMetadataCache(value: .object([
+            let cache = FilmMetadataCache(value: .object([
                 "status": .string(stale ? "stale" : "fresh"), "components": .object([:]),
                 "error": stale ? .object(["code": .string("NETWORK_ERROR")]) : .null
             ]))

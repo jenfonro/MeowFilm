@@ -39,9 +39,9 @@ Reader 也可直接运行，参数和 `--kind source` 路由一致：
 node scripts/accept-reader-sources.mjs --scripts <文件或目录绝对路径> --protocol legado --live --records <JSON 绝对路径>
 ```
 
-- `--protocol auto|legado|yiciyuan|qysg|cat` 保留协议检测／显式覆盖。该入口没有 `music`／`lx` 协议，LX 使用主入口。
+- `--protocol auto|legado|qysg|cat` 保留协议检测／显式覆盖。该入口没有 `music`／`lx` 协议，LX 使用主入口。
 - 目录递归读取 `.js`、`.json`、`.html`／`.htm`，拒绝目录内的符号链接；单文件也可直接输入。`.js` 的 Spider 标记或 `export default` 识别为 portable CatVod，无法识别的 JS 必须明确协议，不猜成 LX 或 Cat Node。
-- `.json` 支持 Legado、异次元旧格式、轻悦时光对象／HTML 字符串和 portable Cat 对象；数组按独立来源拆分为 `<file>#<index>`。轻悦时光对象的 `html` 可以是带 `bookSourceName/bookSourceUrl` 的一个或多个空白分隔 HTTP(S) 候选 URL；live 模式按实际响应重试候选，并使用最终 URL 解析相对脚本。
+- `.json` 支持当前 Legado、轻悦时光对象／HTML 字符串和 portable Cat 对象；数组按独立来源拆分为 `<file>#<index>`。轻悦时光对象的 `html` 可以是带 `bookSourceName/bookSourceUrl` 的一个或多个空白分隔 HTTP(S) 候选 URL；live 模式按实际响应重试候选，并使用最终 URL 解析相对脚本。
 - 默认只进行读取、识别、初始化、卸载和清理，注入阻断网络 adapter；远程 HTML 在离线模式可能初始化失败。`--live` 执行全部声明动作。
 - `--scripts`、`--records`、`--payload` 及显式 `--output` 使用绝对路径。Reader 从来源清单排除 records、报告及其 `.tmp` 文件，不把自己的输出重新识别为来源。
 - Reader 使用原 `records.source` 形状，按拆分来源身份优先、原文件相对名次之查找动作输入：

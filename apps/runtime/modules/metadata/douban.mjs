@@ -8,6 +8,9 @@ const imageFields = new Set(['pic', 'pics', 'cover', 'cover_url', 'avatar', 'ava
   'thumbnail', 'thumbnail_url', 'thumb', 'banner', 'background', 'background_image']);
 const imageVariants = new Set(['normal', 'large', 'small', 'medium', 'original', 'raw', 'url', 'src',
   's', 'm', 'l', 'sizes']);
+const entityLists = ['items', 'subject_collection_items', 'credits', 'directors', 'actors', 'authors',
+  'celebrities', 'trailers', 'videos', 'episodes', 'works', 'recommendations', 'recommend'];
+const entityRelations = ['subjects', 'contents', 'subject_collection', 'target', 'subject', 'author', 'owner'];
 const redirects = new Set([301, 302, 303, 307, 308]);
 
 class Failure extends Error {
@@ -15,10 +18,6 @@ class Failure extends Error {
 }
 const requireValue = (value, code = 'INVALID_REQUEST') => { if (!value) throw new Failure(code); };
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
-function fields(value, allowed, required) {
-  requireValue(object(value) && Object.keys(value).every(key => allowed.includes(key)) &&
-    required.every(key => Object.hasOwn(value, key)));
-}
 function httpURL(value, code) {
   requireValue(typeof value === 'string' && /^https?:\/\//i.test(value) &&
     !control.test(value) && !value.includes('#'), code);
@@ -84,7 +83,7 @@ function sourceImageHost(host) {
   return /^img[0-9]*\.(?:doubanio|douban)\.com$/.test(host) ||
     host === 'img.doubanio.cmliussss.net' || host === 'img.doubanio.cmliussss.com';
 }
-function imageReference(value, hint, config) {
+function imageReference(value, config) {
   if (value === '') return value;
   if (value.startsWith(imageRoute)) {
     resourcePath('/' + value.slice(imageRoute.length), 'UPSTREAM_FORMAT');
@@ -93,21 +92,14 @@ function imageReference(value, hint, config) {
   const unwrapped = unwrapProxy(value, config.proxy, 'UPSTREAM_FORMAT');
   const raw = unwrapped.startsWith('//') ? 'https:' + unwrapped : unwrapped;
   if (raw.startsWith('/') && !raw.startsWith('//')) {
-    if (!hint) return value;
     try { return imageRoute + resourcePath(raw, 'UPSTREAM_FORMAT').slice(1); }
     catch { return applyProxy(httpURL(config.base + raw, 'UPSTREAM_FORMAT').href, config.proxy); }
   }
   let parsed;
-  try { parsed = new URL(raw); } catch {
-    requireValue(!hint, 'UPSTREAM_FORMAT');
-    return value;
-  }
+  try { parsed = new URL(raw); } catch { throw new Failure('UPSTREAM_FORMAT'); }
   const { origin, prefix } = config;
   const configured = parsed.origin === origin && (prefix === '' || parsed.pathname.startsWith(prefix + '/'));
   const sourceImage = sourceImageHost(parsed.hostname);
-  if (!hint && /^(?:movie|m)\.douban\.com$/.test(parsed.hostname) &&
-    /^\/(?:subject|movie|tv|celebrity)\/[0-9]+\/?$/.test(parsed.pathname)) return value;
-  if (!hint && !configured && !sourceImage) return value;
   requireValue(['http:', 'https:'].includes(parsed.protocol) && !control.test(raw), 'UPSTREAM_FORMAT');
   if (!configured && !sourceImage || parsed.search || parsed.hash || parsed.username || parsed.password) {
     return applyProxy(parsed.href, config.proxy);
@@ -118,19 +110,64 @@ function imageReference(value, hint, config) {
 }
 
 /** A pure projection: source image fields keep their positions; ordinary links keep their values. */
-export function rewriteDoubanImages(value, settings) {
+export function rewriteDoubanImages(value, settings, path = '') {
   const config = imageSettings(settings);
-  function visit(item, hint = false) {
-    if (typeof item === 'string') return imageReference(item, hint, config);
-    if (Array.isArray(item)) return item.map(child => visit(child, hint));
-    if (!object(item)) return item;
-    // Photo entities link to a page; their nested image descriptors contain the actual images.
-    const photoEntity = item.type === 'photo' && object(item.image);
-    return Object.fromEntries(Object.entries(item).map(([key, child]) =>
-      [key, photoEntity && key === 'url' && typeof child === 'string' ? child :
-        visit(child, imageFields.has(key) || (hint && imageVariants.has(key)))]));
+  function list(items, project) {
+    const result = [];
+    for (const item of items) {
+      try { result.push(project(item)); }
+      catch (error) {
+        if (!(error instanceof Failure) || error.code !== 'UPSTREAM_FORMAT') throw error;
+      }
+    }
+    requireValue(result.length > 0 || items.length === 0, 'UPSTREAM_FORMAT');
+    return result;
   }
-  return visit(value);
+  function image(item) {
+    if (typeof item === 'string') return imageReference(item, config);
+    if (Array.isArray(item)) return list(item, image);
+    if (!object(item)) return item;
+    // A photo entity's URL is a page; only its image descriptors are images.
+    if (object(item.image)) return entity(item, undefined, true);
+    const result = { ...item };
+    for (const key of imageVariants) if (Object.hasOwn(item, key)) result[key] = image(item[key]);
+    return result;
+  }
+  function entity(item, resource, imageEntity = false) {
+    requireValue(object(item), 'UPSTREAM_FORMAT');
+    const result = { ...item };
+    const section = resource?.replace(/\/+$/, '').split('/').at(-1);
+    for (const key of imageFields) if (Object.hasOwn(item, key)) {
+      try { result[key] = image(item[key]); }
+      catch (error) {
+        if (!(error instanceof Failure) || error.code !== 'UPSTREAM_FORMAT' || imageEntity ||
+            section === key || !object(item[key]) && !Array.isArray(item[key])) throw error;
+        delete result[key];
+      }
+    }
+    for (const key of entityLists) if (Array.isArray(item[key])) {
+      try { result[key] = list(item[key], child => entity(child)); }
+      catch (error) {
+        const requested = resource !== undefined && (['items', 'subject_collection_items'].includes(key) &&
+          (['subjects', 'contents', 'subject_collection'].includes(resource) ||
+            /\/(?:subject\/recent_hot|subject_collection)\//.test(resource) ||
+            ['showing', 'recommend', 'recommendations', 'celebrities', 'credits', 'photos',
+              'trailers', 'videos', 'episodes', 'works'].includes(section)) ||
+          section === key || section === 'celebrities' && key === 'credits');
+        if (!(error instanceof Failure) || error.code !== 'UPSTREAM_FORMAT' || requested) throw error;
+        delete result[key];
+      }
+    }
+    for (const key of entityRelations) if (object(item[key])) {
+      try { result[key] = entity(item[key], key); }
+      catch (error) {
+        if (!(error instanceof Failure) || error.code !== 'UPSTREAM_FORMAT') throw error;
+        delete result[key];
+      }
+    }
+    return result;
+  }
+  return entity(value, path);
 }
 
 export function doubanImageTarget(path, settings) {
@@ -300,8 +337,7 @@ function businessError(payload) {
 }
 
 export async function requestDouban(input, { settings, request, signal }) {
-  fields(input, ['path', 'query'], ['path']);
-  requireValue(typeof input.path === 'string' && input.path.startsWith('/') && !input.path.startsWith('//') &&
+  requireValue(object(input) && typeof input.path === 'string' && input.path.startsWith('/') && !input.path.startsWith('//') &&
     !control.test(input.path) && !/[?#]/.test(input.path));
   const query = queryString(input.query), config = apiSettings(settings, false);
   const body = await fetchMetadata(config.base + input.path + query, config, request, signal, false);
@@ -309,7 +345,7 @@ export async function requestDouban(input, { settings, request, signal }) {
   try { payload = JSON.parse(body); } catch { throw new Failure('UPSTREAM_FORMAT'); }
   requireValue(object(payload), 'UPSTREAM_FORMAT');
   businessError(payload);
-  return rewriteDoubanImages(payload, settings);
+  return rewriteDoubanImages(payload, settings, input.path);
 }
 
 function searchData(html) {
@@ -348,13 +384,13 @@ function numeric(value, integer = false) {
     (!integer || Number.isSafeInteger(value)), 'UPSTREAM_FORMAT');
   return value;
 }
-function searchPayload(payload, query) {
+function searchPayload(payload, query, config) {
   requireValue(object(payload), 'UPSTREAM_FORMAT');
   businessError(payload);
   requireValue(Array.isArray(payload.items), 'UPSTREAM_FORMAT');
   const total = numeric(payload.total, true);
-  numeric(payload.count, true); numeric(payload.start, true);
-  const items = payload.items.map(item => {
+  const items = [];
+  for (const item of payload.items) try {
     requireValue(object(item) && (Number.isSafeInteger(item.id) && item.id > 0 ||
       typeof item.id === 'string' && /^[1-9][0-9]*$/.test(item.id) && !control.test(item.id)) &&
       typeof item.title === 'string', 'UPSTREAM_FORMAT');
@@ -381,11 +417,14 @@ function searchPayload(payload, query) {
     };
     if (Object.hasOwn(item, 'cover_url')) {
       requireValue(item.cover_url === null || typeof item.cover_url === 'string', 'UPSTREAM_FORMAT');
-      target.cover_url = item.cover_url === null ? null : item.cover_url.trim();
+      target.cover_url = item.cover_url === null ? null : imageReference(item.cover_url.trim(), config);
     }
-    return { layout: 'subject', type_name: kind === 'tv' ? '电视剧' : '电影',
-      target_id: id, target_type: kind, target };
-  });
+    items.push({ layout: 'subject', type_name: kind === 'tv' ? '电视剧' : '电影',
+      target_id: id, target_type: kind, target });
+  } catch (error) {
+    if (!(error instanceof Failure) || error.code !== 'UPSTREAM_FORMAT') throw error;
+  }
+  requireValue(items.length > 0 || payload.items.length === 0, 'UPSTREAM_FORMAT');
   return { banned: '', fuzzy: '', promotion: [], search_egg: null, smart_box: [],
     contents: { count: 0, start: 0, total: 0, items: [] },
     subjects: { target_name: '更多热门“' + (optionalText(payload.text).trim() || query) + '”书影音',
@@ -393,11 +432,10 @@ function searchPayload(payload, query) {
 }
 
 export async function searchDouban(input, { settings, request, signal }) {
-  fields(input, ['query'], ['query']);
-  requireValue(typeof input.query === 'string' && input.query.trim().length > 0 &&
+  requireValue(object(input) && typeof input.query === 'string' && input.query.trim().length > 0 &&
     !/[\u0000-\u001f\u007f]/.test(input.query));
   const query = input.query.trim(), config = apiSettings(settings, true);
   const params = new URLSearchParams({ search_text: query, cat: '1002' });
   const body = await fetchMetadata(config.base + '/movie/subject_search?' + params, config, request, signal, true);
-  return rewriteDoubanImages(searchPayload(searchData(body), query), settings);
+  return searchPayload(searchData(body), query, imageSettings(settings));
 }

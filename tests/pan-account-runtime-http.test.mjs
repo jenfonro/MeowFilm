@@ -8,13 +8,13 @@ import { createPanRuntime, createRuntimeClient } from '../apps/runtime/pan-entry
 import { PanError } from '../packages/pan-runtime/src/errors.js';
 import { deferred } from '../packages/runtime-bridge/test/http-fixture.js';
 
-async function connect(t, handler) {
+async function connect(t, handler, options = {}) {
   const area = fileURLToPath(new URL('../tmp/test-results/pan-login/http/', import.meta.url));
   mkdirSync(area, { recursive: true });
   const dataRoot = mkdtempSync(join(area, 'case-'));
   const runtime = createPanRuntime({
     sessionId: randomUUID(), dataRoot,
-    pan: { transport: { request: handler, async close() {} } },
+    pan: { ...options, transport: { request: handler, async close() {} } },
   });
   await runtime.start();
   const client = createRuntimeClient({ baseUrl: runtime.baseUrl });
@@ -85,6 +85,45 @@ test('HTTP account settings expose three states, distinguish authentication from
     .accounts.quark_tv.credentials, {});
 });
 
+test('HTTP pan operations ignore extra fields and never grant them credential or transport authority', async t => {
+  const requests = [];
+  const { client, dataRoot } = await connect(t, async input => {
+    requests.push(input);
+    assert.equal(input.url, 'http://api.extscreen.com/quarkdrive/token');
+    assert.equal(input.method, 'POST');
+    assert.equal(JSON.parse(input.body).refresh_token, credentials.refreshToken);
+    return response(input, { code: 200, data: { access_token: 'synthetic-access', expires_in: 3600 } });
+  }, { now: () => 1800000000000 });
+  const providers = await client.call('pan.providers');
+  const saved = await client.call('pan.settings.set', { provider: 'quark_tv',
+    credentials: { ...credentials, cookie: { unused: true }, method: 'DELETE', headers: ['unused'],
+      url: 'https://untrusted.invalid' },
+    accountRevision: 999, method: 'DELETE', url: 'https://untrusted.invalid', headers: { Cookie: 'untrusted' } });
+  assert.equal(saved.ok, true);
+  assert.deepEqual(saved.value.fields, ['refreshToken', 'deviceId']);
+  assert.deepEqual(JSON.parse(readFileSync(join(dataRoot, 'pan/accounts.json'))).accounts.quark_tv.credentials, credentials);
+  for (const extra of [null, 'unused', [], { nested: { accessToken: 'untrusted' } }]) {
+    const ignored = { method: extra, headers: extra, url: extra, body: extra, credentials: extra, extra };
+    assert.deepEqual(await client.call('pan.providers', ignored), providers);
+    assert.deepEqual((await client.call('pan.settings.get', ignored)).value.accounts.find(item => item.provider === 'quark_tv'),
+      await account(client));
+    const refreshed = await client.call('pan.refresh', { ...ignored, provider: 'quark_tv' });
+    assert.equal(refreshed.ok, true);
+    assert.equal(refreshed.value.account.revision, saved.value.revision);
+    const { signal, ...actual } = requests.at(-1);
+    assert.ok(signal instanceof AbortSignal);
+    if (requests.length > 1) {
+      const { signal: _firstSignal, ...initial } = requests[0];
+      assert.deepEqual(actual, initial);
+    }
+  }
+  const cleared = await client.call('pan.settings.clear', { provider: 'quark_tv',
+    credentials: { refreshToken: 'must-not-be-saved' }, extra: { headers: 'unused' } });
+  assert.equal(cleared.ok, true);
+  assert.equal(cleared.value.revision, saved.value.revision + 1);
+  assert.equal(cleared.value.configured, false);
+});
+
 test('HTTP logout revokes an in-flight refresh and late credentials cannot sign the cleared account back in', async t => {
   const entered = deferred(), release = deferred();
   t.after(() => release.resolve());
@@ -133,13 +172,13 @@ test('HTTP QR confirmation publishes the persisted account and closing the confi
     assert.equal(path, '/');
     return response(input, {});
   });
-  const start = await client.call('pan.login.start', { provider: 'baidu' });
+  const start = await client.call('pan.login.start', { provider: 'baidu', method: 'DELETE', future: { sessionId: 'unused' } });
   assert.equal(start.ok, true);
   assert.equal(start.value.status, 'pending');
   assert.deepEqual(start.value.challenge, {
     type: 'image', url: `data:image/png;base64,${Buffer.from('synthetic-image').toString('base64')}`,
   });
-  const input = { sessionId: start.value.sessionId };
+  const input = { sessionId: start.value.sessionId, provider: 'unused', future: { headers: ['unused'] } };
   assert.equal((await client.call('pan.login.poll', input, { timeout: 45000 })).value.status, 'pending');
   assert.equal((await client.call('pan.login.poll', input, { timeout: 45000 })).value.status, 'scanned');
   const confirmation = await client.call('pan.login.poll', input, { timeout: 45000 });

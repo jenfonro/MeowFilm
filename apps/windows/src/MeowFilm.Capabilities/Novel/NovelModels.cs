@@ -84,6 +84,8 @@ public sealed record NovelRule
     public string ExcludeScope { get; init; } = "";
     public long Order { get; init; }
     public int TimeoutMillisecond { get; init; } = 3000;
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Data { get; init; }
 }
 public sealed record NovelAppearance
 {
@@ -105,6 +107,36 @@ public sealed record NovelAppearance
     [ ("纸白", "#F4F1E9", "#292720"), ("明亮", "#FFFFFF", "#242424"), ("护绿", "#DCE8D1", "#26352A"),
       ("暖黄", "#EFE0B9", "#43351F"), ("浅灰", "#DDDFE0", "#292C2F"), ("粉笺", "#EEDFE0", "#453039"),
       ("夜间", "#212224", "#C8C9CA"), ("墨黑", "#111214", "#AEB0B4") ];
+    [JsonIgnore]
+    internal string ReadingConversion => Conversion is "simplified" or "traditional" ? Conversion : "none";
+    internal NovelAppearance ForReading()
+    {
+        var fallback = new NovelAppearance();
+        static bool Positive(double value) => double.IsFinite(value) && value > 0;
+        static bool Nonnegative(double value) => double.IsFinite(value) && value >= 0;
+        static string Color(string value, string fallback)
+        {
+            try { _ = System.Windows.Media.ColorConverter.ConvertFromString(value); return value; }
+            catch (Exception error) when (error is FormatException or ArgumentException or NotSupportedException) { return fallback; }
+        }
+        string font = FontFamily;
+        try { if (string.IsNullOrWhiteSpace(font)) font = fallback.FontFamily; _ = new System.Windows.Media.FontFamily(font); }
+        catch (ArgumentException) { font = fallback.FontFamily; }
+        double size = System.Windows.Documents.TextElement.FontSizeProperty.IsValidValue(FontSize) &&
+            System.Windows.Documents.TextElement.FontSizeProperty.IsValidValue(FontSize * 1.15) ? FontSize : fallback.FontSize;
+        return this with
+        {
+            Mode = Mode is "cover" or "slide" or "none" or "scroll" ? Mode : fallback.Mode,
+            Conversion = ReadingConversion, Theme = Theme >= 0 && Theme < Themes.Length ? Theme : fallback.Theme,
+            FontFamily = font, FontSize = size,
+            LineHeight = Positive(LineHeight) && Positive(size * LineHeight * 1.15) ? LineHeight : fallback.LineHeight,
+            ParagraphSpacing = Nonnegative(ParagraphSpacing) ? ParagraphSpacing : fallback.ParagraphSpacing,
+            Margin = Nonnegative(Margin) && double.IsFinite(Margin * 2) ? Margin : fallback.Margin,
+            ContentWidth = Positive(ContentWidth) ? ContentWidth : fallback.ContentWidth,
+            AutoSpeed = double.IsFinite(AutoSpeed) && AutoSpeed is >= 1 and <= 10 ? AutoSpeed : fallback.AutoSpeed,
+            Background = Color(Background, fallback.Background), Foreground = Color(Foreground, fallback.Foreground)
+        };
+    }
 }
 internal static class NovelJson
 {

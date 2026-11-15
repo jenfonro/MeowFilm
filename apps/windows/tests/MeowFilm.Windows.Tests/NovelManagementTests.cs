@@ -16,7 +16,7 @@ public static class NovelManagementTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new("novel management form: three protocols nested mapping and unedited JSON types", Drafts);
+        yield return new("novel management form: current protocols nested mapping and unedited JSON types", Drafts);
         yield return new("novel management import: external rule identity nullable fields and tag-only group changes", Imports);
         yield return new("novel management theme: inputs and titles follow resources and window high contrast", () => NovelTests.Sta(ThemeResources));
         yield return new("novel management components: visible selection inverse native tabs fields and previews", () => NovelTests.Sta(Components));
@@ -50,24 +50,35 @@ public static class NovelManagementTests
         Check(result["ruleSearch"]!["bookList"]!.GetValue<string>() == ".changed"); Check(JsonNode.DeepEquals(result["ruleSearch"]!["extension.value"], JsonNode.Parse("[1,false]")));
         Check(result["ruleToc"]!["updateTime"]!.GetValue<string>() == "time@text"); Check(result["ruleBookInfo"]!["canReName"]!.GetValue<bool>());
         Check(!result["extension.value"]!["new"]!.GetValue<bool>() && !result["enabled"]!.GetValue<bool>());
-        foreach (string protocol in new[] { "legado", "yiciyuan", "qysg" })
+        foreach (string protocol in new[] { "legado", "qysg" })
         {
             var item = new NovelSourceDraft(protocol); item.Set(new("bookSourceName", "名称"), "测试"); item.Set(new("bookSourceUrl", "地址"), "https://new.invalid/");
             item.Set(new("bookSourceType", "类型", Kind: NovelSourceFieldKind.Number), "2"); var value = JsonNode.Parse(item.Definition())!.AsObject();
-            Check(value["bookSourceType"]!.GetValue<double>() == 2); Check(value.ContainsKey(protocol switch { "legado" => "ruleSearch", "yiciyuan" => "ruleSearchList", _ => "html" }));
-            Check(new[] { "ruleSearch", "ruleSearchList", "html" }.Count(value.ContainsKey) == 1, "Saving must not change protocols");
+            Check(value["bookSourceType"]!.GetValue<double>() == 2); Check(value.ContainsKey(protocol == "legado" ? "ruleSearch" : "html"));
+            Check(new[] { "ruleSearch", "html" }.Count(value.ContainsKey) == 1, "Saving must not change protocols");
         }
-        var yy = new NovelSourceDraft("yiciyuan", """{"bookSourceName":"异次元","bookSourceUrl":"https://yy.invalid/","ruleSearchList":".book","enabled":true,"enable":true,"customOrder":9,"serialNumber":9,"unknown":[null,3]}""");
-        yy.SetBool(yy.EnabledKey, false); yy.Set(new("serialNumber", "排序", Kind: NovelSourceFieldKind.Number), "-2");
-        result = JsonNode.Parse(yy.Definition())!; Check(!result["enabled"]!.GetValue<bool>() && !result["enable"]!.GetValue<bool>());
-        Check(result["customOrder"]!.GetValue<double>() == -2 && result["serialNumber"]!.GetValue<double>() == -2); Check(JsonNode.DeepEquals(result["unknown"], JsonNode.Parse("[null,3]")));
+        var current = new NovelSourceDraft("legado", """{"bookSourceName":"当前源","bookSourceUrl":"https://current.invalid/","ruleSearch":{},"enabled":true,"enable":false,"customOrder":9,"serialNumber":-2,"ruleFindUrl":{"extra":true}}""");
+        current.SetBool("enabled", false);
+        result = JsonNode.Parse(current.Definition())!;
+        Check(!result["enabled"]!.GetValue<bool>() && !result["enable"]!.GetValue<bool>());
+        Check(result["customOrder"]!.GetValue<int>() == 9 && result["serialNumber"]!.GetValue<int>() == -2);
+        Check(result["ruleFindUrl"]!["extra"]!.GetValue<bool>());
+        var qysg = new NovelSourceDraft("qysg", "\"https://source.invalid/reader.html\"");
+        qysg.Set(new("bookSourceName", "名称"), "轻悦"); qysg.Set(new("bookSourceUrl", "地址"), "https://source.invalid/");
+        Check(JsonNode.Parse(qysg.Definition())!["html"]!.GetValue<string>() == "https://source.invalid/reader.html");
         return Task.CompletedTask;
     }
     private static Task Imports()
     {
-        var rules = NovelRuleImport.Parse("""[{"id":42,"name":"","group":null,"pattern":"广告","replacement":"","scope":null,"excludeScope":null},{"id":43,"regex":"literal[","enable":false,"sortOrder":-2}]""");
+        var rules = NovelRuleImport.Parse("""[{"id":42,"name":"","group":null,"pattern":"广告","replacement":"","scope":null,"excludeScope":null},{"id":43,"pattern":"literal[","regex":{"unused":true},"enable":false,"sortOrder":-2,"serialNumber":7,"replaceSummary":"旧名称","useTo":"旧范围","Pattern":false}]""");
         Check(rules.Select(r => r.Id).SequenceEqual(new[] { "42", "43" })); Check(rules[0].Name == "广告" && rules[0].IsRegex && rules[0].Group == "");
-        Check(!rules[1].IsRegex && !rules[1].Enabled && rules[1].Order == -2);
+        Check(rules[1].Pattern == "literal[" && rules[1].IsRegex && rules[1].Enabled && rules[1].Order == 0 &&
+            rules[1].Name == "literal[" && rules[1].Scope == "");
+        var exported = NovelJson.Value(rules[1]);
+        Check(!exported.GetProperty("enable").GetBoolean() && exported.GetProperty("regex").GetProperty("unused").GetBoolean() &&
+            exported.GetProperty("sortOrder").GetInt32() == -2 && !exported.GetProperty("Pattern").GetBoolean());
+        var defaults = NovelRuleImport.Parse("""{"id":"default","pattern":"当前","regex":false,"enable":{"extra":true},"sortOrder":[null]}""").Single();
+        Check(defaults.Enabled && defaults.IsRegex && defaults.Order == 0);
         Check(NovelGroups.Split(" 甲，乙;丙；甲\n丁 ").ToHashSet().SetEquals(["甲", "乙", "丙", "丁"]));
         Check(NovelGroups.Split(NovelGroups.Replacing("甲,乙", "甲", "丙")).ToHashSet().SetEquals(["乙", "丙"])); Check(NovelGroups.Replacing("甲,乙", "甲", null) == "乙");
         return Task.CompletedTask;
@@ -207,7 +218,7 @@ public static class NovelManagementTests
                 await ReachRuleEditorBottom(dialog, ruleEditor);
                 await CaptureDialog(dialog, "rule-editor-bottom");
             });
-            var preview = new ManagementImportSelection([new("书源一", "阅读源 · 精品", "新增"), new("书源二", "异次元", "已存在")]);
+            var preview = new ManagementImportSelection([new("书源一", "阅读源 · 精品", "新增"), new("书源二", "轻悦时光", "已存在")]);
             Check(preview.Selected.SetEquals([0, 1])); await DialogPreview(surface, preview, "导入书源", "确定导入", "source-import");
             var address = new ManagementForm(true); address.Field("书源地址", "", id: "management.import.url", placeholder: "请输入网络书源地址");
             await DialogPreview(surface, address, "网络导入", "确定", "source-network-import");

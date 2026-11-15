@@ -6,6 +6,7 @@ namespace MeowFilm.Capabilities;
 
 internal static class NovelRuleImport
 {
+    private static readonly JsonSerializerOptions Options = new(NovelJson.Options) { PropertyNameCaseInsensitive = false };
     internal static NovelRule[] Parse(string text)
     {
         var root = JsonNode.Parse(text.TrimStart('\uFEFF')) ?? throw new InvalidDataException("替换规则格式不对");
@@ -13,18 +14,10 @@ internal static class NovelRuleImport
         return entries.Select(entry =>
         {
             var value = entry?.DeepClone() as JsonObject ?? throw new InvalidDataException("替换规则格式不对");
-            bool legacy = !value.ContainsKey("pattern") && value.ContainsKey("regex");
-            foreach (var (key, fallback) in new[] { ("name", "replaceSummary"), ("pattern", "regex"), ("scope", "useTo"), ("isEnabled", "enable"), ("order", "sortOrder") })
-                if (value[key] is null && value[fallback] is { } other) value[key] = other.DeepClone();
-            if (value["order"] is null && value["serialNumber"] is { } order) value["order"] = order.DeepClone();
+            if (value["pattern"]?.GetValueKind() != JsonValueKind.String) throw new InvalidDataException("替换规则格式不对");
             if (value["id"] is JsonValue id && id.GetValueKind() == JsonValueKind.Number) value["id"] = id.ToJsonString();
             foreach (string key in new[] { "id", "name", "group", "scope", "excludeScope", "replacement", "isEnabled", "isRegex", "scopeTitle", "scopeContent", "order", "timeoutMillisecond" }) if (value[key] is null) value.Remove(key);
-            if (legacy)
-            {
-                value["isRegex"] = value["isRegex"]?.GetValueKind() == JsonValueKind.True;
-                value["isEnabled"] = value["enable"]?.GetValueKind() == JsonValueKind.True;
-            }
-            var rule = NovelJson.Decode<NovelRule>(JsonSerializer.SerializeToElement(value, NovelJson.Options));
+            var rule = value.Deserialize<NovelRule>(Options) ?? throw new InvalidDataException("替换规则格式不对");
             return rule.Name.Trim().Length == 0 ? rule with { Name = rule.Pattern.Trim() } : rule;
         }).ToArray();
     }

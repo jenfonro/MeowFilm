@@ -202,6 +202,37 @@ test('metadata modules expose read-only operations without script upload or chan
   assert.equal(JSON.stringify([tmdb, douban]).includes('test_cookie'), false);
 });
 
+test('metadata HTTP operations project known settings and ignore extras without changing upstream requests', async t => {
+  const calls = [];
+  const owner = await runtime(t, area(t), { request: async (url, options) => {
+    calls.push({ url, ...options });
+    return { status: 200, headers: {}, body: Buffer.from('{"id":42}') };
+  } });
+  for (const [id, path, patch] of [
+    ['tmdb', '/3/movie/42', { accessToken: 'synthetic-token' }],
+    ['douban', '/rexxar/api/v2/movie/42', { cookie: 'synthetic=COOKIE' }],
+  ]) {
+    const saved = value(await owner.client.call(`${id}.data.settings.update`, patch));
+    const expected = value(await owner.client.call(`${id}.data.request`, { path }));
+    const { signal: initialSignal, ...initialRequest } = calls.at(-1);
+    assert.ok(initialSignal instanceof AbortSignal);
+    for (const extra of [null, 'unused', [], { nested: { cover_url: 'javascript:unused', imageSize: 'bad' } }]) {
+      assert.deepEqual(value(await owner.client.call(`${id}.data.settings.get`, { extra, revision: extra })), saved);
+      assert.deepEqual(value(await owner.client.call(`${id}.data.settings.update`, { ...patch, extra, revision: extra })), saved);
+      assert.deepEqual(value(await owner.client.call(`${id}.data.request`, {
+        path, method: extra, headers: extra, url: extra, body: extra, cookie: extra, accessToken: extra, extra,
+      })), expected);
+      const { signal, ...actualRequest } = calls.at(-1);
+      assert.ok(signal instanceof AbortSignal);
+      assert.deepEqual(actualRequest, initialRequest);
+    }
+    const key = id === 'tmdb' ? 'accessToken' : 'cookie';
+    assert.deepEqual(await owner.client.call(`${id}.data.settings.update`, { [key]: 'bad\r\nvalue', extra: true }),
+      { ok: false, contract: `${id}.data.v1`, code: 'INVALID_REQUEST' });
+    assert.deepEqual(value(await owner.client.call(`${id}.data.settings.get`)), saved);
+  }
+});
+
 test('runtime persists readable settings and credentials, preserves omitted fields and clears empty text', async t => {
   const dataRoot = area(t), seen = [];
   const base = await upstream(t, (request, response) => { seen.push(request.headers); json(response, { id: 42 }); });
@@ -283,7 +314,7 @@ test('invalid settings and damaged documents fail without rewriting previous per
   settings.update({ cookie: 'test-only', apiProxy: 'https://relay.invalid/?url={encodedUrl}' });
   const path = join(root, 'douban/settings.json'), original = readFileSync(path);
   for (const patch of [
-    { unexpected: true }, { cookie: 'secret\r\nInjected: yes' }, { apiBase: 'file:///tmp' },
+    { cookie: 'secret\r\nInjected: yes' }, { apiBase: 'file:///tmp' },
     { apiProxy: 'https://{url}/' }, { imageProxy: 'https://relay.invalid/{unknown}' },
     { apiBase: 'https://example.invalid/?api_key=secret' },
     { apiBase: 'https://example.invalid/?' }, { imageBase: 'https://example.invalid/#' },

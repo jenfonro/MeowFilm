@@ -21,6 +21,11 @@ public static partial class NovelTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return new("novel native library: independent shelf/history stable identity accepted write and corruption", Library);
+        yield return new("novel native library: raw extensions exact numbers and UTF8 keys survive edits and reopen", LibraryRoundTrip);
+        yield return new("novel native library: bad slots remain raw healthy siblings work and ambiguous identities never overwrite", LibraryIsolation);
+        yield return new("novel native library: root JSON version and CAS failures never publish or overwrite", LibraryGuards);
+        yield return new("novel appearance: unknown values fall back only for consumption and unrelated editing preserves raw values", () => Sta(AppearanceRoundTrip));
+        yield return new("novel rule management: offline import persists current rules without an execution preflight", () => Sta(OfflineRules));
         yield return new("novel native library: real atomic store reopens and second process restores reading", Durable);
         yield return new("novel source repository: no native source copy revision retire import and export", () => Sta(Sources));
         yield return new("novel multi-source search: unknown authors pagination partial failure and stale query", () => Sta(Search));
@@ -341,7 +346,8 @@ public static partial class NovelTests
             var copy = data.ToArray(); Writes++; Accepted?.TrySetResult(); if (Hold is not null) await Hold.Task;
             if (WriteFailure is { } failure) throw failure;
             if (FailWrite) throw new IOException("Synthetic atomic write failure");
-            Check(expected == (Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes))); Bytes = copy; return DocumentFingerprint.FromBytes(copy);
+            if (expected != (Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes))) throw new DocumentStoreException(DocumentStoreError.Conflict);
+            Bytes = copy; return DocumentFingerprint.FromBytes(copy);
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

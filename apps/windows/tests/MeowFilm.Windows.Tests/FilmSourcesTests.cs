@@ -11,6 +11,11 @@ public static partial class FilmSourcesTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("local initialization options order and aggregate choice survive restart", LocalState);
+        yield return Case("mixed documents preserve exact raw extensions facts and nested values through save sync and restart", RawSourcePersistence);
+        yield return Case("unusable cache and isolated fact records never clear healthy options order or tombstones", IsolatedSourceRecords);
+        yield return Case("duplicate source identity members isolate every candidate through save sync and restart", AmbiguousSourceIdentityMembers);
+        yield return Case("unknown update display state never retires an otherwise valid source generation", UnknownUpdateState);
+        yield return Case("unsupported roots and real source CAS conflicts preserve original storage", SourceDocumentBoundaries);
         yield return Case("management uses the Cat wire and status metadata without owning the runtime", Management);
         yield return Case("uninstall reports target cleanup failures and reconciles committed error receipts", UninstallFailures);
         yield return Case("tombstones isolate parents and only successful explicit reimport restores included sites", Tombstones);

@@ -345,6 +345,27 @@ final class NovelSessionTests: XCTestCase {
         XCTAssertFalse(reader.content?.title.contains("不应提交") == true)
         await feature.close()
     }
+    func testInvalidRegexCanBeSavedButCannotPublishPartialContentAndDisablingItRecovers() async throws {
+        let (feature, runtime, _) = try await fixture()
+        let reader = feature.makeReader(book: .init(installationId: "a", bookUrl: "book-a", name: "猫"))
+        reader.start(); await wait { !reader.loading && reader.content != nil }
+        let original = try XCTUnwrap(reader.content)
+        reader.display(try XCTUnwrap(reader.anchor)); await reader.flush()
+        let anchor = reader.anchor
+        var title = NovelRule(); title.pattern = "第一章"; title.replacement = "已处理"; title.scopeTitle = true; title.scopeContent = false
+        var invalid = NovelRule(); invalid.pattern = "["; invalid.isRegex = true; invalid.order = 1
+        try await feature.saveRules([title, invalid])
+        XCTAssertEqual(feature.local.rules, [title, invalid])
+        await wait { !reader.loading && reader.error != nil }
+        XCTAssertEqual(reader.content, original); XCTAssertEqual(reader.anchor, anchor)
+        invalid.isEnabled = false
+        try await feature.saveRules([title, invalid])
+        await wait { !reader.loading && reader.content?.title == "已处理 猫" }
+        XCTAssertEqual(reader.content?.blocks, original.blocks)
+        let calls = await runtime.calls
+        XCTAssertEqual(calls.filter { $0["action"] == .string("content") }.count, 1)
+        await feature.close()
+    }
     func testRetainedReadersApplyGlobalRulesAndConversionOnReturnWithoutDownloadingAgain() async throws {
         let (feature, runtime, _) = try await fixture()
         await runtime.setBodyText("猫与国")
@@ -1109,7 +1130,7 @@ actor NovelSessionRuntime: NovelRuntimeServing {
                 await withCheckedContinuation { searchGate = $0; searchArrived?.resume(); searchArrived = nil }
             }
             let books: [RuntimeValue] = page > 2 ? [] : [.object(["bookUrl": .string("book-\(source)-\(page)"), "name": .string(word), "author": .string(page == 1 ? "林" : "周")])]
-            return .object(["books": .array(books)])
+            return .object(["books": .array(books.isEmpty ? [] : books + [.null, .object(["name": .string("缺少地址")])])])
         case "bookInfo":
             guard case .object(var book) = payload["book"] else { throw NovelError.invalidResponse }
             book["author"] = .string(authors[source] ?? "林"); book["variable"] = .string(#"{"info":"saved"}"#)

@@ -169,6 +169,12 @@ final class NovelUIKitTests: XCTestCase {
         XCTAssertEqual(descendants(page.manager).compactMap { $0 as? UISearchBar }.count, 1)
         let table = try XCTUnwrap(descendants(page.manager).first { $0.accessibilityIdentifier == "management.list" } as? UITableView)
         XCTAssertEqual(table.numberOfRows(inSection: 0), 1); try await attachManagement(window, "source-manager")
+        let more = try XCTUnwrap(descendants(page.manager.tools).compactMap { $0 as? UIButton }.first { $0.accessibilityLabel == "更多" })
+        let create = try XCTUnwrap(more.menu?.children.compactMap { $0 as? UIMenu }.first { $0.title == "新建书源" })
+        XCTAssertEqual(create.children.map(\.title), ["阅读源", "轻悦时光"])
+        let groups = try XCTUnwrap(descendants(page.manager.tools).compactMap { $0 as? UIButton }.first { $0.accessibilityLabel == "分组与协议" })
+        let protocols = try XCTUnwrap(groups.menu?.children.compactMap { $0 as? UIMenu }.first { $0.title == "书源协议" })
+        XCTAssertEqual(protocols.children.map(\.title), ["全部协议", "阅读源", "轻悦时光"])
         page.manager.setRows([], total: 0, validIDs: [], emptyMessage: "暂无书源，请先导入")
         try await attachManagement(window, "source-manager-empty")
         let selectAll = try button("management.selectAll", in: page.manager)
@@ -205,6 +211,7 @@ final class NovelUIKitTests: XCTestCase {
         let timeout = try XCTUnwrap(descendants(form).first { $0.accessibilityIdentifier == "novel.rule.field.timeoutMillisecond" })
         form.scrollRectToVisible(timeout.convert(timeout.bounds, to: form), animated: false)
         try await attachManagement(window, "rule-editor-bottom")
+        await feature.rules.close()
         try button("novel.rule.save", in: ruleEditor.view).sendActions(for: .touchUpInside)
         await wait { feature.local.rules.contains { $0.id == rule.id } && navigation.topViewController === rules }
         let dialog = ManagementDialog(title: "导入书源", action: "确定导入", themeProvider: theme)
@@ -810,8 +817,9 @@ private actor NovelUIKitRuntime: NovelRuntimeServing {
         case "content":
             contentCalls += 1
             var blocks: [RuntimeValue] = [.object(["type": .string("text"),
-                "text": .string(String(repeating: purchases > 0 ? "已购正文。雨夜来信。\n" : "雨落在青石街道上。她推开旧书店的门，信笺仍放在窗前。\n", count: 90))])]
-            if imageBytes != nil { blocks.insert(.object(["type": .string("image"), "src": .string("https://fixture.invalid/image")]), at: 0) }
+                "text": .string(String(repeating: purchases > 0 ? "已购正文。雨夜来信。\n" : "雨落在青石街道上。她推开旧书店的门，信笺仍放在窗前。\n", count: 90)),
+                "src": .object(["unused": .bool(true)]), "alt": .array([.null])])]
+            if imageBytes != nil { blocks.insert(.object(["type": .string("image"), "src": .string("https://fixture.invalid/image"), "text": .object(["unused": .bool(true)])]), at: 0) }
             return .object(["title": .string("第一章 雨声"), "chapter": payload["chapter"], "blocks": .array(blocks)])
         case "exploreKinds":
             exploreCalls.append("kinds:\(revision)")
@@ -823,7 +831,7 @@ private actor NovelUIKitRuntime: NovelRuntimeServing {
                 do { try await Task.sleep(nanoseconds: 60_000_000_000) }
                 catch { let cancelled = exploreCancelled; exploreCancelled = nil; cancelled?(); throw error }
             }
-            return .object(["books": .array([.object(["bookUrl": .string("https://fixture.invalid/book"), "name": .string("雨夜来信"), "author": .string("林舟")])])])
+            return .object(["books": .array([.object(["bookUrl": .string("https://fixture.invalid/book"), "name": .string("雨夜来信"), "author": .string("林舟")]), .null, .object(["name": .string("缺少地址")])])])
         case "payAction": purchases += 1; return .bool(true)
         default: throw NovelError.invalidResponse
         }

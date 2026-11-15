@@ -3,6 +3,14 @@ import { tmdbQuery } from '@meowfilm/film-playback/metadata-query';
 const imageFields = new Set([
   'poster_path', 'backdrop_path', 'profile_path', 'logo_path', 'still_path', 'file_path',
 ]);
+const entityLists = [
+  'results', 'cast', 'crew', 'guest_stars', 'production_companies', 'networks', 'created_by',
+  'seasons', 'episodes', 'parts', 'posters', 'backdrops', 'profiles', 'logos', 'stills',
+];
+const entityRelations = [
+  'credits', 'aggregate_credits', 'combined_credits', 'movie_credits', 'tv_credits', 'images',
+  'recommendations', 'similar', 'belongs_to_collection', 'last_episode_to_air', 'next_episode_to_air',
+];
 const control = /[\u0000-\u001f\u007f\u2028\u2029]/;
 const sizePattern = /^(?:original|[wh][1-9]\d*)$/;
 const filePattern = /^\/[A-Za-z0-9_-]+\.[A-Za-z0-9]+$/;
@@ -44,17 +52,46 @@ function queryParams(query) {
   return params;
 }
 
-function rewriteImages(value, size) {
-  if (value === null || typeof value !== 'object') return value;
-  for (const key of Object.keys(value)) {
+function rewriteImages(value, size, resource) {
+  if (Array.isArray(value)) return value.map(item => rewriteImages(item, size));
+  if (!object(value)) return value;
+  const section = resource?.replace(/\/+$/, '').split('/').at(-1);
+  for (const key of imageFields) {
     const item = value[key];
-    if (!imageFields.has(key) || item === null || item === '') {
-      rewriteImages(item, size);
-      continue;
-    }
+    if (item === undefined || item === null || item === '') continue;
     requireValue(typeof item === 'string' && !control.test(item) && filePattern.test(item),
       'UPSTREAM_FORMAT');
     value[key] = `${imagePrefix}${size}${item}`;
+  }
+  for (const key of entityLists) if (Array.isArray(value[key])) {
+    const items = [];
+    for (const item of value[key]) {
+      try {
+        requireValue(object(item), 'UPSTREAM_FORMAT');
+        items.push(rewriteImages(item, size));
+      } catch (error) {
+        if (!(error instanceof Failure) || error.code !== 'UPSTREAM_FORMAT') throw error;
+      }
+    }
+    if (items.length > 0 || value[key].length === 0) value[key] = items;
+    else {
+      const requested = resource !== undefined && (key === 'results' &&
+        (/\/(?:search|discover|trending)\//.test(resource) ||
+          ['popular', 'top_rated', 'now_playing', 'upcoming', 'airing_today', 'on_the_air',
+            'recommendations', 'similar'].includes(section)) || section === key ||
+        section?.endsWith('credits') && ['cast', 'crew', 'guest_stars'].includes(key) ||
+        section === 'images' && ['posters', 'backdrops', 'profiles', 'logos', 'stills'].includes(key) ||
+        key === 'episodes' && /\/season\/[^/]+\/?$/.test(resource));
+      requireValue(!requested, 'UPSTREAM_FORMAT');
+      delete value[key];
+    }
+  }
+  for (const key of entityRelations) if (object(value[key])) {
+    try { rewriteImages(value[key], size, key); }
+    catch (error) {
+      if (!(error instanceof Failure) || error.code !== 'UPSTREAM_FORMAT') throw error;
+      delete value[key];
+    }
   }
   return value;
 }
@@ -82,7 +119,7 @@ function responseData(response, path, size) {
   try { value = JSON.parse(text); } catch { throw new Failure('UPSTREAM_FORMAT'); }
   requireValue(object(value) || Array.isArray(value), 'UPSTREAM_FORMAT');
   requireValue(value.success !== false, 'UPSTREAM_HTTP');
-  try { value = rewriteImages(value, size); }
+  try { value = rewriteImages(value, size, path); }
   catch (error) {
     if (error instanceof Failure) throw error;
     throw new Failure('UPSTREAM_FORMAT');
@@ -96,8 +133,7 @@ function responseData(response, path, size) {
 }
 
 export async function requestTMDB(input, { settings, request, signal }) {
-  requireValue(record(input) && Object.hasOwn(input, 'path') &&
-    Object.keys(input).every(key => ['path', 'query', 'imageSize'].includes(key)));
+  requireValue(record(input));
   requireValue(typeof input.path === 'string' && input.path.startsWith('/') && !input.path.startsWith('//') &&
     !/[\u0000-\u0020\u007f\\?#\u2028\u2029]/.test(input.path) &&
     object(settings) && typeof request === 'function' &&

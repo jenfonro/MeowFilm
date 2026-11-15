@@ -40,6 +40,8 @@ await runtime.start();
 - `settings.get {}`：读取完整设置（包括明文凭据）和不透明配置代次 `revision`。
 - `settings.update {…patch}`：原子更新指定字段；省略字段不变，凭据空字符串表示清除。成功返回与 get 同形的完整设置。
 
+普通 HTTP 操作只消费各自定义的参数。`settings.get` 忽略附加参数，`settings.update` 仅提取当前 provider 的设置字段；未知字段（包括嵌套扩展）不因白名单被拒绝，也不会成为设置或覆盖 `revision`。实际使用的设置值仍须满足 URL、凭据头等要求。此请求投影不改变现有持久文档格式和恢复行为。
+
 `revision` 是设置 owner 从完整有效配置生成的不透明稳定身份；包括凭据在内的有效配置改变才换代，无变化更新和冷启动保持不变。调用方只比较是否相等，不解析其内容。影视业务缓存以此隔离配置，不复制或用明文凭据充当缓存身份。身份不另写第二套持久配置，也不包含明文凭据；业务元数据的持久化、组件完整度和定向刷新由 [film data owner](film-playback.md)统一处理。
 
 运行器独占 `<dataRoot>/tmdb/settings.json` 和 `<dataRoot>/douban/settings.json`，文档格式为 `{version:1,settings:{…}}`。首次访问恢复配置，之后使用内存快照；更新通过运行器完成，不支持绕过运行器并发外部编辑。首次未配置读取默认值，不写空文件。损坏文件明确失败，不当成缺失、不静默重置。
@@ -108,7 +110,7 @@ Cookie 和 API TOKEN 明文读写，保存失败保留输入和原 saved 快照�
 }
 ```
 
-接口使用上游 GET，不设业务路径或 query 字段许可表。`path` 是追加到已配置 API base 的路径，不是完整 URL；query、fragment 不混入 path，参数单独放 query。URL 按标准规则解析与规范化。认证优先使用显式 accessToken，否则从 apiKey 中识别 v4 JWT／Bearer 或 v3 key；v4 发送 Authorization，v3 覆盖 query 中同名 `api_key`。其它 query 值按原文编码。`imageSize` 缺省为 `original`，支持 TMDB 的 `original`／`w<正整数>`／`h<正整数>` 格式；具体尺寸是否由上游支持仍由来源决定，configuration 返回的尺寸数组可供选择。
+接口使用上游 GET，不设业务路径或 query 字段许可表。请求仅消费 `path/query/imageSize`；额外的 `method/url/headers/body` 等参数不参与操作，不能覆盖目标、认证或传输选项。`path` 是追加到已配置 API base 的路径，不是完整 URL；query、fragment 不混入 path，参数单独放 query。URL 按标准规则解析与规范化。认证优先使用显式 accessToken，否则从 apiKey 中识别 v4 JWT／Bearer 或 v3 key；v4 发送 Authorization，v3 覆盖 query 中同名 `api_key`。其它 query 值按原文编码。`imageSize` 缺省为 `original`，支持 TMDB 的 `original`／`w<正整数>`／`h<正整数>` 格式；具体尺寸是否由上游支持仍由来源决定，configuration 返回的尺寸数组可供选择。
 
 覆盖电影／剧集／人物／综合搜索、discover、trending、genre、configuration、电影与剧集列表／详情、季集、人物与合集详情及关联资源。未列出的 GET 路径同样交给已配置来源处理，是否支持由上游响应决定；没有新增任意目标 URL 或写入方法接口。
 
@@ -155,7 +157,9 @@ Cookie 和 API TOKEN 明文读写，保存失败保留输入和原 saved 快照�
 }
 ```
 
-分页、ID、评分、类型和其他业务字段不重塑。嵌套图片字段同样改写，不额外增加 `poster_url` 或第二套引用。空图片值保持空值。`configuration.images.base_url`／`secure_base_url` 改成 `/v1/tmdb/images/`，尺寸数组等保持来源数据；上游返回的官方／CF 图片基址不会覆盖运行器显式 imageBase。
+分页、ID、评分、类型和其他业务字段不重塑。图片沿元数据的 `results`、演职员、制作公司、季集、合集及 `images` 等来源结构投影，不递归扫描普通扩展分支中的同名键；未消费字段保留原数据。空图片值保持空值，不额外增加 `poster_url` 或第二套引用。`configuration.images.base_url`／`secure_base_url` 改成 `/v1/tmdb/images/`，尺寸数组等保持来源数据；上游返回的官方／CF 图片基址不会覆盖运行器显式 imageBase。
+
+列表中可定位的坏条目（例如当前图片路径无法消费）只隔离该条，保留健康兄弟。真正请求的顶层列表原本非空但全部无法消费时报 `UPSTREAM_FORMAT`，不伪装成功空列表；原本有效的空列表正常返回。详情或列表条目中的可选关系／嵌套图片分支不可用时省略该分支，供消费层识别缺失，不因此丢弃可用的主详情或条目，也不把该分支标成 fresh／完整。根实体的实际图片字段损坏、坏 JSON、认证和上游协议失败仍明确报错。
 
 ### 豆瓣 `request` 与 `search`
 
@@ -185,7 +189,9 @@ subject_collection/{name}[/items]
 
 `id`／`name` 沿来源协议。首页及分类沿用 server 的 `subject/recent_hot/{movie|tv}`，以 `category`／`type` 筛选，分类选项由响应 `tags`／`recommend_tags` 保留；不依赖独立 `/movie/categories` 接口。其它合法 GET 路径同样请求配置的来源；上游 404 仍返回 `UPSTREAM_HTTP`，不回退或伪造分类数据。
 
-query 保留豆瓣 `start`／`limit` 等原有参数，可使用标量或标量数组；不转换为 TMDB 分页。网页 search 当前仅接受 `query`，与参考实现一致不承诺分页参数，`show_more_subjects` 保留参考输出语义。
+Rexxar 请求仅消费 `path/query`；query 保留豆瓣 `start`／`limit` 等原有参数，可使用标量或标量数组，不转换为 TMDB 分页。网页 search 只消费 `query` 文本，附加的 `start/count` 等参数忽略、不向网络透传，与参考实现一致不承诺分页。两种请求的额外 `method/url/headers` 等也不赋予传输或凭据权限。
+
+网页搜索只读取构造结果所需的资料，不检查未使用的响应 `count/start`。坏 ID、标题、实际评分或图片材料等可定位到单条时隔离该条，健康兄弟继续返回；缺失有效 `items` 列表、所有条目均坏或真实页面解析失败仍为 `UPSTREAM_FORMAT`，不能当作搜索无结果。有效空列表与 `show_more_subjects` 的既有输出语义保留。
 
 豆瓣字段示例：
 
@@ -200,7 +206,7 @@ query 保留豆瓣 `start`／`limit` 等原有参数，可使用标量或标量�
 }
 ```
 
-照片实体可同时包含页面链接和图片：例如详情 `cover.url` 是照片详情页，保留为业务链接；`cover.image.*.url` 才改成运行器图片路径。不是把 `cover` 下所有 URL 都改写或拒绝。
+图片仅沿实体列表、详情关系及 `pic/cover/avatar/image` 等来源图片结构投影，不扫描未知扩展分支，也不因未知键的值恰好来自图片域名而改写。真正请求的顶层列表全坏仍失败；嵌套可选关系或图片描述符无法消费时省略该分支，保留可用主结果，不透传非法图片、不伪造空列表或完整状态；根实体直接使用的图片字符串损坏仍失败。照片实体可同时包含页面链接和图片：例如详情 `cover.url` 是照片详情页，保留为业务链接；`cover.image.*.url` 才改成运行器图片路径。不是把 `cover` 下所有 URL 都改写或拒绝。
 
 不伪造 TMDB 的 `page/results` 包装、评分尺度或 ID；也不把 server 的数据库缓存、`cache_status` 和反爬挑战求解器移入本运行器。需要登录／网页验证时明确返回 `WEB_INTERACTION_REQUIRED`，由后续客户端提示用户，不返回虚假的空列表；正常搜索词回显包含“验证码”等文字本身不等于验证页。
 

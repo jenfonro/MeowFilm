@@ -36,7 +36,7 @@ internal sealed class NovelRuleEditor : DockPanel
     }
     internal NovelRule Read()
     {
-        if (!int.TryParse(timeout.Text, out int value) || value <= 0) throw new InvalidDataException("超时毫秒数无效");
+        if (!int.TryParse(timeout.Text, out int value)) throw new InvalidDataException("超时毫秒数无效");
         return original with { Name = name.Text.Trim(), Group = group.Text.Trim(), Pattern = pattern.Text, Replacement = replacement.Text,
             Scope = scope.Text.Trim(), ExcludeScope = exclude.Text.Trim(), TimeoutMillisecond = value,
             IsRegex = regex.IsChecked == true, ScopeTitle = title.IsChecked == true, ScopeContent = content.IsChecked == true };

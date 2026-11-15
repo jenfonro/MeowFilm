@@ -37,7 +37,7 @@ public sealed partial class NovelSettingsView
     }
     private async Task SaveRuleAsync(NovelRule rule, CancellationToken token)
     {
-        await module.Rules.ValidateAsync(rule, token); var next = module.Library.Rules.ToList(); int at = next.FindIndex(r => r.Id == rule.Id);
+        var next = module.Library.Rules.ToList(); int at = next.FindIndex(r => r.Id == rule.Id);
         if (at < 0) next.Add(rule); else next[at] = rule; await SaveRulesAsync(next, token);
     }
     private async Task SaveRulesAsync(IReadOnlyList<NovelRule> rules, CancellationToken token)
@@ -86,7 +86,7 @@ public sealed partial class NovelSettingsView
         }, token, applicationOverlay: true);
         if (accepted) await PreviewRulesAsync(text, token);
     }
-    private async Task<(NovelRule[] Rules, string[] Failures)> ParseRulesAsync(string text, CancellationToken token)
+    private static (NovelRule[] Rules, string[] Failures) ParseRules(string text, CancellationToken token)
     {
         using var document = JsonDocument.Parse(text.TrimStart('\uFEFF'));
         var root = document.RootElement;
@@ -94,7 +94,8 @@ public sealed partial class NovelSettingsView
         var rules = new List<NovelRule>(); var failures = new List<string>();
         for (int index = 0; index < entries.Length; index++)
         {
-            try { var rule = NovelRuleImport.Parse(entries[index].GetRawText()).Single(); await module.Rules.ValidateAsync(rule, token); rules.Add(rule); }
+            token.ThrowIfCancellationRequested();
+            try { rules.Add(NovelRuleImport.Parse(entries[index].GetRawText()).Single()); }
             catch (OperationCanceledException) { throw; }
             catch { failures.Add($"规则 {index + 1} 无效"); }
         }
@@ -102,7 +103,7 @@ public sealed partial class NovelSettingsView
     }
     private async Task PreviewRulesAsync(string text, CancellationToken token)
     {
-        var (rules, failures) = await ParseRulesAsync(text, token);
+        var (rules, failures) = ParseRules(text, token);
         var current = module.Library.Rules.ToDictionary(r => r.Id); var statuses = rules.Select(r => NovelRuleImport.Status(r, current.GetValueOrDefault(r.Id))).ToArray();
         var selection = new ManagementImportSelection(rules.Select((rule, index) => new ManagementImportItem(rule.Name.Length == 0 ? rule.Pattern : rule.Name, rule.Group, statuses[index])).ToArray(), Enumerable.Range(0, rules.Length).Where(index => statuses[index] != "已有"));
         var panel = new StackPanel(); panel.Children.Add(selection); if (failures.Length > 0) panel.Children.Add(NovelUi.Text(string.Join("\n", failures), 12));
@@ -116,7 +117,7 @@ public sealed partial class NovelSettingsView
     // stable external IDs. It is also used by the rule-consumer integration tests.
     internal async Task ImportRulesAsync(string text, CancellationToken token)
     {
-        var (rules, failures) = await ParseRulesAsync(text, token); await MergeRulesAsync(rules, token);
+        var (rules, failures) = ParseRules(text, token); await MergeRulesAsync(rules, token);
         module.Notify(failures.Length == 0 ? "净化规则已导入" : string.Join("\n", failures));
     }
     private Task MergeRulesAsync(IReadOnlyList<NovelRule> rules, CancellationToken token)

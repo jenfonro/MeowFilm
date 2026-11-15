@@ -19,6 +19,35 @@ public static class FilmPlaybackSettingsTests
     private static TaskCompletionSource Gate() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Test("unrelated preference shapes survive edits and unknown order values remain visible", async () =>
+        {
+            await using var scene = await Scene.Create();
+            scene.Preferences = JsonSerializer.Deserialize<JsonElement>("""
+                {"ruleOrder":["future-rule","quality","future-rule"],"panOrder":{"future":["pan"]},"keywords":["visible"],
+                 "siteCleanKeywords":[false,{"nested":true}],"iosAutoPrepare":{"future":1},"extra":{"nested":[7]}}
+                """);
+            await scene.View.ShowAsync("clean");
+            await scene.View.ShowAsync("preferences");
+            await Until(() => scene.View.Idle);
+            Check(!scene.View.ReadFailed && scene.Element<TextBox>("Keywords").Text == "visible" &&
+                scene.Element<SettingsPriorityList>("RuleOrder").ItemsSource!.Cast<object>().Count() == 2 &&
+                Visuals(scene.View).OfType<TextBlock>().Any(block => block.Text == "future-rule"),
+                "another group's shape and duplicate unknown order ids do not reject the current editable group");
+            var original = scene.Preferences;
+            scene.Element<TextBox>("Keywords").Text = "changed";
+            Click(scene.Button("保存关键字匹配规则")); await Until(() => scene.View.Idle);
+            foreach (string field in new[] { "ruleOrder", "panOrder", "siteCleanKeywords", "iosAutoPrepare", "extra" })
+                Check(JsonElement.DeepEquals(original.GetProperty(field), scene.Preferences.GetProperty(field)),
+                    "saving keywords preserves the original unedited field: " + field);
+            Check(scene.Preferences.GetProperty("keywords")[0].GetString() == "changed",
+                "the explicit field is really saved");
+            await scene.View.ShowAsync("clean");
+            scene.Element<TextBox>("CleanKeywords").Text = "";
+            Click(scene.Button("保存站点净化")); await Until(() => scene.View.Idle);
+            Check(scene.Preferences.GetProperty("siteCleanKeywords").GetArrayLength() == 0 &&
+                JsonElement.DeepEquals(original.GetProperty("iosAutoPrepare"), scene.Preferences.GetProperty("iosAutoPrepare")),
+                "an explicit empty edit replaces only its own formerly unconsumable branch");
+        });
         yield return Test("full preferences preserve empty keywords and restore only the chosen group across a new view", async () =>
         {
             await using var scene = await Scene.Create();

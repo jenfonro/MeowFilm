@@ -354,7 +354,8 @@
   }
 
   function process(request, rules) {
-    request = { ...request, text: ruleText(request.text), query: ruleText(request.query) };
+    request = { ...request, text: ruleText(request.text),
+      ...(request.section === 'search' ? { query: ruleText(request.query) } : {}) };
     const input = String(request.text || '').trim();
     const result = {
       section: request.section, type: '', text: '', inputText: input, processedText: input,

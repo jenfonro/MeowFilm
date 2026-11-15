@@ -3,7 +3,7 @@ using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities;
 
-public enum FilmSearchChannelState { Idle, Loading, Completed, NoSources, Unavailable, Error, Cancelled }
+public enum FilmSearchChannelState { Idle, Loading, Completed, NoSources, Unavailable, Error, Cancelled, Unknown }
 
 public sealed record FilmSearchSource(FilmCatSource Cat, FilmVideoSource Site)
 {
@@ -70,7 +70,13 @@ internal static class FilmSearchJson
     {
         if (field.ValueKind == JsonValueKind.String) return field.GetString()!;
         if (field.ValueKind != JsonValueKind.Array) return "";
-        var units = field.EnumerateArray().Select(unit => (char)unit.GetUInt16()).ToArray();
+        var units = new char[field.GetArrayLength()];
+        int index = 0;
+        foreach (var unit in field.EnumerateArray())
+        {
+            if (unit.ValueKind != JsonValueKind.Number || !unit.TryGetUInt16(out ushort value)) return "";
+            units[index++] = (char)value;
+        }
         // WPF text is a projection only; the original JSON remains the transport identity.
         return System.Text.Encoding.Unicode.GetString(System.Text.Encoding.Unicode.GetBytes(units));
     }

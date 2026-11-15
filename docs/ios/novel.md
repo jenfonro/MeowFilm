@@ -11,6 +11,8 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
   稳定身份与独立消费者，返回详情后保留原查询。
 - 首页只请求当前可见发现模式选中的启用源、分类和页码；书架／隐藏页面不请求发现。
   搜索逐源记录失败与页码，来源 revision 变化取消旧代；隐藏查询返回后才重新请求。
+  `NovelSourceClient` 在搜索／发现页内隔离不可消费的书籍，保留健康兄弟；
+  空页正常结束追加，非空页全部不可用或缺少列表则失败，不提前推进页码。
 - `NovelLibrary` 使用 `novel.library.v1` 原子文档，保存本地 UUID、书架／历史、
   锚点、排版和净化规则。decode 后先校验语义；写入使用 CAS，失败不发布内存快照、
   不覆盖旧字节。沿用文档层 8 MiB 资源边界，不限制书籍、来源或搜索结果数量。
@@ -19,10 +21,14 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
   不改书籍元数据、identity 或锚点；只有新书的身份归并调用 Node。
 - `NovelBook`／`NovelChapter` 保留运行器业务字段及 variable 的 JSON 类型，
   从 info／toc 往返 content／payAction；这些字段不是安装定义。
+  `NovelBlock` 仅按 type 读取实际文字或图片材料；未用 src／text 等成员不阻断正文，
+  真实缺失材料或未知块类型仍拒绝整章，不发布部分正文或重排目录序号。
 - `NovelRuleProcessor` 借用现有 `NovelRuntime`，通过 source 的 `rules.process`
   一次发送完整规则及转换快照。Node 负责启用筛选、order 稳定排序、逐条预算
-  （缺省 3000ms）和末尾简繁；规则执行及校验依赖运行器可用。原生文档仍独立保存
+  （缺省 3000ms）和末尾简繁；规则执行依赖运行器可用。原生文档仍独立保存
   书架、历史、排版与净化配置，Node 不另建配置仓库。
+  导入预览和普通保存不调用规则检查 RPC，关闭规则处理器不阻止本地配置编辑；
+  正则编译等错误只在实际 transform 使用时报告，已保存配置不因阅读刷新失败回滚。
   首次普通载入处理失败可读原文，重算失败保留上次完整正文与锚点；
   目录刷新、换源和支付刷新须处理完整成功，不提交中间结果。
   每个保留阅读会话记录成功应用的 rules／conversion；
@@ -437,6 +443,6 @@ SameSite=None 采用用户接受的公开API投影边界；None精确延续、�
 
 ## 原生书源与替换管理
 
-管理与导入行为、三协议字段和净化表单遵循[共同管理契约](../common/novel/reading.md#书源与替换管理)。
+管理与导入行为、当前书源协议字段和净化表单遵循[共同管理契约](../common/novel/reading.md#书源与替换管理)。
 
 `NovelSourcesViewController`、`NovelRulesViewController` 使用 MeowUI 的 `ManagementListView`、`ManagementFormView`、`ManagementDialog` 与 `ManagementImportView`。管理／编辑页使用公共 App 页头，页面背景和表面遵循[设置语义配色](architecture.md#设置语义配色)。来源管理保留原有搜索／圆形工具栏、24 点外距、22 点整表圆角、紧凑行和底部批量栏，仅做主题与必要的动态字体／窄屏适配；同一列表供视频源、音源复用。源字段横向标签与垂直表单分离，键盘不覆盖输入。地址与导入确认以居中浮窗覆盖当前页面，保留后方内容而不另建空白页面；取消等待当前操作实际排空。排版数字／颜色输入也复用该浮窗，无效值留在窗内提示；二维码图片使用系统 CoreImage 解码。

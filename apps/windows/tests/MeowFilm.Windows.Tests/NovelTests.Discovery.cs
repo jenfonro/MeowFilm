@@ -377,11 +377,12 @@ public static partial class NovelTests
                 Anchor: new("chapter-2", "第二章", 1, 0, 2, .6));
             Check(key.Length > 0 && key == await module.Rules.IdentityAsync(latest.Book),
                 "The continuation fixture must retain distinct book ids with a shared matching identity.");
-            await module.Library.SaveEntryAsync(older); await module.Library.SaveEntryAsync(latest);
+            await module.Library.SaveEntryAsync(older);
             int writes = store.Writes;
             string requested = ""; module.NavigationRequested += (_, e) => requested = e.Route;
             await module.OpenBookAsync(older.Book);
-            Check(requested == NovelCapability.BookRoute && module.Session?.Entry.BookId == older.BookId);
+            Check(requested == NovelCapability.BookRoute && module.Session?.Entry.BookId == older.BookId && store.Writes == writes);
+            await module.Library.SaveEntryAsync(latest); writes = store.Writes;
             await module.NavigateAsync(NovelCapability.HomeRoute, default);
             var window = GeneralAppearanceTests.Window(module.View); window.Show();
             try
@@ -408,6 +409,19 @@ public static partial class NovelTests
                     Check(key == await module.Rules.IdentityAsync(module.DiscoverBooks.Single()),
                         "The discovered book must match the retained canonical identity.");
                     requested = "";
+                    var retainedSession = module.Session; int retainedWrites = store.Writes;
+                    try
+                    {
+                        await module.OpenBookAsync(module.DiscoverBooks.Single());
+                        throw new InvalidOperationException("Opening a discovered book guessed an ambiguous saved identity.");
+                    }
+                    catch (System.IO.InvalidDataException error) { Check(error.Message == "AMBIGUOUS_NOVEL_IDENTITY"); }
+                    Check(ReferenceEquals(module.Session, retainedSession) && requested.Length == 0 &&
+                        store.Writes == retainedWrites && module.Library.Entries.Count == 2,
+                        "Ambiguous discovery navigation changed the retained session or saved records.");
+                    await module.Library.DeleteHistoryAsync(latest.BookId);
+                    await Until(() => Find<Button>(module.View).Any(b =>
+                        b.IsLoaded && b.IsVisible && AutomationProperties.GetName(b) == "开始阅读"));
                     Find<Button>(module.View).Single(b => AutomationProperties.GetName(b) == "开始阅读")
                         .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
                     await Until(() => requested == NovelCapability.ReaderRoute);

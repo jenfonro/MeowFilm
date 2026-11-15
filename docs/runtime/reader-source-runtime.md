@@ -7,10 +7,9 @@ Reader adapter 位于 `@meowfilm/source-runtime`，由 `source@0.3.0`／`source.
 | 输入 | 处理 |
 | --- | --- |
 | Legado JSON | 执行搜索、发现、详情、目录、正文、登录状态、登录入口和图片处理规则 |
-| 异次元旧 JSON | 导入为内部 Legado 模型；不维护第二套规则引擎 |
 | 轻悦时光 HTML | 接受内联 HTML 或空白分隔的远程 HTML 候选 URL；提取脚本后在 QuickJS 中提供来源 DOM、jQuery 风格选择器和受控 `flutter_inappwebview.callHandler` bridge |
 
-协议自动识别也可由加载请求显式指定 `legado`、`yiciyuan`、`qysg` 或 `cat`。原始 HTML、JSON 字符串包装的 HTML、带来源名称／地址的轻悦时光远程 HTML 对象和 CatVod JS 均可在 source 入口识别；异次元实例对外报告实际执行协议 `legado` 和 `importedProtocol: yiciyuan`。这里的 `cat` 是[独立 CatVod Spider 输入](cat-source-runtime.md)，不表示支持 `cat.script.v2` 的 CatNode 服务或 Node 兼容层。
+协议自动识别也可由加载请求显式指定 `legado`、`qysg` 或 `cat`。原始 HTML、JSON 字符串包装的 HTML、带来源名称／地址的轻悦时光远程 HTML 对象和 CatVod JS 均可在 source 入口识别；不识别或转换旧书源格式。这里的 `cat` 是[独立 CatVod Spider 输入](cat-source-runtime.md)，不表示支持 `cat.script.v2` 的 CatNode 服务或 Node 兼容层。
 
 ## 动作
 
@@ -73,11 +72,11 @@ source.runtime.rules.process
 
 `PUT /v1/source/sources/{installationId}/{sourceRevision}?basename=...` 一次上传原始源码，接受无路径 `.json/.js/.html/.htm`，长度 1 至 16 MiB，严格 UTF-8 并保留既有 BOM 行为。POST body 是普通 JSON，响应统一 `{ok:true,contract:"source.runtime.v2",value}` 或 `{ok:false,contract,code}`；invoke 的 value 即业务值，控制正文没有普通字节配额。
 
-完整候选按 installation/sourceRevision 拥有，同键同内容幂等，不同内容报 SOURCE_INTEGRITY。新完整上传替换未采用候选，部分 body 不发布；指定版本不存在报 SOURCE_NOT_FOUND。字段/身份/CAS 前置拒绝不消费候选，取入试运行后失败释放；未采用候选在下一次完整上传、卸载或关闭释放，无分片、token、TTL、Base64 或传输摘要。原始 uploadHash 与规范化 contentHash 分别计算并复用，不能混淆。
+完整候选按 installation/sourceRevision 拥有，同键同内容幂等，不同内容报 SOURCE_INTEGRITY。新完整上传替换未采用候选，部分 body 不发布；指定版本不存在报 SOURCE_NOT_FOUND。必需材料、身份或 CAS 不满足时不消费候选，取入试运行后失败释放；未采用候选在下一次完整上传、卸载或关闭释放，无分片、token、TTL、Base64 或传输摘要。原始 uploadHash 与规范化 contentHash 分别计算并复用，不能混淆。普通 RPC 附加参数不触发白名单拒绝，也不进入执行 spec、能力配置或其他操作的参数。
 
 load 必填 `installationId,sourceRevision,revision,expectedRevision`；protocol/version/metadata 可选，默认自动识别、1.0.0、空对象，metadata 保留 32 KiB 格式边界。invoke 必填 `installationId,revision,generation,action,payload`，可选 timeoutMs 为 1 至 60000；unload 必填 installationId/revision，generation 可选。
 
-`rules.process {request}` 单独承载小说身份、归并、章节匹配、净化／简繁、规则校验及固定 URL 正则匹配，返回原纯规则结果，不接受客户端程序。Node owner 接受完整规则列表，稳定排序后逐条使用原规则预算，最后统一简繁；默认 3000ms、URL 匹配 2000ms，不增加规则预算业务上限或整个 transform 的固定截止。`TIMEOUT`／`CANCELLED` 保留原分类，失败实际释放后可重建，close 等待所有已接受规则任务排空。RPC 字段、错误及所有权以[书源仓库的小说纯规则契约](source-library.md#小说纯规则)为准；原生本地配置不迁入 Node 存储。
+`rules.process {request}` 单独承载小说身份、归并、章节匹配、净化／简繁及固定 URL 正则匹配，返回原纯规则结果，不接受客户端程序，不提供独立规则检查。Node owner 接受完整规则列表，稳定排序后逐条使用原规则预算，最后统一简繁；默认 3000ms、URL 匹配 2000ms，不增加规则预算业务上限或整个 transform 的固定截止。管理字段和未执行分支不参与规则计算；实际编译／执行失败仍明确返回。`TIMEOUT`／`CANCELLED` 保留原分类，失败实际释放后可重建，close 等待所有已接受规则任务排空。RPC 字段、错误及所有权以[书源仓库的小说纯规则契约](source-library.md#小说纯规则)为准；原生本地配置不迁入 Node 存储。
 
 加载使用 installation、revision、expectedRevision 做 CAS，调用与卸载核对 generation；候选失败保留原实例，发布后清理失败触发回滚或明确 `SOURCE_CLEANUP`。开发版不提供旧数据迁移或旧契约兼容层。
 

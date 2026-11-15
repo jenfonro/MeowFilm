@@ -20,11 +20,15 @@
 
 ## 阅读数据与生命周期
 
-`NovelLibrary` 使用现有 `IDocumentStore` 的 `novel.library.v1` CAS 原子文档，保存稳定本地 bookId、书架、历史、阅读位置、用户净化规则与排版。存储回执后才发布快照；损坏文档不会自动覆写。运行器源列表是内存投影；源定义、Cookie、源变量由运行器持有。本地收藏、置顶、历史与锚点的数据 API 保留，不依赖运行器就绪；首页继续阅读与详情加／移书架仍消费原有数据。接着读按最新历史条目的准确 `BookId` 恢复 entry／会话及锚点，不重新按来源或规则身份选择 canonical 条目；相同来源身份或规则身份的已有条目仍可分别保留。打开书籍、显示继续阅读及恢复正文不新增或改写 ReadAt／Anchor，实际阅读进度仍由现有保存路径提交。封面／书籍／正文图片网络调用首次准备来源投影，不要求先进入首页或设置，也不会以旧书籍恢复已停用／删除的来源。章节模型以开放 JSON 保留目录字段和规则上下文，正文／购章返回的变量更新与原字段一并进入后续调用。
+`NovelLibrary` 使用现有 `IDocumentStore` 的 `novel.library.v1` CAS 原子文档，保存稳定本地 bookId、书架、历史、阅读位置、用户净化规则与排版。存储回执后才发布快照；坏根 JSON、版本及 CAS 冲突不会触发覆写。文档以 `System.Text.Json` 原始材料保留根、记录及嵌套扩展、未消费数字和不同 UTF-8 键，只合并实际变更字段；不可消费或持久 id 重复的记录不参与健康投影，也不随无关保存删除或替换，书籍匹配不猜歧义身份。不可消费的整个分区保留原值，其他分区仍可使用，针对该分区的写入失败。
+
+外观未知模式、简繁值、主题或不可消费字段只在当前控件／阅读消费时回退；打开编辑器或修改其他字段不会把回退值写回，明确修改该字段才替换原值。
+
+运行器源列表是内存投影；源定义、Cookie、源变量由运行器持有。本地收藏、置顶、历史与锚点的数据 API 保留，不依赖运行器就绪；首页继续阅读与详情加／移书架仍消费原有数据。接着读按最新历史条目的准确 `BookId` 恢复 entry／会话及锚点，不重新按来源或规则身份选择 canonical 条目；相同来源身份或规则身份的已有条目仍可分别保留。打开书籍、显示继续阅读及恢复正文不新增或改写 ReadAt／Anchor，实际阅读进度仍由现有保存路径提交。封面／书籍／正文图片网络调用首次准备来源投影，不要求先进入首页或设置，也不会以旧书籍恢复已停用／删除的来源。章节模型以开放 JSON 保留目录字段和规则上下文，正文／购章返回的变量更新与原字段一并进入后续调用。
 
 保留书籍会话的加／移书架在本地串行写入内读取当前持久成员事实；删除历史后，不从旧会话回填 ReadAt 或 Anchor。即使无书架的历史成员已被删除，再加书架仍保留原 bookId 和当前正文，只有之后实际阅读保存才重新记历史。
 
-`NovelRuleProgram` 通过 `source.runtime.rules.process`（HTTP `/v1/source/rules.process`）发送 `{request:<纯规则输入>}`，消费身份、归并、章节匹配、规则校验、净化／简繁与固定 URL 匹配结果。调用前取得完整输入快照，transform 一次发送全部规则和 conversion；Node 负责启停、order 稳定排序、逐条 timeoutMillisecond（默认 3000ms）及末尾简繁，URL 匹配预算为 2000ms。Windows 不内嵌规则资源或执行引擎，规则计算及校验依赖运行器就绪；本地书架、历史、偏好与净化配置存储仍独立。
+`NovelRuleProgram` 通过 `source.runtime.rules.process`（HTTP `/v1/source/rules.process`）发送 `{request:<纯规则输入>}`，消费身份、归并、章节匹配、净化／简繁与固定 URL 匹配结果。调用前取得完整输入快照，transform 一次发送全部规则和 conversion；Node 负责启停、order 稳定排序、逐条 timeoutMillisecond（默认 3000ms）及末尾简繁，URL 匹配预算为 2000ms。Windows 不内嵌规则资源或执行引擎；本地保存、导入、启停和更名不先调用规则检查，净化配置可离线保存。真实正则编译、预算及执行失败在处理正文时报告，整章失败保留上次显示内容，不删除已经保存的规则。
 
 规则 RPC 只接受调用方与连接取消，不套用其他 source 方法的 30 秒 HTTP 总截止时间，避免合法多规则被较短的批次计时器截断；实际执行预算由 Node 逐条落实。App 适配器等待该调用实际结束，`NovelRuleProgram` 在取消后拒绝迟到成功结果，暂停／关闭只取消并排空本 owner 接纳的调用，不关闭共享运行器。整章全部成功才提交显示数据。正文签名变化使旧块锚点失效，按当前章比例恢复；通常重排使用 blockIndex 和 UTF-16 行首位置。
 
@@ -42,7 +46,7 @@
 
 host-only 与同域 Domain Cookie 互换时，先回传旧 scope 删除、再回传新 scope 写入；避免运行器按归一域／路径／名称写入时误删替代值。双向回归经真实运行器 owner 和 WebView2，检查主域的新值及子域可见性，不仅检查 diff 顺序。
 
-验证入口：`scripts/windows/test.ps1 -Group NovelTests,SearchResultsConsumerTests,SettingsNavigationTests,RuntimeHttpClientTests,RuntimeImageTests`；后两组覆盖新增 source 方法清单、受信二进制图片路由及原元数据图片消费者。增量 App 编译使用普通 `dotnet build`，保留项目正常原生目标；不调用会 publish 并替换安装目录的 `build-windows.ps1`。在仓库根目录、正常 Windows 开发环境中执行：
+验证入口：`scripts/windows/test.ps1 -Group NovelTests,NovelManagementTests,SearchResultsConsumerTests,SettingsNavigationTests,RuntimeHttpClientTests,RuntimeImageTests`；后两组覆盖新增 source 方法清单、受信二进制图片路由及原元数据图片消费者。增量 App 编译使用普通 `dotnet build`，保留项目正常原生目标；不调用会 publish 并替换安装目录的 `build-windows.ps1`。在仓库根目录、正常 Windows 开发环境中执行：
 
 ```powershell
 dotnet restore apps/windows/app/MeowFilm.Windows.App.csproj --locked-mode --configfile apps/windows/NuGet.Config
@@ -57,6 +61,6 @@ dotnet build apps/windows/app/MeowFilm.Windows.App.csproj --configuration Releas
 
 ## 原生书源与替换管理
 
-管理与导入行为、三协议字段和净化表单遵循[共同管理契约](../common/novel/reading.md#书源与替换管理)。
+管理与导入行为、当前协议字段和净化表单遵循[共同管理契约](../common/novel/reading.md#书源与替换管理)。原生书源表单仅提供 Legado 和 QYSG；独立 Cat 输入不由该表单转换。净化导入只消费当前 `pattern/isEnabled/order` 等字段，旧别名只作为普通扩展保留，不回填或改变当前规则语义。
 
 `NovelSettingsView` 的书源与替换标签使用 Desktop 的 `ManagementList`、`ManagementForm`、`ManagementImportSelection`。列表为虚拟化 WPF 控件，编辑器为原生 TabControl／表单，行启用控件使用共享开关样式。设置编辑与网络导入由 `NovelUi.DialogAsync` 挂入 Shell 的 `PlayerDialogHost`，复用桌面浮层的主题边框／表面、恢复输入行分隔、在应用窗口内居中且最大宽度 520 DIP；具体流程保留原提交、取消及 Escape 语义，点击编辑器外不关闭。阅读器内章节选择、换源及 Web 验证交互仍保留各自的 Popup 定位与生命周期。二维码图片由锁定的 ZXing.Net 0.16.11 本地解码，Apache-2.0 许可随 Windows 清单发布。

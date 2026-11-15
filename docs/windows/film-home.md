@@ -13,9 +13,9 @@ Windows 将影视浏览作为独立的 `FilmCapability` 装配在音乐能力之
 | 新番放送 | `tv` | `tv` | `tv_animation` |
 | 热门综艺 | `tv` | `show` | `show` |
 
-首页每栏读取豆瓣移动端 `recent_hot` 的 `start=0&limit=12`。进入栏目数据页时复用这 12 条种子，并以 `start=12&limit=12` 补齐首批 24 条；“加载更多”之后按 `limit=24` 继续推进偏移。适配器只构造首页定义及下述已知筛选组合的 HTTPS 请求，单次范围限制为 1–24 条，禁止任意 category/type、重定向、Cookie 和系统代理，使用 15 秒截止与 4 MiB 解码后响应上限。公开请求头固定为浏览器 `User-Agent`、JSON `Accept`、`https://m.douban.com/` Referer 和同源 Origin，不保存或发送账号凭据。
+首页每栏经公共运行器 `film.data.metadata.entry` 读取豆瓣 `recent_hot` 的 `start=0&limit=12`。进入栏目数据页时复用这 12 条种子，并以 `start=12&limit=12` 补齐首批 24 条；“加载更多”之后按 `limit=24` 继续推进偏移。适配器只传递 `kind` 对应路径及 `start/limit/category/type`，普通读取由运行器检查缓存，显式刷新传递 `refresh:true`；不以本地菜单、栏目 key 或展示标题建立业务许可表，不增加偏移上限或截断返回结果。网络、代理和凭据由[公共元数据 owner](../runtime/metadata-data.md)管理，原生不另建 HTTPS 客户端。
 
-响应只消费影片 `id`、非空 `title`、评分 `rating.value` 与海报候选。海报优先级为 `pic.normal`、`pic.large`、`cover.url`、`cover_url`、`poster`、`image`；零分不显示。豆瓣图片主机在影片适配边界改写为服务器版同样使用的 `img.doubanio.cmliussss.net`，之后继续进入 App 唯一的 `ArtworkService`，共享其公共地址校验、可见性获取、缓存、取消和租约释放，不在通用图片 HTTP 层加入豆瓣分派。
+响应只消费影片 `id`、非空 `title`、评分 `rating.value` 与海报候选。海报优先级为 `pic.normal`、`pic.large`、`cover.url`、`cover_url`、`poster`、`image`；零分不显示。图片保留运行器返回的 `/v1/douban/images/...` 相对引用，通过既有 `ArtworkService` 和受信图片通道获取、解码、缓存、取消与释放，不在通用图片 HTTP 层加入豆瓣分派。辅助 cache/components 或未消费字段的形状不阻断有效影片列表，未知缓存状态原样投影而不当作 fresh，真实刷新错误仍由通知报告。坏条目局部隔离；缺少有效列表、非空列表全部不可消费等真实格式错误不伪装成成功空列表。
 
 ## 状态与生命周期
 

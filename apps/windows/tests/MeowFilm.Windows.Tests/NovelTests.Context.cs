@@ -98,16 +98,26 @@ public static partial class NovelTests
         var sources = new NovelSourceService(runtime); await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
         await module.InitializeAsync(default); await module.ReceiveBookAsync(Book(), default); await module.Session!.ContinueAsync();
         var settings = (NovelSettingsView)module.SettingsView;
-        await settings.ImportRulesAsync("""
+        var original = module.Session.Blocks;
+        try
+        {
+            await settings.ImportRulesAsync("""
             [{"id":1700000000000,"name":"Reader默认正则","group":null,"pattern":"广告\\d+\\n","replacement":"","scope":null,"order":0,"isEnabled":true,"scopeContent":true},
              {"id":1700000000001,"name":"字面量","pattern":"[x]","replacement":"","isRegex":false,"order":1},
              {"id":1700000000002,"name":"非法","pattern":"[","replacement":""}]
             """, default);
-        Check(module.Library.Rules.Count == 2 && module.Library.Rules[0].Id == "1700000000000" && module.Library.Rules[0].IsRegex);
+            throw new InvalidOperationException("Invalid execution published a partial chapter");
+        }
+        catch (BridgeException error) { Check(error.Code == "INVALID_REQUEST"); }
+        Check(module.Library.Rules.Count == 3 && module.Library.Rules[0].Id == "1700000000000" && module.Library.Rules[0].IsRegex);
         Check(!module.Library.Rules[1].IsRegex && module.Library.Rules.All(r => r.TimeoutMillisecond == 3000));
-        Check(module.Session.Blocks.Single().Text == "正文" && module.Notice.Contains("规则 3 无效"));
+        Check(ReferenceEquals(module.Session.Blocks, original), "A failed actual transform must preserve the displayed chapter, not drop the stored rule.");
+        var savedInvalid = new NovelLibrary(store); await savedInvalid.InitializeAsync();
+        Check(savedInvalid.Rules.Count == 3 && savedInvalid.Rules[2].Pattern == "[");
+        await settings.ImportRulesAsync("""[{"id":1700000000002,"pattern":"[","isEnabled":false}]""", default);
+        Check(module.Session.Blocks.Single().Text == "正文");
         await settings.ImportRulesAsync("""[{"id":1700000000001,"pattern":"[x]","replacement":"保留","isRegex":false,"order":1}]""", default);
-        Check(module.Library.Rules.Count == 2 && module.Session.Blocks.Single().Text == "保留正文");
+        Check(module.Library.Rules.Count == 3 && module.Session.Blocks.Single().Text == "保留正文");
         var reopened = new NovelLibrary(store); await reopened.InitializeAsync();
         Check(reopened.Rules.Select(r => r.Id).SequenceEqual(module.Library.Rules.Select(r => r.Id)));
     }

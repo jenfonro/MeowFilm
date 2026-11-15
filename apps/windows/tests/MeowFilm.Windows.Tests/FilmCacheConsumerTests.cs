@@ -19,6 +19,7 @@ public static class FilmCacheConsumerTests
     {
         yield return Test("supplement fills display gaps without changing Douban identity or episode coordinates", SupplementProjection);
         yield return Test("trusted Douban seasons take priority over raw related subjects and preserve owner episode coordinates", DoubanSeasonsProjection);
+        yield return Test("auxiliary cache and supplement shapes never reject a valid main snapshot", AuxiliaryProjection);
         yield return Test("ordinary presentation restore asks owner without forced refresh or another address read", RestorePresentation);
         yield return Test("refresh acknowledgement updates stale display and never schedules its returned pending stage", RefreshDoesNotPlay);
         yield return Test("same-directory refresh retains exact items while loading and reports failure only through session error", RefreshDirectory);
@@ -30,6 +31,34 @@ public static class FilmCacheConsumerTests
         yield return Test("picture settings retry routes errors through notices", ActionControls);
         yield return Test("failed media exposes picture recovery without covering healthy output", RecoveryControl);
         yield return Test("runtime-relative Douban image identity uses the existing native artwork cache", ImageCache);
+    }
+
+    private static Task AuxiliaryProjection()
+    {
+        var target = new FilmPlaybackTarget("douban:movie:100", "movie", "主资料", "douban", "100");
+        var metadata = FilmJson.Encode(new { title = "主资料", intro = "实际简介" });
+        var card = new FilmCardItem(target.Id, target.Title, "", "") { PlaybackContext = new(target, Metadata: metadata) };
+        var page = new FilmPlaybackPage(card, card.PlaybackContext!, null, null);
+        foreach (string auxiliary in new[]
+        {
+            """{"metadataCache":42,"metadataSupplement":[]}""",
+            """
+            {"metadataCache":{"status":"future","components":false,"error":{"code":"UPSTREAM_ERROR"}},
+                "metadataSupplement":{"provider":"future","kind":[],"metadataId":{},"metadata":[]}}
+            """
+        })
+        {
+            var root = JsonNode.Parse(Snapshot(Guid.NewGuid(), 1, target, metadata).GetRawText())!.AsObject();
+            var additions = JsonNode.Parse(auxiliary)!.AsObject();
+            foreach (var pair in additions) root[pair.Key] = pair.Value?.DeepClone();
+            page.Apply(new(JsonSerializer.SerializeToElement(root)));
+            Check(page.Title == "主资料" && page.Overview == "实际简介" && page.ActiveTarget == target &&
+                page.MetadataCache?.Status != "fresh",
+                "only usable display projections are consumed; the main identity and metadata remain intact");
+        }
+        Check(page.MetadataCache is { Status: "future", ErrorCode: "UPSTREAM_ERROR" },
+            "unknown state is preserved without hiding the actual cache error");
+        return Task.CompletedTask;
     }
 
     private static Task SupplementProjection()

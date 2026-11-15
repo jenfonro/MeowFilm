@@ -23,6 +23,7 @@
   };
 
   function identity(book) {
+    if (!object(book)) throw fault('INVALID_BOOK');
     const name = normalizedName(bookName(book)), author = normalizedAuthor(book.author);
     return {
       name, author,
@@ -32,10 +33,13 @@
   }
 
   function merge(books) {
+    if (!Array.isArray(books)) throw fault('INVALID_BOOKS');
     const members = [], positions = new Map();
     for (const entry of books) {
+      if (!object(entry)) throw fault('INVALID_BOOK');
       const candidates = Array.isArray(entry.candidates) ? entry.candidates : [entry];
       for (const book of candidates) {
+        if (!object(book)) throw fault('INVALID_BOOK');
         const key = sourceKey(book);
         if (key && positions.has(key)) {
           const position = positions.get(key);
@@ -94,8 +98,10 @@
   }
 
   function matchChapter(chapters, anchor) {
+    if (!Array.isArray(chapters) || !object(anchor)) throw fault('INVALID_CHAPTERS');
     const url = text(anchor.chapterUrl), title = chapterName(anchor.chapterTitle);
     const select = predicate => chapters.reduce((indices, chapter, index) => {
+      if (!object(chapter)) throw fault('INVALID_CHAPTER');
       if (!chapter.isVolume && predicate(chapter)) indices.push(index);
       return indices;
     }, []);
@@ -110,28 +116,6 @@
     return { index: null, requiresSelection: true };
   }
 
-  function validateRule(rule) {
-    const errors = [];
-    if (!object(rule)) return { valid: false, errors: ['rule'] };
-    if (typeof rule.pattern !== 'string' || !rule.pattern.length) errors.push('pattern');
-    if (rule.replacement !== undefined && typeof rule.replacement !== 'string') errors.push('replacement');
-    for (const field of ['isEnabled', 'isRegex', 'scopeTitle', 'scopeContent']) {
-      if (rule[field] !== undefined && typeof rule[field] !== 'boolean') errors.push(field);
-    }
-    for (const field of ['scope', 'excludeScope', 'name', 'group']) {
-      if (rule[field] !== undefined && rule[field] !== null && typeof rule[field] !== 'string') errors.push(field);
-    }
-    if (rule.order !== undefined && !Number.isSafeInteger(rule.order)) errors.push('order');
-    if (rule.timeoutMillisecond !== undefined &&
-        (!Number.isSafeInteger(rule.timeoutMillisecond) || rule.timeoutMillisecond <= 0)) {
-      errors.push('timeoutMillisecond');
-    }
-    if (!errors.includes('pattern') && rule.isRegex !== false) {
-      try { new RegExp(rule.pattern, 'g'); } catch { errors.push('pattern'); }
-    }
-    return { valid: errors.length === 0, errors };
-  }
-
   function inScope(scope, book, source) {
     const entries = text(scope).split(/[,，;；\r\n]+/).map(value => value.trim()).filter(Boolean);
     if (!entries.length) return false;
@@ -142,16 +126,35 @@
 
   function transform(input) {
     const book = input.book || {}, source = input.source || {};
-    let title = text(input.title);
-    let blocks = input.blocks.map(block => ({ ...block }));
-    for (const { rule } of input.rules.map((rule, index) => ({ rule, index }))
+    if (typeof input.title !== 'string' || !Array.isArray(input.blocks) || !Array.isArray(input.rules)) {
+      throw fault('INVALID_CHAPTER');
+    }
+    let title = input.title;
+    let blocks = input.blocks.map(block => {
+      if (!object(block) || block.type === 'text' && typeof block.text !== 'string') {
+        throw fault('INVALID_BLOCK');
+      }
+      return { ...block };
+    });
+    for (const { rule } of input.rules.map((rule, index) => {
+      if (!object(rule)) throw fault('INVALID_RULE');
+      return { rule, index };
+    }).filter(({ rule }) => rule.isEnabled !== false)
       .sort((left, right) => (left.rule.order ?? 0) - (right.rule.order ?? 0) || left.index - right.index)) {
-      if (rule.isEnabled === false) continue;
-      if (!validateRule(rule).valid) throw fault('INVALID_RULE');
-      if (text(rule.scope).trim() && !inScope(rule.scope, book, source) ||
-          inScope(rule.excludeScope, book, source)) continue;
+      const content = rule.scopeContent !== false && blocks.some(block => block.type === 'text');
+      if (rule.scopeTitle !== true && !content) continue;
+      const scope = rule.scope ?? '', excludeScope = rule.excludeScope ?? '';
+      if (typeof scope !== 'string' || typeof excludeScope !== 'string') throw fault('INVALID_RULE');
+      if (scope.trim() && !inScope(scope, book, source) || inScope(excludeScope, book, source)) continue;
       const started = Date.now(), budget = rule.timeoutMillisecond ?? 3000;
-      const pattern = rule.isRegex === false ? null : new RegExp(rule.pattern, 'g');
+      if (typeof rule.pattern !== 'string' ||
+          rule.replacement !== undefined && typeof rule.replacement !== 'string' ||
+          !Number.isSafeInteger(budget) || budget <= 0) throw fault('INVALID_RULE');
+      let pattern = null;
+      if (rule.isRegex !== false) {
+        try { pattern = new RegExp(rule.pattern, 'g'); }
+        catch { throw fault('INVALID_RULE'); }
+      }
       const replace = value => {
         // This check rejects a late result; the native engine's interrupt
         // deadline is what actually stops a non-returning regular expression.
@@ -163,7 +166,7 @@
         return result;
       };
       if (rule.scopeTitle === true) title = replace(title);
-      if (rule.scopeContent !== false) {
+      if (content) {
         const next = [];
         for (let index = 0; index < blocks.length;) {
           if (blocks[index].type !== 'text') {
@@ -172,7 +175,7 @@
           }
           const run = [];
           while (index < blocks.length && blocks[index].type === 'text') run.push(blocks[index++]);
-          const original = run.map(block => text(block.text)).join('\n');
+          const original = run.map(block => block.text).join('\n');
           const result = replace(original);
           if (result === original) next.push(...run);
           else next.push(...result.split('\n').map(value => ({ type: 'text', text: value })));
@@ -186,7 +189,7 @@
       const map = conversion === 'traditional' ? simplifiedToTraditional : traditionalToSimplified;
       const convert = value => [...value].map(character => map[character] || character).join('');
       title = convert(title);
-      blocks = blocks.map(block => block.type === 'text' ? { ...block, text: convert(text(block.text)) } : block);
+      blocks = blocks.map(block => block.type === 'text' ? { ...block, text: convert(block.text) } : block);
     }
     return { title, blocks };
   }
@@ -206,7 +209,6 @@
       case 'merge': return merge(input.books);
       case 'matchChapter': return matchChapter(input.chapters, input.anchor);
       case 'transform': return transform(input);
-      case 'validateRule': return validateRule(input.rule);
       case 'matchUrl': {
         if (typeof input.pattern !== 'string' || typeof input.url !== 'string') throw fault('INVALID_INPUT');
         let match;

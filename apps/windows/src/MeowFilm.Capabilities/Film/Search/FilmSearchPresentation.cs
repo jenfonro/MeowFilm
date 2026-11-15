@@ -88,13 +88,16 @@ internal sealed class FilmSearchCardProjection
         Func<string, string> resolveImage)
     {
         if (previous is not null && JsonElement.DeepEquals(previous.Json, json)) return previous;
-        var items = json.EnumerateArray().ToArray();
+        if (json.ValueKind != JsonValueKind.Array) throw new FilmPlaybackException("INVALID_RESPONSE");
+        var items = json.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.Object &&
+            FilmSearchJson.Text(item, "displayKey").Length > 0).ToArray();
+        if (json.GetArrayLength() > 0 && items.Length == 0) throw new FilmPlaybackException("INVALID_RESPONSE");
         var values = new FilmSearchCardValue[items.Length];
         var keys = new HashSet<string>(StringComparer.Ordinal);
         for (int index = 0; index < items.Length; index++)
         {
             var item = items[index];
-            string key = FilmJson.RequiredText(item, "displayKey");
+            string key = FilmSearchJson.Text(item, "displayKey");
             if (!keys.Add(key)) throw new FilmPlaybackException("INVALID_RESPONSE");
             // Refresh borrowed elements together when their owning array changes.
             // Keeping one old document per unchanged card would retain historical full snapshots.
@@ -188,12 +191,12 @@ internal sealed class FilmSearchPreparedSnapshot
         Revision = snapshot.GetProperty("revision").GetInt64();
         Invalidated = FilmJson.Bool(snapshot, "invalidated");
         if (Invalidated) return;
-        SitesState = State(FilmJson.RequiredText(snapshot, "siteState"));
-        MetadataState = State(FilmJson.RequiredText(snapshot, "metadataState"));
-        Round = snapshot.GetProperty("round").GetInt32();
+        SitesState = State(FilmJson.Text(snapshot, "siteState"));
+        MetadataState = State(FilmJson.Text(snapshot, "metadataState"));
+        Round = FilmJson.Integer(snapshot, "round") ?? 0;
         Loading = snapshot.GetProperty("loading").GetBoolean();
         HasMore = snapshot.GetProperty("hasMore").GetBoolean();
-        NoSources = snapshot.GetProperty("noSources").GetBoolean();
+        NoSources = FilmJson.Bool(snapshot, "noSources");
         MetadataQuery = FilmJson.Text(snapshot, "metadataQuery");
         MetadataSearch = FilmJson.Member(snapshot, "metadataSearch") is { ValueKind: JsonValueKind.Object } search ? search : null;
         if (readDisplay) Display = FilmSearchDisplay.Read(snapshot, previous, resolveImage);
@@ -226,6 +229,6 @@ internal sealed class FilmSearchPreparedSnapshot
         "idle" => FilmSearchChannelState.Idle, "loading" => FilmSearchChannelState.Loading,
         "completed" => FilmSearchChannelState.Completed, "unavailable" => FilmSearchChannelState.Unavailable,
         "failed" => FilmSearchChannelState.Error, "cancelled" => FilmSearchChannelState.Cancelled,
-        _ => throw new FilmPlaybackException("INVALID_RESPONSE")
+        _ => FilmSearchChannelState.Unknown
     };
 }

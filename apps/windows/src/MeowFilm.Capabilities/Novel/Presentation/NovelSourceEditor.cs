@@ -24,7 +24,7 @@ internal sealed class NovelSourceEditor : DockPanel
         type.SetResourceReference(StyleProperty, "Novel.ComboBox");
         type.SelectedIndex = int.TryParse(Draft.Text(new("bookSourceType", "内容类型")), out int current) && current is >= 0 and < 4 ? current : 0;
         AutomationProperties.SetName(type, "内容类型"); type.SelectionChanged += (_, _) => Draft.Set(new("bookSourceType", "内容类型", Kind: NovelSourceFieldKind.Number), type.SelectedIndex.ToString()); controls.Children.Add(type);
-        foreach (var (key, title) in new[] { (Draft.EnabledKey, "启用"), ("enabledExplore", "发现"), ("enabledCookieJar", "CookieJar") })
+        foreach (var (key, title) in new[] { ("enabled", "启用"), ("enabledExplore", "发现"), ("enabledCookieJar", "CookieJar") })
         {
             var check = new CheckBox { Content = title, IsChecked = Draft.Bool(key), VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 0, 16, 0) };
             check.SetResourceReference(StyleProperty, "MeowFilm.ManagementCheck");

@@ -67,16 +67,18 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
   let runtime, closing, closed = false;
   const get = () => runtime ??= runtimeFactory({ dataRoot, clock });
   const methods = {};
-  function method(name, allowed, required, body) {
+  function method(name, parameters, body) {
     methods['cat.script.' + name] = (input = {}, context = {}) => {
       const task = (async () => {
         try {
           if (closed) throw new ScriptHostError('HOST_CLOSED');
-          requireValue(object(input) && Object.keys(input).every(key => allowed.includes(key)) &&
-            required.every(key => Object.hasOwn(input, key)));
+          requireValue(object(input));
           if (context.signal?.aborted) throw new ScriptHostError('CANCELLED');
           let captured;
-          try { captured = snapshot(input); } catch { throw new ScriptHostError('INVALID_ARGUMENT'); }
+          try {
+            captured = snapshot(Object.fromEntries(parameters.filter(key => Object.hasOwn(input, key))
+              .map(key => [key, input[key]])));
+          } catch { throw new ScriptHostError('INVALID_ARGUMENT'); }
           const linked = linkedSignal(context.signal, lifetime.signal);
           let value, error;
           try {
@@ -94,12 +96,11 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
       return task;
     };
   }
-  method('start', [], [], (_input, signal) => get().start({ signal }));
-  method('status', [], [], () => get().status());
-  method('refresh', [], [], (_input, signal) => get().refresh({ signal }));
+  method('start', [], (_input, signal) => get().start({ signal }));
+  method('status', [], () => get().status());
+  method('refresh', [], (_input, signal) => get().refresh({ signal }));
   method('install', ['installationId', 'sourceRevision', 'config', 'version', 'enabled',
-    'name', 'sourceType', 'sourceUrl'],
-    ['installationId', 'sourceRevision'], async (input, signal) => {
+    'name', 'sourceType', 'sourceUrl'], async (input, signal) => {
       identifier(input.installationId);
       integer(input.sourceRevision);
       requireValue(input.config === undefined || object(input.config));
@@ -126,18 +127,17 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
         return result;
       } catch (error) { sources.finish(uploaded); throw error; }
     });
-  method('import', ['installationId', 'name', 'sourceUrl', 'enabled'],
-    ['installationId', 'name', 'sourceUrl'], (input, signal) => {
+  method('import', ['installationId', 'name', 'sourceUrl', 'enabled'], (input, signal) => {
       identifier(input.installationId); name(input.name); sourceURL(input.sourceUrl);
       requireValue(input.enabled === undefined || typeof input.enabled === 'boolean');
       return get().import(input, { signal });
     });
-  method('edit', ['installationId', 'name', 'sourceUrl'], ['installationId', 'name'], (input, signal) => {
+  method('edit', ['installationId', 'name', 'sourceUrl'], (input, signal) => {
     identifier(input.installationId); name(input.name);
     if (input.sourceUrl !== undefined) sourceURL(input.sourceUrl);
     return get().edit(input, { signal });
   });
-  method('update', ['installationId', 'sourceRevision'], ['installationId'], async (input, signal) => {
+  method('update', ['installationId', 'sourceRevision'], async (input, signal) => {
     identifier(input.installationId);
     if (input.sourceRevision !== undefined) integer(input.sourceRevision);
     const previous = (await get().status()).instances.find(item => item.installationId === input.installationId);
@@ -154,24 +154,23 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
       return result;
     } catch (error) { sources.finish(uploaded); throw error; }
   });
-  method('restart', ['installationId'], ['installationId'], (input, signal) => {
+  method('restart', ['installationId'], (input, signal) => {
     identifier(input.installationId);
     return get().restart(input.installationId, { signal });
   });
   // CatRuntime owns the installation transaction and its pre-queue stop.
   // An extra module tail would hide that stop behind the blocked initializer.
-  method('enable', ['installationId', 'enabled'], ['installationId', 'enabled'], (input, signal) => {
+  method('enable', ['installationId', 'enabled'], (input, signal) => {
     identifier(input.installationId);
     requireValue(typeof input.enabled === 'boolean');
     return get().setEnabled(input.installationId, input.enabled, { signal });
   });
-  method('uninstall', ['installationId'], ['installationId'], async (input, signal) => {
+  method('uninstall', ['installationId'], async (input, signal) => {
     identifier(input.installationId);
     try { return await get().uninstall(input.installationId, { signal }); }
     finally { sources.remove(input.installationId); }
   });
-  method('invoke', ['installationId', 'generation', 'siteId', 'operation', 'payload'],
-    ['installationId', 'siteId', 'operation'], (input, signal, context) => {
+  method('invoke', ['installationId', 'generation', 'siteId', 'operation', 'payload'], (input, signal, context) => {
       identifier(input.installationId); identifier(input.operation);
       requireValue(typeof input.siteId === 'string' && input.siteId.length > 0 &&
         input.siteId.length <= 1024 && !/[\u0000-\u001f\u007f]/.test(input.siteId));
@@ -179,13 +178,12 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
       requireValue(input.payload === undefined || object(input.payload));
       return get().invoke({ ...input, payload: input.payload ?? {} }, { signal, ...(context.mediaPurpose === undefined ? {} : { mediaPurpose: context.mediaPurpose }) });
     });
-  method('management.describe', ['installationId', 'generation'], ['installationId'], (input, signal) => {
+  method('management.describe', ['installationId', 'generation'], (input, signal) => {
     identifier(input.installationId);
     if (input.generation !== undefined) integer(input.generation);
     return get().management(input.installationId, input.generation, { signal });
   });
-  method('management.sync', ['installationId', 'generation', 'provider', 'credentials'],
-    ['installationId', 'provider', 'credentials'], (input, signal) => {
+  method('management.sync', ['installationId', 'generation', 'provider', 'credentials'], (input, signal) => {
       identifier(input.installationId); identifier(input.provider);
       if (input.generation !== undefined) integer(input.generation);
       requireValue(object(input.credentials));

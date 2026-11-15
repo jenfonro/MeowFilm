@@ -48,14 +48,17 @@ function scopeOf(source) {
     }) };
 }
 function searchPage(raw, page) {
-  const items = Array.isArray(raw.list) ? raw.list : Array.isArray(raw.items) ? raw.items : null;
-  requireValue(items && items.every(object), 'UPSTREAM_FORMAT');
+  const rows = Array.isArray(raw.list) ? raw.list : Array.isArray(raw.items) ? raw.items : null;
+  requireValue(rows, 'UPSTREAM_FORMAT');
+  const items = rows.filter(object);
+  requireValue(!rows.length || items.length, 'UPSTREAM_FORMAT');
   const pageCount = [raw.pagecount, raw.pageCount]
     .filter(value => typeof value === 'number' || typeof value === 'string')
     .map(Number).find(value => Number.isSafeInteger(value) && value > 0);
   const explicitPageCount = pageCount !== undefined;
   return { items, page, hasMore: explicitPageCount ? page < pageCount : items.length > 0,
-    explicitPageCount, ...(explicitPageCount ? { pageCount } : {}), raw };
+    explicitPageCount, ...(explicitPageCount ? { pageCount } : {}),
+    raw: items.length === rows.length ? raw : { ...raw, [Array.isArray(raw.list) ? 'list' : 'items']: items } };
 }
 function detailValue(raw, source, detailId) {
   try {
@@ -67,15 +70,22 @@ function detailValue(raw, source, detailId) {
 }
 function metadataValue(provider, path, value, completeness) {
   requireValue(object(value) || Array.isArray(value), 'UPSTREAM_FORMAT');
-  requireValue(value.success !== false, 'UPSTREAM_HTTP');
   if (provider === 'douban' && path === 'search') {
-    requireValue(Array.isArray(value.subjects?.items) && value.subjects.items.every(row =>
-      object(row) && object(row.target) && isIdentifier(row.target_id ?? row.target.id)), 'UPSTREAM_FORMAT');
+    requireValue(Array.isArray(value.subjects?.items), 'UPSTREAM_FORMAT');
+    const items = value.subjects.items.filter(row =>
+      object(row) && object(row.target) && isIdentifier(row.target_id ?? row.target.id));
+    requireValue(!value.subjects.items.length || items.length, 'UPSTREAM_FORMAT');
+    return { ...value, subjects: { ...value.subjects, items } };
   } else if (provider === 'tmdb' && path === '/3/search/multi') {
     requireValue(Array.isArray(value.results), 'UPSTREAM_FORMAT');
+    const results = value.results.filter(object);
+    requireValue(!value.results.length || results.length, 'UPSTREAM_FORMAT');
+    return { ...value, results };
   } else if (provider === 'tmdb' && /^\/3\/(?:search|discover|trending)\//.test(path)) {
-    requireValue(Array.isArray(value.results) && value.results.every(row => object(row) && isIdentifier(row.id)),
-      'UPSTREAM_FORMAT');
+    requireValue(Array.isArray(value.results), 'UPSTREAM_FORMAT');
+    const results = value.results.filter(row => object(row) && isIdentifier(row.id));
+    requireValue(!value.results.length || results.length, 'UPSTREAM_FORMAT');
+    return { ...value, results };
   } else {
     const season = provider === 'tmdb' && /^\/3\/tv\/\d+\/season\/(\d+)$/.exec(path);
     const detail = /^(?:\/3|\/rexxar\/api\/v2)\/(movie|tv)\/(\d+)$/.exec(path);
@@ -367,15 +377,19 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
     requireValue(provider === 'tmdb' ? path.startsWith('/3/') :
       path === 'search' || path.startsWith('/rexxar/api/v2/'));
     requireValue(!/[?#\\\u0000-\u0020]/.test(path));
-    if (provider === 'douban' && path === 'search') requireValue(Object.keys(query).length === 1 && text(query.query));
+    if (provider === 'douban' && path === 'search') {
+      requireValue(text(query.query));
+      query = { query: query.query };
+    }
     else requireValue(Object.values(query).every(value => {
       const scalar = item => typeof item === 'string' || typeof item === 'boolean' ||
         typeof item === 'number' && Number.isFinite(item);
       return provider === 'douban' && Array.isArray(value) ? value.every(scalar) : scalar(value);
     }));
-    if (imageSize !== undefined) requireValue(provider === 'tmdb' &&
+    if (provider === 'tmdb' && imageSize !== undefined) requireValue(
       typeof imageSize === 'string' && /^(?:original|[wh][1-9]\d*)$/.test(imageSize));
-    if (query.append_to_response !== undefined) requireValue(typeof query.append_to_response === 'string');
+    if (provider === 'tmdb' && query.append_to_response !== undefined)
+      requireValue(typeof query.append_to_response === 'string');
     return { kind: 'metadata', provider, path, query: clone(query),
       ...(provider === 'tmdb' ? { imageSize: imageSize ?? 'original' } : {}) };
   }

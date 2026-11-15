@@ -28,6 +28,11 @@ function credentialValue(provider, value) {
   }
   return clone(value);
 }
+function credentialInput(provider, value) {
+  requireValue(object(value));
+  return credentialValue(provider, Object.fromEntries(Object.keys(provider.credentialFields)
+    .filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]])));
+}
 function select(id) {
   requireValue(typeof id === 'string' && providers.has(id));
   return providers.get(id);
@@ -313,20 +318,18 @@ export function createPanService({ dataRoot, transport, now = Date.now } = {}) {
   async function dispatch(operation, params, signal) {
     requireValue(!closed, 'CLOSED');
     requireValue(!signal?.aborted, 'CANCELLED');
+    requireValue(object(params));
     pruneLogins();
-    if (operation === 'providers') { fields(params, []); return { providers: [...providers.values()].map(capabilities) }; }
+    if (operation === 'providers') return { providers: [...providers.values()].map(capabilities) };
     if (operation === 'settings.get') {
-      fields(params, []);
       return { accounts: [...providers.keys()].map(accountStatus) };
     }
     if (operation === 'settings.set' || operation === 'settings.clear') {
-      fields(params, operation === 'settings.set' ? ['provider', 'credentials'] : ['provider']);
       const provider = select(params.provider);
-      const credentials = operation === 'settings.set' ? credentialValue(provider, params.credentials) : {};
+      const credentials = operation === 'settings.set' ? credentialInput(provider, params.credentials) : {};
       return replace(provider.id, credentials);
     }
     if (operation === 'login.poll' || operation === 'login.cancel') {
-      fields(params, ['sessionId']);
       requireValue(typeof params.sessionId === 'string');
       const login = logins.get(params.sessionId);
       requireValue(login, 'LOGIN_EXPIRED');
@@ -337,9 +340,6 @@ export function createPanService({ dataRoot, transport, now = Date.now } = {}) {
       return pollLogin(login, params.sessionId, signal);
     }
     requireValue(['list', 'prepare', 'play', 'refresh', 'login.start'].includes(operation), 'UNSUPPORTED_OPERATION');
-    const expected = ({ list: ['provider', 'share'], prepare: ['provider', 'file'],
-      play: ['provider', 'file', 'mode'], refresh: ['provider'], 'login.start': ['provider'] })[operation];
-    fields(params, expected);
     const provider = select(params.provider), account = accounts.get(provider.id);
     const owner = scope(provider.id, account, signal);
     let sourceOwner;
@@ -348,10 +348,10 @@ export function createPanService({ dataRoot, transport, now = Date.now } = {}) {
       let result;
       if (operation === 'list') {
         requireValue(typeof provider.list === 'function', 'UNSUPPORTED_OPERATION');
-        fields(params.share, ['url', 'password'], ['url']);
-        requireValue(typeof params.share.url === 'string' && params.share.url.length > 0 &&
+        requireValue(object(params.share) && typeof params.share.url === 'string' && params.share.url.length > 0 &&
           (params.share.password === undefined || typeof params.share.password === 'string'));
-        result = await provider.list({ share: clone(params.share) }, ctx);
+        result = await provider.list({ share: { url: params.share.url,
+          ...(params.share.password === undefined ? {} : { password: params.share.password }) } }, ctx);
         requireValue(object(result?.share) && Array.isArray(result.files), 'UPSTREAM_FORMAT');
         result = { ...result, files: result.files.map(item => {
           requireValue(object(item) && typeof item.name === 'string' && typeof item.path === 'string' &&

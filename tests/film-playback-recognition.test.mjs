@@ -282,8 +282,8 @@ test('E02 shared aggregate rules are deterministic and never mutate input or use
   for (let repeat = 0; repeat < 3; repeat++) assert.equal((await matchesResult(raw, { target: selected, rules })), true);
   assert.deepEqual({ raw, selected, rules }, before);
   assert.equal((await matchesResult({ title: '真实剧集衍生' }, { target: selected, rules })), false);
-  (await assert.rejects(async () => (await matchesResult(raw, { target: selected, rules: { aggregateRegexRules: [null] } })),
-    { code: 'INVALID_RULES' }));
+  await assert.rejects(matchesResult(raw, { target: selected, rules: { aggregateRegexRules: ['['] } }),
+    { code: 'INVALID_RULES' });
   assert.equal((await matchesResult(null, { target: selected })), false);
 });
 
@@ -448,7 +448,8 @@ test('E11 custom rules reuse existing cleaning and replacement semantics with de
   assert.deepEqual(rules, before);
   assert.equal((await createRecognitionRules(rules).movie('FEATURE')), true);
   assert.equal((await createRecognitionRules({ ...rules, movieRules: [] }).movie('FEATURE')), false);
-  assert.throws(() => createRecognitionRules({ movieRules: ['secret-pattern'] }), { code: 'INVALID_RULES' });
+  const unused = createRecognitionRules({ ...rules, movieRules: ['secret-pattern'] });
+  assert.deepEqual(await unused.search('FEATURE'), { text: 'FEATURE', key: 'feature' });
 });
 
 test('E11 default Chinese/fullwidth markers and explicit specials are recognized through shared rules', async () => {

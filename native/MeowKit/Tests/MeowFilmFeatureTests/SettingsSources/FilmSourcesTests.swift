@@ -203,6 +203,24 @@ final class FilmSourcesTests: XCTestCase {
         await owner.close()
     }
 
+    func testNewUpdateDisplayStateDoesNotFailTheRuntimeSourceBatch() async throws {
+        let runtime = SourcesRuntimeFixture()
+        let (owner, base, _) = try makeOwner(runtime)
+        defer { try? FileManager.default.removeItem(at: base) }
+        guard case .object(var cat) = SourcesRuntimeFixture.cat("a") else { return XCTFail("Fixture") }
+        cat["updateState"] = .string("scheduled")
+        cat["extra"] = .object(["state": .array([.number(1)])])
+        await runtime.setCat(.object(cat))
+        try await owner.refresh()
+        let snapshot = await owner.snapshot
+        XCTAssertNil(snapshot.runtimeError)
+        XCTAssertEqual(snapshot.cats.count, 2)
+        XCTAssertEqual(snapshot.cats.first { $0.installationId == "a" }?.updateState, "scheduled")
+        XCTAssertTrue(snapshot.cats.allSatisfy(\.canDetect))
+        XCTAssertEqual(snapshot.videos.map(\.key.installationId), ["a", "b"])
+        await owner.close()
+    }
+
     func testFailedUpdateKeepsOldVersionAndReportedModificationTime() async throws {
         let runtime = SourcesRuntimeFixture()
         let (owner, base, _) = try makeOwner(runtime)

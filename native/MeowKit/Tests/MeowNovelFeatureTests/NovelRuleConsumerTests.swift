@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 import MeowRuntime
+import MeowStorage
 @testable import MeowNovelFeature
 
 @MainActor
@@ -10,7 +11,8 @@ final class NovelRuleConsumerTests: XCTestCase {
         let processor = NovelRuleProcessor(runtime: runtime)
         let source = NovelRuleProcessorTests.source()
         let book = NovelBook(installationId: source.id, bookUrl: "book", name: "猫")
-        let original = NovelContent(title: "原文", blocks: [.init(text: "原文")], imageStyle: "full")
+        let image = NovelBlock(src: "https://fixture.invalid/image", alt: "插图")
+        let original = NovelContent(title: "原文", blocks: [.init(text: "原文"), image], imageStyle: "full")
         var first = NovelRule(); first.pattern = "原文"; first.order = 3; first.timeoutMillisecond = 25_000
         var second = NovelRule(); second.pattern = "广告"; second.order = 1; second.isEnabled = false
         let rules = [first, second]
@@ -22,11 +24,37 @@ final class NovelRuleConsumerTests: XCTestCase {
         XCTAssertEqual(requests.first?["request"]["rules"], try .encoding(rules), "Filtering, ordering and budgets belong to Node")
         XCTAssertEqual(requests.first?["request"]["conversion"], .string("traditional"))
         XCTAssertEqual(requests.first?["request"]["blocks"], try .encoding(original.blocks))
-        await runtime.release(.object(["title": .string("完成"), "blocks": .array([.object(["type": .string("text"), "text": .string("完整正文")])])]))
+        await runtime.release(.object(["title": .string("完成"), "blocks": .array([
+            .object(["type": .string("text"), "text": .string("完整正文"), "src": .object(["extra": .bool(true)]), "alt": .array([])]),
+            .object(["type": .string("image"), "src": .string("https://fixture.invalid/image"), "alt": .string("插图"), "text": .object(["extra": .bool(true)])])
+        ])]))
         let value = try await work.value
-        XCTAssertEqual(value.title, "完成"); XCTAssertEqual(value.blocks, [.init(text: "完整正文")])
+        XCTAssertEqual(value.title, "完成"); XCTAssertEqual(value.blocks, [.init(text: "完整正文"), image])
         XCTAssertEqual(value.imageStyle, "full"); XCTAssertEqual(original.title, "原文")
         await processor.close()
+    }
+
+    func testLocalRuleEditsDoNotNeedTheClosedRuleProcessor() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try DocumentStore(baseURL: root, namespace: NovelLibrary.namespace)
+        let runtime = NovelRuleRPCGate(), processor = NovelRuleProcessor(runtime: runtime)
+        let feature = NovelFeature(library: NovelLibrary(store: store), rules: processor, runtime: runtime)
+        try await feature.reloadLocal(); await processor.close()
+        var inactive = NovelRule(); inactive.pattern = "["; inactive.isRegex = true; inactive.isEnabled = false
+        var active = NovelRule(); active.pattern = "广告"
+        try await feature.saveRules([inactive, active])
+        inactive.name = "重命名"; inactive.group = "分组"; inactive.order = 1
+        active.order = 0; active.isEnabled = false
+        try await feature.saveRules([active, inactive])
+        XCTAssertEqual(feature.local.rules, [active, inactive])
+        XCTAssertNil(feature.error)
+        let requests = await runtime.requests; XCTAssertTrue(requests.isEmpty)
+        await feature.close()
+        let reopened = NovelLibrary(store: store), snapshot = try await reopened.snapshot()
+        XCTAssertEqual(snapshot.rules, [active, inactive])
+        await reopened.close()
     }
 
     func testCancelledRPCDiscardsALateMatchWithoutClosingTheRuntime() async throws {

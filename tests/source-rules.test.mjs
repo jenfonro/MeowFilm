@@ -97,7 +97,7 @@ test('the public client gives only rules.process no batch deadline while other s
     } finally { release.resolve(); }
   });
 
-test('the single rules RPC preserves identity, merge, chapter matching, validation and full URL matching',
+test('the single rules RPC preserves identity, merge, chapter matching and full URL matching',
   { timeout }, async t => {
     const { rpc } = setup(t);
     const call = async request => value(await rpc('rules.process', { request }));
@@ -111,9 +111,6 @@ test('the single rules RPC preserves identity, merge, chapter matching, validati
     assert.deepEqual(await call({ operation: 'matchChapter',
       chapters: [{ name: '第１２章：夜 雨', chapterUrl: '/chapter' }],
       anchor: { chapterTitle: '第十二章 夜雨', chapterIndex: 9 } }), { index: 0, requiresSelection: false });
-    assert.deepEqual(await call({ operation: 'validateRule', rule: rule({ pattern: '[', isRegex: true }) }),
-      { valid: false, errors: ['pattern'] });
-    assert.deepEqual(await call({ operation: 'validateRule', rule: null }), { valid: false, errors: ['rule'] });
     for (const [pattern, url, expected] of [
       ['https://books\\.test/.+', 'https://books.test/书', true],
       ['books', 'https://books.test/', false], ['a|ab', 'ab', false],
@@ -125,13 +122,37 @@ test('rules input admits only fixed operations and never executes request source
   { timeout }, async t => {
     const { rpc } = setup(t);
     for (const params of [{}, { request: null }, { request: { operation: 'eval', source: 'for (;;) {}' } },
-      { request: { ...identity, source: 'for (;;) {}' } }, { request: identity, source: 'for (;;) {}' },
       { request: { operation: 'identity' } }, { request: { operation: ['identity'], book: {} } },
       { request: { ...raw, rules: [null] } }, { request: { ...raw, conversion: 'dictionary' } },
       { request: { operation: 'matchUrl', pattern: '[', url: 'private body' } }]) {
       denied(await rpc('rules.process', params), 'INVALID_REQUEST');
     }
     assert.equal(value(await rpc('rules.process', { request: identity })).author, '林舟');
+  });
+
+test('ordinary extra fields and unused transform members neither execute nor block fixed computation',
+  { timeout }, async t => {
+    const { rpc } = setup(t);
+    for (const extra of ['for (;;) {}', { nested: ['for (;;) {}'] }]) {
+      assert.deepEqual(value(await rpc('rules.process', {
+        request: { ...identity, source: extra, extra }, source: extra, revision: false,
+      })), { name: '雨夜来信', author: '林舟', key: '["book","雨夜来信","林舟"]' });
+      const image = { type: 'image', src: extra, text: extra, extra };
+      assert.deepEqual(value(await rpc('rules.process', { request: {
+        ...raw, book: false, source: [extra], blocks: [...raw.blocks, image],
+        rules: [rule({ name: extra, group: extra, extra })], extra,
+      } })), { title: '书', blocks: [{ type: 'text', text: 'B' }, image] });
+    }
+    assert.deepEqual(value(await rpc('rules.process', { request: {
+      ...raw, rules: [
+        rule({ scope: 'another book', pattern: '[', isRegex: true, timeoutMillisecond: 0 }),
+        rule({ excludeScope: 'https://one.test', pattern: '[', isRegex: true, timeoutMillisecond: 'unused' }),
+        rule({ scopeTitle: false, scopeContent: false, pattern: '[', isRegex: true, timeoutMillisecond: -1 }),
+      ], source: { sourceUrl: 'https://one.test' },
+    } })), { title: '书', blocks: [{ type: 'text', text: 'A' }] });
+    denied(await rpc('rules.process', { request: {
+      ...raw, rules: [rule({ timeoutMillisecond: 0 })],
+    } }), 'INVALID_REQUEST');
   });
 
 test('transform sorts the complete native-owned rules stably, skips disabled rules and converts once at the end',

@@ -13,7 +13,6 @@ export {
 } from './errors.js';
 export {
   detectSourceProtocol,
-  importYiciyuanSource,
   normalizeSourceDefinition,
 } from './importers.js';
 export {

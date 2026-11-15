@@ -11,17 +11,8 @@ struct NovelRuleImport {
         try entries(text).map(decode)
     }
     static func decode(_ entry: RuntimeValue) throws -> NovelRule {
-        guard case .object(var fields) = entry else { throw NovelError.invalidRule(["替换规则格式不对"]) }
-        let legacy = fields["pattern"] == nil && fields["regex"] != nil
-        for (key, fallback) in [("name", "replaceSummary"), ("pattern", "regex"), ("scope", "useTo"), ("isEnabled", "enable"), ("order", "sortOrder")] {
-            if fields[key] == nil || fields[key] == .null, let value = fields[fallback] { fields[key] = value }
-        }
-        if fields["order"] == nil || fields["order"] == .null { fields["order"] = fields["serialNumber"] }
-        if legacy {
-            fields["isRegex"] = .bool(fields["isRegex"]?.bool ?? false)
-            fields["isEnabled"] = .bool(fields["enable"]?.bool ?? false)
-        }
-        var rule = try RuntimeValue.object(fields).decoding(NovelRule.self)
+        guard case .object = entry else { throw NovelError.invalidRule(["替换规则格式不对"]) }
+        var rule = try entry.decoding(NovelRule.self)
         if rule.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { rule.name = rule.pattern.trimmingCharacters(in: .whitespacesAndNewlines) }
         return rule
     }

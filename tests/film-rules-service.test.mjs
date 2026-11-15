@@ -137,6 +137,37 @@ test('draft preview and normalization use QuickJS without persisting or replacin
   assert.equal(readFileSync(f.path, 'utf8'), before);
 });
 
+test('preview and recognition consume only their actual section and ignore unused query and rule groups', async t => {
+  const f = fixture(t);
+  const rules = { ...empty(), movieRules: [{ pattern: '^Movie', replace: 'Film', flags: '' }],
+    aggregateRegexRules: { unused: 'not a search draft' }, episodeRules: null };
+  const result = await f.service.preview({ rules, request: { section: 'movie', text: 'Movie',
+    query: { unused: [65536] }, source: 'globalThis.mustNotRun = true' } });
+  assert.equal(result.rewrittenText, 'Film');
+  const grouped = await f.service.previewGroup({ group: 'movie', rules: rules.movieRules,
+    request: { section: 'movie', text: 'Movie', query: [65536] } });
+  assert.equal(grouped.rewrittenText, 'Film');
+  assert.equal(await f.service.normalize({ kind: 'clean', pattern: '/a/m', replace: { unused: true } }), '/a/m');
+  assert.equal(existsSync(f.path), false);
+  assert.equal(await createRecognitionRules({ ...empty(), episodeRules: null }).movie('Movie'), false);
+});
+
+test('queued restore and preview capture consumed drafts before callers can mutate them', async t => {
+  const f = fixture(t);
+  await f.service.snapshot();
+  const draft = { ...empty(), aggregateRegexRules: ['original'] };
+  const restore = f.service.restore({ section: 'episode', rules: draft });
+  draft.aggregateRegexRules[0] = 'changed';
+  assert.deepEqual((await restore).rules.aggregateRegexRules, ['original']);
+
+  const rules = [{ pattern: '^Movie$', replace: 'Film', flags: '' }];
+  const text = [...'Movie'].map(character => character.charCodeAt(0));
+  const preview = f.service.previewGroup({ group: 'movie', rules,
+    request: { section: 'movie', text } });
+  rules[0].replace = 'changed'; text[0] = 'X'.charCodeAt(0);
+  assert.equal((await preview).rewrittenText, 'Film');
+});
+
 test('failed durable writes keep the previous snapshot and external changes are detected', async t => {
   const f = fixture(t), previous = await f.service.snapshot(), saved = readFileSync(f.path, 'utf8');
   renameSync(f.path, `${f.path}.saved`);

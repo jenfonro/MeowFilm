@@ -61,7 +61,7 @@ final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDeleg
             if qr {
                 text = try Self.readRuleQr(data)
             } else { guard let value = String(data: data, encoding: .utf8) else { throw NovelError.invalidRule(["替换规则文件不是 UTF-8"]) }; text = value }
-            try await preview(text)
+            try preview(text)
         } }
     }
     static func readRuleQr(_ data: Data) throws -> String {
@@ -76,18 +76,18 @@ final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDeleg
             let session = URLSession(configuration: config); defer { session.finishTasksAndInvalidate() }
             let (data, response) = try await session.data(from: url)
             guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode), let text = String(data: data, encoding: .utf8) else { throw NovelError.invalidResponse }
-            preview = try await self.parse(text)
+            preview = try self.parse(text)
         }, completed: { [weak self] in self?.showPreview(preview.rules, failures: preview.failures) })
     }
-    private func preview(_ text: String) async throws {
-        let preview = try await parse(text)
+    private func preview(_ text: String) throws {
+        let preview = try parse(text)
         try Task.checkCancellation(); showPreview(preview.rules, failures: preview.failures)
     }
-    private func parse(_ text: String) async throws -> (rules: [NovelRule], failures: [String]) {
+    private func parse(_ text: String) throws -> (rules: [NovelRule], failures: [String]) {
         var rules: [NovelRule] = [], failures: [String] = []
         for (index, entry) in try NovelRuleImport.entries(text).enumerated() {
-            do { let rule = try NovelRuleImport.decode(entry); try await feature.rules.validate(rule); rules.append(rule) }
-            catch is CancellationError { throw CancellationError() }
+            try Task.checkCancellation()
+            do { rules.append(try NovelRuleImport.decode(entry)) }
             catch { try Task.checkCancellation(); failures.append("规则 \(index + 1) 无效") }
         }
         return (rules, failures)

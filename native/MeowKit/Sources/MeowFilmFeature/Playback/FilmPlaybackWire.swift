@@ -232,11 +232,13 @@ public enum FilmPreferenceDimension: String, CaseIterable, Sendable {
 }
 
 public struct FilmPlaybackPreferences: Equatable, Sendable {
-    public var ruleOrder: [FilmPreferenceDimension]
-    public var panOrder: [FilmPanProvider]
+    public var ruleOrder: [FilmPreferenceDimension] { didSet { rawRuleOrder = nil } }
+    public var panOrder: [FilmPanProvider] { didSet { rawPanOrder = nil } }
     public var keywords: [String]
     public var siteCleanKeywords: [String]
     public var iosAutoPrepare: Bool
+    private var rawRuleOrder: RuntimeValue?
+    private var rawPanOrder: RuntimeValue?
 
     public static let defaults = Self(ruleOrder: [.quality, .pan, .keyword],
         panOrder: [.yidong, .tianyi, .quark, .uc, .baidu], keywords: [],
@@ -250,27 +252,25 @@ public struct FilmPlaybackPreferences: Equatable, Sendable {
 
     init(_ value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
-        ruleOrder = try fields.filmArray("ruleOrder").map {
-            guard let text = $0.filmText, let dimension = FilmPreferenceDimension(rawValue: text) else {
-                throw FilmPlaybackError.invalidResponse
-            }
-            return dimension
+        ruleOrder = try fields.filmArray("ruleOrder").compactMap {
+            $0.filmText.flatMap(FilmPreferenceDimension.init(rawValue:))
         }
-        panOrder = try fields.filmArray("panOrder").map {
-            guard let text = $0.filmText, let provider = FilmPanProvider(rawValue: text) else {
-                throw FilmPlaybackError.invalidResponse
-            }
-            return provider
+        panOrder = try fields.filmArray("panOrder").compactMap {
+            $0.filmText.flatMap(FilmPanProvider.init(rawValue:))
         }
         keywords = try fields.filmStrings("keywords")
         siteCleanKeywords = try fields.filmStrings("siteCleanKeywords")
         iosAutoPrepare = try fields.filmBool("iosAutoPrepare")
+        rawRuleOrder = fields["ruleOrder"]
+        rawPanOrder = fields["panOrder"]
     }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool { lhs.value == rhs.value }
 
     var value: RuntimeValue {
         .object([
-            "ruleOrder": .array(ruleOrder.map { .string($0.rawValue) }),
-            "panOrder": .array(panOrder.map { .string($0.rawValue) }),
+            "ruleOrder": rawRuleOrder ?? .array(ruleOrder.map { .string($0.rawValue) }),
+            "panOrder": rawPanOrder ?? .array(panOrder.map { .string($0.rawValue) }),
             "keywords": .array(keywords.map(RuntimeValue.string)),
             "siteCleanKeywords": .array(siteCleanKeywords.map(RuntimeValue.string)),
             "iosAutoPrepare": .bool(iosAutoPrepare),
@@ -515,13 +515,12 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
         stage = try fields.filmString("stage"); error = fields["error"]?.filmText
         metadata = try fields.filmValue("metadata")
         if let cache = fields["metadataCache"], cache != .null {
-            do { metadataCache = try FilmMetadataCache(value: cache) }
-            catch { throw FilmPlaybackError.invalidResponse }
+            metadataCache = FilmMetadataCache(value: cache)
         } else {
             metadataCache = nil
         }
         if let supplement = fields["metadataSupplement"], supplement != .null {
-            metadataSupplement = try FilmPlaybackMetadataSupplement(supplement)
+            metadataSupplement = try? FilmPlaybackMetadataSupplement(supplement)
         } else {
             metadataSupplement = nil
         }

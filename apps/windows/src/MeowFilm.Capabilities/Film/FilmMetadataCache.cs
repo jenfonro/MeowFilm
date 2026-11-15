@@ -6,12 +6,11 @@ internal sealed record FilmMetadataCache(string Status, string ErrorCode, JsonEl
 {
     internal static FilmMetadataCache? Read(JsonElement value)
     {
-        if (value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) return null;
+        if (value.ValueKind != JsonValueKind.Object) return null;
         string status = FilmJson.Text(value, "status");
         var components = FilmJson.Member(value, "components");
-        if (status is not ("fresh" or "stale") || components.ValueKind != JsonValueKind.Object)
-            throw new FilmPlaybackException("INVALID_RESPONSE");
-        return new(status, FilmJson.Text(FilmJson.Member(value, "error"), "code"), components.Clone());
+        return new(status, FilmJson.Text(FilmJson.Member(value, "error"), "code"),
+            components.ValueKind == JsonValueKind.Object ? components.Clone() : default);
     }
 }
 
@@ -19,12 +18,12 @@ internal sealed record FilmMetadataSupplement(string MetadataId, string Kind, Js
 {
     internal static FilmMetadataSupplement? Read(JsonElement value)
     {
-        if (value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) return null;
+        if (value.ValueKind != JsonValueKind.Object) return null;
         string kind = FilmJson.Text(value, "kind");
         var metadata = FilmJson.Member(value, "metadata");
         if (FilmJson.Text(value, "provider") != "tmdb" || kind is not ("movie" or "tv") ||
             !FilmJson.IsIdentity(FilmJson.Member(value, "metadataId")) || metadata.ValueKind != JsonValueKind.Object)
-            throw new FilmPlaybackException("INVALID_RESPONSE");
+            return null;
         return new(FilmJson.Text(value, "metadataId"), kind, metadata.Clone());
     }
 }
