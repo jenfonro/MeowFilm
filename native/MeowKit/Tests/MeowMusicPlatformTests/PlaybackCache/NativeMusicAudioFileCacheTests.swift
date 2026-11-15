@@ -105,6 +105,27 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: marker), replacement)
     }
 
+    func testTrustedBaseDoesNotRequireReadingItsAncestors() throws {
+        let f = try AudioCacheTestFixture()
+        defer { f.cleanup() }
+        let base = f.root, root = base.appendingPathComponent("audio", isDirectory: true)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        XCTAssertEqual(chmod(f.parent.path, 0o100), 0)
+        defer { _ = chmod(f.parent.path, 0o700) }
+        let ancestor = Darwin.open(f.parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        if ancestor >= 0 { Darwin.close(ancestor) }
+        XCTAssertLessThan(ancestor, 0, "The fixture must deny directory reads above the trusted base")
+        let index = Data("synthetic-index".utf8)
+        do {
+            let directory = try NativeMusicAudioCacheDirectory(url: root, baseURL: base)
+            try directory.writeIndex(index)
+            XCTAssertEqual(try directory.readIndex(), index)
+        }
+        let reopened = try NativeMusicAudioCacheDirectory(url: root, baseURL: base)
+        XCTAssertEqual(try reopened.readIndex(), index)
+    }
+
     func testProductionCachesBaseCanonicalizationStillRejectsDescendantSymlinks() async throws {
         let f = try AudioCacheTestFixture()
         defer { f.cleanup() }
@@ -127,6 +148,18 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         await refused.close()
         let count = await transport.count
         XCTAssertEqual(count, 1, "Caller descendants still use NOFOLLOW")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.parent.path), [])
+        let nested = base.appendingPathComponent("meow-audio-cache-parent-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: nested) }
+        let link = nested.appendingPathComponent("link", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: f.parent)
+        let escaped = NativeMusicAudioFileCache(rootURL: link.appendingPathComponent("cache", isDirectory: true),
+            clock: { f.clock.now() }, transport: transport, inspector: AudioCacheTestInspector())
+        await escaped.storeAfterPlayback(f.request())
+        await escaped.close()
+        let finalCount = await transport.count
+        XCTAssertEqual(finalCount, 1, "Intermediate descendants still use NOFOLLOW")
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.parent.path), [])
     }
 
