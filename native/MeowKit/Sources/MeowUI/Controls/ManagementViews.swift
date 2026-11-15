@@ -102,10 +102,11 @@ public final class ManagementListView: UIView, UITableViewDataSource, UITableVie
         search.searchBarStyle = .minimal; search.delegate = self; search.placeholder = "搜索"
         search.searchTextField.font = .systemFont(ofSize: 14); search.searchTextField.layer.cornerRadius = 19; search.searchTextField.clipsToBounds = true
         search.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        tools.axis = .horizontal; tools.spacing = 8
+        tools.axis = .horizontal; tools.spacing = 8; tools.isHidden = true
         table.register(ManagementRowCell.self, forCellReuseIdentifier: "management.row"); table.dataSource = self; table.delegate = self; table.separatorStyle = .singleLine; table.layer.cornerRadius = 22
         table.clipsToBounds = true; table.rowHeight = UITableView.automaticDimension; table.estimatedRowHeight = 64
-        table.keyboardDismissMode = .onDrag; table.accessibilityIdentifier = "management.list"; table.contentInset.bottom = 76
+        table.keyboardDismissMode = .onDrag; table.accessibilityIdentifier = "management.list"
+        table.contentInsetAdjustmentBehavior = .never
         empty.textAlignment = .center; empty.font = .systemFont(ofSize: 14); empty.numberOfLines = 0
         emptyContainer.addSubview(empty); empty.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([empty.leadingAnchor.constraint(equalTo: emptyContainer.leadingAnchor, constant: 16), empty.trailingAnchor.constraint(equalTo: emptyContainer.trailingAnchor, constant: -16), empty.topAnchor.constraint(equalTo: emptyContainer.topAnchor, constant: 80)])
@@ -139,10 +140,13 @@ public final class ManagementListView: UIView, UITableViewDataSource, UITableVie
         count.setContentHuggingPriority(.defaultLow, for: .horizontal)
         batchActions.setContentHuggingPriority(.required, for: .horizontal)
         for child in [toolbar, table, footer] { addSubview(child); child.translatesAutoresizingMaskIntoConstraints = false }
+        let footerBottom = footer.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -12)
+        footerBottom.priority = .defaultHigh
         NSLayoutConstraint.activate([
             toolbar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16), toolbar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24), toolbar.topAnchor.constraint(equalTo: topAnchor, constant: 4), toolbarHeight,
-            table.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 10), table.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24), table.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24), table.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -8),
-            footer.leadingAnchor.constraint(equalTo: table.leadingAnchor, constant: 12), footer.trailingAnchor.constraint(equalTo: table.trailingAnchor, constant: -12), footer.bottomAnchor.constraint(equalTo: table.bottomAnchor, constant: -12), footerHeight])
+            table.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 10), table.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24), table.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24), table.bottomAnchor.constraint(equalTo: bottomAnchor),
+            footer.leadingAnchor.constraint(equalTo: table.leadingAnchor, constant: 12), footer.trailingAnchor.constraint(equalTo: table.trailingAnchor, constant: -12),
+            footerBottom, footer.bottomAnchor.constraint(lessThanOrEqualTo: keyboardLayoutGuide.topAnchor, constant: -12), footerHeight])
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (list: ManagementListView, _: UITraitCollection) in list.applyFonts() }
         applyFonts()
     }
@@ -163,7 +167,11 @@ public final class ManagementListView: UIView, UITableViewDataSource, UITableVie
         let height = vertical ? countHeight + actions.height + 10 : max(52, max(countHeight, actions.height))
         if footerHeight.constant != height {
             footerHeight.constant = height
-            table.contentInset.bottom = height + 24
+        }
+        let bottomInset = bounds.maxY - footer.frame.minY + 12
+        if table.contentInset.bottom != bottomInset {
+            table.contentInset.bottom = bottomInset
+            table.verticalScrollIndicatorInsets.bottom = bottomInset
         }
     }
     private func applyFonts() {
@@ -184,6 +192,7 @@ public final class ManagementListView: UIView, UITableViewDataSource, UITableVie
         buttons.forEach { tools.addArrangedSubview($0) }
         accessories.forEach { tools.addArrangedSubview($0) }
         let hasTools = !buttons.isEmpty || !accessories.isEmpty
+        tools.isHidden = !hasTools
         toolbarSpacer.isHidden = showsSearch || !hasTools
         toolbar.isHidden = !showsSearch && !hasTools
         toolbarHeight.constant = toolbar.isHidden ? 0 : UIFontMetrics.default.scaledValue(for: 50, compatibleWith: traitCollection)

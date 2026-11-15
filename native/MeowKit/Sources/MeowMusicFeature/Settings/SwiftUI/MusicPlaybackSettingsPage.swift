@@ -106,7 +106,7 @@ struct MusicQualitySettingsContent: View {
                 }
                 .listSectionSeparator(.hidden)
             }
-            Section(spatial ? "空间／全景音频优先级" : "音质优先级") {
+            Section {
                 ForEach(order, id: \.self) { id in
                     Toggle(isOn: Binding(
                         get: { state.enabled(id, spatial: spatial) },
@@ -124,8 +124,9 @@ struct MusicQualitySettingsContent: View {
                     values.move(fromOffsets: offsets, toOffset: destination)
                     state.reorder(values, spatial: spatial)
                 }
+            } header: {
+                MusicSettingsSectionHeader(title: spatial ? "空间／全景音频优先级" : "音质优先级", theme: theme)
             }
-            .headerProminence(.increased)
             .listSectionSeparator(.hidden)
         }
         .environment(\.editMode, .constant(.active))

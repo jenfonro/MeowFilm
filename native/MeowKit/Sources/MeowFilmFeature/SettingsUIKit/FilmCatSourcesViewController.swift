@@ -9,23 +9,17 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
     private var selected = Set<String>()
     private var query = ""
     private var updateGeneration = UUID()
-    private lazy var addButton: UIButton = {
-        let button = ManagementListView.icon("plus", label: "导入猫源")
-        button.menu = UIMenu(children: [
+    private lazy var addButton = PageHeaderButton(image: UIImage(systemName: "plus")!,
+        accessibilityLabel: "导入猫源", menu: UIMenu(children: [
             UIAction(title: "本地导入") { [weak self] _ in self?.importSource(local: true) },
             UIAction(title: "网络导入") { [weak self] _ in self?.importSource(local: false) },
-        ])
-        button.showsMenuAsPrimaryAction = true
-        return button
-    }()
-    private lazy var refreshButton = ManagementListView.icon("arrow.clockwise", label: "刷新猫源") { [weak self] in
-        guard let self else { return }; perform({ [service] in try await service.refresh() })
-    }
+        ]))
 
     override func viewDidLoad() {
         pageTitle = "猫源"
         super.viewDidLoad()
         view.accessibilityIdentifier = "film.cats"
+        pageHeader.setTrailing([addButton])
         manager.accessibilityIdentifier = "film.cats.managementList"
         manager.search.placeholder = "搜索猫源"
         manager.onSearch = { [weak self] in self?.query = $0; self?.render() }
@@ -35,7 +29,7 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
             updateFooterMenu()
         }
         manager.onDelete = { [weak self] in self?.removeSelected() }
-        manager.configureToolbar(showsSearch: true, buttons: [refreshButton, addButton])
+        manager.configureToolbar(showsSearch: true, buttons: [])
         view.addSubview(manager)
         manager.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -94,8 +88,8 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
                         emptyMessage: snapshot == nil ? "加载中" :
                             (cats.isEmpty ? "暂无猫源" : "没有匹配的猫源"))
         manager.setSelection(selected)
-        refreshButton.isEnabled = !busy
         addButton.isEnabled = !busy
+        addButton.tintColor = UIColor(theme.ink)
         updateFooterMenu()
     }
     override func applyTheme() {

@@ -65,7 +65,7 @@ struct MusicSourceExclusionsContent: View {
     var restore: (String) -> Void = { _ in }
     var body: some View {
         List {
-            Section("添加错源") {
+            Section {
                 Picker("歌曲", selection: $state.song) {
                     ForEach(state.model.queue) { entry in Text(entry.track.title + " — " + entry.track.artist).tag(entry.id) }
                 }.pickerStyle(.menu).modifier(MusicSettingsRowStyle(theme: theme, first: true, last: false))
@@ -79,16 +79,18 @@ struct MusicSourceExclusionsContent: View {
                 Button("添加", action: add).disabled(state.song.isEmpty)
                     .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                     .modifier(MusicSettingsRowStyle(theme: theme, first: false, last: true))
+            } header: {
+                MusicSettingsSectionHeader(title: "添加错源", theme: theme)
             }
             .listSectionSeparator(.hidden)
-            Section("已排除") {
+            Section {
                 if state.rows.isEmpty { Text("暂无错源").foregroundStyle(Color(uiColor: UIColor(theme.settings.muted))).modifier(MusicSettingsRowStyle(theme: theme, first: true, last: true)) }
                 ForEach(state.rows) { row in
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(row.title + " — " + row.artist)
                             Text(exclusionLabel(row))
-                                .font(.caption).foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
+                                .font(.subheadline).foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                         }
                         Spacer()
                         Button("恢复") { restore(row.id) }
@@ -96,6 +98,8 @@ struct MusicSourceExclusionsContent: View {
                     }.modifier(MusicSettingsRowStyle(theme: theme,
                         first: row.id == state.rows.first?.id, last: row.id == state.rows.last?.id))
                 }
+            } header: {
+                MusicSettingsSectionHeader(title: "已排除", theme: theme)
             }
             .listSectionSeparator(.hidden)
         }

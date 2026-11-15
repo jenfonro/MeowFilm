@@ -1,5 +1,6 @@
 import XCTest
 import UIKit
+import MeowUI
 
 @MainActor
 final class MeowfilmNavigationAcceptanceTests: XCTestCase {
@@ -596,9 +597,20 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         assertSettingsDock()
         attach("21-settings")
         XCTAssertTrue(app.cells["settings.category.film"].exists)
+        let settingsHeader = app.otherElements["page.header"].frame
+        let homeRowHeight = app.cells["settings.category.music"].frame.height
+        let homeLabelHeight = try renderedTitleHeight(in: app.cells["settings.category.music"])
+        XCTAssertEqual(homeRowHeight, 44, accuracy: 1)
         app.cells["settings.category.music"].tap()
         XCTAssertTrue(app.buttons["settings.search"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.otherElements["page.header"].frame.height, settingsHeader.height, accuracy: 1)
+        let accountEntry = settingCell(containing: "music.settings.aggregation")
+        XCTAssertGreaterThanOrEqual(accountEntry.frame.minY, settingsHeader.maxY)
+        XCTAssertLessThanOrEqual(accountEntry.frame.minY - settingsHeader.maxY,
+                                SettingsVisualMetrics.sectionSpacing)
+        XCTAssertEqual(accountEntry.frame.height, homeRowHeight, accuracy: 1)
         assertSettingsDock()
+        attach("22-music-settings-full-screen")
 
         for (identifier, title) in [
             ("settings.search", "搜索设置"),
@@ -613,6 +625,34 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
             assertInsideHeader(app.buttons["page.header.back"])
             assertSettingsDock()
             attach("23-" + identifier)
+            if identifier == "music.settings.aggregation" {
+                for action in ["music.accounts.import", "music.accounts.export"] {
+                    let row = settingCell(containing: action)
+                    XCTAssertEqual(row.frame.height, homeRowHeight, accuracy: 1,
+                                   "Account file actions use the settings home row geometry")
+                    let label = action == "music.accounts.import" ? "导入账号" : "导出账号"
+                    XCTAssertEqual(app.buttons[action].label, label)
+                    XCTAssertEqual(try renderedTitleHeight(in: row), homeLabelHeight, accuracy: 1,
+                                   "Account file actions use the settings home text size")
+                    XCTAssertEqual(row.frame.minX, SettingsVisualMetrics.cardHorizontalInset, accuracy: 1)
+                    XCTAssertEqual(row.frame.maxX, app.frame.maxX - SettingsVisualMetrics.cardHorizontalInset,
+                                   accuracy: 1)
+                }
+            } else if identifier == "settings.search" {
+                for kind in ["songs", "playlists"] {
+                    let open = app.buttons["music.search.\(kind).platforms"]
+                    XCTAssertTrue(open.isHittable)
+                    open.tap()
+                    let table = app.tables["music.search.\(kind).platformTable"]
+                    XCTAssertTrue(table.waitForExistence(timeout: 5))
+                    XCTAssertEqual(table.cells.count, 5)
+                    XCTAssertTrue(table.switches.firstMatch.isHittable)
+                    attach("23-search-\(kind)-platforms-full-screen")
+                    app.buttons["关闭"].tap()
+                    XCTAssertTrue(table.waitForNonExistence(timeout: 5))
+                    XCTAssertTrue(open.isHittable)
+                }
+            }
             app.buttons["page.header.back"].tap()
             XCTAssertTrue(destination.waitForExistence(timeout: 5))
         }
@@ -633,6 +673,103 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         app.buttons["page.header.back"].tap()
         XCTAssertTrue(app.buttons["search.open"].waitForExistence(timeout: 5))
         attach("22-settings-returned")
+    }
+
+    func testSourceManagementChangesAppearAfterNormalAppNavigation() throws {
+        openSettings()
+        app.buttons["music.settings.sources"].tap()
+        assertManagementPage(title: "音源管理", search: "搜索音源", screenshot: "sources-music-full-screen")
+        let search = app.searchFields["搜索音源"]
+        search.tap()
+        search.typeText("source-ui-check")
+        XCTAssertEqual(search.value as? String, "source-ui-check")
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        XCTAssertLessThanOrEqual(app.buttons["management.delete"].frame.maxY, keyboard.frame.minY)
+        attach("sources-music-keyboard-full-screen")
+        app.buttons["page.header.back"].tap()
+        XCTAssertTrue(app.buttons["music.settings.sources"].waitForExistence(timeout: 5))
+        app.buttons["page.header.back"].tap()
+
+        app.cells["settings.category.film"].tap()
+        XCTAssertTrue(app.cells["film.settings.cats"].waitForExistence(timeout: 5))
+        for (identifier, title, query) in [
+            ("film.settings.cats", "猫源", "搜索猫源"),
+            ("film.settings.videos", "视频源", "搜索视频源"),
+        ] {
+            app.cells[identifier].tap()
+            assertManagementPage(title: title, search: query, screenshot: identifier + "-full-screen")
+            if identifier == "film.settings.cats" {
+                let add = app.buttons["导入猫源"]
+                assertInsideHeader(add)
+                XCTAssertFalse(app.buttons["刷新猫源"].exists)
+                add.tap()
+                XCTAssertTrue(app.buttons["本地导入"].waitForExistence(timeout: 5))
+                XCTAssertTrue(app.buttons["网络导入"].exists)
+                attach("sources-cat-header-menu-full-screen")
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.65)).tap()
+            } else {
+                XCTAssertFalse(app.buttons["film.videos.sort"].exists)
+                XCTAssertFalse(app.buttons["排序视频源"].exists)
+            }
+            app.buttons["page.header.back"].tap()
+            XCTAssertTrue(app.cells[identifier].waitForExistence(timeout: 5))
+        }
+        app.buttons["page.header.back"].tap()
+        app.cells["settings.category.novel"].tap()
+        XCTAssertTrue(app.cells["novel.settings.0"].waitForExistence(timeout: 5))
+        app.cells["novel.settings.0"].tap()
+        assertManagementPage(title: "书源管理", search: "搜索书源", screenshot: "sources-novel-full-screen")
+    }
+
+    private func settingCell(containing identifier: String) -> XCUIElement {
+        let matches = app.cells.containing(.button, identifier: identifier)
+        XCTAssertTrue(matches.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(matches.count, 1)
+        return matches.firstMatch
+    }
+
+    private func renderedTitleHeight(in row: XCUIElement) throws -> CGFloat {
+        let image = try XCTUnwrap(row.screenshot().image.cgImage)
+        let scale = CGFloat(image.width) / row.frame.width
+        // Measure the rendered title, not an AX line box: SwiftUI exposes a
+        // single button for these labels. Exclude the outline and trailing controls.
+        let title = try XCTUnwrap(image.cropping(to: CGRect(
+            x: SettingsVisualMetrics.rowHorizontalPadding * scale, y: 2 * scale,
+            width: (row.frame.width / 2 - SettingsVisualMetrics.rowHorizontalPadding) * scale,
+            height: CGFloat(image.height) - 4 * scale)))
+        var pixels = [UInt8](repeating: 0, count: title.width * title.height * 4)
+        try pixels.withUnsafeMutableBytes { buffer in
+            let context = try XCTUnwrap(CGContext(
+                data: buffer.baseAddress, width: title.width, height: title.height,
+                bitsPerComponent: 8, bytesPerRow: title.width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(title, in: CGRect(x: 0, y: 0,
+                width: CGFloat(title.width), height: CGFloat(title.height)))
+        }
+        let inkRows = (0..<title.height).filter { y in
+            (0..<title.width).contains { x in
+                let offset = (y * title.width + x) * 4
+                return min(pixels[offset], min(pixels[offset + 1], pixels[offset + 2])) < 128
+            }
+        }
+        let first = try XCTUnwrap(inkRows.first), last = try XCTUnwrap(inkRows.last)
+        return CGFloat(last - first + 1) / scale
+    }
+
+    private func assertManagementPage(title: String, search: String, screenshot: String) {
+        XCTAssertTrue(app.staticTexts[title].waitForExistence(timeout: 5))
+        let field = app.searchFields[search]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertTrue(field.isHittable)
+        let table = app.tables["management.list"]
+        XCTAssertTrue(table.waitForExistence(timeout: 5))
+        XCTAssertEqual(table.frame.maxY, app.frame.maxY, accuracy: 1,
+                       "The actual source list surface reaches the full page bottom")
+        XCTAssertGreaterThanOrEqual(field.frame.minY, app.otherElements["page.header"].frame.maxY)
+        assertSettingsDock()
+        attach(screenshot)
     }
 
     func testInteractiveReturnCancellationAndCompletionKeepThePageUsable() {

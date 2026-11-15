@@ -72,14 +72,14 @@ public struct MusicSettingsContent: View {
                     .modifier(MusicSettingsRowStyle(theme: theme, first: false, last: true))
                 }
             }
-            .headerProminence(.increased)
             .listSectionSeparator(.hidden)
-            Section("歌词") {
+            Section {
                 Toggle("锁屏歌词", isOn: Binding(get: { lockLyric }, set: setLockLyric))
                     .accessibilityIdentifier("music.settings.lockLyric")
                     .modifier(MusicSettingsRowStyle(theme: theme, first: true, last: true))
+            } header: {
+                MusicSettingsSectionHeader(title: "歌词", theme: theme)
             }
-            .headerProminence(.increased)
             .listSectionSeparator(.hidden)
         }
         .modifier(MusicSettingsListStyle(theme: theme))
@@ -166,7 +166,9 @@ struct MusicSettingsLinkRow<Label: View>: View {
                 .frame(width: 16)
                 .accessibilityHidden(true)
         }
-        .contentShape(Rectangle())
+        .font(.body.weight(.regular))
+        .frame(minHeight: SettingsVisualMetrics.rowHeight - SettingsVisualMetrics.rowVerticalPadding * 2)
+        .contentShape(Rectangle().inset(by: -SettingsVisualMetrics.rowVerticalPadding))
         .accessibilityElement(children: .combine)
     }
 }
@@ -182,13 +184,26 @@ struct MusicSettingsDivider: View {
     }
 }
 
+struct MusicSettingsSectionHeader: View {
+    let title: String
+    let theme: PageTheme
+
+    var body: some View {
+        Text(title)
+            .font(.subheadline.weight(.regular))
+            .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
+            .textCase(nil)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
 struct MusicSettingsRowStyle: ViewModifier {
     let theme: PageTheme
     let first, last: Bool
 
     func body(content: Content) -> some View {
         content
-            .font(.body)
+            .font(.body.weight(.regular))
             .foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
             .padding(.horizontal, SettingsVisualMetrics.rowHorizontalPadding)
             .padding(.vertical, SettingsVisualMetrics.rowVerticalPadding)
@@ -210,8 +225,13 @@ struct MusicSettingsListStyle: ViewModifier {
             .scrollContentBackground(.hidden)
             .contentMargins(.horizontal, SettingsVisualMetrics.cardHorizontalInset,
                             for: .scrollContent)
+            .contentMargins(.top, 0, for: .scrollContent)
             .listSectionSpacing(SettingsVisualMetrics.sectionSpacing)
             .environment(\.defaultMinListRowHeight, SettingsVisualMetrics.rowHeight)
+            .environment(\.defaultMinListHeaderHeight, 0)
+            .font(.body.weight(.regular))
+            .fontWeight(.regular)
+            .textCase(nil)
             .foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
             .tint(Color(uiColor: UIColor(theme.settings.accent)))
             .background(Color.clear)

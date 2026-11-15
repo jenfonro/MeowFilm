@@ -86,7 +86,7 @@ final class MeowUIPlatformTests: XCTestCase {
             manager.centerXAnchor.constraint(equalTo: host.view.centerXAnchor),
             manager.topAnchor.constraint(equalTo: host.view.safeAreaLayoutGuide.topAnchor),
             manager.widthAnchor.constraint(equalToConstant: 320),
-            manager.heightAnchor.constraint(equalToConstant: 620),
+            manager.bottomAnchor.constraint(equalTo: host.view.bottomAnchor),
         ])
         let window = try display(host)
         var edits = 0, changes: [Bool] = [], deletions = 0
@@ -195,6 +195,34 @@ final class MeowUIPlatformTests: XCTestCase {
             total: 1, validIDs: ["a"], emptyMessage: "无来源")
         selectAll.sendActions(for: .touchUpInside)
         XCTAssertEqual(manager.selected, ["a"], "Status rows must never join batch selection")
+
+        host.traitOverrides.preferredContentSizeCategory = .large
+        manager.configureToolbar(showsSearch: true, buttons: [])
+        let scrollRows = (0..<20).map { index in
+            ManagementListView.Row(id: "source.\(index)", title: "书源 \(index + 1)", enabled: true,
+                toggle: { _ in }, menu: UIMenu(children: []))
+        }
+        manager.setRows(scrollRows, total: scrollRows.count,
+            validIDs: Set(scrollRows.map(\.id)), emptyMessage: "无来源")
+        let footer = try XCTUnwrap(selectAll.superview)
+        for bottomInset: CGFloat in [0, 96] {
+            host.additionalSafeAreaInsets.bottom = bottomInset
+            host.view.setNeedsLayout(); host.view.layoutIfNeeded()
+            manager.layoutIfNeeded(); table.layoutIfNeeded()
+            XCTAssertEqual(table.frame.maxY, manager.bounds.maxY, accuracy: 0.5)
+            XCTAssertLessThanOrEqual(footer.frame.maxY, manager.safeAreaLayoutGuide.layoutFrame.maxY)
+            let input = manager.search.searchTextField
+            XCTAssertFalse(manager.search.isHidden)
+            XCTAssertGreaterThan(input.bounds.width, manager.bounds.width / 2)
+            let inputFrame = input.convert(input.bounds, to: manager)
+            XCTAssertGreaterThanOrEqual(inputFrame.minX, 0)
+            XCTAssertLessThanOrEqual(inputFrame.maxX, manager.bounds.width)
+            let last = IndexPath(row: scrollRows.count - 1, section: 0)
+            table.scrollToRow(at: last, at: .bottom, animated: false)
+            table.layoutIfNeeded()
+            let cell = try XCTUnwrap(table.cellForRow(at: last))
+            XCTAssertLessThanOrEqual(cell.convert(cell.bounds, to: manager).maxY, footer.frame.minY)
+        }
     }
 
     func testManagementFormsKeepFieldsAndChecksReadableAt320PointsAcrossDynamicTypeAndThemes() async throws {

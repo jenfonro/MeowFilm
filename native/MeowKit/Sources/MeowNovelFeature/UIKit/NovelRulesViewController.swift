@@ -21,7 +21,9 @@ final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDeleg
     override func viewDidLoad() {
         super.viewDidLoad(); view.accessibilityIdentifier = "novel.rules"; manager.search.placeholder = "搜索替换规则"
         manager.onSearch = { [weak self] in self?.query = $0; self?.render() }
-        for button in [groupButton, moreButton] { button.showsMenuAsPrimaryAction = true; manager.tools.addArrangedSubview(button) }
+        let buttons = [groupButton, moreButton]
+        for button in buttons { button.showsMenuAsPrimaryAction = true }
+        manager.configureToolbar(showsSearch: true, buttons: buttons)
         manager.onSelection = { [weak self] in self?.menus() }
         manager.onDelete = { [weak self] in guard let self else { return }; remove(feature.local.rules.filter { self.manager.selected.contains($0.id) }) }
         render()

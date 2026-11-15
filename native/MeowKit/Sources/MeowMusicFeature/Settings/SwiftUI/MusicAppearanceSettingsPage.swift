@@ -66,6 +66,7 @@ public struct MusicAppearanceSettingsContent: View {
                             Text("配色设置")
                             Spacer(minLength: 8)
                             Text(state.value.colorMode == .fixed ? state.value.colorPalette.title : state.value.colorMode.title)
+                                .font(.subheadline)
                                 .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
                         }
                     }
@@ -135,7 +136,7 @@ struct MusicColorSettingsContent: View {
             }
             .listSectionSeparator(.hidden)
             if state.value.colorMode == .fixed {
-                Section("固定配色") {
+                Section {
                     ForEach(PageColorway.allCases, id: \.rawValue) { palette in
                         option(palette.title, selected: state.value.colorPalette == .preset(palette),
                                id: "music.settings.palette." + palette.rawValue,
@@ -145,8 +146,9 @@ struct MusicColorSettingsContent: View {
                     }
                     option("自定义颜色", selected: isCustom, id: "settings.colors.custom",
                            first: false, last: true, action: customize)
+                } header: {
+                    MusicSettingsSectionHeader(title: "固定配色", theme: theme)
                 }
-                .headerProminence(.increased)
                 .listSectionSeparator(.hidden)
             }
         }

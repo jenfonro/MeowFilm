@@ -28,7 +28,9 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 
 设置窗口背景和 App 页头仍使用原 `PageTheme` 渐变；首页、播放器、原始播放目录、FM 选择器和阅读正文的配色契约不变。原始目录复用影视列表布局但显式不采用设置语义色。该投影不读写偏好，不新增主题模式或存储。
 
-`SettingsVisualMetrics`、`SettingsRowBackgroundView` 共同定义卡片轮廓、行内间距和分割线；UIKit 设置表使用 `SettingsTableView`／`SettingsTableCell`，SwiftUI 音乐设置保留 `List` 并使用薄适配绘制同一底板。设置根页及其下级页面隐藏胶囊播放器，同时撤销其底部占位；返回设置栈外恢复原播放器状态，不停止播放。
+`SettingsVisualMetrics`、`SettingsRowBackgroundView` 共同定义卡片轮廓、行内间距和分割线；UIKit 设置表使用 `SettingsTableView`／`SettingsTableCell`，SwiftUI 音乐设置保留 `List` 并使用薄适配绘制同一底板。设置根页及其下级页面隐藏胶囊播放器，同时撤销其底部占位；导航与播放器均不显示时，Dock 的背景及触摸层也不再覆盖页面。返回设置栈外恢复原播放器状态，不停止播放。
+
+全部设置子页以设置首页的文字角色为基准：主标签和操作为系统 Body Regular，次要资料和分组标题为 Subheadline Regular，继续响应 Dynamic Type。普通单行采用首页实际的 44pt 基准，多行资料和控件按内容增长，不压缩触控区。音乐设置的共享行和操作标签显式采用同一文字角色，分组标题不采用系统 increased／加粗样式；首组不重复叠加顶部内容间距，公共页头高度不变。
 
 ### 启动与首页发布
 
@@ -97,6 +99,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 - 每个页面由 `PageViewController.pageHeader` 绘制可见页头，背景与页面对齐；返回符号、`×`、文字按钮和菜单按钮均为自绘，无胶囊底、无系统按压高亮。
 - 页面标题使用 `pageTitle`，不设置 UIKit 的 `UIViewController.title`；系统导航栈保留 UIKit 自身唯一的空 `navigationItem`，不覆盖为另一套替身元数据。
 - 页头内部统一使用 Auto Layout；背景铺满页面，按钮与标题行遵守水平安全区，横屏避开刘海。页面内容从 `contentTopAnchor`（自身页头底部）开始，不重复增加顶部安全区。窗口根容器与主页面外壳不安装页头；推荐、频道、影视、我的各自持有页头，嵌套的领域页面共用所在主页面的页头；模态页使用自身安全区而非窗口状态栏高度。
+- 书源、音源、视频源和猫源管理共用 `ManagementListView`；列表表面延伸到页面底边，批量操作栏遵守实际底部安全区，滚动范围为操作栏和播放器预留空间。音源的 SwiftUI 桥接不重复裁去底部安全区域；没有附加工具时搜索框占据工具行可用宽度。
 - 窗口根容器和 `PageNavigationController` 把状态栏样式交给栈顶页面；页面未覆盖时保持系统默认，捕获状态栏的模态页自行决定。
 - 推入和返回使用应用自有的横向转场。返回时上一页静止，不变暗、不加阴影；当前页连同页头跟手划开。
 - 左边缘与内容区右滑都由自有手势驱动，复用同一距离／速度判定；可与横向分页协调，在分页到达首屏前不触发返回。系统返回手势保持禁用。

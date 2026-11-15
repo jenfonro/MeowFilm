@@ -96,7 +96,7 @@ private struct MusicMetadataPlatformsContent: View {
 
     var body: some View {
         List {
-            Section("平台优先级") {
+            Section {
                 ForEach(state.value?.platforms ?? [], id: \.rawValue) { platform in
                     Toggle(isOn: Binding(
                         get: { state.value?.enabledPlatforms.contains(platform) == true },
@@ -115,8 +115,9 @@ private struct MusicMetadataPlatformsContent: View {
                     platforms.move(fromOffsets: offsets, toOffset: destination)
                     state.reorder(platforms)
                 }
+            } header: {
+                MusicSettingsSectionHeader(title: "平台优先级", theme: theme)
             }
-            .headerProminence(.increased)
             .listSectionSeparator(.hidden)
         }
         .environment(\.editMode, .constant(.active))

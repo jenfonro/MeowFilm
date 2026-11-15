@@ -47,6 +47,7 @@ final class PanAccountsUIKitTests: XCTestCase {
                 XCTAssertGreaterThan(columns.columns[2].bounds.width, 60)
                 for button in descendants(columns.columns[2]).compactMap({ $0 as? UIButton }) {
                     XCTAssertGreaterThanOrEqual(button.bounds.height, 44)
+                    XCTAssertEqual(button.titleLabel?.font, .preferredFont(forTextStyle: .body))
                 }
             }
         }

@@ -275,6 +275,11 @@ final class FilmSettingsPlatformTests: XCTestCase {
         for style in [UIUserInterfaceStyle.light, .dark] {
             page.traitOverrides.userInterfaceStyle = style
             page.applyTheme()
+            let header = UITableViewHeaderFooterView(reuseIdentifier: nil)
+            header.textLabel?.text = "设置分组"
+            page.tableView(table, willDisplayHeaderView: header, forSection: 0)
+            XCTAssertEqual(header.textLabel?.font, .preferredFont(forTextStyle: .subheadline))
+            XCTAssertTrue(header.textLabel?.adjustsFontForContentSizeCategory == true)
             let cells = (0..<5).map {
                 page.tableView(page.table, cellForRowAt: IndexPath(row: $0, section: 0))
             }
