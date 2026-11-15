@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { buildEpisodeMap, matchEpisodeMaps, resolveEpisode } from '../packages/film-playback/src/episodes.js';
-import { matchesResult, mediaVariants, normalizeDetail, recognizeCandidates,
+import { contentResults, matchesResult, mediaVariants, normalizeDetail, recognizeCandidates,
   recognizeVariantCandidates } from '../packages/film-playback/src/recognition.js';
 import { compareCandidates, isCandidateAllowed } from '../packages/film-playback/src/policy.js';
 import { createRecognitionRules } from '../packages/film-playback/src/rules.js';
@@ -207,6 +207,40 @@ test('E02 explicit year/type/season and provider identity conflicts are not over
   assert.equal((await matchesResult({ title: '真实剧集', year: 2022 }, { target: series })), false);
   assert.equal((await matchesResult({ title: '真实剧集', season_number: 1, year: 2020 }, { target: series })), false);
   assert.equal((await matchesResult({ title: '真实剧集', season_number: 2, year: 2022 }, { target: series })), true);
+});
+
+test('content sources span seasons without weakening per-episode smart eligibility', async () => {
+  const selected = { ...target, season: 2, year: 2020 };
+  const rows = [
+    { title: '真实剧集 第一季', year: 2020 },
+    { title: '真实剧集 第二季', year: 2022 },
+    { title: '真实剧集 第三季', year: 2024 },
+    { title: '真实剧集衍生' },
+    { title: '其他剧集', groupKey: '真实剧集' },
+  ];
+  assert.deepEqual(await contentResults(rows, { target: selected }), [true, true, true, false, false]);
+  assert.equal(await matchesResult(rows[0], { target: selected }), false);
+  assert.equal(await matchesResult(rows[1], { target: selected }), true);
+  assert.equal(await matchesResult(rows[2], { target: selected }), false);
+  assert.deepEqual(await contentResults([
+    { title: '不同译名', originalTitle: 'Actual Original' },
+    { title: '不同译名', metadataProvider: 'tmdb', metadataId: 1 },
+    { title: selected.title, metadataProvider: 'tmdb', metadataId: 2 },
+  ], { target: { ...selected, originalTitle: 'Actual Original' } }), [true, true, false]);
+  assert.deepEqual(await contentResults([
+    { title: '真实电影 (1990)' },
+    { title: '真实电影', year: 2024 },
+    { title: '真实电影' },
+  ], { target: { kind: 'movie', title: '真实电影', year: 2024 } }), [false, true, true]);
+  const contentIdentity = { kind: 'tv', metadataProvider: 'tmdb', metadataId: 1 };
+  assert.equal(await matchesResult({ title: '已关联的源内标题', season_number: 2, year: 2022 },
+    { target: selected, contentIdentity }), true);
+  assert.equal(await matchesResult({ title: '已关联的源内标题', season_number: 1, year: 2020 },
+    { target: selected, contentIdentity }), false);
+  assert.equal(await matchesResult({ title: '已关联的源内标题', season_number: 2,
+    metadataProvider: 'tmdb', metadataId: 2 }, { target: selected, contentIdentity }), false);
+  assert.equal(await matchesResult({ title: '已关联的源内标题', season_number: 2 },
+    { target: selected, contentIdentity: { ...contentIdentity, metadataId: 2 } }), false);
 });
 
 test('E02 aggregate display/group keys do not replace raw identity evidence', async () => {

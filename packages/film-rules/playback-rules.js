@@ -146,34 +146,54 @@
     return titleKey(recognition.search(title, query).text);
   }
 
-  /** Smart eligibility only. Ordinary menus keep the full raw search page. */
-  function matchesResult(raw, { target, rules } = {}) {
+  function matchingRecord(raw) {
+    return isSearchProjection(raw) ? { ...raw, ...raw.raw,
+      rawTitle: raw.raw.rawTitle ?? raw.raw.vod_name ?? raw.raw.title ?? raw.raw.name ?? raw.rawTitle } : raw;
+  }
+
+  function sameContent(raw, target, recognition, contentIdentity) {
+    const kind = resultKind(raw);
+    if (target.kind !== 'group' && kind !== undefined && kind !== target.kind) return false;
+    const provider = raw.metadataProvider ?? (raw.tmdbId > 0 ? 'tmdb' : undefined);
+    const metadataId = raw.metadataId ?? (raw.tmdbId > 0 ? raw.tmdbId
+      : raw.metadataProvider !== undefined ? raw.id : undefined);
+    if (provider === target.metadataProvider && metadataId !== undefined && target.metadataId !== undefined)
+      return String(metadataId) === String(target.metadataId);
+    if (target.metadataProvider !== undefined && contentIdentity?.kind === target.kind &&
+        contentIdentity.metadataProvider === target.metadataProvider &&
+        String(contentIdentity.metadataId) === String(target.metadataId)) return true;
+    const targets = resultTitles(target), titles = resultTitles(raw);
+    return targets.some(title => {
+      const expected = canonicalTitle(title, target.kind, recognition, title);
+      return expected && titles.some(value => canonicalTitle(value, target.kind, recognition, title) === expected);
+    });
+  }
+
+  /** A content's source menu includes its seasons, not other search hits. */
+  function belongsToContent(raw, target, recognition) {
+    if (!object(raw) || !target || !['movie', 'tv', 'group'].includes(target.kind)) return false;
+    raw = matchingRecord(raw);
+    if (target.kind === 'movie') {
+      const rawYear = resultYear(raw), targetYear = resultYear(target);
+      if (rawYear !== undefined && targetYear !== undefined && rawYear !== targetYear) return false;
+    }
+    return sameContent(raw, target, recognition);
+  }
+
+  /** Smart eligibility additionally requires the requested season and year. */
+  function matchesResult(raw, { target, contentIdentity, rules } = {}) {
     if (!object(raw) || !target || !['movie', 'tv', 'source', 'group'].includes(target.kind)) return false;
     // Source scope is checked by the caller's exact installation/detail identity,
     // not by pretending an arbitrary script title has a metadata counterpart.
     if (target.kind === 'source') return true;
-    if (isSearchProjection(raw)) raw = { ...raw, ...raw.raw,
-      rawTitle: raw.raw.rawTitle ?? raw.raw.vod_name ?? raw.raw.title ?? raw.raw.name ?? raw.rawTitle };
-    const kind = resultKind(raw);
-    if (target.kind !== 'group' && kind !== undefined && kind !== target.kind) return false;
+    raw = matchingRecord(raw);
     const recognition = createRecognitionRules(rules);
     const rawSeason = resultSeason(raw, recognition), targetSeason = resultSeason(target, recognition);
     if (rawSeason !== undefined && targetSeason !== undefined && rawSeason !== targetSeason) return false;
     const rawYear = resultYear(raw), targetYear = resultYear(target);
     const laterSeason = target.kind === 'tv' && rawSeason > 1 && rawSeason === targetSeason;
     if (rawYear !== undefined && targetYear !== undefined && rawYear !== targetYear && !laterSeason) return false;
-    const provider = raw.metadataProvider ?? (raw.tmdbId > 0 ? 'tmdb' : undefined);
-    const metadataId = raw.metadataId ?? (raw.tmdbId > 0 ? raw.tmdbId
-      : raw.metadataProvider !== undefined ? raw.id : undefined);
-    if (provider === target.metadataProvider && metadataId !== undefined && target.metadataId !== undefined) {
-      return String(metadataId) === String(target.metadataId);
-    }
-    const targets = resultTitles(target);
-    const titles = resultTitles(raw);
-    return targets.some(title => {
-      const expected = canonicalTitle(title, target.kind, recognition, title);
-      return expected && titles.some(value => canonicalTitle(value, target.kind, recognition, title) === expected);
-    });
+    return sameContent(raw, target, recognition, contentIdentity);
   }
 
 
@@ -215,8 +235,11 @@
       const recognition = createRecognitionRules(request.rules);
       let value;
       switch (request.operation) {
+        case 'recognition.content':
+          value = request.rows.map(row => belongsToContent(row, request.target, recognition)); break;
         case 'recognition.matches':
-          value = request.rows.map(row => matchesResult(row, { target: request.target, rules: request.rules })); break;
+          value = request.rows.map(row => matchesResult(row, { target: request.target,
+            contentIdentity: request.contentIdentity, rules: request.rules })); break;
         case 'recognition.candidates':
           value = candidateTexts(request.detail, request.target, request.source, recognition); break;
         case 'recognition.batch':

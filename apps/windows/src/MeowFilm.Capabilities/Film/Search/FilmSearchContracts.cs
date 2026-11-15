@@ -39,10 +39,12 @@ public interface IFilmSearchMetadata
 public sealed class FilmSearchContext
 {
     internal FilmSearchContext(FilmSearchSession session, JsonElement item)
+        : this(session, FilmSearchJson.Text(item, "displayKey"), item) { }
+    internal FilmSearchContext(FilmSearchSession session, string displayKey, JsonElement item)
     {
         Session = session;
-        Item = item.Clone();
-        DisplayKey = FilmSearchJson.Text(item, "displayKey");
+        Item = item;
+        DisplayKey = displayKey;
     }
 
     public FilmSearchSession Session { get; }
@@ -52,7 +54,8 @@ public sealed class FilmSearchContext
     public string MetadataQuery => Session.MetadataQuery;
     public JsonElement? MetadataSearchPayload => Session.MetadataSearchPayload;
     public string DisplayKey { get; }
-    public JsonElement Item { get; }
+    public JsonElement Item { get; private set; }
+    internal void UpdateItem(JsonElement item) => Item = item;
     internal bool SameSelection(FilmSearchContext other) =>
         ReferenceEquals(Session, other.Session) && DisplayKey == other.DisplayKey;
     internal object Reference => new { sessionId = SessionId, selectionId = DisplayKey };

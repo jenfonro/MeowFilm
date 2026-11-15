@@ -8,7 +8,7 @@
 
 类别文字保持系统 Regular，选中态在文字下方显示独立居中的短横线，不以按钮圆角边框充当高亮。搜索卡片沿用服务器版媒体卡展示：备注／年份／更新进度为海报右上角橙色圆角角标，标题下方的电影／剧集／聚合／站点名为居中浅底描边标签；长文本单行省略，空值不显示。搜索不显示评分，首页仍保留评分角标；数据文字直接消费 Node 快照，不在客户端重新推导进度。
 
-影视搜索海报以176×264 DIP为最大基准，宽度可缩至144 DIP，按实际视口重排完整列；能在下限内多放一列时缩小，否则减少列数并保留必要余量，末行与少量结果不放大。与首页、资料列表共用原生卡片布局，标题、来源标签和角标保留既定系统字体与语义字号，不用整卡变换缩放正文。
+影视搜索海报以176×264 DIP为最大基准，宽度可缩至144 DIP，按实际视口重排完整列；能在下限内多放一列时缩小，否则减少列数并保留必要余量，末行与少量结果不放大。复用首页、资料列表的原生卡片模板与尺寸计算，搜索专属 `FilmSearchVirtualizingPanel` 通过 `IScrollInfo` 只实现视口及邻接行并回收容器；状态／更多计入同一滚动范围但不是卡片。标题、来源标签和角标保留既定系统字体与语义字号，不用整卡变换缩放正文。
 
 ## 类型与装配
 
@@ -22,7 +22,14 @@
 
 ## 搜索生命周期
 
-`FilmSearchService` 是 UI dispatcher owner，`FilmSearchSession` 仅保存最后发布的完整展示快照与借用连接。首轮、加载更多和各源失败／空结果等状态均按 Node 回执显示；不在客户端增加自动重试、截条数或重复取数兜底。切换原始／聚合模式只选择 `rawCards/cards`，保留各自滚动位置。
+`FilmSearchService` 在后台读取 JSON、映射展示字段并计算身份级集合变化，
+Dispatcher 仅提交仍有效的 revision 及必要字段／集合操作；命令与 SSE 竞态按实际提交前驱重算。
+`FilmSearchSession` 保留完整已拥有的快照与借用连接，逐卡引用原数据而不深拷贝原始成员。
+搜索专属 `FilmSearchCardItem` 按会话和不透明 `displayKey` 保持身份，
+同身份只通知变化字段；共享 `FilmCardItem` 仍是普通不可变模型，仅在准确激活时适配。
+状态快照不重映射或改绑卡片，SSE 沿现有容量一的最新快照机制消费。
+首轮、加载更多和各源失败／空结果等状态均按 Node 回执显示；不在客户端增加自动重试、截条数或重复取数兜底。
+切换原始／聚合模式只选择已准备的对应集合，保留各自滚动位置，不重新映射 JSON。
 
 同词分类切换／返回复用同一个 Node session。普通离开立即停止旧 UI 发布并发 `command stop`；停止回执仅更新 loading／cancelled 等状态，不替换 cards/rawCards。停止前已接纳的 open 若迟到，只绑定分配 ID 以便 stop/release，不发布其快照。显式返回通过 snapshot 和 `command resume` 恢复，不再次 open，也不重取成功页；尚未接纳过 open 才在显式返回时首次创建。
 
@@ -61,6 +68,8 @@ Shell 继续保存原模块位置、公共输入草稿和实际可达的历史�
 | `FilmSearchPlaybackTests` | 原样 handoff、原始单源、迟到 reference、初次与重进、实际 producer、来源交集及取消；业务替身 |
 | `SearchResultsConsumerTests` | 真实 Shell/WPF 分类、目标、返回复用、三类导航、迟到更新、封面投影、UInt16 展示与导航先后 |
 | `FilmSearchPresentationTests` | 类别短横线／可达与高对比、服务器角标／类型来源标签、既有卡片／布局、两视图顺序及独立滚动，1110／860 宽度与隐藏 HWND 离屏图 |
+| `FilmSearchIdentityTests` | 前插／删除／移动、字段级通知、状态不重映射、真实身份转换、后台映射与撤权、命令／SSE 前驱竞态及准确激活 |
+| `FilmSearchViewportTests` | 完整数据的视口回收、远距离滚动与 footer、响应式尺寸及行锚点、集合变更、两模式位置和图片租约释放 |
 | `FilmSettingsUiTests` | 规则草稿／编辑／恢复／失败／取消及受影响设置装配；规则业务替身 |
 | `SettingsNavigationTests` | 公共设置导航、App 装配及 Node 不可用时的真实规则错误 |
 | `FilmMetadataConsumerTests` | 配置保存成功／失败隔离、迟到结果、关闭写回执及实际内容 producer |

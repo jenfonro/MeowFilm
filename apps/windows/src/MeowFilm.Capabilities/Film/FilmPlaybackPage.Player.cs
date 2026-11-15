@@ -50,8 +50,7 @@ public sealed partial class FilmPlaybackPage
     public string MetadataAssociationErrorMessage => MetadataAssociationFailed ? "关联资料加载失败" : "";
     public bool PlayerStatusVisible => PlayerStatusText.Length > 0 &&
         (PlayerBusy || !HasOutput || ConnectionFailed || PlayerStage is "error" or "unavailable");
-    public string PlayerStatusText => ConnectionFailed ? StatusText :
-        HasOutput && PlayerBusy ? "正在搜索片源..." : PlayerStage switch
+    public string PlayerStatusText => ConnectionFailed ? StatusText : PlayerStage switch
         {
             "loading" => "加载中...",
             "searching" or "history" or "manual" or "cached" => "正在搜索片源...",

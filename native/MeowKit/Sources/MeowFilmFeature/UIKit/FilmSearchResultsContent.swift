@@ -3,6 +3,62 @@ import UIKit
 import Combine
 import MeowUI
 
+/// The collection's displayed fields and exact selection references, not another
+/// search snapshot or a native owner of aggregation and metadata.
+struct FilmSearchResultsPresentation {
+    struct Identifier: Hashable, Sendable {
+        let sessionID: UUID
+        let displayKey: Data
+    }
+    struct Content: Equatable {
+        let item: FilmItem
+        let textBadge: String
+        let label: String
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.item.identity == rhs.item.identity && lhs.item.title == rhs.item.title &&
+                lhs.item.posterURL == rhs.item.posterURL && lhs.textBadge == rhs.textBadge && lhs.label == rhs.label
+        }
+    }
+    struct Card {
+        let selection: FilmSearchCard
+        let content: Content
+    }
+    struct Changes {
+        let identifiersChanged: Bool
+        let reconfigure: [Identifier]
+        var isEmpty: Bool { !identifiersChanged && reconfigure.isEmpty }
+    }
+    private(set) var identifiers: [Identifier] = []
+    private(set) var cards: [Identifier: Card] = [:]
+    // Share the current input array so state-only snapshots need no display mapping.
+    private var inputSessionID: UUID?
+    private var inputCards: [FilmSearchCard] = []
+
+    mutating func update(_ visible: [FilmSearchCard], sessionID: UUID,
+                         imageURL: (String) -> URL?) -> Changes {
+        if inputSessionID == sessionID, inputCards == visible {
+            return Changes(identifiersChanged: false, reconfigure: [])
+        }
+        var nextIDs: [Identifier] = [], nextCards: [Identifier: Card] = [:], changed: [Identifier] = []
+        nextIDs.reserveCapacity(visible.count); nextCards.reserveCapacity(visible.count)
+        for card in visible {
+            let id = Identifier(sessionID: sessionID, displayKey: Data(card.displayKey.utf8))
+            let previous = cards[id]
+            let content: Content
+            if let previous, previous.selection == card { content = previous.content }
+            else { content = Content(item: card.filmItem(imageURL: imageURL), textBadge: card.textBadge, label: card.label) }
+            if let previous, previous.content != content { changed.append(id) }
+            nextIDs.append(id)
+            nextCards[id] = Card(selection: card, content: content)
+        }
+        let changes = Changes(identifiersChanged: identifiers != nextIDs, reconfigure: changed)
+        identifiers = nextIDs; cards = nextCards
+        inputSessionID = sessionID; inputCards = visible
+        return changes
+    }
+}
+
 /// Content for the existing search pager. It has no header or navigation shell.
 @MainActor
 public final class FilmSearchResultsContent: UIViewController, SearchResultContent, UICollectionViewDelegate {
@@ -19,10 +75,10 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
     private let activity = UIActivityIndicatorView(style: .medium)
     private let empty = UILabel(), metadataStatus = UILabel()
     private var raw = false
-    private var cards: [Data: FilmSearchCard] = [:]
+    private var presentation = FilmSearchResultsPresentation()
     private var shownSessionError: UUID?
     private var offsets: [Bool: CGPoint] = [:]
-    private var dataSource: UICollectionViewDiffableDataSource<Int, Data>!
+    private var dataSource: UICollectionViewDiffableDataSource<Int, FilmSearchResultsPresentation.Identifier>!
     private lazy var collection = UICollectionView(frame: .zero, collectionViewLayout: makeLayout())
 
     public init(service: FilmSearchService, images: ArtworkImages, theme: PageTheme) {
@@ -59,12 +115,15 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
         collection.accessibilityIdentifier = "film.search.grid"
         collection.register(FilmPosterCell.self, forCellWithReuseIdentifier: FilmPosterCell.reuseIdentifier)
         dataSource = UICollectionViewDiffableDataSource(collectionView: collection) { [weak self] view, path, key in
-            guard let self, let card = self.cards[key], let session = self.session else { return nil }
+            guard let self, let content = self.presentation.cards[key]?.content else { return nil }
             let cell = view.dequeueReusableCell(withReuseIdentifier: FilmPosterCell.reuseIdentifier, for: path)
-            (cell as? FilmPosterCell)?.configure(item: card.filmItem(imageURL: session.imageURL),
-                images: self.images, theme: self.theme, textBadge: card.textBadge, label: card.label)
+            (cell as? FilmPosterCell)?.configure(item: content.item,
+                images: self.images, theme: self.theme, textBadge: content.textBadge, label: content.label)
             return cell
         }
+        var initial = NSDiffableDataSourceSnapshot<Int, FilmSearchResultsPresentation.Identifier>()
+        initial.appendSections([0])
+        dataSource.apply(initial, animatingDifferences: false)
         empty.font = .systemFont(ofSize: 15)
         empty.textAlignment = .center
         collection.backgroundView = empty
@@ -111,8 +170,14 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
                 offsets.removeAll()
                 shownSessionError = nil
             }
-            observation = next.$snapshot.receive(on: RunLoop.main).sink { [weak self] _ in self?.render() }
-            errorObservation = next.$error.receive(on: RunLoop.main).sink { [weak self] _ in self?.render() }
+            observation = next.$snapshot.receive(on: RunLoop.main).sink { [weak self, weak next] _ in
+                guard let self, let next, self.session === next else { return }
+                self.render()
+            }
+            errorObservation = next.$error.receive(on: RunLoop.main).sink { [weak self, weak next] _ in
+                guard let self, let next, self.session === next else { return }
+                self.renderStatus()
+            }
             if changed, isViewLoaded { collection.setContentOffset(.zero, animated: false) }
             render()
         } catch { presentError("影视搜索不可用") }
@@ -125,6 +190,7 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
         errorObservation?.cancel(); errorObservation = nil
     }
     public func applyTheme(_ theme: PageTheme) {
+        let changed = self.theme != theme
         self.theme = theme
         guard isViewLoaded, dataSource != nil else { return }
         empty.textColor = UIColor(theme.muted)
@@ -133,6 +199,7 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
         activity.color = UIColor(theme.muted)
         rawLabel.textColor = UIColor(theme.ink)
         rawSwitch.onTintColor = UIColor(theme.accent)
+        guard changed else { return }
         var snapshot = dataSource.snapshot()
         snapshot.reconfigureItems(snapshot.itemIdentifiers)
         dataSource.apply(snapshot, animatingDifferences: false)
@@ -144,18 +211,35 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
     }
 
     private func render(restoringOffset: CGPoint? = nil) {
-        guard isViewLoaded, dataSource != nil, let state = session?.snapshot else { return }
+        guard isViewLoaded, dataSource != nil, let session else { return }
+        let state = session.snapshot
         let visible = raw ? state.rawCards : state.cards
-        cards = Dictionary(uniqueKeysWithValues: visible.map { (Data($0.displayKey.utf8), $0) })
-        var snapshot = NSDiffableDataSourceSnapshot<Int, Data>()
-        snapshot.appendSections([0]); snapshot.appendItems(visible.map { Data($0.displayKey.utf8) })
-        let previous = Set(dataSource.snapshot().itemIdentifiers)
-        snapshot.reconfigureItems(snapshot.itemIdentifiers.filter { previous.contains($0) })
-        dataSource.apply(snapshot, animatingDifferences: false) { [weak self] in
-            guard let self, let restoringOffset else { return }
-            self.collection.layoutIfNeeded()
-            self.collection.setContentOffset(restoringOffset, animated: false)
-        }
+        let changes = presentation.update(visible, sessionID: state.sessionID, imageURL: session.imageURL)
+        if !changes.isEmpty {
+            var snapshot: NSDiffableDataSourceSnapshot<Int, FilmSearchResultsPresentation.Identifier>
+            if changes.identifiersChanged {
+                snapshot = .init()
+                snapshot.appendSections([0]); snapshot.appendItems(presentation.identifiers)
+            } else { snapshot = dataSource.snapshot() }
+            snapshot.reconfigureItems(changes.reconfigure)
+            let mode = raw
+            dataSource.apply(snapshot, animatingDifferences: false) { [weak self, weak session] in
+                guard let self, let session, self.session === session, self.raw == mode else { return }
+                self.restoreOffset(restoringOffset)
+            }
+        } else { restoreOffset(restoringOffset) }
+        renderStatus()
+    }
+
+    private func restoreOffset(_ offset: CGPoint?) {
+        guard let offset else { return }
+        collection.layoutIfNeeded()
+        collection.setContentOffset(offset, animated: false)
+    }
+
+    private func renderStatus() {
+        guard isViewLoaded, let state = session?.snapshot else { return }
+        let visible = raw ? state.rawCards : state.cards
         empty.isHidden = !visible.isEmpty || state.loading || state.failed || session?.error != nil
         let cancelled = state.siteState == .cancelled || state.metadataState == .cancelled
         empty.text = cancelled ? "已取消" : state.noSources ? "尚未启用可搜索来源" : "未找到影片"
@@ -200,7 +284,8 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
     }
 
     public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        guard let id = dataSource.itemIdentifier(for: indexPath), let card = cards[id], let session else { return }
+        guard let id = dataSource.itemIdentifier(for: indexPath), let card = presentation.cards[id]?.selection,
+              let session, id.sessionID == session.snapshot.sessionID else { return }
         collectionView.deselectItem(at: indexPath, animated: false)
         onSelect?(session.context(for: card))
     }

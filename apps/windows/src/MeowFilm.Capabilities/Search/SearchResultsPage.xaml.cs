@@ -7,11 +7,15 @@ namespace MeowFilm.Capabilities;
 public partial class SearchResultsView : UserControl, IDesktopHeaderSource
 {
     private readonly SearchResultsPage page;
+    internal ScrollViewer FilmScroll { get; }
     internal SearchResultsView(SearchResultsPage page)
     {
         this.page = page;
         InitializeComponent();
         DataContext = page;
+        FilmItems.ApplyTemplate();
+        FilmScroll = (ScrollViewer)FilmItems.Template.FindName("PART_ScrollViewer", FilmItems);
+        RegisterName(nameof(FilmScroll), FilmScroll);
     }
     public DesktopHeaderContribution Header => new("") { SearchTargetId = page.SelectedTarget, SearchContextId = page.SelectedTab };
     public event EventHandler? HeaderChanged;

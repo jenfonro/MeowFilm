@@ -44,7 +44,7 @@ public final class FilmSearchSession: ObservableObject {
     func startIfNeeded() {
         guard service?.ownsWork(for: self) == true, !invalidated, !released, !snapshot.query.isEmpty else { return }
         if !started || allocatedID == nil && error != nil {
-            started = true; stopped = false; snapshot.loading = true; error = nil
+            started = true; stopped = false; snapshot.loading = true; clearError()
             let token = publicationID
             enqueue { session in await session.open(publication: token) }
         } else if stopped {
@@ -55,7 +55,7 @@ public final class FilmSearchSession: ObservableObject {
                 else { await session.command("resume", publication: token) }
             }
         } else if error != nil, allocatedID != nil {
-            error = nil
+            clearError()
             let token = publicationID
             enqueue { session in
                 do { try await session.refresh() }
@@ -148,7 +148,7 @@ public final class FilmSearchSession: ObservableObject {
         guard !released, !invalidated, !stopped, publicationID == token else { throw CancellationError() }
         try Task.checkCancellation()
         try accept(value)
-        error = nil
+        clearError()
         observe()
     }
 
@@ -244,7 +244,7 @@ public final class FilmSearchSession: ObservableObject {
             let value = try FilmSearchSnapshot(value: await transport.call("search.command", input))
             guard publicationID == token, !released, !invalidated,
                   action == "stop" || !stopped else { return }
-            try accept(value, stopping: action == "stop"); error = nil
+            try accept(value, stopping: action == "stop"); clearError()
             if action == "resume" { finishScope(.success(Void())); observe() }
         } catch {
             guard publicationID == token, !released, !invalidated else { return }
@@ -277,7 +277,7 @@ public final class FilmSearchSession: ObservableObject {
     private func receive(_ value: FilmSearchSnapshot, token: UUID) throws {
         guard observationID == token, !stopped, !released, !invalidated else { return }
         try accept(value)
-        error = nil
+        clearError()
     }
 
     private func accept(_ value: FilmSearchSnapshot, stopping: Bool = false) throws {
@@ -310,6 +310,9 @@ public final class FilmSearchSession: ObservableObject {
     }
 
     private func fields(_ id: UUID) -> RuntimeObject { ["sessionId": .string(id.uuidString.lowercased())] }
+    private func clearError() {
+        if error != nil { error = nil }
+    }
     private func finishScope(_ result: Result<Void, Error>) {
         let pending = Array(scopeWaiters.values); scopeWaiters.removeAll()
         for waiter in pending { waiter.resume(with: result) }

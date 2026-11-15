@@ -1,7 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
-using System.Text.Json;
 using System.Windows;
 using MeowFilm.Desktop;
 
@@ -22,9 +21,12 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
     private bool disposed, changingMusic;
     private CancellationTokenSource? novelPresentation;
     private readonly SemaphoreSlim musicGate = new(1, 1);
+    private readonly ObservableCollection<FilmSearchCardItem> emptyCards = [];
+    private ObservableCollection<FilmSearchCardItem> shownCards;
     public SearchResultsPage(MusicCapability music, FilmCapability film, NovelCapability? novel = null)
     {
         Music = music;
+        shownCards = emptyCards;
         this.film = film;
         this.novel = novel;
         Tabs = Array.AsReadOnly(new[] { new SearchResultTab("overview", "综合"), new("songs", "单曲"),
@@ -69,7 +71,7 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
     public string SelectedTab => tab;
     public string Query => query;
     public IReadOnlyList<SearchResultTab> Tabs { get; }
-    public ObservableCollection<FilmCardItem> Cards { get; } = [];
+    public ObservableCollection<FilmSearchCardItem> Cards => shownCards;
     public string Error => error;
     public bool RawListMode
     {
@@ -143,7 +145,7 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
             musicLocation = null;
             film.Search.InvalidateQuery(query);
             session = null;
-            Cards.Clear();
+            PublishFilm();
             Changed(nameof(Query));
         }
         error = ""; Changed(nameof(Error));
@@ -254,38 +256,27 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
         finally { changingMusic = false; musicGate.Release(); }
     }
     public Task LoadMoreAsync() => film.Search.LoadMoreAsync();
+    public Task OpenCardAsync(FilmSearchCardItem item) =>
+        Cards.Contains(item) ? OpenCardAsync(item.ToCard()) : Task.CompletedTask;
     public async Task OpenCardAsync(FilmCardItem item)
     {
-        if (!active || tab != "film" || !Cards.Contains(item) || NavigateToPlaybackAsync is null) return;
+        if (!active || tab != "film" || item.SearchContext is null ||
+            !Cards.Any(card => ReferenceEquals(card.SearchContext, item.SearchContext)) || NavigateToPlaybackAsync is null) return;
         try { await NavigateToPlaybackAsync(item, NavigationToken?.Invoke() ?? default); }
         catch (OperationCanceledException) { }
         catch { if (active) { error = "无法打开影片"; Changed(nameof(Error)); } }
     }
     private void PublishFilm()
     {
-        error = session?.Error is { Length: > 0 } failure ? FilmPlaybackError.Message(failure, "搜索不可用") : "";
-        Changed(nameof(Error));
-        var values = (raw ? session?.RawItems : session?.Items) ?? [];
-        var cards = values.Select(item => new FilmCardItem(
-            FilmSearchJson.Text(item, "id"), FilmSearchJson.Text(item, "title"),
-            FilmSearchJson.Text(item, "sourceKind") == "tmdb" ? film.Search.ResolveImage(FilmSearchJson.Text(item, "poster")) : FilmSearchJson.Text(item, "poster"), "")
+        string nextError = session?.Error is { Length: > 0 } failure ? FilmPlaybackError.Message(failure, "搜索不可用") : "";
+        if (error != nextError) { error = nextError; Changed(nameof(Error)); }
+        var cards = (raw ? session?.RawCardItems : session?.CardItems) ?? emptyCards;
+        if (!ReferenceEquals(shownCards, cards))
         {
-            TextBadge = FilmSearchJson.Text(item, "textBadge"), Subtitle = FilmSearchJson.Text(item, "siteLabel"),
-            SearchContext = new(session!, item)
-        }).ToArray();
-        for (int index = 0; index < cards.Length; index++)
-        {
-            if (index < Cards.Count)
-            {
-                if (!Same(Cards[index], cards[index])) Cards[index] = cards[index];
-            }
-            else Cards.Add(cards[index]);
+            shownCards = cards;
+            Changed(nameof(Cards));
         }
-        while (Cards.Count > cards.Length) Cards.RemoveAt(Cards.Count - 1);
         foreach (string property in new[] { nameof(CanLoadMore), nameof(HasMore), nameof(MetadataStatus), nameof(Status) }) Changed(property);
-        static bool Same(FilmCardItem before, FilmCardItem after) => before.Id == after.Id && before.Title == after.Title &&
-            before.Poster == after.Poster && before.TextBadge == after.TextBadge && before.Subtitle == after.Subtitle &&
-            before.SearchContext is { } context && after.SearchContext is { } next && context.SameSelection(next);
     }
     private void RefreshTabs()
     {

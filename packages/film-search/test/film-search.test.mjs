@@ -12,11 +12,15 @@ const site = (payload, overrides = {}) => invoke({
   operation: 'site', query: '星河', aggregateRules: [],
   site: sources[0], page: 1, payload, ...overrides,
 });
-const display = (siteItems, overrides = {}) => invoke({
-  operation: 'display', query: '星河', aggregateRules: [], siteItems,
-  tmdbItems: [], siteOrder: sources.map((source) => source.siteKey),
-  searchCoverSite: '', rawListMode: false, previousOrder: [], ...overrides,
-});
+const display = (siteItems, { rawListMode = false, previousOrder = [], ...overrides } = {}) => {
+  const output = invoke({
+    operation: 'display', query: '星河', aggregateRules: [], siteItems,
+    tmdbItems: [], siteOrder: sources.map((source) => source.siteKey),
+    searchCoverSite: '', [rawListMode ? 'previousRawOrder' : 'previousOrder']: previousOrder, ...overrides,
+  });
+  const items = rawListMode ? output.rawCards : output.cards;
+  return { items, order: items.map(item => item.displayKey) };
+};
 const mapTMDB = (query, results) => invoke({ operation: 'tmdb', query, payload: { results } });
 
 test('all five JSON operations execute without mutating caller data', () => {
@@ -327,6 +331,28 @@ test('raw and aggregate modes keep independent stable orders over multiple round
   // Before settlement, passing the preceding round's order lets late high scores
   // reorder only the current round. With no previous round, the first round sorts all.
   assert.equal(display(cumulative, { rawListMode: true }).items[0].siteDetail, 'b');
+});
+
+test('one projection returns both complete views with independently settled orders', () => {
+  const rows = site({ list: [
+    { id: 'a', name: '星河' }, { id: 'b', name: '星河 第二季' }, { id: 'c', name: '遥远世界' },
+  ] }).items;
+  const tmdbItems = mapTMDB('星河', [{ id: 12, media_type: 'tv', name: '星河' }]).items;
+  const aggregate = display(rows, { tmdbItems });
+  const raw = display(rows, { tmdbItems, rawListMode: true });
+  const previousOrder = aggregate.order.toReversed(), previousRawOrder = raw.order.toReversed();
+  const input = {
+    operation: 'display', siteItems: rows, tmdbItems,
+    siteOrder: sources.map(source => source.siteKey), previousOrder, previousRawOrder,
+  };
+  const before = clone(input);
+  const output = invoke(input);
+  assert.deepEqual(Object.keys(output), ['cards', 'rawCards']);
+  assert.deepEqual(output.cards.map(card => card.displayKey), previousOrder);
+  assert.deepEqual(output.rawCards.map(card => card.displayKey), previousRawOrder);
+  assert.deepEqual(output.cards.find(card => card.tmdbId === 12).aggregateItems.map(item => item.detailId), ['a', 'b']);
+  assert.deepEqual(output.rawCards.filter(card => card.sourceKind === 'site').map(card => card.detailId), ['c', 'b', 'a']);
+  assert.deepEqual(input, before);
 });
 
 test('representative priority is relevance, title length, preferred cover, source order, then page sequence', () => {

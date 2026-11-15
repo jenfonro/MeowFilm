@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.Text.Json;
 using MeowFilm.Core.Runtime;
 
@@ -26,6 +27,10 @@ public sealed class FilmSearchSession
     internal event EventHandler<long>? ReferenceChanged;
     internal long ReferenceRevision { get; private set; } = -1;
     internal FilmSearchService Service { get; }
+    internal FilmSearchDisplay? Display { get; private set; }
+    internal ObservableCollection<FilmSearchCardItem> CardItems { get; } = [];
+    internal ObservableCollection<FilmSearchCardItem> RawCardItems { get; } = [];
+    private readonly Dictionary<string, FilmSearchCardItem> cardModels = new(StringComparer.Ordinal);
     internal RuntimeConnection? Connection { get; set; }
     internal FilmPlaybackClient? Client { get; set; }
     internal IReadOnlyList<JsonElement> SourceSnapshot { get; set; } = [];
@@ -45,52 +50,54 @@ public sealed class FilmSearchSession
     internal Task? Stopping { get; set; }
     internal HashSet<Task> Handoffs { get; } = [];
 
-    internal void Bind(JsonElement snapshot)
+    internal void Bind(FilmSearchPreparedSnapshot snapshot) => Bind(snapshot.Id, snapshot.Query);
+    internal void Bind(string id, string query)
     {
-        string id = FilmJson.RequiredText(snapshot, "sessionId");
-        if (!Guid.TryParse(id, out _) || Id.Length > 0 && Id != id ||
-            FilmJson.RequiredText(snapshot, "query") != Query) throw new FilmPlaybackException("INVALID_RESPONSE");
+        if (Id.Length > 0 && Id != id || query != Query)
+            throw new FilmPlaybackException("INVALID_RESPONSE");
         Id = id;
     }
-    internal bool Apply(JsonElement snapshot, bool refresh = false)
+    internal bool Apply(FilmSearchPreparedSnapshot snapshot, bool refresh = false)
     {
         Bind(snapshot);
-        long revision = snapshot.GetProperty("revision").GetInt64();
+        long revision = snapshot.Revision;
         if (revision < Revision || revision == Revision && !refresh) return false;
-        var siteState = State(FilmJson.RequiredText(snapshot, "siteState"));
-        var metadataState = State(FilmJson.RequiredText(snapshot, "metadataState"));
-        var cards = ReadCards(snapshot, "cards");
-        var rawCards = ReadCards(snapshot, "rawCards");
-        int round = snapshot.GetProperty("round").GetInt32();
-        bool loading = snapshot.GetProperty("loading").GetBoolean();
-        bool hasMore = snapshot.GetProperty("hasMore").GetBoolean();
-        bool noSources = snapshot.GetProperty("noSources").GetBoolean();
-        Revision = revision; Round = round;
-        SitesState = noSources && siteState == FilmSearchChannelState.Completed ? FilmSearchChannelState.NoSources : siteState;
-        MetadataState = metadataState; Loading = loading; HasMore = hasMore;
-        MetadataQuery = FilmJson.Text(snapshot, "metadataQuery");
-        MetadataSearchPayload = FilmJson.Member(snapshot, "metadataSearch") is { ValueKind: JsonValueKind.Object } search
-            ? search.Clone() : null;
-        Items = cards; RawItems = rawCards; Snapshot = snapshot.Clone(); Error = "";
+        var next = snapshot.Display!;
+        if (!ReferenceEquals(Display, next))
+        {
+            foreach (var update in next.Updates)
+            {
+                if (cardModels.TryGetValue(update.Value.Key, out var model)) model.Apply(update.Value, update.Fields);
+                else cardModels.Add(update.Value.Key, new(this, update.Value));
+            }
+            if (!ReferenceEquals(Display?.Cards, next.Cards)) next.Cards.Apply(CardItems, cardModels);
+            if (!ReferenceEquals(Display?.RawCards, next.RawCards)) next.RawCards.Apply(RawCardItems, cardModels);
+            foreach (string key in next.Removed) cardModels.Remove(key);
+            Display = next;
+        }
+        Revision = revision; Round = snapshot.Round;
+        SitesState = snapshot.NoSources && snapshot.SitesState == FilmSearchChannelState.Completed
+            ? FilmSearchChannelState.NoSources : snapshot.SitesState;
+        MetadataState = snapshot.MetadataState; Loading = snapshot.Loading; HasMore = snapshot.HasMore;
+        MetadataQuery = snapshot.MetadataQuery; MetadataSearchPayload = snapshot.MetadataSearch;
+        Items = next.Cards.Items; RawItems = next.RawCards.Items; Snapshot = snapshot.Snapshot; Error = "";
         Notify();
         return true;
     }
-    internal void ApplyStopped(JsonElement snapshot)
+    internal void ApplyStopped(FilmSearchPreparedSnapshot snapshot)
     {
         Bind(snapshot);
-        long revision = snapshot.GetProperty("revision").GetInt64();
+        long revision = snapshot.Revision;
         if (revision < Revision) return;
         Revision = revision;
-        Loading = snapshot.GetProperty("loading").GetBoolean();
-        HasMore = snapshot.GetProperty("hasMore").GetBoolean();
-        SitesState = State(FilmJson.RequiredText(snapshot, "siteState"));
-        MetadataState = State(FilmJson.RequiredText(snapshot, "metadataState"));
+        Loading = snapshot.Loading; HasMore = snapshot.HasMore;
+        SitesState = snapshot.SitesState; MetadataState = snapshot.MetadataState;
         Notify();
     }
-    internal void PublishReference(JsonElement snapshot)
+    internal void PublishReference(FilmSearchPreparedSnapshot snapshot)
     {
         Bind(snapshot);
-        long revision = snapshot.GetProperty("revision").GetInt64();
+        long revision = snapshot.Revision;
         if (revision <= ReferenceRevision) return;
         ReferenceRevision = revision;
         ReferenceChanged?.Invoke(this, revision);
@@ -111,13 +118,4 @@ public sealed class FilmSearchSession
         Notify();
     }
     internal void Notify() => Changed?.Invoke(this, EventArgs.Empty);
-    private static FilmSearchChannelState State(string state) => state switch
-    {
-        "idle" => FilmSearchChannelState.Idle, "loading" => FilmSearchChannelState.Loading,
-        "completed" => FilmSearchChannelState.Completed, "unavailable" => FilmSearchChannelState.Unavailable,
-        "failed" => FilmSearchChannelState.Error, "cancelled" => FilmSearchChannelState.Cancelled,
-        _ => throw new FilmPlaybackException("INVALID_RESPONSE")
-    };
-    private static IReadOnlyList<JsonElement> ReadCards(JsonElement snapshot, string field) =>
-        Array.AsReadOnly(snapshot.GetProperty(field).EnumerateArray().Select(item => item.Clone()).ToArray());
 }

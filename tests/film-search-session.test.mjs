@@ -64,6 +64,99 @@ function setup(t, { search, metadata, getRules, cachedEntry, invoke } = {}) {
   return { service, calls, snapshot, complete };
 }
 
+test('in-flight changes coalesce into one latest projection and settlement waits for the complete pair', async t => {
+  const firstProjection = deferred(), finishProjection = deferred(), metadataGate = deferred();
+  t.after(() => { finishProjection.resolve(); metadataGate.resolve({ results: [] }); });
+  const sources = Array.from({ length: 24 }, (_, index) => ({
+    ...source, key: `source-${index}`, installationId: `source-${index}`,
+    name: `作品${String.fromCharCode(65 + index)}x`,
+  }));
+  let mapped = 0, running = 0, peak = 0;
+  const inputs = [];
+  const { service, snapshot, complete, calls } = setup(t, {
+    search: async item => page([{ id: item.key, name: item.name }], 1, 1),
+    metadata: async () => metadataGate.promise,
+    invoke: async (input, _options, run) => {
+      if (input.operation === 'site') {
+        const value = await run();
+        mapped++;
+        return value;
+      }
+      if (input.operation !== 'display') return run();
+      inputs.push(input.siteItems.length);
+      running++; peak = Math.max(peak, running);
+      try {
+        if (inputs.length === 1) { firstProjection.resolve(); await finishProjection.promise; }
+        return await run();
+      } finally { running--; }
+    },
+  });
+  const { sessionId } = await service.open({ query: '作品', sources });
+  await firstProjection.promise;
+  await until(() => mapped === sources.length);
+  assert.deepEqual(inputs, [1], 'new facts do not enqueue intermediate full projections');
+  assert.equal(snapshot(sessionId).loading, true);
+  assert.deepEqual(snapshot(sessionId).cards, [], 'a superseded projection is not published');
+  finishProjection.resolve();
+  const streamed = await until(() => snapshot(sessionId).cards.length === sources.length && snapshot(sessionId));
+  assert.equal(streamed.loading, true, 'site results do not wait for the slow metadata channel');
+  assert.equal(streamed.rawCards.length, sources.length);
+  assert.deepEqual(inputs, [1, sources.length]);
+  metadataGate.resolve({ results: [] });
+  const final = await complete(sessionId);
+  assert.equal(final.cards.length, sources.length);
+  assert.equal(final.rawCards.length, sources.length);
+  assert.equal(peak, 1);
+  assert.equal(inputs.at(-1), sources.length);
+  assert.equal(calls.filter(call => call[0] === 'search').length, sources.length);
+  assert.ok(calls.filter(call => call[0] === 'search').every(call => call[3] === 1));
+  const handoff = service.handoff({ sessionId, selectionId: final.rawCards[0].displayKey, sources });
+  assert.deepEqual(handoff.target.source, { key: final.rawCards[0].siteKey, detailId: final.rawCards[0].detailId });
+  assert.equal(handoff.results.length, 1);
+});
+
+for (const action of ['stop', 'release', 'invalidate']) {
+  test(`${action} revokes a running projection and its pending latest version`, async t => {
+    const entered = deferred(), finish = deferred();
+    t.after(() => finish.resolve());
+    let mapped = 0, projections = 0;
+    const { service, snapshot, calls, complete } = setup(t, {
+      search: async item => page([{ id: item.key, name: `作品${item.key}` }], 1, 1),
+      invoke: async (input, _options, run) => {
+        if (input.operation === 'site') {
+          const value = await run(); mapped++; return value;
+        }
+        if (input.operation === 'display' && ++projections === 1) { entered.resolve(); await finish.promise; }
+        return run();
+      },
+    });
+    const { sessionId } = await service.open({ query: '作品', sources: [source, sourceB] });
+    await entered.promise;
+    await until(() => mapped === 2);
+    const revoked = action === 'stop' ? service.command({ sessionId, action: 'stop' })
+      : action === 'release' ? service.release({ sessionId }) : service.invalidate('source');
+    finish.resolve();
+    await revoked;
+    assert.equal(projections, 1, 'revocation never starts the pending full projection');
+    if (action === 'release') assert.equal(service.has(sessionId), false);
+    else {
+      const stopped = snapshot(sessionId);
+      assert.equal(stopped.loading, false);
+      assert.deepEqual(stopped.cards, []);
+      assert.deepEqual(stopped.rawCards, []);
+      if (action === 'invalidate') assert.equal(stopped.invalidated, true);
+      else {
+        await service.command({ sessionId, action: 'resume' });
+        const resumed = await complete(sessionId);
+        assert.equal(resumed.cards.length, 2);
+        assert.equal(resumed.rawCards.length, 2);
+        assert.equal(projections, 2);
+        assert.equal(calls.filter(call => call[0] === 'search').length, 2, 'resume reuses accepted page facts');
+      }
+    }
+  });
+}
+
 test('one source page is complete; raw and aggregate views keep typed identities without another fetch', async t => {
   const rows = [{ id: 0, name: '星河', displayKey: 'group:站点原字段',
     extension: { displayKey: 'group:嵌套原字段' } }, { id: '0', name: '星河' },
@@ -493,59 +586,51 @@ test('a real regular-expression interruption fails the channel and the shared pr
     [['a', '超时', 1], ['b', '超时', 1], ['a', '恢复', 1]]);
 });
 
-for (const failureAt of [2, 3]) {
-  test(`a last-page ${failureAt === 2 ? 'raw' : 'final'} display failure retries without refetching or regressing the handoff`, async t => {
-    let failDisplay = true, displayCalls = 0, mappedPages = 0;
-    const entries = [];
-    const { service, calls, complete } = setup(t, {
-      search: async (_source, _query, number) => page(number === 1
-        ? [{ id: 0, name: '星河外传' }] : [{ id: '0', name: '星河' }], number, 2),
-      cachedEntry: async request => {
-        const entry = { request, producer: 'accepted', storedAt: 42 };
-        entries.push(entry); return entry;
-      },
-      invoke: async (input, _options, run) => {
-        if (input.operation === 'site') mappedPages++;
-        if (input.operation === 'display' && input.siteItems.length === 2 &&
-            ++displayCalls === failureAt && failDisplay) {
-          throw Object.assign(new Error('projection budget'), { code: 'RESOURCE_LIMIT' });
-        }
-        return run();
-      },
-    });
-    const { sessionId } = await service.open({ query: '星河', sources: [source] });
-    const first = await complete(sessionId);
-    await service.command({ sessionId, action: 'more' });
-    const failed = await complete(sessionId);
-    assert.equal(failed.siteState, 'failed');
-    assert.equal(failed.metadataState, 'unavailable');
-    assert.equal(failed.hasMore, true);
-    assert.equal(failed.siteItems.length, 2);
-    if (failureAt === 2) {
-      assert.deepEqual(failed.cards, first.cards);
-      assert.deepEqual(failed.rawCards, first.rawCards);
-    } else {
-      assert.equal(failed.cards.length, 2);
-      assert.equal(failed.rawCards.length, 2);
-    }
-    const handoff = service.handoff({ sessionId, selectionId: first.cards[0].displayKey, sources: [source] });
-    assert.deepEqual(handoff.search, [{ sourceKey: 'a', page: 2, completed: true }]);
-    assert.deepEqual(handoff.cacheEntries, entries);
-    const before = structuredClone(calls);
-    failDisplay = false;
-    await service.command({ sessionId, action: 'more' });
-    const recovered = await complete(sessionId);
-    assert.equal(recovered.siteState, 'completed');
-    assert.equal(recovered.hasMore, false);
-    assert.equal(recovered.cards[0].displayKey, first.cards[0].displayKey);
-    assert.deepEqual(recovered.rawCards.map(card => card.detailId), [0, '0']);
-    assert.equal(recovered.cards.length, 2);
-    assert.equal(mappedPages, 2);
-    assert.deepEqual(calls, before);
-    assert.deepEqual(service.handoff({ sessionId, selectionId: first.cards[0].displayKey,
-      sources: [source] }).search, handoff.search);
+test('a last-page projection failure retries both views without refetching or regressing the handoff', async t => {
+  let failDisplay = true, mappedPages = 0;
+  const entries = [];
+  const { service, calls, complete } = setup(t, {
+    search: async (_source, _query, number) => page(number === 1
+      ? [{ id: 0, name: '星河外传' }] : [{ id: '0', name: '星河' }], number, 2),
+    cachedEntry: async request => {
+      const entry = { request, producer: 'accepted', storedAt: 42 };
+      entries.push(entry); return entry;
+    },
+    invoke: async (input, _options, run) => {
+      if (input.operation === 'site') mappedPages++;
+      if (input.operation === 'display' && input.siteItems.length === 2 && failDisplay) {
+        throw Object.assign(new Error('projection budget'), { code: 'RESOURCE_LIMIT' });
+      }
+      return run();
+    },
   });
-}
+  const { sessionId } = await service.open({ query: '星河', sources: [source] });
+  const first = await complete(sessionId);
+  await service.command({ sessionId, action: 'more' });
+  const failed = await complete(sessionId);
+  assert.equal(failed.siteState, 'failed');
+  assert.equal(failed.metadataState, 'unavailable');
+  assert.equal(failed.hasMore, true);
+  assert.equal(failed.siteItems.length, 2);
+  assert.deepEqual(failed.cards, first.cards);
+  assert.deepEqual(failed.rawCards, first.rawCards);
+  const handoff = service.handoff({ sessionId, selectionId: first.cards[0].displayKey, sources: [source] });
+  assert.deepEqual(handoff.search, [{ sourceKey: 'a', page: 2, completed: true }]);
+  assert.deepEqual(handoff.cacheEntries, entries);
+  const before = structuredClone(calls);
+  failDisplay = false;
+  await service.command({ sessionId, action: 'more' });
+  const recovered = await complete(sessionId);
+  assert.equal(recovered.siteState, 'completed');
+  assert.equal(recovered.hasMore, false);
+  assert.equal(recovered.cards[0].displayKey, first.cards[0].displayKey);
+  assert.deepEqual(recovered.rawCards.map(card => card.detailId), [0, '0']);
+  assert.equal(recovered.cards.length, 2);
+  assert.equal(mappedPages, 2);
+  assert.deepEqual(calls, before);
+  assert.deepEqual(service.handoff({ sessionId, selectionId: first.cards[0].displayKey,
+    sources: [source] }).search, handoff.search);
+});
 
 test('metadata detail network failure preserves its summary and settles without a computation error', async t => {
   const { service, calls, complete } = setup(t, {
@@ -702,15 +787,15 @@ test('a failed metadata mapper reuses both original and fallback search receipts
     sources: [] }).cacheEntries, entries);
 });
 
-test('a final metadata-only projection failure remains retryable without refetching or reenriching details', async t => {
-  let failDisplay = true, displayCalls = 0, details = 0;
+test('a last-detail projection failure remains retryable without refetching or reenriching details', async t => {
+  let failDisplay = true, details = 0;
   const { service, calls, complete } = setup(t, {
     metadata: async (_provider, path) => path.includes('/search/')
       ? { results: [{ id: 12, media_type: 'tv', name: '星河' }] }
       : { id: 12, name: '星河', genres: [], seasons: [], status: 'Ended' },
     invoke: async (input, _options, run) => {
       if (input.operation === 'detail') details++;
-      if (input.operation === 'display' && ++displayCalls === 5 && failDisplay) {
+      if (input.operation === 'display' && details === 1 && failDisplay) {
         throw Object.assign(new Error('projection budget'), { code: 'RESOURCE_LIMIT' });
       }
       return run();
@@ -718,7 +803,7 @@ test('a final metadata-only projection failure remains retryable without refetch
   });
   const { sessionId } = await service.open({ query: '星河', sources: [] });
   const failed = await complete(sessionId);
-  assert.equal(failed.siteState, 'failed');
+  assert.equal(failed.siteState, 'completed');
   assert.equal(failed.metadataState, 'failed');
   assert.equal(failed.hasMore, true);
   assert.equal(failed.cards[0].tmdbId, 12);

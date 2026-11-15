@@ -113,23 +113,38 @@ export function createFilmSearchService({ data, rules, program, now = Date.now }
       return undefined;
     }
   }
-  async function display(session, epoch) {
-    const revision = ++session.displayRevision;
-    const input = { operation: 'display', query: session.query,
-      aggregateRules: session.ruleSnapshot.rules.aggregateRegexRules,
-      siteItems: session.siteItems.slice(), tmdbItems: session.tmdbItems.slice(),
-      siteOrder: session.cursors.map(cursor => cursor.source.key), searchCoverSite: session.coverSite };
-    const aggregate = await invoke(session, epoch, { ...input, rawListMode: false, previousOrder: session.order });
-    const raw = await invoke(session, epoch, { ...input, rawListMode: true, previousOrder: session.rawOrder });
-    if (revision !== session.displayRevision) return;
-    session.cards = aggregate.items; session.rawCards = raw.items;
-    for (const card of [...session.cards, ...session.rawCards]) {
-      // Keep only identity-bearing selections, so a previously displayed group
-      // can follow a later TMDB carrier without title inference.
-      const key = displayIdentity(card.displayKey);
-      if (!session.selections.has(key)) session.selections.set(key, clone(card));
-    }
-    publish(session);
+  function project(session, epoch) {
+    if (session.displayWork) return session.displayWork;
+    const work = (async () => {
+      while (session.projectedRevision !== session.displayRevision) {
+        admitted(session, epoch);
+        const revision = session.displayRevision;
+        const value = await invoke(session, epoch, { operation: 'display', query: session.query,
+          aggregateRules: session.ruleSnapshot.rules.aggregateRegexRules,
+          siteItems: session.siteItems.slice(), tmdbItems: session.tmdbItems.slice(),
+          siteOrder: session.cursors.map(cursor => cursor.source.key), searchCoverSite: session.coverSite,
+          previousOrder: session.order, previousRawOrder: session.rawOrder });
+        // Facts can advance while this one projection is running. Do not queue
+        // their obsolete intermediate versions or publish an out-of-date pair.
+        if (revision !== session.displayRevision) continue;
+        session.cards = value.cards; session.rawCards = value.rawCards;
+        session.projectedRevision = revision;
+        for (const card of [...session.cards, ...session.rawCards]) {
+          // Processor results are immutable owner facts. Retain the first
+          // published identity for late-carrier handoff without copying its rows.
+          const key = displayIdentity(card.displayKey);
+          if (!session.selections.has(key)) session.selections.set(key, card);
+        }
+        publish(session);
+      }
+    })();
+    session.displayWork = work;
+    work.then(() => { session.displayWork = undefined; }, () => { session.displayWork = undefined; });
+    return work;
+  }
+  function display(session, epoch) {
+    session.displayRevision++;
+    return project(session, epoch);
   }
   async function readPages(session, epoch, cursors) {
     if (!cursors.length) {
@@ -291,7 +306,7 @@ export function createFilmSearchService({ data, rules, program, now = Date.now }
           metadataPending ? readMetadata(session, epoch) : Promise.resolve()]);
         admitted(session, epoch);
         try {
-          await display(session, epoch);
+          await project(session, epoch);
           if (session.cursors.every(cursor => cursor.ended)) session.siteState = 'completed';
         } catch (error) {
           if (active(session, epoch)) {
@@ -326,7 +341,7 @@ export function createFilmSearchService({ data, rules, program, now = Date.now }
       cursors: sources.map((source, order) => ({ source, order, page: 1, confirmedPage: 0,
         ended: false, recovery: true, pages: new Map() })),
       coverSite: sources.find(source => source.aggregateImages)?.key ?? '',
-      round: 0, sequence: 0, epoch: 0, commandEpoch: 0, displayRevision: 0,
+      round: 0, sequence: 0, epoch: 0, commandEpoch: 0, displayRevision: 0, projectedRevision: 0,
       controller: new AbortController(), work: Promise.resolve(),
       stopped: false, released: false, invalidated: false, loading: false,
       siteState: 'idle', metadataState: 'idle', siteItems: [], tmdbItems: [],
