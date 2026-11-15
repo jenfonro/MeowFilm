@@ -387,6 +387,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
               rootURL.host == nil || rootURL.host == "",
               rootURL.query == nil, rootURL.fragment == nil else { throw NativeMusicAudioCacheFailure.miss }
         var ownedURL = rootURL
+        var baseURL = URL(fileURLWithPath: "/", isDirectory: true)
         if requiresCachesDirectory {
             // Resolve ONLY the system-provided existing base, never a caller's
             // potentially hostile path. Production will not create a download
@@ -400,6 +401,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
             guard let pointer = realpath(provided.path, nil) else { throw NativeMusicAudioCacheFailure.miss }
             defer { free(pointer) }
             let canonical = String(cString: pointer)
+            baseURL = URL(fileURLWithPath: canonical, isDirectory: true)
             if rootURL.path.hasPrefix(provided.path + "/") {
                 let suffix = rootURL.path.dropFirst(provided.path.count)
                 ownedURL = URL(fileURLWithPath: canonical + suffix, isDirectory: true)
@@ -407,7 +409,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
                 guard rootURL.path.hasPrefix(canonical + "/") else { throw NativeMusicAudioCacheFailure.miss }
             }
         }
-        let value = try NativeMusicAudioCacheDirectory(url: ownedURL)
+        let value = try NativeMusicAudioCacheDirectory(url: ownedURL, baseURL: baseURL)
         var loaded: [String: NativeMusicAudioCacheEntry] = [:]
         if let bytes = try value.readIndex() {
             // A corrupt/old index is not authority to touch arbitrary paths.
@@ -940,12 +942,14 @@ final class NativeMusicAudioCacheDirectory: @unchecked Sendable {
     static let indexLimit = 8 * 1024 * 1024
     private static let marker = Data("meowmusic.native-audio-file-cache.v1\n".utf8)
     let url: URL
+    private let baseURL: URL
     private let descriptor: Int32
     private let lockDescriptor: Int32
     private let identity: NativeMusicAudioCacheStamp
 
-    init(url: URL, prepareMarker: (Int32) throws -> Void = NativeMusicAudioCacheProtection.apply(to:)) throws {
-        let fd = try Self.openDirectory(url, createLeaf: true)
+    init(url: URL, baseURL: URL = URL(fileURLWithPath: "/", isDirectory: true),
+         prepareMarker: (Int32) throws -> Void = NativeMusicAudioCacheProtection.apply(to:)) throws {
+        let fd = try Self.openDirectory(url, baseURL: baseURL, createLeaf: true)
         var lockFD: Int32 = -1
         do {
             var info = stat()
@@ -983,7 +987,8 @@ final class NativeMusicAudioCacheDirectory: @unchecked Sendable {
             _ = try Self.regular(lockFD)
             guard flock(lockFD, LOCK_EX | LOCK_NB) == 0 else { throw NativeMusicAudioCacheFailure.miss }
             try NativeMusicAudioCacheProtection.apply(to: lockFD)
-            self.url = url; descriptor = fd; lockDescriptor = lockFD; identity = NativeMusicAudioCacheStamp(info)
+            self.url = url; self.baseURL = baseURL
+            descriptor = fd; lockDescriptor = lockFD; identity = NativeMusicAudioCacheStamp(info)
         } catch {
             if lockFD >= 0 { Darwin.close(lockFD) }
             Darwin.close(fd); throw error
@@ -991,7 +996,7 @@ final class NativeMusicAudioCacheDirectory: @unchecked Sendable {
     }
 
     func check() throws {
-        let fresh = try Self.openDirectory(url, createLeaf: false)
+        let fresh = try Self.openDirectory(url, baseURL: baseURL, createLeaf: false)
         defer { Darwin.close(fresh) }
         var info = stat()
         guard fstat(fresh, &info) == 0, Int64(info.st_dev) == identity.device,
@@ -1093,15 +1098,19 @@ final class NativeMusicAudioCacheDirectory: @unchecked Sendable {
               let id = UUID(uuidString: String(pieces[0])) else { return false }
         return id.uuidString.lowercased() == pieces[0]
     }
-    private static func openDirectory(_ url: URL, createLeaf: Bool) throws -> Int32 {
+    private static func openDirectory(_ url: URL, baseURL: URL, createLeaf: Bool) throws -> Int32 {
         guard url.isFileURL, url.baseURL == nil, url.host == nil || url.host == "",
               url.query == nil, url.fragment == nil, url.path.hasPrefix("/"),
               !url.path.utf8.contains(0) else { throw NativeMusicAudioCacheFailure.miss }
-        let parts = url.path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-        guard parts.count >= 2, parts.allSatisfy({ $0 != "." && $0 != ".." && !$0.contains("\\") }) else {
+        let prefix = baseURL.path == "/" ? "/" : baseURL.path + "/"
+        guard url.path.hasPrefix(prefix) else { throw NativeMusicAudioCacheFailure.miss }
+        let parts = url.path.dropFirst(prefix.count).split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard !parts.isEmpty, parts.allSatisfy({ $0 != "." && $0 != ".." && !$0.contains("\\") }) else {
             throw NativeMusicAudioCacheFailure.miss
         }
-        var fd = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        // Only the system-provided Caches base is trusted in production. Opening
+        // its ancestors individually would require access outside the App sandbox.
+        var fd = Darwin.open(baseURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw NativeMusicAudioCacheFailure.miss }
         for (i, part) in parts.enumerated() {
             var next = openat(fd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
