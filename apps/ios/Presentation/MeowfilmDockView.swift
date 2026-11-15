@@ -12,7 +12,9 @@ final class MeowfilmDockView: UIView {
     private let navigationHost = UIView()
     private let opaqueBackdrop: WindowGradientView
     private let fadedBackdrop: WindowGradientView
-    private let fadeMask = CAGradientLayer()
+    private let fadeMask = UIView()
+    private let playerFade = MeowfilmDockFadeView()
+    private let bottomMask = UIView()
     private let stack = UIStackView()
     private var buttons: [MeowfilmPrimaryPage: UIButton] = [:]
     private var selected = MeowfilmPrimaryPage.recommend
@@ -39,8 +41,11 @@ final class MeowfilmDockView: UIView {
             addSubview(backdrop)
             backdrop.pinEdges(to: self)
         }
-        fadeMask.colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
-        fadedBackdrop.layer.mask = fadeMask
+        fadeMask.isOpaque = false
+        bottomMask.backgroundColor = .black
+        fadeMask.addSubview(playerFade)
+        fadeMask.addSubview(bottomMask)
+        fadedBackdrop.mask = fadeMask
         navigation.axis = .horizontal
         navigation.distribution = .fillEqually
         for page in [MeowfilmPrimaryPage.recommend, .film, .novel, .library] {
@@ -104,16 +109,13 @@ final class MeowfilmDockView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        // Taller than the dock so the mask still covers it while it animates smaller.
-        let height = max(superview?.bounds.height ?? 0, bounds.height, 1)
-        let top = stack.frame.minY
-        let start = min(1, max(0, top / height))
-        let end = min(1, max(start, (top + surfaceHeight.constant) / height))
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        fadeMask.frame = CGRect(x: 0, y: 0, width: bounds.width, height: height)
-        fadeMask.locations = [NSNumber(value: Double(start)), NSNumber(value: Double(end))]
-        CATransaction.commit()
+        // Mask views follow the same animator as the dock, including reversals;
+        // raw gradient stops would jump to the target before the dock moves.
+        fadeMask.frame = bounds
+        let playerFrame = surfaceHost.convert(surfaceHost.bounds, to: self)
+        playerFade.frame = CGRect(x: 0, y: playerFrame.minY, width: bounds.width, height: playerFrame.height)
+        bottomMask.frame = CGRect(x: 0, y: playerFrame.maxY, width: bounds.width,
+                                  height: max(0, bounds.height - playerFrame.maxY))
     }
 
     func select(_ page: MeowfilmPrimaryPage, duration: TimeInterval = 0) {
@@ -169,4 +171,18 @@ final class MeowfilmDockView: UIView {
             button.accessibilityTraits = isSelected ? [.button, .selected] : .button
         }
     }
+}
+
+@MainActor
+private final class MeowfilmDockFadeView: UIView {
+    override class var layerClass: AnyClass { CAGradientLayer.self }
+
+    init() {
+        super.init(frame: .zero)
+        isOpaque = false
+        (layer as! CAGradientLayer).colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }

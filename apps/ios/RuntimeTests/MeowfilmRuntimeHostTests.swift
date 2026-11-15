@@ -908,6 +908,180 @@ final class MeowfilmMusicStartupHostTests: XCTestCase {
 /// Real foreground scene required for presentation-layer animation and native frames.
 @MainActor
 final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
+    func testRootDockKeepsNavigationAndBottomOpaqueDuringCardExpansionAndRapidReversal() async throws {
+        XCTAssertFalse(UIAccessibility.isReduceMotionEnabled, "This case exercises the animated dock")
+        XCTAssertTrue(UIView.areAnimationsEnabled)
+        let foreground = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
+            UIApplication.shared.applicationState == .active &&
+                UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive }
+        } }, evaluatedWith: nil)
+        await fulfillment(of: [foreground], timeout: 5)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let network = MusicStartupNoNetwork()
+        let service = NativeMusicService(document: MusicStartupDocument(failure: nil),
+                                        platformClient: network.client())
+        let playback = PlaybackController()
+        let model = MusicViewModel(service: service, playback: playback)
+        model.nativeAttempt = .init(id: UUID(), resourceID: "music:dock")
+        model.playbackState.queue = [.init(id: "dock", track: .init(ref: .init(kind: .queue, id: "dock"),
+            songId: "dock", title: "Goodbye", artist: "Ramsey"))]
+        model.playbackState.state = .init(currentId: "dock", total: 1)
+        model.playbackState.phase = .paused
+        let content = MusicPlayerContentModel(model: model, playback: playback,
+            appearance: MusicAppearancePreferencesStore(defaults: UserDefaults(suiteName: UUID().uuidString)!),
+            presentation: MusicMiniPlayerPresentation())
+        addTeardownBlock { await model.close(); await service.close() }
+        let navigation = PageNavigationController(themeProvider: content.appearance)
+        navigation.setViewControllers([PageViewController(themeProvider: content.appearance)], animated: false)
+        let root = MeowfilmRootContainerViewController(navigation: navigation, themeProvider: content.appearance)
+        let previousWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.windowLevel = .normal + 1
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        defer {
+            PageViewController.invalidatePages(in: root)
+            window.isHidden = true; window.rootViewController = nil
+            previousWindow?.makeKey()
+        }
+        let surface = MusicPlayerSurface(content: content)
+        root.install(surface: surface)
+        root.setRootVisible(true, animated: false)
+        root.select(.recommend)
+        window.layoutIfNeeded()
+        let dock = try XCTUnwrap(root.dock)
+        func descendants(_ view: UIView) -> [UIView] { view.subviews.flatMap { [$0] + descendants($0) } }
+        let buttons = try ["recommend", "film", "novel", "library"].map { name in
+            try XCTUnwrap(descendants(dock).compactMap { $0 as? UIButton }.first {
+                $0.accessibilityIdentifier == "app.primary." + name
+            })
+        }
+        let expectedFrames = buttons.map { $0.convert($0.bounds, to: window) }
+        XCTAssertTrue(expectedFrames.allSatisfy { $0.width > 0 && $0.height > 0 })
+        XCTAssertGreaterThan(window.safeAreaInsets.bottom, 0, "Include the home-indicator opaque region")
+        let points = [
+            CGPoint(x: 2, y: expectedFrames[0].minY + 2),
+            CGPoint(x: 2, y: expectedFrames[0].midY),
+            CGPoint(x: 2, y: window.bounds.maxY - 2),
+        ]
+        func alpha(_ image: UIImage, at point: CGPoint) throws -> UInt8 {
+            let pixels = try XCTUnwrap(image.cgImage)
+            let crop = try XCTUnwrap(pixels.cropping(to: CGRect(
+                x: floor(point.x), y: floor(point.y), width: 1, height: 1)))
+            var pixel = [UInt8](repeating: 0, count: 4)
+            try pixel.withUnsafeMutableBytes { bytes in
+                let context = try XCTUnwrap(CGContext(data: bytes.baseAddress, width: 1, height: 1,
+                    bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue))
+                context.draw(crop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+            }
+            return pixel[3]
+        }
+        let compactHeight = surface.dockHeight
+        let compact = expectation(description: "compact dock rendered")
+        let expanding = expectation(description: "first intermediate expansion frame")
+        let reversing = expectation(description: "intermediate frame after rapid reversal")
+        let card = expectation(description: "expanded dock rendered")
+        let collapsed = expectation(description: "collapsed dock rendered")
+        var phase = "compact", fulfilled = Set<String>(), rows: [String] = []
+        var lastHeight = compactHeight, reversalHeight = compactHeight, settledFrames = 0
+        let observer = MusicDockChromeFrameObserver { [self] in
+            do {
+                XCTAssertEqual(window.windowScene?.activationState, .foregroundActive)
+                let host = try XCTUnwrap(window.layer.presentation())
+                let layer = try XCTUnwrap(dock.layer.presentation())
+                let playerLayer = try XCTUnwrap(surface.layer.presentation())
+                let height = playerLayer.bounds.height
+                for (button, expected) in zip(buttons, expectedFrames) {
+                    let buttonLayer = try XCTUnwrap(button.layer.presentation())
+                    let frame = buttonLayer.convert(buttonLayer.bounds, to: host)
+                    XCTAssertEqual(frame.minX, expected.minX, accuracy: 0.5, phase)
+                    XCTAssertEqual(frame.minY, expected.minY, accuracy: 0.5, phase)
+                    XCTAssertEqual(frame.width, expected.width, accuracy: 0.5, phase)
+                    XCTAssertEqual(frame.height, expected.height, accuracy: 0.5, phase)
+                    var ancestor: CALayer? = buttonLayer
+                    while let current = ancestor {
+                        XCTAssertFalse(current.isHidden, phase)
+                        XCTAssertEqual(current.opacity, 1, accuracy: 0.001, phase)
+                        if current.masksToBounds {
+                            let rect = buttonLayer.convert(buttonLayer.bounds, to: current)
+                            let visible = rect.intersection(current.bounds)
+                            XCTAssertGreaterThanOrEqual(visible.width, rect.width - 0.5, phase)
+                            XCTAssertGreaterThanOrEqual(visible.height, rect.height - 0.5, phase)
+                        }
+                        if current === host { break }
+                        ancestor = current.superlayer
+                    }
+                }
+                // Render only the dock on transparency: the page beneath it must
+                // not accidentally make a missing or partially faded shield pass.
+                let format = UIGraphicsImageRendererFormat()
+                format.scale = 1; format.opaque = false
+                let image = UIGraphicsImageRenderer(bounds: layer.bounds, format: format).image {
+                    layer.render(in: $0.cgContext)
+                }
+                let alphas = try points.map {
+                    let point = layer.convert($0, from: host)
+                    return try alpha(image, at: CGPoint(x: point.x - layer.bounds.minX,
+                                                       y: point.y - layer.bounds.minY))
+                }
+                XCTAssertTrue(alphas.allSatisfy { $0 >= 254 }, "\(phase): dock shield alpha \(alphas)")
+                let playerFrame = playerLayer.convert(playerLayer.bounds, to: layer)
+                let fadeAlphas = try [playerFrame.minY - 2, playerFrame.midY].map {
+                    try alpha(image, at: CGPoint(x: 2 - layer.bounds.minX, y: $0 - layer.bounds.minY))
+                }
+                XCTAssertLessThanOrEqual(fadeAlphas[0], 1, "\(phase): retain the clear top inset")
+                XCTAssertEqual(Double(fadeAlphas[1]), 128, accuracy: 4, "\(phase): fade tracks the moving player")
+                rows.append("\(phase),\(height),\(alphas),\(fadeAlphas)")
+                let target = surface.dockHeight
+                if abs(height - target) < 0.1 { settledFrames += 1 } else { settledFrames = 0 }
+                let ready: XCTestExpectation?
+                switch phase {
+                case "compact": ready = settledFrames >= 2 ? compact : nil
+                case "expanding": ready = height > compactHeight + 1 && height < target - 1 ? expanding : nil
+                case "reversing": ready = height < reversalHeight - 0.5 && height > compactHeight + 0.5 ? reversing : nil
+                case "card": ready = surface.form == .card && settledFrames >= 2 ? card : nil
+                case "collapsed": ready = surface.form == .compact && settledFrames >= 2 ? collapsed : nil
+                default: ready = nil
+                }
+                lastHeight = height
+                if let ready, fulfilled.insert(phase).inserted {
+                    let snapshot = UIGraphicsImageRenderer(size: window.bounds.size).image { host.render(in: $0.cgContext) }
+                    let attachment = XCTAttachment(image: snapshot)
+                    attachment.name = "root-dock-" + phase; attachment.lifetime = .keepAlways; add(attachment)
+                    ready.fulfill()
+                }
+            } catch { XCTFail("Dock presentation sampling failed: \(error)") }
+        }
+        let displayLink = CADisplayLink(target: observer, selector: #selector(MusicDockChromeFrameObserver.sample(_:)))
+        displayLink.add(to: .main, forMode: .common)
+        defer { displayLink.invalidate() }
+        func expand() {
+            let intent = content.presentation.beginHomePlayback()
+            XCTAssertTrue(content.presentation.finishHomePlayback(intent, playback: .init(
+                occurrenceID: "dock", nativeAttemptID: model.activeNativeAttemptID!,
+                accessGeneration: model.accountAccessGeneration)))
+        }
+        await fulfillment(of: [compact], timeout: 5)
+        phase = "expanding"; settledFrames = 0; expand()
+        await fulfillment(of: [expanding], timeout: 5)
+        reversalHeight = lastHeight
+        phase = "reversing"; settledFrames = 0; surface.collapse()
+        await fulfillment(of: [reversing], timeout: 5)
+        phase = "card"; settledFrames = 0; expand()
+        await fulfillment(of: [card], timeout: 5)
+        XCTAssertEqual(surface.form, .card)
+        phase = "collapsed"; settledFrames = 0; surface.collapse()
+        await fulfillment(of: [collapsed], timeout: 5)
+        XCTAssertEqual(surface.form, .compact)
+        let data = XCTAttachment(string: "phase,surfaceHeight,shieldAlpha,fadeAlpha\n" + rows.joined(separator: "\n"))
+        data.name = "root-dock-presentation-frames"; data.lifetime = .keepAlways; add(data)
+        let networkCalls = await network.calls
+        XCTAssertEqual(networkCalls, 0)
+    }
+
     func testCardMorphKeepsButtonsStationaryDuringExpansionAndReversal() async throws {
         XCTAssertFalse(UIAccessibility.isReduceMotionEnabled, "This case exercises the animated morph")
         XCTAssertTrue(UIView.areAnimationsEnabled)
@@ -1168,6 +1342,18 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
         try attachFrame("capsule-returned")
     }
 
+}
+
+@MainActor
+private final class MusicDockChromeFrameObserver: NSObject {
+    private let onFrame: () -> Void
+
+    init(onFrame: @escaping () -> Void) {
+        self.onFrame = onFrame
+        super.init()
+    }
+
+    @objc func sample(_ displayLink: CADisplayLink) { onFrame() }
 }
 
 @MainActor
