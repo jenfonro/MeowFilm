@@ -388,11 +388,15 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
             {
                 var metadataSources = FilmJson.Array(value.Raw, "metadataSources").Select(row =>
                 {
-                    string provider = FilmJson.RequiredText(row, "provider");
-                    if (provider is not ("tmdb" or "douban")) throw new FilmPlaybackException("INVALID_RESPONSE");
+                    var providerValue = FilmJson.Member(row, "provider");
+                    var id = FilmJson.Member(row, "id");
+                    if (providerValue.ValueKind != JsonValueKind.String ||
+                        providerValue.GetString() is not ("tmdb" or "douban") ||
+                        id.ValueKind != JsonValueKind.String || id.GetString()!.Length == 0) return null;
+                    string provider = providerValue.GetString()!;
                     return new FilmSelection(null, provider == "tmdb" ? "TMDB" : "豆瓣",
-                        MetadataSourceId: FilmJson.RequiredText(row, "id"), Provider: provider);
-                }).ToArray();
+                        MetadataSourceId: id.GetString(), Provider: provider);
+                }).OfType<FilmSelection>().ToArray();
                 if (!MetadataSources.SequenceEqual(metadataSources))
                 { MetadataSources = metadataSources; Changed(nameof(MetadataSources)); }
             }
@@ -466,7 +470,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
             {
                 directory = new(); directories.Add(directoryKey, directory);
             }
-            EpisodeDirectory = directory;
+            EpisodeDirectory = failed ? null : directory;
             if (!failed && directory is not null)
             {
                 directory.Apply(this, FilmJson.Member(SourceId is null ? value.Raw : value.Browsing, "episodes"), seasons,

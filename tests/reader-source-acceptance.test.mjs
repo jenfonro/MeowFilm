@@ -6,6 +6,8 @@ import {
   cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { contracts } from '../apps/runtime/contracts.mjs';
+import { detectSourceProtocol } from '../packages/source-runtime/src/importers.js';
 const temporaryRoot = join(process.cwd(), 'tmp/test-results');
 
 function area(t) {
@@ -212,6 +214,52 @@ test('live QYSG acceptance detects remote HTML, retries candidates and uses the 
     '/rules/helper.js',
   ]);
   assert.equal(requests.includes('/helper.js'), false);
+});
+
+test('QYSG acceptance recognizes authenticated definition URLs like the importer and preserves real HTTP failures', async t => {
+  const { directory, output } = area(t);
+  const username = 'synthetic-reader', password = 'SYNTHETIC-URL-PASSWORD';
+  const authorization = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
+  const server = createServer((request, response) => {
+    if (request.headers.authorization !== authorization) {
+      response.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
+      response.end('Authentication required');
+    } else {
+      response.setHeader('Content-Type', 'text/html; charset=utf-8');
+      response.end('<script>function search(){ return []; }</script>');
+    }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const file = join(directory, 'source.json'), records = join(directory, 'records.json');
+  writeFileSync(records, JSON.stringify({
+    source: { 'source.json': { actions: { image: { body: '' } } } },
+  }));
+  for (const accepted of [true, false]) {
+    const html = new URL('/definition.html', origin);
+    html.username = username;
+    html.password = accepted ? password : 'SYNTHETIC-REJECTED-PASSWORD';
+    const source = { bookSourceName: 'Remote QYSG', bookSourceUrl: origin, html: html.href };
+    assert.equal(detectSourceProtocol(source), 'qysg');
+    writeFileSync(file, JSON.stringify(source));
+    const result = await run(['--scripts', file, '--records', records, '--output', output, '--live']);
+    assert.equal(result.code, accepted ? 0 : 1, exitEvidence(result));
+    const text = readFileSync(output, 'utf8'), report = JSON.parse(text);
+    assert.equal(report.summary.sources, 1);
+    assert.equal(report.rows[0].protocol, 'qysg');
+    assert.equal(report.rows[0].initialization, accepted ? 'ready' : 'failed');
+    if (!accepted) {
+      assert.equal(report.rows[0].code, 'HTTP_ERROR');
+      assert.equal(report.rows[0].failure, 'upstream_failure');
+    }
+    assert.equal(report.rows[0].cleanup, 'complete');
+    assert.equal(report.rows[0].sourceUnchanged, true);
+    const evidence = text + result.stdout + result.stderr;
+    for (const secret of [origin, username, password, html.password, authorization, html.href]) {
+      assert.equal(evidence.includes(secret), false);
+    }
+  }
 });
 
 test('unavailable QYSG remote HTML is classified as upstream failure, not engine incompatibility', async t => {
@@ -919,10 +967,16 @@ test('Reader keeps failed initialization, thrown invocation and unload or close 
         'node_modules/@meowfilm/source-runtime/src', 'node_modules/@meowfilm/novel-rules']) {
         mkdirSync(join(payload, path), { recursive: true });
       }
-      for (const file of ['bootstrap.mjs', 'client.mjs', 'contracts.mjs', 'modules/source-candidates.mjs',
+      for (const file of ['bootstrap.mjs', 'client.mjs', 'modules/source-candidates.mjs',
         'modules/source-library.mjs', 'modules/source-web.mjs', 'modules/source-rules.mjs']) {
         cpSync(join('apps/runtime', file), join(payload, 'app', file));
       }
+      const sourceContract = { ...contracts.source, codes: [...contracts.source.codes] };
+      writeFileSync(join(payload, 'app/contracts.mjs'), `
+        const source = ${JSON.stringify(sourceContract)};
+        source.codes = new Set(source.codes);
+        export const contracts = { source };
+      `);
       cpSync('packages/runtime-bridge', join(payload, 'node_modules/@meowfilm/runtime-bridge'), { recursive: true });
       cpSync('packages/novel-rules/novel-rules.js', join(payload, 'node_modules/@meowfilm/novel-rules/novel-rules.js'));
       writeFileSync(join(payload, 'runtime-manifest.json'), JSON.stringify({
@@ -975,7 +1029,8 @@ test('Reader keeps failed initialization, thrown invocation and unload or close 
       const result = await run([
         '--scripts', file, '--payload', payload, '--output', output, '--live',
       ]);
-      assert.notEqual(result.code, 0);
+      assert.equal(result.code, 1, exitEvidence(result));
+      assert.equal(result.stderr, '', exitEvidence(result));
       const text = readFileSync(output, 'utf8'), report = JSON.parse(text);
       const row = report.rows[0];
       assert.equal(report.summary.initialized, scenario === 'initialization' ? 0 : 1);

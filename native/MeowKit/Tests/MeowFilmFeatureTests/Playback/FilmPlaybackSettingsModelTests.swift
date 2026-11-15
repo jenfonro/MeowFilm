@@ -4,6 +4,38 @@ import MeowRuntime
 
 @MainActor
 final class FilmPlaybackSettingsModelTests: XCTestCase {
+    func testUnknownPreferenceEntriesAreProjectedAndPreservedUntilTheirOrderIsEdited() async throws {
+        var fields = try FilmPlaybackPreferences.defaults.value.filmRequiredObject()
+        fields["ruleOrder"] = .array([.string("keyword"), .string("future-rule"),
+                                      .object(["extra": .bool(true)]), .string("quality")])
+        fields["panOrder"] = .array([.string("quark"), .string("future-provider"), .number(1), .string("baidu")])
+        fields["extra"] = .object(["ruleOrder": .string("unused")])
+        let original = RuntimeValue.object(fields)
+        let server = FilmPlaybackWireServer(handler: { operation, parameters in
+            operation == "settings.get" ? original : parameters
+        })
+        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        try await model.loadPreferences()
+        XCTAssertEqual(model.preferences?.ruleOrder, [.keyword, .quality])
+        XCTAssertEqual(model.preferences?.panOrder, [.quark, .baidu])
+        XCTAssertEqual(model.preferences?.iosAutoPrepare, true)
+        model.edit { $0.keywords = ["新关键词"] }
+        try await model.savePreferences()
+        XCTAssertEqual(model.preferences?.keywords, ["新关键词"])
+        XCTAssertEqual(model.preferences?.value.filmObject?["ruleOrder"], original.filmObject?["ruleOrder"])
+        XCTAssertEqual(model.preferences?.value.filmObject?["panOrder"], original.filmObject?["panOrder"])
+        model.edit { $0.ruleOrder = [.quality, .keyword] }
+        try await model.savePreferences()
+        XCTAssertEqual(model.preferences?.value.filmObject?["ruleOrder"], .array([.string("quality"), .string("keyword")]))
+        XCTAssertEqual(model.preferences?.value.filmObject?["panOrder"], original.filmObject?["panOrder"])
+        let calls = await server.calls()
+        XCTAssertEqual(calls.map(\.0), ["settings.get", "settings.set", "settings.set"])
+        let firstSave = try XCTUnwrap(calls.dropFirst().first)
+        XCTAssertEqual(firstSave.1.filmObject?["ruleOrder"], original.filmObject?["ruleOrder"])
+        XCTAssertEqual(firstSave.1.filmObject?["panOrder"], original.filmObject?["panOrder"])
+        XCTAssertEqual(calls.last?.1, model.preferences?.value)
+    }
+
     func testFailedSaveKeepsPublishedPreferencesAndEditableDraft() async throws {
         let server = FilmPlaybackWireServer(handler: { operation, _ in
             if operation == "settings.set" { throw FilmPlaybackError(code: "STORAGE_ERROR") }

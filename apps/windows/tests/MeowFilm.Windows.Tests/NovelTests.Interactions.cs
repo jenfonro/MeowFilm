@@ -30,7 +30,7 @@ public static partial class NovelTests
             var actual = await rules.TransformAsync(input.GetProperty("title").GetString()!,
                 input.GetProperty("blocks").Deserialize<NovelBlock[]>(NovelJson.Options)!,
                 new("a", 1, "https://fixture.test/book", book.GetProperty("name").GetString()!, NovelJson.Text(book, "author")), source,
-                input.GetProperty("rules").Deserialize<NovelRule[]>(NovelJson.Options)!, input.GetProperty("conversion").GetString()!);
+                input.GetProperty("rules"), input.GetProperty("conversion").GetString()!);
             Check(JsonElement.DeepEquals(actual, fixture.GetProperty("expected")), fixture.GetProperty("name").GetString()!);
             Console.WriteLine("FIXTURE " + fixture.GetProperty("name").GetString());
         }

@@ -291,7 +291,7 @@ public final class FilmSearchSession: ObservableObject {
             // Stop acknowledges only control state, never its newly settled data.
             var state = snapshot.sessionID == value.sessionID ? snapshot :
                 FilmSearchSnapshot(sessionID: value.sessionID, query: snapshot.query)
-            state.sequence = value.sequence; state.revision = value.revision; state.round = value.round
+            state.sequence = value.sequence; state.revision = value.revision
             state.siteState = value.siteState; state.metadataState = value.metadataState
             state.loading = value.loading; state.hasMore = value.hasMore; state.noSources = value.noSources
             snapshot = state

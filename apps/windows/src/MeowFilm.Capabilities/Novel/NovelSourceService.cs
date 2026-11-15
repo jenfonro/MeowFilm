@@ -46,7 +46,7 @@ public sealed class NovelSourceService(IRuntimeClient runtime)
             if (!onlyMissing || !initialized)
             {
                 var result = await CallAsync("library.list", new { }, ct);
-                Publish(NovelJson.Decode<NovelSource[]>(result.GetProperty("sources")));
+                Publish(result.GetProperty("sources").EnumerateArray().Select(NovelSource.From).ToArray());
             }
             return true;
         }
@@ -220,7 +220,7 @@ public sealed class NovelSourceService(IRuntimeClient runtime)
         try
         {
             var receipt = await CallAsync("library.save", new { installationId = source.InstallationId, expectedRevision = source.Revision, definition }, ct);
-            var saved = NovelJson.Decode<NovelSource>(receipt.GetProperty("source"));
+            var saved = NovelSource.From(receipt.GetProperty("source"));
             // The save receipt is authoritative. A subsequent list failure must
             // not lose its revision and make retrying this editor stale.
             Publish(sources.Where(s => s.InstallationId != saved.InstallationId).Append(saved).ToArray());
@@ -241,7 +241,7 @@ public sealed class NovelSourceService(IRuntimeClient runtime)
         {
             var value = await CallAsync(operation, payload, ct);
             var list = await CallAsync("library.list", new { }, ct);
-            Publish(NovelJson.Decode<NovelSource[]>(list.GetProperty("sources")));
+            Publish(list.GetProperty("sources").EnumerateArray().Select(NovelSource.From).ToArray());
             return value;
         }
         finally { changes.Release(); }

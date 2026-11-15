@@ -32,7 +32,6 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
             XCTAssertTrue(session.snapshot.hasMore)
             session.loadMore(); await session.drain()
             XCTAssertEqual(session.snapshot.siteItems.count, 126)
-            XCTAssertEqual(session.snapshot.round, 2)
             XCTAssertFalse(session.snapshot.hasMore)
             let context = session.context(for: try XCTUnwrap(session.snapshot.cards.first))
             XCTAssertEqual(context.snapshot.query, "原查询")
@@ -166,7 +165,7 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         XCTAssertEqual(results.searchTargetID, "film")
         session.loadMore(); await session.drain()
         try await waitFor { session.snapshot.cards.first?.members.count == 4 }
-        XCTAssertEqual(session.snapshot.round, 2); XCTAssertFalse(session.snapshot.hasMore)
+        XCTAssertFalse(session.snapshot.hasMore)
         try await navigate(root.navigation, to: { $0 is FilmDetailViewController }) {
             content.collectionView(grid, didSelectItemAt: IndexPath(item: 0, section: 0))
         }

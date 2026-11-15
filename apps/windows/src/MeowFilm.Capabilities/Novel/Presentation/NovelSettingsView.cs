@@ -130,7 +130,7 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
         if (source is not null)
         {
             var current = await module.Sources.GetAsync(source, token);
-            source = NovelJson.Decode<NovelSource>(current.GetProperty("source")); definition = NovelJson.Text(current, "definition");
+            source = NovelSource.From(current.GetProperty("source")); definition = NovelJson.Text(current, "definition");
         }
         var editor = new NovelSourceEditor(protocol, definition);
         // Keep the controls/tabs fixed while only the selected form scrolls inside the dialog viewport.
@@ -145,9 +145,9 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
             {
                 var result = await module.Sources.ImportAsync(text: text, token: ct);
                 var errors = ImportErrors(result).ToArray(); if (errors.Length > 0) throw new InvalidDataException(string.Join("\n", errors));
-                source = NovelJson.Decode<NovelSource[]>(result.GetProperty("sources")).Single();
+                source = result.GetProperty("sources").EnumerateArray().Select(NovelSource.From).Single();
             }
-            else source = NovelJson.Decode<NovelSource>((await module.Sources.SaveAsync(source, text, ct)).GetProperty("source"));
+            else source = NovelSource.From((await module.Sources.SaveAsync(source, text, ct)).GetProperty("source"));
             module.Notify("书源已保存"); return false;
         }, token, applicationOverlay: true);
     }

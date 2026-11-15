@@ -11,8 +11,10 @@ final class FilmSearchSessionTests: XCTestCase {
     func testCompleteNodePagesAndBothModesKeepExactOrderAndEveryRawField() async throws {
         let first = (0..<126).map { F.row(.number(Double($0)), key: "site:\($0)", title: "标题\($0)") }
         let more = F.row(.string("next"), key: "site:next", title: "下一页")
-        let rpc = FilmSearchRPCFixture(F.snapshot(hasMore: true, cards: Array(first.reversed()), raw: first, items: first))
-        await rpc.setNext([F.snapshot(2, round: 2, cards: Array(first.reversed()) + [more], raw: first + [more], items: first + [more])])
+        var initial = try F.snapshot(hasMore: true, cards: Array(first.reversed()), raw: first, items: first).filmRequiredObject()
+        initial["round"] = .object(["unused": .bool(true)])
+        let rpc = FilmSearchRPCFixture(.object(initial))
+        await rpc.setNext([F.snapshot(2, cards: Array(first.reversed()) + [more], raw: first + [more], items: first + [more])])
         let service = filmSearchService(rpc), session = try service.session(for: "原查询")
         await session.drain()
         XCTAssertEqual(session.snapshot.siteItems, first)
@@ -22,7 +24,8 @@ final class FilmSearchSessionTests: XCTestCase {
         session.loadMore(); await session.drain()
         XCTAssertEqual(session.snapshot.siteItems.count, 127)
         XCTAssertEqual(session.snapshot.cards.map(\.value), Array(first.reversed()) + [more])
-        XCTAssertEqual(session.snapshot.round, 2); XCTAssertFalse(session.snapshot.hasMore)
+        XCTAssertEqual(session.snapshot.sequence, 2); XCTAssertEqual(session.snapshot.revision, 2)
+        XCTAssertFalse(session.snapshot.hasMore)
         session.loadMore(); await session.drain()
         let calls = await rpc.calls
         XCTAssertEqual(calls.map(\.0), ["search.open", "search.command"])
@@ -202,7 +205,7 @@ final class FilmSearchSessionTests: XCTestCase {
         initial["metadataSearch"] = .object(["results": .array([.object(["id": .number(7)])])])
         initial["metadataQuery"] = .string("原元数据查询")
         initial["metadataDetails"] = .object(["movie:7": .object(["overview": .string("旧资料")])])
-        var settled = try F.snapshot(3, round: 2, hasMore: true, site: "cancelled", metadata: "cancelled",
+        var settled = try F.snapshot(3, hasMore: true, site: "cancelled", metadata: "cancelled",
             cards: [row, late], raw: [row, late]).filmRequiredObject()
         settled["tmdbItems"] = .array([.object(["id": .number(8)])])
         settled["metadataSearch"] = .object(["results": .array([.object(["id": .number(8)])])])
@@ -235,7 +238,7 @@ final class FilmSearchSessionTests: XCTestCase {
         await gate.release(); await session.drain()
         XCTAssertEqual(session.snapshot.sessionID, F.id)
         XCTAssertEqual(session.snapshot.sequence, 3); XCTAssertEqual(session.snapshot.revision, 3)
-        XCTAssertEqual(session.snapshot.round, 2); XCTAssertTrue(session.snapshot.hasMore)
+        XCTAssertTrue(session.snapshot.hasMore)
         XCTAssertFalse(session.snapshot.loading); XCTAssertEqual(session.snapshot.siteState, .cancelled)
         XCTAssertEqual(session.snapshot.metadataState, .cancelled)
         XCTAssertEqual(session.snapshot.siteItems, displayed.siteItems)

@@ -10,6 +10,27 @@ public sealed record NovelSource(string InstallationId, long Revision, string Na
     double RespondTime = 180000, bool HasExplore = false)
 {
     public override string ToString() => Name;
+    internal static NovelSource From(JsonElement value)
+    {
+        using var buffer = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            foreach (var property in value.EnumerateObject())
+            {
+                if (property.Name is "weight" or "lastUpdateTime" or "respondTime")
+                    writer.WriteNumber(property.Name, property.Value.ValueKind == JsonValueKind.Number &&
+                        property.Value.TryGetDouble(out var number) && double.IsFinite(number)
+                            ? number : property.Name == "respondTime" ? 180000 : 0);
+                else if (property.NameEquals("hasExplore"))
+                    writer.WriteBoolean(property.Name, property.Value.ValueKind == JsonValueKind.True);
+                else property.WriteTo(writer);
+            }
+            writer.WriteEndObject();
+        }
+        using var document = JsonDocument.Parse(buffer.ToArray());
+        return NovelJson.Decode<NovelSource>(document.RootElement);
+    }
 }
 public sealed record NovelAnchor(string ChapterUrl = "", string ChapterTitle = "", int ChapterIndex = 0,
     int BlockIndex = 0, int Utf16Offset = 0, double Ratio = 0);
@@ -149,12 +170,18 @@ internal static class NovelJson
 
 internal sealed class NovelBlockConverter : JsonConverter<NovelBlock>
 {
+    public override bool HandleNull => true;
     public override NovelBlock Read(ref Utf8JsonReader reader, Type type, JsonSerializerOptions options)
     {
         using var document = JsonDocument.ParseValue(ref reader); var value = document.RootElement;
         string kind = NovelJson.Text(value, "type");
         if (kind is not ("text" or "image")) throw new JsonException();
-        return new(kind, NovelJson.Text(value, "text"), NovelJson.Text(value, "src"), NovelJson.Text(value, "alt"));
+        string member = kind == "text" ? "text" : "src";
+        if (!value.TryGetProperty(member, out var material) || material.ValueKind != JsonValueKind.String)
+            throw new JsonException();
+        string content = material.GetString()!;
+        if (kind == "image" && string.IsNullOrWhiteSpace(content)) throw new JsonException();
+        return kind == "text" ? new(kind, Text: content) : new(kind, Src: content, Alt: NovelJson.Text(value, "alt"));
     }
     public override void Write(Utf8JsonWriter writer, NovelBlock value, JsonSerializerOptions options)
     {

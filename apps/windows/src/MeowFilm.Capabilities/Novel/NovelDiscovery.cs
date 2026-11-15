@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Text.Json;
 
 namespace MeowFilm.Capabilities;
 
@@ -88,7 +89,7 @@ public sealed partial class NovelCapability
                     var result = await Sources.InvokeAsync(source, "exploreKinds", new { }, cancellation);
                     cancellation.ThrowIfCancellationRequested();
                     if (generation != discoveryGeneration) return false;
-                    nextKinds = NovelJson.Decode<NovelKind[]>(result.GetProperty("kinds"));
+                    nextKinds = ReadDiscoveryKinds(result.GetProperty("kinds"));
                     nextKind = nextKinds.FirstOrDefault(k => !string.IsNullOrWhiteSpace(k.Url) && k.Url == requestedKind?.Url)
                         ?? nextKinds.FirstOrDefault(k => !string.IsNullOrWhiteSpace(k.Url));
                 }
@@ -104,7 +105,7 @@ public sealed partial class NovelCapability
                 var page = await Sources.InvokeAsync(source, "explore", new { url = nextKind.Url, page = nextPage }, cancellation);
                 cancellation.ThrowIfCancellationRequested();
                 if (generation != discoveryGeneration) return false;
-                var books = page.GetProperty("books").EnumerateArray().Select(item => NovelBook.From(item, source)).ToArray();
+                var books = ReadDiscoveryBooks(page.GetProperty("books"), source);
                 cancellation.ThrowIfCancellationRequested();
                 // A same-target refresh commits the first page and its kinds together.
                 Kinds = nextKinds; ExploreKind = nextKind;
@@ -139,6 +140,30 @@ public sealed partial class NovelCapability
                 }
             }
         }, token);
+    }
+
+    private static NovelKind[] ReadDiscoveryKinds(JsonElement values)
+    {
+        var result = new List<NovelKind>();
+        foreach (var value in values.EnumerateArray())
+            if (value.ValueKind == JsonValueKind.Object &&
+                value.TryGetProperty("title", out var title) && title.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrWhiteSpace(title.GetString()) &&
+                value.TryGetProperty("url", out var url) && url.ValueKind == JsonValueKind.String)
+                result.Add(new(title.GetString()!, url.GetString()!));
+        if (values.GetArrayLength() > 0 && result.Count == 0) throw new JsonException("INVALID_DISCOVERY_KINDS");
+        return result.ToArray();
+    }
+    private static NovelBook[] ReadDiscoveryBooks(JsonElement values, NovelSource source)
+    {
+        var result = new List<NovelBook>();
+        foreach (var value in values.EnumerateArray())
+            if (value.ValueKind == JsonValueKind.Object &&
+                !string.IsNullOrWhiteSpace(NovelJson.Text(value, "bookUrl")) &&
+                !string.IsNullOrWhiteSpace(NovelJson.Text(value, "name")))
+                result.Add(NovelBook.From(value, source));
+        if (values.GetArrayLength() > 0 && result.Count == 0) throw new JsonException("INVALID_DISCOVERY_BOOKS");
+        return result.ToArray();
     }
 
     internal Task RetryDiscoveryAsync(CancellationToken token) =>

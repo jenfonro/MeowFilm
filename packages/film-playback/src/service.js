@@ -989,7 +989,7 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
       epoch === session.metadataEpoch && browsing === session.browseGeneration;
     try {
       const rows = await data.metadataSources(session.target, {
-        metadata: session.metadata, rules: session.rules, canSchedule: admitted });
+        rules: session.rules, canSchedule: admitted });
       if (!admitted()) return;
       const sources = rows.map(row => ({ ...clone(row), id: metadataIdentity(row) }));
       // A successful discovery is the current proof set. Retaining an omitted

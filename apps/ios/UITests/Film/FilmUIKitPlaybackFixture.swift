@@ -76,7 +76,7 @@ enum FilmUIKitPlaybackFixture {
             "browsing": browsing ?? self.browsing(),
             "episodes": .array(episodes ?? (kind == .movie ? [] : self.episodes())),
             "candidates": .array(candidates), "current": .null, "attempt": .null,
-            "searchComplete": .bool(false), "preferences": FilmPlaybackPreferences.defaults.value,
+            "searchComplete": .bool(false),
             "shortVideo": .bool(shortVideo), "previewEpisodes": .bool(false), "reportError": .null,
         ]
         if let attemptID {

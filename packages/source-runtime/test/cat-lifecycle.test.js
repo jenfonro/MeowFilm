@@ -75,6 +75,22 @@ test('CatVod shares a successful automatic init but not ordinary action I/O or r
     assert.equal(inits, 1);
   });
 
+test('CatVod actions do not import unrelated Reader book and chapter variables', async t => {
+  const { session, calls } = await catSession(t, call => call.action === 'search'
+    ? { keyword: call.payload.keyword } : null);
+  const expected = await session.invoke('search', { keyword: 'same' });
+  for (const variable of ['[1]', [null], { extra: ['unused'] }]) {
+    const payload = { keyword: 'same', book: { variable }, chapter: { variable } };
+    assert.deepEqual(await session.invoke('search', payload), expected);
+    assert.deepEqual(calls.at(-1).payload, payload);
+    await session.drain();
+    assert.equal(session.kernel.registries.size, 0);
+    assert.equal(session.kernel.invocations.size, 0);
+    assert.equal(session.kernel.adapterTasks.size, 0);
+  }
+  assert.equal(calls.filter(call => call.action === 'init').length, 1);
+});
+
 test('CatVod cancelling an init waiter leaves its owner and the next waiter live',
   { timeout: 10000 }, async t => {
     const entered = deferred(), release = deferred();

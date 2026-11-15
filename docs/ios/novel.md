@@ -13,6 +13,11 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
   搜索逐源记录失败与页码，来源 revision 变化取消旧代；隐藏查询返回后才重新请求。
   `NovelSourceClient` 在搜索／发现页内隔离不可消费的书籍，保留健康兄弟；
   空页正常结束追加，非空页全部不可用或缺少列表则失败，不提前推进页码。
+- `NovelSource` 在 list／get／import／save 回执中共用来源投影；
+  weight／lastUpdateTime／respondTime 只接受可选数字，hasExplore 只接受可选布尔值，
+  不可消费时视为未提供，排序和管理菜单沿用缺省展示。安装身份、revision、启用状态
+  和 actions 继续强类型解码，管理指标不授予执行能力。当前 Node producer 已归一这些指标；
+  原生可选投影不改变运行器保存的定义或来源退休／租约边界。
 - `NovelLibrary` 使用 `novel.library.v1` 原子文档，保存本地 UUID、书架／历史、
   锚点、排版和净化规则。decode 后先校验语义；写入使用 CAS，失败不发布内存快照、
   不覆盖旧字节。沿用文档层 8 MiB 资源边界，不限制书籍、来源或搜索结果数量。

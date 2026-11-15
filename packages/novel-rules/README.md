@@ -22,6 +22,10 @@ and author are required to group across sources. Unknown authors remain separate
 per installation and book URL, independent of arrival order. Repeated source
 results update that candidate in place. The returned matching key is not a
 persistent book ID: enriching an author must not rename a native saved record.
+Merge isolates non-object entries and candidates, retaining healthy candidates
+in source order. A non-array root or a list containing only unusable candidates
+fails; empty arrays and empty candidate groups remain empty. Incomplete objects
+remain separate when they have no usable matching identity.
 
 Chapter matching first uses a unique URL, then a unique normalized title, excluding
 volume headers. Chinese chapter numbers and fullwidth/punctuation differences
@@ -38,7 +42,8 @@ capture substitutions); literal replacement treats `$` literally. Scope and
 exclusion accept comma, semicolon or newline-separated exact source URLs or
 normalized book names. Empty scope means all; exclusion wins. Disabled,
 out-of-scope rules and rules without target text do not compile patterns or
-consume invalid rule materials. Consecutive text
+consume invalid rule materials. A scope mismatch does not read `excludeScope`;
+applicable rules still require usable scope and exclusion strings. Consecutive text
 blocks are paragraphs joined with newlines for replacement, including
 cross-paragraph matches; changed text is split back into paragraphs. Images keep
 their URLs, metadata and relative order unchanged and separate text runs. A rule

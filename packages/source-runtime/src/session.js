@@ -201,14 +201,24 @@ class SessionKernel {
 
   beginInvocation(id, payload) {
     sourceRequire(!this.registries.has(id));
+    this.registries.set(id, this.createRegistry());
+    this.invocations.set(id, {
+      variableInputs: [payload.book?.variable, payload.chapter?.variable],
+      variables: null, sourceWrites: new Map(), sourceVariable: undefined,
+    });
+  }
+
+  ruleVariables(id) {
+    const entry = this.invocations.get(id);
+    if (!entry || entry.variables) return entry?.variables;
     const variables = new Map();
-    for (let value of [payload.book?.variable, payload.chapter?.variable]) {
+    for (let value of entry.variableInputs) {
       if (typeof value === 'string') { try { value = JSON.parse(value); } catch { value = null; } }
       const entries = Array.isArray(value) ? value : value && typeof value === 'object' ? Object.entries(value) : [];
       for (const [key, item] of entries) variables.set(String(key), item ?? '');
     }
-    this.registries.set(id, this.createRegistry());
-    this.invocations.set(id, { variables, sourceWrites: new Map(), sourceVariable: undefined });
+    entry.variables = variables;
+    return variables;
   }
 
   endInvocation(id) {
@@ -250,19 +260,19 @@ class SessionKernel {
   }
 
   ruleVariableGet(key, id, fallback = '') {
-    const variables = this.invocations.get(id)?.variables;
+    const variables = this.ruleVariables(id);
     return variables ? sourceClone(variables.get(String(key)) ?? fallback) : this.state.get('rule', key, fallback);
   }
 
   ruleVariableSet(key, value, id) {
-    const variables = this.invocations.get(id)?.variables;
+    const variables = this.ruleVariables(id);
     if (!variables) return this.state.set('rule', key, value);
     variables.set(String(key), sourceClone(value ?? ''));
     return value;
   }
 
   variableValue(id) {
-    const values = this.invocations.get(id)?.variables;
+    const values = this.ruleVariables(id);
     return values?.size ? JSON.stringify(Object.fromEntries(values)) : null;
   }
 

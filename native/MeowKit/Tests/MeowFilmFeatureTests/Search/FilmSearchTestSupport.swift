@@ -23,13 +23,13 @@ enum FilmSearchWireFixture {
             "sourceKind": .string("site"), "siteLabel": .string("聚合"), "textBadge": .string("更新至12集"),
             "groupKey": .string("opaque-group"), "aggregateItems": .array(members)])
     }
-    static func snapshot(_ sequence: Int = 1, query: String = "原查询", round: Int = 1,
+    static func snapshot(_ sequence: Int = 1, query: String = "原查询",
                          loading: Bool = false, hasMore: Bool = false, noSources: Bool = false,
                          site: String = "completed", metadata: String = "unavailable",
                          cards: [RuntimeValue] = [], raw: [RuntimeValue] = [], items: [RuntimeValue]? = nil,
                          id: UUID = FilmSearchWireFixture.id) -> RuntimeValue {
         .object(["sessionId": .string(id.uuidString.lowercased()), "sequence": .number(Double(sequence)),
-            "revision": .number(Double(sequence)), "query": .string(query), "round": .number(Double(round)),
+            "revision": .number(Double(sequence)), "query": .string(query),
             "loading": .bool(loading), "hasMore": .bool(hasMore), "noSources": .bool(noSources),
             "siteState": .string(site), "metadataState": .string(metadata), "siteItems": .array(items ?? raw),
             "tmdbItems": .array([]), "metadataSearch": .null, "metadataQuery": .string(query),

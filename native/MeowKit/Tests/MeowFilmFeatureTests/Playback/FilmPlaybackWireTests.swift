@@ -3,27 +3,19 @@ import MeowRuntime
 @testable import MeowFilmFeature
 
 final class FilmPlaybackWireTests: XCTestCase {
-    func testUnknownPreferenceEntriesAreNotExecutedOrAllowedToRejectTheSnapshot() throws {
-        var preferences = try FilmPlaybackPreferences.defaults.value.filmRequiredObject()
-        preferences["ruleOrder"] = .array([.string("keyword"), .string("future-rule"),
-                                           .object(["extra": .bool(true)]), .string("quality")])
-        preferences["panOrder"] = .array([.string("quark"), .string("future-provider"), .number(1), .string("baidu")])
-        preferences["extra"] = .object(["ruleOrder": .string("unused")])
-        var fields = try FilmPlaybackFixture.snapshot().filmRequiredObject()
-        fields["preferences"] = .object(preferences)
-        let snapshot = try FilmPlaybackSnapshot(value: .object(fields))
-        XCTAssertEqual(snapshot.preferences.ruleOrder, [.keyword, .quality])
-        XCTAssertEqual(snapshot.preferences.panOrder, [.quark, .baidu])
-        XCTAssertEqual(snapshot.preferences.iosAutoPrepare, true)
-        XCTAssertEqual(snapshot.preferences.value.filmObject?["ruleOrder"], preferences["ruleOrder"])
-        XCTAssertEqual(snapshot.preferences.value.filmObject?["panOrder"], preferences["panOrder"])
-        var edited = snapshot.preferences
-        edited.keywords = ["新关键词"]
-        XCTAssertEqual(edited.value.filmObject?["ruleOrder"], preferences["ruleOrder"])
-        XCTAssertEqual(edited.value.filmObject?["panOrder"], preferences["panOrder"])
-        edited.ruleOrder = [.quality, .keyword]
-        XCTAssertEqual(edited.value.filmObject?["ruleOrder"], .array([.string("quality"), .string("keyword")]))
-        XCTAssertEqual(edited.value.filmObject?["panOrder"], preferences["panOrder"])
+    func testUnconsumedPreferencesDoNotRejectAPreparationAttempt() throws {
+        let value = FilmPlaybackFixture.snapshot(stage: "prepared",
+            attempt: FilmPlaybackFixture.attempt("prepared", prepareOnly: true))
+        let expected = try FilmPlaybackSnapshot(value: value)
+        for preferences in [RuntimeValue?.none, .null, .bool(false), .string("unused"),
+                            .object(["iosAutoPrepare": .array([])])] {
+            var fields = try value.filmRequiredObject()
+            fields["preferences"] = preferences
+            XCTAssertEqual(try FilmPlaybackSnapshot(value: .object(fields)), expected)
+        }
+        XCTAssertEqual(expected.attempt?.id, "prepared")
+        XCTAssertEqual(expected.attempt?.prepareOnly, true)
+        XCTAssertNil(expected.current)
     }
 
     func testUnusableSupplementDoesNotRejectPrimaryMetadataOrAnActiveAttempt() throws {
@@ -175,14 +167,61 @@ final class FilmPlaybackWireTests: XCTestCase {
         XCTAssertEqual(request.value.filmObject?["cacheEntries"], .array(entries))
     }
     func testFailedCurrentBrowsingCannotDisplayOldPlayableRows() throws {
-        let browsing: RuntimeValue = .object([
-            "sourceId": .string("result-b"), "lineId": .null, "loading": .bool(false), "error": .string("UPSTREAM_HTTP"),
-            "lines": .array([]), "episodes": .array([.object(["id": .string("old"), "name": .string("old"),
-                                                             "candidateId": .string("old-candidate")])]),
-        ])
-        let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(browsing: browsing))
-        XCTAssertTrue(snapshot.browsing.files.isEmpty)
-        XCTAssertEqual(snapshot.browsing.sourceID, "result-b")
+        for unused in [RuntimeValue?.none, .null, .bool(false), .object(["unused": .number(1)]),
+                       .array([.null, .object(["id": .string("missing-name")])]),
+                       .array([.object(["id": .string("old"), "name": .string("old"),
+                                       "candidateId": .string("old-candidate")])])] {
+            var browsing: RuntimeObject = [
+                "sourceId": .string("result-b"), "lineId": .number(0), "loading": .bool(false),
+                "refreshing": .bool(true), "error": .string("UPSTREAM_HTTP"),
+                "lines": .array([.object(["id": .number(0), "label": .string("真实线路")])]),
+            ]
+            browsing["episodes"] = unused; browsing["originalEpisodes"] = unused
+            let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
+                current: FilmPlaybackFixture.current("playing"), browsing: .object(browsing)))
+            XCTAssertEqual(snapshot.browsing.error, "UPSTREAM_HTTP")
+            XCTAssertTrue(snapshot.browsing.files.isEmpty); XCTAssertTrue(snapshot.browsing.originalFiles.isEmpty)
+            XCTAssertEqual(snapshot.browsing.sourceID, "result-b")
+            XCTAssertEqual(snapshot.browsing.lineID, .number(0))
+            XCTAssertEqual(snapshot.browsing.lines.map(\.label), ["真实线路"])
+            XCTAssertTrue(snapshot.browsing.refreshing)
+            XCTAssertEqual(snapshot.current?.attemptID, "playing")
+            XCTAssertEqual(snapshot.current?.candidate.lineID, .string("opaque-line"))
+        }
+    }
+
+    func testBrowsingFailureStillConsumesLinesRefreshingAndIndependentCurrent() throws {
+        let browsing: RuntimeObject = [
+            "loading": .bool(false), "error": .string("UPSTREAM_HTTP"), "lines": .array([]),
+        ]
+        for (key, value) in [("lines", RuntimeValue.bool(false)),
+                             ("lines", .array([.object(["label": .string("缺少身份")])])),
+                             ("refreshing", .string("true"))] {
+            var invalid = browsing; invalid[key] = value
+            XCTAssertThrowsError(try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(browsing: .object(invalid)))) {
+                XCTAssertEqual($0 as? FilmPlaybackError, .invalidResponse)
+            }
+        }
+        XCTAssertThrowsError(try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
+            current: .object(["attemptId": .string("missing-candidate")]), browsing: .object(browsing)))) {
+            XCTAssertEqual($0 as? FilmPlaybackError, .invalidResponse)
+        }
+    }
+
+    func testSuccessfulBrowsingRequiresUsableFileListsAndIdentities() throws {
+        for key in ["episodes", "originalEpisodes"] {
+            for invalid in [RuntimeValue.object([:]), .array([.null]),
+                            .array([.object(["id": .string("missing-name")])]),
+                            .array([.object(["id": .number(0), "name": .string("错误身份")])])] {
+                var browsing: RuntimeObject = [
+                    "loading": .bool(false), "error": .null, "lines": .array([]), "episodes": .array([]),
+                ]
+                browsing[key] = invalid
+                XCTAssertThrowsError(try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(browsing: .object(browsing)))) {
+                    XCTAssertEqual($0 as? FilmPlaybackError, .invalidResponse)
+                }
+            }
+        }
     }
     func testRefreshingBrowseKeepsSuccessfulFilesAndDefaultsToFalseWhenAbsent() throws {
         let file: RuntimeValue = .object(["id": .string("old"), "name": .string("旧成功文件"),
@@ -272,6 +311,92 @@ final class FilmPlaybackWireTests: XCTestCase {
         XCTAssertEqual(snapshot.metadataError, "UPSTREAM_HTTP")
         let missing = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot())
         XCTAssertTrue(missing.metadataSources.isEmpty, "A module or title does not prove a provider association")
+    }
+
+    func testMetadataMenuKeepsHealthySiblingsAndPrimarySeasonsDespiteUnusableAuxiliaryRows() throws {
+        let selected: RuntimeObject = [
+            "id": .string("tmdb:tv:19"), "provider": .string("tmdb"), "metadataId": .number(19),
+            "kind": .string("tv"), "title": .string("主资料"),
+        ]
+        let other: RuntimeObject = [
+            "id": .string("douban:tv:0"), "provider": .string("douban"), "metadataId": .number(0),
+            "kind": .string("tv"), "title": .string("健康后项"),
+        ]
+        let metadata: RuntimeValue = .object([
+            "name": .string("主资料"), "seasons": .array([
+                .object(["id": .string("special"), "season_number": .number(0), "name": .string("主特别篇")]),
+            ]),
+        ])
+        let original = FilmDetail(item: .init(sourceID: "tmdb", id: "19", title: "原资料", kind: .tv))
+        for seasons in [RuntimeValue?.none, .null, .bool(false), .string("unused"),
+                        .object(["unused": .array([])]), .array([.null])] {
+            var row = selected; row["seasons"] = seasons
+            var last = other; last["seasons"] = seasons
+            var badProvider = selected; badProvider["id"] = .string("bad-provider")
+            badProvider["provider"] = .string("future")
+            var badKind = selected; badKind["id"] = .string("bad-kind"); badKind["kind"] = .string("future")
+            var badID = selected; badID["id"] = .string("bad-id"); badID["metadataId"] = .object([:])
+            let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(stage: "pending",
+                attempt: FilmPlaybackFixture.attempt("pending"), metadata: metadata,
+                episodes: [.object(["season": .number(0), "episode": .number(0), "name": .string("特别集")])],
+                metadataSources: [.object(row), .null, .object(badProvider), .object(badKind), .object(badID), .object(last)],
+                metadataSourceID: "tmdb:tv:19"))
+            XCTAssertEqual(snapshot.metadataSources.map(\.id), ["tmdb:tv:19", "douban:tv:0"])
+            XCTAssertEqual(snapshot.metadataSources.map(\.provider), [.tmdb, .douban])
+            XCTAssertEqual(snapshot.metadataSources.map(\.metadataID), [.number(19), .number(0)])
+            XCTAssertEqual(snapshot.attempt?.id, "pending")
+            let detail = FilmPlaybackPresentation.detail(snapshot, original: original)
+            XCTAssertEqual(detail.item.identity, original.item.identity)
+            XCTAssertEqual(detail.seasons.map(\.number), [0])
+            XCTAssertEqual(detail.seasons.map(\.title), ["主特别篇"])
+            XCTAssertEqual(detail.seasons.first?.episodes.map(\.number), [0])
+        }
+    }
+
+    func testSelectedMetadataReferenceRequiresAnExactStringOrNoSelection() throws {
+        let selected: RuntimeValue = .object([
+            "id": .string("0"), "provider": .string("tmdb"), "metadataId": .number(0),
+            "kind": .string("tv"), "title": .string("特别篇"),
+        ])
+        let value = FilmPlaybackFixture.snapshot(metadataSources: [selected], metadataSourceID: "0")
+        let snapshot = try FilmPlaybackSnapshot(value: value)
+        XCTAssertEqual(snapshot.metadataSourceID, "0")
+        XCTAssertEqual(snapshot.metadataSources.first?.metadataID, .number(0))
+        for invalid in [RuntimeValue.number(0), .object(["id": .string("0")]),
+                        .bool(false), .array([.string("0")]), .string("")] {
+            var fields = try value.filmRequiredObject(); fields["metadataSourceId"] = invalid
+            XCTAssertThrowsError(try FilmPlaybackSnapshot(value: .object(fields))) {
+                XCTAssertEqual($0 as? FilmPlaybackError, .invalidResponse)
+            }
+        }
+        for absent in [RuntimeValue?.none, .null] {
+            var fields = try value.filmRequiredObject(); fields["metadataSourceId"] = absent
+            let unselected = try FilmPlaybackSnapshot(value: .object(fields))
+            XCTAssertNil(unselected.metadataSourceID)
+            XCTAssertEqual(unselected.metadataSources.map(\.id), ["0"])
+        }
+    }
+
+    func testSelectedMetadataStillRequiresConfirmedProviderKindAndTypedIdentity() throws {
+        let selected: RuntimeObject = [
+            "id": .string("0"), "provider": .string("tmdb"), "metadataId": .number(0),
+            "kind": .string("tv"), "title": .string("特别篇"),
+        ]
+        var other = selected; other["id"] = .string("healthy"); other["metadataId"] = .string("0")
+        for (key, invalid) in [
+            ("id", RuntimeValue.object([:])), ("id", .number(0)), ("provider", .string("future")),
+            ("kind", .string("future")), ("metadataId", .object([:])), ("metadataId", .bool(false)),
+        ] {
+            var row = selected; row[key] = invalid
+            XCTAssertThrowsError(try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
+                metadataSources: [.object(row), .object(other)], metadataSourceID: "0"))) {
+                XCTAssertEqual($0 as? FilmPlaybackError, .invalidResponse)
+            }
+        }
+        XCTAssertThrowsError(try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
+            metadataSources: [.object(selected), .object(other)], metadataSourceID: "missing"))) {
+            XCTAssertEqual($0 as? FilmPlaybackError, .invalidResponse)
+        }
     }
 
     func testMediaReceiptAcceptsHTTPURLsWithoutHostPortOrResourcePathAdmission() throws {

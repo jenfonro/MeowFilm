@@ -262,9 +262,20 @@ internal sealed class FilmPlaybackSnapshot
         Target.Validate();
         EntryTarget = FilmJson.Target(FilmJson.Member(Raw, "entryTarget"));
         EntryTarget.Validate();
-        string metadataSourceId = FilmJson.Text(Raw, "metadataSourceId");
+        string metadataSourceId = FilmJson.Member(Raw, "metadataSourceId") switch
+        {
+            { ValueKind: JsonValueKind.Null or JsonValueKind.Undefined } => "",
+            { ValueKind: JsonValueKind.String } reference => reference.GetString()!,
+            _ => throw new FilmPlaybackException("INVALID_RESPONSE")
+        };
         SelectedMetadataSource = metadataSourceId.Length > 0
-            ? FilmJson.Array(Raw, "metadataSources").FirstOrDefault(row => FilmJson.Text(row, "id") == metadataSourceId) : default;
+            ? FilmJson.Array(Raw, "metadataSources").FirstOrDefault(row =>
+                FilmJson.Member(row, "id") is { ValueKind: JsonValueKind.String } identity &&
+                identity.GetString() == metadataSourceId) : default;
+        if (metadataSourceId.Length > 0 &&
+            (FilmJson.RequiredText(SelectedMetadataSource, "id") != metadataSourceId ||
+                FilmJson.RequiredText(SelectedMetadataSource, "provider") is not ("tmdb" or "douban")))
+            throw new FilmPlaybackException("INVALID_RESPONSE");
         string contentKind = FilmJson.Text(SelectedMetadataSource, "kind");
         ContentKind = contentKind is "movie" or "tv" ? contentKind : Target.Kind;
         MetadataCache = FilmMetadataCache.Read(FilmJson.Member(Raw, "metadataCache"));

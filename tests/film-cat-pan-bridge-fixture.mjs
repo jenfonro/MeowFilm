@@ -139,7 +139,7 @@ CatSession.prototype.start = function(...args) {
 `;
 }
 
-function catSource(origin) {
+function catSource(origin, searchDetailId) {
   return `
 const https = require('https');
 const upstream = (url, payload) => new Promise((resolve, reject) => {
@@ -161,7 +161,7 @@ const upstream = (url, payload) => new Promise((resolve, reject) => {
   request.end(body);
 });
 module.exports.search = (query, _quick, page) => ({ page: page || 1, pagecount: 1,
-  list: [{ vod_id: 'bridge-detail', vod_name: ${JSON.stringify(bridgeTitle)}, vod_year: '2025' }] });
+  list: [{ vod_id: ${JSON.stringify(searchDetailId)}, vod_name: ${JSON.stringify(bridgeTitle)}, vod_year: '2025' }] });
 const reference = (token, list) => Buffer.from(JSON.stringify({ fid: list.value.data.list[0].fid,
   stoken: token.value.data.stoken })).toString('base64');
 module.exports.detail = async id => {
@@ -222,7 +222,8 @@ module.exports.play = (_flag, id) => id === 'hls-master' ? {
 /** The only substitutes are Cat's outbound network and the pan/TMDB upstream I/O.
  * All script interception, provider parsing, transfers, business rules and HTTP
  * responses run through the production owners. No media body is ever served. */
-export async function startCatPanBridgeFixture({ scenario = 'success', interception = true } = {}) {
+export async function startCatPanBridgeFixture({ scenario = 'success', interception = true,
+  searchDetailId = 'bridge-detail' } = {}) {
   if (!bridgeScenarios.includes(scenario)) throw new Error('Unknown fixture scenario');
   mkdirSync(fixtureArea, { recursive: true });
   const dataRoot = mkdtempSync(join(fixtureArea, 'case-'));
@@ -511,7 +512,7 @@ export async function startCatPanBridgeFixture({ scenario = 'success', intercept
     settings.providers.uc = interception;
     writeFileSync(status.settingsPath, JSON.stringify(settings));
     await call('cat.script.refresh');
-    await client.upload('cat', 'cat-pan-bridge', 1, Buffer.from(catSource(controlUrl))).then(bridgeOkay);
+    await client.upload('cat', 'cat-pan-bridge', 1, Buffer.from(catSource(controlUrl, searchDetailId))).then(bridgeOkay);
     const installReply = await client.call('cat.script.install', { installationId: 'cat-pan-bridge',
       sourceRevision: 1, enabled: true, name: 'Bridge site' });
     if (installReply.ok !== true) {

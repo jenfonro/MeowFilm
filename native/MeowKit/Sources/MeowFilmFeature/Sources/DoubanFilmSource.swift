@@ -123,6 +123,7 @@ public struct DoubanFilmSource: FilmCategorySource {
                                   score: score(row["rating"]), subtitle: text(row["card_subtitle"]),
                                   metadataSeed: try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])))
         }
+        guard rows.isEmpty || !items.isEmpty else { throw FilmHomeError.invalidResponse }
         return items
     }
 

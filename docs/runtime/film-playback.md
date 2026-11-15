@@ -159,7 +159,9 @@ metadata: provider, path, query?, imageSize?, settings:{revision}
 
 请求身份、配置代次和原始时间必须来自实际 data owner。`data.cache.entry` 导出同一
 记录，不重置 TTL、不请求上游内容。旧代次／过期记录不成为新命中，partial 不冒充
-full。一个 32 MiB 有界内存缓存拥有数据、完整度、过期时间和 in-flight 合并；超预算
+full。可选 handoff 中内容无法消费的记录仅作为缓存 miss，健康记录继续接收并按需
+真实加载；请求身份、配置读取及取消错误仍按原语义失败，显式 seed 仍报告坏内容。
+一个 32 MiB 有界内存缓存拥有数据、完整度、过期时间和 in-flight 合并；超预算
 结果完整返回但不在内存保留，不截断业务页。站点数据、盘列表、stored、短效 URL
 随进程，仍分别按真实来源／账号／模式与短效期限失效。TMDB／豆瓣业务元数据另以
 `<dataRoot>/film-metadata/<provider>/<身份散列>.json` 原子持久，复用相同缓存owner；

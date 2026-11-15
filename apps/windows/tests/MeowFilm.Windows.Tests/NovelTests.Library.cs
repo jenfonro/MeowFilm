@@ -5,6 +5,7 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
+using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -151,6 +152,73 @@ public static partial class NovelTests
             }
             catch (DocumentStoreException error) { Check(error.Error == DocumentStoreError.Corrupt); }
             Check(broken.Writes == accepted && StoredLibrary(broken).GetProperty(section).ValueKind == JsonValueKind.False);
+        }
+    }
+    private static async Task RuleProjectionExecution()
+    {
+        const string text = """
+            {"version":1,"entries":[],"appearance":{},"rules":[
+              {"id":"name","name":{"extra":9007199254740993123456789},"unused":9007199254740993123456789,"group":"正文","pattern":"广告","replacement":"甲","isRegex":false},
+              {"id":"group","name":"第二条","group":[1,false],"pattern":"甲","replacement":"乙","isRegex":false,"order":1}]}
+            """;
+        await using var store = new MemoryStore { Bytes = Encoding.UTF8.GetBytes(text) };
+        var library = new NovelLibrary(store); await library.InitializeAsync();
+        var original = StoredLibrary(store).GetProperty("rules");
+        Check(library.Rules.Select(rule => rule.Id).SequenceEqual(["name", "group"]) &&
+            library.Rules[0].Name == "" && library.Rules[1].Group == "");
+        var runtime = new Runtime { Text = "广告正文" }; var sources = new NovelSourceService(runtime);
+        await using var engine = new RuleProbe(); await using var rules = new NovelRuleProgram(engine);
+        var session = new NovelBookSession(sources, library, rules, new("projection", "key", Book()));
+        NovelBookSession? restored = null;
+        try
+        {
+            await session.ContinueAsync(); Check(session.Blocks.Single().Text == "乙正文");
+            await session.SaveProgressAsync(new("chapter-1", "第一章", 0, 0, 1, .4));
+            int transforms = engine.Transforms;
+            await library.SaveAppearanceAsync(library.Appearance with { FontSize = 25 });
+            await library.SaveRulesAsync(library.Rules.Select(rule => rule with { }).ToArray());
+            await session.ContinueAsync();
+            Check(engine.Transforms == transforms && JsonElement.DeepEquals(original, StoredLibrary(store).GetProperty("rules")),
+                "An unrelated or equivalent save changed raw rules or reprocessed unchanged input.");
+            var reopened = new NovelLibrary(store); await reopened.InitializeAsync();
+            restored = new(sources, reopened, rules, reopened.Entries.Single());
+            await restored.ContinueAsync(); Check(restored.Blocks.Single().Text == "乙正文");
+            var blocks = restored.Blocks; var entry = restored.Entry; var chapter = restored.Chapter;
+            var invalid = new NovelRule { Id = "invalid", Pattern = "[", Order = 2 };
+            await reopened.SaveRulesAsync(reopened.Rules.Append(invalid).ToArray());
+            int writes = store.Writes;
+            try { await restored.ReprocessAsync(); throw new InvalidOperationException("A bad enabled rule disappeared from execution."); }
+            catch (BridgeException error) { Check(error.Code == "INVALID_REQUEST"); }
+            Check(ReferenceEquals(restored.Blocks, blocks) && restored.Entry == entry &&
+                ReferenceEquals(restored.Chapter, chapter) && store.Writes == writes &&
+                reopened.Rules.Single(rule => rule.Id == "invalid").Pattern == "[");
+            var raw = StoredLibrary(store).GetProperty("rules");
+            Check(JsonElement.DeepEquals(raw[0], original[0]) && JsonElement.DeepEquals(raw[1], original[1]));
+            RawNumber(raw[0].GetProperty("name"), "extra", "9007199254740993123456789");
+            RawNumber(raw[0], "unused", "9007199254740993123456789");
+            await reopened.SaveRulesAsync(reopened.Rules.Select(rule => rule.Id == "invalid" ? rule with { Enabled = false } : rule).ToArray());
+            await restored.ReprocessAsync(); Check(restored.Blocks.Single().Text == "乙正文" && restored.Entry.Anchor == entry.Anchor);
+        }
+        finally
+        {
+            if (restored is not null) await restored.PrepareShutdownAsync();
+            await session.PrepareShutdownAsync(); await sources.PrepareShutdownAsync();
+        }
+        foreach (string pattern in new[] { "null", "[]", "{}" })
+        {
+            await using var broken = new MemoryStore
+            {
+                Bytes = Encoding.UTF8.GetBytes("""{"version":1,"rules":[{"id":"bad","name":{},"group":[],"pattern":""" + pattern + "}]}")
+            };
+            var unreadable = new NovelLibrary(broken); await unreadable.InitializeAsync();
+            Check(unreadable.Rules.Count == 0);
+            try
+            {
+                await rules.TransformAsync("标题", [new("text", "正文")], Book(), Source(), unreadable.RuleInputs, "none");
+                throw new InvalidOperationException("Unprojectable execution material became an empty rule set.");
+            }
+            catch (BridgeException error) { Check(error.Code == "INVALID_REQUEST"); }
+            Check(broken.Writes == 0);
         }
     }
     private static async Task LibraryGuards()

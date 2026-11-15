@@ -39,6 +39,31 @@ public struct NovelSource: Codable, Equatable, Sendable, Identifiable {
     public var id: String { installationId }
 }
 
+extension NovelSource {
+    private enum CodingKeys: String, CodingKey {
+        case installationId, revision, name, sourceUrl, group, order, enabled, enabledExplore
+        case `protocol`, actions, errorCode, weight, lastUpdateTime, respondTime, hasExplore
+    }
+    public init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(installationId: try fields.decode(String.self, forKey: .installationId),
+            revision: try fields.decode(Int.self, forKey: .revision),
+            name: try fields.decode(String.self, forKey: .name),
+            sourceUrl: try fields.decode(String.self, forKey: .sourceUrl),
+            group: try fields.decode(String.self, forKey: .group),
+            order: try fields.decode(Double.self, forKey: .order),
+            enabled: try fields.decode(Bool.self, forKey: .enabled),
+            enabledExplore: try fields.decode(Bool.self, forKey: .enabledExplore),
+            protocol: try fields.decode(String.self, forKey: .protocol),
+            actions: try fields.decode([String].self, forKey: .actions),
+            errorCode: try fields.decodeIfPresent(String.self, forKey: .errorCode),
+            weight: try? fields.decode(Double.self, forKey: .weight),
+            lastUpdateTime: try? fields.decode(Double.self, forKey: .lastUpdateTime),
+            respondTime: try? fields.decode(Double.self, forKey: .respondTime),
+            hasExplore: try? fields.decode(Bool.self, forKey: .hasExplore))
+    }
+}
+
 /// Runtime locators remain separate from the local UUID. Metadata enrichment or
 /// source switching never changes a saved book's identity.
 public struct NovelBook: Codable, Equatable, Sendable, Identifiable {

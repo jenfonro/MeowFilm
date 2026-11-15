@@ -241,6 +241,149 @@ test('Legado WebView requests preserve absent optional method and body fields', 
   }]);
 });
 
+test('Legado raw list fallback rejects unusable JSON roots and preserves real empty arrays', async t => {
+  let data;
+  const session = new SourceSession({
+    installationId: 'legado-raw-lists', protocol: 'legado',
+    source: { ...legadoSource, exploreUrl: 'https://books.invalid/list',
+      ruleSearch: {}, ruleExplore: {}, ruleToc: { chapterName: '$.name', chapterUrl: '$.chapterUrl' } },
+    capabilities: capabilitiesFor({ '/search': () => data, '/list': () => data }),
+    createSandbox: sandboxFactory(),
+  });
+  t.after(() => session.close());
+  await session.start();
+  session.activate();
+  for (const [action, payload, key] of [
+    ['search', { keyword: 'fixture' }, 'books'],
+    ['explore', { url: 'https://books.invalid/list' }, 'books'],
+    ['toc', { bookUrl: 'https://books.invalid/book', tocUrl: 'https://books.invalid/list' }, 'chapters'],
+  ]) {
+    for (data of ['', 'not JSON', '[{"name":', '{}', 'null', 'false', '7', '"[]"']) {
+      await assert.rejects(session.invoke(action, payload), { code: 'SCRIPT_PROTOCOL_ERROR' });
+    }
+    data = '[]';
+    assert.deepEqual((await session.invoke(action, payload))[key], []);
+    data = JSON.stringify([{ name: 'One', bookUrl: '/book', chapterUrl: '/chapter' }]);
+    const items = (await session.invoke(action, payload))[key];
+    assert.equal(items.length, 1);
+    assert.equal(items[0].name, 'One');
+    assert.equal(items[0][key === 'books' ? 'bookUrl' : 'chapterUrl'],
+      `https://books.invalid/${key === 'books' ? 'book' : 'chapter'}`);
+  }
+});
+
+test('Legado explicit list selectors can return no matches without requiring a raw JSON array', async t => {
+  const session = new SourceSession({
+    installationId: 'legado-empty-selectors', source: { ...legadoSource,
+      exploreUrl: 'https://books.invalid/list', ruleExplore: legadoSource.ruleSearch },
+    protocol: 'legado',
+    capabilities: capabilitiesFor({
+      '/search': '<main>No matching books</main>',
+      '/list': '<main>No matching entries</main>',
+    }),
+    createSandbox: sandboxFactory(),
+  });
+  t.after(() => session.close());
+  await session.start();
+  session.activate();
+  assert.deepEqual((await session.invoke('search', { keyword: 'fixture' })).books, []);
+  assert.deepEqual((await session.invoke('explore', { url: 'https://books.invalid/list' })).books, []);
+  assert.deepEqual((await session.invoke('toc', { tocUrl: 'https://books.invalid/list' })).chapters, []);
+});
+
+test('Legado categories isolate bad rows while retaining title-only groups and URL-only entries', async t => {
+  let value;
+  const session = new SourceSession({
+    installationId: 'legado-categories',
+    source: { ...legadoSource, exploreUrl: '@js:categories()' }, protocol: 'legado',
+    capabilities: capabilitiesFor({}),
+    createSandbox: sandboxFactory({ evaluate: () => value }),
+  });
+  t.after(() => session.close());
+  await session.start();
+  session.activate();
+  const healthy = [
+    { title: 'Group', style: { width: 1 } },
+    { name: 'One', url: '/one', extra: { future: true } },
+    { url: '/two', style: 'unused' },
+  ];
+  const expected = { kinds: [
+    { title: 'Group', url: '', style: { width: 1 } },
+    { title: 'One', url: '/one', style: {} },
+    { title: '', url: '/two', style: {} },
+  ] };
+  for (const invalid of [null, 7, false, [], {}, { title: {} }, { url: [] }]) {
+    for (let index = 0; index <= healthy.length; index++) {
+      value = healthy.toSpliced(index, 0, invalid);
+      assert.deepEqual(await session.invoke('exploreKinds'), expected);
+    }
+    value = [invalid];
+    await assert.rejects(session.invoke('exploreKinds'), { code: 'SCRIPT_PROTOCOL_ERROR' });
+  }
+  for (value of [[], '[]', '', ' \n ']) {
+    assert.deepEqual(await session.invoke('exploreKinds'), { kinds: [] });
+  }
+  value = 'bad row\nOne::/one\n::/two\nGroup::';
+  assert.deepEqual(await session.invoke('exploreKinds'), { kinds: [
+    { title: 'One', url: '/one', style: {} },
+    { title: '', url: '/two', style: {} },
+    { title: 'Group', url: '', style: {} },
+  ] });
+  for (value of ['bad row', '[{"title":', {}, null, false, 7]) {
+    await assert.rejects(session.invoke('exploreKinds'), { code: 'SCRIPT_PROTOCOL_ERROR' });
+  }
+});
+
+test('Legado Cookie-only login status does not consume Reader variables', async t => {
+  const calls = [];
+  const session = new SourceSession({
+    installationId: 'legado-cookie-status', source: legadoSource, protocol: 'legado',
+    capabilities: capabilitiesFor({}, calls),
+    createSandbox: sandboxFactory(),
+  });
+  t.after(() => session.close());
+  await session.start();
+  session.activate();
+  const expected = { loggedIn: false, cookiePresent: false };
+  assert.deepEqual(await session.invoke('loginStatus'), expected);
+  for (const variable of ['[1]', [null], { extra: ['unused'] }]) {
+    assert.deepEqual(await session.invoke('loginStatus', {
+      book: { variable }, chapter: { variable },
+    }), expected);
+  }
+  assert.deepEqual(calls.map(call => call.name), Array(4).fill('cookie.get'));
+  await session.drain();
+  assert.equal(session.kernel.registries.size, 0);
+  assert.equal(session.kernel.invocations.size, 0);
+  assert.equal(session.stats().pendingAdapterTasks, 0);
+});
+
+test('Legado login checks import variables when the script actually reads them', async t => {
+  const session = new SourceSession({
+    installationId: 'legado-variable-status', source: { ...legadoSource,
+      loginCheckJs: '@js:java.get("token")' }, protocol: 'legado',
+    capabilities: capabilitiesFor({ '/': 'status' }),
+    createSandbox: sandboxFactory({
+      evaluate(options, _code, _bindings, { context }) {
+        return options.onSync('legado.variableGet', { key: 'token' }, context);
+      },
+    }),
+  });
+  t.after(() => session.close());
+  await session.start();
+  session.activate();
+  assert.deepEqual(await session.invoke('loginStatus', {
+    book: { variable: JSON.stringify({ token: 'present' }) },
+  }), { loggedIn: true, value: 'present' });
+  await assert.rejects(session.invoke('loginStatus', {
+    book: { variable: '[1]' },
+  }), { code: 'SCRIPT_EXCEPTION' });
+  assert.deepEqual(await session.invoke('loginStatus'), { loggedIn: false, value: null });
+  await session.drain();
+  assert.equal(session.kernel.registries.size, 0);
+  assert.equal(session.kernel.invocations.size, 0);
+});
+
 test('current Legado definitions keep unrelated keys without interpreting them', () => {
   const source = { ...legadoSource, enable: false, serialNumber: -7,
     ruleSearchList: 'not a current rule', ruleFindUrl: 'not an explore URL' };
@@ -899,6 +1042,50 @@ test('QYSG list contracts report protocol errors without changing non-list strin
       title: '', chapter: {}, content: value, blocks: [{ type: 'text', text: value }], imageStyle: '',
     });
   }
+});
+
+test('QYSG rejects an entire directory with a bad chapter and keeps valid chapter array positions', async t => {
+  let value;
+  const session = new SourceSession({
+    installationId: 'qysg-directory-positions',
+    source: { bookSourceName: 'Directory', bookSourceUrl: 'https://books.invalid/',
+      html: '<script>function chapter() { return []; }</script>' },
+    protocol: 'qysg',
+    capabilities: capabilitiesFor({}),
+    createSandbox: sandboxFactory({ actions: ['chapter'], invoke: () => value }),
+  });
+  t.after(() => session.close());
+  await session.start();
+  session.activate();
+  const healthy = [
+    { name: 'Volume', chapterUrl: '', isVolume: true, index: 90 },
+    { name: 'One', chapterUrl: '/one', index: 90 },
+    { name: 'Two', chapterUrl: '/two', index: -1 },
+  ];
+  for (const invalid of [null, false, 7, [], {}, '[{"name":', { name: {} },
+    { name: 'One', title: {} }, { chapterUrl: [] }]) {
+    for (let index = 0; index <= healthy.length; index++) {
+      value = healthy.toSpliced(index, 0, invalid);
+      const before = structuredClone(value);
+      await assert.rejects(session.invoke('toc'), { code: 'SCRIPT_PROTOCOL_ERROR' });
+      assert.deepEqual(value, before);
+    }
+    value = [invalid];
+    await assert.rejects(session.invoke('toc'), { code: 'SCRIPT_PROTOCOL_ERROR' });
+  }
+  for (value of [healthy, { chapters: healthy }, { list: healthy }, JSON.stringify(healthy),
+    healthy.map(item => JSON.stringify(item))]) {
+    const { chapters } = await session.invoke('toc');
+    assert.deepEqual(chapters.map(chapter => [chapter.name, chapter.index, chapter.chapterUrl]), [
+      ['Volume', 0, ''], ['One', 1, 'https://books.invalid/one'], ['Two', 2, 'https://books.invalid/two'],
+    ]);
+  }
+  value = [];
+  assert.deepEqual(await session.invoke('toc'), { chapters: [] });
+  await session.drain();
+  assert.equal(session.kernel.registries.size, 0);
+  assert.equal(session.kernel.invocations.size, 0);
+  assert.equal(session.stats().pendingAdapterTasks, 0);
 });
 
 test('QYSG external script HTTP failures retain the upstream HTTP error', async () => {

@@ -395,16 +395,35 @@ test('same fixture quality switch resolves the exact other file without repeatin
 
 test('one episode across real Quark/UC owners sorts qualities, reselects after failure and resolves a quality switch',
   { timeout: 15000 }, async t => {
-    const f = await fixture(t);
-    let state = await open(f, { target: detailTarget(f, 'cross-provider') });
-    const { sessionId } = state, observation = await events(t, f, sessionId);
-    state = await browse(f, state);
+    const f = await fixture(t, { searchDetailId: 'cross-provider' });
+    const rawEntry = detailTarget(f, 'cross-provider');
+    let state = await browse(f, await open(f, { target: rawEntry }));
     assert.equal(state.browsing.error, null);
     assert.deepEqual(state.browsing.lines, [
       { id: '夸克', label: '夸克', provider: 'quark' }, { id: 'UC', label: 'UC', provider: 'uc' },
     ]);
     assert.deepEqual(state.browsing.episodes.map(row => row.quality), ['1080p', '4k_fps'],
       'the upstream deliberately supplies the lower quality first');
+    const actualEpisode = state.browsing.episodes[0];
+    assert.deepEqual([actualEpisode.season, actualEpisode.episode], [1, 1]);
+    await f.call('film.session.release', { sessionId: state.sessionId });
+    state = await open(f, { target: f.metadataTarget, resumeTarget: { ...rawEntry,
+      season: actualEpisode.season, episode: actualEpisode.episode } });
+    const { sessionId } = state, observation = await events(t, f, sessionId);
+    const metadataSource = state.metadataSources.find(row => row.provider === 'tmdb' && row.metadataId === 321);
+    assert.ok(metadataSource);
+    await f.command(sessionId, 'browse.metadata', { metadataSourceId: metadataSource.id });
+    state = await waitForBridge(async () => {
+      const next = await f.snapshot(sessionId);
+      return !next.browsing.loading && next.browsing.sourceId === null && next;
+    }, 'explicit metadata selection');
+    assert.deepEqual(state.entryTarget, f.metadataTarget);
+    assert.equal(state.target.kind, 'tv');
+    assert.equal(state.target.metadataProvider, 'tmdb');
+    assert.equal(state.target.metadataId, 321);
+    assert.equal(state.target.source, undefined);
+    assert.equal(state.metadataSourceId, metadataSource.id);
+    assert.deepEqual([state.target.season, state.target.episode], [actualEpisode.season, actualEpisode.episode]);
     // A missing quality makes the real scheduler finish both pan lines before
     // selection. Browsing another line reloads detail and is not discovery.
     await f.command(sessionId, 'quality', { quality: '4k_hdr' });
@@ -581,17 +600,43 @@ for (const [scenario, code] of [['list-http', 'UPSTREAM_HTTP'], ['list-auth', 'A
   test(`provider ${scenario} remains a real browse error, then retries without cached false success`, async t => {
     const f = await fixture(t, { scenario });
     let state = await browse(f, await open(f));
-    assert.equal(state.browsing.error, code);
-    assert.deepEqual(state.browsing.episodes, []);
+    assert.equal(state.error, code);
+    assert.equal(state.browsing.error, null, 'the actual Cat line remains available after pan expansion fails');
+    assert.deepEqual(state.browsing.lines, [{ id: '夸克', label: '夸克', provider: 'quark' }]);
+    assert.equal(state.browsing.episodes.length, 1);
+    assert.equal(state.browsing.episodes[0].name, '第一季');
+    assert.equal(state.browsing.episodes[0].path, undefined, 'a failed pan list cannot fabricate a file');
     assert.equal(state.attempt, null);
     assert.deepEqual(f.panInputs.map(row => row.operation), ['list']);
     const failure = f.records.find(row => row.layer === 'pan-service' && row.phase === 'list-error');
     assert.equal(failure.code, code);
     f.setScenario('success');
-    state = await browse(f, state);
+    await f.command(state.sessionId, 'browse.refresh');
+    state = await waitForBridge(async () => {
+      const next = await f.snapshot(state.sessionId);
+      return !next.browsing.loading && next;
+    }, 'successful provider retry');
+    assert.equal(state.error, null);
     assert.equal(state.browsing.error, null);
     assert.equal(state.browsing.episodes.length, 3);
     assert.deepEqual(f.panInputs.map(row => row.operation), ['list', 'list']);
+    const directory = state.browsing;
+    f.setScenario(scenario);
+    await f.command(state.sessionId, 'browse.refresh');
+    state = await waitForBridge(async () => {
+      const next = await f.snapshot(state.sessionId);
+      return !next.browsing.loading && next;
+    }, 'failed provider refresh');
+    assert.equal(state.error, code, 'retaining the successful directory must not hide the actual refresh failure');
+    assert.equal(state.browsing.error, null);
+    assert.equal(state.browsing.sourceId, directory.sourceId);
+    assert.equal(state.browsing.lineId, directory.lineId);
+    assert.deepEqual(state.browsing.lines, directory.lines);
+    assert.deepEqual(state.browsing.episodes, directory.episodes);
+    assert.equal(state.attempt, null);
+    assert.deepEqual(f.panInputs.map(row => row.operation), ['list', 'list', 'list']);
+    assert.deepEqual(f.records.filter(row => row.layer === 'pan-service' && row.phase === 'list-error')
+      .map(row => row.code), [code, code]);
     assert.equal(f.counters.mediaBody, 0);
   });
 }
@@ -951,7 +996,7 @@ test('M3 missing exact HLS variant fails without a master or sibling attempt and
     await f.command(state.sessionId, 'play');
     state = await terminal(f, state.sessionId);
     assert.equal(state.stage, 'unavailable');
-    assert.equal(state.error, 'NO_MATCH');
+    assert.equal(state.error, 'NOT_FOUND', 'the exact saved variant is absent, not an unmatched smart target');
     assert.equal(state.attempt, null);
     assert.equal(state.current, null);
     assert.deepEqual(state.target, saved.target);
@@ -960,7 +1005,7 @@ test('M3 missing exact HLS variant fails without a master or sibling attempt and
     do { frames.push(await observation.next()); } while (frames.at(-1).stage !== 'unavailable');
     assert.ok(frames.every(frame => frame.sessionId === state.sessionId && frame.attempt === null &&
       frame.current === null));
-    assert.equal(frames.at(-1).error, 'NO_MATCH');
+    assert.equal(frames.at(-1).error, 'NOT_FOUND');
     assert.equal(f.counters.manifestDocuments, 2);
     assert.equal(f.counters.mediaHead, 1, 'a missing variant never exposes a fallback resource');
     assert.equal(f.counters.mediaBody, 0);

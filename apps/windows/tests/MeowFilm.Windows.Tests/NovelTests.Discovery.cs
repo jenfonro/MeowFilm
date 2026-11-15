@@ -108,6 +108,91 @@ public static partial class NovelTests
         }
         finally { late.TrySetResult(DiscoveryKinds()); }
     }
+    private static async Task DiscoveryResponseIsolation()
+    {
+        await using var store = new MemoryStore(); var runtime = new Runtime();
+        var kinds = JsonSerializer.Deserialize<JsonElement>("""
+            {"kinds":[null,{"title":"源站分组","url":""},{"title":{},"url":"bad"},
+              {"title":"健康分类","url":"https://catalog.invalid/live","extra":false},17,
+              {"title":"无地址"},{"title":"第二分类","url":"https://catalog.invalid/next"},{"title":"坏地址","url":[]}]}
+            """);
+        var books = JsonSerializer.Deserialize<JsonElement>("""
+            {"books":[null,{"name":"缺身份"},{"name":"首本","bookUrl":"first","kind":"原始题材"},
+              {"bookUrl":{},"name":"坏身份"},false,{"bookUrl":"second","name":"次本","extra":{"keep":true}},
+              {"bookUrl":"","name":"空身份"},{"bookUrl":"missing-name"}]}
+            """);
+        runtime.Read = (_, action, _, _) => Task.FromResult(action == "exploreKinds" ? kinds : books);
+        await using var module = new NovelCapability(new NovelSourceService(runtime), new NovelLibrary(store), new NovelRuleProgram(runtime));
+        await module.LoadDiscoveryAsync(null, null, true);
+        Check(module.DiscoveryState == NovelDiscoveryState.Ready && module.MoreDiscovery &&
+            module.Kinds.Select(kind => kind.Title).SequenceEqual(["源站分组", "健康分类", "第二分类"]) &&
+            module.ExploreKind?.Title == "健康分类");
+        Check(module.DiscoverBooks.Select(book => book.BookUrl).SequenceEqual(["first", "second"]) &&
+            NovelJson.Text(module.DiscoverBooks[0].Data, "kind") == "原始题材" &&
+            module.DiscoverBooks[1].Data.GetProperty("extra").GetProperty("keep").GetBoolean());
+        int calls = runtime.Calls.Count;
+        await module.LoadDiscoveryAsync(module.ExploreSource, module.Kinds[0], false);
+        Check(runtime.Calls.Count == calls, "A valid empty-URL group became an explore request.");
+        var originalBooks = module.DiscoverBooks.ToArray(); var originalKinds = module.Kinds; var originalKind = module.ExploreKind;
+        var healthyKinds = kinds; var healthyBooks = books;
+        foreach (string invalid in new[]
+        {
+            "null", "[]", "{}", """{"kinds":null}""", """{"kinds":{}}""",
+            """{"kinds":[null,false,{"title":"缺地址"},{"title":[],"url":"bad"}]}"""
+        })
+        {
+            kinds = JsonSerializer.Deserialize<JsonElement>(invalid);
+            await module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, true);
+            Unchanged();
+        }
+        kinds = DiscoveryKinds("候选");
+        foreach (string invalid in new[]
+        {
+            "null", "[]", "{}", """{"books":false}""", """{"books":{}}""",
+            """{"books":[{"name":"没有 bookUrl"}]}""",
+            """{"books":[null,17,{"bookUrl":"","name":"空身份"},{"bookUrl":"  ","name":"空白身份"},{"bookUrl":[],"name":"坏身份"},{"bookUrl":"valid","name":{}}]}"""
+        })
+        {
+            books = JsonSerializer.Deserialize<JsonElement>(invalid);
+            await module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, true);
+            Unchanged();
+        }
+        kinds = healthyKinds; books = healthyBooks; runtime.Calls.Clear();
+        await module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, true);
+        originalBooks = module.DiscoverBooks.ToArray(); originalKinds = module.Kinds; originalKind = module.ExploreKind;
+        books = JsonSerializer.Deserialize<JsonElement>("""{"books":[{"name":"坏第二页"}]}""");
+        await module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, false);
+        Unchanged();
+        books = Json(new { books = new[] { DiscoveryBook("第三本", "third") } });
+        await module.RetryDiscoveryAsync(default);
+        Check(module.DiscoveryState == NovelDiscoveryState.Ready && module.MoreDiscovery &&
+            module.DiscoverBooks.Select(book => book.BookUrl).SequenceEqual(["first", "second", "third"]) &&
+            runtime.Calls.Where(call => IsAction(call, "explore")).Select(call => call.Payload.GetProperty("payload").GetProperty("page").GetInt32())
+                .SequenceEqual([1, 2, 2]), "An unusable page advanced the committed page counter.");
+        books = Json(new { books = Array.Empty<object>() });
+        await module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, false);
+        Check(module.DiscoveryState == NovelDiscoveryState.Ready && !module.MoreDiscovery && module.DiscoverBooks.Count == 3);
+        await module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, true);
+        Check(module.DiscoveryState == NovelDiscoveryState.Empty && !module.MoreDiscovery && module.DiscoverBooks.Count == 0);
+        kinds = JsonSerializer.Deserialize<JsonElement>("""{"kinds":[{"title":"只有分组","url":""}]}""");
+        calls = runtime.Calls.Count(call => IsAction(call, "explore"));
+        await module.LoadDiscoveryAsync(module.ExploreSource, null, true);
+        Check(module.DiscoveryState == NovelDiscoveryState.Empty && module.Kinds.Single().Title == "只有分组" &&
+            module.ExploreKind is null && runtime.Calls.Count(call => IsAction(call, "explore")) == calls);
+        kinds = healthyKinds; books = JsonSerializer.Deserialize<JsonElement>("""{"books":[{"name":"没有 bookUrl"}]}""");
+        await module.LoadDiscoveryAsync(module.ExploreSource, null, true);
+        Check(module.DiscoveryState == NovelDiscoveryState.Failed && module.DiscoverBooks.Count == 0 && !module.MoreDiscovery &&
+            module.Kinds.Single().Title == "只有分组" && module.ExploreKind is null,
+            "An unusable first page became Ready or published its candidate categories.");
+        kinds = Json(new { kinds = Array.Empty<object>() });
+        await module.LoadDiscoveryAsync(module.ExploreSource, null, true);
+        Check(module.DiscoveryState == NovelDiscoveryState.Empty && module.Kinds.Count == 0 &&
+            module.ExploreKind is null && !module.MoreDiscovery);
+        void Unchanged() => Check(module.DiscoveryState == NovelDiscoveryState.Failed && !module.LoadingDiscovery &&
+            module.DiscoverBooks.SequenceEqual(originalBooks) && module.Kinds.SequenceEqual(originalKinds) &&
+            module.ExploreKind == originalKind && module.MoreDiscovery,
+            "An unusable response committed a partial refresh, erased prior books, or ended pagination.");
+    }
     private static async Task DiscoveryRetirement()
     {
         await using var store = new MemoryStore(); var runtime = new Runtime { Records = [Source("a"), Source("b")] };

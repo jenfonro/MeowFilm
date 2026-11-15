@@ -62,7 +62,7 @@ JS 公开 `createRuntimeClient().call("source.runtime.rules.process",...)` 使�
 
 payload 显式传 `book`、`chapter` 和稳定 `bookUrl`，缺省顶层 URL 可从相应对象补齐。正文应同时传 `nextChapterUrl`，或在 `book.catalog/book.chapters`（也可顶层 catalog）和 chapter.index 中提供下一章；分页不会跟随此章地址。目录支持 `preUpdateJs`、`book.tocHtml`、多 nextTocUrl 和字段规则；正文支持多 nextContentUrl、title、imageStyle、合并后 replaceRegex 和有序块。重复页去重，循环结束，不设置固定页数截断；超时、取消及已有 DOM／解析预算仍生效。
 
-content 返回 `{title,chapter,chapterUrl,content,blocks,imageStyle,nextUrls,type}`，`blocks` 的公开结构只有 `{type:"text",text}` 或 `{type:"image",src,alt}`，图片地址按所属页面最终 URL 解析。book／chapter.variable 导入本次调用并写回对应结果，各并行动作隔离。`source.get/put/setVariable`、cache 和 Cookie 由源仓库持久化；只恢复源私有数据，不恢复 QuickJS 执行内存。jsLib 的 JSON 库名→HTTP URL 映射在每个 generation 初始化时获取并缓存，普通 jsLib 字符串继续作为内联脚本。
+content 返回 `{title,chapter,chapterUrl,content,blocks,imageStyle,nextUrls,type}`，`blocks` 的公开结构只有 `{type:"text",text}` 或 `{type:"image",src,alt}`，图片地址按所属页面最终 URL 解析。Legado 在实际变量读取或结果写回时导入 book／chapter.variable，各并行动作隔离；content 写回 chapter.variable 本身就是消费者，导入失败在 HTTP 前终止并释放本次上下文。Cat 和纯 Cookie loginStatus 不解析 Reader 变量；loginCheckJs 实际读取变量时仍执行导入并传播失败。`source.get/put/setVariable`、cache 和 Cookie 由源仓库持久化；只恢复源私有数据，不恢复 QuickJS 执行内存。jsLib 的 JSON 库名→HTTP URL 映射在每个 generation 初始化时获取并缓存，普通 jsLib 字符串继续作为内联脚本。
 
 源私有数据在实际 generation 的 profile 中读写，候选执行使用隔离副本。只有当前已发布且未取消的 generation 可写回仓库。失败候选、退休请求、停用、删除及关闭后的迟到写入被拒绝；重启和启用会从持久状态向新 generation 注入副本。
 

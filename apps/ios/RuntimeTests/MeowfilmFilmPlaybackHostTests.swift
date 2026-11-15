@@ -478,7 +478,7 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
                 "actionError=\(model.actionError?.code ?? "none"), " +
                 "observationError=\(model.observationError?.code ?? "none"), " +
                 "attempt=\(snapshot?.attempt != nil), current=\(snapshot?.current != nil), " +
-                "autoPrepare=\(snapshot?.preferences.iosAutoPrepare == true)")
+                "prepareOnly=\(snapshot?.attempt?.prepareOnly == true)")
             throw error
         }
         XCTAssertNil(model.actionError)
@@ -486,7 +486,7 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
         XCTAssertNil(model.snapshot?.error)
         XCTAssertNil(model.snapshot?.browsing.error)
         XCTAssertNil(model.snapshot?.current)
-        XCTAssertEqual(model.snapshot?.preferences.iosAutoPrepare, autoPrepare)
+        XCTAssertEqual(model.snapshot?.attempt?.prepareOnly, autoPrepare ? true : nil)
     }
 
     private func waitForHost(_ predicate: @escaping @MainActor () -> Bool) async throws {
@@ -555,7 +555,10 @@ final class FilmPlaybackHostFixture {
         // changing the container's original settings after teardown.
         var changed = try FilmPlaybackPreferences.defaults.value.filmRequiredObject()
         changed["iosAutoPrepare"] = .bool(autoPrepare)
-        _ = try await client.call(module: .film, operation: "settings.set", parameters: .object(changed))
+        let saved = try FilmPlaybackPreferences(await client.call(module: .film, operation: "settings.set", parameters: .object(changed)))
+        XCTAssertEqual(saved.iosAutoPrepare, autoPrepare)
+        let loaded = try FilmPlaybackPreferences(await client.call(module: .film, operation: "settings.get"))
+        XCTAssertEqual(loaded.iosAutoPrepare, autoPrepare)
         let bytes = try Data(contentsOf: movie).base64EncodedString()
         // Base64 only embeds a synthetic test asset in the installed fixture.
         // The production Node/native media path below is binary HTTP with Range.

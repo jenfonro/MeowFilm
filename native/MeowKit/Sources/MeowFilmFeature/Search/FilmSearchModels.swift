@@ -76,7 +76,6 @@ public struct FilmSearchCard: Equatable, Sendable {
 public struct FilmSearchSnapshot: Equatable, Sendable {
     public let sessionID: UUID
     public let query: String
-    public var round = 0
     public var revision = 0
     public var sequence: Int64 = -1
     public var siteState: FilmSearchChannelState = .idle
@@ -104,12 +103,11 @@ extension FilmSearchSnapshot {
         guard let id = UUID(uuidString: try fields.filmString("sessionId")),
               let sequence = fields["sequence"]?.filmInteger,
               let revision = fields["revision"]?.filmInteger,
-              let round = fields["round"]?.filmInteger,
               let site = FilmSearchChannelState(rawValue: try fields.filmString("siteState")),
               let metadata = FilmSearchChannelState(rawValue: try fields.filmString("metadataState")),
               let details = fields["metadataDetails"]?.filmObject else { throw FilmSearchError.invalidResponse }
         sessionID = id; query = try fields.filmString("query")
-        self.sequence = Int64(sequence); self.revision = revision; self.round = round
+        self.sequence = Int64(sequence); self.revision = revision
         siteState = site; metadataState = metadata
         loading = try fields.filmBool("loading"); hasMore = try fields.filmBool("hasMore")
         noSources = try fields.filmBool("noSources")

@@ -48,7 +48,7 @@ enum FilmPlaybackFixture {
                                              "error": .null, "lines": .array([]), "episodes": .array([])]),
             "episodes": .array(episodes), "candidates": .array(candidates),
             "attempt": attempt, "current": current, "searchComplete": .bool(false),
-            "preferences": FilmPlaybackPreferences.defaults.value, "shortVideo": .bool(false),
+            "shortVideo": .bool(false),
             "previewEpisodes": .bool(false), "reportError": .null, "prefetch": .array([]),
         ]
         fields["metadataSources"] = metadataSources.map(RuntimeValue.array)
