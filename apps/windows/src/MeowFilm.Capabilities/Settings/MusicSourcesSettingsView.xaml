@@ -107,9 +107,9 @@
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
   <StackPanel x:Name="SourceTitleRow" Style="{StaticResource MeowFilm.ManagementTitleRow}">
    <TextBlock Text="音源管理" FontSize="{StaticResource MeowFilm.Font.Size.SectionHeading}" VerticalAlignment="Center" Margin="0,0,12,0"/>
-   <Button Content="添加本地文件" Style="{StaticResource MeowFilm.ManagementRowButton.Primary}" Click="ImportLocal_Click" IsEnabled="{Binding CanEditScripts}" AutomationProperties.Name="添加本地文件"/>
-   <Button Content="添加网络源" Style="{StaticResource MeowFilm.ManagementRowButton}" Click="ImportNetwork_Click" IsEnabled="{Binding CanEditScripts}"/>
-   <Button Content="检测所选" Style="{StaticResource MeowFilm.ManagementRowButton}" Click="CheckSelected_Click" IsEnabled="{Binding CanCheckSelectedSources}"/>
+   <Button Content="添加本地文件" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" Click="ImportLocal_Click" IsEnabled="{Binding CanEditScripts}" AutomationProperties.Name="添加本地文件"/>
+   <Button Content="添加网络源" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" Click="ImportNetwork_Click" IsEnabled="{Binding CanEditScripts}"/>
+   <Button Content="检测所选" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" Click="CheckSelected_Click" IsEnabled="{Binding CanCheckSelectedSources}"/>
    <Button Content="删除所选" Style="{StaticResource MeowFilm.ManagementDeleteSelected}" Click="RemoveSelected_Click" IsEnabled="{Binding CanRemoveSelectedSources}"/>
   </StackPanel>
   <desktop:ManagementList x:Name="SourceList" Grid.Row="1" ShowToolbar="False" ShowBulkActions="False" AutomationProperties.Name="音源列表"/>
