@@ -179,6 +179,8 @@ function fileIdentity(file, share, sourceIdentity, detailId, lineId, playId) {
   if (playId === undefined) invalidDetail();
   return identity(['script', sourceIdentity, detailId, lineId, playId]);
 }
+export { fileIdentity as candidateResourceIdentity };
+export const candidateIdentity = (source, detailId, lineId, resource) => identity([source, detailId, lineId, resource]);
 
 function mapIndex(map, key) {
   const index = new Map();
@@ -255,7 +257,7 @@ export async function recognizeCandidates(detail, { target, source = detail?.sou
       }
       const resourceIdentity = fileIdentity(item.file, item.share, sourceIdentity, detailId, line.id, item.playId);
       const provider = item.file?.provider ?? item.provider ?? line.provider;
-      const candidate = { id: identity([sourceIdentity, detailId, line.id, resourceIdentity]),
+      const candidate = { id: candidateIdentity(sourceIdentity, detailId, line.id, resourceIdentity),
         fileIdentity: resourceIdentity, targetId: target.id, source: candidateSource, detailId, lineId: line.id,
         lineLabel: line.label, flag: line.flag ?? line.id, name: item.name, fileName,
         episodeId: item.id, index: item.index, kind: target.kind,

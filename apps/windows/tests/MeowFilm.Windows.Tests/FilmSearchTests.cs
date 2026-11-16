@@ -126,16 +126,18 @@ public static class FilmSearchTests
     {
         var receipt = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        JsonElement acceptedInput = default;
         await using var f = new SearchFixture();
         f.Runtime.Respond = async (method, input, _) =>
         {
             if (method != "film.search.open") return f.Runtime.Handle(method, input);
+            acceptedInput = input.Clone();
             entered.SetResult(); return await receipt.Task;
         };
         var session = f.Service.Start("关闭"); await entered.Task;
         var close = f.Service.PrepareShutdownAsync(); Check(!close.IsCompleted, "accepted open is drained before close");
         f.Runtime.Respond = null;
-        var envelope = f.Runtime.Handle("film.search.open", FilmJson.Encode(new { query = session.Query }));
+        var envelope = f.Runtime.Handle("film.search.open", acceptedInput);
         receipt.SetResult(envelope); await close;
         f.Service.Resume(); await session.Work;
         Check(f.Runtime.Calls.Any(call => FilmJson.Text(call.Input, "action") == "stop") &&
@@ -214,9 +216,11 @@ public static class FilmSearchTests
             var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var receipt = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
             CancellationToken accepted = default;
+            JsonElement acceptedInput = default;
             f.Runtime.Respond = (method, input, token) =>
             {
                 if (method != "film.search.open") return Task.FromResult(f.Runtime.Handle(method, input));
+                acceptedInput = input.Clone();
                 accepted = token; entered.TrySetResult(); return receipt.Task;
             };
             try
@@ -232,7 +236,7 @@ public static class FilmSearchTests
                 }
                 else stopped = f.Service.StopAsync();
                 f.Runtime.Respond = null;
-                var allocated = f.Runtime.Handle("film.search.open", FilmJson.Encode(new { query = session.Query }));
+                var allocated = f.Runtime.Handle("film.search.open", acceptedInput);
                 receipt.SetResult(allocated); await stopped;
                 Check(session.Id == FilmJson.Text(allocated.GetProperty("value"), "sessionId") && session.Items.Count == 0 &&
                     session.RawItems.Count == 0 && publications.All(count => count == 0) &&
@@ -361,12 +365,19 @@ internal sealed class SearchFixture : IAsyncDisposable
     internal static JsonElement Member(FilmSearchSource source, object detailId, string title) => FilmJson.Encode(new
     {
         id = "raw:" + JsonSerializer.Serialize(detailId), displayKey = "site:" + source.Key + ":" + JsonSerializer.Serialize(detailId), sourceKind = "site",
+        businessId = "site:" + source.Key + ":" + JsonSerializer.Serialize(detailId),
+        playbackTarget = new FilmPlaybackTarget("site:" + source.Key + ":" + JsonSerializer.Serialize(detailId),
+            "source", title, Source: FilmJson.Encode(new { key = source.Key, engine = "cat",
+                installationId = source.Cat.InstallationId, siteId = source.Site.Key.SiteKey, detailId })).Wire(),
         siteKey = source.Key, installationId = source.Cat.InstallationId, generation = source.Cat.Generation, siteId = source.Site.Key.SiteKey,
         detailId, title, siteLabel = source.Site.Name, textBadge = "高清", poster = "", raw = new { vod_id = detailId, vod_name = title, vod_remarks = "  原备注  ", unknown = "  原始字段  " }
     });
     internal static JsonElement Card(string key, string kind, string title, JsonElement[] members, string? label = null) => FilmJson.Encode(new
     {
         id = key, displayKey = key, sourceKind = kind, title, poster = "", textBadge = "2023", siteLabel = label ?? (kind == "tmdb" ? "剧集" : "聚合"),
+        businessId = key, playbackTarget = (kind == "tmdb" ? new FilmPlaybackTarget(key, "tv", title, "tmdb", "7") :
+            new FilmPlaybackTarget(key, "group", title, Members: FilmJson.Encode(members.Select(member => new
+            { sourceKey = FilmJson.Text(member, "siteKey"), detailId = FilmJson.Member(member, "detailId") }).ToArray()))).Wire(),
         aggregateItems = members, tmdbType = kind == "tmdb" ? "tv" : "", tmdbId = kind == "tmdb" ? 7 : 0
     });
     internal static JsonElement Snapshot(Guid id, string query, JsonElement[] cards, JsonElement[] rawCards,

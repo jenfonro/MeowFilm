@@ -9,9 +9,11 @@ public struct FilmSearchTransport: Sendable {
     ) async throws -> Void
     private let request: Request
     private let observation: Observation
+    private let connectionProvider: (@Sendable () async throws -> RuntimeHTTPClient)?
     let producer: @Sendable () async throws -> RuntimeHTTPClient?
 
     public init(connection: @escaping @Sendable () async throws -> RuntimeHTTPClient) {
+        connectionProvider = connection
         let transport = FilmPlaybackTransport(connectionProvider: connection)
         producer = transport.producer
         request = { try await transport.call($0, parameters: $1) }
@@ -32,6 +34,11 @@ public struct FilmSearchTransport: Sendable {
     public init(request: @escaping Request, observation: @escaping Observation,
                 producer: @escaping @Sendable () async throws -> RuntimeHTTPClient? = { nil }) {
         self.request = request; self.observation = observation; self.producer = producer
+        connectionProvider = nil
+    }
+
+    func renewed() -> Self {
+        connectionProvider.map { Self(connection: $0) } ?? self
     }
 
     func call(_ operation: String, _ fields: RuntimeObject = [:]) async throws -> RuntimeValue {

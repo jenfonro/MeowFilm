@@ -43,6 +43,10 @@ public struct FilmSearchSite: Sendable {
 public struct FilmSearchCard: Equatable, Sendable {
     public let value: RuntimeValue
     public init(value: RuntimeValue) { self.value = value }
+    public var businessID: String { text("businessId") }
+    public var playbackTarget: FilmPlaybackTarget? {
+        value.catField("playbackTarget").flatMap { try? FilmPlaybackTarget($0) }
+    }
     public var displayKey: String { text("displayKey") }
     public var id: String { text("id") }
     public var title: String { text("title") }
@@ -69,7 +73,8 @@ public struct FilmSearchCard: Equatable, Sendable {
         FilmItem(sourceID: sourceKind == "tmdb" ? "tmdb" : text("siteKey"),
             id: sourceKind == "tmdb" ? tmdbID.map(String.init) ?? id : id, title: title,
             kind: sourceKind == "tmdb" ? FilmItemKind(rawValue: tmdbType) : nil,
-            posterURL: imageURL(text("poster")), subtitle: label)
+            posterURL: imageURL(text("poster")), subtitle: label,
+            businessID: businessID.isEmpty ? nil : businessID, playbackTarget: playbackTarget)
     }
 }
 
@@ -84,6 +89,7 @@ public struct FilmSearchSnapshot: Equatable, Sendable {
     public var loading = false
     public var hasMore = false
     public var noSources = false
+    public var sources: [FilmPlaybackSource] = []
     public var siteItems: [RuntimeValue] = []
     public var tmdbItems: [RuntimeValue] = []
     public var metadataSearch: RuntimeValue?
@@ -99,6 +105,24 @@ public struct FilmSearchSnapshot: Equatable, Sendable {
 }
 
 extension FilmSearchSnapshot {
+    func retainingDisplay(_ previous: Self) -> Self {
+        var value = self
+        value.sources = previous.sources
+        value.cards = previous.cards; value.rawCards = previous.rawCards
+        value.siteItems = previous.siteItems; value.tmdbItems = previous.tmdbItems
+        value.metadataSearch = previous.metadataSearch
+        value.metadataQuery = previous.metadataQuery
+        value.metadataDetails = previous.metadataDetails
+        return value
+    }
+
+    func retainingLoadingDisplay(_ previous: Self) -> Self {
+        guard cards.isEmpty, rawCards.isEmpty,
+              [.idle, .loading, .failed, .unavailable].contains(siteState),
+              [.idle, .loading, .failed, .unavailable].contains(metadataState) else { return self }
+        return retainingDisplay(previous)
+    }
+
     public init(value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
         guard let id = UUID(uuidString: try fields.filmString("sessionId")),
@@ -113,11 +137,15 @@ extension FilmSearchSnapshot {
         siteState = site; metadataState = metadata
         loading = try fields.filmBool("loading"); hasMore = try fields.filmBool("hasMore")
         noSources = try fields.filmBool("noSources")
+        sources = try fields.filmArray("sources").map(FilmPlaybackSource.init)
         siteItems = try fields.filmArray("siteItems"); tmdbItems = try fields.filmArray("tmdbItems")
         metadataSearch = fields["metadataSearch"].flatMap { $0 == .null ? nil : $0 }
         metadataQuery = fields["metadataQuery"]?.filmText
         metadataDetails = Dictionary(uniqueKeysWithValues: details.map { ($0.key, $0.value) })
         cards = try fields.filmArray("cards").map(FilmSearchCard.init)
         rawCards = try fields.filmArray("rawCards").map(FilmSearchCard.init)
+        guard (cards + rawCards).allSatisfy({ !$0.businessID.isEmpty && $0.playbackTarget != nil }) else {
+            throw FilmSearchError.invalidResponse
+        }
     }
 }

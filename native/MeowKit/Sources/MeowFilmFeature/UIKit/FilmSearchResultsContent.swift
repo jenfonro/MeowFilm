@@ -7,7 +7,6 @@ import MeowUI
 /// search snapshot or a native owner of aggregation and metadata.
 struct FilmSearchResultsPresentation {
     struct Identifier: Hashable, Sendable {
-        let sessionID: UUID
         let displayKey: Data
     }
     struct Content: Equatable {
@@ -32,18 +31,17 @@ struct FilmSearchResultsPresentation {
     private(set) var identifiers: [Identifier] = []
     private(set) var cards: [Identifier: Card] = [:]
     // Share the current input array so state-only snapshots need no display mapping.
-    private var inputSessionID: UUID?
     private var inputCards: [FilmSearchCard] = []
 
-    mutating func update(_ visible: [FilmSearchCard], sessionID: UUID,
+    mutating func update(_ visible: [FilmSearchCard],
                          imageURL: (String) -> URL?) -> Changes {
-        if inputSessionID == sessionID, inputCards == visible {
+        if inputCards == visible {
             return Changes(identifiersChanged: false, reconfigure: [])
         }
         var nextIDs: [Identifier] = [], nextCards: [Identifier: Card] = [:], changed: [Identifier] = []
         nextIDs.reserveCapacity(visible.count); nextCards.reserveCapacity(visible.count)
         for card in visible {
-            let id = Identifier(sessionID: sessionID, displayKey: Data(card.displayKey.utf8))
+            let id = Identifier(displayKey: Data(card.businessID.utf8))
             let previous = cards[id]
             let content: Content
             if let previous, previous.selection == card { content = previous.content }
@@ -54,7 +52,7 @@ struct FilmSearchResultsPresentation {
         }
         let changes = Changes(identifiersChanged: identifiers != nextIDs, reconfigure: changed)
         identifiers = nextIDs; cards = nextCards
-        inputSessionID = sessionID; inputCards = visible
+        inputCards = visible
         return changes
     }
 }
@@ -163,11 +161,13 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
             let next = try service.session(for: query, reusing: session)
             guard session !== next || observation == nil else { return }
             let changed = session !== next
+            let queryChanged = session.map { !$0.snapshot.query.utf8.elementsEqual(next.snapshot.query.utf8) } ?? true
             observation?.cancel()
             errorObservation?.cancel()
             session = next
+            next.setPresentationVisible(viewIfLoaded?.window != nil)
             if changed {
-                offsets.removeAll()
+                if queryChanged { offsets.removeAll() }
                 shownSessionError = nil
             }
             observation = next.$snapshot.receive(on: RunLoop.main).sink { [weak self, weak next] _ in
@@ -178,7 +178,7 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
                 guard let self, let next, self.session === next else { return }
                 self.renderStatus()
             }
-            if changed, isViewLoaded { collection.setContentOffset(.zero, animated: false) }
+            if queryChanged, isViewLoaded { collection.setContentOffset(.zero, animated: false) }
             render()
         } catch { presentError("影视搜索不可用") }
     }
@@ -207,14 +207,20 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
 
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        session?.setPresentationVisible(true)
         render()
+    }
+
+    public override func viewWillDisappear(_ animated: Bool) {
+        session?.setPresentationVisible(false)
+        super.viewWillDisappear(animated)
     }
 
     private func render(restoringOffset: CGPoint? = nil) {
         guard isViewLoaded, dataSource != nil, let session else { return }
         let state = session.snapshot
         let visible = raw ? state.rawCards : state.cards
-        let changes = presentation.update(visible, sessionID: state.sessionID, imageURL: session.imageURL)
+        let changes = presentation.update(visible, imageURL: session.imageURL)
         if !changes.isEmpty {
             var snapshot: NSDiffableDataSourceSnapshot<Int, FilmSearchResultsPresentation.Identifier>
             if changes.identifiersChanged {
@@ -285,7 +291,7 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
 
     public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         guard let id = dataSource.itemIdentifier(for: indexPath), let card = presentation.cards[id]?.selection,
-              let session, id.sessionID == session.snapshot.sessionID else { return }
+              let session else { return }
         collectionView.deselectItem(at: indexPath, animated: false)
         onSelect?(session.context(for: card))
     }

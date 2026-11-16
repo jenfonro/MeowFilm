@@ -28,7 +28,8 @@ final class FilmPlaybackRuntimeLifetimeTests: XCTestCase {
         XCTAssertEqual(model.sessionReleaseError?.code, "CLOSED")
         XCTAssertFalse(model.isReleased)
         XCTAssertTrue(model.canLeave, "The confirmed dead owner has no local media to drain")
-        XCTAssertNil(model.open())
+        XCTAssertNil(model.executionStage)
+        XCTAssertNotNil(model.presentation)
         await client.close()
     }
 
@@ -147,7 +148,8 @@ final class FilmPlaybackRuntimeLifetimeTests: XCTestCase {
         await fulfillment(of: [revoked], timeout: 2)
         subscription.cancel()
         XCTAssertFalse(model.navigateFromSystem(forward: true))
-        XCTAssertNil(model.open())
+        XCTAssertNil(model.executionStage)
+        XCTAssertNotNil(model.presentation)
         XCTAssertTrue(media.stopped.isEmpty, "The old admitted close is still being drained")
         let stopped = expectation(description: "non-retaining close follows the admitted close")
         media.onStop = { stopped.fulfill() }
@@ -298,7 +300,8 @@ final class FilmPlaybackRuntimeLifetimeTests: XCTestCase {
         await model.waitForPendingWork()
         XCTAssertFalse(media.isCurrent(sessionID: FilmPlaybackFixture.sessionID, attemptID: "undrained"))
         XCTAssertEqual(model.observationError?.code, "CLOSED")
-        XCTAssertNil(model.open())
+        XCTAssertNil(model.executionStage)
+        XCTAssertNotNil(model.presentation)
     }
 
     func testMissingSessionReleaseReceiptRemainsFailureAfterPhysicalStop() async throws {

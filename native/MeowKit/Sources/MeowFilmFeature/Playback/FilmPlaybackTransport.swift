@@ -12,9 +12,11 @@ public struct FilmPlaybackTransport: Sendable {
     private let observation: Observation
     let runtimeClosure: RuntimeClosure?
     let producer: @Sendable () async throws -> RuntimeHTTPClient?
+    private let renewConnection: @Sendable () async -> Void
 
     public init(connectionProvider: @escaping @Sendable () async throws -> RuntimeHTTPClient) {
         let connection = FilmPlaybackConnection(provider: connectionProvider)
+        renewConnection = { await connection.renew() }
         producer = { try await connection.client() }
         request = { operation, parameters in
             let client = try await connection.client()
@@ -45,11 +47,16 @@ public struct FilmPlaybackTransport: Sendable {
                 producer: @escaping @Sendable () async throws -> RuntimeHTTPClient? = { nil }) {
         self.request = request; self.observation = observation; self.runtimeClosure = runtimeClosure
         self.producer = producer
+        renewConnection = {}
     }
 
     func call(_ operation: String, parameters: RuntimeValue = .object([:])) async throws -> RuntimeValue {
         try await perform { try await request(operation, parameters) }
     }
+
+    /// Called only after the previous executor and native media have drained.
+    /// Release/feedback calls stay pinned until that boundary.
+    func renew() async { await renewConnection() }
 
     func snapshots(sessionID: UUID, after: Int64,
                    receive: @escaping @Sendable (FilmPlaybackSnapshot) async throws -> Void) async throws {
@@ -92,4 +99,6 @@ private actor FilmPlaybackConnection {
         borrowed = client
         return client
     }
+
+    func renew() { borrowed = nil }
 }

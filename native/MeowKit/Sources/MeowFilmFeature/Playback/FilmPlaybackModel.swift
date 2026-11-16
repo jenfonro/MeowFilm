@@ -10,6 +10,7 @@ import UIKit
 @MainActor
 public final class FilmPlaybackModel: ObservableObject {
     @Published public private(set) var snapshot: FilmPlaybackSnapshot?
+    @Published public private(set) var presentation: FilmPlaybackSnapshot?
     @Published public private(set) var opening = false
     @Published public private(set) var observationError: FilmPlaybackError?
     @Published public private(set) var actionError: FilmPlaybackError?
@@ -18,6 +19,12 @@ public final class FilmPlaybackModel: ObservableObject {
     @Published public private(set) var sessionReleaseError: FilmPlaybackError?
     @Published public private(set) var mediaState = FilmMediaState()
     public var sessionID: UUID? { allocatedSessionID }
+    var restoringRead: Bool { restorePresentation != nil }
+    public var executionStage: String? {
+        guard !closed, !runtimeClosed, observationError == nil else { return nil }
+        if restorePresentation != nil { return snapshot?.browsing.loading == true ? "loading" : nil }
+        return snapshot?.stage
+    }
     public var isReleased: Bool { released && mediaStopped }
     /// A dead runtime cannot acknowledge release. Keep that failure visible,
     /// but do not trap navigation after the precise local resources have drained.
@@ -30,11 +37,8 @@ public final class FilmPlaybackModel: ObservableObject {
     private let makeRequest: @Sendable () async throws -> FilmPlaybackRequest
     private let searchContext: FilmSearchContext?
     private var searchObservation: AnyCancellable?
-    private var searchAdmissionTask: Task<FilmPlaybackRequest, Error>?
     private var searchUpdateTask: Task<Void, Never>?
-    /// The handoff's full authorized search scope, independent of card results
-    /// and the currently browsed or playing source.
-    private var searchScope: [FilmPlaybackSource] = []
+    private var restorePresentation: FilmPlaybackSnapshot?
     private var searchRevision = -1
     private var reentryTarget: FilmPlaybackTarget?
     private var reentryError: String?
@@ -45,6 +49,8 @@ public final class FilmPlaybackModel: ObservableObject {
     private var observationAdmission = UUID()
     private var runtimeClosureTask: Task<Void, Never>?
     private var runtimeClosed = false
+    private var recoveryTask: Task<Void, Never>?
+    private var presentationOwners = Set<UUID>()
     private var closingTask: Task<Void, Never>?
     private var closingAdmission = UUID()
     private var reopeningTask: Task<Void, Never>?
@@ -130,14 +136,14 @@ public final class FilmPlaybackModel: ObservableObject {
     }
 
     @discardableResult
-    public func open() -> Task<Void, Never>? {
-        guard !runtimeClosed else { return nil }
+    public func open(restoreOnly: Bool = false) -> Task<Void, Never>? {
+        if runtimeClosed { return recoverRuntime() }
         if closingTask != nil { return reopenAfterDrain() }
         if let openingTask { return openingTask }
         guard !closed else { return nil }
         if snapshot != nil {
             observeRuntimeClosure(); observe(); observeSearchContext()
-            return refreshBrowsing(refresh: false)
+            return nil
         }
         if allocatedSessionID != nil { return reopenAfterDrain() }
         opening = true; actionError = nil
@@ -146,22 +152,16 @@ public final class FilmPlaybackModel: ObservableObject {
             guard let self else { return }
             defer { self.opening = false; self.openingTask = nil }
             do {
-                let base: FilmPlaybackRequest
+                let previous = self.presentation
+                let base = try await self.makeRequest()
+                var request = self.reentryTarget.map { base.retargeted($0, errorCode: self.reentryError) } ?? base
+                request.restoreOnly = restoreOnly || previous != nil
+                self.restorePresentation = request.restoreOnly ? previous : nil
+                if request.restoreOnly, let previous { request.restoreBrowsing(previous) }
                 if let context = self.searchContext {
-                    // Search composition supplies the one authoritative Node
-                    // handoff. This pre-open wait owns no playback session.
-                    let admission = Task { try await self.makeRequest() }
-                    self.searchAdmissionTask = admission
-                    do { base = try await admission.value }
-                    catch { self.searchAdmissionTask = nil; throw error }
-                    self.searchAdmissionTask = nil
-                    self.searchRevision = context.handoffRevision
-                } else {
-                    base = try await self.makeRequest()
+                    self.searchRevision = Int(context.snapshot.sequence)
                 }
-                let request = self.reentryTarget.map { base.retargeted($0, errorCode: self.reentryError) } ?? base
                 guard !self.closed, self.generation == generation else { return }
-                self.searchScope = request.sources
                 // Once admitted, an open is drained rather than cancelled: its
                 // returned session must still be released if the page leaves.
                 let value = try await self.transport.call("session.open", parameters: request.value)
@@ -172,9 +172,13 @@ public final class FilmPlaybackModel: ObservableObject {
                 self.allocatedSessionID = snapshot.sessionID
                 self.observeRuntimeClosure()
                 guard !self.closed, self.generation == generation else { return }
-                self.accept(snapshot); self.observe(); self.observeSearchContext()
+                self.accept(snapshot); self.observe()
+                if self.restorePresentation == nil { self.observeSearchContext() }
             } catch {
-                if !self.closed, !Self.cancelled(error) { self.actionError = Self.failure(error) }
+                if !self.closed, !Self.cancelled(error) {
+                    self.actionError = Self.failure(error)
+                    self.observeRuntimeClosure()
+                }
             }
         }
         return openingTask
@@ -200,14 +204,13 @@ public final class FilmPlaybackModel: ObservableObject {
             if self.retained {
                 self.closed = false; self.retained = false
                 self.observe(); self.observeSearchContext()
-                await self.refreshBrowsing(refresh: false)?.value
                 return
             }
             if !self.isReleased { await self.closeSession() }
             guard !Task.isCancelled, self.reopeningAdmission == admission, self.isReleased else { return }
             self.closingTask = nil
             self.resetSession()
-            await self.open()?.value
+            await self.open(restoreOnly: true)?.value
         }
         return reopeningTask
     }
@@ -228,6 +231,7 @@ public final class FilmPlaybackModel: ObservableObject {
 
     /// Reconnect only the observer. Disconnection never ends the business or media owner.
     public func reconnect() {
+        if runtimeClosed { _ = recoverRuntime(); return }
         guard !closed, snapshot != nil else { return }
         let previous = observationTask
         previous?.cancel()
@@ -238,6 +242,51 @@ public final class FilmPlaybackModel: ObservableObject {
             self.observationTask = nil
             if !self.closed { self.observe() }
         }
+    }
+
+    public func setPresentationVisible(_ visible: Bool, owner: UUID) {
+        if visible { presentationOwners.insert(owner) }
+        else { presentationOwners.remove(owner) }
+    }
+
+    /// App runtime availability, not a replay of a playback intent. Hidden
+    /// pages retain display data and rebind when they are next activated.
+    public func runtimeDidBecomeAvailable() {
+        guard !presentationOwners.isEmpty else { return }
+        let generation = generation
+        Task { [weak self] in
+            guard let self, (try? await self.transport.producer())?.isClosed == true,
+                  self.generation == generation else { return }
+            self.observeRuntimeClosure()
+            await self.runtimeClosureTask?.value
+            guard !self.presentationOwners.isEmpty, self.runtimeClosed, self.generation == generation else { return }
+            _ = self.recoverRuntime()
+        }
+    }
+
+    private func recoverRuntime() -> Task<Void, Never>? {
+        if let recoveryTask { return recoveryTask }
+        let generation = generation
+        recoveryTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.recoveryTask = nil }
+            await self.closingTask?.value
+            guard !Task.isCancelled, self.generation == generation, self.canLeave else { return }
+            do {
+                await self.transport.renew()
+                guard let client = try await self.transport.producer(), !client.isClosed else {
+                    throw FilmPlaybackError.closed
+                }
+                guard !Task.isCancelled, self.generation == generation else { return }
+                self.closingTask = nil
+                self.runtimeClosed = false
+                self.resetSession()
+                await self.open(restoreOnly: true)?.value
+            } catch {
+                if !Self.cancelled(error) { self.observationError = Self.failure(error) }
+            }
+        }
+        return recoveryTask
     }
 
     public func suspendObservation() async {
@@ -305,8 +354,19 @@ public final class FilmPlaybackModel: ObservableObject {
 
     private func accept(_ value: FilmPlaybackSnapshot, reconcileMedia: Bool = true) {
         guard value.sessionID == allocatedSessionID else { return }
-        if let current = snapshot, value.sequence <= current.sequence { return }
+        if let current = snapshot, current.sessionID == value.sessionID, value.sequence <= current.sequence { return }
         snapshot = value
+        if let previous = restorePresentation {
+            if !value.browsing.loading {
+                if let error = value.browsing.error ?? value.error {
+                    actionError = FilmPlaybackError(code: error)
+                } else {
+                    restorePresentation = nil
+                    presentation = value.retainingLoadedPresentation(previous)
+                    observeSearchContext()
+                }
+            }
+        } else { presentation = value.retainingLoadedPresentation(presentation) }
         reentryTarget = value.target
         reentryError = value.error
         if reconcileMedia { reconcilePreparation() }
@@ -325,33 +385,24 @@ public final class FilmPlaybackModel: ObservableObject {
     }
 
     private func scheduleSearchUpdate() {
-        guard !closed, !runtimeClosed, allocatedSessionID != nil,
+        guard !closed, !runtimeClosed, restorePresentation == nil, allocatedSessionID != nil,
               searchUpdateTask == nil, let context = searchContext else { return }
         let generation = generation
         searchUpdateTask = Task { [weak self] in
             guard let self else { return }
             defer { self.searchUpdateTask = nil }
             while !Task.isCancelled, !self.closed, !self.runtimeClosed, self.generation == generation,
-                  context.snapshot.revision > self.searchRevision {
-                do {
-                    let owner = try await self.transport.producer()
-                    guard !Task.isCancelled, !self.closed, !self.runtimeClosed, self.generation == generation else { return }
-                    let update = try await context.playbackUpdate(sources: self.searchScope, owner: owner)
-                    guard !Task.isCancelled, !self.closed, !self.runtimeClosed, self.generation == generation else { return }
-                    self.searchRevision = update.revision
-                    await self.enqueueAction("search.update", parameters: update.fields, ui: true)?.value
-                } catch {
-                    if !Self.cancelled(error), !self.closed, self.generation == generation {
-                        self.actionError = Self.failure(error)
-                    }
-                    return
-                }
+                  Int(context.snapshot.sequence) > self.searchRevision {
+                guard let update = context.playbackUpdate() else { return }
+                guard !Task.isCancelled, !self.closed, !self.runtimeClosed, self.generation == generation else { return }
+                self.searchRevision = update.revision
+                await self.enqueueAction("search.update", parameters: update.fields, ui: true)?.value
             }
         }
     }
 
     private func reconcilePreparation() {
-        guard (!closed || retained), awaitingIntent == nil, let value = snapshot else { return }
+        guard (!closed || retained), restorePresentation == nil, awaitingIntent == nil, let value = snapshot else { return }
         if let attempt = value.attempt, !attempt.prepareOnly, attempt.id != blockedAttemptID,
            attempt.id != committedID {
             prepare(attempt, sessionID: value.sessionID)
@@ -387,7 +438,6 @@ public final class FilmPlaybackModel: ObservableObject {
     /// keeps only its latest queued value. Actual start/terminal facts stay ordered.
     @discardableResult
     public func send(_ action: String, parameters: RuntimeObject = [:]) -> Task<Void, Never>? {
-        guard !runtimeClosed else { return nil }
         if action == "stop", closed || closingTask != nil || openingTask != nil || reopeningTask != nil {
             let admission = UUID(); commandAdmission = admission
             let generation = generation
@@ -396,8 +446,12 @@ public final class FilmPlaybackModel: ObservableObject {
                 await self.close()
             }
         }
+        if openingTask == nil {
+            restorePresentation = nil
+        }
         let explicitPlayback = action == "play" || action == "select.episode" || action == "select.candidate"
-        if explicitPlayback, closed || openingTask != nil || reopeningTask != nil {
+        if (explicitPlayback || runtimeClosed || openingTask != nil),
+           closed || openingTask != nil || reopeningTask != nil {
             // Admit the explicit intent before drain/reopen can publish an older attempt.
             commandAdmission = UUID(); awaitingIntent = commandAdmission
             let opening = open()
@@ -539,9 +593,9 @@ public final class FilmPlaybackModel: ObservableObject {
     }
     public func browseSeason(_ number: Int) { send("browse.season", parameters: ["season": .number(Double(number))]) }
     @discardableResult
-    public func refreshBrowsing(refresh: Bool = true) -> Task<Void, Never>? {
-        if refresh { actionError = nil }
-        return send("browse.refresh", parameters: refresh ? [:] : ["refresh": .bool(false)])
+    public func refreshBrowsing() -> Task<Void, Never>? {
+        actionError = nil
+        return send("browse.refresh")
     }
     @discardableResult
     public func retryMedia(attemptID: String? = nil) -> Task<Void, Never>? {
@@ -820,6 +874,7 @@ public final class FilmPlaybackModel: ObservableObject {
     #endif
 
     public func close(allowSystemOwner: Bool = false) async {
+        recoveryTask?.cancel()
         reopeningTask?.cancel()
         reopeningTask = nil; reopeningAdmission = UUID()
         commandAdmission = UUID(); awaitingIntent = nil
@@ -843,7 +898,6 @@ public final class FilmPlaybackModel: ObservableObject {
         closed = true
         closeDrained = false
         searchObservation?.cancel(); searchObservation = nil
-        searchAdmissionTask?.cancel()
         searchUpdateTask?.cancel()
         retained = allowSystemOwner && !runtimeClosed && hasSystemOwner && committed?.started == true
         cancelPreparation(); observationAdmission = UUID(); observationTask?.cancel()
@@ -905,6 +959,7 @@ public final class FilmPlaybackModel: ObservableObject {
 
     /// Test/host synchronization waits for admitted work, not timer polling.
     public func waitForPendingWork() async {
+        await recoveryTask?.value
         await reopeningTask?.value
         await closingTask?.value
         while openingTask != nil || commandWorker != nil || searchUpdateTask != nil || preparationWorker != nil ||
@@ -925,7 +980,8 @@ public final class FilmPlaybackModel: ObservableObject {
         (error as? FilmPlaybackError) ?? FilmPlaybackError.invalidResponse
     }
     deinit {
-        runtimeClosureTask?.cancel(); searchAdmissionTask?.cancel(); searchUpdateTask?.cancel()
+        recoveryTask?.cancel()
+        runtimeClosureTask?.cancel(); searchUpdateTask?.cancel()
         observationTask?.cancel(); activePreparation?.cancel()
     }
 }

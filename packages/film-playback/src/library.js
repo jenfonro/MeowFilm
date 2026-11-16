@@ -3,6 +3,7 @@ import { isUtf8 } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import { defaultPreferences, normalizePreferences } from './policy.js';
+import { checkTarget } from './identity.js';
 
 const codes = new Set([
   'INVALID_REQUEST', 'CLOSED', 'STORAGE_ERROR', 'CORRUPT_STORAGE',
@@ -10,7 +11,7 @@ const codes = new Set([
 ]);
 const historyKeys = [
   'targetId', 'title', 'sourceKey', 'candidateId', 'detailId', 'lineId', 'episode',
-  'position', 'duration', 'paused', 'ended', 'playedAt', 'updatedAt',
+  'position', 'duration', 'paused', 'ended', 'playedAt', 'updatedAt', 'playbackTarget',
 ];
 const manualKeys = [
   'id', 'targetId', 'kind', 'title', 'name', 'sourceKey', 'detailId', 'provider', 'share',
@@ -83,6 +84,25 @@ function history(value) {
   text(value.title);
   identity(value.sourceKey);
   candidateIdentity(value.candidateId);
+  if (value.playbackTarget !== undefined) {
+    const target = value.playbackTarget;
+    shape(target, ['id', 'kind', 'title', 'year', 'metadataProvider', 'metadataId',
+      'season', 'episode', 'globalEpisode', 'members', 'source']);
+    try { checkTarget(target); } catch { requireValue(false); }
+    requireValue(target.id === value.targetId);
+    if (target.source !== undefined) {
+      shape(target.source, ['key', 'engine', 'installationId', 'siteId', 'detailId', 'lineId', 'candidateId']);
+      identity(target.source.key);
+      resourceIdentity(target.source.detailId);
+      if (target.source.lineId !== undefined) resourceIdentity(target.source.lineId);
+      if (target.source.candidateId !== undefined) candidateIdentity(target.source.candidateId);
+    }
+    for (const member of target.members ?? []) {
+      shape(member, ['sourceKey', 'detailId']);
+      identity(member.sourceKey);
+      resourceIdentity(member.detailId);
+    }
+  }
   resourceIdentity(value.detailId);
   resourceIdentity(value.lineId);
   number(value.position);
@@ -150,19 +170,33 @@ function blockIdentity(value) {
 }
 
 function validate(value) {
-  shape(value, ['version', 'preferences', 'history', 'manual', 'blocks', 'previewTargets']);
-  requireValue(value.version === 1 && object(value.preferences) &&
+  if (value.version === 1) {
+    shape(value, ['version', 'preferences', 'history', 'manual', 'blocks', 'previewTargets']);
+    value = { ...value, version: 2, groups: [] };
+  }
+  shape(value, ['version', 'preferences', 'history', 'manual', 'blocks', 'previewTargets', 'groups']);
+  requireValue(value.version === 2 && object(value.preferences) &&
     Array.isArray(value.history) && Array.isArray(value.manual) && Array.isArray(value.blocks) &&
-    Array.isArray(value.previewTargets));
+    Array.isArray(value.previewTargets) && Array.isArray(value.groups));
   shape(value.preferences, Object.keys(defaultPreferences()));
   value.preferences = normalizePreferences(value.preferences);
   value.history.forEach(history);
   value.manual.forEach(manual);
   value.blocks.forEach(block);
   value.previewTargets.forEach(identity);
+  for (const group of value.groups) {
+    shape(group, ['id', 'keys', 'members']);
+    requireValue(/^group:[a-f0-9]{64}$/.test(group.id) && Array.isArray(group.keys) &&
+      Array.isArray(group.members) && group.members.length > 0 &&
+      [...group.keys, ...group.members].every(key => /^[a-f0-9]{64}$/.test(key)));
+    unique(group.keys, key => key);
+    unique(group.members, key => key);
+  }
   unique(value.history, entry => entry.targetId);
   unique(value.manual, entry => entry.id);
   unique(value.blocks, blockIdentity);
+  unique(value.groups, group => group.id);
+  unique(value.groups.flatMap(group => group.keys), key => key);
   return value;
 }
 
@@ -214,7 +248,7 @@ export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
     .filter(([key]) => key !== 'preferences')) : value);
   const initial = readDisk();
   let committed = freeze(initial ?? {
-    version: 1, preferences: defaultPreferences(), history: [], manual: [], blocks: [], previewTargets: [],
+    version: 2, preferences: defaultPreferences(), history: [], manual: [], blocks: [], previewTargets: [], groups: [],
   });
   let diskState = initial === null ? null : serialized(initial);
 

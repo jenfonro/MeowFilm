@@ -33,6 +33,7 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
             new("playlists", "歌单"), new("film", "影视"), new("novel", "小说") });
         view = new(this);
         film.Search.Changed += FilmChanged;
+        film.RuntimeRestored += RuntimeRestored;
         music.PropertyChanged += MusicChanged;
         if (novel is not null) novel.Search.Changed += NovelChanged;
     }
@@ -40,8 +41,15 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
     private void FilmChanged(object? sender, EventArgs e)
     {
         if (disposed) return;
-        if (film.Search.Current is null) session = null;
         if (ReferenceEquals(session, film.Search.Current)) PublishFilm();
+    }
+    private void RuntimeRestored(object? sender, EventArgs e)
+    {
+        if (!disposed && active && tab == "film" && query.Length > 0)
+        {
+            session = film.Search.Start(query);
+            PublishFilm();
+        }
     }
     private void MusicChanged(object? sender, PropertyChangedEventArgs e)
     {
@@ -54,6 +62,7 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
         if (disposed) return;
         Deactivate(); disposed = true;
         film.Search.Changed -= FilmChanged;
+        film.RuntimeRestored -= RuntimeRestored;
         Music.PropertyChanged -= MusicChanged;
         if (novel is not null) novel.Search.Changed -= NovelChanged;
         NavigateToPlaybackAsync = null; NavigationToken = null;

@@ -39,7 +39,11 @@ public final class FilmLibrary: ObservableObject {
     }
 
     public func contains(_ item: FilmItem) -> Bool {
-        favorites.contains(item.identity)
+        favorites.contains(item.identity) || favorites.contains(legacyIdentity(item))
+    }
+
+    private func legacyIdentity(_ item: FilmItem) -> FilmItemIdentity {
+        .init(sourceID: item.sourceID, itemID: item.id, kind: item.kind)
     }
 
     @discardableResult
@@ -48,7 +52,9 @@ public final class FilmLibrary: ObservableObject {
         guard item.sourceID != "tmdb" || item.kind != nil else { throw FilmLibraryError.missingKind }
         var updated = favorites
         let added: Bool
-        if updated.remove(item.identity) == nil {
+        let existing = updated.remove(item.identity)
+        let legacy = updated.remove(legacyIdentity(item))
+        if existing == nil && legacy == nil {
             updated.insert(item.identity)
             added = true
         } else {

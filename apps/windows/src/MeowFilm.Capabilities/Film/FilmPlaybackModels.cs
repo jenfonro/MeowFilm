@@ -148,7 +148,7 @@ public sealed record FilmPlaybackRequest(FilmPlaybackTarget Target,
     IReadOnlyList<JsonElement>? Sources = null, string? Query = null,
     JsonElement? Results = null, JsonElement? Search = null, JsonElement? Metadata = null,
     JsonElement? CacheEntries = null, JsonElement? ResultHints = null, JsonElement? SearchReference = null,
-    string? EntrySurface = null, FilmPlaybackTarget? ResumeTarget = null)
+    string? EntrySurface = null, FilmPlaybackTarget? ResumeTarget = null, JsonElement? Browsing = null)
 {
     // Only the producer of the original source results/cache may bind this proof.
     // Navigation persistence intentionally loses it: process-local authority is not JSON.
@@ -162,7 +162,7 @@ public sealed record FilmPlaybackRequest(FilmPlaybackTarget Target,
             ? resume with { Source = resume.Source?.Clone(), Members = resume.Members?.Clone() } : null,
         Sources = Sources?.Select(value => value.Clone()).ToArray(),
         Results = Results?.Clone(), Search = Search?.Clone(), Metadata = Metadata?.Clone(), CacheEntries = CacheEntries?.Clone(),
-        ResultHints = ResultHints?.Clone(), SearchReference = SearchReference?.Clone()
+        ResultHints = ResultHints?.Clone(), SearchReference = SearchReference?.Clone(), Browsing = Browsing?.Clone()
     };
 }
 
@@ -289,12 +289,14 @@ internal sealed class FilmPlaybackSnapshot
 }
 
 public sealed record FilmSelection(string? Id, string Label, int? Season = null, JsonElement? WireId = null,
-    string? MetadataSourceId = null, string? Provider = null);
+    string? MetadataSourceId = null, string? Provider = null, string? BusinessId = null, FilmPlaybackTarget? PlaybackTarget = null);
 
 public sealed record FilmCandidateItem(string Id, string Name, string Path, string Quality,
     string? Provider, string SourceKey, JsonElement DetailId, JsonElement LineId,
     int? Season = null, int? Episode = null, int? GlobalEpisode = null) : INotifyPropertyChanged
 {
+    public string BusinessId { get; init; } = "";
+    public FilmPlaybackTarget? PlaybackTarget { get; init; }
     public string DisplayLabel { get; init; } = "";
     public bool IsSelected { get; private set; }
     internal void Select(bool value)
@@ -310,12 +312,16 @@ public sealed record FilmCandidateItem(string Id, string Name, string Path, stri
     public JsonElement Fps { get; init; }
     public string Codec { get; init; } = "";
     internal bool SameDisplay(FilmCandidateItem other) =>
-        Id == other.Id && Name == other.Name && Path == other.Path && Quality == other.Quality &&
+        Id == other.Id && BusinessId == other.BusinessId && Name == other.Name && Path == other.Path && Quality == other.Quality &&
         Provider == other.Provider && SourceKey == other.SourceKey && Season == other.Season &&
         Episode == other.Episode && GlobalEpisode == other.GlobalEpisode && DisplayLabel == other.DisplayLabel &&
         Image == other.Image && Overview == other.Overview && Codec == other.Codec &&
         FilmJson.Equal(DetailId, other.DetailId) && FilmJson.Equal(LineId, other.LineId) &&
-        FilmJson.Equal(Resolution, other.Resolution) && FilmJson.Equal(Fps, other.Fps);
+        FilmJson.Equal(Resolution, other.Resolution) && FilmJson.Equal(Fps, other.Fps) &&
+        (PlaybackTarget is null ? other.PlaybackTarget is null : other.PlaybackTarget is { } next &&
+            (PlaybackTarget with { Source = null, Members = null }) == (next with { Source = null, Members = null }) &&
+            FilmJson.Equal(PlaybackTarget.Source ?? default, next.Source ?? default) &&
+            FilmJson.Equal(PlaybackTarget.Members ?? default, next.Members ?? default));
     private static string QualityLabel(string quality) => quality switch
     {
         "4k_hdr" => "4K HDR", "4k_fps" => "4K 60帧", "4k" => "4K", "1080p" => "1080P", "720p" => "720P",
@@ -324,11 +330,15 @@ public sealed record FilmCandidateItem(string Id, string Name, string Path, stri
     internal static FilmCandidateItem Read(JsonElement value)
     {
         var source = FilmJson.Member(value, "source");
+        var target = FilmJson.Target(value.GetProperty("playbackTarget"));
+        target.Validate();
         return new(FilmJson.RequiredText(value, "id"), FilmJson.Text(value, "name"), FilmJson.Text(value, "path"),
             FilmJson.Text(value, "quality"), FilmJson.Text(value, "provider") is { Length: > 0 } provider ? provider : null,
             FilmJson.RequiredText(source, "key"), FilmJson.Identity(source, "detailId", required: true), FilmJson.Identity(value, "lineId"),
             FilmJson.Integer(value, "season"), FilmJson.Integer(value, "episode"), FilmJson.Integer(value, "globalEpisode"))
         {
+            BusinessId = FilmJson.RequiredText(value, "businessId"),
+            PlaybackTarget = target,
             DisplayLabel = QualityLabel(FilmJson.Text(value, "quality")) + " · " + FilmJson.Text(source, "name"),
             Resolution = FilmJson.Copy(FilmJson.Member(value, "resolution")),
             Fps = FilmJson.Copy(FilmJson.Member(value, "fps")),

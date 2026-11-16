@@ -102,7 +102,7 @@ internal sealed class FilmSearchConsumerRuntime : IRuntimeClient, IRuntimeConnec
         if (method == "film.search.open")
         {
             LastSearchId = Guid.NewGuid();
-            var value = SearchOpen!(LastSearchId, input);
+            var value = WithSources(SearchOpen!(LastSearchId, input), input.GetProperty("sources"));
             searches.Add(LastSearchId, (value, Channel.CreateUnbounded<JsonElement>()));
             return Success(value);
         }
@@ -117,7 +117,8 @@ internal sealed class FilmSearchConsumerRuntime : IRuntimeClient, IRuntimeConnec
         if (method == "film.search.handoff") return Success(SearchHandoff!(input));
         if (method == "film.search.command")
         {
-            var next = SearchCommand is { } command ? command(input, search.Value) : search.Value;
+            var next = WithSources(SearchCommand is { } command ? command(input, search.Value) : search.Value,
+                search.Value.GetProperty("sources"));
             searches[id] = (next, search.Events);
             return Success(next);
         }
@@ -127,8 +128,16 @@ internal sealed class FilmSearchConsumerRuntime : IRuntimeClient, IRuntimeConnec
     {
         var id = Guid.Parse(FilmJson.RequiredText(snapshot, "sessionId"));
         var search = searches[id];
+        snapshot = WithSources(snapshot, search.Value.GetProperty("sources"));
         searches[id] = (snapshot, search.Events);
         search.Events.Writer.TryWrite(snapshot);
+    }
+    private static JsonElement WithSources(JsonElement snapshot, JsonElement sources)
+    {
+        if (snapshot.TryGetProperty("sources", out _)) return snapshot;
+        var value = JsonNode.Parse(snapshot.GetRawText())!.AsObject();
+        value["sources"] = JsonNode.Parse(sources.GetRawText());
+        return JsonSerializer.SerializeToElement(value);
     }
     internal void ReconnectSearch(Guid id)
     {

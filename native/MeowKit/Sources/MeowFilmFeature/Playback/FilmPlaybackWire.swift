@@ -9,7 +9,7 @@ public enum FilmMetadataProvider: String, Sendable {
 
 /// Provider identifiers preserve their wire prototype, including numeric zero.
 /// Display text must not be round-tripped back into a playback/browse identity.
-public enum FilmPlaybackIdentifier: Equatable, Sendable {
+public enum FilmPlaybackIdentifier: Hashable, Sendable {
     case string(String)
     case number(Int64)
     init(_ value: RuntimeValue) throws {
@@ -43,7 +43,7 @@ public enum FilmPlaybackIdentifier: Equatable, Sendable {
 }
 
 /// Carries the selected identity, not a title-only request or a reconstructed search.
-public struct FilmPlaybackTarget: Equatable, Sendable {
+public struct FilmPlaybackTarget: Equatable, Codable, Sendable {
     public let value: RuntimeObject
     public var id: String { value["id"]!.filmText! }
     public var title: String { value["title"]!.filmText! }
@@ -70,7 +70,17 @@ public struct FilmPlaybackTarget: Equatable, Sendable {
         self.value = value
     }
 
-    init(_ value: RuntimeValue) throws {
+    public init(from decoder: any Decoder) throws {
+        let bytes = try decoder.singleValueContainer().decode(Data.self)
+        try self.init(RuntimeJSON.decode(bytes))
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(RuntimeJSON.encode(.object(value)))
+    }
+
+    public init(_ value: RuntimeValue) throws {
         let object = try value.filmRequiredObject()
         _ = try object.filmString("id"); _ = try object.filmString("title")
         guard FilmPlaybackKind(rawValue: try object.filmString("kind")) != nil else {
@@ -144,6 +154,8 @@ public struct FilmPlaybackRequest: Sendable {
     public let cacheEntries: [RuntimeValue]
     public let searchReference: RuntimeValue?
     public let entrySurface: String?
+    public var restoreOnly = false
+    public var browsing: RuntimeObject?
     public private(set) var resumeTarget: FilmPlaybackTarget?
 
     public init(target: FilmPlaybackTarget, sources: [FilmPlaybackSource], query: String? = nil,
@@ -169,7 +181,25 @@ public struct FilmPlaybackRequest: Sendable {
         fields["searchReference"] = searchReference
         fields["resumeTarget"] = resumeTarget.map { .object($0.value) }
         fields["entrySurface"] = entrySurface.map(RuntimeValue.string)
+        if restoreOnly {
+            fields["restoreOnly"] = .bool(true)
+            fields["browsing"] = browsing.map(RuntimeValue.object)
+        }
         return .object(fields)
+    }
+
+    mutating func restoreBrowsing(_ snapshot: FilmPlaybackSnapshot) {
+        restoreOnly = true
+        var fields: RuntimeObject = [
+            "sourceId": snapshot.browsing.sourceID.map(RuntimeValue.string) ?? .null,
+            "metadataSourceId": snapshot.metadataSourceID.map(RuntimeValue.string) ?? .null,
+        ]
+        fields["lineId"] = snapshot.browsing.lineID?.value
+        fields["season"] = snapshot.browsing.season.map { .number(Double($0)) }
+        if let selected = snapshot.sources.first(where: { $0.id == snapshot.browsing.sourceID }) {
+            fields["source"] = .object(selected.source.value)
+        }
+        browsing = fields
     }
 
     func retargeted(_ target: FilmPlaybackTarget, errorCode: String? = nil) -> Self {
@@ -190,6 +220,7 @@ public struct FilmPlaybackRequest: Sendable {
                      search: search, metadata: sameMetadata ? metadata : nil, cacheEntries: cacheEntries,
                      searchReference: searchReference, entrySurface: entrySurface)
         if searchReference != nil { request.resumeTarget = target }
+        request.restoreOnly = restoreOnly; request.browsing = browsing
         return request
     }
 }
@@ -289,6 +320,8 @@ public struct FilmPlaybackPreferences: Equatable, Sendable {
 }
 
 public struct FilmPlaybackCandidate: Equatable, Sendable {
+    public let businessID: String
+    public let playbackTarget: FilmPlaybackTarget
     public let id: String
     public let source: FilmPlaybackSource
     public let lineID: FilmPlaybackIdentifier
@@ -305,6 +338,8 @@ public struct FilmPlaybackCandidate: Equatable, Sendable {
 
     init(_ value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
+        businessID = try fields.filmString("businessId")
+        playbackTarget = try FilmPlaybackTarget(fields.filmValue("playbackTarget"))
         id = try fields.filmString("id")
         source = try FilmPlaybackSource(fields.filmValue("source"))
         lineID = try FilmPlaybackIdentifier(fields.filmValue("lineId"))
@@ -321,6 +356,8 @@ public struct FilmPlaybackCandidate: Equatable, Sendable {
 }
 
 public struct FilmPlaybackSourceRow: Equatable, Sendable {
+    public let businessID: String
+    public let playbackTarget: FilmPlaybackTarget
     public let id: String
     public let title: String
     public let source: FilmPlaybackSource
@@ -328,6 +365,8 @@ public struct FilmPlaybackSourceRow: Equatable, Sendable {
     public let error: String?
     init(_ value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
+        businessID = try fields.filmString("businessId")
+        playbackTarget = try FilmPlaybackTarget(fields.filmValue("playbackTarget"))
         id = try fields.filmString("id"); title = try fields.filmString("title")
         source = try FilmPlaybackSource(fields.filmValue("source"))
         state = try fields.filmString("state"); error = fields["error"]?.filmText
@@ -335,6 +374,8 @@ public struct FilmPlaybackSourceRow: Equatable, Sendable {
 }
 
 public struct FilmPlaybackMetadataSource: Equatable, Sendable {
+    public let businessID: String
+    public let playbackTarget: FilmPlaybackTarget
     public let id: String
     public let provider: FilmMetadataProvider
     public let metadataID: FilmPlaybackIdentifier
@@ -344,6 +385,8 @@ public struct FilmPlaybackMetadataSource: Equatable, Sendable {
 
     init(_ value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
+        businessID = try fields.filmString("businessId")
+        playbackTarget = try FilmPlaybackTarget(fields.filmValue("playbackTarget"))
         id = try fields.filmString("id")
         guard let provider = FilmMetadataProvider(rawValue: try fields.filmString("provider")),
               let kind = FilmPlaybackKind(rawValue: try fields.filmString("kind")) else {
@@ -360,17 +403,23 @@ public struct FilmPlaybackMetadataSource: Equatable, Sendable {
 }
 
 public struct FilmPlaybackLine: Equatable, Sendable {
+    public let businessID: String
+    public let playbackTarget: FilmPlaybackTarget
     public let id: FilmPlaybackIdentifier
     public let label: String
     public let provider: String?
     init(_ value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
+        businessID = try fields.filmString("businessId")
+        playbackTarget = try FilmPlaybackTarget(fields.filmValue("playbackTarget"))
         id = try FilmPlaybackIdentifier(fields.filmValue("id")); label = try fields.filmString("label")
         provider = fields["provider"]?.filmText
     }
 }
 
 public struct FilmPlaybackFile: Equatable, Sendable {
+    public let businessID: String
+    public let playbackTarget: FilmPlaybackTarget
     public let id: String
     public let candidateID: String?
     public let name: String
@@ -382,6 +431,8 @@ public struct FilmPlaybackFile: Equatable, Sendable {
     public let codec: String?
     init(_ value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
+        businessID = try fields.filmString("businessId")
+        playbackTarget = try FilmPlaybackTarget(fields.filmValue("playbackTarget"))
         id = try fields.filmString("id"); name = try fields.filmString("name")
         candidateID = fields["candidateId"]?.filmText; path = fields["path"]?.filmText
         quality = fields["quality"]?.filmText; resolution = fields["resolution"]?.filmText
@@ -425,11 +476,13 @@ public struct FilmPlaybackEpisode: Equatable, Sendable {
     public let raw: RuntimeObject
     public let position: FilmEpisodePosition
     public let name: String?
-    public var displayID: String {
-        "season-\(position.season!)-episode-\(position.episode!)"
-    }
+    public let businessID: String
+    public let playbackTarget: FilmPlaybackTarget
+    public var displayID: String { businessID }
     init(_ value: RuntimeValue) throws {
         raw = try value.filmRequiredObject()
+        businessID = try raw.filmString("businessId")
+        playbackTarget = try FilmPlaybackTarget(raw.filmValue("playbackTarget"))
         guard let season = raw["season"]?.filmInteger, let episode = raw["episode"]?.filmInteger else {
             throw FilmPlaybackError.invalidResponse
         }
@@ -491,19 +544,19 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
     public let target: FilmPlaybackTarget
     public let entryTarget: FilmPlaybackTarget?
     public let entrySurface: String?
-    public let entryResolution: String?
+    public private(set) var entryResolution: String?
     public let stage: String
     public let error: String?
-    public let metadata: RuntimeValue
-    public let metadataCache: FilmMetadataCache?
-    public let metadataSupplement: FilmPlaybackMetadataSupplement?
-    public let metadataSources: [FilmPlaybackMetadataSource]
-    public let metadataSourceID: String?
+    public private(set) var metadata: RuntimeValue
+    public private(set) var metadataCache: FilmMetadataCache?
+    public private(set) var metadataSupplement: FilmPlaybackMetadataSupplement?
+    public private(set) var metadataSources: [FilmPlaybackMetadataSource]
+    public private(set) var metadataSourceID: String?
     public let metadataError: String?
-    public let sources: [FilmPlaybackSourceRow]
-    public let browsing: FilmPlaybackBrowsing
-    public let episodes: [FilmPlaybackEpisode]
-    public let candidates: [FilmPlaybackCandidate]
+    public private(set) var sources: [FilmPlaybackSourceRow]
+    public private(set) var browsing: FilmPlaybackBrowsing
+    public private(set) var episodes: [FilmPlaybackEpisode]
+    public private(set) var candidates: [FilmPlaybackCandidate]
     public let attempt: FilmPlaybackAttempt?
     public let current: FilmPlaybackCurrent?
     public let searchComplete: Bool
@@ -550,6 +603,35 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
         preferences = try FilmPlaybackPreferences(fields.filmValue("preferences"))
         shortVideo = try fields.filmBool("shortVideo"); previewEpisodes = try fields.filmBool("previewEpisodes")
         reportError = fields["reportError"]?.filmText; prefetch = fields["prefetch"]
+    }
+
+    /// Native display state may outlive its executor. Never feed this projection
+    /// back to the execution owner as authorization or cache freshness.
+    func retainingLoadedPresentation(_ previous: Self?) -> Self {
+        guard let previous else { return self }
+        var result = self
+        if metadata == .null, metadataSourceID == previous.metadataSourceID || sessionID != previous.sessionID {
+            result.metadata = previous.metadata
+            result.metadataCache = previous.metadataCache
+            result.metadataSupplement = previous.metadataSupplement
+            result.metadataSources = previous.metadataSources
+            result.metadataSourceID = previous.metadataSourceID
+        }
+        if entryResolution == "loading" || entryResolution == "error",
+           previous.entryResolution != "loading", previous.entryResolution != "error" {
+            result.entryResolution = previous.entryResolution
+        }
+        if sources.isEmpty, stage == "loading" || error != nil { result.sources = previous.sources }
+        if browsing.loading || browsing.error != nil,
+           browsing.sourceID == previous.browsing.sourceID,
+           browsing.lineID == previous.browsing.lineID,
+           browsing.season == previous.browsing.season,
+           metadataSourceID == previous.metadataSourceID {
+            result.browsing = previous.browsing
+            result.episodes = previous.episodes
+            result.candidates = previous.candidates
+        }
+        return result
     }
 }
 

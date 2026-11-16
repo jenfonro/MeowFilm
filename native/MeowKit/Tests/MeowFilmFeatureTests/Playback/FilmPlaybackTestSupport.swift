@@ -17,11 +17,40 @@ enum FilmPlaybackFixture {
         "key": .string("source-key"), "engine": .string("cat"), "installationId": .string("fixture"),
         "siteId": .string("site"), "generation": .number(1), "name": .string("测试站"), "detailId": .number(0),
     ])
+    static func sourceTarget(source: RuntimeValue = source, lineID: RuntimeValue? = nil,
+                             candidateID: String? = nil) -> RuntimeValue {
+        var pointer = RuntimeObject(uniqueKeysWithValues: source.filmObject!.filter {
+            ["key", "engine", "installationId", "siteId", "detailId"].contains($0.key)
+        })
+        pointer["lineId"] = lineID
+        pointer["candidateId"] = candidateID.map(RuntimeValue.string)
+        return .object(["id": .string("tmdb:tv:19"), "kind": .string("source"),
+                        "title": .string("星河"), "source": .object(pointer)])
+    }
     static func candidate(_ id: String = "candidate-a", source: RuntimeValue = source,
                           lineID: RuntimeValue = .string("opaque-line")) -> RuntimeValue {
-        .object(["id": .string(id), "source": source, "lineId": lineID,
+        .object(["businessId": .string(id), "playbackTarget": sourceTarget(source: source, lineID: lineID, candidateID: id),
+                 "id": .string(id), "source": source, "lineId": lineID,
                  "lineLabel": .string("自定义线路"), "name": .string("第一集"),
                  "season": .number(1), "episode": .number(1), "globalEpisode": .number(1)])
+    }
+    static func identifiedBrowsing(_ value: RuntimeValue) -> RuntimeValue {
+        var fields = value.filmObject!
+        fields["lines"] = .array((fields["lines"]?.filmArray ?? []).map { value in
+            var row = value.filmObject!
+            row["businessId"] = .string("fixture-line-\(row["id"]!.filmScalar!)")
+            row["playbackTarget"] = sourceTarget(lineID: row["id"])
+            return .object(row)
+        })
+        for name in ["episodes", "originalEpisodes"] where fields[name] != nil {
+            fields[name] = .array(fields[name]!.filmArray!.map { value in
+                var row = value.filmObject!
+                row["businessId"] = row["id"]
+                row["playbackTarget"] = sourceTarget(lineID: fields["lineId"], candidateID: row["candidateId"]?.filmText)
+                return .object(row)
+            })
+        }
+        return .object(fields)
     }
     static func attempt(_ id: String, prepareOnly: Bool = false, candidate: RuntimeValue = candidate()) -> RuntimeValue {
         .object(["id": .string(id), "candidate": candidate, "prepareOnly": .bool(prepareOnly),
@@ -42,16 +71,30 @@ enum FilmPlaybackFixture {
             "sessionId": .string(sessionID.uuidString.lowercased()), "sequence": .number(Double(sequence)),
             "target": target, "stage": .string(stage), "error": .null, "metadata": metadata,
             "metadataCache": metadataCache, "metadataSupplement": metadataSupplement,
-            "sources": .array([.object(["id": .string("result-a"), "title": .string("星河"), "source": source,
+            "sources": .array([.object(["businessId": .string("source-fixture"), "playbackTarget": sourceTarget(),
+                                         "id": .string("result-a"), "title": .string("星河"), "source": source,
                                          "state": .string("ready"), "error": .null])]),
-            "browsing": browsing ?? .object(["sourceId": .null, "lineId": .null, "loading": .bool(false),
-                                             "error": .null, "lines": .array([]), "episodes": .array([])]),
-            "episodes": .array(episodes), "candidates": .array(candidates),
+            "browsing": identifiedBrowsing(browsing ?? .object(["sourceId": .null, "lineId": .null, "loading": .bool(false),
+                                             "error": .null, "lines": .array([]), "episodes": .array([])])),
+            "episodes": .array(episodes.map { value in
+                var row = value.filmObject!
+                var address = target.filmObject!
+                address["season"] = row["season"]; address["episode"] = row["episode"]
+                row["businessId"] = .string("fixture-season-\(row["season"]!.filmInteger!)-episode-\(row["episode"]!.filmInteger!)")
+                row["playbackTarget"] = .object(address)
+                return .object(row)
+            }), "candidates": .array(candidates),
             "attempt": attempt, "current": current, "searchComplete": .bool(false),
             "preferences": FilmPlaybackPreferences.defaults.value, "shortVideo": .bool(false),
             "previewEpisodes": .bool(false), "reportError": .null, "prefetch": .array([]),
         ]
-        fields["metadataSources"] = metadataSources.map(RuntimeValue.array)
+        fields["metadataSources"] = metadataSources.map { rows in .array(rows.map { value in
+            var row = value.filmObject!
+            row["businessId"] = row["id"]
+            row["playbackTarget"] = .object(["id": row["id"]!, "kind": row["kind"]!, "title": row["title"]!,
+                "metadataProvider": row["provider"]!, "metadataId": row["metadataId"]!])
+            return .object(row)
+        }) }
         fields["metadataSourceId"] = metadataSourceID.map(RuntimeValue.string)
         fields["metadataError"] = metadataError.map(RuntimeValue.string)
         return .object(fields)
@@ -66,8 +109,8 @@ enum FilmPlaybackFixture {
     }
     static func library(preferences: FilmPlaybackPreferences = .defaults,
                         manual: [RuntimeValue] = [], history: [RuntimeValue] = [], blocks: [RuntimeValue] = []) -> RuntimeValue {
-        .object(["version": .number(1), "preferences": preferences.value, "history": .array(history),
-                 "manual": .array(manual), "blocks": .array(blocks)])
+        .object(["version": .number(2), "preferences": preferences.value, "history": .array(history),
+                 "manual": .array(manual), "blocks": .array(blocks), "groups": .array([])])
     }
 }
 

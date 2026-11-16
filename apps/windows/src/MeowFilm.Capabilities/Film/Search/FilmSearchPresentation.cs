@@ -4,14 +4,14 @@ using System.Text.Json;
 
 namespace MeowFilm.Capabilities;
 
-/// <summary>Search-only presentation. Node's opaque selection key, not a representative's ID, owns its lifetime.</summary>
+/// <summary>Search presentation keeps the runtime's business identity and optional live selection reference.</summary>
 public sealed class FilmSearchCardItem : INotifyPropertyChanged
 {
     private FilmSearchCardValue value;
     internal FilmSearchCardItem(FilmSearchSession session, FilmSearchCardValue value)
     {
         this.value = value;
-        SearchContext = new(session, value.Key, value.Item);
+        SearchContext = new(session, FilmSearchJson.Text(value.Item, "displayKey"), value.Item);
     }
 
     public string Id => value.Id;
@@ -28,7 +28,7 @@ public sealed class FilmSearchCardItem : INotifyPropertyChanged
 
     internal FilmCardItem ToCard() => new(Id, Title, Poster, Score)
     {
-        TextBadge = TextBadge, Subtitle = Subtitle, SearchContext = SearchContext
+        TextBadge = TextBadge, Subtitle = Subtitle, SearchContext = SearchContext, PlaybackContext = SearchContext.PlaybackRequest
     };
 
     internal void Apply(FilmSearchCardValue next, FilmSearchCardFields fields)
@@ -97,13 +97,15 @@ internal sealed class FilmSearchCardProjection
         for (int index = 0; index < items.Length; index++)
         {
             var item = items[index];
-            string key = FilmSearchJson.Text(item, "displayKey");
+            string key = FilmJson.RequiredText(item, "businessId");
             if (!keys.Add(key)) throw new FilmPlaybackException("INVALID_RESPONSE");
             // Refresh borrowed elements together when their owning array changes.
             // Keeping one old document per unchanged card would retain historical full snapshots.
             string poster = FilmSearchJson.Text(item, "poster");
             if (FilmSearchJson.Text(item, "sourceKind") == "tmdb") poster = resolveImage(poster);
-            values[index] = new(key, FilmSearchJson.Text(item, "id"), FilmSearchJson.Text(item, "title"),
+            var target = FilmJson.Target(item.GetProperty("playbackTarget"));
+            target.Validate();
+            values[index] = new(key, key, FilmSearchJson.Text(item, "title"),
                 poster, FilmSearchJson.Text(item, "textBadge"), FilmSearchJson.Text(item, "siteLabel"), item);
         }
         var order = previous?.Values.Select(value => value.Key).ToList() ?? [];
