@@ -63,16 +63,17 @@ public struct FilmCatSource: Codable, Equatable, Sendable {
     public let sourceHash: String?
     public var error: String?
     public var sites: [FilmSourceSite]
+    public let inputRevision: Int64
     public init(installationId: String, name: String, sourceType: String, sourceUrl: String? = nil,
                 enabled: Bool = true, importedAt: Int64? = nil, updatedAt: Int64? = nil,
                 updateState: String = "idle", updateError: String? = nil, generation: Int64 = 0,
                 state: String = "stopped", sourceHash: String? = nil, error: String? = nil,
-                sites: [FilmSourceSite] = []) {
+                sites: [FilmSourceSite] = [], inputRevision: Int64 = 0) {
         self.installationId = installationId; self.name = name; self.sourceType = sourceType
         self.sourceUrl = sourceUrl; self.enabled = enabled; self.importedAt = importedAt
         self.updatedAt = updatedAt; self.updateState = updateState; self.updateError = updateError
         self.generation = generation; self.state = state; self.sourceHash = sourceHash
-        self.error = error; self.sites = sites
+        self.error = error; self.sites = sites; self.inputRevision = inputRevision
     }
     public var modifiedAt: Int64? { updatedAt ?? importedAt }
     public var canRestart: Bool { enabled }

@@ -51,6 +51,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
             alert.dismiss(animated: false) { dismissed.fulfill() }
             await fulfillment(of: [dismissed], timeout: 5)
             await waitFor { form.canPresentPageAlert }
+            try await waitForNativeRuntimeSettings(.douban, resources: resources)
         }
         try edit("apiProxy", upstream.base + "/data?target=")
         try edit("imageProxy", upstream.base + "/pictures?target=")
@@ -139,13 +140,13 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         root.loadViewIfNeeded()
         await waitFor { root.canPresentPageAlert }
         let menu = try XCTUnwrap(root.children.compactMap { $0 as? FilmSettingsListController }.first)
-        let scraping = try XCTUnwrap(menu.sections.flatMap(\.rows).first { $0.title == "数据源" })
+        let scraping = try XCTUnwrap(menu.sections.flatMap(\.rows).first { $0.title == "刮削设置" })
         try select(menu, scraping.id)
         await waitFor { navigation.topViewController is FilmDataSourceSettingsViewController }
         let scrapingPage = try XCTUnwrap(navigation.topViewController as? FilmDataSourceSettingsViewController)
         scrapingPage.loadViewIfNeeded()
         let page = try XCTUnwrap(scrapingPage.children.compactMap { $0 as? FilmDataSourceFormController }.first)
-        XCTAssertEqual(scrapingPage.pageTitle, "数据源")
+        XCTAssertEqual(scrapingPage.pageTitle, "刮削设置")
         await waitFor { settings.tmdb.saved != nil && !settings.tmdb.busy && page.canPresentPageAlert }
         XCTAssertEqual(try field(page, "apiToken").text, "")
         XCTAssertFalse(try field(page, "apiToken").isSecureTextEntry)
@@ -300,6 +301,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         try await model.load()
         model.apiBase = upstream.base + "/old/3"; model.imageBase = upstream.base + "/images"
         try await model.save()
+        try await waitForNativeRuntimeSettings(.tmdb, resources: resources)
         let old = try search.session(for: "同词")
         await fulfillment(of: [entered], timeout: 10)
         await waitFor { old.snapshot.cards.contains { $0.tmdbType == "tv" } }
@@ -354,6 +356,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         _ = try await resources.filmMetadata.updateSettings([
             "apiBase": .string(upstream.base + "/api/3"), "imageBase": .string(upstream.base + "/images")
         ])
+        try await waitForNativeRuntimeSettings(.tmdb, resources: resources)
         search.metadataSettingsChanged()
         let connection = try await resources.scriptSession.connection()
         let read = Task { try await resources.filmMetadata.detailRead(type: "tv", id: 7) }
@@ -410,6 +413,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
             "apiBase": .string(upstream.base + "/api/3"), "imageBase": .string(upstream.base + "/images"),
             "apiKey": .string("synthetic-image-api-key"), "accessToken": .string("synthetic-image-api-token")
         ])
+        try await waitForNativeRuntimeSettings(.tmdb, resources: resources)
         assembly.filmSearch?.metadataSettingsChanged()
         // Unique relative file names avoid depending on other tests' warm cache.
         let prefix = UUID().uuidString.lowercased()
@@ -520,6 +524,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         alert.dismiss(animated: false) { dismissed.fulfill() }
         await fulfillment(of: [dismissed], timeout: 5)
         await waitFor { page.canPresentPageAlert }
+        try await waitForNativeRuntimeSettings(.tmdb, resources: try await hostResources())
     }
     private func mount(_ page: UIViewController) async throws -> (UIWindow, UIWindow?) {
         await waitFor { UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive } }
@@ -590,22 +595,24 @@ final class MeowfilmTMDBShutdownHostTests: XCTestCase {
             }
         }
         _ = try await resources.filmMetadata.updateSettings(["imageBase": .string(upstream.base + "/images")])
+        try await waitForNativeRuntimeSettings(.tmdb, resources: resources)
         let relative = try XCTUnwrap(resources.filmMetadata.imageURL(path: "/v1/tmdb/images/w500/shutdown-\(UUID().uuidString).png"))
         let read = Task { try await assembly.filmImages.read(relative) }
         addTeardownBlock { read.cancel(); upstream.stop(); _ = await read.result }
         await fulfillment(of: [entered], timeout: 10)
-        // Restore the fixture before terminal shutdown. The admitted image still
-        // owns its original upstream configuration snapshot.
-        _ = try await resources.filmMetadata.updateSettings([
-            "apiBase": .string(original.apiBase), "imageBase": .string(original.imageBase),
-            "apiKey": .string(""), "accessToken": .string("")
-        ])
+        // Shutdown must physically drain this admitted image. Restore native
+        // settings only after closing, so a settings notification cannot be the
+        // action which disconnects the physical upstream.
         let ended = expectation(description: "App owner physically shut down")
         assembly.shutdown()
         let closing = Task { await assembly.waitForShutdown(); ended.fulfill() }
         await fulfillment(of: [disconnected, ended], timeout: 15)
         upstream.stop()
         await closing.value
+        _ = try await resources.filmMetadata.updateSettings([
+            "apiBase": .string(original.apiBase), "imageBase": .string(original.imageBase),
+            "apiKey": .string(""), "accessToken": .string("")
+        ])
         do { _ = try await read.value; XCTFail("Owner close cannot cache pending image bytes") }
         catch {}
         XCTAssertNil(assembly.filmImages.cached(relative))

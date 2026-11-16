@@ -2544,7 +2544,11 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     open: (...args) => tracked(open(...args)),
     command, attempt, release, releaseMedia, events, snapshot: input => snapshot(get(input.sessionId)),
     settings() { return clone(preferences()); },
+    async settingsChanged() {
+      for (const session of sessions.values()) await refreshEligibility(session);
+    },
     async setSettings(input) {
+      requireValue(library.configurationOwner !== 'native', 'PERMISSION_DENIED');
       const next = normalizePreferences(input);
       library.update(document => { document.preferences = next; });
       for (const session of sessions.values()) await refreshEligibility(session);

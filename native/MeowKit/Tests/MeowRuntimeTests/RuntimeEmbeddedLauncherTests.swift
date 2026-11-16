@@ -30,6 +30,12 @@ private struct RuntimeBootstrapPeer {
     }
     func endpoint(_ address: String = "http://127.0.0.1:43210") {
         let data = try! RuntimeJSON.encode(.object(["baseUrl": .string(address)])) + Data([10])
+        write(data)
+    }
+    func frame(_ value: RuntimeValue) {
+        write(try! RuntimeJSON.encode(value) + Data([10]))
+    }
+    func write(_ data: Data) {
         data.withUnsafeBytes { bytes in
             var offset = 0
             while offset < bytes.count {
@@ -58,6 +64,86 @@ final class RuntimeEmbeddedLauncherTests: XCTestCase {
             "assemblyProfile": "common-native", "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease", "music-platform"]]
         value.merge(changes) { $1 }
         try JSONSerialization.data(withJSONObject: value).write(to: root.appendingPathComponent("runtime-manifest.json"))
+    }
+
+    func testPrivateSettingsFramesWorkBeforeAndAfterEndpointAndOnlyPanCanWrite() async throws {
+        let root = try payload()
+        let blocks = ["cat.sources", "pan.accounts", "tmdb", "douban", "film.rules", "film.preferences"]
+        let fingerprint: RuntimeValue = .object(["exists": .bool(false), "length": .number(0), "sha256": .null])
+        let writes = RuntimeLaunchRecord()
+        let access = RuntimeSettingsAccess(blocks: Set(blocks), writableBlocks: ["pan.accounts"], read: { block in
+            .init(document: .object(["block": .string(block)]), fingerprint: fingerprint)
+        }, write: { block, value, expected in
+            XCTAssertEqual(block, "pan.accounts"); XCTAssertEqual(expected, fingerprint)
+            XCTAssertEqual(value, .object(["version": .number(1)]))
+            writes.set([block])
+            return .init(document: value, fingerprint: fingerprint)
+        })
+        let updated = expectation(description: "post-endpoint private write settled")
+        let launcher = RuntimeEmbeddedLauncher(payload: { try RuntimePayload(root: root) }, dataDirectory: root,
+            settings: access, start: { arguments in
+                let peer = RuntimeBootstrapPeer(duplicating: Int32(arguments[3])!)
+                guard let bytes = peer.readLine(), case .object(let configuration) = try? RuntimeJSON.decode(bytes) else {
+                    peer.close(); return 1
+                }
+                XCTAssertEqual(configuration.count, 3); XCTAssertEqual(configuration["nativeSettings"], .bool(true))
+                for (index, block) in blocks.enumerated() {
+                    let request = try! RuntimeJSON.encode(.object(["kind": .string("settings.read"),
+                        "id": .number(Double(index + 1)), "block": .string(block)])) + Data([10])
+                    // Exercise fragmentation without depending on transport packet boundaries.
+                    peer.write(request.prefix(3)); peer.write(request.dropFirst(3))
+                    guard let bytes = peer.readLine(), case .object(let result) = try? RuntimeJSON.decode(bytes) else {
+                        peer.close(); return 1
+                    }
+                    XCTAssertEqual(result["kind"], .string("settings.result"))
+                    XCTAssertEqual(result["id"], .number(Double(index + 1)))
+                    XCTAssertEqual(result["ok"], .bool(true))
+                    XCTAssertEqual(result["document"], .object(["block": .string(block)]))
+                    XCTAssertEqual(result["fingerprint"], fingerprint)
+                }
+                peer.endpoint()
+                peer.frame(.object(["kind": .string("settings.write"), "id": .number(7),
+                    "block": .string("pan.accounts"), "document": .object(["version": .number(1)]), "expected": fingerprint]))
+                guard let bytes = peer.readLine(), case .object(let result) = try? RuntimeJSON.decode(bytes) else {
+                    peer.close(); return 1
+                }
+                XCTAssertEqual(result["ok"], .bool(true))
+                updated.fulfill()
+                XCTAssertNil(peer.readLine())
+                peer.close(); return 0
+            })
+        let client = try await launcher.connect()
+        await fulfillment(of: [updated], timeout: 5)
+        XCTAssertEqual(writes.get(), ["pan.accounts"])
+        await launcher.close()
+        XCTAssertTrue(client.isClosed)
+    }
+
+    func testPrivateSettingsConflictIsClosedErrorAndForbiddenWriteEndsLaunch() async throws {
+        let root = try payload(), reads = RuntimeLaunchRecord()
+        let access = RuntimeSettingsAccess(blocks: ["pan.accounts", "tmdb"], writableBlocks: ["pan.accounts"], read: { _ in
+            throw RuntimeSettingsAccessError.storageFailure
+        }, write: { _, _, _ in throw RuntimeSettingsAccessError.conflict })
+        let launcher = RuntimeEmbeddedLauncher(payload: { try RuntimePayload(root: root) }, dataDirectory: root,
+            settings: access, start: { arguments in
+                let peer = RuntimeBootstrapPeer(duplicating: Int32(arguments[3])!)
+                _ = peer.readLine()
+                peer.frame(.object(["kind": .string("settings.write"), "id": .number(1),
+                    "block": .string("pan.accounts"), "document": .object([:]), "expected": .object([:])]))
+                if let bytes = peer.readLine(), case .object(let result) = try? RuntimeJSON.decode(bytes) {
+                    XCTAssertEqual(result, ["kind": .string("settings.result"), "id": .number(1),
+                                           "ok": .bool(false), "code": .string("STORAGE_CONFLICT")])
+                    reads.set(["conflict"])
+                } else { XCTFail("missing closed error reply") }
+                peer.frame(.object(["kind": .string("settings.write"), "id": .number(2),
+                    "block": .string("tmdb"), "document": .object([:]), "expected": .object([:])]))
+                XCTAssertNil(peer.readLine())
+                peer.close(); return 0
+            })
+        do { _ = try await launcher.connect(); XCTFail("forbidden write cannot yield an endpoint") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .invalidResponse) }
+        await launcher.close()
+        XCTAssertEqual(reads.get(), ["conflict"])
     }
 
     func testSessionCloseWaitsForNodeStartReturnAfterNativeEOF() async throws {

@@ -91,6 +91,23 @@ final class EncryptedDocumentStoreTests: XCTestCase {
         XCTAssertEqual(keys.createCount, 1)
     }
 
+    func testCompareAndSwapUsesExactDecryptedBytesAndNeverOverwritesConflict() throws {
+        let (base, keys, store) = try fixture()
+        try store.compareAndSwap(key: document, expected: nil, replacement: plaintext)
+        XCTAssertEqual(try store.read(key: document), plaintext)
+        let second = plaintext + Data([1])
+        try store.compareAndSwap(key: document, expected: plaintext, replacement: second)
+        let committed = try Data(contentsOf: location(base))
+        for stale in [nil, plaintext] {
+            XCTAssertThrowsError(try store.compareAndSwap(key: document, expected: stale, replacement: Data())) {
+                XCTAssertEqual($0 as? EncryptedDocumentStoreError, .revisionConflict)
+            }
+            XCTAssertEqual(try Data(contentsOf: location(base)), committed)
+        }
+        let reopened = try EncryptedDocumentStore(baseURL: base, namespace: namespace, keyProvider: keys)
+        XCTAssertEqual(try reopened.read(key: document), second)
+    }
+
     func testIndependentlySealedEnvelopeIsReadableAndVersionIsAuthenticated() throws {
         let (base, keys, store) = try fixture()
         try store.write(plaintext, key: document)

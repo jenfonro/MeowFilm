@@ -2,6 +2,11 @@ import Foundation
 import MeowRuntime
 
 public struct FilmDoubanSettings: Equatable, Sendable {
+    static let defaultValue: RuntimeValue = .object([
+        "apiBase": .string("https://m.douban.com"), "searchBase": .string("https://search.douban.com"),
+        "imageBase": .string("https://img3.doubanio.com"), "apiProxy": .string(""),
+        "imageProxy": .string(""), "cookie": .string(""),
+    ])
     public let apiBase: String
     public let searchBase: String
     public let imageBase: String
@@ -21,18 +26,18 @@ public struct FilmDoubanSettings: Equatable, Sendable {
     }
 }
 
-/// Borrows the App runtime; douban.data.v1 remains the sole settings owner.
+/// The native document is the only editable settings owner.
 public struct FilmDoubanSettingsService: Sendable {
-    private let connection: @Sendable () async throws -> RuntimeHTTPClient
-    public init(connection: @escaping @Sendable () async throws -> RuntimeHTTPClient) { self.connection = connection }
+    private let settingsDocument: FilmSettingsDocument
+    public init(settingsDocument: FilmSettingsDocument) { self.settingsDocument = settingsDocument }
     public func settings() async throws -> FilmDoubanSettings {
-        let client = try await connection()
-        let value = try await client.call(module: .douban, operation: "settings.get")
-        return try FilmDoubanSettings(value)
+        try Task.checkCancellation()
+        let value = try FilmDoubanSettings(FilmMetadataSettingsDocument.read(settingsDocument, defaults: FilmDoubanSettings.defaultValue))
+        try Task.checkCancellation()
+        return value
     }
     public func updateSettings(_ patch: RuntimeObject) async throws -> FilmDoubanSettings {
-        let client = try await connection()
-        let value = try await client.call(module: .douban, operation: "settings.update", parameters: .object(patch))
-        return try FilmDoubanSettings(value)
+        try Task.checkCancellation()
+        return try FilmDoubanSettings(FilmMetadataSettingsDocument.update(settingsDocument, defaults: FilmDoubanSettings.defaultValue, patch: patch))
     }
 }

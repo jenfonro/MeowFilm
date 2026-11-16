@@ -18,11 +18,14 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let sourceStore = try DocumentStore(baseURL: directory, namespace: FilmSourceService.documentNamespace)
         let transport = CatScriptTransport(connectionProvider: { try await resources.scriptSession.connection() })
-        let sources = FilmSourceService(transport: transport, storeFactory: { sourceStore })
+        let sources = FilmSourceService(transport: transport, storeFactory: { sourceStore },
+            settingsDocument: resources.filmSettings[.catSources],
+            runtimeSourceRoot: MeowfilmScriptRuntime.dataDirectory.appendingPathComponent("cat"))
         let service = FilmSearchService(sources: sources, connection: { try await resources.scriptSession.connection() })
         let id = "ios-film-search-" + UUID().uuidString.lowercased()
         do {
-            let installed = try await sources.importLocal(name: "Search transport fixture", source: filmSearchCatScript, installationId: id)
+            _ = try await sources.importLocal(name: "Search transport fixture", source: filmSearchCatScript, installationId: id)
+            let installed = try await waitForNativeCat(id, service: sources)
             let session = try service.session(for: "原查询")
             await session.drain()
             XCTAssertEqual(session.snapshot.siteItems.count, 125, "A real Cat response must not be truncated by the client")
@@ -45,7 +48,7 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
             await sources.close()
         } catch {
             await service.close()
-            _ = try? await transport.call("uninstall", ["installationId": .string(id)])
+            try? await sources.deleteCat(id)
             await sources.close()
             throw error
         }
@@ -91,8 +94,9 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         let assembly = try XCTUnwrap(app.readyAssembly())
         let client = try await resources.scriptSession.connection()
         let id = "ios-film-search-live-" + UUID().uuidString.lowercased()
-        let installed = try await resources.filmSourceSettings.importLocal(name: "Live search fixture",
+        _ = try await resources.filmSourceSettings.importLocal(name: "Live search fixture",
             source: filmSearchPlaybackCatScript, installationId: id)
+        let installed = try await waitForNativeCat(id, service: resources.filmSourceSettings)
         let catalog = await resources.filmSourceSettings.snapshot
         let sites = catalog.videos.filter { $0.key.installationId == id }.map { FilmSearchSite(cat: installed, source: $0) }
         XCTAssertEqual(Set(sites.map { $0.source.key.siteKey }), ["first", "second"])
@@ -228,13 +232,14 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         try await controlledMetadata(resources)
         let rules = FilmRuleSet(aggregateRegexRules: [#"/\p{Extended_Pictographic}/gu"#, "(?<=作品)高清(?=2)"])
         try await controlledRules(resources, rules: rules)
-        let ruleService = FilmRuleService(connection: { client })
+        let ruleService = FilmRuleService(settingsDocument: resources.filmSettings[.rules], connection: { client })
         addTeardownBlock { await ruleService.close() }
         let preview = try await ruleService.process(.init(section: .search, text: "作品🎬高清2外传", query: "作品2外传"))
         XCTAssertEqual(preview.groupKey, FilmRuleText("作品2外传"))
         let id = "ios-rule-search-" + UUID().uuidString.lowercased()
-        let cat = try await resources.filmSourceSettings.importLocal(name: "Rule input fixture",
+        _ = try await resources.filmSourceSettings.importLocal(name: "Rule input fixture",
             source: filmRuleSearchCatScript, installationId: id)
+        let cat = try await waitForNativeCat(id, service: resources.filmSourceSettings)
         let catalog = await resources.filmSourceSettings.snapshot
         let sites = catalog.videos.filter { $0.key.installationId == id }.map { FilmSearchSite(cat: cat, source: $0) }
         let service = FilmSearchService(transport: FilmSearchTransport(connection: { client }), sites: { sites })
@@ -286,13 +291,14 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         let resources = try await hostResources(), client = try await resources.scriptSession.connection()
         try await controlledMetadata(resources)
         try await controlledRules(resources, rules: .init(aggregateRegexRules: [#"/\uD840/g"#]))
-        let rules = FilmRuleService(connection: { client })
+        let rules = FilmRuleService(settingsDocument: resources.filmSettings[.rules], connection: { client })
         addTeardownBlock { await rules.close() }
         let preview = try await rules.process(.init(section: .search, text: "𠀀星河"))
         XCTAssertEqual(preview.groupKey.utf16, [0xDC00, 0x661F, 0x6CB3])
         let id = "ios-rule-units-" + UUID().uuidString.lowercased()
-        let cat = try await resources.filmSourceSettings.importLocal(name: "UTF16 search fixture",
+        _ = try await resources.filmSourceSettings.importLocal(name: "UTF16 search fixture",
             source: filmRuleSearchCatScript, installationId: id)
+        let cat = try await waitForNativeCat(id, service: resources.filmSourceSettings)
         let catalog = await resources.filmSourceSettings.snapshot
         let sites = catalog.videos.filter { $0.key.installationId == id }.map { FilmSearchSite(cat: cat, source: $0) }
         let service = FilmSearchService(transport: FilmSearchTransport(connection: { client }), sites: { sites })
@@ -328,16 +334,19 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
                 "apiKey": .string(""), "accessToken": .string("")])
         }
         _ = try await metadata.updateSettings(["apiBase": .string(upstream.base + "/api"), "imageBase": .string(upstream.base + "/images")])
+        try await waitForNativeRuntimeSettings(.tmdb, resources: resources)
     }
 
     private func controlledRules(_ resources: MeowfilmResources, rules: FilmRuleSet = .init()) async throws {
         let client = try await resources.scriptSession.connection()
         let original = try await client.call(module: .film, operation: "rules.get").filmRequiredObject().filmValue("rules")
         addTeardownBlock {
-            _ = try await client.call(module: .film, operation: "rules.set", parameters: .object(["rules": original]))
+            _ = try resources.filmSettings[.rules].update { _ in .object(["version": .number(1), "rules": original]) }
+            try await self.waitForNativeRuntimeSettings(.rules, resources: resources)
         }
         let value = try RuntimeJSON.decode(JSONEncoder().encode(rules))
-        _ = try await client.call(module: .film, operation: "rules.set", parameters: .object(["rules": value]))
+        _ = try resources.filmSettings[.rules].update { _ in .object(["version": .number(1), "rules": value]) }
+        try await waitForNativeRuntimeSettings(.rules, resources: resources)
     }
 
     private func sourceState(_ client: RuntimeHTTPClient, _ source: FilmCatSource,

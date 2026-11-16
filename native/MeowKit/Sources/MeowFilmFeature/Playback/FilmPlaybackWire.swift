@@ -263,13 +263,13 @@ public enum FilmPreferenceDimension: String, CaseIterable, Sendable {
 }
 
 public struct FilmPlaybackPreferences: Equatable, Sendable {
-    public var ruleOrder: [FilmPreferenceDimension] { didSet { rawRuleOrder = nil } }
-    public var panOrder: [FilmPanProvider] { didSet { rawPanOrder = nil } }
-    public var keywords: [String]
-    public var siteCleanKeywords: [String]
-    public var iosAutoPrepare: Bool
-    private var rawRuleOrder: RuntimeValue?
-    private var rawPanOrder: RuntimeValue?
+    public var ruleOrder: [FilmPreferenceDimension] { didSet { edited.insert("ruleOrder") } }
+    public var panOrder: [FilmPanProvider] { didSet { edited.insert("panOrder") } }
+    public var keywords: [String] { didSet { edited.insert("keywords") } }
+    public var siteCleanKeywords: [String] { didSet { edited.insert("siteCleanKeywords") } }
+    public var iosAutoPrepare: Bool { didSet { edited.insert("iosAutoPrepare") } }
+    private var original: RuntimeObject?
+    private var edited: Set<String> = []
 
     public static let defaults = Self(ruleOrder: [.quality, .pan, .keyword],
         panOrder: [.yidong, .tianyi, .quark, .uc, .baidu], keywords: [],
@@ -283,29 +283,39 @@ public struct FilmPlaybackPreferences: Equatable, Sendable {
 
     init(_ value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
-        ruleOrder = try fields.filmArray("ruleOrder").compactMap {
+        ruleOrder = (fields["ruleOrder"]?.filmArray ?? []).compactMap {
             $0.filmText.flatMap(FilmPreferenceDimension.init(rawValue:))
         }
-        panOrder = try fields.filmArray("panOrder").compactMap {
+        panOrder = (fields["panOrder"]?.filmArray ?? []).compactMap {
             $0.filmText.flatMap(FilmPanProvider.init(rawValue:))
         }
-        keywords = try fields.filmStrings("keywords")
-        siteCleanKeywords = try fields.filmStrings("siteCleanKeywords")
-        iosAutoPrepare = try fields.filmBool("iosAutoPrepare")
-        rawRuleOrder = fields["ruleOrder"]
-        rawPanOrder = fields["panOrder"]
+        keywords = (fields["keywords"]?.filmArray ?? []).compactMap(\.filmText)
+        siteCleanKeywords = (fields["siteCleanKeywords"]?.filmArray ?? []).compactMap(\.filmText)
+        iosAutoPrepare = fields["iosAutoPrepare"] == .bool(true)
+        original = fields
     }
 
     public static func == (lhs: Self, rhs: Self) -> Bool { lhs.value == rhs.value }
 
-    var value: RuntimeValue {
-        .object([
-            "ruleOrder": rawRuleOrder ?? .array(ruleOrder.map { .string($0.rawValue) }),
-            "panOrder": rawPanOrder ?? .array(panOrder.map { .string($0.rawValue) }),
+    /// Only deliberate edits replace raw JSON. Unconsumed entries, unknown
+    /// types and missing fields survive an unrelated settings edit.
+    var editedValues: RuntimeObject {
+        let typed: RuntimeObject = [
+            "ruleOrder": .array(ruleOrder.map { .string($0.rawValue) }),
+            "panOrder": .array(panOrder.map { .string($0.rawValue) }),
             "keywords": .array(keywords.map(RuntimeValue.string)),
             "siteCleanKeywords": .array(siteCleanKeywords.map(RuntimeValue.string)),
             "iosAutoPrepare": .bool(iosAutoPrepare),
-        ])
+        ]
+        var fields = RuntimeObject()
+        for (key, value) in typed where original == nil || edited.contains(key) { fields[key] = value }
+        return fields
+    }
+
+    var value: RuntimeValue {
+        var fields = original ?? RuntimeObject()
+        for (key, value) in editedValues { fields[key] = value }
+        return .object(fields)
     }
 }
 

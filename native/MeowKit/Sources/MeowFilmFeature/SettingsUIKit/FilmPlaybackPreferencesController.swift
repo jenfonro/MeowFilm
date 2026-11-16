@@ -31,7 +31,7 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
         keywords.addAction(UIAction { [weak self] _ in
             guard let self else { return }
             let values = (keywords.text ?? "").split(whereSeparator: { $0 == "," || $0 == "，" })
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+                .map { FilmPlaybackSettingsModel.trimInput(String($0)) }.filter { !$0.isEmpty }
             owner.edit { if self.area == .siteClean { $0.siteCleanKeywords = values } else { $0.keywords = values } }
         }, for: .editingChanged)
         keywords.addAction(UIAction { [weak self] _ in self?.update() }, for: .editingDidEnd)
@@ -49,7 +49,7 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
 
     private func update() {
         guard let draft = owner.draft else {
-            sections = [.init(title: "", rows: [.init(title: owner.busy ? "加载中" : "暂无设置",
+            sections = [.init(title: "", rows: [.init(title: owner.preferencesBusy ? "加载中" : "暂无设置",
                                                       id: "film.preferences.state")])]
             render(); return
         }
@@ -58,13 +58,13 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
             sections = [
                 .init(title: "优先片源规则", rows: draft.ruleOrder.enumerated().map { index, dimension in
                     .init(title: dimension.title, detail: "\(index + 1)", id: "film.preferences.dimension.\(dimension.rawValue)",
-                          enabled: !owner.busy, disclosure: true, action: { [weak self] in
+                          enabled: !owner.preferencesBusy, disclosure: true, action: { [weak self] in
                               self?.orderMenu(group: .ruleOrder, index: index, title: dimension.title)
                           })
                 } + [restoreRow("恢复默认顺序", group: .ruleOrder)]),
                 .init(title: "网盘匹配规则", rows: draft.panOrder.enumerated().map { index, provider in
                     .init(title: provider.title, detail: "\(index + 1)", id: "film.preferences.pan.\(provider.rawValue)",
-                          enabled: !owner.busy, disclosure: true, action: { [weak self] in
+                          enabled: !owner.preferencesBusy, disclosure: true, action: { [weak self] in
                               self?.orderMenu(group: .panOrder, index: index, title: provider.title)
                           })
                 } + [restoreRow("恢复默认网盘", group: .panOrder)]),
@@ -75,7 +75,7 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
         case .autoPrepare:
             sections = [.init(title: "", rows: [
                 filmSwitchRow("进入播放页自动准备", id: "film.preferences.auto-prepare",
-                              isOn: draft.iosAutoPrepare, enabled: !owner.busy) { [weak owner] value in
+                              isOn: draft.iosAutoPrepare, enabled: !owner.preferencesBusy) { [weak owner] value in
                     owner?.edit { $0.iosAutoPrepare = value }
                 },
                 restoreRow("恢复默认", group: .autoPrepare),
@@ -85,7 +85,7 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
     }
 
     private func restoreRow(_ title: String, group: FilmPlaybackSettingsModel.Group) -> FilmSettingsRow {
-        .init(title: title, id: "film.preferences.restore.\(group)", enabled: !owner.busy,
+        .init(title: title, id: "film.preferences.restore.\(group)", enabled: !owner.preferencesBusy,
               action: { [weak self] in
                   self?.view.endEditing(true)
                   self?.owner.restoreDraft(group)
@@ -94,7 +94,7 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
 
     private func keywordRows(_ values: [String], group: FilmPlaybackSettingsModel.Group) -> [FilmSettingsRow] {
         keywords.text = values.joined(separator: ",")
-        keywords.isEnabled = !owner.busy; keywords.textColor = UIColor(theme.settings.ink)
+        keywords.isEnabled = !owner.preferencesBusy; keywords.textColor = UIColor(theme.settings.ink)
         return [.init(title: "关键字匹配规则", id: "film.preferences.keywords.row", content: keywords),
                 restoreRow("恢复默认关键词", group: group)]
     }

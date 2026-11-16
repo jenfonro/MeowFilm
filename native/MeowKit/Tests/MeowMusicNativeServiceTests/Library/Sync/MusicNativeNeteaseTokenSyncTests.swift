@@ -305,7 +305,7 @@ private struct NeteaseTokenSyncFixture {
         let saved = try await service.automaticLibrarySyncPreferences()
         let result = try await service.saveAutomaticLibrarySync(.init(revision: saved.revision,
             selections: [.init(platform: .netease, playlists: true)]), requestID: UUID(), authorization: .init())
-        return try result.synchronization.get()
+        return try await result.synchronization.value.get()
     }
     func prepare(_ action: MusicLibrarySyncMutation.Action) async throws {
         await peer.setSubscribed(action == .unsubscribe)

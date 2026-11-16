@@ -24,10 +24,10 @@ final class MeowfilmUserDataReset: @unchecked Sendable {
         }
     }
 
-    // Only the current sensitive account store belongs to this reset.
+    // Only the current sensitive stores belong to this reset.
     // Never enumerate/delete arbitrary services in the signed app's access group.
     static let keychainServices = [
-        "music.platform.accounts.v1"
+        "music.platform.accounts.v1", "film.settings.keys.v1"
     ].map { MeowfilmIdentity.bundleIdentifier + "." + $0 }
 
     private let support: URL

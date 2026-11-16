@@ -37,8 +37,6 @@ actor FilmRuleGate {
 
 /// RPC fixture only. Rule computation is verified on the real Node host/Mobile.
 actor FilmRuleRPC {
-    var rules = FilmRuleSet(movieRules: [.init(pattern: "saved")])
-    var revision = 0
     var failure: RuntimeHTTPError?
     var response: RuntimeValue?
     var calls: [(String, RuntimeValue)] = []
@@ -48,25 +46,11 @@ actor FilmRuleRPC {
         calls.append((operation, input))
         if let failure { throw failure }
         if let response { return response }
-        if operation == "rules.normalize" { return .null }
-        if let value = input.filmObject?["rules"], operation == "rules.set" {
-            rules = try JSONDecoder().decode(FilmRuleSet.self, from: RuntimeJSON.encode(value))
-            revision += 1
-        }
-        if let fields = input.filmObject, case .string(let name)? = fields["group"],
-           let group = FilmRuleGroup(rawValue: name), let value = fields["rules"], operation == "rules.group.set" {
-            let rows: [FilmMatchRule]
-            if group.isClean {
-                rows = try JSONDecoder().decode([String].self, from: RuntimeJSON.encode(value)).map { .init(pattern: $0) }
-            } else {
-                rows = try JSONDecoder().decode([FilmMatchRule].self, from: RuntimeJSON.encode(value))
-            }
-            rules.replace(group, with: rows); revision += 1
-        }
-        if operation == "rules.clear" { rules = .init(); revision += 1 }
-        return .object(["rules": try filmRuleValue(rules), "revision": .string("receipt-\(revision)")])
+        return .null
     }
-    nonisolated var service: FilmRuleService { .init(request: { try await self.call($0, $1) }) }
+    nonisolated func service(_ document: FilmSettingsDocument) -> FilmRuleService {
+        .init(settingsDocument: document, request: { try await self.call($0, $1) })
+    }
 }
 
 actor FilmRuleControlledRPC {
@@ -93,5 +77,11 @@ actor FilmRuleControlledRPC {
     }
     func setResponse(_ value: RuntimeValue) { response = value }
     func ignoreCancellation() { returnAfterCancellation = true }
-    nonisolated var service: FilmRuleService { .init(request: { try await self.call($0, $1) }) }
+    nonisolated func service(_ document: FilmSettingsDocument) -> FilmRuleService {
+        .init(settingsDocument: document, request: { try await self.call($0, $1) })
+    }
+}
+
+func filmRulePreviewValue() throws -> RuntimeValue {
+    try RuntimeJSON.decode(Data(#"{"section":"movie","type":"success","text":"preview","inputText":"pending","processedText":"pending","matched":false,"matchedRuleIndex":null,"rewriteApplied":false,"rewrittenText":null,"groupKey":"","trailingDigits":"","errors":[],"previews":[]}"#.utf8))
 }
