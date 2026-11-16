@@ -319,8 +319,13 @@ public static partial class MusicUiTests
 
         yield return Case("source management shares list chrome and keeps aligned columns and actions without horizontal scrolling", async () =>
         {
+            True(Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT") is { Length: > 0 },
+                "source management fixture requires MEOWFILM_TEST_RUNTIME_ROOT with the packaged aggregate runtime");
             await using var f = await Fixture.Create();
             await InstallSettingsSources(f, 6);
+            True(f.Module.Sources.Count == 9 && f.Module.Sources.Count(row => row.IsScript) == 6,
+                "source management fixture requires six imported scripts and three built-in sources; " +
+                $"sources={f.Module.Sources.Count}; scripts={f.Module.Sources.Count(row => row.IsScript)}; status={f.Module.Status}");
             var settings = (MusicSettingsView)f.Module.SettingsView;
             using var mount = new ReplicaMount(settings);
             ReplicaAnchors(settings)[^1].IsChecked = true;
@@ -333,6 +338,9 @@ public static partial class MusicUiTests
             True(ReferenceEquals(toolbar.Style, view.FindResource("MeowFilm.ManagementTitleRow")), "shared management title chrome");
             True(toolbar.Children.OfType<Button>().Select(button => button.Content as string)
                 .SequenceEqual(["添加本地文件", "添加网络源", "检测所选", "删除所选"]), "source management toolbar order");
+            True(toolbar.Children.OfType<Button>().Take(3).All(button =>
+                ReferenceEquals(button.Style, view.FindResource("Settings.PrimaryButton"))),
+                "source import and selected detection actions reuse the shared save button style");
             var deleteSelected = toolbar.Children.OfType<Button>().Last();
             True(ReferenceEquals(deleteSelected.Style, view.FindResource("MeowFilm.ManagementDeleteSelected")) &&
                 ((SolidColorBrush)deleteSelected.Background).Color.A == 0, "shared transparent outlined batch delete");
@@ -342,6 +350,8 @@ public static partial class MusicUiTests
                 settings.UpdateLayout(); await Drain(); view.UpdateLayout();
                 var list = SourceItems(view);
                 var scroll = Visuals(list).OfType<ScrollViewer>().First();
+                CaptureSettings(mount.Window, "music-source-management-" + (int)width + ".png");
+                Equal(9, list.Items.Count);
                 True(scroll.HorizontalScrollBarVisibility == ScrollBarVisibility.Disabled &&
                     scroll.ScrollableWidth == 0 && scroll.ScrollableHeight > 0, "vertical-only scrolling at " + width);
                 var row = f.Module.Sources[0];
@@ -358,7 +368,6 @@ public static partial class MusicUiTests
                 foreach (var platform in row.Platforms)
                     True(Visuals(view).OfType<TextBlock>().Any(text => text.IsVisible &&
                         ReferenceEquals(text.DataContext, platform) && text.Text == platform.Name), "platform remains visible at " + width);
-                CaptureSettings(view, "music-source-management-" + (int)width + ".png");
             }
             var first = f.Module.Sources[0];
             var check = Visuals(management).OfType<CheckBox>().Single(box =>
