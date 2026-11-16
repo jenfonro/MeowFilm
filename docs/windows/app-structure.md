@@ -9,12 +9,12 @@
 ```text
 Windows App
  ├─ AppHost → Desktop / Platform
- ├─ Capabilities → Desktop / Platform / Media
- └─ SystemMedia → Media
-Platform / Desktop → Core
+ ├─ Capabilities → Desktop / Platform / Audio / Media
+ └─ SystemMedia
+Audio / Media / Platform / Desktop → Core
 ```
 
-Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口、一套导航与设置、一个原生播放协调、一个系统媒体会话。原生媒体基础设施由既有音频链和影视媒体共同使用；当前不装配下载能力。
+Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口、一套导航与设置、一个原生播放协调、一个系统媒体会话。原生媒体基础设施由既有音频链和影视媒体共同使用；当前不装配下载能力。`SystemMedia` 只消费本模块的中性 `ISystemPlayback`／`ISystemMediaBackend`，项目不引用具体播放工程；音乐／电影 typed 投影由 App 装配。
 
 `scripts/windows/verify-app-structure.mjs` 检查 Windows 源码、公共 `apps/runtime`／`packages`、Windows／共享引擎工具和 `scripts/` 根层的共享 Node `.mjs` 工具，不按文件名登记，也不递归扫描整个 `scripts`。iOS 专属工具放在 `scripts/ios/`，专属模板只在其生成运行时中解析；Windows 源码或工具不能反向导入这些工具或模板。相对导入、链接安全、运行时目录闭包和 WPF 资源检查保持；EmbeddedResource 的实际路径、逻辑身份及清单也由此检查。Windows 构建输入指纹采用相同源码／工具范围及生成目录排除规则，并包含本端配置、测试、共享引擎输入和随包许可；独立 iOS 代码、工具目录及测试不影响该指纹，共享引擎工具仍按整个职责目录计入。
 
@@ -71,7 +71,7 @@ Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，
 
 App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能力数量和 `IDesktopModule.Id` 不要求等于脚本模块数量或名称。增加不依赖脚本的原生能力不会被迫增加 Node 模块；脚本清单只决定 App 启动时的 JS 载荷与协议版本。
 
-当前 App 依次注册音乐、`FilmCapability` 和 `NovelCapability`，因此启动页保持音乐推荐。影视能力拥有规则设置草稿及 Node 回执快照、视频源、元数据设置、搜索与播放会话消费者；首页通过元数据适配读取豆瓣，正式播放实现通过 `FilmPlaybackSession` 消费 Node film，而不是由首页本地 preview 提供片源。电影由独立 FilmPlayback／FilmKernel 持有解码、WASAPI 设备时钟及 D3D11 原生 HDR／DOVI 输出；经 App 既有仲裁器与音乐 NativeAudioPlayback 互斥准入；不借用音乐 PCM／时钟或旧 LibVLC，旧路径本次不迁移。固定来源、许可及构建与真实输出的验证边界见[原生媒体实现](media-playback.md)。App 另通过 `AppLauncher.createPages` 装配 `SearchResultsPage`，Desktop 只消费中性 `IDesktopSearchPage`；影视规则及搜索 JS 只在 Node 载荷执行，Capabilities 不嵌入规则／搜索程序，也不保留客户端引擎回退。小说规则消费者借用同一运行器，原生 UI 和数据 owner 不迁移。原生导航／搜索已接入正式播放会话与小说详情；实现接通、构建、原生测试与真实媒体验证分别记录，不代表整 App 已全部通过。搜索交接只见[共同契约](../common/film/search.md)。影视首页见[影视首页](film-home.md)，设置见[影视设置](film-settings.md)，端侧搜索接通状态和原生测试清单见[影视搜索](film-search.md)。
+当前 App 依次注册音乐、`FilmCapability` 和 `NovelCapability`，因此启动页保持音乐推荐。影视能力拥有规则设置草稿及 Node 回执快照、视频源、元数据设置、搜索与播放会话消费者；首页通过元数据适配读取豆瓣，正式播放实现通过 `FilmPlaybackSession` 消费 Node film，而不是由首页本地 preview 提供片源。电影由独立 FilmPlayback／FilmKernel 持有解码、WASAPI 设备时钟及 D3D11 原生 HDR／DOVI 输出；经 App 既有仲裁器与音乐 NativeAudioPlayback 互斥准入，不借用音乐 PCM／时钟。Core 的 `NativeHttpMediaTransfer.CopyCompleteAsync` 供音乐缓存完整文件 producer 使用，缓存不依赖电影解码／输出。固定来源、许可及构建与真实输出的验证边界见[原生媒体实现](media-playback.md)。App 另通过 `AppLauncher.createPages` 装配 `SearchResultsPage`，Desktop 只消费中性 `IDesktopSearchPage`；影视规则及搜索 JS 只在 Node 载荷执行，Capabilities 不嵌入规则／搜索程序，也不保留客户端引擎回退。小说规则消费者借用同一运行器，原生 UI 和数据 owner 不迁移。原生导航／搜索已接入正式播放会话与小说详情；实现接通、构建、原生测试与真实媒体验证分别记录，不代表整 App 已全部通过。搜索交接只见[共同契约](../common/film/search.md)。影视首页见[影视首页](film-home.md)，设置见[影视设置](film-settings.md)，端侧搜索接通状态和原生测试清单见[影视搜索](film-search.md)。
 
 
 ## 同进程清除本机数据
@@ -79,5 +79,7 @@ App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能�
 通用设置的清除操作由 `AppLauncher` 注入，不由音乐或影视模块互相清理数据。`UserDataDirectory` 的一次待清理请求同时覆盖 `AppDataPaths.Documents`（`aggregate`）与 `AppDataPaths.Caches`（`aggregate-cache`）；前者包含全部 Node 元数据／媒体／脚本缓存，后者包含全部原生缓存文档、账号展示快照及音频文件，不按命名空间清单筛选。两根仍保留独立存储队列和根锁；普通启动只取得 App 准入，不打开或创建可选缓存根。
 
 `AppUserDataReset` 串行持有一次已确认操作的阶段：记录待清理请求、真实释放旧代、删除两根自有数据、重新装配；失败显式重试只继续未成功的阶段。旧窗口取消导航并锁定交互，媒体设置先封住系统输入，随后使用 `AppShutdown.ForceReleaseAsync` 退役全部所有者，包含实际排空的 `CacheDocumentStore` 与其 backing store。内存缓存随旧代释放；缓存落盘尚未结算、任一根删除失败或释放超时，都不能放行新代启动。删除前两根均取得排他删除句柄，任一仍有存储占用则不开始删另一根。
+
+强制释放先确认共享运行器真实退役；原生消费者通过[运行器关闭回执](app-runtime.md#所有权与关闭)完成本地排空，不向退役宿主再次请求会话重置或图片释放，真实关闭失败仍阻断删除与替代代次。清除失败后的托盘退出与浮层退出复用同一单飞 abort 路径；尚未确认、清除中或退出中不接纳竞争动作，也不改走普通保存关闭。
 
 两根全部清除后才移除 pending，关闭旧 Shell，但不关闭 WPF dispatcher；复用启动/失败重试窗口创建新的 `AppStartup`、store、cache owner、runtime、业务模块、偏好、播放和窗口附件。小说原生写入、规则 RPC 与 Web 交互随旧 owner 取消并排空，搜索页及导航委托一并释放并重新装配，不借用旧 `NovelCapability`。入口装配闭包在资源成功释放后清空，旧 Shell 的 Closed 不会终止替代代次。程序 PID 不变，无需手动重启。中断后的进程启动先继续同一请求，部分删除失败仍不准入业务；完成请求的重试不再删除新代业务或缓存。范围及文件排他边界见[本机数据清除](protected-storage.md#clear-all-local-user-data)。

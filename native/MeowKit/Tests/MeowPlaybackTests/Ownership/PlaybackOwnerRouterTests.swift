@@ -20,7 +20,7 @@ final class PlaybackOwnerRouterTests: XCTestCase {
             let b = try h.router.bind(owner: "two") { two.append($0) }
             defer { a.cancel(); b.cancel() }
             let attempt = h.play(media, owner: "one")
-            h.state.ready(generation: attempt.id, duration: 120, ranges: [])
+            h.state.ready(generation: attempt.id, duration: 120)
             h.state.transport(generation: attempt.id, state: .playing)
             h.state.progress(generation: attempt.id, position: 20)
             h.state.pause()
@@ -43,7 +43,7 @@ final class PlaybackOwnerRouterTests: XCTestCase {
             let b = try h.router.bind(owner: "two") { two.append($0) }
             defer { a.cancel(); b.cancel() }
             let old = h.play(media, owner: "one")
-            h.state.ready(generation: old.id, duration: 120, ranges: [])
+            h.state.ready(generation: old.id, duration: 120)
             h.state.progress(generation: old.id, position: 42)
             h.publish()
             let current = h.play(media, owner: "two")
@@ -69,7 +69,7 @@ final class PlaybackOwnerRouterTests: XCTestCase {
             let lease = try h.router.bind(owner: "one") { events.append($0) }
             defer { lease.cancel() }
             let old = h.play(media, owner: "one")
-            h.state.ready(generation: old.id, duration: 120, ranges: [])
+            h.state.ready(generation: old.id, duration: 120)
             h.router.enqueue(h.state.takeEvents()) // Capture, intentionally delay delivery.
             _ = h.play(media, owner: "two")
             let current = h.play(media, owner: "one")
@@ -103,7 +103,7 @@ final class PlaybackOwnerRouterTests: XCTestCase {
             }
             defer { a.cancel(); b.cancel() }
             let old = h.play(media, owner: "one")
-            h.state.ready(generation: old.id, duration: 120, ranges: [])
+            h.state.ready(generation: old.id, duration: 120)
             h.state.transport(generation: old.id, state: .playing)
             h.state.progress(generation: old.id, position: 4)
             h.publish()
@@ -129,7 +129,7 @@ final class PlaybackOwnerRouterTests: XCTestCase {
             }
             defer { lease.cancel() }
             let old = h.play(media, owner: "one")
-            h.state.ready(generation: old.id, duration: 120, ranges: [])
+            h.state.ready(generation: old.id, duration: 120)
             h.publish()
             h.state.end(generation: old.id)
             h.publish()
@@ -158,7 +158,7 @@ final class PlaybackOwnerRouterTests: XCTestCase {
             }
             defer { lease.cancel() }
             let attempt = h.play(media, owner: "one")
-            h.state.ready(generation: attempt.id, duration: 120, ranges: [])
+            h.state.ready(generation: attempt.id, duration: 120)
             h.state.transport(generation: attempt.id, state: .playing)
             h.publish()
             XCTAssertEqual(kinds, [.preparing, .prepared, .stopped])
@@ -180,7 +180,7 @@ final class PlaybackOwnerRouterTests: XCTestCase {
             defer { lease?.cancel(); lease = nil }
             let attempt = h.play(media, owner: "one")
             let route = try XCTUnwrap(h.router.navigationRoutes.next)
-            h.state.ready(generation: attempt.id, duration: 120, ranges: [])
+            h.state.ready(generation: attempt.id, duration: 120)
             h.state.transport(generation: attempt.id, state: .playing)
             h.state.progress(generation: attempt.id, position: 8)
             h.publish()
@@ -198,7 +198,7 @@ final class PlaybackOwnerRouterTests: XCTestCase {
             var count = 0
             let lease = try h.router.bind(owner: "one") { _ in count += 1 }
             let attempt = h.play(media, owner: "one")
-            h.state.ready(generation: attempt.id, duration: 120, ranges: [])
+            h.state.ready(generation: attempt.id, duration: 120)
             h.router.enqueue(h.state.takeEvents())
             lease.cancel()
             lease.cancel()
@@ -286,7 +286,7 @@ final class PlaybackOwnerRouterTests: XCTestCase {
             var newCalls = 0
             let old = try h.router.bind(owner: "one") { _ in oldCalls += 1 }
             let attempt = h.play(media, owner: "one")
-            h.state.ready(generation: attempt.id, duration: 120, ranges: [])
+            h.state.ready(generation: attempt.id, duration: 120)
             h.router.enqueue(h.state.takeEvents())
             let current = try h.router.bind(owner: "one") { _ in newCalls += 1 }
             defer { old.cancel(); current.cancel() }
@@ -304,7 +304,7 @@ final class PlaybackOwnerRouterTests: XCTestCase {
         try await MainActor.run {
             let h = LifecycleHarness()
             let attempt = h.play(media, owner: "one")
-            h.state.ready(generation: attempt.id, duration: 120, ranges: [])
+            h.state.ready(generation: attempt.id, duration: 120)
             h.state.transport(generation: attempt.id, state: .playing)
             h.state.pause()
             h.publish()
@@ -329,7 +329,7 @@ final class PlaybackOwnerRouterTests: XCTestCase {
                                          commands: .init(next: { _ in true })) { events.append($0.kind) }
             defer { lease.cancel() }
             let attempt = h.play(media, owner: "one")
-            h.state.ready(generation: attempt.id, duration: 120, ranges: [])
+            h.state.ready(generation: attempt.id, duration: 120)
             h.state.transport(generation: attempt.id, state: .playing)
             h.publish()
             XCTAssertTrue(events.isEmpty)
@@ -353,7 +353,7 @@ final class PlaybackOwnerRouterTests: XCTestCase {
             defer { lease.cancel() }
             let attempt = h.play(media, owner: "one")
             let old = try XCTUnwrap(h.router.navigationRoutes.next)
-            h.state.ready(generation: attempt.id, duration: 120, ranges: [])
+            h.state.ready(generation: attempt.id, duration: 120)
             h.router.enqueue(h.state.takeEvents())
             lease.setEnabled(false)
             lease.setEnabled(true)
@@ -379,7 +379,7 @@ final class PlaybackOwnerRouterTests: XCTestCase {
             }
             defer { old.cancel(); replacement?.cancel() }
             let attempt = h.play(media, owner: "one")
-            h.state.ready(generation: attempt.id, duration: 120, ranges: [])
+            h.state.ready(generation: attempt.id, duration: 120)
             h.state.transport(generation: attempt.id, state: .playing)
             h.publish()
             XCTAssertTrue(old.isCancelled)
@@ -461,7 +461,7 @@ final class PlaybackOwnerRouterTests: XCTestCase {
             defer { lease.cancel() }
             let attempt = h.play(media, owner: "one")
             let route = try XCTUnwrap(h.router.navigationRoutes.next)
-            h.state.ready(generation: attempt.id, duration: 120, ranges: [])
+            h.state.ready(generation: attempt.id, duration: 120)
             h.router.enqueue(h.state.takeEvents())
             lease.updateCommands(.init(previous: { _ in calls.append("new"); return true }))
             h.router.deliverPending()
@@ -562,7 +562,7 @@ final class PlaybackOwnerRouterTests: XCTestCase {
             XCTAssertNil(h.router.navigationRoutes.next)
             let attempt = h.play(media, owner: "one")
             let route = try XCTUnwrap(h.router.navigationRoutes.next)
-            h.state.ready(generation: attempt.id, duration: 120, ranges: [])
+            h.state.ready(generation: attempt.id, duration: 120)
             h.state.end(generation: attempt.id)
             h.publish()
             XCTAssertTrue(h.router.perform(route))

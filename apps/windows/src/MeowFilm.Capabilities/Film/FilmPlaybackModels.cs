@@ -72,10 +72,10 @@ internal static class FilmPlaybackError
         "MEDIA_EMPTY_RESPONSE" => "媒体响应为空",
         "MEDIA_INVALID_DESCRIPTOR" or PlaybackError.InvalidRequest => "媒体请求无效",
         "MEDIA_LISTEN_FAILED" => "媒体服务启动失败",
-        "MEDIA_MANIFEST_INVALID" or PlaybackError.AdaptiveInvalid => "媒体清单格式错误",
-        "MEDIA_MANIFEST_UNSUPPORTED" or PlaybackError.AdaptiveUnsupported => "媒体清单不受支持",
+        "MEDIA_MANIFEST_INVALID" => "媒体清单格式错误",
+        "MEDIA_MANIFEST_UNSUPPORTED" => "媒体清单不受支持",
         "MEDIA_METHOD_NOT_ALLOWED" => "媒体请求方法不受支持",
-        "MEDIA_MANIFEST_LIMIT" or "MEDIA_RESOURCE_LIMIT" or PlaybackError.AdaptiveBudget => "媒体资源超出处理预算",
+        "MEDIA_MANIFEST_LIMIT" or "MEDIA_RESOURCE_LIMIT" => "媒体资源超出处理预算",
         "MEDIA_DRM_UNSUPPORTED" or PlaybackError.AdaptiveDrmUnsupported => "当前媒体加密方式不受支持",
         "MEDIA_PREFETCH_DISABLED" => "媒体预缓存未启用",
         "MEDIA_PREFETCH_HTTP_ERROR" => "媒体预缓存请求失败",
@@ -99,7 +99,6 @@ internal static class FilmPlaybackError
         PlaybackError.HttpServerFailed or PlaybackError.HttpStatusFailed => "媒体服务请求失败",
         PlaybackError.HttpEncodingUnsupported => "媒体编码不受支持",
         PlaybackError.HttpInvalidRange or PlaybackError.HttpRangeRejected => "媒体范围读取失败",
-        PlaybackError.AdaptiveEncryptionUnsupported => "媒体加密方式不受支持",
         _ => failure
     };
 }

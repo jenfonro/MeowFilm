@@ -177,12 +177,12 @@ final class HLSLoopbackRouteTests: XCTestCase {
             let controller = PlaybackController()
             let attempt = controller.playAttempt(resource: resource, owner: "film", autoplay: false)
             XCTAssertEqual(attempt.resourceID, resource.id)
-            XCTAssertTrue(controller.requiresLocalMediaFetch)
+            XCTAssertTrue(controller.hasActiveMusicInput)
             XCTAssertFalse(controller.hasMusicOutput)
             // Listener readiness dispatches back to this actor. Stop before it
             // can prepare audio media or perform any upstream request.
             controller.stop()
-            XCTAssertFalse(controller.requiresLocalMediaFetch)
+            XCTAssertFalse(controller.hasActiveMusicInput)
             XCTAssertFalse(controller.hasMusicOutput)
             XCTAssertNil(controller.activeAudioMedia)
             XCTAssertEqual(controller.snapshot.phase, .idle)

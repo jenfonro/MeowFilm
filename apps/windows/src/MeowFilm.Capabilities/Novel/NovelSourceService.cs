@@ -414,7 +414,17 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IDocumentStore st
     }, token);
     public async Task ReleaseImageAsync(string reference)
     {
-        await CallAsync("library.releaseImage", new { reference }, CancellationToken.None);
+        if (runtime is IRuntimeLifetime { ShutdownCompletion: { } shutdown })
+            await shutdown;
+        else
+        {
+            try { await CallAsync("library.releaseImage", new { reference }, CancellationToken.None); }
+            catch (BridgeException error) when (error.Code == "CLOSED" &&
+                runtime is IRuntimeLifetime { ShutdownCompletion: not null })
+            {
+                await ((IRuntimeLifetime)runtime).ShutdownCompletion!;
+            }
+        }
         imageReferences.Remove(reference);
     }
     internal Task VisualAsync(Func<CancellationToken, Task> action, CancellationToken token = default) => visuals.Run(async ct =>

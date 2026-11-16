@@ -14,7 +14,6 @@ public final class PlaybackPreparedReplacement {
     let media: PlaybackAudioMedia
     var committed = false
     var synchronizationDeadline: ContinuousClock.Instant?
-    let failures = PlaybackReplacementFailures()
     private var cancelled = false
     private var closing: Task<Void, Error>?
     private let retire: @MainActor (PlaybackAudioMedia) -> Task<Void, Error>
@@ -25,7 +24,6 @@ public final class PlaybackPreparedReplacement {
          media: PlaybackAudioMedia, retire: @escaping @MainActor (PlaybackAudioMedia) -> Task<Void, Error>) {
         self.resource = resource; self.replacing = replacing; self.owner = owner
         self.admission = admission; self.autoplay = autoplay; self.media = media; self.retire = retire
-        failures.receive = { [weak media] in media?.report($0) }
     }
 
     func prepare() async throws {
@@ -74,8 +72,4 @@ public final class PlaybackPreparedReplacement {
     isolated deinit { if !committed { cancel() } }
 }
 
-@MainActor
-final class PlaybackReplacementFailures {
-    var receive: (@MainActor (Error) -> Void)?
-}
 #endif

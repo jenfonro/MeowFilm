@@ -6,7 +6,7 @@
 
 底部“影视”进入保留的首页，使用所属主页面的 App 页头；四个主页面各自保留独立页头。影视页头保留左侧菜单，剩余标题区域为搜索胶囊；菜单打开影视侧边栏，搜索胶囊复用 App 的统一搜索路由，默认选择影视目标，返回恢复原影视首页及滚动位置。当前影视首页数据源仅有豆瓣，选择菜单位于影视侧边栏；侧边栏“首页”返回影视首页，底部“首页”仍进入音乐推荐页。搜索复用现有页面的影视分类，不另建专用搜索页；视频源内容首页尚未接入。
 
-侧边栏来源菜单与首页共用同一 `FilmHomeModel`；视频列表观察 App 持有的 `FilmSettingsModel` 快照，使用 `FilmSourceSnapshot.homeVideos` 保留目录顺序及 `FilmSourceKey` 精确身份，仅筛选启用且首页可见的项，不按检测结果过滤。源行是只读展示，不发起源内容请求、自动检测或管理详情导航。
+侧边栏主菜单首先为“首页”，其后为视频源列表；原元数据来源快捷菜单另组保留，与首页共用同一 `FilmHomeModel`。视频列表观察 App 持有的 `FilmSettingsModel` 快照，使用 `FilmSourceSnapshot.homeVideos` 保留目录顺序及 `FilmSourceKey` 精确身份，仅筛选启用且首页可见的项，不按检测结果过滤。源行是只读展示，不发起源内容请求、自动检测或管理详情导航；首页数据切源尚未接入。菜单样式与底部固定设置沿用[App 外壳](architecture.md#ui-所有权)。
 
 `FilmSourceDescriptor.id` 标识来源；`FilmItem`／`FilmItemIdentity` 原样保留 Node 返回的 `businessID` 和 `playbackTarget`，相等／散列使用已提供的业务身份；非执行展示缺少业务身份时仅按来源／影片／类型区分显示项。共同身份语义见[稳定业务身份](../common/film/search.md#稳定业务身份)。来源自行返回栏目与影片，页面不按豆瓣分类解释其他来源。豆瓣读取与 Windows 一致的四个栏目：热门电影、热门剧集、新番放送、热门综艺，每栏请求 12 个摘要，不预取详情或播放地址。`DoubanFilmSource` 按实际影片 id／title 及必需的业务身份／播放目标隔离不可消费行，保留健康兄弟，从返回目标读取类型，不按栏目造业务目标；真实空数组成功，非空但全部不可消费的栏目失败，刷新失败保留已完成内容。图片地址沿用豆瓣图片代理归一化。
 
@@ -30,6 +30,8 @@
 reference 只复用活跃事实；原本没有元数据的 source／group 不补造元数据 provenance。
 
 `FilmPlaybackModel`／`MeowfilmFilmMedia` 的媒体接缝把真实 attempt 交给共享 MeowPlayback 的两阶段 prepare／commit；播放状态来自实际内核输出，不用本地计时模拟。MeowVideoKernel 适配固定源码 KSMEPlayer 的真实解码／原生输出，保留完整渲染视图及实际首帧确认；核心关闭等待真实输入、解码、轨道、音频与渲染工作退出后才释放媒体 receipt。直连输入的 HTTP headers／Cookie 通过每实例 KSOptions 注入，运行器 receipt 保持空原生上下文。Node 仍拥有业务会话及媒体资源授权，见[共同原生播放契约](../common/film/playback.md)。影片收藏继续由稳定 `FilmLibrary` 持有，用原 namespace `meowfilm.film.library.v1` 保存身份记录，记录包含当前 `businessID/playbackTarget`；收藏与重开直接消费稳定目标，不提供旧收藏双身份匹配或缺字段补全。读取隔离不可用及歧义身份条目，无关增删保留原始坏行和精确扩展；坏根或非空全坏明确失败。它不复制进 Node v2 历史／人工匹配／屏蔽／偏好／聚合注册库，也不写音乐曲库。
+
+视频定位能力由 `VideoSession → PlaybackVideoDecoding → PlaybackController` 透传：准备后的有限 HLS／DASH 时间线使用实际探测到的 demuxer 时间定位能力，不要求主清单支持 HTTP Range；普通 progressive 输入使用核心的字节定位能力。未准备、失败或已撤销的 session 不接受 seek，已知时长不等于可定位。不按 URL 后缀或调用方 format hint 推断能力，也不新增 live／DVR 时间线支持。
 
 媒体准备或真实播放失败的 `media.failed` 回执携带已有原生适配器的有限 `code`，不发送异常正文、URL 或凭据。运行器区分取回执、准备和播放阶段，保留真实原生失败原因；候选续选的过程错误不重复弹出最终错误。客户端沿用准确 attempt、取消、资源释放与系统 owner 边界，不因错误码扩展改变手动准确播放或自动准备策略。
 

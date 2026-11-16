@@ -378,6 +378,59 @@ public static class FilmPlaybackSessionTests
             }
             finally { finish.TrySetResult(); response.TrySetResult(); }
         });
+        foreach (bool pause in new[] { true, false })
+            yield return Test($"same episode uses the newer user pause={pause} while preparation is pending", async () =>
+            {
+                await using var rig = new FilmPlaybackRig();
+                await rig.OpenAsync(); await Play(rig);
+                await rig.Session.SetPausedAsync(!pause);
+                var donor = rig.Native.Scope;
+                var entered = Gate(); var finish = Gate();
+                rig.Native.Preparing = async _ => { entered.TrySetResult(); await finish.Task; };
+                try
+                {
+                    rig.Runtime.Attempt("late-pause", Candidate("late-pause"));
+                    await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    Check(rig.Native.Intents[^1].PreserveFrom == donor, "the replacement names the exact live donor");
+                    await rig.Session.SetPausedAsync(pause);
+                    await rig.Session.SeekAsync(137);
+                    finish.TrySetResult();
+                    await Until(() => rig.Native.SettledIdentity == "late-pause" && Called(rig, "media.started", "late-pause"));
+                    Check(rig.Native.Paused == pause && rig.Session.IsPlaying == !pause &&
+                        rig.Native.Position == 137 && rig.Native.Commits == 2 && rig.Runtime.Released.Contains("first") &&
+                        !Called(rig, "media.failed"),
+                        "the user's latest control survives same-content replacement in both directions");
+                }
+                finally { finish.TrySetResult(); }
+            });
+        foreach (string code in new[] { PlaybackError.Superseded, PlaybackError.ReleaseFailed })
+            yield return Test($"uncommitted {code} settles once with its exact error semantics", async () =>
+            {
+                await using var rig = new FilmPlaybackRig();
+                rig.Runtime.Controlled = false;
+                await rig.OpenAsync();
+                int commits = 0;
+                rig.Native.Committing = _ =>
+                {
+                    commits++;
+                    throw new PlaybackException(code);
+                };
+                rig.Runtime.Attempt("terminal", Candidate("terminal"));
+                await Until(() => rig.Runtime.Released.Contains("terminal") && rig.Native.DiscardedIdentity == "terminal");
+                Check(commits == 1 && rig.Native.Commits == 0 && rig.Native.Discards == 1 &&
+                    !Called(rig, "media.started", "terminal") &&
+                    Called(rig, "media.failed", "terminal") == (code == PlaybackError.ReleaseFailed) &&
+                    rig.Runtime.Calls.Count(call => call.Method == "film.session.media.release" &&
+                        FilmJson.Text(call.Parameters, "attemptId") == "terminal" &&
+                        FilmJson.Text(call.Parameters, "resourceId") == FilmJson.Text(rig.Runtime.Receipts["terminal"], "id")) == 1,
+                    "supersession is not a failed source or a retry, whereas release failure must not be hidden");
+                if (code == PlaybackError.ReleaseFailed)
+                    Check(rig.Runtime.Calls.Any(call => FilmJson.Text(call.Parameters, "action") == "media.failed" &&
+                        FilmJson.Text(call.Parameters, "code") == code), "the exact release failure is preserved");
+                rig.Native.Committing = null;
+                await Play(rig, "after-terminal");
+                Check(rig.Native.Commits == 1, "the settled attempt does not retain the business or native work gate");
+            });
         yield return Test("same episode keeps live position pause rate and aspect while next episode starts at zero", async () =>
         {
             await using var rig = new FilmPlaybackRig();
@@ -401,7 +454,7 @@ public static class FilmPlaybackSessionTests
                     rig.Native.Rate == 1.5 && rig.Native.Aspect == "4:3", "same-episode handoff uses live donor intent");
                 rig.Native.Preparing = null;
                 await Play(rig, "next", 2);
-                Check(rig.Native.Position == 0 && !rig.Native.Paused && !rig.Native.Intents[^1].PreserveCurrent,
+                Check(rig.Native.Position == 0 && !rig.Native.Paused && rig.Native.Intents[^1].PreserveFrom is null,
                     "a real new episode does not inherit the preceding episode's clock or paused state");
             }
             finally { finish.TrySetResult(); }
@@ -425,7 +478,7 @@ public static class FilmPlaybackSessionTests
                 Source = FilmJson.Encode(new { key = "cat:fixture:site:1", detailId = 0, lineId = 0, candidateId = "new-source-episode" })
             });
             await Until(() => rig.Native.SettledIdentity == "new-source-episode" && Called(rig, "media.started", "new-source-episode"));
-            Check(!rig.Native.Intents[^1].PreserveCurrent && rig.Native.Position == 0 && !rig.Native.Paused,
+            Check(rig.Native.Intents[^1].PreserveFrom is null && rig.Native.Position == 0 && !rig.Native.Paused,
                 "new exact episode coordinates cannot inherit the old episode's clock or paused state");
         });
         foreach (string provider in new[] { "tmdb", "douban" })
@@ -494,7 +547,7 @@ public static class FilmPlaybackSessionTests
             rig.Runtime.Attempt("unknown-other", Candidate("unknown-other", episode: null), target: source with
             { Source = FilmJson.Encode(new { key = "cat:fixture:site:1", detailId = 0, lineId = 0, candidateId = "unknown-other" }) });
             await Until(() => rig.Native.SettledIdentity == "unknown-other" && Called(rig, "media.started", "unknown-other"));
-            Check(!rig.Native.Intents[^1].PreserveCurrent && rig.Native.Position == 0 && !rig.Native.Paused &&
+            Check(rig.Native.Intents[^1].PreserveFrom is null && rig.Native.Position == 0 && !rig.Native.Paused &&
                 !rig.Page.ShowMovieCandidates && rig.Native.Commits == 2 && !Called(rig, "media.failed"),
                 "an unselected movie row, movie-like ID and title are not evidence that two coordinate-free files share a movie clock");
         });
@@ -695,7 +748,7 @@ public static class FilmPlaybackSessionTests
                 var terminal = rig.Native.TerminalAsync(false); await entered.Task;
                 rig.Runtime.Attempt("replacement", Candidate("replacement"));
                 await Until(() => Called(rig, "media.started", "replacement"));
-                Check(!rig.Native.Intents[^1].PreserveCurrent, "a dead resource cannot be a live-clock donor merely because its coordinates match");
+                Check(rig.Native.Intents[^1].PreserveFrom is null, "a dead resource cannot be a live-clock donor merely because its coordinates match");
                 finish.TrySetResult(); await terminal;
                 await Until(() => rig.Native.SettledIdentity == "replacement" && rig.Session.HasOutput);
                 Check(!Called(rig, "media.failed", "replacement"), "the retired native occurrence cannot fail its successor");

@@ -2,7 +2,7 @@
 
 电影产品对固定源码 KSPlayer 的薄适配。`native/KSPlayer` 编译实际 `KSMEPlayer`、FFmpeg 解码／过滤、VideoToolbox、原生音频输出、Metal／sample-buffer surface、轨道和字幕；上游播放控件、SwiftUI 页面和 Demo 不进入 target。这里不再保留第二套私有 C decoder、帧队列或音视频输出。音乐不使用此包。
 
-`VideoSession.prepare(url:format:clearKeys:position:headers:)` 为静默候选创建独立核心及 `KSOptions`；必要来源凭据已在 Node 媒体 owner 的 receipt 不重复传回原生，直连媒体则显式传 headers/Cookie。共同输入、隔离和生命周期契约见[电影原生播放](../../docs/common/film/playback.md)。
+`VideoSession.prepare(url:format:clearKeys:position:headers:)` 为每个静默候选直接创建独立 `KSMEPlayer` 及 `KSOptions`，请求头仅写入该输入的 FFmpeg options；必要来源凭据已在 Node 媒体 owner 的 receipt 不重复传回原生，直连媒体则显式传 headers/Cookie。共同输入、隔离和生命周期契约见[电影原生播放](../../docs/common/film/playback.md)。
 
 `VideoOutput.presentationView` 保留核心完整 UIView／NSView 层级。`renderFirstVideoFrame` 等实际 displayed pixel 或 Metal drawable 呈现确认后才允许提交；prepare/open 成功不视为显示。PiP 使用核心实际 display layer，由产品控制器持有，核心不注册独立系统音频会话、Now Playing 或远程控制。
 

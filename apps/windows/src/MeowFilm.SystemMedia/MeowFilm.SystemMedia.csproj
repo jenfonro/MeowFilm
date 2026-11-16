@@ -4,7 +4,4 @@
     <WindowsSdkPackageVersion>10.0.19041.57</WindowsSdkPackageVersion>
     <UseWPF>true</UseWPF>
   </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="../MeowFilm.Media/MeowFilm.Media.csproj" />
-  </ItemGroup>
 </Project>

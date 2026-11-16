@@ -748,11 +748,6 @@ identify the texts, not a removal of upstream's “or later” grant.
   including the core's upstream deinterlacing filters.
   The exact recipe and source adaptations are in `scripts/ios-video-kernel.json`
   and `native/VideoKernel/patches/ffmpeg-native-output.patch`.
-- The legacy Windows VideoKernel builds a private avformat/avcodec/avutil demux library with decoders,
-  encoders, network protocols and GPL/nonfree components disabled. The source
-  adaptations and build recipe are in `apps/windows/native/VideoKernel/`.
-  Existing libVLC remains the decoder/rendering owner; the private adapter does
-  not convert video to another format.
 - This software is based in part on the work of the Independent JPEG Group.
   The upstream IJG notices and the unchanged-source statement are reproduced
   in `FFmpeg-IJG-NOTICE.txt` for the iOS decoding build.
@@ -790,7 +785,9 @@ Pennington and Daniel Veillard. Their distinct permission/disclaimer is appended
 to `libxml2-MIT.txt` without dropping those notices.
 iOS links the Apple SDK's system libxml2 rather than shipping a second copy.
 
-The legacy Windows VideoKernel build links the GCC 13.2.0 support library `libgcc`
+## Windows music toolchain — GCC, MinGW-w64 and winpthreads
+
+The Windows music audio kernel links the GCC 13.2.0 support library `libgcc`
 statically. Its source is GCC tag `releases/gcc-13.2.0`:
 <https://github.com/gcc-mirror/gcc/tree/releases/gcc-13.2.0/libgcc>.
 Copyright (C) Free Software Foundation, Inc. The applicable grant is
@@ -800,9 +797,9 @@ grant. `GCC-Runtime-Library-Exception-3.1.txt` reproduces upstream
 `COPYING.RUNTIME` verbatim (SHA-256
 `9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74`).
 The exception applies to eligible compilation processes as defined in that
-text; it does not change FFmpeg's or VLC's separate license obligations.
+text; it does not change FFmpeg's separate license obligations.
 
-That legacy Windows toolchain also contributes the MinGW-w64 runtime and statically
+That Windows music toolchain also contributes the MinGW-w64 runtime and statically
 linked winpthreads. Installed headers identify MinGW-w64 11.0.1; upstream tag
 `v11.0.1` supplies the source notices:
 <https://github.com/mingw-w64/mingw-w64/tree/v11.0.1>.
@@ -812,17 +809,6 @@ BSD-style notice, and the additional 2011–2016 notice from `src/misc.c`.
 The native build receipt records the actual static archive identities; the
 upstream attribution alone does not establish absence of toolchain patches.
 These Windows support libraries are not included in the iOS kernel.
-
-## VLC 3.0.24 SDK — Windows
-
-The private demux plugin uses the official VideoLAN VLC 3.0.24 Windows x64 SDK:
-<https://download.videolan.org/pub/videolan/vlc/3.0.24/win64/vlc-3.0.24-win64.7z>,
-SHA-256 `1ed59c09152e78aff84663fa76efab26057716576db74332858810e5ef54ae1f`.
-Copyright VideoLAN and VLC authors. VLC is GPLv2 or later, while libVLC's
-public library interface is LGPLv2.1 or later. The corresponding license texts
-are `GPL-2.0-only.txt` and `LGPL-2.1-only.txt`; existing bundled upstream notices
-remain in the libVLC distribution. The plugin's SDK ABI and exact libvlccore
-identity are checked by the locked native build.
 
 ## Windows film playback kernel — independent KSPlayer-derived native implementation
 
@@ -834,8 +820,8 @@ identified above. This derivative is covered by the project's GPL-3.0-only
 license (`GPL-3.0-only.txt`), not MIT. It is not an official Windows build of
 the Apple Swift SDK and does not include upstream player controls or demos.
 D3D11 output, WASAPI device consumption/clock and DOVI composition are Windows
-implementations. The film kernel does not link libVLC, libmpv or another music
-playback owner; the legacy Windows and music paths and their notices remain.
+implementations. The film kernel does not link libVLC, libmpv or the independent
+Windows music playback owner.
 
 The authoritative 16-source inventory, exact archive URLs/SHA-256, upstream
 license-file SHA-256, source-tree identities and checked local build inputs are
@@ -904,7 +890,7 @@ This software is based in part on the work of the Independent JPEG Group;
 the pinned IJG files remain locally unchanged as stated in the shared notice.
 
 The film build driver selects LLVM-MinGW `20261104` (x86_64 UCRT), separately
-from the legacy GCC VideoKernel toolchain. The release's fixed build scripts
+from the Windows music GCC toolchain. The release's fixed build scripts
 identify [LLVM `llvmorg-23.1.5`](https://github.com/llvm/llvm-project/tree/llvmorg-23.1.5)
 and [MinGW-w64 `ee9bd87644156c41072a11ad957d1e11831a72df`](https://github.com/mingw-w64/mingw-w64/tree/ee9bd87644156c41072a11ad957d1e11831a72df).
 The LLVM exception and legacy NCSA notice are preserved once in the film

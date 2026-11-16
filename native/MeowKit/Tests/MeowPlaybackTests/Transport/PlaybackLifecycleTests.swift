@@ -35,8 +35,8 @@ final class PlaybackLifecycleTests: XCTestCase {
         XCTAssertEqual(state.takeEvents().map(\.kind), [.preparing])
         state.resume()
         XCTAssertTrue(state.takeEvents().isEmpty)
-        state.ready(generation: token, duration: 120, ranges: [])
-        state.ready(generation: token, duration: 120, ranges: [])
+        state.ready(generation: token, duration: 120)
+        state.ready(generation: token, duration: 120)
         XCTAssertEqual(state.takeEvents().map(\.kind), [.prepared])
         let seek = try XCTUnwrap(state.takeSeekIfPossible())
         state.completeSeek(seek, finished: true, actualPosition: 20)
@@ -54,7 +54,7 @@ final class PlaybackLifecycleTests: XCTestCase {
         XCTAssertFalse(state.wantsPlayback)
         XCTAssertEqual(state.snapshot.phase, .paused)
         _ = state.takeEvents()
-        state.ready(generation: token, duration: 120, ranges: [])
+        state.ready(generation: token, duration: 120)
         let prepared = try XCTUnwrap(state.takeEvents().first)
         XCTAssertEqual(prepared.kind, .prepared)
         XCTAssertEqual(prepared.snapshot.phase, .paused)
@@ -72,7 +72,7 @@ final class PlaybackLifecycleTests: XCTestCase {
     func testPauseAndNativePauseAreOneEdgeButActualResumeCanPlayAgain() throws {
         var state = PlaybackStateMachine()
         let token = state.begin(resource: try resource(), owner: "one")
-        state.ready(generation: token, duration: 120, ranges: [])
+        state.ready(generation: token, duration: 120)
         state.transport(generation: token, state: .playing)
         _ = state.takeEvents()
         state.pause()
@@ -88,7 +88,7 @@ final class PlaybackLifecycleTests: XCTestCase {
     func testNativePauseDoesNotRequireAControllerPauseCall() throws {
         var state = PlaybackStateMachine()
         let token = state.begin(resource: try resource(), owner: "one")
-        state.ready(generation: token, duration: 120, ranges: [])
+        state.ready(generation: token, duration: 120)
         state.transport(generation: token, state: .playing)
         _ = state.takeEvents()
         state.transport(generation: token, state: .paused)
@@ -100,7 +100,7 @@ final class PlaybackLifecycleTests: XCTestCase {
     func testInterruptedAndResumedIntentIsNotActualPlayed() throws {
         var state = PlaybackStateMachine()
         let token = state.begin(resource: try resource(), owner: "one")
-        state.ready(generation: token, duration: 120, ranges: [])
+        state.ready(generation: token, duration: 120)
         state.transport(generation: token, state: .playing)
         _ = state.takeEvents()
         state.interruptionBegan()
@@ -115,14 +115,14 @@ final class PlaybackLifecycleTests: XCTestCase {
     func testStopEndsInterruptionTrackingSoLaterExplicitPlayCannotRemainLatched() throws {
         var state = PlaybackStateMachine()
         let old = state.begin(resource: try resource(), owner: "one")
-        state.ready(generation: old, duration: 120, ranges: [])
+        state.ready(generation: old, duration: 120)
         state.interruptionBegan()
         state.stop()
         XCTAssertFalse(state.isInterrupted)
         // The platform observer scope is gone while stopped; no end callback
         // needs to arrive before an unrelated explicit new attempt can proceed.
         let current = state.begin(resource: try resource(), owner: "two")
-        state.ready(generation: current, duration: 120, ranges: [])
+        state.ready(generation: current, duration: 120)
         XCTAssertTrue(state.shouldPlay)
         XCTAssertFalse(state.accepts(old))
     }
@@ -130,13 +130,13 @@ final class PlaybackLifecycleTests: XCTestCase {
     func testTerminalFailureEndsInterruptionTrackingWithoutAutomaticRecovery() throws {
         var state = PlaybackStateMachine()
         let old = state.begin(resource: try resource(), owner: "one")
-        state.ready(generation: old, duration: 120, ranges: [])
+        state.ready(generation: old, duration: 120)
         state.interruptionBegan()
         state.fail(NativePlaybackError.playbackFailed, generation: old)
         XCTAssertFalse(state.isInterrupted)
         XCTAssertFalse(state.resume())
         let current = state.begin(resource: try resource(), owner: "one")
-        state.ready(generation: current, duration: 120, ranges: [])
+        state.ready(generation: current, duration: 120)
         XCTAssertTrue(state.shouldPlay)
     }
 
@@ -144,7 +144,7 @@ final class PlaybackLifecycleTests: XCTestCase {
         var state = PlaybackStateMachine()
         let token = state.begin(resource: try resource(start: 50), owner: "one")
         state.progress(generation: token, position: 0)
-        state.ready(generation: token, duration: 120, ranges: [])
+        state.ready(generation: token, duration: 120)
         let seek = try XCTUnwrap(state.takeSeekIfPossible())
         state.progress(generation: token, position: 2)
         XCTAssertEqual(state.takeEvents().map(\.kind), [.preparing, .prepared])
@@ -164,10 +164,10 @@ final class PlaybackLifecycleTests: XCTestCase {
     func testProgressReportsChangedDurationEvenAtSamePosition() throws {
         var state = PlaybackStateMachine()
         let token = state.begin(resource: try resource(), owner: "one")
-        state.ready(generation: token, duration: 120, ranges: [])
+        state.ready(generation: token, duration: 120)
         state.progress(generation: token, position: 5)
         _ = state.takeEvents()
-        state.updateTimeline(generation: token, duration: 130, ranges: [])
+        state.updateTimeline(generation: token, duration: 130)
         state.progress(generation: token, position: 5)
         let event = try XCTUnwrap(state.takeEvents().first)
         XCTAssertEqual(event.kind, .progress)
@@ -177,7 +177,7 @@ final class PlaybackLifecycleTests: XCTestCase {
     func testNaturalEndKeepsObservedPositionAndIsOncePerAttemptEvenAfterLegacyReplay() throws {
         var state = PlaybackStateMachine()
         let token = state.begin(resource: try resource(), owner: "one")
-        state.ready(generation: token, duration: 120, ranges: [])
+        state.ready(generation: token, duration: 120)
         _ = state.takeEvents()
         XCTAssertTrue(state.end(generation: token))
         XCTAssertFalse(state.end(generation: token))
@@ -199,7 +199,7 @@ final class PlaybackLifecycleTests: XCTestCase {
     func testSeekingToEndIsNotNaturalEndOrQueueAdvance() throws {
         var state = PlaybackStateMachine()
         let token = state.begin(resource: try resource(start: 999), owner: "one")
-        state.ready(generation: token, duration: 120, ranges: [])
+        state.ready(generation: token, duration: 120)
         _ = state.takeEvents()
         let seek = try XCTUnwrap(state.takeSeekIfPossible())
         state.completeSeek(seek, finished: true, actualPosition: 120)
@@ -220,7 +220,7 @@ final class PlaybackLifecycleTests: XCTestCase {
         let media = try resource()
         for _ in 0..<3 {
             let token = state.begin(resource: media, owner: "one")
-            state.ready(generation: token, duration: 120, ranges: [])
+            state.ready(generation: token, duration: 120)
             _ = state.takeEvents()
             state.end(generation: token)
             XCTAssertEqual(state.takeEvents().map(\.kind), [.ended])
@@ -232,11 +232,11 @@ final class PlaybackLifecycleTests: XCTestCase {
         var state = PlaybackStateMachine()
         let media = try resource()
         let old = state.begin(resource: media, owner: "one")
-        state.ready(generation: old, duration: 120, ranges: [])
+        state.ready(generation: old, duration: 120)
         state.begin(resource: try resource(id: "b"), owner: "two")
         let current = state.begin(resource: media, owner: "one")
         _ = state.takeEvents()
-        state.ready(generation: old, duration: 500, ranges: [])
+        state.ready(generation: old, duration: 500)
         state.transport(generation: old, state: .playing)
         state.progress(generation: old, position: 80)
         state.end(generation: old)
@@ -249,12 +249,12 @@ final class PlaybackLifecycleTests: XCTestCase {
     func testFailureIsOnceAndBlocksAllLaterSuccessEvents() throws {
         var state = PlaybackStateMachine()
         let token = state.begin(resource: try resource(), owner: "one")
-        state.ready(generation: token, duration: 120, ranges: [])
+        state.ready(generation: token, duration: 120)
         state.progress(generation: token, position: 10)
         _ = state.takeEvents()
         state.fail(NativePlaybackError.playbackFailed, generation: token)
         state.fail(NativePlaybackError.preparationFailed, generation: token)
-        state.ready(generation: token, duration: 120, ranges: [])
+        state.ready(generation: token, duration: 120)
         state.progress(generation: token, position: 12)
         state.transport(generation: token, state: .playing)
         state.end(generation: token)
@@ -278,7 +278,7 @@ final class PlaybackLifecycleTests: XCTestCase {
     func testReplacementAndStopKeepTheRetiringSnapshotWithoutNaturalEnd() throws {
         var state = PlaybackStateMachine()
         let token = state.begin(resource: try resource(), owner: "one")
-        state.ready(generation: token, duration: 120, ranges: [])
+        state.ready(generation: token, duration: 120)
         state.progress(generation: token, position: 23)
         _ = state.takeEvents()
         let next = state.begin(resource: try resource(id: "episode"), owner: "two")
@@ -304,7 +304,7 @@ final class PlaybackLifecycleTests: XCTestCase {
             XCTAssertFalse(state.commandContext.accepts(command, generation: old))
         }
         let token = state.begin(resource: try resource(), owner: "one")
-        state.ready(generation: token, duration: 120, ranges: [])
+        state.ready(generation: token, duration: 120)
         for command in commands {
             XCTAssertTrue(state.commandContext.accepts(command, generation: token))
         }
@@ -325,9 +325,9 @@ final class PlaybackLifecycleTests: XCTestCase {
         XCTAssertFalse(state.commandContext.accepts(.play, generation: old))
         XCTAssertTrue(state.commandContext.accepts(.play, generation: token))
         XCTAssertFalse(state.commandContext.accepts(.seek(10), generation: token))
-        state.ready(generation: token, duration: nil, ranges: [])
+        state.ready(generation: token, duration: nil)
         XCTAssertFalse(state.commandContext.accepts(.seek(10), generation: token))
-        state.updateTimeline(generation: token, duration: 120, ranges: [])
+        state.updateTimeline(generation: token, duration: 120)
         XCTAssertTrue(state.commandContext.accepts(.seek(10), generation: token))
         for invalid in [Double.nan, .infinity, -1] {
             XCTAssertFalse(state.commandContext.accepts(.seek(invalid), generation: token))
