@@ -301,11 +301,10 @@ final class MusicPlaybackControlsView: UIView {
         durationLabel.frame = CGRect(x: width - 96, y: seekTop + 28, width: 80, height: 18)
         let metrics = miniLayout
         let frame = metrics.compactControlFrame(width: Double(width))
-            .offsetBy(dx: 0, dy: height - CGFloat(metrics.compactHeight))
         compactPlay.frame = CGRect(x: frame.minX, y: frame.minY, width: 44, height: 44)
         compactQueue.frame = CGRect(x: frame.minX + 44, y: frame.minY, width: 44, height: 44)
-        // Both sets belong to the dock's fixed bottom edge, not to each other's slots.
-        let controlsTop = height - CGFloat(metrics.expandedHeight - metrics.controlsTop)
+        // Transport follows the same moving top edge as metadata and progress.
+        let controlsTop = CGFloat(metrics.controlsTop)
         let cellWidth = max(0, width - 32) / 5
         for (index, button) in [favorite, previous, play, nextButton, queue].enumerated() {
             button.frame = CGRect(x: 16 + CGFloat(index) * cellWidth, y: controlsTop,
