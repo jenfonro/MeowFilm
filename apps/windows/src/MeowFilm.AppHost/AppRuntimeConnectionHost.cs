@@ -9,7 +9,7 @@ namespace MeowFilm.AppHost;
 /// factory result and its owner token, never infers an epoch from Generation.
 /// </summary>
 internal sealed class AppRuntimeConnectionHost : IRuntimeClient, IRuntimeImageClient, IRuntimeRecovery, IRuntimeConnectionSource,
-    IRuntimeSettingsNotifications, IAsyncDisposable
+    IRuntimeSettingsNotifications, IRuntimeLifetime, IAsyncDisposable
 {
     private sealed class Capture(CancellationToken owner)
     {
@@ -42,7 +42,8 @@ internal sealed class AppRuntimeConnectionHost : IRuntimeClient, IRuntimeImageCl
                 }
                 catch
                 {
-                    await session.DisposeAsync().ConfigureAwait(false);
+                    try { await session.DisposeAsync().ConfigureAwait(false); }
+                    catch { throw new RuntimeStartupCleanupException(); }
                     throw;
                 }
             }
@@ -59,6 +60,7 @@ internal sealed class AppRuntimeConnectionHost : IRuntimeClient, IRuntimeImageCl
     internal void Start() => runtime.Start();
     public long Generation => runtime.Generation;
     public RuntimeConnectionState State => runtime.State;
+    public Task? ShutdownCompletion => runtime.ShutdownCompletion;
     public bool CanRetry => runtime.CanRetry;
     public void RegisterRecoveryScope(IRuntimeRecoveryScope scope) => runtime.RegisterRecoveryScope(scope);
     public Task RetryAsync(CancellationToken cancellationToken = default) => runtime.RetryAsync(cancellationToken);

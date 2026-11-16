@@ -19,9 +19,12 @@ public static class AppRuntimeConnectionTests
             CancellationToken owner = default;
             int launches = 0;
             await using var host = new AppRuntimeConnectionHost(token => { launches++; owner = token; return ready.Task; });
+            IRuntimeLifetime lifetime = host;
+            Check(lifetime.ShutdownCompletion is null, "reading a dormant host's lifetime does not start final shutdown");
             await Error("CLOSED", () => host.CaptureConnectionAsync());
             Check(launches == 0, "only App Start may create the runtime epoch");
             host.Start();
+            Check(lifetime.ShutdownCompletion is null, "a pending start is not final shutdown");
             using var caller = new CancellationTokenSource();
             var cancelled = host.CaptureConnectionAsync(caller.Token);
             var retained = host.CaptureConnectionAsync();
@@ -47,12 +50,15 @@ public static class AppRuntimeConnectionTests
                 if (launches == 1) first = session; else next = session;
                 return Task.FromResult<IRuntimeSession>(session);
             });
+            IRuntimeLifetime lifetime = host;
             host.Start();
             var old = await host.CaptureConnectionAsync();
             first!.Crash();
             Check(old.Revoked.IsCancellationRequested && host.CanRetry, "actual epoch failure revokes old capabilities");
+            Check(lifetime.ShutdownCompletion is null, "epoch revocation does not publish a final shutdown receipt");
             await host.RetryAsync();
             var current = await host.CaptureConnectionAsync();
+            Check(lifetime.ShutdownCompletion is null, "recovery retires an epoch without starting final App shutdown");
             Check(first.Disposals == 1 && launches == 2 && !current.Revoked.IsCancellationRequested &&
                 !ReferenceEquals(current.Client, old.Client) && current.BusinessOrigin.Port == 41003 && old.BusinessOrigin.Port == 41002,
                 "recovery publishes a new triple only after retiring the old owner");
@@ -67,19 +73,95 @@ public static class AppRuntimeConnectionTests
             EpochSession? session = null;
             var host = new AppRuntimeConnectionHost(token => Task.FromResult<IRuntimeSession>(
                 session = new(token, 41002) { Drain = drain.Task }));
+            IRuntimeLifetime lifetime = host;
             host.Start();
             var captured = await host.CaptureConnectionAsync();
+            Check(lifetime.ShutdownCompletion is null, "a live host has no final shutdown receipt");
             try
             {
                 var close = host.DisposeAsync().AsTask();
                 Check(captured.Revoked.IsCancellationRequested && !close.IsCompleted,
                     "revocation is immediate but does not pretend physical close is finished");
+                Check(ReferenceEquals(close, lifetime.ShutdownCompletion) &&
+                    ReferenceEquals(close, host.DisposeAsync().AsTask()),
+                    "the host forwards the same pending App-owned physical drain task");
                 await Error("CLOSED", () => host.CaptureConnectionAsync());
                 drain.TrySetResult(); await close; await host.DisposeAsync();
+                Check(close.IsCompletedSuccessfully && ReferenceEquals(close, lifetime.ShutdownCompletion),
+                    "the successful final shutdown receipt remains stable");
                 Check(session!.Disposals == 1, "one actual session retirement owns repeated host disposal");
             }
             finally { drain.TrySetResult(); await host.DisposeAsync(); }
         });
+        yield return Test("host shutdown receipt retains physical drain failure across repeated close", async () =>
+        {
+            var drain = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            EpochSession? session = null;
+            var host = new AppRuntimeConnectionHost(token => Task.FromResult<IRuntimeSession>(
+                session = new(token, 41002) { Drain = drain.Task }));
+            IRuntimeLifetime lifetime = host;
+            host.Start();
+            await host.CaptureConnectionAsync();
+            try
+            {
+                var close = host.DisposeAsync().AsTask();
+                Check(ReferenceEquals(close, lifetime.ShutdownCompletion) && !close.IsCompleted,
+                    "the receipt waits for the actual session drain");
+                drain.TrySetException(new InvalidOperationException("synthetic-private-drain"));
+                await Error("INTERNAL", () => close);
+                Check(close.IsFaulted && ReferenceEquals(close, lifetime.ShutdownCompletion) &&
+                    ReferenceEquals(close, host.DisposeAsync().AsTask()),
+                    "a failed physical drain never becomes a successful receipt on retry");
+                await Error("INTERNAL", () => host.DisposeAsync().AsTask());
+                Check(session!.Disposals == 1, "observing the failed receipt never repeats session disposal");
+            }
+            finally
+            {
+                drain.TrySetResult();
+                await Error("INTERNAL", () => host.DisposeAsync().AsTask());
+            }
+        });
+        foreach (bool failed in new[] { false, true })
+            yield return Test($"host shutdown receipt retains {(failed ? "failed" : "successful")} cleanup of a late factory session", async () =>
+            {
+                var ready = new TaskCompletionSource<IRuntimeSession>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var drain = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var disposing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                CancellationToken owner = default;
+                var host = new AppRuntimeConnectionHost(token => { owner = token; return ready.Task; });
+                IRuntimeLifetime lifetime = host;
+                host.Start();
+                var close = host.DisposeAsync().AsTask();
+                var session = new EpochSession(owner, 41002) { Drain = drain.Task, DisposalStarted = disposing };
+                try
+                {
+                    Check(owner.IsCancellationRequested && !close.IsCompleted &&
+                        ReferenceEquals(close, lifetime.ShutdownCompletion),
+                        "shutdown publishes its pending receipt before the factory returns");
+                    ready.SetResult(session);
+                    await disposing.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    Check(!close.IsCompleted && session.DisposeCalls == 1 && session.Disposals == 1,
+                        "the rejected late session is physically drained once before shutdown can settle");
+                    if (failed) drain.SetException(new InvalidOperationException("synthetic-private-drain"));
+                    else drain.SetResult();
+                    if (failed)
+                    {
+                        await Error("INTERNAL", () => close);
+                        await Error("INTERNAL", () => host.DisposeAsync().AsTask());
+                    }
+                    else { await close; await host.DisposeAsync(); }
+                    Check(close.IsFaulted == failed && close.IsCompletedSuccessfully == !failed &&
+                        ReferenceEquals(close, lifetime.ShutdownCompletion) &&
+                        ReferenceEquals(close, host.DisposeAsync().AsTask()) &&
+                        session.DisposeCalls == 1 && session.Disposals == 1,
+                        "the factory cleanup outcome is retained without disposing its session again");
+                }
+                finally
+                {
+                    ready.TrySetResult(session); drain.TrySetResult();
+                    try { await host.DisposeAsync(); } catch (BridgeException) when (failed) { }
+                }
+            });
         yield return Test("an unrevocable capture is rejected and its actual session is disposed", async () =>
         {
             var session = new EpochSession(default, 41002) { Unrevocable = true };
@@ -90,6 +172,9 @@ public static class AppRuntimeConnectionTests
             ready.SetResult(session);
             await Error("INVALID_RESPONSE", () => capture);
             Check(session.Disposals == 1, "failed trusted capture does not strand its factory result");
+            await host.DisposeAsync();
+            Check(host.ShutdownCompletion?.IsCompletedSuccessfully == true && session.DisposeCalls == 1,
+                "a startup failure with successful cleanup still permits a successful final shutdown");
         });
         yield return Test("image forwarding preserves the reference budget and bytes without starting a dormant host", async () =>
         {
@@ -314,6 +399,7 @@ public static class AppRuntimeConnectionTests
                 else next = session;
                 return Task.FromResult<IRuntimeSession>(session);
             });
+            IRuntimeLifetime lifetime = host;
             host.Start();
             var old = await host.CaptureConnectionAsync();
             IRuntimeSettingsNotifications notifications = host;
@@ -329,6 +415,7 @@ public static class AppRuntimeConnectionTests
                 var recovery = host.RetryAsync();
                 Check(host.State == RuntimeConnectionState.Recovering && !recovery.IsCompleted && first.Disposals == 1,
                     "only explicit recovery retires the failed owner and waits for its physical drain");
+                Check(lifetime.ShutdownCompletion is null, "an in-progress epoch recovery is not final App shutdown");
                 await settings.SavePreferencesAsync(FilmPreferences.Defaults with { Keywords = ["recovering-save"] });
                 notifications.SettingsChanged("pan.accounts");
                 Check(launches == 1 && first.Calls == 0 && store.Writes == 2 &&
@@ -630,9 +717,10 @@ public static class AppRuntimeConnectionTests
         private readonly CancellationTokenSource lifetime;
         internal readonly Uri Origin;
         internal CancellationToken Revoked { get; }
-        internal int Calls, ImageReads, Disposals;
+        internal int Calls, ImageReads, Disposals, DisposeCalls;
         internal bool Unrevocable;
         internal Task Drain = Task.CompletedTask;
+        internal TaskCompletionSource? DisposalStarted;
         internal Func<string, int, CancellationToken, Task<byte[]>>? ImageReader;
         internal Func<string, CancellationToken, Task<byte[]>>? CompleteImageReader;
         internal readonly Channel<TimedCall> TimedCalls = Channel.CreateUnbounded<TimedCall>();
@@ -683,11 +771,13 @@ public static class AppRuntimeConnectionTests
             ImageReads++;
             return CompleteImageReader?.Invoke(reference, cancellationToken) ?? throw new BridgeException("METHOD_UNAVAILABLE");
         }
-        public ValueTask DisposeAsync() => new(disposal ??= CloseAsync());
+        public ValueTask DisposeAsync() { DisposeCalls++; return new(disposal ??= CloseAsync()); }
         private async Task CloseAsync()
         {
-            Disposals++; await lifetime.CancelAsync(); await Drain;
-            lifetime.Dispose();
+            Disposals++;
+            DisposalStarted?.TrySetResult();
+            try { await lifetime.CancelAsync(); await Drain; }
+            finally { lifetime.Dispose(); }
         }
     }
 }
