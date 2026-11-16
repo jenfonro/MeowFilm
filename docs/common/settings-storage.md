@@ -1,6 +1,6 @@
 # 原生设置存储与运行器通知
 
-本文件规定普通设置的事实来源、离线读写、通知及在线回写边界，不统一界面或平台存储实现。端侧实际接线见 [iOS 存储](../ios/storage.md#影视设置)；运行器的可选注入与独立入口见 [Runtime HTTP](../runtime/runtime-bridge.md#原生设置注入)。
+本文件规定普通设置的事实来源、离线读写、通知及在线回写边界，不统一界面或平台存储实现。端侧实际接线见 [iOS 存储](../ios/storage.md#影视设置)与 [Windows 原生设置](../windows/native-settings.md)；运行器的可选注入与独立入口见 [Runtime HTTP](../runtime/runtime-bridge.md#原生设置注入)。
 
 ## 事实来源与操作边界
 

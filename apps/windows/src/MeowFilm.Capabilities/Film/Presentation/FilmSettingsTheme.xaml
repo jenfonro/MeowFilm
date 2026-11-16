@@ -8,7 +8,6 @@
  <Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}"/>
 
  <Style x:Key="FilmSettings.Anchor" TargetType="RadioButton" BasedOn="{StaticResource MeowFilm.SettingsArea}">
-  <Setter Property="Height" Value="44"/><Setter Property="Margin" Value="0,0,28,0"/>
   <Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
  </Style>
  <Style x:Key="FilmSettings.Grid" TargetType="DataGrid">
@@ -67,30 +66,18 @@
  <Style x:Key="FilmSettings.CellText" TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}">
   <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="TextTrimming" Value="CharacterEllipsis"/>
  </Style>
- <Style x:Key="FilmSettings.ErrorCell" TargetType="TextBlock" BasedOn="{StaticResource FilmSettings.CellText}">
-  <Setter Property="ToolTip" Value="{Binding ErrorText}"/>
-  <Setter Property="AutomationProperties.HelpText" Value="{Binding ErrorText}"/>
+ <Style x:Key="FilmSettings.AggregateBadge" TargetType="Border">
+  <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.AccentText}"/>
+  <Setter Property="TextElement.Foreground" Value="{DynamicResource MeowFilm.Brush.AccentText}"/>
+  <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+   <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+   <Setter Property="TextElement.Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+  </Trigger></Style.Triggers>
  </Style>
- <Style x:Key="FilmSettings.UpdateCell" TargetType="TextBlock" BasedOn="{StaticResource FilmSettings.CellText}">
-  <Setter Property="ToolTip" Value="{Binding UpdateErrorText}"/>
-  <Setter Property="AutomationProperties.HelpText" Value="{Binding UpdateErrorText}"/>
- </Style>
- <Style x:Key="FilmSettings.DateCell" TargetType="TextBlock" BasedOn="{StaticResource FilmSettings.CellText}">
-  <Setter Property="TextAlignment" Value="Right"/><Setter Property="Typography.NumeralAlignment" Value="Tabular"/>
- </Style>
- <Style x:Key="FilmSettings.Radio" TargetType="RadioButton">
-  <Setter Property="Width" Value="28"/><Setter Property="Height" Value="32"/>
-  <Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
-  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RadioButton">
-   <Grid Background="Transparent">
-    <Ellipse x:Name="Ring" Width="16" Height="16" Fill="{DynamicResource MeowFilm.Brush.Surface}" Stroke="{DynamicResource MeowFilm.Brush.Border}"/>
-    <Ellipse x:Name="Dot" Width="8" Height="8" Fill="{DynamicResource MeowFilm.Brush.Accent}" Visibility="Collapsed"/>
-   </Grid>
-   <ControlTemplate.Triggers>
-    <Trigger Property="IsChecked" Value="True"><Setter TargetName="Dot" Property="Visibility" Value="Visible"/></Trigger>
-    <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Ring" Property="Opacity" Value=".6"/></Trigger>
-    <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter TargetName="Ring" Property="Fill" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/><Setter TargetName="Ring" Property="Stroke" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/><Setter TargetName="Dot" Property="Fill" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger>
-   </ControlTemplate.Triggers>
-  </ControlTemplate></Setter.Value></Setter>
+ <Style x:Key="FilmSettings.AggregateText" TargetType="TextBlock" BasedOn="{StaticResource FilmSettings.CellText}">
+  <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.AccentText}"/>
+  <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+   <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+  </Trigger></Style.Triggers>
  </Style>
 </ResourceDictionary>

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Security.Cryptography;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Automation.Peers;
@@ -28,17 +29,19 @@ public static class FilmSettingsUiTests
     {
         yield return Case("draft testing passes all four groups and query without saving", DraftTesting);
         yield return Case("row save add delete and section restore preserve whole panel scope", RuleEditing);
-        yield return Case("new-rule inputs reach the Node normalizer without native whitespace or regex interpretation", NativeRuleInputs);
+        yield return Case("new-rule inputs use native normalization and storage without RPC and retain failed drafts", NativeRuleInputs);
         yield return Case("rule cancellation and errors cannot publish into a hidden view", RuleLifetime);
-        yield return Case("local scripts preserve valid UTF8 bytes and reject invalid UTF8", LocalScriptEncoding);
+        yield return Case("local file selection preserves bytes without native script decoding", LocalScriptEncoding);
         yield return Case("cat edits toggles restart and bulk deletion reach the source owner", CatManagement);
         yield return Case("centered edits survive resize and offset coercion while confirmations retire without saving", PopupLifetime);
-        yield return Case("video options radio selection and order survive a new owner", VideoSettings);
-        yield return Case("video detection deletion and explicit reimport use the selected installation", VideoActions);
+        yield return Case("video switches aggregate menu and row order survive a new owner", VideoSettings);
+        yield return Case("video detection deletion and add-only dialogs preserve installation identities", VideoActions);
+        yield return Case("cat add and type edits are draft-only until saved", CatTypeDraft);
+        yield return Case("diagnostic states open the shared dialog without querying the runtime", DetectionDiagnostics);
         yield return Case("failed source operations restore switches and notify with retry", SourceFailure);
-        yield return Case("native keyboard scrolling high contrast and screenshots cover both window sizes", Layout);
+        yield return Case("native navigation scrolling high contrast and WPF snapshots cover both window sizes", Layout);
         yield return Case("empty source pages keep their actions and columns", Empty);
-        yield return Case("data sources echo one token and cookie and save server proxy options independently", DataSources);
+        yield return Case("data sources echo one token and cookie and save proxy options natively and independently", DataSources);
         yield return Case("site clean lives under matching and playback uses half-width shared order lists", PlaybackLayout);
         yield return Case("playback management separates counted target groups from bounded source tables and empty states", PlaybackManagement);
         yield return Case("cache controls invalidate exact domains and drain both providers on failure", MetadataCache);
@@ -69,7 +72,7 @@ public static class FilmSettingsUiTests
         movie.Rows[0].Replace = "draft-movie";
         scene.Box("SearchInput").Text = "作品2 更新";
         scene.Box("SearchQuery").Text = "作品2";
-        int writes = scene.RulesRuntime.Writes;
+        int writes = scene.Store.WritesFor("film.rules.v1"), notifications = scene.RulesRuntime.Notifications;
         scene.RulesRuntime.Result = new()
         {
             Section = FilmRuleSection.Search, Type = "success", Text = "净化后：作品2",
@@ -83,7 +86,8 @@ public static class FilmSettingsUiTests
         Check(call.GetProperty("rules").GetProperty("episodeRules")[0].GetProperty("pattern").GetString() == "draft-episode" &&
             call.GetProperty("rules").GetProperty("movieRules")[0].GetProperty("replace").GetString() == "draft-movie",
             "test consumes the current entire draft");
-        Check(scene.RulesRuntime.Writes == writes && scene.Rules.GetSavedSnapshot().EpisodeRules[0].Pattern == "episode",
+        Check(scene.Store.WritesFor("film.rules.v1") == writes && scene.RulesRuntime.Notifications == notifications &&
+            scene.Rules.GetSavedSnapshot().EpisodeRules[0].Pattern == "episode",
             "testing neither writes nor changes the saved owner snapshot");
         var result = scene.Element<StackPanel>("SearchResults");
         Check(Texts(result).Contains("聚合 Key：作品2") && Texts(result).Contains("搜索尾号保护：2"),
@@ -92,7 +96,8 @@ public static class FilmSettingsUiTests
         movie.Rows[0].Pattern = "next-draft";
         Check(result.Children.Count == 0, "changing a draft clears stale results");
         await scene.Select("cats"); await scene.Select("rules");
-        Check(movie.Rows[0].Pattern == "next-draft" && scene.RulesRuntime.Writes == writes,
+        Check(movie.Rows[0].Pattern == "next-draft" && scene.Store.WritesFor("film.rules.v1") == writes &&
+            scene.RulesRuntime.Notifications == notifications,
             "switching settings pages preserves unsaved draft without saving it");
     }
 
@@ -105,15 +110,15 @@ public static class FilmSettingsUiTests
         await Until(() => !scene.View.RulesBusy);
         Check(scene.Rules.GetSavedSnapshot().EpisodeCleanRegexRules.SequenceEqual(["clean-draft"]) &&
             scene.Rules.GetSavedSnapshot().MovieRules[0].Replace == "movie-draft", "a row save persists every group's draft");
-        Check(!scene.RulesRuntime.Requests.Any(request => request.Method == "film.rules.normalize"),
-            "existing-row edits do not use new-rule parsing");
+        Check(scene.RulesRuntime.Requests.Count == 0 && scene.Store.WritesFor("film.rules.v1") == 1 &&
+            scene.RulesRuntime.Notifications == 1, "existing-row edits save natively and notify only after the write");
         var editor = scene.Editor("MovieEditor");
         ((TextBox)editor.FindName("NewPattern")).Text = "/added/gi";
         ((TextBox)editor.FindName("NewReplace")).Text = "$1";
         Click((Button)editor.FindName("AddButton"));
         await Until(() => !scene.View.RulesBusy);
         Check(scene.Rules.GetSavedSnapshot().MovieRules[^1] == new FilmMatchRule("added", "$1", "gi"),
-            "new matching rows retain the normalizer's flags and replacement");
+            "new matching rows retain the native parser's flags and replacement");
         int count = editor.Rows.Count;
         var rowDelete = Visuals(editor).OfType<Button>().First(button => Equals(button.Content, "删除"));
         Click(rowDelete); await Drain();
@@ -144,10 +149,13 @@ public static class FilmSettingsUiTests
             scene.Rules.GetSavedSnapshot().EpisodeCleanRegexRules.SequenceEqual(["clean-draft"]), "cancelled restore preserves drafts and saved rules");
         Click(restore); await scene.AcceptPopup();
         var restored = scene.Rules.GetSavedSnapshot();
-        Check(restored.EpisodeCleanRegexRules.SequenceEqual(["restored-clean"]) &&
-            restored.EpisodeRules[0].Pattern == "restored-episode" &&
+        var defaults = DefaultRules();
+        Check(restored.EpisodeCleanRegexRules.SequenceEqual(defaults.EpisodeCleanRegexRules) &&
+            restored.EpisodeRules.SequenceEqual(defaults.EpisodeRules) &&
             restored.AggregateRegexRules.SequenceEqual(["search-unsaved"]),
             "episode restore replaces its two groups and saves other groups' drafts");
+        Check(scene.RulesRuntime.Requests.Count == 0 && scene.Store.WritesFor("film.rules.v1") == 4 &&
+            scene.RulesRuntime.Notifications == 4, "save add delete and restore commit natively without rule settings RPCs");
     }
 
     private static async Task NativeRuleInputs()
@@ -159,25 +167,77 @@ public static class FilmSettingsUiTests
             var pattern = (TextBox)editor.FindName("NewPattern");
             var replace = (TextBox)editor.FindName("NewReplace");
             pattern.Text = "\u0085"; replace.Text = "X";
-            scene.RulesRuntime.Normalize = new FilmMatchRule("\u0085", "X");
             Click((Button)editor.FindName("AddButton")); await Until(() => !scene.View.RulesBusy);
-            var call = scene.RulesRuntime.Requests.Last(request => request.Method == "film.rules.normalize");
             var saved = scene.Rules.GetSavedSnapshot();
-            Check(call.Input.GetProperty("kind").GetString() == "match" && call.Input.GetProperty("pattern").GetString() == "\u0085" &&
-                (name == "MovieEditor" ? saved.MovieRules : saved.EpisodeRules)[^1] == new FilmMatchRule("\u0085", "X"),
-                "each editor sends the exact WPF NEL input to Node and saves its receipt without native trimming");
-            pattern.Text = " \t\uFEFF"; replace.Text = "invalid"; scene.RulesRuntime.Normalize = null;
-            int count = editor.Rows.Count, writes = scene.RulesRuntime.Writes, notices = scene.Notices.Count;
+            Check((name == "MovieEditor" ? saved.MovieRules : saved.EpisodeRules)[^1] == new FilmMatchRule("\u0085", "X"),
+                "native matching input preserves NEL because ECMAScript trim does not remove it");
+            pattern.Text = "\uFEFF /🐱\\\\d+/gi \u00A0"; replace.Text = "\uFEFF $1\u0085 \u00A0";
             Click((Button)editor.FindName("AddButton")); await Until(() => !scene.View.RulesBusy);
-            Check(scene.RulesRuntime.Requests.Last(request => request.Method == "film.rules.normalize").Input.GetProperty("pattern").GetString() == " \t\uFEFF" &&
-                editor.Rows.Count == count && scene.RulesRuntime.Writes == writes && scene.Notices.Count > notices && scene.Notices[^1].Contains("请输入正则", StringComparison.Ordinal),
-                "Node's empty normalization receipt prevents save and reports the existing UI error");
+            saved = scene.Rules.GetSavedSnapshot();
+            Check((name == "MovieEditor" ? saved.MovieRules : saved.EpisodeRules)[^1] == new FilmMatchRule("🐱\\d+", "$1\u0085", "gi"),
+                "native parsing trims ECMAScript whitespace and preserves valid UTF16 replacement and flags");
+            pattern.Text = " \t\uFEFF"; replace.Text = "invalid";
+            int count = editor.Rows.Count, writes = scene.Store.WritesFor("film.rules.v1"),
+                notifications = scene.RulesRuntime.Notifications, notices = scene.Notices.Count;
+            string revision = scene.Rules.Revision, document = scene.Store.Read("film.rules.v1").GetRawText();
+            Click((Button)editor.FindName("AddButton")); await Until(() => !scene.View.RulesBusy);
+            Check(editor.Rows.Count == count && pattern.Text == " \t\uFEFF" && replace.Text == "invalid" &&
+                scene.Store.WritesFor("film.rules.v1") == writes && scene.RulesRuntime.Notifications == notifications &&
+                scene.Rules.Revision == revision && scene.Store.Read("film.rules.v1").GetRawText() == document &&
+                scene.Notices.Count > notices && scene.Notices[^1].Contains("请输入正则", StringComparison.Ordinal),
+                "empty native normalization retains inputs and reports the UI error without saving or notifying");
+
+            string original = editor.Rows[0].Replace;
+            editor.Rows[0].Replace = "A\ud800B\udc00";
+            notices = scene.Notices.Count;
+            Click(Visuals(editor).OfType<Button>().First(button => Equals(button.Content, "保存")));
+            await Until(() => !scene.View.RulesBusy);
+            Check(editor.Rows[0].Replace == "A\ud800B\udc00" && scene.Rules.Revision == revision &&
+                scene.Store.Read("film.rules.v1").GetRawText() == document &&
+                scene.Store.WritesFor("film.rules.v1") == writes && scene.RulesRuntime.Notifications == notifications &&
+                scene.Notices.Count > notices && scene.Notices[^1].Contains("INVALID_RULES", StringComparison.Ordinal),
+                "isolated UTF16 units remain in the failed draft without corrupting the native saved rules");
+            editor.Rows[0].Replace = original;
+
+            pattern.Text = "/retry/gy"; replace.Text = "$1";
+            notices = scene.Notices.Count;
+            scene.Store.FailWrite = true;
+            try
+            {
+                Click((Button)editor.FindName("AddButton")); await Until(() => !scene.View.RulesBusy);
+                Check(editor.Rows.Count == count && pattern.Text == "/retry/gy" && replace.Text == "$1" &&
+                    scene.Rules.Revision == revision && scene.Store.Read("film.rules.v1").GetRawText() == document &&
+                    scene.Store.WritesFor("film.rules.v1") == writes && scene.RulesRuntime.Notifications == notifications &&
+                    scene.Notices.Count > notices && scene.Notices[^1].Contains("规则操作失败", StringComparison.Ordinal),
+                    "native storage failure retains the add draft without publishing or notifying");
+            }
+            finally { scene.Store.FailWrite = false; }
+            Click((Button)editor.FindName("AddButton")); await Until(() => !scene.View.RulesBusy);
+            saved = scene.Rules.GetSavedSnapshot();
+            Check(editor.Rows.Count == count + 1 && pattern.Text.Length == 0 && replace.Text.Length == 0 &&
+                (name == "MovieEditor" ? saved.MovieRules : saved.EpisodeRules)[^1] == new FilmMatchRule("retry", "$1", "gy") &&
+                scene.Store.WritesFor("film.rules.v1") == writes + 1 && scene.RulesRuntime.Notifications == notifications + 1,
+                "retry commits the retained draft once and clears inputs only after native success");
         }
-        await using var reopened = new FilmRuleService(scene.RulesRuntime);
+        foreach (string name in new[] { "EpisodeCleanEditor", "SearchEditor" })
+        {
+            var editor = scene.Editor(name);
+            ((TextBox)editor.FindName("NewPattern")).Text = "\uFEFF /🐱\\\\d+/gy \u00A0";
+            Click((Button)editor.FindName("AddButton")); await Until(() => !scene.View.RulesBusy);
+            var saved = scene.Rules.GetSavedSnapshot();
+            Check((name == "EpisodeCleanEditor" ? saved.EpisodeCleanRegexRules : saved.AggregateRegexRules)[^1] == "/🐱\\d+/gy",
+                "clean-rule editors also parse new inputs natively and retain flags");
+        }
+        await using var reopened = new FilmRuleService(scene.RulesRuntime, scene.Store);
         await reopened.InitializeAsync();
-        Check(reopened.GetSavedSnapshot().MovieRules[^1].Pattern == "\u0085" &&
-            reopened.GetSavedSnapshot().EpisodeRules[^1].Pattern == "\u0085",
-            "a new settings consumer reads both acknowledged Node rule groups");
+        var snapshot = reopened.GetSavedSnapshot();
+        Check(snapshot.MovieRules.Contains(new FilmMatchRule("\u0085", "X")) &&
+            snapshot.EpisodeRules.Contains(new FilmMatchRule("\u0085", "X")) &&
+            snapshot.MovieRules.Contains(new FilmMatchRule("🐱\\d+", "$1\u0085", "gi")) &&
+            snapshot.EpisodeRules.Contains(new FilmMatchRule("🐱\\d+", "$1\u0085", "gi")) &&
+            snapshot.EpisodeCleanRegexRules[^1] == "/🐱\\d+/gy" && snapshot.AggregateRegexRules[^1] == "/🐱\\d+/gy" &&
+            reopened.Revision == scene.Rules.Revision && scene.RulesRuntime.Requests.Count == 0,
+            "a new native settings consumer reads all four committed groups without any rule RPC");
     }
 
     private static async Task RuleLifetime()
@@ -218,24 +278,31 @@ public static class FilmSettingsUiTests
 
     private static async Task LocalScriptEncoding()
     {
+        await using var scene = await Scene.Create();
         string path = TestWorkspace.DataPath("film-settings-script-" + Guid.NewGuid().ToString("N") + ".js");
         try
         {
-            const string expected = "\uFEFFconst 名称 = '猫源🐾';\r\n";
-            byte[] bytes = Encoding.UTF8.GetBytes(expected);
+            byte[] bytes = Encoding.UTF8.GetBytes("\uFEFFconst 名称 = '猫源🐾';\r\n");
             await File.WriteAllBytesAsync(path, bytes);
-            string actual = await FilmSettingsView.ReadLocalScriptAsync(path);
-            Check(actual == expected && Encoding.UTF8.GetBytes(actual).SequenceEqual(bytes),
-                "valid UTF8 script text preserves original bytes including BOM and line endings");
-            await File.WriteAllBytesAsync(path, [0xC3, 0x28]);
-            bool rejected = false;
-            try { await FilmSettingsView.ReadLocalScriptAsync(path); }
-            catch (DecoderFallbackException) { rejected = true; }
-            Check(rejected, "invalid UTF8 must fail explicitly rather than substitute replacement characters");
+            var imported = await scene.Sources.ImportLocalAsync("本地字节样例", path);
+            AssertInput(imported, bytes);
+            Check((await File.ReadAllBytesAsync(path)).SequenceEqual(bytes),
+                "selected valid UTF8 bytes retain BOM and line endings without native rewriting");
+            byte[] invalidUtf8 = [0xC3, 0x28];
+            await File.WriteAllBytesAsync(path, invalidUtf8);
+            imported = await scene.Sources.UpdateCatAsync(imported.InstallationId, path);
+            AssertInput(imported, invalidUtf8);
+            Check((await File.ReadAllBytesAsync(path)).SequenceEqual(invalidUtf8),
+                "source selection never substitutes invalid bytes; execution decoding belongs to the runtime");
         }
-        finally
+        finally { File.Delete(path); }
+        void AssertInput(FilmCatSource cat, byte[] bytes)
         {
-            File.Delete(path);
+            var configured = scene.Store.Read("film.cat-sources.v1").GetProperty("scripts").EnumerateArray()
+                .Single(script => script.GetProperty("installationId").GetString() == cat.InstallationId);
+            Check(configured.GetProperty("localPath").GetString() == Path.GetFullPath(path) &&
+                configured.GetProperty("localHash").GetString() == Convert.ToHexStringLower(SHA256.HashData(bytes)),
+                "the unique settings owner records the selected path and exact source digest");
         }
     }
 
@@ -245,13 +312,14 @@ public static class FilmSettingsUiTests
         scene.Window.Left = 80; scene.Window.Top = 60;
         scene.Window.Width = 1100; scene.Window.Height = 430;
         await scene.Select("cats");
-        var grid = scene.Element<DataGrid>("CatsGrid");
+        var grid = scene.Element<ManagementList>("CatsList");
         var scroll = Visuals(grid).OfType<ScrollViewer>().First();
         var row = scene.View.CatRows.Last();
         string id = row.Source.InstallationId;
         var popup = scene.Element<Popup>("ActionPopup");
-        int edits = scene.Runtime.Calls.Count(call => call.Method == "cat.script.edit");
+        int edits = scene.Store.Writes;
         int writes = scene.Store.Writes;
+        int configurationWrites = scene.Store.WritesFor("film.cat-sources.v1");
         await OpenEdit();
         scene.Box("CatNameBox").Text = "保留的猫源草稿";
         scene.Box("CatUrlBox").Text = "https://fixture.invalid/retained.js";
@@ -264,17 +332,15 @@ public static class FilmSettingsUiTests
         scene.Window.UpdateLayout(); await Drain();
         Check(scroll.VerticalOffset < offset, "height growth actually coerces the bottom table offset");
         AssertDraft();
-        Check(scene.Runtime.Calls.Count(call => call.Method == "cat.script.edit") == edits &&
+        Check(scene.Store.Writes == edits &&
             scene.Store.Writes == writes, "resizing does not save the editor");
         await scene.AcceptPopup();
-        var saved = scene.Runtime.Calls.Where(call => call.Method == "cat.script.edit").Skip(edits).ToArray();
-        Check(saved.Length == 1 && saved[0].Parameters.GetProperty("installationId").GetString() == id &&
-            saved[0].Parameters.GetProperty("name").GetString() == "保留的猫源草稿" &&
-            saved[0].Parameters.GetProperty("sourceUrl").GetString() == "https://fixture.invalid/retained.js" &&
-            scene.Sources.Cats.Single(cat => cat.InstallationId == id).Name == "保留的猫源草稿",
-            "the retained action saves exactly once to the original installation");
-        Check(!popup.IsOpen, "saving closes the retained editor");
-        edits++;
+        Check(scene.Store.WritesFor("film.cat-sources.v1") == configurationWrites + 1 && scene.Sources.Cats.Single(cat => cat.InstallationId == id) is
+            { Name: "保留的猫源草稿", SourceUrl: "https://fixture.invalid/retained.js" },
+            "the retained action saves exactly once to the original native installation");
+        Check(!popup.IsOpen && !scene.Runtime.Calls.Any(call => call.Method == "cat.script.edit"),
+            "saving closes the editor without a settings RPC");
+        edits = scene.Store.Writes;
         writes = scene.Store.Writes;
         await OpenEdit();
         scene.Box("CatNameBox").Text = "切页放弃";
@@ -283,14 +349,14 @@ public static class FilmSettingsUiTests
 
         var restore = Button(scene.View, "恢复列表净化默认规则");
         string original = scene.Editor("EpisodeCleanEditor").Rows[0].Pattern;
-        int restores = scene.RulesRuntime.Requests.Count(request => request.Method == "film.rules.restore");
+        int restores = scene.RulesRuntime.Notifications;
         Click(restore); await Drain();
         scene.Window.Width = 1050; scene.Window.Height = 650;
         scene.Window.UpdateLayout(); await Drain();
         AssertCentered();
         Click(scene.Element<Button>("PopupCancel")); await Drain();
         Check(!popup.IsOpen && scene.Editor("EpisodeCleanEditor").Rows[0].Pattern == original &&
-            scene.RulesRuntime.Requests.Count(request => request.Method == "film.rules.restore") == restores &&
+            scene.RulesRuntime.Notifications == restores &&
             scene.Store.Writes == writes, "resized restore confirmation can be cancelled without changing rules or writing");
 
         await scene.Select("cats");
@@ -303,7 +369,7 @@ public static class FilmSettingsUiTests
         await OpenEdit();
         scene.Box("CatNameBox").Text = "卸载放弃";
         scene.Window.Content = null; await Drain();
-        Check(!popup.IsOpen && scene.Runtime.Calls.Count(call => call.Method == "cat.script.edit") == edits &&
+        Check(!popup.IsOpen && scene.Store.Writes == edits &&
             scene.Store.Writes == writes &&
             scene.Sources.Cats.Single(cat => cat.InstallationId == id).Name == "保留的猫源草稿",
             "category changes hiding and unloading do not save abandoned drafts");
@@ -336,17 +402,17 @@ public static class FilmSettingsUiTests
     {
         await using var scene = await Scene.Create();
         await scene.Select("cats");
-        var grid = scene.Element<DataGrid>("CatsGrid");
-        Check(grid.Columns.Skip(1).Select(column => column.Header?.ToString()).SequenceEqual(
-            ["启用", "名称", "类型", "状态", "修改时间", "更新状态", "操作"]), "cat columns follow the agreed order");
+        var grid = scene.Element<ManagementList>("CatsList");
+        Check(Headers(grid).SequenceEqual(["名称", "类型", "状态", "启用", "修改时间", "更新状态", "操作"]),
+            "cat headers share the public list columns");
         var first = scene.View.CatRows[0];
         Click(await Cell<Button>(grid, first, 7, button => Equals(button.Content, "编辑"))); await Drain();
         scene.Box("CatNameBox").Text = "已改名的猫源";
         scene.Box("CatUrlBox").Text = "https://fixture.invalid/revised.js";
         await scene.AcceptPopup();
         Check(scene.Sources.Cats[0].Name == "已改名的猫源" &&
-            scene.Runtime.Calls.Any(call => call.Method == "cat.script.edit"), "edit persists via the management owner");
-        var toggle = await Cell<CheckBox>(grid, first, 1);
+            scene.Sources.Cats[0].SourceUrl == "https://fixture.invalid/revised.js", "edit persists via the native management owner");
+        var toggle = await Cell<CheckBox>(grid, first, 4);
         toggle.SetCurrentValue(ToggleButton.IsCheckedProperty, false); Click(toggle); await Until(() => !scene.View.SourcesBusy);
         Check(!first.Enabled && !first.CanRestart &&
             !(await Cell<Button>(grid, first, 7, button => Equals(button.Content, "重启"))).IsEnabled,
@@ -355,14 +421,15 @@ public static class FilmSettingsUiTests
         Check(scene.View.VideoRows.Where(row => row.Source.Key.InstallationId == first.Source.InstallationId).All(row => !row.CanDetect),
             "disabled cats also make their video detection unavailable");
         await scene.Select("cats");
-        toggle = await Cell<CheckBox>(grid, first, 1);
+        toggle = await Cell<CheckBox>(grid, first, 4);
         toggle.SetCurrentValue(ToggleButton.IsCheckedProperty, true); Click(toggle); await Until(() => !scene.View.SourcesBusy);
         Click(await Cell<Button>(grid, first, 7, button => Equals(button.Content, "重启"))); await Until(() => !scene.View.SourcesBusy);
         Check(scene.Runtime.Calls.Count(call => call.Method == "cat.script.restart") == 1, "restart targets one installation");
         Click(await Cell<Button>(grid, first, 7, button => Equals(button.Content, "更新"))); await Until(() => !scene.View.SourcesBusy);
         Check(scene.Runtime.Calls.Count(call => call.Method == "cat.script.update") == 1 && first.Source.UpdateState == "updated",
             "network update uses the installed URL through the owner");
-        first.Selected = true;
+        var selected = await Cell<CheckBox>(grid, first, 0);
+        selected.IsChecked = true; Click(selected);
         Click(Button(scene.View, "删除选中猫源")); await Drain();
         Check(scene.Sources.Cats.Count == 2, "opening confirmation does not delete");
         Capture(scene.Element<Border>("PopupSurface"), "film-settings-delete-confirmation.png");
@@ -375,66 +442,162 @@ public static class FilmSettingsUiTests
     {
         await using var scene = await Scene.Create();
         await scene.Select("videos");
-        var grid = scene.Element<DataGrid>("VideosGrid");
+        var grid = scene.Element<ManagementList>("VideosList");
+        Check(Headers(grid).SequenceEqual(["站源名称", "检测状态", "启用", "首页显示", "搜索启用", "操作"]),
+            "video headers omit routing, errors, aggregation and sorting columns");
         var first = scene.View.VideoRows[0];
-        foreach (int column in new[] { 4, 5, 6 })
+        foreach (int column in new[] { 3, 4, 5 })
         {
             var box = await Cell<CheckBox>(grid, first, column);
             box.SetCurrentValue(ToggleButton.IsCheckedProperty, false); Click(box);
             await Until(() => !scene.View.SourcesBusy);
         }
-        var radio = await Cell<RadioButton>(grid, first, 7);
-        radio.SetCurrentValue(ToggleButton.IsCheckedProperty, true); Click(radio); await Until(() => !scene.View.SourcesBusy);
+        await SetAggregate(first);
         var second = scene.View.VideoRows[1];
-        radio = await Cell<RadioButton>(grid, second, 7);
-        radio.SetCurrentValue(ToggleButton.IsCheckedProperty, true); Click(radio); await Until(() => !scene.View.SourcesBusy);
+        await SetAggregate(second);
         Check(scene.Sources.Videos.Count(video => video.Options.AggregateImages) == 1 &&
             scene.Sources.Videos.Single(video => video.Options.AggregateImages).Key == second.Source.Key,
-            "aggregate images uses owner-wide single selection");
-        var order = await Cell<TextBox>(grid, second, 8);
-        order.Text = "0"; order.GetBindingExpression(TextBox.TextProperty)!.UpdateSource();
-        RaiseKey(order, Key.Enter); await Until(() => !scene.View.SourcesBusy);
+            "aggregate menu retains owner-wide single selection");
+        Check(Texts(await RowView(grid, second)).Contains("聚合") && !Texts(await RowView(grid, first)).Contains("聚合"),
+            "the green aggregate badge follows the saved unique selection");
+        grid.ReportOrder(JsonSerializer.Serialize(second.Source.Key), JsonSerializer.Serialize(first.Source.Key), after: false);
+        await Until(() => !scene.View.SourcesBusy);
         await using var reopened = new FilmSourceService(scene.Runtime, scene.Store);
         await reopened.InitializeAsync();
         var saved = reopened.Videos.Single(video => video.Key == first.Source.Key);
         Check(saved.Options is { Enabled: false, HomeVisible: false, SearchEnabled: false, AggregateImages: false } &&
             reopened.Videos[0].Key == second.Source.Key && reopened.Videos[0].Options.AggregateImages,
             "all four settings and ordering reload through a new service");
+        async Task SetAggregate(FilmSettingsVideoRow row)
+        {
+            var more = await Cell<Button>(grid, row, 6, button => Equals(button.Content, "···"));
+            Click(more); await Drain();
+            Check(more.ContextMenu!.IsOpen, "row more opens the real menu");
+            ((MenuItem)more.ContextMenu.Items[0]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            more.ContextMenu.IsOpen = false;
+            await Until(() => !scene.View.SourcesBusy);
+        }
     }
 
     private static async Task VideoActions()
     {
         await using var scene = await Scene.Create();
         await scene.Select("videos");
-        var grid = scene.Element<DataGrid>("VideosGrid");
+        var grid = scene.Element<ManagementList>("VideosList");
         var first = scene.View.VideoRows[0];
         var original = first.Source.Options;
-        Click(await Cell<Button>(grid, first, 10, button => Equals(button.Content, "检测")));
+        Click(await Cell<Button>(grid, first, 6, button => Equals(button.Content, "检测")));
         await Until(() => !scene.View.SourcesBusy);
         Check(scene.Runtime.Calls.Where(call => call.Method == "cat.script.invoke").Select(call => call.Parameters.GetProperty("operation").GetString())
             .SequenceEqual(["home", "category", "detail", "play", "search"]), "detection calls the real owner probe through its runtime port");
         Check(first.Source.Detection?.Result == "valid" && first.Source.Options == original,
             "detection updates its result without changing options");
-        Click(await Cell<Button>(grid, first, 10, button => Equals(button.Content, "删除"))); await scene.AcceptPopup();
+        Click(await Cell<Button>(grid, first, 6, button => Equals(button.Content, "删除"))); await scene.AcceptPopup();
         Check(scene.Sources.Videos.All(video => video.Key != first.Source.Key), "video deletion reaches persistent mapping owner");
         await scene.Select("cats");
-        Click(Button(scene.View, "网络导入")); await Drain();
-        var target = scene.Element<ComboBox>("ImportTarget");
-        target.SelectedIndex = 1;
+        int count = scene.Sources.Cats.Count;
+        Click(Button(scene.View, "添加网络猫源")); await Drain();
+        Check(scene.View.FindName("ImportTarget") is null && scene.Element<StackPanel>("CatTypeField").Visibility == Visibility.Collapsed,
+            "add-only dialog has no existing installation or type-edit target");
+        scene.Box("CatNameBox").Text = "新增猫源";
+        scene.Box("CatUrlBox").Text = "https://fixture.invalid/new.js";
         await scene.AcceptPopup();
-        Check(scene.Runtime.Calls.Last(call => call.Method == "cat.script.import").Parameters.GetProperty("installationId").GetString() ==
-            first.Source.Key.InstallationId, "explicit reimport preserves the selected installation identity");
-        Check(scene.Sources.Videos.Any(video => video.Key == first.Source.Key), "successful explicit reimport restores its deleted video");
+        Check(scene.Sources.Cats.Count == count + 1 && scene.Sources.Cats.Last().InstallationId != first.Source.Key.InstallationId &&
+            scene.Sources.Videos.All(video => video.Key != first.Source.Key),
+            "adding creates a new identity without restoring a deleted video from an existing installation");
+    }
+
+    private static async Task CatTypeDraft()
+    {
+        await using var scene = await Scene.Create();
+        await scene.Select("cats");
+        int count = scene.Sources.Cats.Count, writes = scene.Store.Writes;
+        var toolbar = (StackPanel)scene.Element<Grid>("CatsPage").Children[0];
+        Check(toolbar.Children.OfType<Button>().Select(button => button.Content?.ToString())
+            .SequenceEqual(["添加本地文件", "添加网络源", "删除所选"]) &&
+            toolbar.Children.OfType<TextBlock>().Single().Text == "猫源管理",
+            "cat title and exact action order share the public compact row");
+        Check(toolbar.Children.OfType<Button>().Last().Style == scene.View.FindResource("MeowFilm.ManagementDeleteSelected"),
+            "the top delete action uses the shared outline style, not the filled row delete pill");
+        Click(Button(scene.View, "添加本地文件")); await Drain();
+        Check(scene.Element<StackPanel>("CatFileField").Visibility == Visibility.Visible &&
+            scene.Element<StackPanel>("CatUrlField").Visibility == Visibility.Collapsed,
+            "local add opens the same editor with a file control instead of an address");
+        Click(scene.Element<Button>("PopupAccept")); await Drain();
+        Check(scene.Element<Popup>("ActionPopup").IsOpen && scene.Store.Writes == writes,
+            "an incomplete local draft cannot save");
+        Click(scene.Element<Button>("PopupCancel")); await Drain();
+        var row = scene.View.CatRows.First();
+        Click(await Cell<Button>(scene.Element<ManagementList>("CatsList"), row, 7, button => Equals(button.Content, "编辑")));
+        await Drain();
+        var type = scene.Element<ComboBox>("CatTypeBox");
+        type.SelectedValue = "local"; await Drain();
+        Check(scene.Element<StackPanel>("CatTypeField").IsVisible &&
+            scene.Element<StackPanel>("CatFileField").IsVisible && !scene.Element<StackPanel>("CatUrlField").IsVisible &&
+            row.Source.SourceType == "network" && scene.Store.Writes == writes,
+            "switching the edit type changes only draft controls");
+        Click(scene.Element<Button>("PopupCancel")); await Drain();
+        Check(scene.Sources.Cats.Count == count && row.Source.SourceType == "network" && scene.Store.Writes == writes,
+            "cancelled type changes and additions preserve all native installations");
+        string path = TestWorkspace.DataPath("cat-type-draft-" + Guid.NewGuid().ToString("N") + ".js");
+        try
+        {
+            await File.WriteAllTextAsync(path, "const fixture = 'local';");
+            Click(await Cell<Button>(scene.Element<ManagementList>("CatsList"), row, 7, button => Equals(button.Content, "编辑")));
+            type.SelectedValue = "local";
+            scene.View.SelectCatFile(path);
+            await scene.AcceptPopup();
+            Check(row.Source is { SourceType: "local", SourceUrl: null }, "saving commits the selected local type and file");
+            Click(await Cell<Button>(scene.Element<ManagementList>("CatsList"), row, 7, button => Equals(button.Content, "编辑")));
+            type.SelectedValue = "network";
+            scene.Box("CatUrlBox").Text = "https://fixture.invalid/type-replacement.js";
+            await scene.AcceptPopup();
+            await using var reopened = new FilmSourceService(scene.Runtime, scene.Store);
+            await reopened.InitializeAsync();
+            Check(reopened.Cats.Single(cat => cat.InstallationId == row.Source.InstallationId) is
+                { SourceType: "network", SourceUrl: "https://fixture.invalid/type-replacement.js" },
+                "saved type and address reload from the unique native owner without an update action");
+        }
+        finally { File.Delete(path); }
+    }
+
+    private static async Task DetectionDiagnostics()
+    {
+        await using var scene = await Scene.Create();
+        await scene.Select("videos");
+        var row = scene.View.VideoRows.First();
+        var status = await Cell<ManagementStatus>(scene.Element<ManagementList>("VideosList"), row, 2);
+        Click(status); await Drain();
+        Check(!scene.Element<Popup>("ActionPopup").IsOpen, "a state with no diagnostics does not open an empty dialog");
+        row.Update(row.Source with { Detection = new("valid", 1730000000000, true,
+            [new("category", "failed", "fixture partial category diagnostic"), new("play", "valid")]) }, true);
+        await Drain();
+        Check(Equals(status.Content, "通过") && status.Focusable && status.Tone == ManagementStatusTone.Success,
+            "overall success retains a focusable partial-diagnostic state");
+        int calls = scene.Runtime.Calls.Count;
+        Click(status); await Drain();
+        Check(scene.Element<Popup>("ActionPopup").IsOpen && scene.Element<TextBlock>("PopupMessage").Text.Contains("category", StringComparison.Ordinal) &&
+            scene.Element<TextBlock>("PopupMessage").Text.Contains("fixture partial category diagnostic", StringComparison.Ordinal) &&
+            scene.Runtime.Calls.Count == calls, "status reads the published diagnostic into the shared dialog without RPC");
+        await scene.AcceptPopup();
+        row.SetDetecting(true); await Drain();
+        Check(Equals(status.Content, "检测中") && !status.Focusable && !row.HasDiagnostics && row.Diagnostics.Length == 0,
+            "an active probe neither shows nor exposes an old error");
+        Click(status); await Drain();
+        Check(!scene.Element<Popup>("ActionPopup").IsOpen && scene.Runtime.Calls.Count == calls,
+            "the in-progress state cannot open stale diagnostics");
+        row.SetDetecting(false); await Drain();
+        Check(row.HasDiagnostics, "hiding diagnostics during a probe never erases the previous snapshot");
     }
 
     private static async Task SourceFailure()
     {
         await using var scene = await Scene.Create();
         await scene.Select("videos");
-        var grid = scene.Element<DataGrid>("VideosGrid");
+        var grid = scene.Element<ManagementList>("VideosList");
         var row = scene.View.VideoRows[0];
         scene.Store.FailWrite = true;
-        var box = await Cell<CheckBox>(grid, row, 5);
+        var box = await Cell<CheckBox>(grid, row, 4);
         box.SetCurrentValue(ToggleButton.IsCheckedProperty, false); Click(box);
         await Until(() => !scene.View.SourcesBusy);
         Check(row.HomeVisible && box.IsChecked == true && scene.View.SourcesFailed,
@@ -490,25 +653,35 @@ public static class FilmSettingsUiTests
                 }
                 else
                 {
-                    var grid = scene.Element<DataGrid>(page == "cats" ? "CatsGrid" : "VideosGrid");
-                    Check(grid.Parent is Border card && card.Style == scene.View.FindResource("Settings.ListSurface") &&
-                        card.CornerRadius == new CornerRadius(10) && grid.BorderThickness == new Thickness(0),
-                        "source lists reuse the shared rounded card rather than a second square frame");
+                    var grid = scene.Element<ManagementList>(page == "cats" ? "CatsList" : "VideosList");
+                    Check(!grid.ShowToolbar && !grid.ShowBulkActions && !Visuals(grid).OfType<DataGrid>().Any(),
+                        "source pages use the common card without unrequested search or bulk footer");
                     var scroll = Visuals(grid).OfType<ScrollViewer>().First();
-                    // DataGrid's virtualizing panel reports ViewportHeight in rows,
-                    // not DIP. Measure the actual viewport against the 56-DIP row.
                     var viewport = Visuals(scroll).OfType<ScrollContentPresenter>().First();
-                    Check(viewport.ActualHeight > grid.RowHeight && scroll.ScrollableHeight > 0,
-                        "source tables retain rows and vertical scrolling");
-                    if (size.Width == 620) Check(scroll.ScrollableWidth > 0, "minimum window keeps all table columns via internal horizontal scrolling");
+                    Check(viewport.ActualHeight > 64 && scroll.ScrollableHeight > 0 && scroll.ScrollableWidth == 0,
+                        "virtualized source rows retain vertical scrolling without horizontal overflow");
+                    Check(grid.MaxWidth == 1400, "the management list maximum width is bounded");
+                    var header = Visuals(grid).OfType<Grid>().First(value => value.Children.OfType<TextBlock>()
+                        .Any(text => text.Text is "名称" or "站源名称"));
+                    foreach (var row in Visuals(grid).OfType<ManagementRowView>())
+                    {
+                        Check(row.ColumnDefinitions.Sum(column => column.ActualWidth) <= row.ActualWidth + 1,
+                            "all fixed cells fit beside the flexible name column");
+                        for (int i = 1; i < row.ColumnDefinitions.Count; i++)
+                        {
+                            double headX = header.TranslatePoint(new(header.ColumnDefinitions.Take(i).Sum(column => column.ActualWidth), 0), grid).X;
+                            double rowX = row.TranslatePoint(new(row.ColumnDefinitions.Take(i).Sum(column => column.ActualWidth), 0), grid).X;
+                            Check(Math.Abs(headX - rowX) <= 1.1, "fixed header and row cells stay aligned through scrolling and recycling");
+                        }
+                    }
                 }
                 Capture(scene.View, $"film-settings-{page}-{size.Width}.png");
             }
         }
         var nav = scene.Element<StackPanel>("SettingsNavigation").Children.OfType<RadioButton>().ToArray();
-        nav[2].Focus(); RaiseKey(nav[2], Key.Home); await Drain();
+        nav[2].Focus(); Check(scene.View.NavigateSection(nav[2], Key.Home), "Home section action is handled"); await Drain();
         Check(nav[0].IsChecked == true && nav[0].IsKeyboardFocused, "Home navigates internal tabs and keeps real focus");
-        RaiseKey(nav[0], Key.Right); await Drain();
+        Check(scene.View.NavigateSection(nav[0], Key.Right), "arrow section action is handled"); await Drain();
         Check(nav[1].IsChecked == true && nav[1].IsKeyboardFocused, "arrow navigation works");
         DesktopTheme.SetIsHighContrast(scene.View, true); scene.View.UpdateLayout();
         Check(scene.View.Background is SolidColorBrush brush && brush.Color == SystemColors.WindowColor, "high contrast uses system ground");
@@ -550,16 +723,16 @@ public static class FilmSettingsUiTests
         scene.Element<CheckBox>("MetadataIncludeAdult").IsChecked = true;
         Click(Visuals(scene.View).OfType<Button>().Single(button => Equals(button.Tag, "tmdb")));
         await Until(() => !scene.View.MetadataBusy);
-        var saved = data.Calls.Last(call => call.Method == "tmdb.data.settings.update").Input;
+        var saved = scene.Store.Read("film.tmdb.v1").GetProperty("settings");
         Check(saved.GetProperty("apiKey").GetString() == "synthetic-v3-key" && saved.GetProperty("accessToken").GetString() == "" &&
             saved.GetProperty("language").GetString() == "en-US" && saved.GetProperty("region").GetString() == "US" &&
-            saved.GetProperty("includeAdult").GetBoolean(), "single token replaces prior auth and all query options reach the runtime");
+            saved.GetProperty("includeAdult").GetBoolean(), "single token replaces prior auth and all query options persist natively");
         Check(scene.Box("MetadataApiToken").Text == "synthetic-v3-key", "successful save stays editable without a configured placeholder");
         await Drain();
-        int notices = scene.Notices.Count, writes = data.Calls.Count(call => call.Method.EndsWith(".update", StringComparison.Ordinal));
+        int notices = scene.Notices.Count, writes = scene.Store.Writes;
         scene.View.Visibility = Visibility.Collapsed; await Drain();
         scene.View.Visibility = Visibility.Visible; await Until(() => scene.View.CanEditMetadata);
-        Check(scene.Notices.Count == notices && data.Calls.Count(call => call.Method.EndsWith(".update", StringComparison.Ordinal)) == writes,
+        Check(scene.Notices.Count == notices && scene.Store.Writes == writes,
             "returning from another module does not replay a save notice or repeat the save");
         scene.Element<ComboBox>("DoubanDataProxy").SelectedValue = "custom";
         scene.Element<ComboBox>("DoubanImageProxy").SelectedValue = "cdn-tx";
@@ -567,7 +740,7 @@ public static class FilmSettingsUiTests
         scene.Box("DoubanCookie").Text = "";
         Click(Visuals(scene.View).OfType<Button>().Single(button => Equals(button.Tag, "douban")));
         await Until(() => !scene.View.MetadataBusy);
-        saved = data.Calls.Last(call => call.Method == "douban.data.settings.update").Input;
+        saved = scene.Store.Read("film.douban.v1").GetProperty("settings");
         Check(saved.GetProperty("apiProxy").GetString() == "https://fixture.invalid/nested/" &&
             saved.GetProperty("searchBase").GetString() == "https://search.douban.com" &&
             saved.GetProperty("imageBase").GetString() == "https://img.doubanio.cmliussss.net" &&
@@ -575,10 +748,10 @@ public static class FilmSettingsUiTests
         data.FailWrite = true;
         scene.Box("MetadataApiToken").Text = "unsaved";
         Click(Visuals(scene.View).OfType<Button>().Single(button => Equals(button.Tag, "tmdb")));
-        await Until(() => !scene.View.MetadataBusy);
+        await Until(() => !scene.View.MetadataBusy && scene.Notices.Contains("数据源设置操作失败"));
         Check(scene.Box("MetadataApiToken").Text == "unsaved" &&
-            data.Tmdb["apiKey"]?.ToString() == "synthetic-v3-key" && scene.Notices.Contains("数据源设置操作失败"),
-            "a failed save keeps the draft and the prior runtime receipt");
+            scene.Store.Read("film.tmdb.v1").GetProperty("settings").GetProperty("apiKey").GetString() == "synthetic-v3-key" && scene.Notices.Contains("数据源设置操作失败"),
+            "a failed save keeps the draft and the prior native settings");
         foreach (var width in new[] { 1248, 620 })
         {
             scene.Window.Width = width; await Drain(); scene.View.UpdateLayout();
@@ -597,7 +770,7 @@ public static class FilmSettingsUiTests
         HeadingSave(playback, "站点净化设置", "保存站点净化");
         ((TextBox)playback.FindName("CleanKeywords")).Text = " 广告,，直播, ";
         Click(Button(playback, "保存站点净化")); await Until(() => playback.Idle);
-        Check(FilmPreferences.Read(scene.Data!.Preferences).SiteCleanKeywords.SequenceEqual(["广告", "直播"]),
+        Check(FilmPreferences.Read(scene.Store.Read("film.preferences.v1").GetProperty("preferences")).SiteCleanKeywords.SequenceEqual(["广告", "直播"]),
             "the single line preserves order and ignores only empty comma-separated entries");
         await scene.Select("preferences"); await Until(() => playback.Idle && playback.ManualGroups.Count == 1);
         var navigation = scene.Element<StackPanel>("BusinessNavigation").Children.OfType<RadioButton>().ToArray();
@@ -759,7 +932,7 @@ public static class FilmSettingsUiTests
             Check(!drain.IsCompleted && !((WrapPanel)cache.FindName("Actions")).IsEnabled &&
                 !data.InvalidationToken.IsCancellationRequested, "the second admitted invalidation drains even after the first failed");
             gate.SetResult(); await drain; await Drain();
-            Check(scene.Notices.Contains("缓存清理失败") && data.Tmdb["apiKey"]?.ToString() == "synthetic-key" &&
+            Check(scene.Notices.Contains("缓存清理失败") && scene.Store.Read("film.tmdb.v1").GetProperty("settings").GetProperty("apiKey").GetString() == "synthetic-key" &&
                 FilmPreferences.Read(data.Preferences).SiteCleanKeywords.SequenceEqual(["直播", "预告"]),
                 "partial failure is not success and does not clear settings or preferences");
         }
@@ -780,15 +953,15 @@ public static class FilmSettingsUiTests
         internal readonly FilmMetadataService? Metadata;
         private Scene(int cats, bool dataSettings)
         {
-            Runtime = new(cats);
-            Rules = new(RulesRuntime); Sources = new(Runtime, Store);
+            Runtime = new(cats, Store);
+            Rules = new(RulesRuntime, Store); Sources = new(Runtime, Store);
             if (dataSettings)
             {
-                Data = new(); Metadata = new(Data);
-                View = new(Rules, Sources, new FilmPlaybackSettings(Data), () => null, Metadata);
+                Data = new(Store); Metadata = new(Data, Store);
+                View = new(Rules, Sources, Store, new FilmPlaybackSettings(Data, Store), () => null, Metadata);
             }
             else View = new(Rules, Sources);
-            Window = new() { Content = View, Width = 1248, Height = 820, Left = -10000, Top = -10000,
+            Window = new() { Content = View, Width = 1248, Height = 820, Left = 80, Top = 60,
                 WindowStyle = WindowStyle.None, ShowActivated = false, ShowInTaskbar = false };
             Window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, args) =>
             {
@@ -800,6 +973,26 @@ public static class FilmSettingsUiTests
             var scene = new Scene(cats, dataSettings);
             try
             {
+                scene.Store.Seed("film.rules.v1", new { version = 1, rules = new FilmRuleSet
+                {
+                    EpisodeCleanRegexRules = ["clean"], EpisodeRules = [new("episode", "E$1", "i")],
+                    MovieRules = [new("movie", "", "i")], AggregateRegexRules = ["search"]
+                } });
+                if (scene.Data is { } data)
+                {
+                    scene.Store.Seed("film.tmdb.v1", new { version = 1, settings = data.Tmdb });
+                    scene.Store.Seed("film.douban.v1", new { version = 1, settings = data.Douban });
+                    scene.Store.Seed("film.preferences.v1", new { version = 1, preferences = data.Preferences });
+                }
+                scene.Store.Seed("film.cat-sources.v1", new
+                {
+                    version = 1, port = 0, providers = new { }, mappings = Array.Empty<object>(),
+                    scripts = scene.Runtime.Cats.Select(cat => new
+                    {
+                        cat.InstallationId, cat.Name, cat.SourceType, cat.SourceUrl, cat.Enabled,
+                        localPath = (string?)null, localHash = cat.SourceType == "local" ? new string('0', 64) : null, inputRevision = 1
+                    }).ToArray()
+                });
                 await scene.Sources.RefreshAsync();
                 scene.Window.Show();
                 await Until(() => scene.View.RulesLoaded && !scene.View.RulesBusy);
@@ -825,6 +1018,7 @@ public static class FilmSettingsUiTests
             Check(Element<Popup>("ActionPopup").IsOpen, "confirmation or edit popup is open");
             Click(Element<Button>("PopupAccept"));
             await Until(() => !View.RulesBusy && !View.SourcesBusy);
+            await Until(() => Sources.Cats.All(cat => cat.State != "starting"));
             View.UpdateLayout(); await Drain();
         }
         public async ValueTask DisposeAsync()
@@ -837,7 +1031,7 @@ public static class FilmSettingsUiTests
         }
     }
 
-    private sealed class DataSettingsRuntime : IRuntimeClient
+    private sealed class DataSettingsRuntime(MemoryStore store) : IRuntimeClient, IRuntimeSettingsNotifications
     {
         internal readonly List<(string Method, JsonElement Input)> Calls = [];
         internal Dictionary<string, object?> Tmdb = new()
@@ -846,7 +1040,7 @@ public static class FilmSettingsUiTests
             ["apiKey"] = "synthetic-key", ["accessToken"] = "synthetic.v4.token",
             ["language"] = "zh-CN", ["region"] = "CN", ["includeAdult"] = false
         };
-        private Dictionary<string, object?> douban = new()
+        internal Dictionary<string, object?> Douban = new()
         {
             ["apiBase"] = "https://m.douban.com", ["searchBase"] = "https://search.douban.com",
             ["imageBase"] = "https://img3.doubanio.com", ["apiProxy"] = "", ["imageProxy"] = "", ["cookie"] = "synthetic_cookie=initial"
@@ -857,7 +1051,9 @@ public static class FilmSettingsUiTests
             manual = new[] { new { id = "manual", targetId = "tmdb:tv:7", title = "管理样例", sourceKey = "source", detailId = 0, enabled = true } },
             blocks = new[] { new { targetId = "tmdb:tv:7", sourceKey = "source", detailId = 0, lineId = 0 } }
         });
-        internal bool FailWrite;
+        internal bool FailWrite { get => store.FailWrite; set => store.FailWrite = value; }
+        internal readonly List<string> Notifications = [];
+        public void SettingsChanged(string block) => Notifications.Add(block);
         internal string? FailDomain;
         internal Task? HeldInvalidation;
         internal CancellationToken InvalidationToken;
@@ -872,39 +1068,23 @@ public static class FilmSettingsUiTests
                 if (HeldInvalidation is not null) await HeldInvalidation;
                 return FilmRuntimeProbe.Ok(FilmJson.Encode(new { }));
             }
-            if (method == "film.settings.get") return FilmRuntimeProbe.Ok(Preferences);
-            if (method == "film.settings.set") { Preferences = input.Clone(); return FilmRuntimeProbe.Ok(Preferences); }
             if (method == "film.library.get") return FilmRuntimeProbe.Ok(Library);
-            bool tmdb = method.StartsWith("tmdb.", StringComparison.Ordinal);
-            var values = tmdb ? Tmdb : douban;
-            Check(method.EndsWith(".settings.get", StringComparison.Ordinal) || method.EndsWith(".settings.update", StringComparison.Ordinal),
-                "settings must not fetch data or restart a runtime");
-            if (method.EndsWith(".update", StringComparison.Ordinal))
-            {
-                if (FailWrite) return FilmRuntimeProbe.Failure("STORAGE_ERROR");
-                foreach (var item in input.EnumerateObject()) values[item.Name] = item.Value.Clone();
-            }
-            return FilmRuntimeProbe.Ok(FilmJson.Encode(values));
+            throw new InvalidOperationException("Ordinary settings must use the native store: " + method);
         }
         public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
             ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("Settings do not upload scripts.");
     }
 
-    // Wire receipts test UI/service wiring. Actual rule semantics belong to the shared runtime suite.
-    private sealed class RecordingRules : IRuntimeClient
+    // Only previews use runtime receipts; configuration uses the scene's native document store.
+    private sealed class RecordingRules : IRuntimeClient, IRuntimeSettingsNotifications
     {
         internal readonly List<(string Method, JsonElement Input)> Requests = [];
         internal TaskCompletionSource? HoldProcess;
         internal bool ProcessEntered, ProcessCancelled, FailProcess;
-        internal int Writes;
-        internal FilmMatchRule? Normalize = new("added", "$1", "gi");
+        internal int Notifications;
+        public void SettingsChanged(string block) { Check(block == "film.rules", "only the changed settings block is notified"); Notifications++; }
         internal FilmRuleResult Result = new() { Section = FilmRuleSection.Episode, Type = "success", Text = "命中第 1 条" };
-        private FilmRuleSet saved = new()
-        {
-            EpisodeCleanRegexRules = ["clean"], EpisodeRules = [new("episode", "E$1", "i")],
-            MovieRules = [new("movie", "", "i")], AggregateRegexRules = ["search"]
-        };
         public async Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
             var value = FilmJson.Encode(parameters ?? new { }); Requests.Add((method, value));
@@ -917,21 +1097,7 @@ public static class FilmSettingsUiTests
                 if (FailProcess) throw new InvalidOperationException("fixture rule service failure");
                 reply = JsonSerializer.SerializeToElement(Result, FilmRuleService.Json);
             }
-            else if (method == "film.rules.normalize")
-                reply = value.GetProperty("kind").GetString() == "match"
-                    ? JsonSerializer.SerializeToElement(Normalize, FilmRuleService.Json) : FilmJson.Encode("added-clean");
-            else
-            {
-                if (method == "film.rules.set") { saved = value.GetProperty("rules").Deserialize<FilmRuleSet>(Json)!; Writes++; }
-                else if (method == "film.rules.restore")
-                {
-                    saved = value.GetProperty("rules").Deserialize<FilmRuleSet>(Json)! with
-                    { EpisodeCleanRegexRules = ["restored-clean"], EpisodeRules = [new("restored-episode", "E$1", "i")] };
-                    Writes++;
-                }
-                else if (method != "film.rules.get") throw new InvalidOperationException(method);
-                reply = FilmRuleConsumerRuntime.Snapshot(saved, "acknowledged-" + Writes);
-            }
+            else throw new InvalidOperationException("Ordinary rule settings must use the native store: " + method);
             return FilmSearchConsumerRuntime.Success(reply);
         }
         public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
@@ -941,37 +1107,96 @@ public static class FilmSettingsUiTests
 
     private sealed class MemoryStore : IDocumentStore
     {
+        private readonly object gate = new();
         private readonly Dictionary<string, byte[]> documents = [];
+        private readonly Dictionary<string, int> writesByNamespace = [];
+        internal int WritesFor(string name) { lock (gate) return writesByNamespace.GetValueOrDefault(name); }
         internal int Writes;
         internal bool FailWrite;
+        internal void Seed(string name, object value) { lock (gate) documents[name] = JsonSerializer.SerializeToUtf8Bytes(value, Json); }
+        internal JsonElement Read(string name)
+        {
+            lock (gate)
+            {
+                using var document = JsonDocument.Parse(documents[name]);
+                return document.RootElement.Clone();
+            }
+        }
         public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            byte[]? bytes = documents.TryGetValue(documentNamespace, out var stored) ? stored.ToArray() : null;
-            return Task.FromResult(new DocumentSnapshot(bytes, bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
+            lock (gate)
+            {
+                byte[]? bytes = documents.TryGetValue(documentNamespace, out var stored) ? stored.ToArray() : null;
+                return Task.FromResult(new DocumentSnapshot(bytes, bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
+            }
         }
-        public async Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
+        public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
             DocumentFingerprint expected, CancellationToken cancellationToken = default)
         {
-            if (FailWrite) throw new DocumentStoreException(DocumentStoreError.Storage);
-            var before = await ReadAsync(documentNamespace, cancellationToken);
-            if (before.Fingerprint != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-            documents[documentNamespace] = data.ToArray(); Writes++;
-            return DocumentFingerprint.FromBytes(data.Span);
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (gate)
+            {
+                if (FailWrite) throw new DocumentStoreException(DocumentStoreError.Storage);
+                var before = documents.TryGetValue(documentNamespace, out var bytes) ? DocumentFingerprint.FromBytes(bytes) : DocumentFingerprint.Missing;
+                if (before != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
+                documents[documentNamespace] = data.ToArray(); Writes++;
+                writesByNamespace[documentNamespace] = WritesFor(documentNamespace) + 1;
+                return Task.FromResult(DocumentFingerprint.FromBytes(data.Span));
+            }
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
-    private sealed class RecordingRuntime : IRuntimeClient
+    private sealed class RecordingRuntime : IRuntimeSession, IRuntimeSettingsNotifications, IRuntimeConnectionSource
     {
         internal readonly List<(string Method, JsonElement Parameters)> Calls = [];
         private readonly List<FilmCatSource> cats;
-        internal RecordingRuntime(int count) => cats = Enumerable.Range(0, count).Select(index => new FilmCatSource(
+        private readonly MemoryStore store;
+        internal IReadOnlyList<FilmCatSource> Cats => cats;
+        internal readonly List<string> Notifications = [];
+        internal RecordingRuntime(int count, MemoryStore store)
+        {
+            this.store = store;
+            cats = Enumerable.Range(0, count).Select(index => new FilmCatSource(
             $"cat-{index}", $"测试猫源 {index + 1}", index % 2 == 0 ? "network" : "local",
             index % 2 == 0 ? $"https://fixture.invalid/{index}.js" : null, true, 1730000000000, null,
             "idle", null, 1, "ready", "fixture-hash", null,
             [new("site", $"测试视频源 {index + 1}", $"/fixture/{index}",
-                ["home", "category", "detail", "play", "search"], new Dictionary<string, string>())])).ToList();
+                ["home", "category", "detail", "play", "search"], new Dictionary<string, string>())]) { InputRevision = 1 }).ToList();
+        }
+        public bool IsConnected => true;
+        public Task<RuntimeConnection> CaptureConnectionAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(new RuntimeConnection(this, new Uri("http://127.0.0.1:1/"), CancellationToken.None));
+        public Task<JsonElement> CallAsync(string method, object? parameters, TimeSpan timeout, CancellationToken cancellationToken = default) =>
+            CallAsync(method, parameters, cancellationToken);
+        public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Source settings do not read images.");
+        public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Source settings do not read images.");
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public void SettingsChanged(string block)
+        {
+            Check(block == "cat.sources", "source edits notify only their settings block");
+            Notifications.Add(block);
+            var configured = store.Read("film.cat-sources.v1").GetProperty("scripts");
+            var updated = new List<FilmCatSource>();
+            foreach (var script in configured.EnumerateArray())
+            {
+                string id = script.GetProperty("installationId").GetString()!;
+                var existing = cats.FirstOrDefault(cat => cat.InstallationId == id);
+                bool enabled = script.GetProperty("enabled").GetBoolean();
+                updated.Add((existing ?? new(id, "", "", null, enabled, null, null, "idle", null, 0, "stopped", null, null, [])) with
+                {
+                    Name = script.GetProperty("name").GetString()!, SourceType = script.GetProperty("sourceType").GetString()!,
+                    SourceUrl = script.GetProperty("sourceUrl").GetString(), Enabled = enabled,
+                    InputRevision = script.GetProperty("inputRevision").GetInt64(),
+                    Generation = existing?.Generation ?? 0,
+                    State = enabled && existing is not null ? "ready" : enabled ? "stopped" : "disabled"
+                });
+            }
+            cats.Clear(); cats.AddRange(updated);
+        }
         public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
             ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("The film settings fixture does not upload local sources.");
@@ -979,6 +1204,11 @@ public static class FilmSettingsUiTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             var value = JsonSerializer.SerializeToElement(parameters, Json); Calls.Add((method, value));
+            if (method == "runtime.settings.changed")
+            {
+                SettingsChanged(value.GetProperty("block").GetString()!);
+                return Reply(new { });
+            }
             string operation = method["cat.script.".Length..];
             if (operation == "status") return Reply(new { instances = cats });
             if (operation == "invoke")
@@ -1014,6 +1244,12 @@ public static class FilmSettingsUiTests
         }, Json));
     }
 
+    private static FilmRuleSet DefaultRules()
+    {
+        using var stream = typeof(FilmRuleService).Assembly.GetManifestResourceStream("MeowFilm.FilmRuleDefaults.json")!;
+        using var json = JsonDocument.Parse(stream);
+        return json.RootElement.GetProperty("restore").Deserialize<FilmRuleSet>(FilmRuleService.Json)!;
+    }
     private static Button Button(DependencyObject root, string name) => Visuals(root).OfType<Button>().First(button =>
         AutomationProperties.GetName(button) == name || Equals(button.Content, name));
     private static void Click(ButtonBase button) => button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
@@ -1024,18 +1260,21 @@ public static class FilmSettingsUiTests
         for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
             foreach (var child in Visuals(VisualTreeHelper.GetChild(root, i))) yield return child;
     }
-    private static async Task<T> Cell<T>(DataGrid grid, object row, int column, Func<T, bool>? predicate = null) where T : FrameworkElement
+    private static IEnumerable<string> Headers(ManagementList list) => Visuals(list).OfType<Grid>()
+        .First(grid => grid.Children.OfType<TextBlock>().Any(text => text.Text is "名称" or "站源名称"))
+        .Children.OfType<TextBlock>().Select(text => text.Text);
+    private static async Task<ManagementRowView> RowView(ManagementList management, FilmSettingsSourceRow row)
     {
-        grid.ScrollIntoView(row, grid.Columns[column]); grid.UpdateLayout(); await Drain();
-        var content = grid.Columns[column].GetCellContent(row) ?? throw new InvalidOperationException("Unrealized table cell");
-        return Visuals(content).OfType<T>().First(value => predicate?.Invoke(value) ?? true);
+        var list = Visuals(management).OfType<ListBox>().Single();
+        string name = row switch { FilmSettingsCatRow cat => cat.Name, FilmSettingsVideoRow video => video.Name, _ => throw new InvalidOperationException() };
+        var item = list.Items.Cast<ManagementRowState>().Single(state => state.Row.Title == name);
+        list.ScrollIntoView(item); list.UpdateLayout(); await Drain();
+        return Visuals((ListBoxItem)list.ItemContainerGenerator.ContainerFromItem(item)).OfType<ManagementRowView>().Single();
     }
-    private static void RaiseKey(UIElement element, Key key)
+    private static async Task<T> Cell<T>(ManagementList list, FilmSettingsSourceRow row, int column, Func<T, bool>? predicate = null) where T : FrameworkElement
     {
-        var args = new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(element)!, 0, key)
-            { RoutedEvent = Keyboard.PreviewKeyDownEvent };
-        element.RaiseEvent(args);
-        Check(args.Handled, "native keyboard action handled");
+        var content = (await RowView(list, row)).Children.OfType<FrameworkElement>().Single(cell => Grid.GetColumn(cell) == column);
+        return Visuals(content).OfType<T>().First(value => predicate?.Invoke(value) ?? true);
     }
     private static async Task Drain()
     {

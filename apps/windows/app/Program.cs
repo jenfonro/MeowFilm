@@ -48,9 +48,9 @@ internal static class Program
                 });
                 capabilities.Add(new MusicCapability(runtime, storage, musicPlayback,
                     Path.Combine(cacheRoot, "music-audio"), cacheStore));
-                pendingRules = new FilmRuleService(runtime);
+                pendingRules = new FilmRuleService(runtime, storage);
                 pendingSources = new FilmSourceService(runtime, storage);
-                pendingMetadata = new FilmMetadataService(runtime);
+                pendingMetadata = new FilmMetadataService(runtime, storage);
                 var capture = runtime as IRuntimeConnectionSource ?? throw new InvalidOperationException("RUNTIME_CAPTURE_UNAVAILABLE");
                 capabilities.Add(new FilmCapability(pendingRules, pendingSources, runtime, storage, filmPlayback,
                     capture.CaptureConnectionAsync, pendingMetadata));

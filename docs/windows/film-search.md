@@ -18,7 +18,7 @@
 - Node 唯一执行规则、识别、相关度、分页、聚合与排序，持有来源原始响应和规则快照。客户端只显示选定数组并转发动作，不再直接发搜索内容请求、执行 JS、排序或从卡片生成缓存 seed。
 - Capabilities 无规则／搜索 JS 内嵌资源；Platform 不再构建或复制独立规则 DLL。实际执行由运行器载荷的公共 script-host addon 提供，缺失运行器或方法时显示真实错误，无原生回退。
 - 正式 entry、manifest 与原生 describe 精确装配 `music,cat,source,pan,tmdb,douban,film,netease,music-platform` 九模块。通用默认三模块不变；加入豆瓣模块不扩展搜索范围。运行器装配与依赖分别见[平台接入](app-runtime.md)、[打包](runtime-packaging.md)。
-- TMDB 设置与图片仍走既有 `FilmMetadataService`、`IRuntimeImageClient` 和 `ArtworkService`。配置、内容缓存、完整度与同 key producer 合并归 [Node 数据 owner](../runtime/film-playback.md)；原生图片缓存与解码预算不等于搜索结果条数限制。
+- TMDB 设置由既有 `FilmMetadataService` 直接读写[原生唯一文档](native-settings.md)，图片仍走 `IRuntimeImageClient` 和 `ArtworkService`。有效配置消费、内容缓存、完整度与同 key producer 合并归 [Node 数据 owner](../runtime/film-playback.md)；原生图片缓存与解码预算不等于搜索结果条数限制。
 
 ## 搜索生命周期
 
@@ -65,7 +65,7 @@ Shell 继续保存原模块位置、公共输入草稿和实际可达的历史�
 
 | Group | 覆盖 |
 | --- | --- |
-| `FilmRulesTests` | 六个规则接口、完整草稿、保存失败、opaque revision、UInt16 与关闭排空；业务替身 |
+| `FilmRulesTests` | 原生规则读写、完整草稿、保存失败、opaque revision 与关闭排空；执行预览使用业务替身 |
 | `FilmSearchTests` | 完整投影与 typed ID、精确顺序／状态、停止／恢复／断线、迟到 SSE/open、来源与 source wire；业务替身 |
 | `FilmSearchPlaybackTests` | 原样 handoff、原始单源、迟到 reference、初次与重进、实际 producer、来源交集及取消；业务替身 |
 | `SearchResultsConsumerTests` | 真实 Shell/WPF 分类、目标、返回复用、三类导航、迟到更新、封面投影、UInt16 展示与导航先后 |
@@ -73,7 +73,7 @@ Shell 继续保存原模块位置、公共输入草稿和实际可达的历史�
 | `FilmSearchIdentityTests` | 前插／删除／移动、字段级通知、状态不重映射、真实身份转换、后台映射与撤权、命令／SSE 前驱竞态及准确激活 |
 | `FilmSearchViewportTests` | 完整数据的视口回收、远距离滚动与 footer、响应式尺寸及行锚点、集合变更、两模式位置和图片租约释放 |
 | `FilmSettingsUiTests` | 规则草稿／编辑／恢复／失败／取消及受影响设置装配；规则业务替身 |
-| `SettingsNavigationTests` | 公共设置导航、App 装配及 Node 不可用时的真实规则错误 |
+| `SettingsNavigationTests` | 公共设置导航、App 装配及 Node 不可用时的普通设置保存／预览错误边界 |
 | `FilmMetadataConsumerTests` | 配置保存成功／失败隔离、迟到结果、关闭写回执及实际内容 producer |
 | `FilmRulesRuntimeTests` | 实际 Node/addon 的规则预览、保存／空组重启、恢复／清除、Unicode／flags／UInt16 |
 | `FilmSearchRuntimeTests` | 实际 Node 搜索/SSE/Cat Worker、完整页与 typed 成员、选定封面、more/stop/resume/handoff；真实 TMDB HTTP／完整资料／图片和失败回退消费者 |

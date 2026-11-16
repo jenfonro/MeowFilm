@@ -56,7 +56,7 @@ await runtime.start();
 
 `createTMDBDataModule`／`createDoubanDataModule` 可接收 `nativeSettings`，读取 `tmdb`／`douban` 块的同形文档。此时唯一持久值由原生 owner 保存，不再读取或写入上述 Node 设置文件；HTTP `settings.update` 返回 `PERMISSION_DENIED`，`settings.get` 仍返回当前快照。缺失使用默认值，损坏明确失败，不回退旧文件。
 
-App 冷启动先读配置，活跃块通知由装配层重读并调用模块 `settingsChanged()`，撤销旧配置在途请求及相关 film 缓存／会话资格。通知不携带凭据、不等待业务应用才结算本地保存。唯一事实来源与通知规则见[共同契约](../common/settings-storage.md)，iOS 的加密文档及生命周期见[存储](../ios/storage.md#影视设置)与[运行底座](../ios/runtime-preflight.md#原生设置私密通道)。未注入的公共入口继续保持上述独立模式。
+App 冷启动先读配置，活跃块通知由装配层重读并调用模块 `settingsChanged()`，撤销旧配置在途请求及相关 film 缓存／会话资格。通知不携带凭据、不等待业务应用才结算本地保存。唯一事实来源与通知规则见[共同契约](../common/settings-storage.md)，iOS 的加密文档及生命周期见[存储](../ios/storage.md#影视设置)与[运行底座](../ios/runtime-preflight.md#原生设置私密通道)，Windows 的保护、迁移与私密能力见[原生设置](../windows/native-settings.md)。未注入的公共入口继续保持上述独立模式。
 
 ### TMDB
 

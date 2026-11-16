@@ -9,22 +9,7 @@
  <UserControl.Resources>
   <ResourceDictionary>
    <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/MeowFilm.Capabilities;component/Settings/SettingsTheme.xaml"/></ResourceDictionary.MergedDictionaries>
-   <Style x:Key="Settings.Anchor" TargetType="RadioButton">
-    <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Body}"/><Setter Property="Margin" Value="0,0,32,0"/>
-    <Setter Property="Height" Value="44"/><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
-    <Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
-    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RadioButton">
-     <Border x:Name="Underline" BorderBrush="Transparent" BorderThickness="0,0,0,2" Padding="0,0,0,2">
-      <ContentPresenter VerticalAlignment="Center" TextElement.Foreground="{TemplateBinding Foreground}" RecognizesAccessKey="True"/>
-     </Border>
-     <ControlTemplate.Triggers>
-      <Trigger Property="IsChecked" Value="True"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/><Setter TargetName="Underline" Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/></Trigger>
-      <Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/></Trigger>
-      <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger>
-      <MultiTrigger><MultiTrigger.Conditions><Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsChecked" Value="True"/></MultiTrigger.Conditions><Setter TargetName="Underline" Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/></MultiTrigger>
-     </ControlTemplate.Triggers>
-    </ControlTemplate></Setter.Value></Setter>
-   </Style>
+   <Style x:Key="Settings.Anchor" TargetType="RadioButton" BasedOn="{StaticResource MeowFilm.SettingsArea}"/>
    <DataTemplate x:Key="Quality.Name">
     <TextBlock Foreground="{Binding (TextElement.Foreground),RelativeSource={RelativeSource AncestorType=ContentPresenter}}">
      <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}">
@@ -49,9 +34,9 @@
    <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></Trigger></Style.Triggers>
   </Style>
  </UserControl.Style>
- <Grid x:Name="MusicContent" Margin="32,0,32,12">
-  <Grid.RowDefinitions><RowDefinition Height="44"/><RowDefinition/></Grid.RowDefinitions>
-  <Border BorderThickness="0,0,0,1" BorderBrush="{DynamicResource MeowFilm.Brush.Border}">
+ <Grid x:Name="MusicContent" Style="{StaticResource MeowFilm.SettingsPage}">
+  <Grid.RowDefinitions><RowDefinition Style="{StaticResource MeowFilm.SettingsNavigationRow}"/><RowDefinition/></Grid.RowDefinitions>
+  <Border Style="{StaticResource MeowFilm.SettingsNavigationBar}">
    <ScrollViewer VerticalScrollBarVisibility="Disabled" HorizontalScrollBarVisibility="Hidden">
     <StackPanel x:Name="SettingsNavigation" Orientation="Horizontal" AutomationProperties.Name="设置分类">
      <RadioButton Content="账号与平台" Tag="AccountsSection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" IsChecked="True" Checked="Section_Checked" Click="Section_Checked" PreviewKeyDown="Anchor_KeyDown"/>

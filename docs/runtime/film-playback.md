@@ -19,7 +19,8 @@ fsync 与 rename 原子替换文档路径；文件链接的其他目录项保留
 注入 `nativeSettings` 后，规则与偏好只读 `film.rules`／`film.preferences` 原生块，
 不读写旧规则文件或把偏好写回 Node 资料库；资料库仍保存历史、人工匹配、屏蔽及点映选择。
 普通原生保存与按块通知见[共同契约](../common/settings-storage.md)，iOS 旧配置采用及保护
-见[存储](../ios/storage.md#已知-node-设置的单向迁移)。HTTP `settings.set` 及规则写入
+见[存储](../ios/storage.md#已知-node-设置的单向迁移)，Windows 接线见[原生设置](../windows/native-settings.md)。
+HTTP `settings.set` 及规则写入
 在注入模式返回 `PERMISSION_DENIED`，不形成第二个配置写 owner。
 
 双端 aggregate entry 显式装配九个模块（顺序见[音乐平台运行器](music-platform.md)）；通用 `createRuntime` 未显式启用
@@ -90,6 +91,7 @@ Windows 只使用内置原生输出，不提供外部播放器入口或子进程
 组预览的 `request.section` 须与组一致（`episodeClean` 对应 `episode`）；关联的另一剧集组
 只取 Node 已保存配置，客户端其他组草稿不参与。分组保存仅归一化本组，其他组原样保留；
 写入失败不发布新快照。未注入模式的 `rules.set`／`rules.restore` 保留整份提交语义。
+Windows 页面整份草稿由原生服务提交，不调用这两个运行器写入方法。
 保存仅投影当前定义的规则字段；预览和识别直接消费实际使用的规则组，不在调用前或
 每次复用不可变快照时重新校验整棵规则树。未使用的组、查询及普通扩展不阻断本次计算；
 实际正则错误、文本表示边界、取消和预算仍按执行结果处理。
@@ -97,7 +99,7 @@ iOS 页面新增、编辑、删除和恢复默认只修改本组草稿，唯一�
 保存一旦交给稳定草稿 owner，其 Task 会等待实际落盘回执并更新本组草稿；离页或取消页面
 等待者不取消该写入，也不丢弃归一化结果。页内测试随页面隐藏或失活取消，旧结果不再发布；
 服务保留取消任务直到调用结束，Node 原生程序先停止并排空实际计算再结束取消。
-`revision` 包含共享 QuickJS-NG 0.18.0／Unicode 身份与实际规则内容。搜索和播放持不可变快照，
+Node 执行快照的 `revision` 包含共享 QuickJS-NG 0.18.0／Unicode 身份与实际规则内容，不等同于原生文档 CAS 指纹或页面保存 revision。搜索和播放持不可变快照，
 保存新规则不改变旧任务、不清原始数据缓存，也不打断媒体。设置预览与播放识别使用独立于第三方
 脚本的 Runtime/Context；纯计算可中断并排空，失败后下次调用重建同一内核，不回退到 Node vm。
 

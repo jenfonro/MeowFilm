@@ -7,6 +7,8 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
+using MeowFilm.Core.Runtime;
+using MeowFilm.Platform.Storage;
 using MeowFilm.Desktop;
 using static MeowFilm.Windows.Tests.FilmPlaybackFixture;
 
@@ -19,6 +21,171 @@ public static class FilmPlaybackSettingsTests
     private static TaskCompletionSource Gate() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Test("native preferences read save and reopen offline while manual business still fails", async () =>
+        {
+            var runtime = new FilmRuleConsumerRuntime { Respond = (_, _, _) => throw new BridgeException("CLOSED") };
+            await using var store = new FilmNativeSettingsFixture();
+            var service = new FilmPlaybackSettings(runtime, store);
+            var original = await service.ReadPreferencesAsync(default);
+            var next = original with { Keywords = ["offline"] };
+            await service.SavePreferencesAsync(next, "keywords");
+            Check(runtime.Calls.Count == 0 && runtime.Notifications.SequenceEqual(["film.preferences"]) &&
+                store.Value("film.preferences.v1").GetProperty("version").GetInt32() == 1,
+                "ordinary preferences use the native version-one document and only a block notification");
+            var reopened = new FilmPlaybackSettings(runtime, store);
+            Check((await reopened.ReadPreferencesAsync(default)).Keywords.SequenceEqual(["offline"]), "new consumer reads the same native owner while offline");
+            foreach (var error in new[] { DocumentStoreError.Storage, DocumentStoreError.Conflict })
+            {
+                store.WriteError = error;
+                await PreferenceStoreError(error, () => service.SavePreferencesAsync(next with { Keywords = ["not-committed"] }, "keywords"));
+                Check((await service.ReadPreferencesAsync(default)).Keywords.SequenceEqual(["offline"]) && runtime.Notifications.Count == 1,
+                    "failed native CAS cannot notify or replace the committed value");
+            }
+            store.WriteError = null;
+            using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+            try { await service.ReadPreferencesAsync(cancelled.Token); throw new Exception("Cancelled read succeeded"); }
+            catch (OperationCanceledException) { }
+            await BridgeTests.Expect("CLOSED", () => service.SaveManualAsync(FilmJson.Encode(new { id = "offline" })));
+            Check(runtime.Calls.Single().Method == "film.manual.update", "manual remains a real runtime business operation without native fallback");
+            store.SeedBytes("film.preferences.v1", [123]);
+            await PreferenceStoreError(DocumentStoreError.Corrupt, () => service.ReadPreferencesAsync(default));
+            await PreferenceStoreError(DocumentStoreError.Corrupt, () => service.SavePreferencesAsync(next));
+            Check(runtime.Notifications.Count == 1, "corrupt native preferences are not replaced by defaults");
+        });
+        yield return Test("native validation rejects edited preferences offline before any write or notification", async () =>
+        {
+            var runtime = new FilmRuleConsumerRuntime { Respond = (_, _, _) => throw new BridgeException("CLOSED") };
+            await using var store = new FilmNativeSettingsFixture();
+            store.Seed("film.preferences.v1", FilmJson.Encode(new { version = 1, preferences = FilmPreferences.Defaults }));
+            var service = new FilmPlaybackSettings(runtime, store);
+            var original = await service.ReadPreferencesAsync(default);
+            var document = store.Value("film.preferences.v1");
+            foreach (var (field, draft) in new (string, FilmPreferences)[]
+            {
+                ("ruleOrder", original with { RuleOrder = ["quality", "pan"] }),
+                ("ruleOrder", original with { RuleOrder = ["quality", "pan", "pan"] }),
+                ("ruleOrder", original with { RuleOrder = ["quality", "pan", "future"] }),
+                ("ruleOrder", original with { RuleOrder = ["Quality", "pan", "keyword"] }),
+                ("panOrder", original with { PanOrder = ["115"] }),
+                ("panOrder", original with { PanOrder = ["139"] }),
+                ("panOrder", original with { PanOrder = ["quark", " quark "] }),
+                ("keywords", original with { RuleOrder = ["keyword", "pan", "quality"], Keywords = ["DDP", " ddp "] }),
+                ("keywords", original with { Keywords = [""] }),
+                ("keywords", original with { Keywords = [null!] }),
+                ("keywords", original with { Keywords = null! }),
+                ("siteCleanKeywords", original with { SiteCleanKeywords = ["Live", " live "] }),
+                ("siteCleanKeywords", original with { SiteCleanKeywords = ["\ufeff\u00a0"] })
+            })
+            {
+                foreach (string? editedField in new string?[] { field, null })
+                {
+                    await InvalidPreferences(() => service.SavePreferencesAsync(draft, editedField));
+                    Check(store.Writes == 0 && runtime.Notifications.Count == 0 && runtime.Calls.Count == 0 &&
+                        document.GetRawText() == store.Value("film.preferences.v1").GetRawText(),
+                        "an invalid explicit or inferred edit fails before native admission without touching the offline runtime");
+                }
+            }
+            await using var empty = new FilmNativeSettingsFixture();
+            var first = new FilmPlaybackSettings(runtime, empty);
+            await InvalidPreferences(() => first.SavePreferencesAsync(FilmPreferences.Defaults with { Keywords = ["DDP", "ddp"] }));
+            Check((await empty.ReadAsync("film.preferences.v1")).Data is null && empty.Writes == 0 &&
+                runtime.Notifications.Count == 0 && runtime.Calls.Count == 0, "an invalid first full save cannot create a document");
+        });
+        yield return Test("native preference receipts and reopen return trimmed values and complete partial pan orders", async () =>
+        {
+            var runtime = new FilmRuleConsumerRuntime { Respond = (_, _, _) => throw new BridgeException("CLOSED") };
+            await using var store = new FilmNativeSettingsFixture();
+            var service = new FilmPlaybackSettings(runtime, store);
+            var draft = new FilmPreferences([" keyword ", "\tpan", "quality\u00a0"], [" baidu ", "\ufeffquark"],
+                ["\ufeffDDP\u00a0", " H.265 ", "\u0085keep\u0085"], ["\u3000直播\ufeff"], false);
+            var saved = await service.SavePreferencesAsync(draft);
+            Check(saved.RuleOrder.SequenceEqual(["keyword", "pan", "quality"]) &&
+                saved.PanOrder.SequenceEqual(["baidu", "quark", "yidong", "tianyi", "uc"]) &&
+                saved.Keywords.SequenceEqual(["DDP", "H.265", "\u0085keep\u0085"]) &&
+                saved.SiteCleanKeywords.SequenceEqual(["直播"]) && !saved.IosAutoPrepare,
+                "first typed input uses JS whitespace, preserves non-whitespace NEL and keyword casing, and appends missing providers");
+            Check(draft.PanOrder.SequenceEqual([" baidu ", "\ufeffquark"]) && draft.Keywords[0] == "\ufeffDDP\u00a0",
+                "normalizing a save does not mutate its caller's arrays");
+            var reopened = await new FilmPlaybackSettings(runtime, store).ReadPreferencesAsync(default);
+            Check(JsonElement.DeepEquals(FilmJson.Encode(saved), FilmJson.Encode(reopened)) &&
+                JsonElement.DeepEquals(store.Value("film.preferences.v1").GetProperty("preferences"), FilmJson.Encode(saved)) &&
+                store.Writes == 1 && runtime.Notifications.SequenceEqual(["film.preferences"]) && runtime.Calls.Count == 0,
+                "the canonical response, stored native value and reopened owner agree without a runtime call");
+            saved = await service.SavePreferencesAsync(saved with { PanOrder = [] }, "panOrder");
+            Check(saved.PanOrder.SequenceEqual(FilmPreferences.Defaults.PanOrder), "an empty edited pan order expands to every provider");
+            saved = await service.SavePreferencesAsync(saved with { Keywords = [] }, "keywords");
+            saved = await service.SavePreferencesAsync(saved with { SiteCleanKeywords = [] }, "siteCleanKeywords");
+            Check(saved.Keywords.Length == 0 && saved.SiteCleanKeywords.Length == 0 && !saved.IosAutoPrepare &&
+                saved.RuleOrder.SequenceEqual(["keyword", "pan", "quality"]) && store.Writes == 4 &&
+                runtime.Notifications.SequenceEqual(Enumerable.Repeat("film.preferences", 4)) && runtime.Calls.Count == 0,
+                "explicit empty keyword groups stay empty and leave other groups and the typed switch alone");
+        });
+        yield return Test("explicit and inferred preference edits preserve untouched raw shapes and missing fields", async () =>
+        {
+            var runtime = new FilmRuleConsumerRuntime { Respond = (_, _, _) => throw new BridgeException("CLOSED") };
+            await using var store = new FilmNativeSettingsFixture();
+            var service = new FilmPlaybackSettings(runtime, store);
+            var raw = JsonSerializer.Deserialize<JsonElement>("""
+                {"ruleOrder":["future-rule","quality","future-rule"],"panOrder":{"future":["pan"]},"keywords":["visible",7],
+                 "siteCleanKeywords":[false,{"nested":true}],"iosAutoPrepare":{"future":1},"extra":{"nested":[7]}}
+                """);
+            store.Seed("film.preferences.v1", FilmJson.Encode(new { version = 1, preferences = raw }));
+            var original = await service.ReadPreferencesAsync(default);
+            await service.SavePreferencesAsync(original);
+            Check(store.Writes == 0 && JsonElement.DeepEquals(raw, store.Value("film.preferences.v1").GetProperty("preferences")),
+                "an unchanged projection does not validate, normalize or rewrite legacy branches");
+            int writes = 0;
+            foreach (string? field in new string?[] { "keywords", null })
+            {
+                store.Seed("film.preferences.v1", FilmJson.Encode(new { version = 1, preferences = raw }));
+                original = await service.ReadPreferencesAsync(default);
+                var draft = original with { Keywords = ["\ufeff visible \u00a0"] };
+                if (field is not null) draft = draft with { RuleOrder = ["future"], PanOrder = ["115"], SiteCleanKeywords = ["x", "X"] };
+                var saved = await service.SavePreferencesAsync(draft, field);
+                var value = store.Value("film.preferences.v1").GetProperty("preferences");
+                foreach (string untouched in new[] { "ruleOrder", "panOrder", "siteCleanKeywords", "iosAutoPrepare", "extra" })
+                    Check(JsonElement.DeepEquals(raw.GetProperty(untouched), value.GetProperty(untouched)),
+                        "only the selected or actually changed field is replaced: " + untouched);
+                Check(saved.Keywords.SequenceEqual(["visible"]) && value.GetProperty("keywords").GetArrayLength() == 1 &&
+                    store.Writes == ++writes, "a real edit replaces the raw branch even when trimming restores its old projected value");
+            }
+            original = await service.ReadPreferencesAsync(default);
+            var changed = await service.SavePreferencesAsync(original with
+                { PanOrder = [" baidu "], SiteCleanKeywords = [], IosAutoPrepare = true });
+            var committed = store.Value("film.preferences.v1").GetProperty("preferences");
+            Check(changed.PanOrder.SequenceEqual(["baidu", "yidong", "tianyi", "quark", "uc"]) &&
+                changed.SiteCleanKeywords.Length == 0 && changed.IosAutoPrepare &&
+                JsonElement.DeepEquals(raw.GetProperty("ruleOrder"), committed.GetProperty("ruleOrder")) &&
+                JsonElement.DeepEquals(raw.GetProperty("extra"), committed.GetProperty("extra")),
+                "multiple inferred edits normalize only their changed branches and retain future order values");
+            store.Seed("film.preferences.v1", FilmJson.Encode(new { version = 1, preferences = new { keywords = new[] { "visible" }, extra = 7 } }));
+            original = await service.ReadPreferencesAsync(default);
+            await service.SavePreferencesAsync(original with { Keywords = [" next "] });
+            committed = store.Value("film.preferences.v1").GetProperty("preferences");
+            Check(committed.EnumerateObject().Count() == 2 && committed.GetProperty("keywords")[0].GetString() == "next" &&
+                committed.GetProperty("extra").GetInt32() == 7 && runtime.Calls.Count == 0,
+                "an inferred keyword edit never materializes unedited missing fields");
+        });
+        yield return Test("duplicate keyword drafts fail before storage and a corrected draft can still save", async () =>
+        {
+            await using var scene = await Scene.Create();
+            scene.Runtime.Intercept = (_, _, _) => throw new BridgeException("CLOSED");
+            int writes = scene.Writes, calls = scene.Runtime.Calls.Count;
+            var original = scene.Preferences;
+            scene.Element<TextBox>("Keywords").Text = "DDP, ddp";
+            Click(scene.Button("保存关键字匹配规则"));
+            await Until(() => scene.View.Idle && scene.Notices.Contains("保存失败"));
+            Check(scene.Writes == writes && scene.Runtime.Calls.Count == calls &&
+                JsonElement.DeepEquals(scene.Preferences, original) && !scene.Notices.Contains("设置已保存") &&
+                scene.Element<TextBox>("Keywords").Text == "DDP, ddp",
+                "the UI keeps the rejected draft and reports failure without committing it or contacting the offline runtime");
+            scene.Element<TextBox>("Keywords").Text = "\ufeffDDP\u00a0, H.265";
+            Click(scene.Button("保存关键字匹配规则"));
+            await Until(() => scene.View.Idle && scene.Notices.Contains("设置已保存"));
+            Check(scene.Writes == writes + 1 && scene.Runtime.Calls.Count == calls &&
+                FilmPreferences.Read(scene.Preferences).Keywords.SequenceEqual(["DDP", "H.265"]) &&
+                scene.Element<TextBox>("Keywords").Text == "DDP,H.265", "a valid retry publishes the canonical native receipt");
+        });
         yield return Test("unrelated preference shapes survive edits and unknown order values remain visible", async () =>
         {
             await using var scene = await Scene.Create();
@@ -101,11 +268,8 @@ public static class FilmPlaybackSettingsTests
         {
             await using var scene = await Scene.Create();
             var entered = Gate(); var finish = Gate(); CancellationToken writeToken = default;
-            scene.Runtime.Intercept = async (method, input, token) =>
-            {
-                if (method == "film.settings.set") { writeToken = token; entered.TrySetResult(); await finish.Task; }
-                return scene.Response(method, input);
-            };
+            scene.Store.Writing = async (_, token) =>
+            { writeToken = token; entered.TrySetResult(); await finish.Task; };
             try
             {
                 scene.Element<TextBox>("Keywords").Text = " first,，second, ";
@@ -222,11 +386,8 @@ public static class FilmPlaybackSettingsTests
             var list = (ListBox)priority.FindName("PriorityItems");
             var moved = list.Items[0];
             var entered = Gate(); var finish = Gate(); CancellationToken writeToken = default;
-            scene.Runtime.Intercept = async (method, input, token) =>
-            {
-                if (method == "film.settings.set") { writeToken = token; entered.TrySetResult(); await finish.Task; }
-                return scene.Response(method, input);
-            };
+            scene.Store.Writing = async (_, token) =>
+            { writeToken = token; entered.TrySetResult(); await finish.Task; };
             try
             {
                 scene.Window.Focus(); var handle = Grip(list, 0); handle.Focus();
@@ -238,11 +399,8 @@ public static class FilmPlaybackSettingsTests
                 Check(ReferenceEquals(list.Items[1], moved) && ReferenceEquals(Keyboard.FocusedElement, Grip(list, 1)),
                     "the original row regains its handle after the automatic save");
                 var retired = Gate(); var settle = Gate();
-                scene.Runtime.Intercept = async (method, input, token) =>
-                {
-                    if (method == "film.settings.set") { writeToken = token; retired.TrySetResult(); await settle.Task; }
-                    return scene.Response(method, input);
-                };
+                scene.Store.Writing = async (_, token) =>
+                { writeToken = token; retired.TrySetResult(); await settle.Task; };
                 try
                 {
                     int notices = scene.Notices.Count;
@@ -263,18 +421,57 @@ public static class FilmPlaybackSettingsTests
         {
             await using var scene = await Scene.Create();
             await scene.View.ShowAsync("clean");
-            bool fail = true; int writes = scene.Writes;
-            scene.Runtime.Intercept = (method, input, _) => Task.FromResult(method == "film.settings.get" && fail
-                ? FilmRuntimeProbe.Failure("STORAGE_FAILED") : scene.Response(method, input));
+            int writes = scene.Writes;
+            scene.Store.ReadError = DocumentStoreError.Storage;
             await scene.View.ShowAsync("preferences");
             var retry = scene.Button("重新读取智能播放设置");
             await Until(() => scene.View.ReadFailed && retry.IsVisible);
             Check(scene.View.ReadFailed && retry.IsVisible && scene.Notices.Contains("影视设置读取失败"),
                 "failed reads have an explicit visible retry");
-            fail = false; Click(retry);
+            scene.Store.ReadError = null; Click(retry);
             await Until(() => scene.View.Idle && !scene.View.ReadFailed);
             Check(!retry.IsVisible && scene.Writes == writes &&
                 scene.Element<TextBox>("Keywords").Text == "fixture-keyword", "recovery only reads the authoritative settings");
+        });
+        yield return Test("runtime library wait and failure never block native preference editing", async () =>
+        {
+            await using var scene = await Scene.Create();
+            await scene.View.ShowAsync("clean");
+            var entered = Gate(); var finish = Gate();
+            scene.Runtime.Intercept = async (method, input, token) =>
+            {
+                if (method == "film.library.get")
+                {
+                    entered.TrySetResult(); await finish.Task;
+                    throw new BridgeException("CLOSED");
+                }
+                return scene.Response(method, input);
+            };
+            try
+            {
+                var opening = scene.View.ShowAsync("preferences");
+                await entered.Task;
+                Check(scene.View.Idle && !scene.View.CanEditLibrary &&
+                    scene.Element<TextBox>("Keywords").Text == "fixture-keyword",
+                    "local settings publish before the runtime business request completes");
+                scene.Element<TextBox>("Keywords").Text = "offline-saved";
+                Click(scene.Button("保存关键字匹配规则"));
+                await Until(() => scene.View.Idle && FilmPreferences.Read(scene.Preferences).Keywords.SequenceEqual(["offline-saved"]));
+                finish.TrySetResult(); await opening;
+                await Until(() => scene.Notices.Contains("匹配记录读取失败"));
+                Check(!scene.View.ReadFailed && scene.View.LibraryFailed && scene.View.Idle &&
+                    scene.Notices.Contains("匹配记录读取失败") &&
+                    scene.Element<TextBox>("Keywords").Text == "offline-saved",
+                    "runtime failure is isolated from the committed native settings and current editor");
+                scene.Element<TextBox>("Keywords").Text = "unsaved-draft";
+                scene.Runtime.Intercept = (method, input, _) => Task.FromResult(scene.Response(method, input));
+                Click(scene.Button("重新读取智能播放设置"));
+                await Until(() => !scene.View.LibraryFailed && scene.View.CanEditLibrary);
+                Check(scene.Element<TextBox>("Keywords").Text == "unsaved-draft" &&
+                    FilmPreferences.Read(scene.Preferences).Keywords.SequenceEqual(["offline-saved"]),
+                    "retrying runtime records neither saves nor discards an unrelated native draft");
+            }
+            finally { finish.TrySetResult(); }
         });
         yield return Test("clear collections and typed block identities reach the one business owner", async () =>
         {
@@ -338,6 +535,18 @@ public static class FilmPlaybackSettingsTests
         });
     }
 
+    private static async Task InvalidPreferences(Func<Task> operation)
+    {
+        try { await operation(); throw new Exception("Expected invalid native preferences"); }
+        catch (FilmPlaybackException error) { Check(error.Code == "INVALID_PREFERENCES", "the native owner preserves the fixed validation code"); }
+    }
+
+    private static async Task PreferenceStoreError(DocumentStoreError code, Func<Task> operation)
+    {
+        try { await operation(); throw new Exception("Expected native storage failure"); }
+        catch (DocumentStoreException error) { Check(error.Error == code, "native storage code is preserved"); }
+    }
+
     private sealed class Scene : IAsyncDisposable
     {
         internal readonly FilmRuntimeProbe Runtime = new();
@@ -345,10 +554,14 @@ public static class FilmPlaybackSettingsTests
         internal readonly FilmPlaybackSettingsView View;
         internal readonly Window Window;
         internal readonly List<string> Notices = [];
-        internal bool FailWrite;
-        internal int Writes => Runtime.Calls.Count(call => call.Method == "film.settings.set");
-        internal JsonElement Preferences = FilmJson.Encode(new FilmPreferences(["keyword", "pan", "quality"],
-            ["baidu", "uc", "quark", "tianyi", "yidong"], ["fixture-keyword"], ["fixture-clean"], false));
+        internal readonly FilmNativeSettingsFixture Store = new();
+        internal bool FailWrite { set => Store.WriteError = value ? DocumentStoreError.Storage : null; }
+        internal int Writes => Store.Writes;
+        internal JsonElement Preferences
+        {
+            get => Store.Value("film.preferences.v1").GetProperty("preferences");
+            set => Store.Seed("film.preferences.v1", FilmJson.Encode(new { version = 1, preferences = value }));
+        }
         internal JsonElement LibraryValue = FilmJson.Encode(new
         {
             history = new[] { new { title = "当前历史", targetId = "tmdb:tv:100", position = 10d, duration = 600d } },
@@ -357,7 +570,9 @@ public static class FilmPlaybackSettingsTests
         });
         private Scene()
         {
-            Service = new(Runtime); View = new(Service, () => Card().PlaybackContext!.Target);
+            Preferences = FilmJson.Encode(new FilmPreferences(["keyword", "pan", "quality"],
+                ["baidu", "uc", "quark", "tianyi", "yidong"], ["fixture-keyword"], ["fixture-clean"], false));
+            Service = new(Runtime, Store); View = new(Service, () => Card().PlaybackContext!.Target);
             Runtime.Intercept = (method, input, _) => Task.FromResult(Response(method, input));
             Window = new() { Content = View, Width = 1000, Height = 800, Left = -10000, Top = -10000,
                 ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None };
@@ -366,12 +581,6 @@ public static class FilmPlaybackSettingsTests
         }
         internal JsonElement Response(string method, JsonElement input)
         {
-            if (method == "film.settings.get") return FilmRuntimeProbe.Ok(Preferences);
-            if (method == "film.settings.set")
-            {
-                if (FailWrite) return FilmRuntimeProbe.Failure("STORAGE_FAILED");
-                Preferences = input.Clone(); return FilmRuntimeProbe.Ok(Preferences);
-            }
             if (method == "film.library.get") return FilmRuntimeProbe.Ok(LibraryValue);
             return Runtime.Handle(method, input);
         }
@@ -392,7 +601,7 @@ public static class FilmPlaybackSettingsTests
         {
             await View.PrepareShutdownAsync();
             foreach (Window owned in Window.OwnedWindows.Cast<Window>().ToArray()) owned.Close();
-            Window.Content = null; Window.Close(); await Runtime.DisposeAsync();
+            Window.Content = null; Window.Close(); await Runtime.DisposeAsync(); await Store.DisposeAsync();
         }
     }
     private static Thumb Grip(ListBox list, int index)

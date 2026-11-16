@@ -65,7 +65,7 @@ public sealed partial class ShellWindow
     {
         Orientation = Orientation.Horizontal,
         VerticalAlignment = VerticalAlignment.Center,
-        Margin = new(0, 4, 0, 0)
+        Margin = new(0)
     };
     private bool _updatingSettingsTabs;
 

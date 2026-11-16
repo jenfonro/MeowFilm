@@ -41,13 +41,15 @@ public static class PanAccountsPresentationTests
                     Ok(new { refreshed = true, account = runtime.Accounts[id] }));
             };
         });
+        await scene.Model.RefreshAsync(scene.Model.Rows[1]);
+        await Until(() => scene.Notices.Contains("网盘凭据已失效"));
         var header = (Grid)scene.View.FindName("AccountTableHeader");
         Check(header.ColumnDefinitions.Count == 3 &&
             header.Children.OfType<TextBlock>().Select(text => text.Text).SequenceEqual(["平台", "状态", "操作"]),
             "table has exactly platform/status/action columns");
         var cells = Visuals(scene.View).OfType<Grid>().Where(grid => grid.Name == "AccountCells").ToArray();
         Check(cells.Length == 7 && cells.All(grid => grid.ColumnDefinitions.Count == 3), "all seven rows share the three-column contract");
-        Check(VisibleActions(scene.View, scene.Model.Rows[0]).SequenceEqual(["刷新", "退出登录"]), "signed-in row actions bind");
+        Check(VisibleActions(scene.View, scene.Model.Rows[0]).SequenceEqual(["编辑", "退出登录"]), "signed-in row actions bind");
         Check(VisibleActions(scene.View, scene.Model.Rows[1]).SequenceEqual(["重新登录", "退出登录"]), "expired row actions bind");
         Check(VisibleActions(scene.View, scene.Model.Rows[2]).SequenceEqual(["登录"]), "signed-out row action binds");
         Check(Visuals(scene.View).OfType<Image>().Count() == 0, "music icons and account profile are not reused");
@@ -84,19 +86,17 @@ public static class PanAccountsPresentationTests
         var password = fields.Children.OfType<PasswordBox>().Single(box => ((PanCredentialField)box.Tag).Id == "password");
         password.Password = "  synthetic password  ";
         fields.Children.OfType<TextBox>().Single().Text = "synthetic-user";
-        bool exact = false;
-        scene.Runtime.Overrides["pan.settings.set"] = (parameters, _) =>
+        scene.Runtime.WriteOverride = (bytes, expected, _) =>
         {
-            var value = parameters.GetProperty("credentials");
-            exact = value.EnumerateObject().Select(field => field.Name).SequenceEqual(["username", "password"]) &&
-                value.GetProperty("password").GetString() == "  synthetic password  ";
-            scene.Runtime.Account("tianyi", 1, "signedOut", "username", "password");
-            return Task.FromResult(Ok(scene.Runtime.Accounts["tianyi"]));
+            return Task.FromResult(scene.Runtime.Commit(bytes, expected));
         };
         Click((Button)scene.View.FindName("SaveCredentials"));
         await Until(() => !row.IsBusy && !popup.IsOpen);
-        Check(exact && row.Status == "signedIn" && fields.Children.OfType<PasswordBox>().All(box => box.Password.Length == 0),
-            "save replaces exactly supplied values, preserves spaces, verifies, closes and clears draft");
+        var saved = scene.Runtime.Saved.GetProperty("accounts").GetProperty("tianyi").GetProperty("credentials");
+        Check(saved.EnumerateObject().Select(field => field.Name).SequenceEqual(["username", "password"]) &&
+            saved.GetProperty("password").GetString() == "  synthetic password  " && row.Status == "signedIn" &&
+            scene.Runtime.Calls.Count == 0 && fields.Children.OfType<PasswordBox>().All(box => box.Password.Length == 0),
+            "save commits native values, preserves spaces, closes and clears draft without online verification");
         Check(scene.BindingErrors.ToString().Length == 0, "manual controls resolve owner bindings");
     }
     private static async Task Qr()
@@ -140,7 +140,11 @@ public static class PanAccountsPresentationTests
             if (action == 0) scene.View.Visibility = Visibility.Collapsed;
             else if (action == 1) scene.Window.WindowState = WindowState.Minimized;
             else if (action == 2) scene.Window.Content = null;
-            else scene.View.DataContext = new PanAccounts(new PanAccountFixture());
+            else
+            {
+                var replacement = new PanAccountFixture();
+                scene.View.DataContext = new PanAccounts(replacement, replacement);
+            }
             await Until(() => !scene.Model.LoginOpen && scene.Runtime.Cancelled.Count == before + 1);
             Check(!((Popup)scene.View.FindName("LoginPopup")).IsOpen, "surface retirement closes the actual popup");
             if (action == 0) scene.View.Visibility = Visibility.Visible;
@@ -169,10 +173,11 @@ public static class PanAccountsPresentationTests
         Click(Visuals(popup.Child).OfType<Button>().Single(button => Equals(button.Content, "确定")));
         await Until(() => !row.IsBusy && row.Revision == 2);
         Check(row.Status == "signedOut" && !row.Configured &&
-            scene.Runtime.Calls.Count(call => call.Method == "pan.settings.clear") == 1, "confirm binds exactly one revision-advancing clear");
+            scene.Runtime.Writes.Count == 1 && scene.Runtime.Calls.Count == 0, "confirm binds exactly one native revision-advancing clear");
         scene.Runtime.Account("baidu", 3, "expired", "cookie");
         scene.Runtime.Overrides["pan.refresh"] = (_, _) => Task.FromResult(Failure("AUTH_FAILED"));
         await scene.Model.ReloadAsync(); await Drain();
+        await scene.Model.RefreshAsync(row); await Drain();
         Click(Action(scene.View, row, "退出登录")); await Drain();
         scene.Runtime.Account("baidu", 4, "expired", "cookie");
         await scene.Model.ReloadAsync(); await Drain();
@@ -184,7 +189,7 @@ public static class PanAccountsPresentationTests
         await using var store = new QualityFixture.DocumentStore();
         runtime.Overrides["film.rules.get"] = (_, _) => Task.FromResult(FilmRuntimeProbe.Ok(
             JsonSerializer.SerializeToElement(new { rules = new FilmRuleSet(), revision = "fixture-rules" }, Json)));
-        await using var rules = new FilmRuleService(runtime);
+        await using var rules = new FilmRuleService(runtime, store);
         await using var sources = new FilmSourceService(runtime, store);
         var view = new FilmSettingsView(rules, sources);
         var navigation = (StackPanel)view.FindName("SettingsNavigation");
@@ -198,7 +203,7 @@ public static class PanAccountsPresentationTests
             var model = (PanAccounts)pan.DataContext;
             await Until(() => model.Rows.Count == 7 && !model.IsLoading);
             Check(pan.IsVisible && !((Grid)view.FindName("BusinessPage")).IsVisible &&
-                runtime.Calls.Any(call => call.Method == "pan.providers"), "film settings instantiates the pan owner using its existing runtime");
+                runtime.Calls.All(call => !call.Method.StartsWith("pan.")), "film settings reads pan settings without its existing runtime");
             Click(Action(pan, model.Rows[0], "登录"));
             await Until(() => model.QrImage is not null);
             navigation.Children.OfType<RadioButton>().Single(button => Equals(button.Tag, "rules")).IsChecked = true;
@@ -260,7 +265,7 @@ public static class PanAccountsPresentationTests
         private Scene(Action<PanAccountFixture>? configure)
         {
             configure?.Invoke(Runtime);
-            Model = new(Runtime);
+            Model = new(Runtime, Runtime);
             View = new() { DataContext = Model };
             Window = TestWindow(View);
             Window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, args) =>

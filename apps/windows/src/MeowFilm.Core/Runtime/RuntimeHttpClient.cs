@@ -48,6 +48,9 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (method == "runtime.settings.changed")
+            return RequestAsync(HttpMethod.Post, "/v1/settings/changed", BridgeCodec.EncodeJSONValue(parameters ?? new { }),
+                false, RuntimeHttpProtocol.Name, RuntimeHttpProtocol.PublicCodes, cancellationToken, timeout: timeout);
         foreach (var (id, contract) in RuntimeHttpProtocol.Modules)
         {
             if (method is null || !method.StartsWith(contract.Prefix, StringComparison.Ordinal)) continue;

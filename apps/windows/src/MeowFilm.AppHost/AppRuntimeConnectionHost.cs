@@ -8,7 +8,8 @@ namespace MeowFilm.AppHost;
 /// Composition adapter for the existing AppRuntimeClient. Captures the actual
 /// factory result and its owner token, never infers an epoch from Generation.
 /// </summary>
-internal sealed class AppRuntimeConnectionHost : IRuntimeClient, IRuntimeImageClient, IRuntimeRecovery, IRuntimeConnectionSource, IAsyncDisposable
+internal sealed class AppRuntimeConnectionHost : IRuntimeClient, IRuntimeImageClient, IRuntimeRecovery, IRuntimeConnectionSource,
+    IRuntimeSettingsNotifications, IAsyncDisposable
 {
     private sealed class Capture(CancellationToken owner)
     {
@@ -61,6 +62,23 @@ internal sealed class AppRuntimeConnectionHost : IRuntimeClient, IRuntimeImageCl
     public bool CanRetry => runtime.CanRetry;
     public void RegisterRecoveryScope(IRuntimeRecoveryScope scope) => runtime.RegisterRecoveryScope(scope);
     public Task RetryAsync(CancellationToken cancellationToken = default) => runtime.RetryAsync(cancellationToken);
+
+    public void SettingsChanged(string block)
+    {
+        // Only this live/starting epoch is eligible. Saving never waits or recovers it.
+        if (State is not (RuntimeConnectionState.Starting or RuntimeConnectionState.Ready)) return;
+        _ = NotifyAsync();
+        async Task NotifyAsync()
+        {
+            try
+            {
+                var connection = await CaptureConnectionAsync().ConfigureAwait(false);
+                await connection.Client.CallAsync("runtime.settings.changed", new { block },
+                    TimeSpan.FromSeconds(5), connection.Revoked).ConfigureAwait(false);
+            }
+            catch (Exception) { /* Durable native settings are already committed. The next start rereads them. */ }
+        }
+    }
 
     public async Task<RuntimeConnection> CaptureConnectionAsync(CancellationToken cancellationToken = default)
     {

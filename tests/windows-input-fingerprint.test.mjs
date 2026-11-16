@@ -27,7 +27,7 @@ test('Windows input inventory covers shared packaging, locked configuration and 
     'apps/runtime/modules/cat-script.mjs',
     'apps/runtime/modules/source-runtime.mjs', 'apps/runtime/modules/source-library.mjs',
     'apps/runtime/modules/source-web.mjs', 'apps/runtime/modules/source-rules.mjs', 'packages/source-runtime/src/index.js',
-    'apps/windows/NuGet.Config', 'apps/windows/global.json',
+    'apps/windows/NuGet.Config', 'apps/windows/global.json', 'apps/windows/runtime/native-settings.mjs',
     'LICENSES/node-LICENSE.txt',
     'LICENSES/NOTICE.md',
     'LICENSES/Apache-2.0.txt',
@@ -76,7 +76,8 @@ test('Windows fingerprint binds bytes and paths; inventory order and duplicates 
   mkdirSync(temporaryRoot, { recursive: true });
   const root = mkdtempSync(join(temporaryRoot, 'meowfilm-inputs-'));
   try {
-    const files = ['build-windows.ps1', 'scripts/package-runtime.mjs', 'apps/windows/NuGet.Config', ...metadataFiles];
+    const runtimeFiles = [...metadataFiles, 'apps/windows/runtime/native-settings.mjs'];
+    const files = ['build-windows.ps1', 'scripts/package-runtime.mjs', 'apps/windows/NuGet.Config', ...runtimeFiles];
     for (const path of files) {
       mkdirSync(dirname(join(root, path)), { recursive: true });
       writeFileSync(join(root, path), 'first');
@@ -93,7 +94,7 @@ test('Windows fingerprint binds bytes and paths; inventory order and duplicates 
     assert.notEqual(fingerprintInputs(root, files), original);
     writeFileSync(join(root, files[0]), 'first');
     assert.notEqual(fingerprintInputs(root, [files[0]]), original);
-    for (const path of metadataFiles) {
+    for (const path of runtimeFiles) {
       writeFileSync(join(root, path), 'second');
       assert.notEqual(fingerprintInputs(root, files), original, `${path} bytes affect the fingerprint`);
       writeFileSync(join(root, path), 'first');

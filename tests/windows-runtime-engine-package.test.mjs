@@ -71,12 +71,12 @@ function verifyManifest(output, manifest) {
     'app/modules/netease-token.mjs', 'app/modules/pan-runtime.mjs', 'app/modules/source-candidates.mjs', 'app/modules/source-library.mjs',
     'app/modules/source-rules.mjs', 'app/modules/source-runtime.mjs', 'app/modules/source-web.mjs',
     'app/pan-entry.mjs',
-    'app/windows/bootstrap.mjs', 'app/windows/entries/aggregate.mjs',
+    'app/windows/bootstrap.mjs', 'app/windows/entries/aggregate.mjs', 'app/windows/native-settings.mjs',
   ]);
 }
 
 function packagingFixture({
-  missingBootstrap = false, extraSource = false, extraImport = false,
+  missingBootstrap = false, missingSettings = false, extraSource = false, extraImport = false,
   missingShared = false, missingCommonModule = false, missingSourceModule = false, platformModule = false,
 } = {}) {
   const fixtureArea = area(), source = join(fixtureArea, 'source');
@@ -127,8 +127,9 @@ function packagingFixture({
     "import './modules/music-script.mjs';");
   if (missingSourceModule) write(source, 'apps/runtime/entry.mjs',
     "import './modules/source-runtime.mjs';");
-  for (const path of ['bootstrap.mjs', 'entries/aggregate.mjs']) {
+  for (const path of ['bootstrap.mjs', 'native-settings.mjs', 'entries/aggregate.mjs']) {
     if (missingBootstrap && path === 'bootstrap.mjs') continue;
+    if (missingSettings && path === 'native-settings.mjs') continue;
     let text = readFileSync(join(root, 'apps/windows/runtime', path), 'utf8');
     if (extraImport && path === 'bootstrap.mjs') text += "\nimport { unexpected } from './unexpected.mjs';\n";
     write(source, `apps/windows/runtime/${path}`, text);
@@ -149,7 +150,7 @@ test('packaging rejects existing output without changing a single prior byte', a
 });
 
 for (const [option, code] of [
-  ['missingBootstrap', 'ENOENT'], ['extraSource', 'WINDOWS_CLOSURE'],
+  ['missingBootstrap', 'ENOENT'], ['missingSettings', 'ENOENT'], ['extraSource', 'WINDOWS_CLOSURE'],
   ['extraImport', 'WINDOWS_IMPORT'], ['missingShared', 'MISSING_PUBLIC_FILE'],
   ['missingCommonModule', 'MISSING_SOURCE'], ['platformModule', 'WINDOWS_CLOSURE'],
   ['missingSourceModule', 'MISSING_SOURCE'],
@@ -193,6 +194,17 @@ for (const statement of ["require('node:child_process');", "import('./unexpected
   });
 }
 
+for (const statement of ["import 'node:net';", "import 'node:fs';",
+  "import '@meowfilm/script-host';", "import('./native-settings.mjs');", 'import(moduleName);',
+  "require('@meowfilm/runtime-bridge');"]) {
+  test(`Windows settings helper rejects unsupported imports: ${statement}`, async () => {
+    const f = packagingFixture(), path = 'apps/windows/runtime/native-settings.mjs';
+    write(f.root, path, `${readFileSync(join(f.root, path), 'utf8')}\n${statement}`);
+    await assert.rejects(packageWindowsRuntime({ ...f, product: 'aggregate' }), { code: 'WINDOWS_IMPORT' });
+    assert.equal(readJSON(join(f.output, 'runtime-manifest.json')).status, 'failed');
+  });
+}
+
 test('Windows source junctions are rejected, not dereferenced or silently omitted', async () => {
   const f = packagingFixture();
   const entries = join(f.root, 'apps/windows/runtime/entries'), relocated = join(f.root, 'saved-entries');
@@ -222,6 +234,20 @@ test('Windows packaging preserves common files byte-for-byte and is reproducible
     assert.deepEqual(first.inputs.filter(input => input.path === path), [{ path, sha256: sha256(bytes) }]);
   }
   assert.ok(readFileSync(join(f.output, first.entry), 'utf8').includes("from '../../entry.mjs'"));
+  for (const relative of ['bootstrap.mjs', 'native-settings.mjs', 'entries/aggregate.mjs']) {
+    const source = `apps/windows/runtime/${relative}`, path = `app/windows/${relative}`;
+    assert.deepEqual(first.inputs.filter(input => input.path === source),
+      [{ path: source, sha256: sha256(readFileSync(join(f.root, source))) }]);
+    assert.ok(first.files.some(file => file.path === path));
+  }
+  assert.deepEqual(readFileSync(join(f.output, 'app/windows/native-settings.mjs')),
+    readFileSync(join(f.root, 'apps/windows/runtime/native-settings.mjs')));
+  assert.ok(readFileSync(join(f.output, 'app/windows/bootstrap.mjs'), 'utf8')
+    .includes("from './native-settings.mjs'"));
+  assert.deepEqual(first.relocations.find(item => item.source === 'apps/windows/runtime/native-settings.mjs'), {
+    source: 'apps/windows/runtime/native-settings.mjs', path: 'app/windows/native-settings.mjs',
+    imports: [{ from: '@meowfilm/runtime-bridge', to: '@meowfilm/runtime-bridge' }],
+  });
 });
 
 test('Windows packaging automatically includes a new shared runtime helper', async () => {

@@ -3,6 +3,7 @@ using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Platform.Storage;
 using Microsoft.Win32.SafeHandles;
 
 namespace MeowFilm.Platform.Runtime;
@@ -26,14 +27,15 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
     private Task? disposal;
 
     private NodeRuntime(Process process, NamedPipeServerStream pipe, RuntimeHttpClient client,
-        Task output, Task error, Task processExit, OwnedProcessJob job, Uri businessOrigin, CancellationToken ownerRevoked)
+        Task output, Task error, Task processExit, OwnedProcessJob job, Uri businessOrigin, CancellationToken ownerRevoked,
+        RuntimeSettingsPipe settingsPipe)
     {
         this.process = process; processId = process.Id; this.pipe = pipe; this.client = client;
         outputDrain = output; errorDrain = error; this.processExit = processExit; this.job = job;
         this.businessOrigin = businessOrigin;
         capability = CancellationTokenSource.CreateLinkedTokenSource(ownerRevoked);
         revoked = capability.Token;
-        pipeEnd = WatchPipeAsync(pipe);
+        pipeEnd = settingsPipe.RunAsync();
         _ = MonitorAsync();
     }
 
@@ -60,7 +62,8 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
 
     public static async Task<NodeRuntime> StartAsync(string nodeExecutable, RuntimeBundle bundle,
         IReadOnlyList<RuntimeModule> expectedModules, string scriptDataRoot,
-        CancellationToken cancellationToken = default, CancellationToken ownerRevoked = default)
+        CancellationToken cancellationToken = default, CancellationToken ownerRevoked = default,
+        IDocumentStore? settingsStore = null, IReadOnlyDictionary<string, string>? settingsNamespaces = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         string node, dataRoot;
@@ -118,15 +121,17 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
             await connect.ConfigureAwait(false);
             if (!GetNamedPipeClientProcessId(server.SafePipeHandle, out var pid) || pid != (uint)child.Id)
                 throw new BridgeException("INVALID_MESSAGE");
-            var config = BridgeCodec.EncodeJSONValue(new { sessionId, dataRoot });
+            var config = BridgeCodec.EncodeJSONValue(settingsStore is null ? new { sessionId, dataRoot } :
+                (object)new { sessionId, dataRoot, nativeSettings = true });
             if (config.Length + 1 > HandshakeBytes) throw new BridgeException("INVALID_MESSAGE");
             await server.WriteAsync(config, deadline.Token).ConfigureAwait(false);
             await server.WriteAsync("\n"u8.ToArray(), deadline.Token).ConfigureAwait(false);
             await server.FlushAsync(deadline.Token).ConfigureAwait(false);
-            var ready = await ReadReadyAsync(server, deadline.Token).ConfigureAwait(false);
+            var settingsPipe = new RuntimeSettingsPipe(server, settingsStore, settingsNamespaces);
+            var ready = await settingsPipe.ReadyAsync(deadline.Token).ConfigureAwait(false);
             client = new RuntimeHttpClient(ready);
             runtime = new NodeRuntime(child, server, client, output, error, exited, job,
-                RuntimeHttpProtocol.ValidateEndpoint(ready), ownerRevoked);
+                RuntimeHttpProtocol.ValidateEndpoint(ready), ownerRevoked, settingsPipe);
             var description = await client.DescribeAsync(deadline.Token).ConfigureAwait(false);
             if (!description.GetProperty("ok").GetBoolean())
                 throw new BridgeException(description.GetProperty("code").GetString()!);
@@ -160,33 +165,6 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
                 child?.Dispose();
             }
             throw new BridgeException(failedCleanup ? "INTERNAL" : cancellationToken.IsCancellationRequested ? "CANCELLED" : failure);
-        }
-    }
-
-    private static async Task<string> ReadReadyAsync(Stream stream, CancellationToken cancellationToken)
-    {
-        using var line = new MemoryStream();
-        var buffer = new byte[4096];
-        while (true)
-        {
-            var count = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
-            if (count == 0) throw new BridgeException("CLOSED");
-            if (line.Length + count > HandshakeBytes) throw new BridgeException("INVALID_RESPONSE");
-            var newline = Array.IndexOf(buffer, (byte)'\n', 0, count);
-            if (newline >= 0 && newline != count - 1) throw new BridgeException("INVALID_RESPONSE");
-            line.Write(buffer, 0, newline < 0 ? count : newline);
-            if (newline < 0) continue;
-            try
-            {
-                var ready = BridgeCodec.DecodeJSONValue(line.ToArray());
-                if (ready.ValueKind != JsonValueKind.Object || ready.EnumerateObject().Count() != 2
-                    || ready.GetProperty("protocol").GetString() != RuntimeHttpProtocol.Name)
-                    throw new BridgeException("INVALID_RESPONSE");
-                var baseUrl = ready.GetProperty("baseUrl").GetString()!;
-                _ = RuntimeHttpProtocol.ValidateEndpoint(baseUrl);
-                return baseUrl;
-            }
-            catch { throw new BridgeException("INVALID_RESPONSE"); }
         }
     }
 
@@ -229,12 +207,6 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
     {
         if (!IsConnected) return Task.FromException<byte[]>(new BridgeException("CLOSED"));
         return client.ReadImageAsync(reference, cancellationToken);
-    }
-
-    private static async Task<string> WatchPipeAsync(Stream stream)
-    {
-        try { return await stream.ReadAsync(new byte[1]).ConfigureAwait(false) == 0 ? "CLOSED" : "INVALID_RESPONSE"; }
-        catch { return "CLOSED"; }
     }
 
     private async Task MonitorAsync()
