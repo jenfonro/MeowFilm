@@ -1,7 +1,6 @@
 #if os(iOS) || os(macOS)
 import Foundation
 import MeowContracts
-import MeowVideoKernel
 
 /// Product/model-owned lease on the one injected PlaybackController. Keep this
 /// outside page lifetime when actual PiP is retained; never create one per view.
@@ -78,7 +77,7 @@ public final class PlaybackVideoLease {
         let operation = UUID(); revision = operation
         let preceding = pending.map { retire($0) }
         let candidate: PlaybackVideoTransport
-        do { candidate = try PlaybackVideoTransport(media: media, input: input) }
+        do { candidate = try PlaybackVideoTransport(media: media, input: input, decoder: controller.makeVideoDecoder()) }
         catch {
             let failure = Self.error(error)
             _ = retirement(for: media) { try await media.close() }
@@ -341,18 +340,6 @@ public final class PlaybackVideoLease {
         if error is CancellationError { return .cancelled }
         if let failure = error as? PlaybackVideoError { return failure }
         if error as? NativePlaybackError == .audioSessionUnavailable { return .outputFailed }
-        if let failure = error as? VideoKernelFailure {
-            switch failure {
-            case .cancelled, .interrupted: return .cancelled
-            case .openFailed, .transportFailed: return .inputFailed
-            case .formatFailed: return .unsupportedFormat
-            case .decodeFailed: return .decodingFailed
-            case .seekFailed: return .seekFailed
-            case .outputFailed: return .outputFailed
-            case .timedOut: return .timedOut
-            case .decryptionFailed: return .decryptionFailed
-            }
-        }
         return .inputFailed
     }
 }

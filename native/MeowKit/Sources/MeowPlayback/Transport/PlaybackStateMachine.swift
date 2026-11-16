@@ -1,7 +1,7 @@
 import Foundation
 import MeowContracts
 
-/// Failures owned by the native backend. URL/header-bearing AVFoundation errors
+/// Failures owned by the native backend. URL/header-bearing decoder/OS errors
 /// are deliberately not copied into UI state or logs.
 public enum NativePlaybackError: Error, Equatable, LocalizedError, Sendable {
     case preparationFailed
@@ -11,6 +11,8 @@ public enum NativePlaybackError: Error, Equatable, LocalizedError, Sendable {
     case audioSessionUnavailable
     case audioSessionDeactivationFailed
     case mediaServicesReset
+    case outputFailed
+    case resourceReleaseFailed
 
     public var errorDescription: String? {
         switch self {
@@ -21,6 +23,8 @@ public enum NativePlaybackError: Error, Equatable, LocalizedError, Sendable {
         case .audioSessionUnavailable: return "系统音频会话不可用"
         case .audioSessionDeactivationFailed: return "系统音频会话释放失败"
         case .mediaServicesReset: return "系统媒体服务已重置，请重新播放"
+        case .outputFailed: return "音频输出失败"
+        case .resourceReleaseFailed: return "媒体资源释放失败"
         }
     }
 }
@@ -56,6 +60,7 @@ struct PlaybackStateMachine {
     private(set) var attempt: PlayAttempt?
     private(set) var wantsPlayback = false
     private(set) var isReady = false
+    private var supportsSeeking = true
     private(set) var isInterrupted = false
     private(set) var requestsAudioAdmission = false
     private(set) var pendingSeek: Seek?
@@ -98,7 +103,7 @@ struct PlaybackStateMachine {
     }
 
     var outstandingSeek: Seek? { pendingSeek ?? activeSeek }
-    var canSeek: Bool { isPlayable && isReady && (snapshot.duration != nil || !seekableRanges.isEmpty) }
+    var canSeek: Bool { isPlayable && isReady && supportsSeeking && (snapshot.duration != nil || !seekableRanges.isEmpty) }
 
     @discardableResult
     mutating func begin(resource: PlaybackResource, owner: String, autoplay: Bool = true,
@@ -138,6 +143,7 @@ struct PlaybackStateMachine {
         error = nil
         wantsPlayback = autoplay
         isReady = false
+        supportsSeeking = true
         hasEndedNaturally = false
         acceptedRate = 1
         lastReportedTransport = nil
@@ -160,10 +166,11 @@ struct PlaybackStateMachine {
 
     func accepts(_ token: UUID) -> Bool { generation == token && isPlayable }
 
-    mutating func ready(generation token: UUID, duration: TimeInterval?, ranges: [TimeRange]) {
+    mutating func ready(generation token: UUID, duration: TimeInterval?, ranges: [TimeRange], seekable: Bool = true) {
         guard accepts(token) else { return }
         let wasReady = isReady
         isReady = true
+        supportsSeeking = seekable
         updateTimeline(generation: token, duration: duration, ranges: ranges)
         if !wasReady {
             updatePendingPhase()
@@ -235,7 +242,7 @@ struct PlaybackStateMachine {
 
     @discardableResult
     mutating func requestSeek(to position: TimeInterval) -> Bool {
-        guard isPlayable, let token = generation, position.isFinite, position >= 0 else { return false }
+        guard isPlayable, (!isReady || supportsSeeking), let token = generation, position.isFinite, position >= 0 else { return false }
         let wasPlaying = snapshot.phase == .playing
         // Invalidates the preceding seek before the adapter cancels it.
         finishOutstandingSeek(.superseded)

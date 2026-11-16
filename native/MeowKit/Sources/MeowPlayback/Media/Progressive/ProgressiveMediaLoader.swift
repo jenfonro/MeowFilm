@@ -3,7 +3,7 @@ import Foundation
 import FoundationNetworking
 #endif
 
-/// The AVFoundation adapter and deterministic test sinks implement this small
+/// The audio byte adapter and deterministic test sinks implement this small
 /// byte boundary. Every method is called on the loader's serial queue.
 protocol ProgressiveMediaSink: AnyObject {
     var range: ProgressiveReadRange? { get } // nil = content-information only
@@ -29,6 +29,7 @@ final class ProgressiveMediaLoader: NSObject, URLSessionDataDelegate, @unchecked
     private var pending: [ObjectIdentifier] = [] // round-robin between payload windows
     private var transfers: [Int: Transfer] = [:]
     private var information: ProgressiveContentInformation?
+    private var closeWaiters: [CheckedContinuation<Void, Never>] = []
     private var pumping = false
     private var pumpAgain = false
 
@@ -114,6 +115,16 @@ final class ProgressiveMediaLoader: NSObject, URLSessionDataDelegate, @unchecked
             if let observation { budget.unobserve(observation); self.observation = nil }
             for id in Array(loads.keys) { remove(id, finish: false, error: nil) }
             session?.invalidateAndCancel()
+        }
+    }
+
+    func close() async {
+        invalidate()
+        await withCheckedContinuation { continuation in
+            performSynchronized {
+                if transfers.isEmpty { continuation.resume() }
+                else { closeWaiters.append(continuation) }
+            }
         }
     }
 
@@ -298,6 +309,10 @@ final class ProgressiveMediaLoader: NSObject, URLSessionDataDelegate, @unchecked
         guard let transfer = transfers.removeValue(forKey: task.taskIdentifier) else { return }
         // Release before pumping, never before this real completion.
         transfer.reservation.complete()
+        if invalidated, transfers.isEmpty {
+            let waiters = closeWaiters; closeWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
         guard !invalidated, let load = loads[transfer.sinkID], load.taskID == task.taskIdentifier else { return }
         load.taskID = nil
         guard error == nil, let response = transfer.response, transfer.received == response.bodyBytes else {

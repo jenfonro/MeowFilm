@@ -53,6 +53,24 @@ final class NativeMusicAudioCacheInspectorTests: XCTestCase {
         }
     }
 
+    func testLosslessSourceFrameCountIsNotRoundedFromResampledPCM() async throws {
+        for rate in [44_100, 96_000, 192_000] {
+            let frames = rate + 1
+            let f = try AudioCacheTestFixture()
+            let recording = AudioCacheRecordingInspector()
+            let cache = f.cache(transport: AudioCacheTestTransport(
+                bytes: Self.wav(depth: 24, rate: rate, frames: frames)), inspector: recording)
+            let duration = Double(frames) / Double(rate)
+            await cache.storeAfterPlayback(f.request(quality: "flac24bit", duration: duration))
+            let hit = await f.hit(cache), measurement = await recording.measurement
+            XCTAssertNotNil(hit)
+            XCTAssertEqual(measurement?.decodedFrames, Int64(frames))
+            XCTAssertEqual(measurement?.sampleRate, Double(rate))
+            XCTAssertEqual(try XCTUnwrap(measurement?.duration), duration, accuracy: 1 / Double(rate))
+            await cache.close(); f.cleanup()
+        }
+    }
+
     func testEncryptedFragmentedAndTruncatedContainersAreMissesBeforePublication() async throws {
         let ftyp = Self.box("ftyp", Data("M4A \0\0\0\0M4A ".utf8))
         let encrypted = ftyp + Self.box("moov", Self.box("pssh", Data(repeating: 0, count: 16))) +
@@ -107,17 +125,19 @@ final class NativeMusicAudioCacheInspectorTests: XCTestCase {
     private static func le(_ value: UInt32, bytes: Int) -> Data {
         Data((0..<bytes).map { UInt8(truncatingIfNeeded: value >> ($0 * 8)) })
     }
-    private static func wav(depth: Int = 16, channels: Int = 1) -> Data {
-        let rate = 44_100, block = depth / 8 * channels
-        let payload = Data(repeating: 0, count: rate * block)
+    private static func wav(depth: Int = 16, channels: Int = 1, rate: Int = 44_100, frames: Int? = nil) -> Data {
+        let block = depth / 8 * channels
+        let payload = Data(repeating: 0, count: (frames ?? rate) * block)
+        let padding = payload.count & 1
         var data = Data("RIFF".utf8)
-        data += le(UInt32(payload.count + 36), bytes: 4)
+        data += le(UInt32(payload.count + padding + 36), bytes: 4)
         data += Data("WAVEfmt ".utf8)
         data += le(16, bytes: 4); data += le(1, bytes: 2)
         data += le(UInt32(channels), bytes: 2); data += le(UInt32(rate), bytes: 4)
         data += le(UInt32(rate * block), bytes: 4); data += le(UInt32(block), bytes: 2)
         data += le(UInt32(depth), bytes: 2); data += Data("data".utf8)
         data += le(UInt32(payload.count), bytes: 4); data += payload
+        if padding != 0 { data.append(0) }
         return data
     }
     private static func box(_ type: String, _ payload: Data) -> Data {

@@ -1,8 +1,7 @@
 import Foundation
 
 /// Owns *removal* actions, not just callback generation guards. The adapter
-/// stores KVO invalidations, NotificationCenter removals, AVPlayer time-observer
-/// removals and MPRemoteCommand target removals here.
+/// stores NotificationCenter, timer and MPRemoteCommand target removals here.
 @MainActor
 final class PlaybackObservationScope {
     private var removals: [() -> Void] = []

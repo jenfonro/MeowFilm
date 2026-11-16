@@ -1,5 +1,6 @@
 import Foundation
 import AudioToolbox
+import MeowAudio
 import MeowMusicFeature
 
 public protocol NativeMusicAudioCacheInspecting: Sendable {
@@ -66,13 +67,9 @@ public struct NativeMusicAudioCacheInspection: Codable, Sendable {
     }
 }
 
-/// Strict known-container validation plus AudioToolbox decoding of EVERY frame
-/// to EOF. Opening a file, duration metadata, requestedQuality, and a successful
-/// near-EOF seek are not completeness evidence.
-///
-/// Apple API contract: ExtAudioFileRead returns zero frames at EOF;
-/// ExtAudioFileWrapAudioFileID does not own the wrapped AudioFileID.
-/// AudioFileOpenWithCallbacks keeps all reads on our already-pinned descriptor.
+/// AudioFile validates source metadata and every encoded packet; the shared
+/// FFmpeg audio decoder then consumes EVERY PCM frame to EOF. No native output
+/// is created, and resampled float PCM never becomes the source's bit depth.
 public struct NativeMusicAudioCacheInspector: NativeMusicAudioCacheInspecting {
     public init() {}
 
@@ -145,48 +142,39 @@ public struct NativeMusicAudioCacheInspector: NativeMusicAudioCacheInspecting {
         try Self.property(audio, kAudioFilePropertyAudioDataByteCount, &audioBytes)
         guard audioBytes > 0, audioBytes <= UInt64(file.size) else { throw NativeMusicAudioCacheFailure.miss }
         try Self.verifyPackets(audio, source: source, file: file, expectedBytes: audioBytes)
-        var wrapped: ExtAudioFileRef?
-        try Self.ok(ExtAudioFileWrapAudioFileID(audio, false, &wrapped))
-        guard let wrapped else { throw NativeMusicAudioCacheFailure.miss }
-        defer { ExtAudioFileDispose(wrapped) }
-        var nativeFrames: Int64 = 0
-        var lengthSize = UInt32(MemoryLayout<Int64>.size)
-        try Self.ok(ExtAudioFileGetProperty(wrapped, kExtAudioFileProperty_FileLengthFrames, &lengthSize, &nativeFrames))
+        var sourceDuration = 0.0
+        try Self.property(audio, kAudioFilePropertyEstimatedDuration, &sourceDuration)
+        guard sourceDuration.isFinite, sourceDuration > 0 else { throw NativeMusicAudioCacheFailure.miss }
+        let nativeFrames = structure.frames ?? Int64((sourceDuration * source.mSampleRate).rounded())
         guard nativeFrames > 0 else { throw NativeMusicAudioCacheFailure.miss }
 
-        // No sample-rate conversion. Interleaved float PCM is only a bounded
-        // decoder output format, NOT a claim about the file's source precision.
-        var output = AudioStreamBasicDescription(
-            mSampleRate: source.mSampleRate, mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-            mBytesPerPacket: 4 * source.mChannelsPerFrame, mFramesPerPacket: 1,
-            mBytesPerFrame: 4 * source.mChannelsPerFrame, mChannelsPerFrame: source.mChannelsPerFrame,
-            mBitsPerChannel: 32, mReserved: 0)
-        try Self.ok(ExtAudioFileSetProperty(wrapped, kExtAudioFileProperty_ClientDataFormat,
-                                           UInt32(MemoryLayout<AudioStreamBasicDescription>.size), &output))
-        let frameCapacity: UInt32 = 4096
-        let bytes = Int(frameCapacity * output.mBytesPerFrame)
-        let buffer = UnsafeMutableRawPointer.allocate(byteCount: bytes, alignment: MemoryLayout<Float>.alignment)
-        defer { buffer.deallocate() }
-        var decoded: Int64 = 0
-        let maximumFrames = (expectedDuration + MusicMediaDuration.tolerance + 1) * source.mSampleRate
+        let decoder = AudioDecoder(input: MusicCacheAudioInput(file))
+        var outputFrames: Int64 = 0
+        let decoded: Int64
+        let maximumFrames = (expectedDuration + MusicMediaDuration.tolerance + 1) * 48_000
         guard maximumFrames.isFinite, maximumFrames < Double(Int64.max) else { throw NativeMusicAudioCacheFailure.miss }
-        while true {
-            try file.checkCancellation()
-            var list = AudioBufferList(mNumberBuffers: 1,
-                mBuffers: AudioBuffer(mNumberChannels: output.mChannelsPerFrame, mDataByteSize: UInt32(bytes), mData: buffer))
-            var frames = frameCapacity
-            try Self.ok(ExtAudioFileRead(wrapped, &frames, &list))
-            guard frames <= frameCapacity, list.mNumberBuffers == 1,
-                  list.mBuffers.mDataByteSize <= UInt32(bytes) else { throw NativeMusicAudioCacheFailure.miss }
-            if frames == 0 { break }
-            guard list.mBuffers.mNumberChannels == output.mChannelsPerFrame,
-                  list.mBuffers.mDataByteSize == frames * output.mBytesPerFrame else {
+        do {
+            _ = try await decoder.prepare()
+            while let chunk = try await decoder.read() {
+                try file.checkCancellation()
+                guard Int64(chunk.frameCount) <= Int64(maximumFrames) - outputFrames else {
+                    throw NativeMusicAudioCacheFailure.miss
+                }
+                outputFrames += Int64(chunk.frameCount)
+            }
+            let measured = try await decoder.information()
+            guard measured.isComplete, Double(measured.sourceSampleRate) == source.mSampleRate,
+                  measured.sourceChannels == Int(source.mChannelsPerFrame) else {
                 throw NativeMusicAudioCacheFailure.miss
             }
-            guard Int64(frames) <= Int64(maximumFrames) - decoded else { throw NativeMusicAudioCacheFailure.miss }
-            decoded += Int64(frames)
+            decoded = measured.decodedSourceFrames
+            try await decoder.close()
+        } catch {
+            try? await decoder.close()
+            throw error
         }
+        // Source frames are counted before resampling. Rounding the output
+        // frame count cannot recover a high-rate source's exact final sample.
         try file.checkCancellation()
         guard decoded > 0 else { throw NativeMusicAudioCacheFailure.miss }
         // Compressed packet tables can include encoder priming/padding. Bound
@@ -259,6 +247,44 @@ public struct NativeMusicAudioCacheInspector: NativeMusicAudioCacheInspecting {
         try ok(AudioFileGetProperty(file, id, &size, &value))
         guard size == UInt32(MemoryLayout<T>.size) else { throw NativeMusicAudioCacheFailure.miss }
     }
+}
+
+private final class MusicCacheAudioInput: AudioByteInput, @unchecked Sendable {
+    let formatHint: String? = nil
+    let loopbackRoot: String? = nil
+    private let file: NativeMusicAudioCacheFile
+    private let lock = NSLock()
+    private var cancelled = false
+    private var closed = false
+    private var position: Int64 = 0
+    init(_ file: NativeMusicAudioCacheFile) { self.file = file }
+    var isReadCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled || closed }
+    func read(maximumBytes: Int) throws -> Data {
+        guard !isReadCancelled else { throw CancellationError() }
+        try file.checkCancellation()
+        let count = Int(min(Int64(maximumBytes), file.size - position))
+        let bytes = try file.read(offset: position, count: count)
+        position += Int64(bytes.count)
+        return bytes
+    }
+    func seek(_ request: AudioByteSeek) throws -> Int64 {
+        guard !isReadCancelled else { throw CancellationError() }
+        try file.checkCancellation()
+        switch request {
+        case .size: return file.size
+        case .offset(let offset, let origin):
+            let base: Int64
+            switch origin { case .start: base = 0; case .current: base = position; case .end: base = file.size }
+            let (target, overflow) = base.addingReportingOverflow(offset)
+            guard !overflow, target >= 0, target <= file.size else { throw AudioCoreError.seekFailed }
+            position = target
+            return target
+        }
+    }
+    func cancelReads() { lock.lock(); cancelled = true; lock.unlock() }
+    func resumeReads() { lock.lock(); if !closed { cancelled = false }; lock.unlock() }
+    // Borrowed pinned descriptor: its caller owns file close after inspect.
+    func close() async throws { lock.lock(); closed = true; lock.unlock() }
 }
 
 /// Fail-closed structural checks complement native decoders that may tolerate

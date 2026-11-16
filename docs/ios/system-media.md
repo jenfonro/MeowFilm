@@ -1,6 +1,6 @@
 # 系统媒体控制
 
-音乐沿用 `AVAudioSession` 的 playback category 和 App 的 audio 后台声明。`PlaybackController` 管理当前播放尝试，`PlaybackSystemSession` 负责 `MPNowPlayingInfoCenter`、`MPMediaItemArtwork` 与 `MPRemoteCommandCenter`；`MusicSystemMetadataCoordinator` 将音乐资料映射到该会话，不另建播放器或系统信息写入者。
+音乐沿用 `AVAudioSession` 的 playback category 和 App 的 audio 后台声明。[独立音乐核心](music-audio-core.md)只负责解码及 AVAudioEngine 输出；`PlaybackController` 管理当前播放尝试，`PlaybackSystemSession` 负责 `MPNowPlayingInfoCenter`、`MPMediaItemArtwork` 与 `MPRemoteCommandCenter`；`MusicSystemMetadataCoordinator` 将音乐资料映射到该会话，不另建播放器或系统信息写入者。
 
 ## 锁屏、控制中心与灵动岛
 
@@ -35,7 +35,7 @@ EarPods 和部分 AirPods 的单次、双次、三次操作由耳机与系统解
 
 ## 音频中断与交接
 
-原生播放尝试建立后，即开始接收音频会话中断，覆盖 scoped HLS listener 异步启动至 item 安装的等待期。只有系统允许、当前播放意图有效且恢复资格仍属于当前尝试时才自动恢复；中断期间的暂停撤销恢复资格，新歌曲不继承旧歌曲的自动恢复资格。实际中断结束后，用户仍可明确播放。
+原生播放尝试建立后，即开始接收音频会话中断，覆盖 scoped HLS listener 异步启动至音频 decoder 准备完成的等待期。只有系统允许、当前播放意图有效且恢复资格仍属于当前尝试时才自动恢复；中断期间的暂停撤销恢复资格，新歌曲不继承旧歌曲的自动恢复资格。实际中断结束后，用户仍可明确播放。
 
 音频会话激活／停用由独立串行执行队列调用，阻塞的 `AVAudioSession.setActive` 不占用主线程。暂停先停止实际输出并发布暂停事实，不等待系统会话停用；继续播放须等待真实激活成功，再核对当前 attempt、播放意图及取消状态。迟到的激活／停用完成不能覆盖新 owner 的状态，停用失败保留可重试的实际会话事实。视频关闭／交接仍等待属于退休 lease 的释放结果，不把异步提交当作释放完成。
 

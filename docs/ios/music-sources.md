@@ -46,7 +46,7 @@ URL缓存、取链前后的脚本声明复核与新能力枚举遵循同一来�
 
 ## 准备与交接
 
-取链只创建 `MusicPreparedSource`，不会退役旧播放。手动切换由 `PlaybackController.prepareReplacement` 在独立静音 AVPlayer 上准备并校验时长；已停止输出的同曲恢复使用 `preparePlayback`，提交前不发布原生 attempt 或播放事实；异步记账/准入完成后，再通过 `synchronizeReplacement` 定位到旧流实时位置。同步及必要的重同步共用15秒预算，仍以0.25秒位置差为最终交接条件，不因中途seek放宽检查。取消、定位失败、过期、歌曲/设置/权限改变均不破坏旧流。普通媒体准备失败反馈同一会话并尝试同档其他候选，最新操作先取消并排空旧匹配，不将正常连续选择当作服务忙。
+取链只创建 `MusicPreparedSource`，不会退役旧播放。手动切换由 `PlaybackController.prepareReplacement` 在独立无输出的音频 decoder 上准备并校验时长；已停止输出的同曲恢复使用 `preparePlayback`，提交前不发布原生 attempt 或播放事实；异步记账/准入完成后，再通过 `synchronizeReplacement` 定位到旧流实时位置。同步及必要的重同步共用15秒预算，仍以0.25秒位置差为最终交接条件，不因中途seek放宽检查。取消、定位失败、过期、歌曲/设置/权限改变均不破坏旧流。普通媒体准备失败反馈同一会话并尝试同档其他候选，最新操作先取消并排空旧匹配，不将正常连续选择当作服务忙。解码与输出所有权见[独立音乐核心](music-audio-core.md)。
 
 播放反馈只在实际媒体提交后切换原生 attempt；同 occurrence／可信录音保留同一听音 instance 与累计，准备失败保留旧事实 owner。上述15秒是媒体同步 deadline，不是听音计量阈值。旧进展、反馈准入及本地事实顺序交接，网络 ACK 不参与媒体提交等待；已知错源先停止并使旧反馈失效。
 

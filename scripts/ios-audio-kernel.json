@@ -1,0 +1,113 @@
+{
+  "schema": 1,
+  "source": {
+    "version": "9.0.1",
+    "tag": "n9.0.1",
+    "commit": "bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa",
+    "url": "https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz",
+    "sha256": "cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635",
+    "treeSha256": "7cdc17943e6f819c958c951747509388ef969c59f83671f9f35dedb5be2439ad",
+    "signature": {
+      "url": "https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz.asc",
+      "sha256": "b613a00005232a1245ace7080088781ac23a916119d3e5b0d6c042368eee0177",
+      "keyUrl": "https://ffmpeg.org/ffmpeg-devel.asc",
+      "keySha256": "397b3becedcd5a98769967ff1ff8501ddc89f8368b8f766e4701377d7dbaabe5",
+      "verifiedFingerprint": "FCF986EA15E6E293A5644F10B4322F04D67658D8"
+    }
+  },
+  "libraries": [
+    {
+      "name": "avutil",
+      "major": 61,
+      "minor": 1,
+      "micro": 101
+    },
+    {
+      "name": "swresample",
+      "major": 7,
+      "minor": 1,
+      "micro": 101
+    },
+    {
+      "name": "avcodec",
+      "major": 63,
+      "minor": 1,
+      "micro": 101
+    },
+    {
+      "name": "avformat",
+      "major": 63,
+      "minor": 1,
+      "micro": 101
+    }
+  ],
+  "targets": {
+    "macos-x86_64": {
+      "sdk": "macosx",
+      "arch": "x86_64",
+      "triple": "x86_64-apple-macos14.0",
+      "minimum": "14.0"
+    },
+    "ios-arm64": {
+      "sdk": "iphoneos",
+      "arch": "arm64",
+      "triple": "arm64-apple-ios17.0",
+      "minimum": "17.0"
+    },
+    "ios-simulator-x86_64": {
+      "sdk": "iphonesimulator",
+      "arch": "x86_64",
+      "triple": "x86_64-apple-ios17.0-simulator",
+      "minimum": "17.0"
+    },
+    "ios-simulator-arm64": {
+      "sdk": "iphonesimulator",
+      "arch": "arm64",
+      "triple": "arm64-apple-ios17.0-simulator",
+      "minimum": "17.0"
+    },
+    "macos-arm64": {
+      "sdk": "macosx",
+      "arch": "arm64",
+      "triple": "arm64-apple-macos14.0",
+      "minimum": "14.0"
+    }
+  },
+  "configure": [
+    "--disable-autodetect",
+    "--disable-everything",
+    "--disable-gpl",
+    "--disable-version3",
+    "--disable-nonfree",
+    "--disable-programs",
+    "--disable-doc",
+    "--disable-debug",
+    "--disable-shared",
+    "--enable-static",
+    "--enable-pic",
+    "--disable-avdevice",
+    "--disable-avfilter",
+    "--disable-swscale",
+    "--enable-pthreads",
+    "--enable-avutil",
+    "--enable-swresample",
+    "--enable-avcodec",
+    "--enable-avformat",
+    "--enable-network",
+    "--disable-protocols",
+    "--enable-protocol=http,tcp,crypto",
+    "--enable-zlib",
+    "--enable-demuxer=aac,ac3,eac3,aiff,amr,ape,asf,dsf,iff,flac,matroska,mov,mp3,ogg,wav,wv,hls,mpegts",
+    "--enable-decoder=aac,aac_latm,ac3,alac,amrnb,amrwb,ape,dca,dsd_lsbf,dsd_msbf,dsd_lsbf_planar,dsd_msbf_planar,eac3,flac,mp1float,mp2float,mp3float,opus,vorbis,wavpack,wmalossless,wmapro,wmav1,wmav2,wmavoice,pcm_alaw,pcm_mulaw,pcm_s8,pcm_u8,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be,pcm_s64le,pcm_s64be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be,pcm_u16le,pcm_u16be,pcm_u24le,pcm_u24be,pcm_u32le,pcm_u32be,pcm_s16le_planar,pcm_s24le_planar,pcm_s32le_planar",
+    "--enable-parser=aac,aac_latm,ac3,dca,flac,mpegaudio,opus,vorbis"
+  ],
+  "exports": [
+    "meow_audio_decoder_create",
+    "meow_audio_decoder_info",
+    "meow_audio_decoder_read",
+    "meow_audio_decoder_seek",
+    "meow_audio_decoder_cancel",
+    "meow_audio_decoder_resume",
+    "meow_audio_decoder_destroy"
+  ]
+}

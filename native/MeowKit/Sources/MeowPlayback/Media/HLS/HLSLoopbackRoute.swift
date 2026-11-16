@@ -24,6 +24,7 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
     var invalidated = false
     var startup: (@Sendable (Result<URL, PlaybackNetworkError>) -> Void)?
     var startupTimeout: DispatchWorkItem?
+    var closeWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(plan: PlaybackNetworkPlan, budget: PlaybackNetworkBudget,
          configuration: URLSessionConfiguration = .ephemeral,
@@ -85,6 +86,7 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
                     if !invalidated { fail(.loopbackUnavailable) }
                     listener.stateUpdateHandler = nil; listener.newConnectionHandler = nil
                     self.listener = nil; listenerLease.complete()
+                    finishCloseIfDrained()
                 default: break
                 }
             }
@@ -100,6 +102,22 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
     }
 
     func invalidate() { synchronized { invalidateLocked() } }
+
+    func close() async {
+        invalidate()
+        await withCheckedContinuation { continuation in
+            synchronized {
+                closeWaiters.append(continuation)
+                finishCloseIfDrained()
+            }
+        }
+    }
+
+    func finishCloseIfDrained() {
+        guard invalidated, listener == nil, clients.isEmpty, transfers.isEmpty else { return }
+        let waiters = closeWaiters; closeWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
 
     func invalidateLocked() {
         guard !invalidated else { return }
@@ -140,6 +158,7 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
                 client.connection.stateUpdateHandler = nil
                 clients[client.id] = nil
                 client.lease.complete()
+                finishCloseIfDrained()
             default: break
             }
         }

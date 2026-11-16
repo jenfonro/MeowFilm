@@ -302,7 +302,7 @@ final class MusicSystemMetadataTests: XCTestCase {
         let bridge = MusicSystemMetadataCoordinator(model: model, playback: playback, appearance: appearance)
         let pending = bridge.pendingUpdate
         XCTAssertNil(playback.currentAttempt)
-        XCTAssertNil(playback.player.currentItem)
+        XCTAssertNil(playback.activeAudioMedia)
         bridge.close(); bridge.close()
         await pending?.value
         appearance.set(\.lockLyric, false)

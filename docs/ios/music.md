@@ -182,7 +182,9 @@ Node 保管匿名设备及 prepare；Swift 账号 owner 保留 Keychain、安全
 
 共同归属、清理和换图规则见[共享图片与展示资源](../common/music/presentation-resources.md)。iOS 当前音乐 `ArtworkImages` 借用 `MusicNativePresentationCache` 的图片字节 port，namespace 为 `music.presentation-resources.v1`。图片原网络字节与 songID／sourceKey 关联的歌词共用 256 MiB／30 天预算；内存沿 24 MiB／128 项，单图网络 4 MiB，ImageIO 缩略及现有解码限制保留。播放器独占图片持久副本已删除；影视／小说入口不使用这个音乐磁盘 port。
 
-`MusicNativeAudioFileCache.preparePlayback` 继续提供从起点增长的顺序文件，AVAssetResourceLoader 的读取／seek 不改变下载位置。音频本身沿原 256 MiB／30 天预算。实际播放调用展示资源续期；单音频淘汰不删共享图／健康歌词，显式全部播放缓存清理仍覆盖原种类。音乐业务文档的实际字节限制及 CAS 保留。
+`MusicNativeAudioFileCache.preparePlayback` 继续提供从起点增长的顺序文件，受控音频字节输入的读取／seek 不改变下载位置。音频本身沿原 256 MiB／30 天预算。实际播放调用展示资源续期；单音频淘汰不删共享图／健康歌词，显式全部播放缓存清理仍覆盖原种类。音乐业务文档的实际字节限制及 CAS 保留。
+
+播放与缓存完整解码共用[独立音乐核心](music-audio-core.md)。缓存检查保留源结构、AudioFile 元数据及每个编码包的完整性核对，再由同一 FFmpeg decoder 消耗全部 PCM 至实际 EOF；不创建输出，不把重采样后的 float 精度冒充源位深。
 
 生产音频缓存直接打开系统提供的 Caches 基目录，再逐级以 `openat`／`O_NOFOLLOW` 打开本应用缓存子目录，不逐个读取沙盒外的祖先目录。目录打开不提供 `/` 默认值，测试也必须显式传入已存在的私有基目录。重开时沿同一基目录核对目录身份，保留私有权限、独占锁和真机 Data Protection 校验。
 

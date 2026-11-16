@@ -234,7 +234,7 @@ final class MeowfilmFilmColdStartPrepareTests: XCTestCase {
         }
         let played = try XCTUnwrap(model.snapshot?.current)
         XCTAssertEqual(assembly.playback.currentAttempt?.owner, "film")
-        XCTAssertNil(assembly.playback.player.currentItem)
+        XCTAssertFalse(assembly.playback.hasActiveMusicInput)
         model.pauseOrResume()
         try await lifecycleWait { model.mediaState.paused }
         model.seek(to: 1.1)

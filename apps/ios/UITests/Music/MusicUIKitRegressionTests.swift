@@ -6276,7 +6276,7 @@ final class MusicPlayerContentModelTests: XCTestCase {
                                             headers: ["X-Fixture": "bad\nvalue"])
         // Exercise the real attempt identity without creating an item or fetching media.
         let attempt = playback.playAttempt(resource: resource, owner: "music", autoplay: false)
-        XCTAssertNil(playback.player.currentItem)
+        XCTAssertFalse(playback.hasActiveMusicInput)
         model.nativeAttempt = .init(id: attempt.id, resourceID: resource.id)
         let selection = MusicPlaybackSelection(installationId: "official:fixture", generation: 1,
             siteId: "wy", sourceKey: "wy:" + id, quality: "128k")

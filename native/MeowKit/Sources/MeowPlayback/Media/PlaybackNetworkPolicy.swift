@@ -7,9 +7,8 @@ import FoundationNetworking
 /// Network errors contain no URL, cookie, response body or upstream error text.
 public enum PlaybackNetworkError: Error, Equatable, LocalizedError, Sendable {
     case invalidHeaders, invalidURL, headersOnLocalFile
-    case hlsCustomHeadersUnavailable, hlsCookieScopeRequiresConsent
+    case hlsCustomHeadersUnavailable
     case hlsRequiresExplicitFormat
-    case nativeCookieStorageNotIsolated
     case redirectDenied, redirectLimit, rangeUnsupported, invalidResponse
     case resourceChanged, unsupportedContent, httpStatus(Int)
     case resourceBudgetExceeded, budgetWaitTimedOut, cancelled, transportFailed
@@ -21,9 +20,7 @@ public enum PlaybackNetworkError: Error, Equatable, LocalizedError, Sendable {
         case .invalidURL: return "媒体地址无效"
         case .headersOnLocalFile: return "本地媒体不支持 HTTP 请求头"
         case .hlsCustomHeadersUnavailable: return "当前内核不支持此 HLS 请求头"
-        case .hlsCookieScopeRequiresConsent: return "此 HLS 需要明确 Cookie 作用域"
         case .hlsRequiresExplicitFormat: return "此资源需要 HLS 播放路径"
-        case .nativeCookieStorageNotIsolated: return "系统媒体 Cookie 存储未隔离"
         case .redirectDenied: return "媒体重定向不符合凭据策略"
         case .redirectLimit: return "媒体重定向次数超限"
         case .rangeUnsupported: return "媒体服务器不支持所需字节范围"
@@ -47,17 +44,13 @@ public enum PlaybackNetworkError: Error, Equatable, LocalizedError, Sendable {
 public struct PlaybackNetworkOptions: Equatable, Sendable {
     public enum Format: Equatable, Sendable { case automatic, progressive, httpLiveStreaming }
     public var format: Format
-    /// An explicit adapter decision, NOT a global cookie permission. AVFoundation
-    /// uses standard cookie matching, not our stricter redirect-origin policy.
-    public var allowsStandardHTTPCookiesForHLS: Bool
     /// Only a header-scoped HLS attempt may use the native loopback adapter.
     /// false restores an explicit unsupported error, never a headerless retry.
     public var allowsScopedHLSLoopback: Bool
 
-    public init(format: Format = .automatic, allowsStandardHTTPCookiesForHLS: Bool = false,
+    public init(format: Format = .automatic,
                 allowsScopedHLSLoopback: Bool = true) {
         self.format = format
-        self.allowsStandardHTTPCookiesForHLS = allowsStandardHTTPCookiesForHLS
         self.allowsScopedHLSLoopback = allowsScopedHLSLoopback
     }
 }
@@ -106,29 +99,10 @@ struct PlaybackNetworkPlan {
             throw PlaybackNetworkError.unsupportedContent
         }
         if hls {
-            let custom = !Set(headers.keys).isSubset(of: ["user-agent", "cookie"])
-            let scopedCookie = headers["cookie"] != nil && !options.allowsStandardHTTPCookiesForHLS
-            if custom || scopedCookie {
-                guard options.allowsScopedHLSLoopback else {
-                    throw custom ? PlaybackNetworkError.hlsCustomHeadersUnavailable : .hlsCookieScopeRequiresConsent
-                }
-                _ = try HLSResourceRegistry.validateURL(url)
-                route = .scopedHLS
-                return
-            }
-            if headers["cookie"] != nil {
-                guard options.allowsStandardHTTPCookiesForHLS else {
-                    throw PlaybackNetworkError.hlsCookieScopeRequiresConsent
-                }
-                // Raw cookies are never sent in cleartext by the public-API lane.
-                guard url.scheme?.lowercased() == "https", (url.port ?? 443) == 443 else {
-                    throw PlaybackNetworkError.redirectDenied
-                }
-                _ = try Self.standardCookies(headers["cookie"]!, url: url)
-            }
-            route = .systemHTTP
+            guard options.allowsScopedHLSLoopback else { throw PlaybackNetworkError.hlsCustomHeadersUnavailable }
+            _ = try HLSResourceRegistry.validateURL(url)
+            route = .scopedHLS
         } else if headers.isEmpty && options.format == .automatic {
-            // Preserve the system's ability to recognize extensionless HLS.
             route = .systemHTTP
         } else {
             route = .progressive
@@ -169,32 +143,6 @@ struct PlaybackNetworkPlan {
         return result
     }
 
-    /// Host-only cookies derived from an HTTP Cookie request header, NOT
-    /// Set-Cookie. Do not invent a parent domain, read shared credentials, or
-    /// persist these values. Native cookie scope is explicitly opted into.
-    static func standardCookies(_ header: String, url: URL) throws -> [HTTPCookie] {
-        guard !header.isEmpty else { throw PlaybackNetworkError.invalidHeaders }
-        var cookies: [HTTPCookie] = []
-        var names = Set<String>()
-        for pair in header.split(separator: ";", omittingEmptySubsequences: false) {
-            let fields = pair.trimmingCharacters(in: .whitespaces).split(separator: "=", maxSplits: 1,
-                                                                        omittingEmptySubsequences: false)
-            guard fields.count == 2, !fields[0].isEmpty,
-                  names.insert(String(fields[0])).inserted else { throw PlaybackNetworkError.invalidHeaders }
-            let token = String(fields[0])
-            // Cookie attributes in a request header would enlarge its scope.
-            guard !token.hasPrefix("$"), !token.contains(where: { $0.isWhitespace || $0 == "," }),
-                  !fields[1].contains(",") else { throw PlaybackNetworkError.invalidHeaders }
-            let parsed = HTTPCookie.cookies(withResponseHeaderFields: [
-                "Set-Cookie": "\(token)=\(fields[1]); Path=/; Secure"
-            ], for: url)
-            guard parsed.count == 1, let cookie = parsed.first, cookie.name == token,
-                  cookie.value == String(fields[1]), cookie.domain.lowercased() == url.host?.lowercased(),
-                  cookie.isSecure else { throw PlaybackNetworkError.invalidHeaders }
-            cookies.append(cookie)
-        }
-        return cookies
-    }
 }
 
 /// Rebuild EVERY redirected request instead of trusting inherited headers.

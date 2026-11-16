@@ -3,6 +3,8 @@ import UIKit
 import AVFoundation
 import MeowContracts
 import KSPlayer
+import MeowVideoKernel
+@testable import MeowPlaybackVideo
 @testable import MeowPlayback
 @testable import MeowMusicFeature
 
@@ -15,7 +17,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         defer { gate.open() }
         let audio = AudioAdmissionActions()
         audio.beforeActivation = { _ in try gate.wait() }
-        let controller = PlaybackController(audioSessionActions: audio.actions)
+        let controller = PlaybackController(audioSessionActions: audio.actions, videoDecoderFactory: makePlaybackVideoDecoder)
         var handoffs = 0
         let film = try controller.bindVideo(owner: "film", willCommit: { handoffs += 1; return nil }) { _ in }
         let host = try AudioAdmissionHost(controller: controller, film: film)
@@ -23,11 +25,13 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         let movie = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "ordinary", withExtension: "mp4"))
         let donor = controller.playAttempt(resource: try .init(id: "healthy-music", url: movie, title: "Donor"),
             owner: "music", autoplay: false)
-        let item = try XCTUnwrap(controller.player.currentItem)
+        let item = try XCTUnwrap(controller.activeAudioMedia)
         var releases = 0
         let media = try PlaybackVideoMediaLease(attemptID: "failed-after-frame",
             input: .init(resourceID: "failed-after-frame", url: movie, title: "Candidate")) { releases += 1 }
-        let candidate = try PlaybackVideoTransport(media: media, input: XCTUnwrap(media.takeInput()))
+        let native = try VideoSession()
+        let candidate = try PlaybackVideoTransport(media: media, input: XCTUnwrap(media.takeInput()),
+                                                   decoder: makePlaybackVideoDecoder(session: native))
         try await candidate.prepare()
         film.surface.stage(candidate.output.presentationView)
         try await candidate.renderFirstVideoFrame()
@@ -39,7 +43,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         // Real picture output preceded admission. Only the core's failure
         // delivery is controlled; no synthetic first-frame/clock is supplied.
         let sender = KSMEPlayer(url: movie, options: KSOptions())
-        candidate.kernel.finish(player: sender, error: NSError(domain: "SyntheticNativeFailure", code: Int.max))
+        native.finish(player: sender, error: NSError(domain: "SyntheticNativeFailure", code: Int.max))
         await sender.shutdownAndWait()
         gate.open()
         try await activation.value
@@ -48,7 +52,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
             XCTFail("a failure during audio admission must invalidate the candidate")
         } catch { XCTAssertEqual(error as? PlaybackVideoError, .decodingFailed) }
         XCTAssertEqual(controller.currentAttempt, donor)
-        XCTAssertTrue(controller.player.currentItem === item)
+        XCTAssertTrue(controller.activeAudioMedia === item)
         XCTAssertEqual(handoffs, 0)
         controller.cancelVideoAdmission(candidate: candidate)
         try await candidate.close()
@@ -61,7 +65,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
     func testAudioActivationFailureAfterPictureReadinessPreservesMusicUntilAnExplicitRetry() async throws {
         let audio = AudioAdmissionActions()
         audio.failActivation = true
-        let controller = PlaybackController(audioSessionActions: audio.actions)
+        let controller = PlaybackController(audioSessionActions: audio.actions, videoDecoderFactory: makePlaybackVideoDecoder)
         let movie = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "ordinary", withExtension: "mp4"))
         var events: [PlaybackVideoEvent] = []
         var handoffCaptures = 0, handoffs = 0
@@ -78,7 +82,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         }, evaluatedWith: nil)
         await fulfillment(of: [ready], timeout: 15)
         XCTAssertEqual(controller.snapshot.phase, .paused)
-        let donorItem = try XCTUnwrap(controller.player.currentItem)
+        let donorItem = try XCTUnwrap(controller.activeAudioMedia)
         let donorPosition = controller.snapshot.position
         XCTAssertEqual(audio.activations, 0, "A paused donor has not acquired audio focus")
 
@@ -99,11 +103,11 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         try await rejected.close()
         XCTAssertEqual(rejectedReleases, 1, "The failed native candidate has one drained receipt")
         XCTAssertEqual(controller.currentAttempt, donor)
-        XCTAssertTrue(controller.player.currentItem === donorItem)
+        XCTAssertTrue(controller.activeAudioMedia === donorItem)
         XCTAssertEqual(controller.snapshot.phase, .paused)
         XCTAssertEqual(controller.snapshot.position, donorPosition, accuracy: 0.15)
         XCTAssertFalse(controller.wantsPlayback)
-        XCTAssertEqual(controller.player.rate, 0)
+        XCTAssertEqual(controller.actualRate, 0)
         XCTAssertNil(film.currentAttempt)
         XCTAssertEqual(audio.deactivations, 0, "A failed acquire cannot release someone else's system focus")
         XCTAssertEqual(handoffCaptures, 0)
@@ -119,7 +123,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         XCTAssertEqual(audio.activations, 2)
         XCTAssertEqual(controller.currentAttempt, current)
         XCTAssertEqual(current.owner, "film")
-        XCTAssertNil(controller.player.currentItem)
+        XCTAssertNil(controller.activeAudioMedia)
         XCTAssertEqual(events.filter { $0.kind == .started }.map(\.attemptID), ["audio-accepted"])
         XCTAssertTrue(controller.wantsPlayback)
         XCTAssertEqual(acceptedReleases, 0)
@@ -137,7 +141,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         defer { gate.open() }
         let audio = AudioAdmissionActions()
         audio.beforeActivation = { _ in try gate.wait() }
-        let controller = PlaybackController(audioSessionActions: audio.actions)
+        let controller = PlaybackController(audioSessionActions: audio.actions, videoDecoderFactory: makePlaybackVideoDecoder)
         var handoffs = 0, events: [PlaybackVideoEvent] = []
         let film = try controller.bindVideo(owner: "film", willCommit: { handoffs += 1; return nil }) { events.append($0) }
         let host = try AudioAdmissionHost(controller: controller, film: film)
@@ -145,7 +149,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         let movie = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "ordinary", withExtension: "mp4"))
         let donor = controller.playAttempt(resource: try .init(id: "donor", url: movie, title: "Donor"),
             owner: "music", autoplay: false)
-        let item = try XCTUnwrap(controller.player.currentItem)
+        let item = try XCTUnwrap(controller.activeAudioMedia)
         let drained = expectation(description: "cancelled candidate decoded resources drained")
         let media = try PlaybackVideoMediaLease(attemptID: "held-audio",
             input: .init(resourceID: "held-audio", url: movie, title: "Held video")) { drained.fulfill() }
@@ -153,7 +157,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         defer { work.cancel() }
         await fulfillment(of: [gate.entered], timeout: 10)
         XCTAssertEqual(controller.currentAttempt, donor)
-        XCTAssertTrue(controller.player.currentItem === item)
+        XCTAssertTrue(controller.activeAudioMedia === item)
         XCTAssertFalse(controller.wantsPlayback)
         var closed = false
         let close = Task { try await film.close(); closed = true }
@@ -164,8 +168,8 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         do { _ = try await work.value; XCTFail("A cancelled audio admission cannot commit") }
         catch { XCTAssertEqual(error as? PlaybackVideoError, .staleAttempt) }
         XCTAssertEqual(controller.currentAttempt, donor)
-        XCTAssertTrue(controller.player.currentItem === item)
-        XCTAssertEqual(controller.player.rate, 0)
+        XCTAssertTrue(controller.activeAudioMedia === item)
+        XCTAssertEqual(controller.actualRate, 0)
         XCTAssertFalse(controller.wantsPlayback)
         XCTAssertEqual(handoffs, 0)
         XCTAssertFalse(events.contains { $0.kind == .started })
@@ -179,7 +183,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
             defer { gate.open() }
             let audio = AudioAdmissionActions()
             audio.beforeActivation = { _ in try gate.wait() }
-            let controller = PlaybackController(audioSessionActions: audio.actions)
+            let controller = PlaybackController(audioSessionActions: audio.actions, videoDecoderFactory: makePlaybackVideoDecoder)
             let film = try controller.bindVideo(owner: "film") { event in
                 XCTAssertNotEqual(event.kind, .started)
             }
@@ -219,7 +223,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         let audio = AudioAdmissionActions()
         audio.beforeActivation = { number in if number == 1 { try gate.wait() } }
         let notifications = NotificationCenter()
-        let controller = PlaybackController(audioSessionActions: audio.actions, systemNotifications: notifications)
+        let controller = PlaybackController(audioSessionActions: audio.actions, systemNotifications: notifications, videoDecoderFactory: makePlaybackVideoDecoder)
         var started: [String] = []
         let film = try controller.bindVideo(owner: "film") { event in
             if event.kind == .started { started.append(event.attemptID) }
@@ -248,7 +252,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         let audio = AudioAdmissionActions()
         audio.failDeactivation = true
         audio.beforeDeactivation = { number in if number == 1 { try? gate.wait() } }
-        let controller = PlaybackController(audioSessionActions: audio.actions)
+        let controller = PlaybackController(audioSessionActions: audio.actions, videoDecoderFactory: makePlaybackVideoDecoder)
         let film = try controller.bindVideo(owner: "film") { _ in }
         let host = try AudioAdmissionHost(controller: controller, film: film)
         addTeardownBlock {
@@ -275,7 +279,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: file) }
         let next = controller.playAttempt(resource: try .init(id: "next", url: file, title: "Next"), owner: "music")
         _ = controller.setVolume(0, attempt: next)
-        XCTAssertEqual(controller.player.rate, 0)
+        XCTAssertEqual(controller.actualRate, 0)
         gate.open()
         let releaseError = await close.value
         XCTAssertEqual(releaseError, .outputFailed)
@@ -294,7 +298,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
     func testSuccessfulVideoCommitRetiresPendingOnlyMusicAndRejectsLateResolutionWithoutStoppingVideo() async throws {
         let file = try musicFile()
         defer { try? FileManager.default.removeItem(at: file) }
-        let controller = PlaybackController(audioSessionActions: .init(activate: {}, deactivate: {}))
+        let controller = PlaybackController(audioSessionActions: .init(activate: {}, deactivate: {}), videoDecoderFactory: makePlaybackVideoDecoder)
         let service = VideoHandoffMusicService(file: file)
         let music = MusicViewModel(service: service, playback: controller)
         let binding = try bindMusic(music, to: controller)
@@ -332,7 +336,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         await request.value
         await music.flushPlaybackFacts()
         XCTAssertEqual(controller.currentAttempt, video, "A late, non-cooperative source receipt cannot steal video")
-        XCTAssertNil(controller.player.currentItem)
+        XCTAssertNil(controller.activeAudioMedia)
         XCTAssertNil(music.activeNativeAttemptID)
         XCTAssertEqual(music.phase, .idle)
         XCTAssertNil(music.error)
@@ -351,7 +355,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
     func testSuccessfulVideoCommitPersistsMusicExitAndRetiresDelayedNextWithoutTakingNewVideo() async throws {
         let file = try musicFile()
         defer { try? FileManager.default.removeItem(at: file) }
-        let controller = PlaybackController(audioSessionActions: .init(activate: {}, deactivate: {}))
+        let controller = PlaybackController(audioSessionActions: .init(activate: {}, deactivate: {}), videoDecoderFactory: makePlaybackVideoDecoder)
         let service = VideoHandoffMusicService(file: file)
         let music = MusicViewModel(service: service, playback: controller)
         let binding = try bindMusic(music, to: controller)
@@ -411,7 +415,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         for paused in [false, true] {
             let file = try musicFile()
             defer { try? FileManager.default.removeItem(at: file) }
-            let controller = PlaybackController(audioSessionActions: .init(activate: {}, deactivate: {}))
+            let controller = PlaybackController(audioSessionActions: .init(activate: {}, deactivate: {}), videoDecoderFactory: makePlaybackVideoDecoder)
             let service = VideoHandoffMusicService(file: file)
             let music = MusicViewModel(service: service, playback: controller)
             let binding = try bindMusic(music, to: controller)
@@ -421,7 +425,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
             await waitForMusic(controller, model: music)
             let donor = try XCTUnwrap(controller.currentAttempt)
             if paused { XCTAssertTrue(controller.systemCommand(.pause, generation: donor.id)) }
-            let item = controller.player.currentItem, candidate = music.candidate, selection = music.selectionID
+            let item = controller.activeAudioMedia, candidate = music.candidate, selection = music.selectionID
             var handoffs = 0
             let film = try controller.bindVideo(owner: "film", willCommit: {
                 handoffs += 1
@@ -440,7 +444,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
                 } catch { XCTAssertEqual(error as? PlaybackVideoError, .cancelled) }
                 XCTAssertEqual(handoffs, 0)
                 XCTAssertEqual(controller.currentAttempt, donor)
-                XCTAssertTrue(controller.player.currentItem === item)
+                XCTAssertTrue(controller.activeAudioMedia === item)
                 XCTAssertEqual(controller.wantsPlayback, !paused)
                 XCTAssertEqual(music.activeNativeAttemptID, donor.id)
                 XCTAssertEqual(music.candidate?.attemptId, candidate?.attemptId)
@@ -507,7 +511,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         for next in ["still-failing", "system-recovered", "music"] {
             let audio = AudioAdmissionActions()
             audio.failDeactivation = true
-            let controller = PlaybackController(audioSessionActions: audio.actions)
+            let controller = PlaybackController(audioSessionActions: audio.actions, videoDecoderFactory: makePlaybackVideoDecoder)
             let movie = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "ordinary", withExtension: "mp4"))
             let film = try controller.bindVideo(owner: "film") { _ in }
             let fixture = try AudioAdmissionHost(controller: controller, film: film)
@@ -583,7 +587,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
                 }
             }
             defer { retry.signal() }
-            let controller = PlaybackController(audioSessionActions: audio.actions)
+            let controller = PlaybackController(audioSessionActions: audio.actions, videoDecoderFactory: makePlaybackVideoDecoder)
             let movie = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "ordinary", withExtension: "mp4"))
             let film = try controller.bindVideo(owner: "film") { _ in }
             let fixture = try AudioAdmissionHost(controller: controller, film: film)
@@ -594,7 +598,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
             }
             let media = try PlaybackVideoMediaLease(attemptID: "controller-first",
                 input: .init(resourceID: "controller-first", url: movie, title: "Synthetic video")) {}
-            let transport = try PlaybackVideoTransport(media: media, input: XCTUnwrap(media.takeInput()))
+            let transport = try PlaybackVideoTransport(media: media, input: XCTUnwrap(media.takeInput()), decoder: makePlaybackVideoDecoder())
             try await transport.prepare()
             film.surface.stage(transport.output.presentationView)
             try await transport.renderFirstVideoFrame()
@@ -602,7 +606,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
             try await controller.prepareVideoAudio(admission: admission, owner: film.owner, paused: false)
             _ = try controller.commitVideo(transport, lease: film, admission: admission, paused: false)
             if trigger == "stop" { controller.stop() }
-            else if trigger == "failure" { transport.kernel.onFailure?(.decodeFailed) }
+            else if trigger == "failure" { transport.kernel.onFailure?(PlaybackVideoError.decodingFailed) }
             else {
                 _ = controller.playAttempt(resource: try .init(id: "next-music",
                     url: movie, title: "Synthetic music"), owner: "music", autoplay: false)
@@ -618,11 +622,11 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
                 // Wait for the new paused owner to finish its own successful
                 // system release before measuring the retired lease's close.
                 let released = expectation(for: NSPredicate { _, _ in
-                    MainActor.assumeIsolated { audio.deactivations == 2 && controller.player.currentItem?.status == .readyToPlay }
+                    MainActor.assumeIsolated { audio.deactivations == 2 && controller.isMusicPrepared }
                 }, evaluatedWith: nil)
                 await fulfillment(of: [released], timeout: 15)
                 XCTAssertEqual(audio.deactivations, 2)
-                XCTAssertEqual(controller.player.currentItem?.status, .readyToPlay)
+                XCTAssertEqual(controller.isMusicPrepared, true)
             }
             let before = audio.deactivations
             for _ in 0..<2 {
@@ -637,8 +641,8 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
     }
 }
 
-/// Only business receipts are controlled. Music uses the shared AVPlayer and
-/// video uses real decoding/first-frame output on that same controller.
+/// Only business receipts are controlled. Music uses the independent PCM core and
+/// video uses real decoding/first-frame output on the shared owner controller.
 private actor VideoHandoffMusicService: MusicServing {
     static let selection = MusicPlaybackSelection(installationId: "official:wy", generation: 1,
         siteId: "wy", sourceKey: "synthetic", quality: "128k")
