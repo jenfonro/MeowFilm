@@ -27,8 +27,8 @@
 
 搜索会话与播放通过同一个 App 运行器的数据 owner 读取内容，底层保留 `film.data.search`／`film.data.metadata` 契约，
 共用[影视数据 owner](../../runtime/film-playback.md) 的缓存、完整度、配置代次和在途合并，
-不另建原生成功详情缓存。TMDB 设置与图片仍由
-[元数据模块](../../runtime/metadata-data.md) 持有；聚合规则由 Node 规则 owner 保存。
+不另建原生成功详情缓存。[元数据模块](../../runtime/metadata-data.md) 消费有效 TMDB 配置并转发图片；
+Node 规则 owner 捕获聚合规则快照并执行，设置的持久写入 owner 由端侧装配明确，不形成第二份可编辑配置。
 综合搜索使用 `/3/search/multi`、`{query:原查询,page:1,language:'zh-CN'}`、
 `imageSize:'w500'`；完整详情按原 `movie`／`tv` 类型与 ID 请求，
 使用 `{language:'zh-CN',append_to_response:'credits,similar,images'}`、

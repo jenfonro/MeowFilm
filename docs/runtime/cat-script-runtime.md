@@ -12,6 +12,8 @@ contract: cat.script.v2
 
 `createCatScriptModule({dataRoot,configuration?})` 接收受信调用方选定的稳定绝对数据目录。公共独立入口见 [Runtime HTTP](runtime-bridge.md)；模块负责完整源码候选、安装、Node Worker、私有卷、服务端口、Cat 调用和关闭。未注入 `configuration` 时也拥有来源设置；注入后的边界见[原生来源意图](#原生来源意图注入)。iOS 接入见[影视设置](../ios/film-settings.md#猫源与公共宿主)，Windows 接入见[平台接入](../windows/app-runtime.md)；不提供旧 wire 兼容。
 
+以下导入、管理事务及 version 1 设置文件描述未注入 `configuration` 的默认装配。iOS／Windows 正式 App 注入原生来源配置后，`install/import/edit/enable/uninstall` 返回 `PERMISSION_DENIED`；新增、编辑、启停与删除由原生唯一提交，`update` 只接受 installationId，从当前来源读取输入，不接收 sourceRevision。`start/status/refresh/restart/invoke` 仍消费公共 Cat owner；refresh 可按最新来源意图下载、加载和替换。版本 2 文件只保存运行器安装事实，列表结果另带 `inputRevision`；共同边界见[原生来源意图注入](#原生来源意图注入)，Windows 接线见[原生设置](../windows/native-settings.md#猫源意图与安装事实)，不把默认导入回滚承诺套用到已提交的原生来源变更。
+
 ## HTTP 与完整导入
 
 本节的上传及来源写入方法描述无 `configuration` 注入的独立模式；注入模式的拒写与更新行为见[下文](#原生来源意图注入)。状态、调用、管理同步和资源生命周期仍共用同一模块。

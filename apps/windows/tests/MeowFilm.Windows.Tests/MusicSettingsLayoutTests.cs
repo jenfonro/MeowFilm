@@ -692,28 +692,29 @@ public static partial class MusicUiTests
                     True(((MusicSourcesSettingsView)view.FindName("SourcesPage")).IsVisible &&
                         footer.Visibility == Visibility.Collapsed, "independent source management keeps the player hidden");
                     var sources = (MusicSourcesSettingsView)view.FindName("SourcesPage");
-                    var items = (ItemsControl)sources.FindName("SourceList");
-                    var body = (ScrollViewer)items.Template.FindName("ItemsScroll", items);
-                    var sourceHeader = (Grid)sources.FindName("SourceHeader");
+                    var management = (ManagementList)sources.FindName("SourceList");
+                    var items = Visuals(management).OfType<ListBox>().Single();
+                    var body = Visuals(items).OfType<ScrollViewer>().First();
                     var firstRow = Visuals((DependencyObject)items.ItemContainerGenerator.ContainerFromIndex(0))
-                        .OfType<Grid>().Single(grid => grid.ColumnDefinitions.Count == 7);
+                        .OfType<ManagementRowView>().Single();
                     var firstName = firstRow.Children.OfType<StackPanel>().Single(panel => Grid.GetColumn(panel) == 2);
-                    var nameHeader = sourceHeader.Children.OfType<TextBlock>().Single(text => text.Text == "名称");
+                    var nameHeader = Visuals(management).OfType<TextBlock>().Single(text => text.Text == "名称");
                     True(Math.Abs(firstName.TranslatePoint(new Point(), sources).X -
                         nameHeader.TranslatePoint(new Point(), sources).X) < 1,
                         $"table name alignment at {size.Width}: header={nameHeader.TranslatePoint(new Point(), sources).X} " +
-                        $"row={firstName.TranslatePoint(new Point(), sources).X}; headerWidth={sourceHeader.ActualWidth} " +
+                        $"row={firstName.TranslatePoint(new Point(), sources).X}; headerWidth={management.ActualWidth} " +
                         $"viewport={body.ViewportWidth} extent={body.ExtentWidth} rowWidth={firstRow.ActualWidth}");
                     if (size.Width == 860)
                     {
-                        True(body.ViewportHeight >= 82 && body.ScrollableHeight > 0,
+                        // ManagementList scrolls in logical rows; measure the rendered viewport in DIP.
+                        var viewport = (ScrollContentPresenter)body.Template.FindName("PART_ScrollContentPresenter", body);
+                        True(viewport.ActualHeight >= 82 && body.ScrollableHeight > 0,
                             "the minimum shell retains a visible source row and its internal scrollbar");
                     }
                     CaptureSettings(root, "replica-shell-source-" + (int)size.Width + ".png");
                     body.ScrollToRightEnd(); await Drain(); root.UpdateLayout();
-                    var headerScroll = (ScrollViewer)sources.FindName("HeaderScroll");
-                    True(Math.Abs(headerScroll.HorizontalOffset - body.HorizontalOffset) < 1,
-                        "the fixed header follows horizontal source-table scrolling");
+                    True(body.HorizontalScrollBarVisibility == ScrollBarVisibility.Disabled && body.ScrollableWidth == 0,
+                        "source columns fit the management card without horizontal scrolling");
                     var remove = Visuals(sources).OfType<Button>().First(button => Equals(button.Content, "删除"));
                     var removeBounds = new Rect(remove.TranslatePoint(new Point(), sources), remove.RenderSize);
                     True(removeBounds.Left >= 0 && removeBounds.Right <= sources.ActualWidth,
@@ -791,8 +792,9 @@ public static partial class MusicUiTests
             Wheel(picker, UIElement.PreviewMouseWheelEvent); Equal(0d, scroll.VerticalOffset);
             picker.IsDropDownOpen = false; await Drain();
             ReplicaAnchors(view)[^1].IsChecked = true; await Drain(); view.UpdateLayout();
-            var sources = (ItemsControl)((MusicSourcesSettingsView)view.FindName("SourcesPage")).FindName("SourceList");
-            var body = (ScrollViewer)sources.Template.FindName("ItemsScroll", sources);
+            var sources = Visuals((ManagementList)((MusicSourcesSettingsView)view.FindName("SourcesPage")).FindName("SourceList"))
+                .OfType<ListBox>().Single();
+            var body = Visuals(sources).OfType<ScrollViewer>().First();
             True(body.ScrollableHeight > 0, "source fixture overflows its own list");
             Wheel((UIElement)sources.ItemContainerGenerator.ContainerFromIndex(0), UIElement.PreviewMouseWheelEvent);
             Wheel((UIElement)sources.ItemContainerGenerator.ContainerFromIndex(0), UIElement.MouseWheelEvent);
@@ -868,9 +870,9 @@ public static partial class MusicUiTests
             True(tabs.Select(tab => (string)tab.Content).SequenceEqual(new[] { "外观", "首页数据源", "缓存控制" }), "general areas match their contents");
             int qualityReads = f.Calls.Count("music.quality.settings.get");
             int sourceReads = f.Calls.Count("music.catalogSource.settings.get");
-            tabs[1].IsChecked = true; await Drain();
+            tabs[1].IsChecked = true; await Until(() => f.Module.CanEditCatalogSource);
             True(f.Module.HomeSourceSettingsView.IsVisible && !f.Module.AppearanceSettingsView.IsVisible, "source controls only mount in their own area");
-            Equal(sourceReads, f.Calls.Count("music.catalogSource.settings.get"));
+            Equal(sourceReads + 1, f.Calls.Count("music.catalogSource.settings.get"));
             tabs[2].IsChecked = true; await Drain();
             var cache = f.Module.CacheSettingsView;
             var clear = Visuals(cache).OfType<Button>().Single(button => Equals(button.Content, "清空播放缓存"));

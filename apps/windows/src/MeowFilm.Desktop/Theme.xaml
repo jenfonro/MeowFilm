@@ -28,6 +28,10 @@
     <SolidColorBrush x:Key="MeowFilm.Brush.Focus" Color="#16A34A" />
     <SolidColorBrush x:Key="MeowFilm.Brush.Error" Color="#B62535" />
     <SolidColorBrush x:Key="MeowFilm.Brush.ErrorSurface" Color="#FFF0F0" />
+    <SolidColorBrush x:Key="MeowFilm.Brush.ManagementNeutral" Color="#F9FAFB"/>
+    <SolidColorBrush x:Key="MeowFilm.Brush.ManagementBlue" Color="#EFF6FF"/>
+    <SolidColorBrush x:Key="MeowFilm.Brush.ManagementBlueText" Color="#1D4ED8"/>
+    <SolidColorBrush x:Key="MeowFilm.Brush.ManagementSuccess" Color="#F0FDF4"/>
     <FontFamily x:Key="MeowFilm.Font.Icons">Segoe Fluent Icons, Segoe MDL2 Assets, Segoe UI Symbol</FontFamily>
     <BooleanToVisibilityConverter x:Key="MeowFilm.BoolToVisibility" />
 
@@ -139,6 +143,69 @@
     <Style TargetType="ContextMenu" BasedOn="{StaticResource MeowFilm.ContextMenu}"/>
     <Style TargetType="MenuItem" BasedOn="{StaticResource MeowFilm.MenuItem}"/>
 
+    <Style x:Key="MeowFilm.SettingsNavigationRow" TargetType="RowDefinition"><Setter Property="Height" Value="36"/></Style>
+    <Style x:Key="MeowFilm.SettingsPage" TargetType="Grid"><Setter Property="Margin" Value="32,0,32,12"/></Style>
+    <Style x:Key="MeowFilm.SettingsNavigationBar" TargetType="Border">
+        <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/><Setter Property="BorderThickness" Value="0,0,0,1"/>
+        <Style.Triggers><Trigger Property="local:DesktopTheme.IsHighContrast" Value="True"><Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger></Style.Triggers>
+    </Style>
+    <Style x:Key="MeowFilm.ManagementTitleRow" TargetType="StackPanel">
+        <Setter Property="Orientation" Value="Horizontal"/><Setter Property="Margin" Value="0,8,0,8"/><Setter Property="VerticalAlignment" Value="Center"/>
+    </Style>
+    <Style x:Key="MeowFilm.ManagementRowButton" TargetType="Button">
+        <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
+        <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="FontWeight" Value="Normal"/>
+        <Setter Property="Height" Value="30"/><Setter Property="MinHeight" Value="30"/><Setter Property="Padding" Value="12,0"/>
+        <Setter Property="Margin" Value="4,0,0,0"/><Setter Property="VerticalAlignment" Value="Center"/>
+        <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.ManagementBlueText}"/>
+        <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ManagementBlue}"/><Setter Property="BorderBrush" Value="Transparent"/><Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
+        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+            <Border x:Name="Pill" CornerRadius="15" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}">
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" TextElement.Foreground="{TemplateBinding Foreground}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Pill" Property="Opacity" Value=".8"/></Trigger>
+                <Trigger Property="IsPressed" Value="True"><Setter TargetName="Pill" Property="Opacity" Value=".65"/></Trigger>
+            </ControlTemplate.Triggers>
+        </ControlTemplate></Setter.Value></Setter>
+        <Style.Triggers>
+            <Trigger Property="IsEnabled" Value="False"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Disabled}"/></Trigger>
+            <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+                <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/><Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+            </Trigger>
+            <MultiTrigger><MultiTrigger.Conditions><Condition Property="local:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsEnabled" Value="False"/></MultiTrigger.Conditions><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/></MultiTrigger>
+        </Style.Triggers>
+    </Style>
+    <Style x:Key="MeowFilm.ManagementRowButton.Primary" TargetType="Button" BasedOn="{StaticResource MeowFilm.ManagementRowButton}">
+        <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.OnAccent}"/><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.AccentText}"/>
+    </Style>
+    <Style x:Key="MeowFilm.ManagementRowButton.Danger" TargetType="Button" BasedOn="{StaticResource MeowFilm.ManagementRowButton}">
+        <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Error}"/><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ErrorSurface}"/>
+    </Style>
+    <Style x:Key="MeowFilm.ManagementDeleteSelected" TargetType="Button" BasedOn="{StaticResource MeowFilm.ManagementRowButton.Danger}">
+        <Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Error}"/><Setter Property="Height" Value="34"/><Setter Property="MinHeight" Value="34"/>
+    </Style>
+    <Style x:Key="MeowFilm.ManagementStatus" TargetType="local:ManagementStatus" BasedOn="{StaticResource MeowFilm.ManagementRowButton}">
+        <Setter Property="Margin" Value="6,0"/><Setter Property="HorizontalAlignment" Value="Center"/>
+        <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ManagementNeutral}"/>
+        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="local:ManagementStatus">
+            <Border CornerRadius="15" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <Grid Width="10" Height="10" Margin="0,0,6,0">
+                        <Ellipse Stroke="{TemplateBinding Foreground}" StrokeThickness="1"/>
+                        <Ellipse Fill="{TemplateBinding Foreground}" Width="4" Height="4"/>
+                    </Grid>
+                    <ContentPresenter VerticalAlignment="Center" RecognizesAccessKey="True" TextElement.Foreground="{TemplateBinding Foreground}"/>
+                </StackPanel>
+            </Border>
+        </ControlTemplate></Setter.Value></Setter>
+        <Style.Triggers>
+            <Trigger Property="Tone" Value="Success"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.AccentText}"/><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ManagementSuccess}"/></Trigger>
+            <Trigger Property="Tone" Value="Failure"><Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Error}"/><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.ErrorSurface}"/></Trigger>
+            <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></Trigger>
+        </Style.Triggers>
+    </Style>
     <Style x:Key="MeowFilm.SettingsArea" TargetType="RadioButton">
         <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" />
         <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Body}" />
@@ -146,7 +213,7 @@
         <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
         <Setter Property="TextOptions.TextRenderingMode" Value="Auto" />
         <Setter Property="Margin" Value="0,0,32,0" />
-        <Setter Property="Height" Value="44" />
+        <Setter Property="Height" Value="36" />
         <Setter Property="FocusVisualStyle" Value="{DynamicResource MeowFilm.FocusVisual}" />
         <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}" />
         <Setter Property="Template">
@@ -516,7 +583,8 @@
     </Style>
     <Style x:Key="MeowFilm.ManagementListItem" TargetType="ListBoxItem">
         <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/>
-        <Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="Transparent"/>
+        <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Surface}"/><Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
+        <Setter Property="Margin" Value="0,0,0,4"/>
         <Setter Property="BorderThickness" Value="1"/><Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
         <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
             <Border CornerRadius="12" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
@@ -737,7 +805,7 @@
   <Style.Triggers><Trigger Property="local:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger></Style.Triggers>
  </Style>
  <Style x:Key="MeowFilm.SettingsSection" TargetType="Border">
-  <Setter Property="Padding" Value="0,12"/><Setter Property="BorderThickness" Value="0,0,0,1"/>
+  <Setter Property="Padding" Value="0,8"/><Setter Property="BorderThickness" Value="0,0,0,1"/>
   <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
  </Style>
  <Style x:Key="MeowFilm.ManagementInput" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}">
@@ -766,17 +834,27 @@
   </Style.Triggers>
  </Style>
  <Style x:Key="MeowFilm.ManagementSearch" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}">
-  <Setter Property="Height" Value="38"/><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.InputSurface}"/>
+  <Setter Property="Height" Value="38"/><Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Surface}"/>
   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TextBox">
-   <Border CornerRadius="19" Background="{TemplateBinding Background}">
+   <Border CornerRadius="19" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
     <Grid>
-     <TextBlock Text="&#xE721;" FontFamily="{DynamicResource MeowFilm.Font.Icons}" FontSize="{StaticResource MeowFilm.Font.Size.Body}" Margin="14,0,0,0" VerticalAlignment="Center" Foreground="{DynamicResource MeowFilm.Brush.Muted}"/>
+     <TextBlock x:Name="SearchIcon" Text="&#xE721;" FontFamily="{DynamicResource MeowFilm.Font.Icons}" FontSize="{StaticResource MeowFilm.Font.Size.Body}" Margin="14,0,0,0" VerticalAlignment="Center" Foreground="{DynamicResource MeowFilm.Brush.Muted}"/>
      <ScrollViewer x:Name="PART_ContentHost" Margin="36,0,12,0" VerticalAlignment="Center"/>
      <TextBlock x:Name="Hint" Text="{TemplateBinding Tag}" Margin="36,0,12,0" VerticalAlignment="Center" Foreground="{DynamicResource MeowFilm.Brush.Muted}" IsHitTestVisible="False" Visibility="Collapsed"/>
     </Grid>
    </Border>
-   <ControlTemplate.Triggers><Trigger Property="Text" Value=""><Setter TargetName="Hint" Property="Visibility" Value="Visible"/></Trigger></ControlTemplate.Triggers>
+   <ControlTemplate.Triggers>
+    <Trigger Property="Text" Value=""><Setter TargetName="Hint" Property="Visibility" Value="Visible"/></Trigger>
+    <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+     <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+     <Setter TargetName="Hint" Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+     <Setter TargetName="SearchIcon" Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+    </Trigger>
+   </ControlTemplate.Triggers>
   </ControlTemplate></Setter.Value></Setter>
+  <Style.Triggers><Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+   <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+  </Trigger></Style.Triggers>
  </Style>
  <Style x:Key="MeowFilm.ManagementCheck" TargetType="CheckBox">
   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>

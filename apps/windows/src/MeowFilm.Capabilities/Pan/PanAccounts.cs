@@ -3,14 +3,17 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-public sealed partial class PanAccounts(IRuntimeClient runtime) : INotifyPropertyChanged, IAsyncDisposable
+public sealed partial class PanAccounts(IRuntimeClient runtime, IDocumentStore store) : INotifyPropertyChanged, IAsyncDisposable
 {
+    private readonly PanSettingsStore settings = new(runtime, store);
     private readonly HashSet<Task> pending = [];
     private CancellationTokenSource? loading;
     private Task load = Task.CompletedTask;
+    private Task nativeWrites = Task.CompletedTask;
     private long epoch;
     private bool active, stopping;
     private bool loadFailed;
@@ -55,6 +58,7 @@ public sealed partial class PanAccounts(IRuntimeClient runtime) : INotifyPropert
         PanAccountException { Code: "LOGIN_EXPIRED" } => "二维码已过期",
         PanAccountException { Code: "CHALLENGE_REQUIRED" } => "网盘需要登录验证",
         PanAccountException { Code: "STALE_ACCOUNT" } => "网盘账号已变更",
+        BridgeException { Code: "STALE_ACCOUNT" } => "网盘账号已变更",
         PanAccountException { Code: "STORAGE_ERROR" or "CORRUPT_STORAGE" } => "网盘凭据保存失败",
         BridgeException { Code: "STORAGE_ERROR" or "CORRUPT_STORAGE" } => "网盘凭据保存失败",
         PanAccountException { Code: "INVALID_REQUEST" } => "请检查网盘凭据格式",
@@ -86,24 +90,20 @@ public sealed partial class PanAccounts(IRuntimeClient runtime) : INotifyPropert
         {
             try
             {
-                await cleanup;
+                await nativeWrites;
                 request.Token.ThrowIfCancellationRequested();
                 if (Rows.Count == 0)
                 {
-                    var providers = await Call("providers", token: request.Token);
-                    var rows = providers.GetProperty("providers").EnumerateArray().Select(value => new PanAccountRow(value)).ToArray();
+                    var rows = PanSettingsStore.Providers.Select(value => new PanAccountRow(value)).ToArray();
                     if (!active || ticket != epoch) return;
                     foreach (var row in rows) { row.Active = true; Rows.Add(row); }
                 }
                 var generations = Rows.ToDictionary(row => row.Provider, row => row.Generation);
-                var reply = await Call("settings.get", token: request.Token);
-                var accounts = reply.GetProperty("accounts").EnumerateArray().Select(PanAccountSnapshot.Read)
+                var accounts = (await settings.ReadAsync(request.Token))
                     .ToDictionary(account => account.Provider);
                 if (!active || ticket != epoch) return;
                 foreach (var row in Rows)
                     if (row.Generation == generations[row.Provider]) row.Publish(accounts[row.Provider]);
-                await Task.WhenAll(Rows.Where(row => row.Configured && row.SupportsRefresh &&
-                    row.Generation == generations[row.Provider]).Select(RefreshAsync));
             }
             catch (OperationCanceledException) when (request.IsCancellationRequested) { }
             catch (Exception error)
@@ -123,14 +123,19 @@ public sealed partial class PanAccounts(IRuntimeClient runtime) : INotifyPropert
     {
         if (!active || stopping || !Rows.Contains(row) || !row.HasSnapshot || !row.Configured ||
             row.IsBusy || row.Editing || !row.SupportsRefresh) return Task.CompletedTask;
-        var before = cleanup;
+        var before = Task.WhenAll(cleanup, nativeWrites);
         return RunRow(row, async (request, current) =>
         {
             await before;
             if (!current()) return;
             var reply = await Call("refresh", new { provider = row.Provider }, request.Token);
             if (!reply.GetProperty("refreshed").GetBoolean()) throw new BridgeException("INVALID_RESPONSE");
-            if (current()) row.Publish(PanAccountSnapshot.Read(reply.GetProperty("account")));
+            var reported = PanAccountSnapshot.Read(reply.GetProperty("account"));
+            var saved = await settings.ReadAsync(row.Provider, request.Token);
+            if (!current()) return;
+            row.Publish(saved);
+            ValidateOnlineAccount(row.Provider, reported, saved);
+            row.Publish(saved with { Status = reported.Status });
         });
     }
 
@@ -138,13 +143,13 @@ public sealed partial class PanAccounts(IRuntimeClient runtime) : INotifyPropert
     {
         if (!active || stopping || !Rows.Contains(row) || !row.CanLogout) return Task.CompletedTask;
         long revision = row.Revision;
-        var before = cleanup;
-        return cleanup = RunRow(row, async (_, current) =>
+        var before = nativeWrites;
+        return nativeWrites = RunRow(row, async (request, current) =>
         {
             await Task.Yield(); // Publish the drain before an admitted clear can outlive its page.
             await before;
             if (!current()) return;
-            var account = PanAccountSnapshot.Read(await Call("settings.clear", new { provider = row.Provider }));
+            var account = await settings.ClearAsync(row.Provider, request.Token);
             if (account.Revision <= revision || account.Configured || account.Status != "signedOut")
                 throw new BridgeException("INVALID_RESPONSE");
             if (current()) { row.Publish(account); Notify("已退出网盘账号"); }
@@ -153,7 +158,7 @@ public sealed partial class PanAccounts(IRuntimeClient runtime) : INotifyPropert
 
     private Task RunRow(PanAccountRow row, Func<CancellationTokenSource, Func<bool>, Task> execute)
     {
-        long generation = ++row.Generation, ticket = epoch;
+        long revision = row.Revision, generation = ++row.Generation, ticket = epoch;
         var request = new CancellationTokenSource();
         row.Request = request; row.Changed();
         Notify("");
@@ -167,7 +172,20 @@ public sealed partial class PanAccounts(IRuntimeClient runtime) : INotifyPropert
             {
                 if (Current())
                 {
-                    if (error is PanAccountException { Code: "AUTH_REQUIRED" or "AUTH_FAILED" }) row.Expire();
+                    if (error is PanAccountException { Code: "AUTH_REQUIRED" or "AUTH_FAILED" or "STALE_ACCOUNT" } ||
+                        error is BridgeException { Code: "STALE_ACCOUNT" })
+                    {
+                        try
+                        {
+                            var saved = await settings.ReadAsync(row.Provider, request.Token);
+                            if (!Current()) return;
+                            bool expired = error is PanAccountException { Code: "AUTH_REQUIRED" or "AUTH_FAILED" } &&
+                                saved.Configured && saved.Revision == revision;
+                            row.Publish(expired ? saved with { Status = "expired" } : saved);
+                        }
+                        catch (OperationCanceledException) when (request.IsCancellationRequested) { return; }
+                        catch (Exception readError) { if (Current()) Notify(Error(readError)); return; }
+                    }
                     Notify(Error(error));
                 }
             }
@@ -178,6 +196,15 @@ public sealed partial class PanAccounts(IRuntimeClient runtime) : INotifyPropert
                 if (ReferenceEquals(login?.Row, row)) LoginChanged();
             }
         }
+    }
+
+    private static void ValidateOnlineAccount(string provider, PanAccountSnapshot reported, PanAccountSnapshot saved)
+    {
+        if (reported.Provider != provider) throw new BridgeException("INVALID_RESPONSE");
+        if (reported.Revision != saved.Revision) throw new PanAccountException("STALE_ACCOUNT");
+        if (reported.Configured != saved.Configured || !reported.Fields.Order().SequenceEqual(saved.Fields.Order()) ||
+            reported.Status != "signedIn" || !saved.Configured)
+            throw new BridgeException("INVALID_RESPONSE");
     }
 
     public Task DeactivateAsync()
@@ -191,7 +218,7 @@ public sealed partial class PanAccounts(IRuntimeClient runtime) : INotifyPropert
             request?.Cancel(); row.Changed();
         }
         Changed(nameof(IsLoading));
-        return CloseLoginAsync();
+        return Task.WhenAll(CloseLoginAsync(), nativeWrites);
     }
 
     internal async Task PrepareShutdownAsync()

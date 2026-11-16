@@ -50,6 +50,7 @@
 - [影视搜索](windows/film-search.md)
 - [小说、书架与原生阅读器](windows/novel.md)
 - [本地文档与敏感信息保护](windows/protected-storage.md)
+- [原生设置与运行器消费](windows/native-settings.md)
 - [公共图像](windows/artwork.md)
 - [系统媒体会话](windows/system-media.md)
 

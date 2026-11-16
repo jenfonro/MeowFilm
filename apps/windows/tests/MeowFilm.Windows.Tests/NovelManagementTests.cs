@@ -20,6 +20,9 @@ public static class NovelManagementTests
         yield return new("novel management import: external rule identity nullable fields and tag-only group changes", Imports);
         yield return new("novel management theme: inputs and titles follow resources and window high contrast", () => NovelTests.Sta(ThemeResources));
         yield return new("novel management components: visible selection inverse native tabs fields and previews", () => NovelTests.Sta(Components));
+        yield return new("novel management layout: shared columns virtualized cells selection and reorder reports", () => NovelTests.Sta(ListLayout));
+        yield return new("novel management drag: stationary edges reach unrealized rows and report stable order", () => NovelTests.Sta(DragAutoScroll));
+        yield return new("novel management drag: cancellation invalid data filtering and lifecycle release scrolling", () => NovelTests.Sta(DragLifetime));
         yield return new("novel management QR: local image decodes original rule text and rejects invalid images", () => NovelTests.Sta(Qr));
         yield return new("novel management save: accepted revisions remain editable without another list request", () => NovelTests.Sta(SavedRevision));
     }
@@ -93,7 +96,10 @@ public static class NovelManagementTests
         var preview = new ManagementImportSelection([new("导入标题", "导入说明", "新增"), new("已存在标题", "已存在说明", "已存在")]);
         root.Children.Add(preview);
         var list = new ManagementList { Height = 300 }; root.Children.Add(list);
-        var host = GeneralAppearanceTests.Window(root); DesktopTheme.SetIsHighContrast(host, false);
+        var statuses = new[] { new ManagementStatus("未检测"), new ManagementStatus("通过", ManagementStatusTone.Success), new ManagementStatus("失效", ManagementStatusTone.Failure) };
+        foreach (var status in statuses) root.Children.Add(status);
+        var delete = ManagementList.Button("删除所选", () => { }); delete.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.ManagementDeleteSelected"); root.Children.Add(delete);
+        var host = GeneralAppearanceTests.Window(root); host.Left = 40; host.Top = 40; DesktopTheme.SetIsHighContrast(host, false);
         try
         {
             host.Show();
@@ -141,6 +147,15 @@ public static class NovelManagementTests
 
             void Foreground(bool contrast)
             {
+                var searchBackground = contrast ? SystemColors.WindowBrush : (Brush)root.FindResource("MeowFilm.Brush.Surface");
+                Check(list.Search.Background == searchBackground, "Management search must be white normally and system-colored in high contrast.");
+                Check(statuses.All(status => status.FontWeight == FontWeights.Normal) && delete.FontWeight == FontWeights.Normal);
+                Check(statuses.All(status => NovelTests.Find<System.Windows.Shapes.Ellipse>(status).Count() == 2), "Status capsules must render a ring with a center dot.");
+                if (contrast)
+                    Check(statuses.All(status => status.Foreground == SystemColors.WindowTextBrush && status.Background == SystemColors.WindowBrush), "Status capsules must preserve high-contrast colors.");
+                else
+                    Check(statuses[1].Foreground == root.FindResource("MeowFilm.Brush.AccentText") && statuses[2].Foreground == root.FindResource("MeowFilm.Brush.Error") &&
+                        (delete.Background as SolidColorBrush)?.Color.A == 0 && delete.BorderBrush == root.FindResource("MeowFilm.Brush.Error"), "Status tones and outlined delete must keep their semantic colors.");
                 var text = contrast ? SystemColors.WindowTextBrush : (Brush)root.FindResource("MeowFilm.Brush.Text");
                 var muted = contrast ? SystemColors.WindowTextBrush : (Brush)root.FindResource("MeowFilm.Brush.Muted");
                 var error = contrast ? SystemColors.WindowTextBrush : (Brush)root.FindResource("MeowFilm.Brush.Error");
@@ -167,6 +182,226 @@ public static class NovelManagementTests
         }
         finally { host.Close(); }
     }
+    private static async Task ListLayout()
+    {
+        int created = 0;
+        var list = new ManagementList { ShowToolbar = false, ShowBulkActions = false, EnableRowDrag = true };
+        list.SetColumns([new("名称", new(1, GridUnitType.Star)), new("状态", new(100)), new("操作", new(90))]);
+        var rows = Enumerable.Range(1, 5000).Select(index => new ManagementRow(index.ToString(), "来源 " + index, "", true,
+            () => { }, _ => { }, new ContextMenu(), Cells: () =>
+            {
+                created++;
+                var title = new TextBlock { Text = "来源 " + index, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
+                title.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.Text");
+                var edit = new Button { Content = "编辑" }; edit.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.ManagementRowButton");
+                return [title, new ManagementStatus("通过", ManagementStatusTone.Success), edit];
+            })).ToArray();
+        var root = new Border { Background = AppearanceColors.DefaultBackground, Child = list, Width = 880, Height = 600 }; NovelUi.Theme(root);
+        var host = GeneralAppearanceTests.Window(root); host.Left = 40; host.Top = 40; host.SizeToContent = SizeToContent.WidthAndHeight;
+        try
+        {
+            host.Show(); list.SetRows(rows, rows.Length, rows.Select(row => row.Id), "暂无来源");
+            host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            var native = NovelTests.Find<ListBox>(list).Single();
+            Check(VirtualizingPanel.GetIsVirtualizing(native) && VirtualizingPanel.GetVirtualizationMode(native) == VirtualizationMode.Recycling);
+            Check(created > 0 && created < 100, "Custom controls must only be created for realized rows.");
+            Check(!list.Search.IsVisible && !list.More.IsVisible, "Hidden book-source tools must not reserve visible chrome.");
+            foreach (double width in new[] { 880d, 620d })
+            {
+                root.Width = width; host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+                var header = (Grid)NovelTests.Find<TextBlock>(list).Single(text => text.Text == "名称").Parent;
+                foreach (var row in NovelTests.Find<ManagementRowView>(list))
+                {
+                    Check(row.ColumnDefinitions.Count == header.ColumnDefinitions.Count);
+                    for (int column = 0; column < header.ColumnDefinitions.Count; column++)
+                        Check(Math.Abs(row.ColumnDefinitions[column].ActualWidth - header.ColumnDefinitions[column].ActualWidth) < 1,
+                            "Header and realized row columns must share available width.");
+                    Check(!ManagementList.IsInteractive(row.Children[1]), "Plain row text must allow dragging.");
+                    var edit = (Button)row.Children[3];
+                    Check(ManagementList.IsInteractive(edit) && ManagementList.IsInteractive(row.Children[0]),
+                        "Selection and row actions must not begin a row drag.");
+                }
+                Check(NovelTests.Find<ScrollViewer>(native).Single().ScrollableWidth == 0, "Management columns must not cause horizontal scrolling.");
+                GeneralAppearanceTests.SavePreview(root, "management-columns-" + (int)width, (int)width, 600);
+            }
+            var firstCheck = NovelTests.Find<CheckBox>(list).Single(check => AutomationProperties.GetName(check) == "选择 来源 1");
+            firstCheck.IsChecked = true; firstCheck.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            native.ScrollIntoView(native.Items[^1]); host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            Check(NovelTests.Find<TextBlock>(list).Any(text => text.Text == "来源 5000") && created < 200,
+                "Scrolling must recycle containers without constructing every item.");
+            Check(list.Selected.SetEquals(["1"]), "Selection must survive row recycling.");
+            IReadOnlyList<string>? reported = null; list.OrderChanged += order => reported = order;
+            list.ReportOrder("1", "3", true);
+            Check(reported is not null && reported.Take(3).SequenceEqual(["2", "3", "1"]) && reported.Count == rows.Length);
+            Check(native.Items[0] is ManagementRowState { Row.Id: "1" }, "The public list must report order, not own persistence.");
+            reported = null; list.ReportOrder("1", "1", false); Check(reported is null);
+            list.EnableRowDrag = false; list.ReportOrder("1", "3", true); Check(reported is null);
+            list.SetRows(rows, rows.Length, rows.Select(row => row.Id), "暂无来源");
+            var all = NovelTests.Find<CheckBox>(list).Single(check => AutomationProperties.GetName(check) == "全选");
+            all.IsChecked = true; all.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); Check(list.Selected.Count == rows.Length);
+        }
+        finally { host.Close(); }
+    }
+    // These call the ordinary drag coordinator and WPF scrolling APIs; they do not inject mouse input.
+    private static async Task DragAutoScroll()
+    {
+        int created = 0, reports = 0;
+        IReadOnlyList<string>? reported = null;
+        var list = new ManagementList { ShowToolbar = false, ShowBulkActions = false, EnableRowDrag = true };
+        list.SetColumns([new("名称", new(1, GridUnitType.Star))]);
+        var rows = Enumerable.Range(1, 5000).Select(index => new ManagementRow(index.ToString(), "来源 " + index, "", true,
+            () => { }, _ => { }, new ContextMenu(), Cells: () => { created++; return [new TextBlock { Text = "来源 " + index }]; })).ToArray();
+        var root = new Border { Child = list, Width = 880, Height = 600 }; NovelUi.Theme(root);
+        var host = GeneralAppearanceTests.Window(root); host.SizeToContent = SizeToContent.WidthAndHeight;
+        list.OrderChanged += order => { reports++; reported = order; };
+        try
+        {
+            host.Show(); list.SetRows(rows, rows.Length, rows.Select(row => row.Id), "暂无来源");
+            host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            var native = NovelTests.Find<ListBox>(list).Single();
+            var scroll = NovelTests.Find<ScrollViewer>(native).Single();
+            var viewport = (ScrollContentPresenter)scroll.Template.FindName("PART_ScrollContentPresenter", scroll);
+            var firstCheck = NovelTests.Find<CheckBox>(list).Single(check => AutomationProperties.GetName(check) == "选择 来源 1");
+            firstCheck.IsChecked = true; firstCheck.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            int targetIndex = Enumerable.Range(0, rows.Length).First(index => native.ItemContainerGenerator.ContainerFromIndex(index) is null) + 3;
+            Check(native.ItemContainerGenerator.ContainerFromIndex(targetIndex) is null, "The scroll target must start unrealized.");
+            var data = list.BeginRowDrag("1") ?? throw new InvalidOperationException("Visible rows must allow dragging.");
+            var bottom = viewport.TranslatePoint(new Point(90, viewport.ActualHeight - 2), native);
+            Check(list.UpdateRowDrag(data, bottom) && list.IsDragAutoScrolling);
+            // A single edge update must keep scrolling while the pointer remains stationary.
+            await WaitForDrag(() =>
+            {
+                if (native.ItemContainerGenerator.ContainerFromIndex(targetIndex) is not ListBoxItem item) return false;
+                var bounds = item.TransformToAncestor(viewport).TransformBounds(new Rect(item.RenderSize));
+                return bounds.Top >= 0 && bounds.Bottom < viewport.ActualHeight;
+            }, "Continuous edge scrolling did not reach an initially unrealized row.");
+            var center = viewport.TranslatePoint(new Point(90, viewport.ActualHeight / 2), native);
+            Check(list.UpdateRowDrag(data, center) && !list.IsDragAutoScrolling);
+            Check(reports == 0 && list.Selected.SetEquals(["1"]), "Scrolling must preserve identity and selection without saving.");
+            var target = (ListBoxItem)native.ItemContainerGenerator.ContainerFromIndex(targetIndex);
+            var drop = target.TranslatePoint(new Point(90, target.ActualHeight * .75), native);
+            Check(list.DropRowDrag(data, drop) && !list.IsDragAutoScrolling);
+            var expected = rows.Skip(1).Select(row => row.Id).ToList(); expected.Insert(targetIndex, "1");
+            Check(reports == 1 && reported is not null && reported.SequenceEqual(expected),
+                "Drop must report the source's stable ID after the currently realized target.");
+            Check(native.Items[0] is ManagementRowState { Row.Id: "1" }, "The caller remains the order and persistence owner.");
+            Check(VirtualizingPanel.GetIsVirtualizing(native) && VirtualizingPanel.GetVirtualizationMode(native) == VirtualizationMode.Recycling &&
+                  created < 300, "Automatic scrolling must retain recycling without constructing the full list.");
+
+            double offset = scroll.VerticalOffset;
+            data = list.BeginRowDrag(rows[targetIndex].Id)!;
+            var top = viewport.TranslatePoint(new Point(90, 2), native);
+            Check(list.UpdateRowDrag(data, top) && list.IsDragAutoScrolling);
+            await WaitForDrag(() => scroll.VerticalOffset < offset, "The upper edge must scroll upward.");
+            list.CancelRowDrag(); Check(!list.IsDragAutoScrolling && reports == 1);
+
+            scroll.ScrollToEnd(); host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            data = list.BeginRowDrag(rows[^1].Id)!;
+            Check(list.UpdateRowDrag(data, bottom) && !list.IsDragAutoScrolling, "The bottom boundary must not retain a timer.");
+            list.CancelRowDrag();
+            scroll.ScrollToHome(); host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            data = list.BeginRowDrag("1")!;
+            Check(list.UpdateRowDrag(data, top) && !list.IsDragAutoScrolling, "The top boundary must not retain a timer.");
+            var second = (ListBoxItem)native.ItemContainerGenerator.ContainerFromIndex(1);
+            Check(list.DropRowDrag(data, second.TranslatePoint(new Point(90, 2), native)) && reports == 1,
+                "Dropping at the same insertion position must not save.");
+            data = list.BeginRowDrag("1")!;
+            var first = (ListBoxItem)native.ItemContainerGenerator.ContainerFromIndex(0);
+            Check(list.DropRowDrag(data, first.TranslatePoint(new Point(90, first.ActualHeight / 2), native)) && reports == 1,
+                "Dropping on the source itself must not save.");
+        }
+        finally { list.CancelRowDrag(); host.Close(); }
+    }
+    private static async Task DragLifetime()
+    {
+        var list = new ManagementList { ShowToolbar = false, ShowBulkActions = false, EnableRowDrag = true };
+        var rows = Enumerable.Range(1, 500).Select(index => new ManagementRow(index.ToString(), "来源 " + index, "", true,
+            () => { }, _ => { }, new ContextMenu())).ToArray();
+        var root = new Border { Child = list, Width = 880, Height = 600 }; NovelUi.Theme(root);
+        var host = GeneralAppearanceTests.Window(root); host.SizeToContent = SizeToContent.WidthAndHeight;
+        int reports = 0; list.OrderChanged += _ => reports++;
+        try
+        {
+            host.Show(); Reset(); await Dispatcher.Yield(DispatcherPriority.Render);
+            var native = NovelTests.Find<ListBox>(list).Single();
+            Point bottom = default;
+            Point Bottom()
+            {
+                // Reattachment can replace the inherited scroll template.
+                var scroll = NovelTests.Find<ScrollViewer>(native).Single();
+                var viewport = (ScrollContentPresenter)scroll.Template.FindName("PART_ScrollContentPresenter", scroll);
+                return bottom = viewport.TranslatePoint(new Point(90, viewport.ActualHeight - 2), native);
+            }
+            var data = Start();
+            Check(!list.UpdateRowDrag(data, new Point(-20, -20)) && !list.IsDragAutoScrolling,
+                "Leaving the viewport must stop scrolling.");
+            Check(list.UpdateRowDrag(data, Bottom()) && list.IsDragAutoScrolling, "Reentry may resume the same valid drag.");
+            list.CancelRowDrag(); Released(data);
+
+            data = Start();
+            Check(!list.UpdateRowDrag(new DataObject("MeowFilm.ManagementRow", "1"), Bottom()), "A matching text ID is not the active drag.");
+            Released(data);
+            var old = Start(); data = Start();
+            Check(!list.DropRowDrag(old, Bottom()), "An old drag payload must not commit a newer session.");
+            Released(data);
+
+            data = Start(); list.EnableRowDrag = false; Released(data); list.EnableRowDrag = true;
+            data = Start(); list.IsEnabled = false; Released(data); list.IsEnabled = true;
+            data = Start(); list.Visibility = Visibility.Collapsed; Released(data); list.Visibility = Visibility.Visible; host.UpdateLayout();
+            data = Start(); list.SetRows(rows, rows.Length, rows.Select(row => row.Id), "暂无来源"); Released(data); host.UpdateLayout();
+            data = Start(); list.SetColumns([new("名称", new(1, GridUnitType.Star)), new("启用", GridLength.Auto),
+                new("", GridLength.Auto), new("", GridLength.Auto)]); Released(data); host.UpdateLayout();
+            data = Start();
+            list.SetRows(rows.Take(10).ToArray(), rows.Length, rows.Select(row => row.Id), "暂无来源"); Released(data);
+            Check(list.BeginRowDrag("1") is null, "Filtered rows must not start a partial-order drag.");
+            list.ReportOrder("1", "3", true); Check(reports == 0, "Filtered rows must not report a partial persisted order.");
+            Reset(); await Dispatcher.Yield(DispatcherPriority.Render);
+
+            data = Start();
+            Check(!list.DropRowDrag(data, new Point(-20, -20))); Released(data);
+            data = Start();
+            Check(!list.DropRowDrag(new DataObject(), Bottom())); Released(data);
+            data = Start(); root.Child = null; host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Loaded);
+            Released(data); root.Child = list; host.UpdateLayout();
+            await WaitForDrag(() => list.IsLoaded &&
+                NovelTests.Find<ScrollViewer>(native).SingleOrDefault() is { IsLoaded: true } current &&
+                current.Template.FindName("PART_ScrollContentPresenter", current) is ScrollContentPresenter
+                    { IsLoaded: true, IsArrangeValid: true, ActualWidth: > 90, ActualHeight: > 2 } &&
+                current.VerticalOffset < current.ScrollableHeight,
+                "The reattached list must finish layout with a current viewport and room to scroll.");
+            data = Start(); host.Close(); await Dispatcher.Yield(DispatcherPriority.Loaded); Released(data);
+            Check(reports == 0, "Cancelled, invalid, filtered and detached drags must never save.");
+
+            IDataObject Start()
+            {
+                var value = list.BeginRowDrag("1") ?? throw new InvalidOperationException("A full enabled list must allow dragging.");
+                Check(list.UpdateRowDrag(value, Bottom()) && list.IsDragAutoScrolling, "The fixture must actually start the scrolling resource.");
+                return value;
+            }
+            void Released(IDataObject value)
+            {
+                Check(!list.IsDragAutoScrolling, "Invalidating a drag must immediately release its timer.");
+                Check(!list.DropRowDrag(value, bottom) && !list.IsDragAutoScrolling, "The invalidated payload must not commit or restart scrolling.");
+            }
+        }
+        finally { list.CancelRowDrag(); host.Close(); }
+        void Reset() { list.SetRows(rows, rows.Length, rows.Select(row => row.Id), "暂无来源"); host.UpdateLayout(); }
+    }
+    private static async Task WaitForDrag(Func<bool> completed, string message)
+    {
+        var result = new TaskCompletionSource<bool>();
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(20) };
+        timer.Tick += Tick;
+        timer.Start();
+        try { Check(await result.Task, message); }
+        finally { timer.Stop(); timer.Tick -= Tick; }
+        void Tick(object? sender, EventArgs e)
+        {
+            try { if (completed()) result.TrySetResult(true); else if (elapsed.Elapsed > TimeSpan.FromSeconds(8)) result.TrySetResult(false); }
+            catch (Exception error) { result.TrySetException(error); }
+        }
+    }
     private static async Task Components()
     {
         var list = new ManagementList();
@@ -174,7 +409,7 @@ public static class NovelManagementTests
         NovelUi.Theme(surface);
         var root = new Grid(); root.Children.Add(surface);
         var dialogHost = new PlayerDialogHost(); root.Children.Add(dialogHost);
-        var host = GeneralAppearanceTests.Window(root); host.SizeToContent = SizeToContent.WidthAndHeight;
+        var host = GeneralAppearanceTests.Window(root); host.Left = 40; host.Top = 40; host.SizeToContent = SizeToContent.WidthAndHeight;
         DesktopTheme.SetIsHighContrast(host, false); dialogHost.Attach(host); host.Show();
         string? previous = Environment.GetEnvironmentVariable("MEOWFILM_SETTINGS_PREVIEW_ROOT");
         Environment.SetEnvironmentVariable("MEOWFILM_SETTINGS_PREVIEW_ROOT", TestWorkspace.DataPath("novel-management-previews"));

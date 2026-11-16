@@ -16,9 +16,9 @@
    <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
   </Trigger></Style.Triggers>
  </Style></UserControl.Style>
- <Grid Margin="32,0,32,12">
-  <Grid.RowDefinitions><RowDefinition Height="44"/><RowDefinition/></Grid.RowDefinitions>
-  <Border BorderThickness="0,0,0,1" BorderBrush="{DynamicResource MeowFilm.Brush.Border}">
+ <Grid Style="{StaticResource MeowFilm.SettingsPage}">
+  <Grid.RowDefinitions><RowDefinition Style="{StaticResource MeowFilm.SettingsNavigationRow}"/><RowDefinition/></Grid.RowDefinitions>
+  <Border Style="{StaticResource MeowFilm.SettingsNavigationBar}">
    <StackPanel x:Name="Areas" Orientation="Horizontal">
     <RadioButton Content="外观" Tag="appearance" IsChecked="True" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" PreviewKeyDown="Area_KeyDown"/>
     <RadioButton Content="首页数据源" Tag="sources" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Area_Checked" PreviewKeyDown="Area_KeyDown"/>

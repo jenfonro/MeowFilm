@@ -12,6 +12,8 @@ public sealed record FilmCatSource(
     long Generation, string State, string? SourceHash, string? Error,
     IReadOnlyList<FilmSourceSite> Sites)
 {
+    public string? LocalPath { get; init; }
+    public long InputRevision { get; init; }
     public long? ModifiedAt => UpdatedAt ?? ImportedAt;
     public bool CanRestart => Enabled;
     public bool CanDetect => Enabled && State == "ready" && Generation > 0;

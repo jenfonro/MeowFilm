@@ -46,6 +46,11 @@ public sealed partial class PanAccounts
         if (!active || stopping || !Rows.Contains(row) || !row.CanLogin) return Task.CompletedTask;
         return SetLogin(row, row.SupportsQr);
     }
+    public Task OpenCredentialsAsync(PanAccountRow row)
+    {
+        if (!active || stopping || !Rows.Contains(row) || !row.CanEdit) return Task.CompletedTask;
+        return SetLogin(row, qr: false);
+    }
     public Task SwitchMethodAsync(bool qr)
     {
         if (!active || login is not { } current || !CanChangeMethod || qr && !current.Row.SupportsQr)
@@ -59,7 +64,7 @@ public sealed partial class PanAccounts
     private Task SetLogin(PanAccountRow row, bool qr)
     {
         RetireLogin();
-        var session = new Login(row, qr, epoch, cleanup);
+        var session = new Login(row, qr, epoch, Task.WhenAll(cleanup, nativeWrites));
         login = session;
         row.Editing = true; row.Changed();
         Notify("");
@@ -127,10 +132,13 @@ public sealed partial class PanAccounts
                     case "pending": session.Status = "等待扫码"; break;
                     case "scanned": session.Status = "等待确认"; break;
                     case "confirmed":
-                        var account = PanAccountSnapshot.Read(reply.GetProperty("account"));
-                        if (account.Revision <= session.Revision || account.Status != "signedIn" || !account.Configured)
-                            throw new BridgeException("INVALID_RESPONSE");
+                        var reported = PanAccountSnapshot.Read(reply.GetProperty("account"));
+                        var account = await settings.ReadAsync(session.Row.Provider, session.Cancellation.Token);
+                        if (!Current(session)) return;
                         session.Row.Publish(account);
+                        ValidateOnlineAccount(session.Row.Provider, reported, account);
+                        if (account.Revision <= session.Revision)
+                            throw new BridgeException("INVALID_RESPONSE");
                         session.Confirmed = true;
                         Notify("网盘登录成功");
                         _ = CloseLoginAsync();
@@ -168,28 +176,19 @@ public sealed partial class PanAccounts
             credentials.Clear(); Notify(Error(error)); return Task.CompletedTask;
         }
         session.Busy = true; LoginChanged();
-        return session.Save = RunRow(session.Row, async (request, current) =>
+        var before = nativeWrites;
+        return session.Save = nativeWrites = RunRow(session.Row, async (request, current) =>
         {
             await Task.Yield();
             try
             {
-                await session.Before;
+                await before;
                 if (!current() || !ReferenceEquals(login, session)) return;
-                // Once dispatched, observe the real write receipt before admitting a successor.
-                // Cancelling HTTP observation cannot revoke an already admitted runtime replace.
-                var account = PanAccountSnapshot.Read(await Call("settings.set",
-                    new { provider = session.Row.Provider, credentials }));
+                var account = await settings.SaveAsync(session.Row.Provider, credentials, request.Token);
                 credentials.Clear();
                 if (account.Revision <= session.Revision) throw new BridgeException("INVALID_RESPONSE");
                 if (!current() || !ReferenceEquals(login, session)) return;
                 session.Row.Publish(account);
-                var refreshed = await Call("refresh", new { provider = session.Row.Provider }, request.Token);
-                if (!refreshed.GetProperty("refreshed").GetBoolean()) throw new BridgeException("INVALID_RESPONSE");
-                if (!current() || !ReferenceEquals(login, session)) return;
-                var verified = PanAccountSnapshot.Read(refreshed.GetProperty("account"));
-                if (!verified.Configured || verified.Status != "signedIn" || verified.Revision < account.Revision)
-                    throw new BridgeException("INVALID_RESPONSE");
-                session.Row.Publish(verified);
                 Notify("网盘凭据已保存");
                 _ = CloseLoginAsync();
             }

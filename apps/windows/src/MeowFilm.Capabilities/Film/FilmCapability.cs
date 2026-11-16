@@ -77,7 +77,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
             metadata, new FilmPlaybackSession(capture, new FilmNativeMedia(playback),
                 prepareOpen: (page, parameters, reconnect, token) =>
                     PreparePlaybackOpenAsync(sources, capture, page, parameters, reconnect, token)),
-            new FilmLibrary(storage), new FilmPlaybackSettings(runtime))
+            new FilmLibrary(storage), new FilmPlaybackSettings(runtime, storage), storage)
     {
         (runtime as IRuntimeRecovery)?.RegisterRecoveryScope(this);
     }
@@ -87,7 +87,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
 
     private FilmCapability(IFilmHomeSource source, FilmRuleService? rules, FilmSourceService? sources,
         FilmSearchService? search = null, FilmMetadataService? metadata = null,
-        FilmPlaybackSession? playback = null, FilmLibrary? library = null, FilmPlaybackSettings? business = null)
+        FilmPlaybackSession? playback = null, FilmLibrary? library = null, FilmPlaybackSettings? business = null, IDocumentStore? storage = null)
     {
         this.source = source ?? throw new ArgumentNullException(nameof(source));
         this.rules = rules;
@@ -116,7 +116,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         ];
         view = new(this);
         settings = rules is not null && sources is not null
-            ? new FilmSettingsView(rules, sources, business, () => Playback?.ActiveTarget, metadata)
+            ? new FilmSettingsView(rules, sources, storage ?? sources.Storage, business, () => Playback?.ActiveTarget, metadata)
             : new Grid { Background = Brushes.Transparent }; // Home-only test composition.
     }
 

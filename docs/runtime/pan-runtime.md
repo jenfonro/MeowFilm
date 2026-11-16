@@ -54,7 +54,7 @@ await runtime.close();
 {"version":1,"accounts":{"baidu":{"revision":1,"credentials":{"cookie":"synthetic-example"}}}}
 ```
 
-目录／文件权限分别为 `0700/0600`（由平台文件系统执行）。祖先目录、dataRoot 与 pan 目录可使用系统或 App 管理的目录别名，不要求调用方先解析真实路径。自有文件的符号链接和硬链接按正常文件 I/O 读取；写入仍以原子 rename 替换 `accounts.json` 目录项，不改写原链接目标的内容。dataRoot 不接受相对路径、NUL 或 `..` 路径段；非普通文件、损坏文档与文件系统错误明确报错，不重置覆盖，不迁移旧客户端数据。读取时系统报告 `ENOENT` 视为尚无文档；路径被普通文件阻挡时写入仍失败，不覆盖阻挡文件。**不加密，也不保证同用户进程或恶意脚本无法读取**；没有密钥文件、平台秘密桥或自定义加密壳。单个 dataRoot 应只由一个运行器管理，不支持多进程同时写同一份配置。
+默认文件 store 的目录／文件权限分别为 `0700/0600`（由平台文件系统执行）。祖先目录、dataRoot 与 pan 目录可使用系统或 App 管理的目录别名，不要求调用方先解析真实路径。自有文件的符号链接和硬链接按正常文件 I/O 读取；写入仍以原子 rename 替换 `accounts.json` 目录项，不改写原链接目标的内容。dataRoot 不接受相对路径、NUL 或 `..` 路径段；非普通文件、损坏文档与文件系统错误明确报错，不重置覆盖，不迁移旧客户端数据。读取时系统报告 `ENOENT` 视为尚无文档；路径被普通文件阻挡时写入仍失败，不覆盖阻挡文件。**默认文件不加密，也不保证同用户进程或恶意脚本无法读取**；此路径没有密钥文件或自定义加密壳。单个 dataRoot 应只由一个运行器管理，不支持多进程同时写同一份配置；这些文件语义不是 Windows 注入原生 DPAPI store 的存储承诺。
 
 写入先同步暂存文件，再以原子 rename 为提交点；成功后的磁盘与内存配置一致，不承诺断电时目录项的额外耐久性保证。
 
@@ -64,7 +64,7 @@ await runtime.close();
 
 `createPanService`／`createPanRuntimeModule` 可接收受信 `store`，提供 `read/write/close` 和可选 `reload`；文档仍为上述 v1 格式。注入后不创建第二份 `accounts.json`。`settingsChanged()` 通过串行变更边界重读同一原生 owner，撤销旧账号代次的请求、登录及引用。
 
-`settings.set/clear` HTTP 接口仍保留，但实际写入也必须经过 supplied store；它们不绕过原生 CAS。iOS 普通页面直接调用原生 owner，运行器仅通过私密 `pan.accounts` 内容 CAS 写回扫码及刷新所得凭据。新凭据持久化成功才发布 confirmed／refreshed；手动换号、清除或其他块内容变化导致旧 fingerprint 冲突时，旧请求不能覆盖新值。共同规则见[原生设置契约](../common/settings-storage.md#在线取得凭据的安全回写)，iOS 私密能力见[运行底座](../ios/runtime-preflight.md#原生设置私密通道)。
+`settings.set/clear` HTTP 接口仍保留，但实际写入也必须经过 supplied store；它们不绕过原生 CAS。iOS／Windows 普通页面直接调用原生 owner，运行器通过私密 `pan.accounts` 内容 CAS 写回扫码及刷新所得凭据。新凭据持久化成功才发布 confirmed／refreshed；手动换号、清除或其他块内容变化导致旧 fingerprint 冲突时，旧请求不能覆盖新值。共同规则见[原生设置契约](../common/settings-storage.md#在线取得凭据的安全回写)，iOS 私密能力见[运行底座](../ios/runtime-preflight.md#原生设置私密通道)，Windows 接线见[原生设置](../windows/native-settings.md#网盘凭据回写)。
 
 ## 分享与播放
 
@@ -114,6 +114,8 @@ TV 只接受明确账号内的 `kind:"stored"` 引用，不 list、不转存、�
 
 百度、夸克和 UC 默认扫码，可切换手动 Cookie；其余 provider 按其凭据字段手动登录。手动输入只持有当前浮层草稿，不读取或回显已有秘密，提交采用账号配置的整份替换语义。二维码 `url` 使用客户端二维码编码能力，`image` 解码运行器交付的 data URI，不套用音乐平台的域名约束。
 
+Windows 表格直接读取原生设置，不自动请求 refresh，手动提交与退出等待原生 CAS 回执；二维码及显式验证仍调用运行器，配置读取不显示顶部进度条。页面及单行操作代次隔离迟到结果，关闭浮层不清除已保存账号；保护与回写见[原生设置](../windows/native-settings.md#网盘凭据回写)。
+
 iOS 的 `PanAccountService(document:request:)`／`PanAccountService(document:connection:)` 直接读取原生配置；`providers/accounts/replace/clear` 不请求运行器，页面进入不自动 refresh。已有凭据但无匹配当前内容的在线观察显示「未验证」，不把 configured 当作 signedIn。手动保存及退出在原生事务完成后结算，不等待验证或旧在线工作排空；扫码、显式刷新仍请求运行器，离线真实失败。关闭浮层不清除已保存账号，手动保存完成不冒充扫码 confirmed。文件保护与状态接线见[iOS 设置](../ios/film-settings.md#网盘账号)。
 
 未采用原生存储的消费者继续使用 `providers/settings.get` 与 `settings.set/clear`，不能把 Node HTTP 写入当作本地同步事务。页面及单行操作都须隔离迟到结果，已经接纳的持久化按真实回执结算；在线登录关闭、离页及后台取消轮询，但已 confirmed 的账号不因关闭浮层退出。端侧实际接线分别以平台文档为准，不将一端验证结果视为另一端通过。
@@ -137,7 +139,7 @@ TV 刷新**按已确认方案**将长期 refreshToken 发送给第三方明文 H
 - `http://api.extscreen.com/quarkdrive/token`
 - `http://api.extscreen.com/ucdrive/token`
 
-实际 file 接口为官方网盘 HTTPS。第三方可获得长期凭据，HTTP 路径存在窃听／篡改风险；本实现不宣称消除这些风险，也不未经验证将协议改成 HTTPS。它与本地凭据不加密是两个独立边界。
+实际 file 接口为官方网盘 HTTPS。第三方可获得长期凭据，HTTP 路径存在窃听／篡改风险；本实现不宣称消除这些风险，也不未经验证将协议改成 HTTPS。它与本地凭据保护是两个独立边界，Windows DPAPI 不消除上游明文 HTTP 的风险。
 
 各请求可同时等待网络，无全局业务队列、并发额度或每账号线程。解析计算仍在 Node 主线程，不能把 async 等同于 CPU 并行。仅同 provider/账号代次的刷新与相同文件的在途转存合并；取消一个等待者不影响其他等待者，全部取消、换号或关闭时取消上游。普通网络请求默认截止 30 秒；协议任务轮询受自身截止时间和调用方取消控制。`close()` 等待实际工作排空，不以等待者提前取消冒充物理释放。
 

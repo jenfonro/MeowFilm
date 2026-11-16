@@ -24,6 +24,8 @@
 | `POST /v1/settings/changed` | `{block}`，仅显式注入 `settingsChanged` 的装配提供 | `{notified:true}`；重读已保存配置，不提交设置值 |
 | `POST /v1/close` | `{}` | 停止全部模块、取消其他交换并等待实际排空，成功值为 `{closed:true,cleanupComplete:true}` |
 
+设置通知不传设置值或凭据，不授予 HTTP 客户端原生读写能力，也不声明异步装载完成。现行消费者为 [Windows 原生设置适配](../windows/native-settings.md#私密配置能力)与 [iOS 原生设置适配](../ios/runtime-preflight.md#原生设置私密通道)；通用默认入口未装配此通知路由，模块版本与 describe 方法清单不因此改变。
+
 成功统一 `{ok:true,contract,value}`，失败统一 `{ok:false,contract,code}`。value 是直接对象、数组、标量或 null，不是另一份序列化 JSON。通用默认三模块为 `music@0.8.0/music.script.v3`、`cat@0.2.0/cat.script.v2`、`source@0.3.0/source.runtime.v2`。iOS／Windows 正式 App 按此前三项、`pan@0.1.0/pan.runtime.v1`、`tmdb@0.1.0/tmdb.data.v1`、`douban@0.1.0/douban.data.v1`、`film@0.1.0/film.playback.v1`、`netease@0.1.0/netease.token.v1`、`music-platform@0.1.0/music.platform.v1` 的顺序精确装配九模块；元数据见[元数据契约](metadata-data.md)，影视会话与媒体见[影视播放契约](film-playback.md)，实时 token 见[网易订阅 token](netease-token.md)，共同音乐配方见[音乐平台](music-platform.md)。
 
 受信 Node 装配可显式加入 [pan.runtime.v1](pan-runtime.md)，使用 `POST /v1/pan/{operation}`；pan 不支持源码上传。`pan-entry.mjs` 提供同进程 pan-only 入口，或 `createRuntime({...,pan:{}})` 共用 aggregate HTTP 会话。通用默认 `createRuntime()` 不装配 pan；正式 App 显式装配它，双端平台握手按序精确匹配九模块及其版本、契约，不接受模块缺项／多项／重复项。Windows 还严格核对全部模块的完整方法清单；iOS 对 TMDB、netease 与 music-platform 严格核对方法清单，其余模块沿各自既有方法契约。

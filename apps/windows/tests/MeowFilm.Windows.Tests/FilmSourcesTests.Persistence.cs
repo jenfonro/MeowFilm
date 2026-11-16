@@ -10,12 +10,12 @@ public static partial class FilmSourcesTests
     private const string RawSourceDocument = """
         {"version":1,"Version":[],"Videos":{},"é":1,"e\u0301":2,"rootExtra":{"integer":900719925474099312345678901234567890,"fraction":0.12345678901234567890123456789},
          "cats":[
-          {"installationId":"a","InstallationId":[],"name":"猫a","Name":false,"sourceType":"local","enabled":true,"updateState":"future-update","sites":[
+          {"installationId":"a","InstallationId":[],"name":"猫a","Name":false,"sourceType":"local","enabled":true,"inputRevision":1,"updateState":"future-update","sites":[
            {"key":"video","name":"缓存名","api":"/cached","actions":["home","category","detail","play","search"],
             "methods":{"home":"GET","category":"POST","detail":"POST","play":"POST","search":"POST"},
             "siteExtra":{"number":1e999}}],
            "catExtra":{"number":1.2345678901234567890123456789}},
-          {"installationId":"b","name":"猫b","sourceType":"local","enabled":true,"updateState":"idle","sites":[]}],
+          {"installationId":"b","name":"猫b","sourceType":"local","enabled":true,"inputRevision":1,"updateState":"idle","sites":[]}],
          "videos":[
           {"key":{"installationId":"a","InstallationId":[],"siteKey":"video","keyExtra":{"number":90071992547409931234567890}},
            "Key":false,"Order":[],
@@ -40,7 +40,8 @@ public static partial class FilmSourcesTests
     private static async Task RawSourcePersistence()
     {
         var runtime = new Runtime(); runtime.Add("a", "video", "deleted"); runtime.Add("b");
-        var store = new Store { Bytes = Encoding.UTF8.GetBytes(RawSourceDocument) };
+        foreach (var node in runtime.Nodes.Values) { node.SourceType = "local"; node.SourceUrl = null; }
+        var store = new Store(runtime) { Bytes = Encoding.UTF8.GetBytes(RawSourceDocument) };
         using var before = JsonDocument.Parse(store.Bytes!);
         await using (var service = new FilmSourceService(runtime, store))
         {
@@ -115,6 +116,7 @@ public static partial class FilmSourcesTests
         var runtime = new Runtime();
         runtime.Add("a", "video", "first", "last", "inner-install", "inner-first", "inner-last", "same", "partial", "deleted-first", "deleted-last");
         runtime.Add("b"); runtime.Add("c", "inner-install");
+        store.CatBytes = new Store(runtime).CatBytes;
         FilmSourceKey[] candidates =
         [
             new("a", "first"), new("a", "last"), new("a", "inner-install"), new("c", "inner-install"),
@@ -163,11 +165,13 @@ public static partial class FilmSourcesTests
              "deleted":[{"installationId":"a","siteKey":"deleted","extra":{"number":1e999}},null,{"siteKey":"bad-identity"}]}
             """) };
         var runtime = new Runtime(); runtime.Add("a", "video", "deleted", "broken", "duplicate"); runtime.Add("b");
+        store.CatBytes = new Store(runtime).CatBytes;
         await using (var service = new FilmSourceService(runtime, store))
         {
             await service.InitializeAsync();
-            Check(service.Cats.Count == 0 && service.Videos.Count == 2 && service.CurrentSearchSources.Count == 0,
-                "unusable cat cache does not erase options or authorize cached execution; malformed siblings are isolated");
+            Check(service.Cats.Count == 2 && service.Cats.All(cat => !cat.CanDetect) &&
+                service.Videos.Count == 2 && service.CurrentSearchSources.Count == 0,
+                "native source intent survives unusable cat cache without authorizing execution or erasing options");
             await service.SaveVideoOptionsAsync(Key("b"), new(true, true, false, false), order: 12);
             await service.RefreshAsync();
             Check(service.Cats.Count == 2 && service.Videos.Count == 2 && service.Videos.All(video =>
@@ -192,7 +196,7 @@ public static partial class FilmSourcesTests
     private static async Task UnknownUpdateState()
     {
         var runtime = new Runtime(); runtime.Add("a"); runtime.Nodes["a"].UpdateState = "future-state";
-        await using var service = new FilmSourceService(runtime, new Store());
+        await using var service = new FilmSourceService(runtime, new Store(runtime));
         await service.RefreshAsync();
         var cat = service.Cats.Single();
         Check(cat.UpdateState == "future-state" && cat.CanDetect && cat.Generation == 1 &&
@@ -222,7 +226,8 @@ public static partial class FilmSourcesTests
             Check(broken.Writes == 0 && Encoding.UTF8.GetString(broken.Bytes!) == root && runtime.Calls.Count == 0,
                 "invalid fact roots and unsupported versions never become empty successful storage or start Node");
         }
-        var store = new Store { Bytes = Encoding.UTF8.GetBytes(RawSourceDocument) };
+        runtime.Add("a"); runtime.Add("b");
+        var store = new Store(runtime) { Bytes = Encoding.UTF8.GetBytes(RawSourceDocument) };
         await using var service = new FilmSourceService(runtime, store);
         await service.InitializeAsync();
         var before = service.Videos.Single(video => video.Key == Key("b"));

@@ -363,7 +363,8 @@ public static class FilmSearchPlaybackTests
             return Task.FromResult(FilmSearchConsumerRuntime.Success(entry));
         };
         replacement.Respond = producer.Respond;
-        await using var service = new FilmMetadataService(facade);
+        await using var store = new FilmNativeSettingsFixture();
+        await using var service = new FilmMetadataService(facade, store);
         IFilmSearchMetadata consumer = service;
         var search = await consumer.SearchAsync(" 原查询 ", default);
         var detail = await consumer.DetailAsync("tv", 7, default);
@@ -387,14 +388,16 @@ public static class FilmSearchPlaybackTests
                 : failure == "shape" ? FilmSearchConsumerRuntime.Success(new[] { 1 })
                 : failure == "contract" ? Encode(new { ok = true, contract = "tmdb.data.v1", value = (object?)null })
                 : FilmSearchConsumerRuntime.Failure(failure));
-            await using var service = new FilmMetadataService(runtime);
+            await using var store = new FilmNativeSettingsFixture();
+            await using var service = new FilmMetadataService(runtime, store);
             await FilmPlaybackFixture.Error(failure is "shape" or "contract" ? "INVALID_RESPONSE" : failure,
                 () => service.SearchAsync("目标", default));
         }
         using var valid = new FilmSearchConsumerRuntime();
         valid.Respond = (method, _, _) => Task.FromResult(FilmSearchConsumerRuntime.Success(
             method == "film.data.metadata" ? (object)SearchFixture.Tmdb("tv", 7, "目标", "简介") : null));
-        await using var metadata = new FilmMetadataService(valid);
+        await using var validStore = new FilmNativeSettingsFixture();
+        await using var metadata = new FilmMetadataService(valid, validStore);
         var response = await ((IFilmSearchMetadata)metadata).SearchAsync("目标", default);
         Check(response.CacheEntry is null && response.Value.GetProperty("results").GetArrayLength() == 1,
             "only successful null means content exists without a retained cache entry");
@@ -412,7 +415,8 @@ public static class FilmSearchPlaybackTests
                 if ((method == "film.data.cache.entry") == atReceipt) { entered.TrySetResult(); return await release.Task; }
                 return FilmSearchConsumerRuntime.Success(SearchFixture.Tmdb("tv", 7, "目标", "简介"));
             };
-            await using var service = new FilmMetadataService(runtime);
+            await using var store = new FilmNativeSettingsFixture();
+            await using var service = new FilmMetadataService(runtime, store);
             var read = service.SearchAsync("目标", default);
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             runtime.Revoked.Cancel();
@@ -429,7 +433,8 @@ public static class FilmSearchPlaybackTests
         using var waiter = new CancellationTokenSource();
         var receipt = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         runtime.Respond = (_, _, _) => receipt.Task;
-        await using var metadata = new FilmMetadataService(runtime);
+        await using var store = new FilmNativeSettingsFixture();
+        await using var metadata = new FilmMetadataService(runtime, store);
         var read = metadata.SearchAsync("原查询", waiter.Token);
         waiter.Cancel();
         receipt.SetResult(FilmSearchConsumerRuntime.Success(SearchFixture.Tmdb("tv", 7, "目标", "有限晚到")));

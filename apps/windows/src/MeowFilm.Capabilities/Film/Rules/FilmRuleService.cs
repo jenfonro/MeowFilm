@@ -1,18 +1,22 @@
 using System;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Film.Rules;
 
-/// <summary>Settings drafts and acknowledged display snapshots. Node owns rules and their execution.</summary>
+/// <summary>Native rule configuration and durable drafts. Only execution and previews belong to Node.</summary>
 public sealed class FilmRuleService : IAsyncDisposable
 {
     internal static readonly JsonSerializerOptions Json = CreateJson();
     private readonly FilmPlaybackClient client;
+    private readonly SettingsDocument document;
+    private readonly IRuntimeSettingsNotifications? notifications;
     private readonly SemaphoreSlim serial = new(1, 1);
     private readonly object lifecycle = new();
     private CancellationTokenSource pending = new();
@@ -24,15 +28,18 @@ public sealed class FilmRuleService : IAsyncDisposable
     private int active;
     private int closed;
 
-    public FilmRuleService(IRuntimeClient runtime)
+    public FilmRuleService(IRuntimeClient runtime, IDocumentStore store)
     {
         client = new(runtime ?? throw new ArgumentNullException(nameof(runtime)));
+        document = new(store, "film.rules.v1");
+        notifications = runtime as IRuntimeSettingsNotifications;
     }
 
     public Task InitializeAsync(CancellationToken cancellationToken = default) =>
         RunAsync(async token =>
         {
-            Accept(await CallAsync("get", new { }, token).ConfigureAwait(false));
+            var value = await document.ReadAsync(token).ConfigureAwait(false);
+            AcceptLocal(value?.GetProperty("rules").Deserialize<FilmRuleSet>(Json) ?? Defaults("initial"));
             return true;
         }, cancellationToken);
 
@@ -48,8 +55,13 @@ public sealed class FilmRuleService : IAsyncDisposable
         var owned = Copy(rules);
         return RunAsync(async token =>
         {
-            var result = await CallAsync("set", new { rules = owned }, token).ConfigureAwait(false);
-            return Accept(result);
+            Validate(owned);
+            var normalized = NormalizeForSave(owned);
+            var result = await document.UpdateAsync(_ => JsonSerializer.SerializeToElement(new { version = 1, rules = normalized }, Json), token)
+                .ConfigureAwait(false);
+            var saved = AcceptLocal(result.GetProperty("rules").Deserialize<FilmRuleSet>(Json)!);
+            notifications?.SettingsChanged("film.rules");
+            return saved;
         }, cancellationToken);
     }
 
@@ -62,12 +74,24 @@ public sealed class FilmRuleService : IAsyncDisposable
 
     private Task<FilmRuleSet> RestoreAsync(FilmRuleSection section, FilmRuleSet? draft, CancellationToken cancellationToken)
     {
-        string key = SectionKey(section);
+        _ = SectionKey(section);
         return RunAsync(async token =>
         {
-            var input = new System.Collections.Generic.Dictionary<string, object?> { ["section"] = key };
-            if (draft is not null) input["rules"] = draft;
-            return Accept(await CallAsync("restore", input, token).ConfigureAwait(false));
+            var current = draft ?? (await document.ReadAsync(token).ConfigureAwait(false))?.GetProperty("rules")
+                .Deserialize<FilmRuleSet>(Json) ?? Defaults("initial");
+            var defaults = Defaults("restore");
+            var next = section switch
+            {
+                FilmRuleSection.Episode => current with { EpisodeCleanRegexRules = defaults.EpisodeCleanRegexRules, EpisodeRules = defaults.EpisodeRules },
+                FilmRuleSection.Movie => current with { MovieRules = defaults.MovieRules },
+                _ => current with { AggregateRegexRules = defaults.AggregateRegexRules }
+            };
+            Validate(next);
+            next = NormalizeForSave(next);
+            await document.UpdateAsync(_ => JsonSerializer.SerializeToElement(new { version = 1, rules = next }, Json), token).ConfigureAwait(false);
+            var saved = AcceptLocal(next);
+            notifications?.SettingsChanged("film.rules");
+            return saved;
         }, cancellationToken);
     }
 
@@ -100,36 +124,110 @@ public sealed class FilmRuleService : IAsyncDisposable
     }
 
     public Task<FilmMatchRule?> NormalizeNewMatchRuleAsync(string pattern, string replace = "",
-        CancellationToken cancellationToken = default) => RunAsync(async token =>
+        CancellationToken cancellationToken = default) => RunAsync(token =>
         {
-            var result = await CallAsync("normalize", new { kind = "match", pattern, replace }, token).ConfigureAwait(false);
-            return result.ValueKind == JsonValueKind.Null ? null : result.Deserialize<FilmMatchRule>(Json);
+            token.ThrowIfCancellationRequested();
+            var parsed = ParseInput(pattern);
+            return Task.FromResult(parsed is null ? null : new FilmMatchRule(parsed.Value.Pattern, TrimInput(replace), parsed.Value.Flags));
         }, cancellationToken);
 
     public Task<string> NormalizeNewCleanRuleAsync(string pattern, CancellationToken cancellationToken = default) =>
-        RunAsync(async token =>
+        RunAsync(token =>
         {
-            var result = await CallAsync("normalize", new { kind = "clean", pattern }, token).ConfigureAwait(false);
-            return result.Deserialize<string>(Json) ?? "";
+            token.ThrowIfCancellationRequested();
+            var parsed = ParseInput(pattern);
+            return Task.FromResult(parsed is null ? "" : parsed.Value.Flags.Length == 0 ? parsed.Value.Pattern :
+                "/" + parsed.Value.Pattern + "/" + parsed.Value.Flags);
         }, cancellationToken);
 
     public Task<FilmRuleSet> ClearAsync(CancellationToken cancellationToken = default) =>
-        RunAsync(async token => Accept(await CallAsync("clear", new { }, token).ConfigureAwait(false)), cancellationToken);
+        SaveAsync(Defaults("initial"), cancellationToken);
 
-    private Task<JsonElement> CallAsync(string operation, object input, CancellationToken token) =>
-        client.CallAsync("rules." + operation, JsonSerializer.SerializeToElement(input, Json), token);
-
-    private FilmRuleSet Accept(JsonElement result)
+    private FilmRuleSet AcceptLocal(FilmRuleSet rules)
     {
-        var next = DecodeRules(result);
-        Revision = FilmJson.RequiredText(result, "revision");
+        var next = Copy(rules);
+        Revision = DocumentFingerprint.FromBytes(JsonSerializer.SerializeToUtf8Bytes(next, Json)).Sha256!;
         Volatile.Write(ref saved, next);
         return Copy(next);
     }
 
-    private static FilmRuleSet DecodeRules(JsonElement result) => Copy(
-        result.GetProperty("rules").Deserialize<FilmRuleSet>(Json) ??
-            throw new InvalidOperationException("Film rule snapshot is missing."));
+    private static (string Pattern, string Flags)? ParseInput(string value)
+    {
+        string pattern = TrimInput(value), flags = "";
+        if (pattern.StartsWith('/') && pattern.LastIndexOf('/') is > 0 and var end)
+        {
+            flags = TrimInput(pattern[(end + 1)..]);
+            pattern = TrimInput(pattern[1..end]);
+        }
+        pattern = NormalizeRegexText(pattern);
+        return pattern.Length == 0 ? null : (pattern, flags);
+    }
+
+    private static readonly char[] InputWhitespace =
+        "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff".ToCharArray();
+    private static string TrimInput(string value) => value.Trim(InputWhitespace);
+
+    private static string NormalizeRegexText(string value)
+    {
+        var result = new StringBuilder(value.Length);
+        for (int i = 0; i < value.Length; i++)
+        {
+            result.Append(value[i]);
+            if (value[i] == '\\' && i + 2 < value.Length && value[i + 1] == '\\' &&
+                "dDsSwWbB.()[]{}+*?^$|\\-_/".Contains(value[i + 2])) i++;
+        }
+        return result.ToString();
+    }
+
+    // Keep the dashboard's JS trim → Go TrimSpace → response decode order.
+    // This is settings encoding only; compiling and executing rules stays in Node.
+    private static FilmRuleSet NormalizeForSave(FilmRuleSet rules)
+    {
+        static string[] Clean(IEnumerable<string> rows) => rows.Select(TrimInput).Where(value => value.Length > 0)
+            .Select(value => value.Trim()).Where(value => value.Length > 0).Select(TrimInput)
+            .Where(value => value.Length > 0).ToArray();
+        static FilmMatchRule[] Matches(IEnumerable<FilmMatchRule> rows) => rows.Select(row =>
+        {
+            string pattern = NormalizeRegexText(TrimInput(row.Pattern));
+            pattern = NormalizeRegexText(TrimInput(pattern));
+            pattern = NormalizeRegexText(TrimInput(pattern));
+            return row with { Pattern = pattern, Flags = TrimInput(row.Flags) };
+        }).Where(row => row.Pattern.Length > 0).ToArray();
+        return new()
+        {
+            EpisodeCleanRegexRules = Clean(rules.EpisodeCleanRegexRules),
+            EpisodeRules = Matches(rules.EpisodeRules),
+            MovieRules = Matches(rules.MovieRules),
+            AggregateRegexRules = Clean(rules.AggregateRegexRules)
+        };
+    }
+
+    private static FilmRuleSet Defaults(string name)
+    {
+        using var stream = typeof(FilmRuleService).Assembly.GetManifestResourceStream("MeowFilm.FilmRuleDefaults.json")!;
+        using var json = JsonDocument.Parse(stream);
+        return Copy(json.RootElement.GetProperty(name).Deserialize<FilmRuleSet>(Json)!);
+    }
+
+    private static void Validate(FilmRuleSet rules)
+    {
+        static bool Valid(string value)
+        {
+            for (int i = 0; i < value.Length; i++)
+            {
+                if (char.IsHighSurrogate(value[i]))
+                { if (++i == value.Length || !char.IsLowSurrogate(value[i])) return false; }
+                else if (char.IsLowSurrogate(value[i])) return false;
+            }
+            return true;
+        }
+        if (rules.EpisodeCleanRegexRules.Concat(rules.AggregateRegexRules).Any(value => !Valid(value)) ||
+            rules.EpisodeRules.Concat(rules.MovieRules).Any(row => !Valid(row.Pattern) || !Valid(row.Replace) || !Valid(row.Flags)))
+            throw new FilmPlaybackException("INVALID_RULES");
+    }
+
+    private Task<JsonElement> CallAsync(string operation, object input, CancellationToken token) =>
+        client.CallAsync("rules." + operation, JsonSerializer.SerializeToElement(input, Json), token);
 
     private static FilmRuleSet Copy(FilmRuleSet rules)
     {

@@ -27,14 +27,21 @@ public static class AppIdentity
     /// <summary>Trusted native content collections. Music sources are stored by the shared runtime module.</summary>
     public static IReadOnlyList<string> NativeCollections { get; } = Array.AsReadOnly(Array.Empty<string>());
     public static IReadOnlyList<string> ProtectedNamespaces { get; } =
-        Array.AsReadOnly(new[] { "music.accounts.v2" });
+        Array.AsReadOnly(new[] { "music.accounts.v2", "pan.accounts.v1", "film.tmdb.v1", "film.douban.v1", "film.cat-sources.v1" });
     public static IReadOnlyList<string> NativeNamespaces { get; } = Array.AsReadOnly(new[]
     {
         "app.appearance.v1", "app.window.v1", "app.media-controls.v1", "music.library.v2", "music.files.v2", "music.accounts.v2", "music.feedback.v2",
         "music.playback-outbox.v2",
-        "music.fm-selection.v2", "film.video-sources.v1", "film.library.v1",
+        "music.fm-selection.v2", "film.video-sources.v1", "film.library.v1", "film.cat-sources.v1",
+        "pan.accounts.v1", "film.tmdb.v1", "film.douban.v1", "film.rules.v1", "film.preferences.v1",
         "novel.library.v1", "novel.sources.v1"
     });
+    public static IReadOnlyDictionary<string, string> RuntimeSettingsNamespaces { get; } = new Dictionary<string, string>
+    {
+        ["cat.sources"] = "film.cat-sources.v1", ["pan.accounts"] = "pan.accounts.v1",
+        ["tmdb"] = "film.tmdb.v1", ["douban"] = "film.douban.v1",
+        ["film.rules"] = "film.rules.v1", ["film.preferences"] = "film.preferences.v1"
+    };
     public static IReadOnlyList<string> CacheNamespaces { get; } = Array.AsReadOnly(new[]
     {
         "music.presentation-resources.v1", "music.account-details.v2", "music.playback-sources.v2",
