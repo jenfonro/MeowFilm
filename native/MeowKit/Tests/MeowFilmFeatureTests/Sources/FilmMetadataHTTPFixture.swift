@@ -9,7 +9,7 @@ final class FilmMetadataHTTPFixture: @unchecked Sendable {
     private var pending: [URLProtocol] = []
     private let held: Bool
     private let started: (@Sendable () -> Void)?
-    private let response: @Sendable (RuntimeObject) throws -> RuntimeValue
+    private var response: @Sendable (RuntimeObject) throws -> RuntimeValue
 
     init(held: Bool = false, started: (@Sendable () -> Void)? = nil,
          response: @escaping @Sendable (RuntimeObject) throws -> RuntimeValue = { _ in
@@ -37,6 +37,11 @@ final class FilmMetadataHTTPFixture: @unchecked Sendable {
         return received
     }
 
+    func setResponse(_ value: RuntimeValue) {
+        lock.lock(); defer { lock.unlock() }
+        response = { _ in value }
+    }
+
     func close() {
         finish()
         FilmMetadataHTTPProtocol.remove(self)
@@ -54,6 +59,7 @@ final class FilmMetadataHTTPFixture: @unchecked Sendable {
         lock.lock()
         seen.append(instance.request)
         if held { pending.append(instance) }
+        let response = response
         lock.unlock()
         do {
             let input = try Self.parameters(instance.request)

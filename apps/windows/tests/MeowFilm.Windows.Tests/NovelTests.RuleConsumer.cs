@@ -44,7 +44,11 @@ public static partial class NovelTests
         {
             operation = "transform", title = "原文", blocks = originals, book = Book().Json(),
             source = new { installationId = "a", sourceUrl = Source().SourceUrl, bookSourceUrl = Source().SourceUrl, name = Source().Name },
-            rules = selected, conversion = "traditional"
+            rules = selected.Select(rule => new
+            {
+                rule.Pattern, rule.Replacement, rule.IsRegex, isEnabled = rule.Enabled, rule.ScopeTitle,
+                rule.ScopeContent, rule.Scope, rule.ExcludeScope, rule.Order, rule.TimeoutMillisecond
+            }).ToArray(), conversion = "traditional"
         });
         runtime.Respond = async (parameters, _) =>
         {
@@ -52,10 +56,10 @@ public static partial class NovelTests
             await release.Task;
             var payload = NovelJson.Value(parameters!);
             Check(payload.EnumerateObject().Count() == 1 && JsonElement.DeepEquals(expected, payload.GetProperty("request")),
-                "one detached request preserves all rules, disabled entries, original order, budgets and final conversion");
+                "one detached request preserves actual rule materials, disabled entries, original order, budgets and final conversion");
             return Json(new { ok = true, contract = "source.runtime.v2", value = new { title = "处理结果", blocks = new[] { new NovelBlock("text", "净化") } } });
         };
-        var processing = rules.TransformAsync("原文", originals, Book(), Source(), selected, "traditional");
+        var processing = rules.TransformAsync("原文", originals, Book(), Source(), NovelJson.Value(selected), "traditional");
         await entered.Task;
         selected[0] = selected[0] with { Pattern = "改写" }; originals[0] = new("text", "调用后改写");
         release.TrySetResult();

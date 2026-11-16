@@ -395,10 +395,7 @@ public struct FilmPlaybackMetadataSource: Equatable, Sendable {
         self.provider = provider; self.kind = kind
         metadataID = try FilmPlaybackIdentifier(fields.filmValue("metadataId"))
         title = try fields.filmString("title")
-        if let value = fields["seasons"], value != .null {
-            guard let seasons = value.filmArray else { throw FilmPlaybackError.invalidResponse }
-            self.seasons = seasons
-        } else { seasons = nil }
+        seasons = fields["seasons"]?.filmArray
     }
 }
 
@@ -461,14 +458,16 @@ public struct FilmPlaybackBrowsing: Equatable, Sendable {
         if fields["refreshing"] != nil { refreshing = try fields.filmBool("refreshing") }
         else { refreshing = false }
         lines = try fields.filmArray("lines").map(FilmPlaybackLine.init)
-        let files = try fields.filmArray("episodes").map(FilmPlaybackFile.init)
         // A failed current list must never expose a previous list's playable rows.
-        self.files = error == nil ? files : []
-        let original: [FilmPlaybackFile] = try fields["originalEpisodes"].map { value in
-            guard let values = value.filmArray else { throw FilmPlaybackError.invalidResponse }
-            return try values.map(FilmPlaybackFile.init)
-        } ?? []
-        originalFiles = error == nil ? original : []
+        if error != nil {
+            files = []; originalFiles = []
+        } else {
+            files = try fields.filmArray("episodes").map(FilmPlaybackFile.init)
+            originalFiles = try fields["originalEpisodes"].map { value in
+                guard let values = value.filmArray else { throw FilmPlaybackError.invalidResponse }
+                return try values.map(FilmPlaybackFile.init)
+            } ?? []
+        }
     }
 }
 
@@ -560,7 +559,6 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
     public let attempt: FilmPlaybackAttempt?
     public let current: FilmPlaybackCurrent?
     public let searchComplete: Bool
-    public let preferences: FilmPlaybackPreferences
     public let shortVideo: Bool
     public let previewEpisodes: Bool
     public let reportError: String?
@@ -587,11 +585,19 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
         } else {
             metadataSupplement = nil
         }
-        metadataSources = try fields["metadataSources"].map { value in
+        let metadataSources: [FilmPlaybackMetadataSource] = try fields["metadataSources"].map { value in
             guard let values = value.filmArray else { throw FilmPlaybackError.invalidResponse }
-            return try values.map(FilmPlaybackMetadataSource.init)
+            return values.compactMap { try? FilmPlaybackMetadataSource($0) }
         } ?? []
-        metadataSourceID = fields["metadataSourceId"]?.filmText
+        let metadataSourceID = try fields["metadataSourceId"].flatMap { $0 == .null ? nil : $0 }.map { value in
+            guard let id = value.filmText, !id.isEmpty else { throw FilmPlaybackError.invalidResponse }
+            return id
+        }
+        if let metadataSourceID, !metadataSources.contains(where: { $0.id == metadataSourceID }) {
+            throw FilmPlaybackError.invalidResponse
+        }
+        self.metadataSources = metadataSources
+        self.metadataSourceID = metadataSourceID
         metadataError = fields["metadataError"]?.filmText
         sources = try fields.filmArray("sources").map(FilmPlaybackSourceRow.init)
         browsing = try FilmPlaybackBrowsing(fields.filmValue("browsing"))
@@ -600,7 +606,6 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
         attempt = try fields.filmOptional("attempt").map(FilmPlaybackAttempt.init)
         current = try fields.filmOptional("current").map(FilmPlaybackCurrent.init)
         searchComplete = try fields.filmBool("searchComplete")
-        preferences = try FilmPlaybackPreferences(fields.filmValue("preferences"))
         shortVideo = try fields.filmBool("shortVideo"); previewEpisodes = try fields.filmBool("previewEpisodes")
         reportError = fields["reportError"]?.filmText; prefetch = fields["prefetch"]
     }

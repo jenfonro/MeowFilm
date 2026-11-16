@@ -35,11 +35,12 @@
   function merge(books) {
     if (!Array.isArray(books)) throw fault('INVALID_BOOKS');
     const members = [], positions = new Map();
+    let invalid = false;
     for (const entry of books) {
-      if (!object(entry)) throw fault('INVALID_BOOK');
+      if (!object(entry)) { invalid = true; continue; }
       const candidates = Array.isArray(entry.candidates) ? entry.candidates : [entry];
       for (const book of candidates) {
-        if (!object(book)) throw fault('INVALID_BOOK');
+        if (!object(book)) { invalid = true; continue; }
         const key = sourceKey(book);
         if (key && positions.has(key)) {
           const position = positions.get(key);
@@ -53,6 +54,7 @@
         }
       }
     }
+    if (invalid && !members.length) throw fault('INVALID_BOOK');
     const groups = new Map();
     for (let index = 0; index < members.length; index++) {
       const book = members[index], normalized = identity(book);
@@ -143,9 +145,12 @@
       .sort((left, right) => (left.rule.order ?? 0) - (right.rule.order ?? 0) || left.index - right.index)) {
       const content = rule.scopeContent !== false && blocks.some(block => block.type === 'text');
       if (rule.scopeTitle !== true && !content) continue;
-      const scope = rule.scope ?? '', excludeScope = rule.excludeScope ?? '';
-      if (typeof scope !== 'string' || typeof excludeScope !== 'string') throw fault('INVALID_RULE');
-      if (scope.trim() && !inScope(scope, book, source) || inScope(excludeScope, book, source)) continue;
+      const scope = rule.scope ?? '';
+      if (typeof scope !== 'string') throw fault('INVALID_RULE');
+      if (scope.trim() && !inScope(scope, book, source)) continue;
+      const excludeScope = rule.excludeScope ?? '';
+      if (typeof excludeScope !== 'string') throw fault('INVALID_RULE');
+      if (inScope(excludeScope, book, source)) continue;
       const started = Date.now(), budget = rule.timeoutMillisecond ?? 3000;
       if (typeof rule.pattern !== 'string' ||
           rule.replacement !== undefined && typeof rule.replacement !== 'string' ||

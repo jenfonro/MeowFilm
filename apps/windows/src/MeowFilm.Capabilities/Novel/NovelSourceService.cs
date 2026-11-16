@@ -108,7 +108,14 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IDocumentStore st
                 var value = envelope.GetProperty("value");
                 if (value.GetProperty("revision").GetInt64() != next.Revision) throw new BridgeException("INVALID_RESPONSE");
                 if (!ReferenceEquals(configuration.Snapshot, next)) { force = true; continue; }
-                var projected = NovelJson.Decode<NovelSource[]>(value.GetProperty("sources"));
+                var projected = value.GetProperty("sources").EnumerateArray().Select(source => new
+                {
+                    InstallationId = source.GetProperty("installationId").GetString(),
+                    Revision = source.GetProperty("revision").GetInt64(),
+                    Actions = NovelJson.Decode<string[]>(source.GetProperty("actions")),
+                    ErrorCode = source.TryGetProperty("errorCode", out var error) && error.ValueKind != JsonValueKind.Null
+                        ? error.GetString() : null
+                }).ToArray();
                 if (projected.Length != next.Sources.Length || projected.Any(source =>
                     !next.Sources.Any(item => item.InstallationId == source.InstallationId && item.Revision == source.Revision)))
                     throw new BridgeException("INVALID_RESPONSE");
@@ -118,7 +125,7 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IDocumentStore st
                     var applied = projected.Single(source => source.InstallationId == item.InstallationId);
                     return item.Source() with { Actions = applied.Actions, ErrorCode = applied.ErrorCode };
                 }).ToArray());
-                if (projected.Any(source => source.Enabled && source.ErrorCode is not null))
+                if (sources.Any(source => source.Enabled && source.ErrorCode is not null))
                     ApplyFailed?.Invoke(this, "书源配置已保存，部分书源未能生效");
                 return;
             }

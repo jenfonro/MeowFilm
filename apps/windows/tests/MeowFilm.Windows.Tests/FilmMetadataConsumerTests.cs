@@ -19,7 +19,6 @@ public static partial class MusicUiTests
         yield return Case("TMDB admitted settings save drains before close and never restores a revoked search", MetadataSaveDrain);
         yield return Case("native TMDB and Douban settings work offline with CAS failures and block notifications", MetadataNativeOwner);
         yield return Case("native metadata saves preserve canonical text endpoints and proxy validation offline", MetadataNativeNormalization);
-        yield return Case("metadata content captures its exact producer and never invents native detail cache receipts", MetadataProducerConsumer);
     }
     private static void MetadataSearch(FilmSearchConsumerRuntime runtime)
     {
@@ -45,6 +44,8 @@ public static partial class MusicUiTests
         await using var scene = await UnifiedScene.Create(metadata: metadata, runtime: runtime);
         await scene.Submit("目标", "film"); await SearchFixture.Settle(scene.Film.Search.Current!);
         var oldSession = scene.Film.Search.Current!;
+        var oldCard = scene.Page.Cards.Single();
+        var cardSnapshot = oldCard.SearchContext.Item.Clone();
         await scene.Page.OpenCardAsync(scene.Page.Cards.Single());
         var oldPlayback = scene.Film.Playback!;
         store.WriteError = DocumentStoreError.Storage;
@@ -52,8 +53,13 @@ public static partial class MusicUiTests
         True(ReferenceEquals(scene.Film.Search.Current, oldSession), "failed settings receipt cannot revoke an effective search");
         store.WriteError = null;
         await metadata.SaveSettingsAsync(new Dictionary<string, object?>());
-        True(scene.Film.Search.Current is null && scene.Page.Cards.Count == 0 && runtime.SearchOpens == 1,
-            "successful save revokes display without starting another search");
+        True(scene.Film.Search.Current is null && oldSession.Retired &&
+            ReferenceEquals(scene.Page.Cards.Single(), oldCard) && oldCard.Id == "tmdb:tv:7" && oldCard.Title == "目标" &&
+            ReferenceEquals(oldCard.SearchContext.Session, oldSession) &&
+            JsonElement.DeepEquals(oldCard.SearchContext.Item, cardSnapshot) &&
+            oldCard.SearchContext.PlaybackRequest.Target == new FilmPlaybackTarget("tmdb:tv:7", "tv", "目标", "tmdb", "7") &&
+            runtime.SearchOpens == 1,
+            "successful save retires execution while retaining the exact successful card and target without another search");
         Equal("详情1", oldPlayback.Overview);
         scene.Click("BackButton"); await SearchFixture.Until(() => scene.SearchHost is not null && scene.Status == "");
         await SearchFixture.Settle(scene.Film.Search.Current!);
@@ -98,6 +104,9 @@ public static partial class MusicUiTests
         using var runtime = new FilmSearchConsumerRuntime(); MetadataSearch(runtime);
         await using var scene = await UnifiedScene.Create(metadata: metadata, runtime: runtime);
         await scene.Submit("目标", "film"); await SearchFixture.Settle(scene.Film.Search.Current!);
+        var oldSession = scene.Film.Search.Current!;
+        var oldCard = scene.Page.Cards.Single();
+        var cardSnapshot = oldCard.SearchContext.Item.Clone();
         using var caller = new CancellationTokenSource();
         var save = metadata.SaveSettingsAsync(new Dictionary<string, object?>(), caller.Token);
         caller.Cancel();
@@ -107,7 +116,12 @@ public static partial class MusicUiTests
             True(!save.IsCompleted && !close.IsCompleted && !store.WriteToken.CanBeCanceled,
                 "caller cancellation and close drain an admitted settings write without abandoning its receipt");
             receipt.SetResult(); await save; await close;
-            True(scene.Film.Search.Current is null && scene.Page.Cards.Count == 0, "successful save revokes the old search during shutdown");
+            True(scene.Film.Search.Current is null && oldSession.Retired &&
+                ReferenceEquals(scene.Page.Cards.Single(), oldCard) && oldCard.Id == "tmdb:tv:7" && oldCard.Title == "目标" &&
+                ReferenceEquals(oldCard.SearchContext.Session, oldSession) &&
+                JsonElement.DeepEquals(oldCard.SearchContext.Item, cardSnapshot) &&
+                oldCard.SearchContext.PlaybackRequest.Target == new FilmPlaybackTarget("tmdb:tv:7", "tv", "目标", "tmdb", "7"),
+                "successful save retires the old search during shutdown without clearing its exact successful card and target");
             await scene.Film.CancelShutdownPreparationAsync();
             True(scene.Film.Search.Current is null && runtime.SearchOpens == 1, "shutdown cancellation does not restore a revoked search");
             await scene.Submit("最终关闭", "film"); await SearchFixture.Settle(scene.Film.Search.Current!);
@@ -128,49 +142,6 @@ public static partial class MusicUiTests
             finally { finalReceipt.TrySetResult(); }
         }
         finally { receipt.TrySetResult(); }
-    }
-    private static async Task MetadataProducerConsumer()
-    {
-        using var runtime = new MetadataRuntime();
-        await using var store = new FilmNativeSettingsFixture();
-        await using var metadata = new FilmMetadataService(runtime, store);
-        IFilmSearchMetadata consumer = metadata;
-        var search = await consumer.SearchAsync("原查询 2 ", default);
-        var detail = await consumer.DetailAsync("tv", 7, default);
-        True(search.Owner is { } searchOwner && detail.Owner is { } detailOwner &&
-            ReferenceEquals(searchOwner.Client, runtime.Producer) && ReferenceEquals(detailOwner.Client, runtime.Producer) &&
-            !ReferenceEquals(runtime.Producer, runtime) && searchOwner.Revoked.CanBeCanceled &&
-            searchOwner.Revoked == detailOwner.Revoked && !searchOwner.Revoked.IsCancellationRequested &&
-            search.CacheEntry is null && detail.CacheEntry is null,
-            "content and optional receipt use the actual captured producer, not the settings facade or fabricated native freshness");
-        Equal("/v1/tmdb/images/w500/poster.png", search.Value.GetProperty("results")[0].GetProperty("poster_path").GetString());
-        Equal("/v1/tmdb/images/original/poster.png", detail.Value.GetProperty("poster_path").GetString());
-        Equal("  原始搜索字段  ", search.Value.GetProperty("raw").GetProperty("unknown").GetString());
-        Equal("  原始详情字段  ", detail.Value.GetProperty("raw").GetProperty("unknown").GetString());
-        True(detail.Value.GetProperty("genres").GetArrayLength() == 1 && detail.Value.GetProperty("seasons").GetArrayLength() == 1 &&
-            detail.Value.GetProperty("credits").GetProperty("cast").GetArrayLength() == 1 &&
-            detail.Value.GetProperty("similar").GetProperty("results").GetArrayLength() == 1 &&
-            detail.Value.GetProperty("images").GetProperty("posters").GetArrayLength() == 1,
-            "the native adapter preserves complete original detail and every requested appended object");
-        var repeated = await consumer.DetailAsync("tv", 7, default);
-        Equal("详情2", repeated.Value.GetProperty("overview").GetString());
-        True(runtime.Searches == 1 && runtime.Details == 2 && runtime.CacheReads == 3 && repeated.CacheEntry is null,
-            "each new native read reaches the captured Node interface; only the real runtime tests assert upstream cache reuse");
-        var held = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        runtime.HeldDetail = held.Task;
-        try
-        {
-            var first = consumer.DetailAsync("tv", 7, default);
-            var second = consumer.DetailAsync("tv", 7, default);
-            await SearchFixture.Until(() => runtime.Details == 4);
-            True(!first.IsCompleted && !second.IsCompleted && runtime.CacheReads == 3,
-                "both same-key native calls reach the Node producer before either body or receipt is available; no second native flight owner");
-            held.SetResult(MetadataRuntime.Detail("同一producer并发详情"));
-            var completed = await Task.WhenAll(first, second);
-            True(completed.All(value => value.CacheEntry is null && ReferenceEquals(value.Owner?.Client, runtime.Producer)) &&
-                runtime.CacheReads == 5, "both native waiters retain the same captured producer without inventing a shared cache receipt");
-        }
-        finally { held.TrySetResult(MetadataRuntime.Detail("同一producer并发详情")); }
     }
     private static async Task MetadataNativeOwner()
     {
@@ -199,8 +170,11 @@ public static partial class MusicUiTests
         catch (OperationCanceledException) { }
         await BridgeTests.Expect("INVALID_REQUEST", () => metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["includeAdult"] = "true" }));
         True(store.Writes == writes && metadata.Settings!.Language != original.Language, "cancelled and invalid edits do not replace the committed snapshot");
-        await BridgeTests.Expect("CLOSED", () => metadata.SearchAsync("离线", default));
-        await BridgeTests.Expect("CLOSED", () => metadata.DetailAsync("tv", 7, default));
+        await BridgeTests.Expect("CLOSED", () => Read(new
+        { provider = "tmdb", path = "/3/search/multi", query = new { query = "离线", page = 1 }, imageSize = "w500" }));
+        await BridgeTests.Expect("CLOSED", () => Read(new
+        { provider = "tmdb", path = "/3/tv/7", query = new { append_to_response = "credits,similar,images" }, imageSize = "original" }));
+        True(runtime.Captures == 2, "explicit metadata content fails at the offline connection without changing native settings");
         await using var reopened = new FilmMetadataService(runtime, store);
         Equal("ja-JP", (await reopened.GetSettingsAsync()).Language);
         Equal("https://douban.fixture.invalid", (await reopened.GetDoubanSettingsAsync()).ApiBase);
@@ -208,6 +182,11 @@ public static partial class MusicUiTests
         await MetadataStoreError(DocumentStoreError.Corrupt, () => metadata.GetSettingsAsync());
         await MetadataStoreError(DocumentStoreError.Corrupt, () => metadata.SaveSettingsAsync(new Dictionary<string, object?>()));
         True(store.Writes == writes && runtime.Notifications.Count == 2, "a corrupt document is never repaired by blind overwrite or runtime fallback");
+        async Task Read(object input)
+        {
+            var owner = await runtime.CaptureConnectionAsync();
+            await new FilmPlaybackClient(owner.Client).CallAsync("data.metadata", input, owner.Revoked);
+        }
     }
     private static async Task MetadataNativeNormalization()
     {
@@ -244,7 +223,7 @@ public static partial class MusicUiTests
         })
             await BridgeTests.Expect("INVALID_REQUEST", () => metadata.SaveDoubanSettingsAsync(patch));
         True(store.Writes == writes && (await metadata.GetDoubanSettingsAsync()) == douban &&
-            runtime.Notifications.SequenceEqual(["tmdb", "douban"]) && runtime.CacheReads == 0,
+            runtime.Notifications.SequenceEqual(["tmdb", "douban"]) && runtime.Captures == 0,
             "invalid drafts cannot write notify or replace accepted local settings while offline");
     }
     private static async Task MetadataStoreError(DocumentStoreError code, Func<Task> operation)
@@ -256,86 +235,36 @@ public static partial class MusicUiTests
     {
         private readonly CancellationTokenSource lifetime = new();
         private readonly RuntimeConnection connection;
-        internal readonly IRuntimeClient Producer;
-        internal int Searches, Details, CacheReads;
         internal bool Offline;
+        internal int Captures;
         internal readonly List<string> Notifications = [];
-        internal Task<JsonElement>? HeldDetail;
-        internal CancellationToken DetailToken;
-        internal MetadataRuntime()
-        {
-            Producer = new MetadataProducer(this);
-            connection = new(Producer, new Uri("http://127.0.0.1:1/"), lifetime.Token);
-        }
+        internal MetadataRuntime() => connection = new(this, new Uri("http://127.0.0.1:1/"), lifetime.Token);
         public Task<RuntimeConnection> CaptureConnectionAsync(CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested(); lifetime.Token.ThrowIfCancellationRequested();
+            Captures++;
             if (Offline) throw new BridgeException("CLOSED");
             return Task.FromResult(connection);
         }
         public void SettingsChanged(string block) => Notifications.Add(block);
         public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
-            throw new InvalidOperationException("Settings must use native documents; content must capture the producer.");
-        private async Task<JsonElement> ContentAsync(string method, object? parameters, CancellationToken cancellationToken)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            True(method is "film.data.metadata" or "film.data.cache.entry", "metadata content uses only the formal film operations");
-            var request = JsonSerializer.SerializeToElement(parameters);
-            bool receipt = method == "film.data.cache.entry";
-            True(request.ValueKind == JsonValueKind.Object && request.EnumerateObject().Count() == (receipt ? 5 : 4) &&
-                request.GetProperty("provider").GetString() == "tmdb" &&
-                (!receipt || request.GetProperty("kind").GetString() == "metadata"),
-                "content and cache identity retain the exact formal provider/shape");
-            string? path = request.GetProperty("path").GetString();
-            var query = request.GetProperty("query");
-            if (path == "/3/search/multi")
-            {
-                True(query.EnumerateObject().Count() == 2 && query.GetProperty("query").ValueKind == JsonValueKind.String &&
-                    query.GetProperty("page").GetInt32() == 1 &&
-                    request.GetProperty("imageSize").GetString() == "w500", "search uses its original query, first page and w500 identity; configured language belongs to Node");
-                if (receipt) { Interlocked.Increment(ref CacheReads); return Success(null); }
-                Interlocked.Increment(ref Searches);
-                return Success(new
-                {
-                    marker = "完整搜索原响应", raw = new { unknown = "  原始搜索字段  " }, results = new[]
-                    {
-                        new { media_type = "tv", id = 7, name = "目标", title = "目标", overview = "已得搜索简介",
-                            first_air_date = "2023-01-01", release_date = "2023-01-01", poster_path = "/v1/tmdb/images/w500/poster.png" }
-                    }
-                });
-            }
-            True(path == "/3/tv/7" && query.EnumerateObject().Count() == 1 &&
-                query.GetProperty("append_to_response").GetString() == "credits,similar,images" &&
-                request.GetProperty("imageSize").GetString() == "original", "full detail uses its exact type/ID, append set and original image identity");
-            if (receipt) { Interlocked.Increment(ref CacheReads); return Success(null); }
-            int number = Interlocked.Increment(ref Details); DetailToken = cancellationToken;
-            // Deliberately return an already admitted late body even after its
-            // UI waiter leaves; the production consumer must reject publication.
-            return Success(HeldDetail is { } held ? await held : Detail("详情" + number));
-        }
+            throw new InvalidOperationException("Settings must use native documents; content belongs to Node search/playback sessions.");
         internal static JsonElement Detail(string overview) => SearchFixture.Json(new
         {
             id = 7, name = "目标", overview, poster_path = "/v1/tmdb/images/original/poster.png",
+            businessId = "tmdb:tv:7", playbackTarget = new FilmPlaybackTarget("tmdb:tv:7", "tv", "目标", "tmdb", "7").Wire(),
             marker = "完整详情原响应", raw = new { unknown = "  原始详情字段  " },
             genres = new[] { new { id = 18, name = "剧情" } },
-            seasons = new[] { new { season_number = 1, episode_count = 3, air_date = "2023-01-01" } },
+            seasons = new[] { new { season_number = 1, episode_count = 3, air_date = "2023-01-01",
+                businessId = "tmdb:tv:7:season:1", playbackTarget = new FilmPlaybackTarget("tmdb:tv:7", "tv", "目标", "tmdb", "7", Season: 1).Wire() } },
             credits = new { cast = new[] { new { id = 19, name = "演员" } }, crew = Array.Empty<object>() },
-            similar = new { results = new[] { new { id = 8, name = "相关作品" } } },
+            similar = new { results = new[] { new { id = 8, name = "相关作品", businessId = "tmdb:tv:8",
+                playbackTarget = new FilmPlaybackTarget("tmdb:tv:8", "tv", "相关作品", "tmdb", "8").Wire() } } },
             images = new { posters = new[] { new { file_path = "/v1/tmdb/images/original/poster.png" } } }
         });
-        private static JsonElement Success(object? value) => JsonSerializer.SerializeToElement(new { ok = true, contract = "film.playback.v1", value });
         public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
             ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
             => throw new InvalidOperationException("Metadata does not upload source.");
         public void Dispose() { lifetime.Cancel(); lifetime.Dispose(); }
-
-        private sealed class MetadataProducer(MetadataRuntime runtime) : IRuntimeClient
-        {
-            public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
-                runtime.ContentAsync(method, parameters, cancellationToken);
-            public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
-                ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default) =>
-                throw new InvalidOperationException("Metadata does not upload source.");
-        }
     }
 }

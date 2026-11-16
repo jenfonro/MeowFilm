@@ -22,20 +22,25 @@ public static partial class NovelTests
     {
         yield return new("novel native library: independent shelf/history stable identity accepted write and corruption", Library);
         yield return new("novel native library: raw extensions exact numbers and UTF8 keys survive edits and reopen", LibraryRoundTrip);
+        yield return new("novel native rules: management projections preserve raw execution through cold open edits and real failures", () => Sta(RuleProjectionExecution));
         yield return new("novel native library: bad slots remain raw healthy siblings work and ambiguous identities never overwrite", LibraryIsolation);
         yield return new("novel native library: root JSON version and CAS failures never publish or overwrite", LibraryGuards);
         yield return new("novel appearance: unknown values fall back only for consumption and unrelated editing preserves raw values", () => Sta(AppearanceRoundTrip));
         yield return new("novel rule management: offline import persists current rules without an execution preflight", () => Sta(OfflineRules));
         yield return new("novel native library: real atomic store reopens and second process restores reading", Durable);
         yield return new("novel source configuration: native owner offline import export and revision retirement", () => Sta(Sources));
+        yield return new("novel source consumer contract: optional management fields preserve receipts actions and retirement", () => Sta(SourceProjectionContract));
+        yield return new("novel native source editors: raw definitions preserve existing and new editor repeated save revisions", () => Sta(SourceProjectionEditors));
         yield return new("novel multi-source search: unknown authors pagination partial failure and stale query", () => Sta(Search));
         yield return new("novel reading session: metadata creates no history source switch ambiguity and failure preserve book", () => Sta(Reading));
         yield return new("novel retained shelf: deleted history stays deleted until new reading is saved", () => Sta(RetainedShelfHistory));
         yield return new("novel catalog refresh: metadata and automatic reload commit one reading snapshot or preserve the old one", () => Sta(CatalogAtomic));
         yield return new("novel source switch identity: enriched author persists and third source keeps the same local book", () => Sta(SwitchIdentity));
         yield return new("novel chapter context: native toc content and purchase retain open JSON fields and volume text", () => Sta(ChapterContext));
+        yield return new("novel chapter blocks: required branch material fails atomically and unused members remain lazy", () => Sta(ChapterBlockMaterials));
         yield return new("novel cold library: saved book reads without home and disabled or removed sources stay retired", () => Sta(ColdShelf));
         yield return new("novel discovery: real source entries fields order paging and shared home categories selection", () => Sta(DiscoveryData));
+        yield return new("novel discovery response: healthy siblings groups empty pages and failed page retry preserve atomic state", () => Sta(DiscoveryResponseIsolation));
         yield return new("novel discovery isolation: late source and category results cannot overwrite the current request", () => Sta(DiscoveryIsolation));
         yield return new("novel discovery cancellation: receipt drains and revised disabled or removed selections stay isolated", () => Sta(DiscoveryRetirement));
         yield return new("novel discovery failure: first load refresh and more retain the selected source and retry the same page", () => Sta(DiscoveryFailures));
@@ -254,13 +259,14 @@ public static partial class NovelTests
         var original = new[] { new NovelBlock("text", new string('a', 200) + "!") };
         try
         {
-            await rules.TransformAsync("正文", original, Book(), Source(), [new() { Pattern = "a", Replacement = "b", Order = 0 },
-                new() { Pattern = "^(b+)+$", Replacement = "x", IsRegex = true, Order = 1, TimeoutMillisecond = 30 }], "none");
+            await rules.TransformAsync("正文", original, Book(), Source(), NovelJson.Value(new NovelRule[] { new() { Pattern = "a", Replacement = "b", Order = 0 },
+                new() { Pattern = "^(b+)+$", Replacement = "x", IsRegex = true, Order = 1, TimeoutMillisecond = 30 } }), "none");
             throw new InvalidOperationException("Failed batch returned");
         }
         catch (BridgeException e) { Check(e.Code == "TIMEOUT"); }
         Check(original.Single().Text[0] == 'a');
-        var clean = await rules.TransformAsync("标题", [new("text", "广告\n正文")], Book(), Source(), [new() { Pattern = "广告\n", Replacement = "" }], "none");
+        var clean = await rules.TransformAsync("标题", [new("text", "广告\n正文")], Book(), Source(),
+            NovelJson.Value(new NovelRule[] { new() { Pattern = "广告\n", Replacement = "" } }), "none");
         Check(clean.GetProperty("blocks")[0].GetProperty("text").GetString() == "正文");
     }
     private static async Task Layout()
@@ -371,6 +377,7 @@ public static partial class NovelTests
         internal Runtime() { SourceStore.Seed(records); SourceStore.BeforeRead = token => Listing?.Invoke(token) ?? Task.CompletedTask; }
         internal readonly List<(string Method, JsonElement Payload)> Calls = [];
         internal Func<CancellationToken, Task>? Listing;
+        internal Func<string, JsonElement, JsonElement>? Project;
         internal Func<NovelSource, string, JsonElement, CancellationToken, Task<JsonElement>>? Read;
         internal bool DuplicateTitles, FailContent, Locked, Paid, IncludeImages;
         internal NovelBlock[]? Blocks;
@@ -397,7 +404,8 @@ public static partial class NovelTests
                 case "library.list": if (Listing is not null) await Listing(token); result = Json(new { sources = Records }); break;
                 case "web.pending": result = Json(new { requests = PendingWeb }); break;
                 case "web.respond": result = Json(new { accepted = true }); break;
-                case "library.get": result = Json(new { source = Records[0], definition = "{\"bookSourceName\":\"合成\"}" }); break;
+                case "library.get": result = Json(new { source = Records[0],
+                    definition = Json(new { bookSourceName = "合成", bookSourceUrl = Records[0].SourceUrl }).GetRawText() }); break;
                 case "library.export": result = Json(new { text = "[]" }); break;
                 case "library.import": result = Json(new { sources = Records, failures = new object[0] }); break;
                 case "library.save": Records = [Records[0] with { Revision = Records[0].Revision + 1 }]; result = Json(new { source = Records[0] }); break;
@@ -411,7 +419,7 @@ public static partial class NovelTests
                     result = Read is not null ? await Read(source, action, input, token) : Default(source, action, input); break;
                 default: result = Json(new { released = true }); break;
             }
-            return Json(new { ok = true, contract = "source.runtime.v2", value = result });
+            return Json(new { ok = true, contract = "source.runtime.v2", value = Project is null ? result : Project(method, result) });
         }
         private JsonElement Default(NovelSource source, string action, JsonElement input) => action switch
         {

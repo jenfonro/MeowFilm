@@ -21,7 +21,9 @@ public static class NovelEditorTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return new("novel editor input: initial load reverted input and successful save reset", Input);
-        yield return new("novel editor confirmation: cancel close dismiss Escape and protocol use only yes or no", () => NovelTests.Sta(Confirmation));
+        yield return new("novel editor confirmation: cancel close dismiss and protocol use only yes or no",
+            () => NovelTests.Sta(() => Confirmation(["cancel", "close", "dismiss", "protocol"])));
+        yield return new("novel editor Escape: save confirmation preserves only yes or no", () => NovelTests.Sta(() => Confirmation(["escape"])));
         yield return new("novel editor save: failure retains input and cancelled accepted write drains before continuing", () => NovelTests.Sta(SaveFailure));
         yield return new("novel editor viewport: fixed footer optimized internal horizontal and vertical scrolling", () => NovelTests.Sta(Viewport));
         yield return new("novel settings navigation: shared areas direct new source and ordered protocol actions", () => NovelTests.Sta(Settings));
@@ -44,9 +46,9 @@ public static class NovelEditorTests
             "Later input lost its marker or an unrelated extension.");
         return Task.CompletedTask;
     }
-    private static async Task Confirmation()
+    private static async Task Confirmation(string[] requests)
     {
-        foreach (string request in new[] { "cancel", "close", "dismiss", "escape", "protocol" })
+        foreach (string request in requests)
         foreach (string answer in new[] { "是", "否" })
         {
             await using var scene = new Scene(); await scene.Ready();
@@ -65,6 +67,7 @@ public static class NovelEditorTests
                 case "protocol": change = scene.Editing.ContinueAsync(() => { scene.Editor.ChangeProtocol("qysg"); switched = true; }); break;
             }
             await Until(() => scene.Question is not null);
+            await scene.Layout();
             var question = scene.Question!;
             Check(NovelTests.Find<TextBlock>(question).Any(text => text.Text == "当前更改未保存，是否保存"),
                 "The save question changed its specified text.");

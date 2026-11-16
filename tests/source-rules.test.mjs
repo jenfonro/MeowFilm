@@ -118,6 +118,36 @@ test('the single rules RPC preserves identity, merge, chapter matching and full 
     ]) assert.equal(await call({ operation: 'matchUrl', pattern, url }), expected);
   });
 
+test('merge RPC isolates bad entries and candidates but rejects bad roots and nonempty all-bad lists',
+  { timeout }, async t => {
+    const { rpc } = setup(t);
+    const known = { ...identity.book, installationId: 'two', bookUrl: '/other' };
+    const expected = value(await rpc('rules.process', {
+      request: { operation: 'merge', books: [identity.book, known] },
+    }));
+    for (let index = 0; index <= 2; index++) {
+      const books = [identity.book, known].toSpliced(index, 0, null);
+      for (const input of [books, [{ candidates: books }]]) {
+        assert.deepEqual(value(await rpc('rules.process', {
+          request: { operation: 'merge', books: input },
+        })), expected);
+      }
+    }
+    for (const books of [null, {}, '[]', [null], [{ candidates: [null, false] }]]) {
+      denied(await rpc('rules.process', { request: { operation: 'merge', books } }), 'INVALID_REQUEST');
+    }
+    for (const books of [[], [{ candidates: [] }]]) {
+      assert.deepEqual(value(await rpc('rules.process', {
+        request: { operation: 'merge', books },
+      })), { books: [] });
+    }
+    const incomplete = value(await rpc('rules.process', {
+      request: { operation: 'merge', books: [null, {}, { name: identity.book.name }] },
+    }));
+    assert.equal(incomplete.books.length, 2);
+    assert.notEqual(incomplete.books[0].groupKey, incomplete.books[1].groupKey);
+  });
+
 test('rules input admits only fixed operations and never executes request source text',
   { timeout }, async t => {
     const { rpc } = setup(t);
@@ -153,6 +183,15 @@ test('ordinary extra fields and unused transform members neither execute nor blo
     denied(await rpc('rules.process', { request: {
       ...raw, rules: [rule({ timeoutMillisecond: 0 })],
     } }), 'INVALID_REQUEST');
+    for (const excludeScope of [{ name: '书' }, ['书']]) {
+      assert.deepEqual(value(await rpc('rules.process', { request: {
+        ...raw, rules: [rule({ scope: 'another book', excludeScope,
+          pattern: '[', isRegex: true, timeoutMillisecond: 0 })],
+      } })), { title: '书', blocks: [{ type: 'text', text: 'A' }] });
+      denied(await rpc('rules.process', { request: {
+        ...raw, rules: [rule({ excludeScope })],
+      } }), 'INVALID_REQUEST');
+    }
   });
 
 test('transform sorts the complete native-owned rules stably, skips disabled rules and converts once at the end',

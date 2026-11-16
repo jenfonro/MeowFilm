@@ -30,6 +30,8 @@ Shell 的公共搜索页用 `Destination.PageId` 进入与播放相同的历史�
 
 `snapshot.target` 表达当前准确播放目标，不充当全部展示类型。元数据页面选择站点文件后，即使其 `kind` 成为 `source`，本端仍按运行器给出的 `metadataSourceId`／`metadataSources` 投影资料 provider、电影／剧集布局、季度与推荐。同内容换文件／重新取址以接纳时已确认的内容类型和季集坐标决定是否承接实际进度，不能从标题或内容 ID 猜电影。重入沿用 `target` 保存真实元数据入口、`resumeTarget` 保存准确 source 的既有契约，无搜索 reference 或换运行器 owner 也不抹掉已证入口及可用资料／缓存；执行仍严格按 source 恢复，不重新变成智能播放。
 
+元数据菜单逐行消费字符串 `id` 与已支持的 provider；未选坏行局部隔离，健康兄弟保序，不能阻断同一快照的主资料、后续 SSE 或媒体 attempt。非空 `metadataSourceId` 按字符串身份精确关联具有可消费 id／provider 的真实选中行，数字不转作字符串别名，也不能借菜单回退替换身份。菜单仍只在原始行变化时投影，投影未变不替换集合；目录保留与释放继续按原会话、来源、typed 线路、元数据来源和季度管理。
+
 关闭询问或取消不退休 App typed 系统媒体会话。仅 Shell 的准确入托盘隐藏保留已有实际 Film 输出、attempt、媒体通道和暂停进度；恢复不重开或双播，准备中没有实际输出则照旧取消并排空。普通影视离页或切换模块仍停止普通 native 输出，只有显式 PiP 可继续保留。托盘退出和其他真正退出均走原 preparation／disposal，等待实际原生输出和准确媒体回执排空，不以隐藏或保留 owner 代替关闭成功。
 
 原生准备失败传递受控异常的有限错误码，实际输出失败读取同一 `FilmPlayback.LastErrorCode`，以准确 attempt 的 `media.failed.code` 回报运行器；不发送异常正文或地址。`media.started` 只在同一 attempt 的真实首帧提交后反馈；终止观察者在真实 retire 后、状态清空前读取准确 scope／时钟，停止或关闭不得转发旧身份的终止事件，具体见[电影生命周期](media-playback.md#电影生命周期许可与验证边界)。最终原生错误优先于无关资料加载提示，候选过程失败不反复作为最终错误通知。目录状态与原生资源分别释放，handoff 的 discard 等待实际在途 commit 结束后才退休候选；停止路径的原生控制与释放共用现有命令锁。

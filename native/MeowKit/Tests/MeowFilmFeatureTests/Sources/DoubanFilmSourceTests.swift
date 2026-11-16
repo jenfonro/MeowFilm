@@ -56,9 +56,13 @@ final class DoubanFilmSourceTests: XCTestCase {
     func testParsingKeepsRuntimeBusinessIdentityPosterFallbacksAndNormalizedScores() throws {
         let payload = Data(#"""
         {"items":[
+          {"businessId":"bad-first","playbackTarget":null,"id":100,"title":"坏目标先项"},
           {"businessId":"fixture-100","playbackTarget":{"id":"fixture-100","kind":"movie","title":"第一部","metadataProvider":"douban","metadataId":"100"},"id":100,"title":" 第一部 ","pic":{"normal":"http://img1.doubanio.com/a.jpg",
             "large":"https://img2.doubanio.com/a-large.jpg"},"rating":{"value":8.6},"card_subtitle":"真实副标题"},
           {"id":"blank","title":"   "},
+          {"businessId":false,"playbackTarget":{"id":"bad-200","kind":"movie","title":"坏身份"},"id":200,"title":"坏身份"},
+          {"businessId":"bad-250","playbackTarget":{"id":"bad-250","kind":"future","title":"坏类型"},"id":250,"title":"坏类型"},
+          {"id":"missing-target","title":"缺少新的身份材料"},
           {"businessId":"fixture-300","playbackTarget":{"id":"fixture-300","kind":"movie","title":"第二部","metadataProvider":"douban","metadataId":"300"},"id":"300","title":"第二部","pic":{"large":"https://img2.doubanio.com/large.jpg"},"rating":{"value":0}},
           {"businessId":"fixture-400","playbackTarget":{"id":"fixture-400","kind":"movie","title":"第三部","metadataProvider":"douban","metadataId":"400"},"id":400,"title":"第三部","cover":{"url":"//img3.doubanio.com/cover.jpg"},"rating":{"value":"9.0"}},
           {"businessId":"fixture-500","playbackTarget":{"id":"fixture-500","kind":"movie","title":"第四部","metadataProvider":"douban","metadataId":"500"},"id":"500","title":"第四部","cover_url":"https://user@artwork.invalid/private.jpg","rating":{"value":"NaN"}},
@@ -112,13 +116,150 @@ final class DoubanFilmSourceTests: XCTestCase {
         }
     }
 
-    func testEmptyItemsAreValidButMissingItemsAndInvalidJSONAreErrors() throws {
+    func testEmptyItemsAreValidButAllBadItemsMissingItemsAndInvalidJSONAreErrors() throws {
         XCTAssertEqual(try DoubanFilmSource.parse(Data(#"{"items":[]}"#.utf8)), [])
-        for payload in ["[]", "{}", #"{"items":null}"#, #"{"items":{}}"#, "invalid JSON"] {
+        for payload in ["[]", "{}", #"{"items":null}"#, #"{"items":{}}"#, "invalid JSON",
+                        #"{"items":[{}]}"#, #"{"items":[{"title":"缺少身份"},{"id":"missing-title"}]}"#,
+                        #"{"items":[{"id":"1","title":"  "},null,{"id":true,"title":"错误身份"}]}"#,
+                        #"{"items":[{"id":"1","title":"缺少新身份"}]}"#,
+                        #"{"items":[{"id":"1","title":"坏身份","businessId":null,"playbackTarget":{"id":"1","kind":"movie","title":"坏身份"}}]}"#,
+                        #"{"items":[{"id":"1","title":"坏目标","businessId":"1","playbackTarget":{"id":"1","kind":"future","title":"坏目标"}}]}"#] {
             XCTAssertThrowsError(try DoubanFilmSource.parse(Data(payload.utf8))) {
                 XCTAssertEqual($0 as? FilmHomeError, .invalidResponse)
             }
         }
+    }
+
+    func testAllBadNonemptyPagesFailThroughBothSourceEntries() async throws {
+        let fixture = FilmMetadataHTTPFixture()
+        defer { fixture.close() }
+        let client = try fixture.connection()
+        addTeardownBlock { await client.close() }
+        let source = DoubanFilmSource { client }
+        for rows in [
+            [RuntimeValue.object([:])],
+            [.object(["title": .string("缺少身份")]), .object(["id": .string("blank"), "title": .string(" ")])],
+            Array(repeating: .object([:]), count: 24),
+            [.object(["id": .number(0), "title": .string("坏业务身份"), "businessId": .null])],
+            Array(repeating: .object(["id": .number(0), "title": .string("坏目标"), "playbackTarget": .object([:])]), count: 24),
+        ] {
+            fixture.setResponse(Self.entry(items: rows))
+            do {
+                _ = try await source.loadHome()
+                XCTFail("An unusable nonempty home cannot publish successful empty sections")
+            } catch { XCTAssertEqual(error as? FilmHomeError, .invalidResponse) }
+            do {
+                _ = try await source.loadCategory(.movie, filters: [:], offset: 24)
+                XCTFail("An unusable nonempty page cannot advance or end pagination")
+            } catch { XCTAssertEqual(error as? FilmHomeError, .invalidResponse) }
+        }
+    }
+
+    func testNewIdentityFailuresStayLocalAndHealthyDuplicatesKeepRawOffsetsAndTargets() async throws {
+        let first: RuntimeValue = .object(["id": .number(0), "title": .string("健康前项")])
+        let lastTarget = FilmPlaybackTarget(id: "opaque-tv", kind: .tv, title: "健康后项",
+            metadataProvider: .douban, metadataID: "1")
+        let last: RuntimeValue = .object(["id": .number(1), "title": .string("健康后项"),
+            "businessId": .string("opaque-tv"), "playbackTarget": .object(lastTarget.value)])
+        let badFirst: RuntimeValue = .object(["id": .number(0), "title": .string("坏身份先项"), "businessId": .bool(false)])
+        let badLast: RuntimeValue = .object(["id": .number(1), "title": .string("坏目标先项"), "playbackTarget": .object([:])])
+        let rows = [badFirst, first] + Array(repeating: badLast, count: 21) + [last]
+        let fixture = FilmMetadataHTTPFixture(response: { _ in Self.entry(items: rows) })
+        defer { fixture.close() }
+        let client = try fixture.connection()
+        addTeardownBlock { await client.close() }
+        let source = DoubanFilmSource { client }
+        let page = try await source.loadCategory(.movie, filters: [:], offset: 24)
+        XCTAssertEqual(page.items.map(\.id), ["0", "1"])
+        XCTAssertEqual(page.items.map(\.businessID), ["fixture-0", "opaque-tv"])
+        XCTAssertEqual(page.items.map(\.kind), [.movie, .tv])
+        XCTAssertEqual(page.items.last?.playbackTarget, lastTarget)
+        XCTAssertEqual(page.nextOffset, 48)
+        XCTAssertEqual(fixture.inputs.first?["query"]?.filmObject?["start"], .number(24))
+        let home = try await source.loadHome()
+        XCTAssertEqual(home.map { $0.items.map(\.id) }, Array(repeating: ["0", "1"], count: 4))
+        XCTAssertTrue(home.allSatisfy { $0.items.last?.playbackTarget == lastTarget })
+    }
+
+    @MainActor
+    func testHomeAllBadRefreshKeepsCompletedContentAndRecoveryAndTrueEmptyStillPublish() async throws {
+        let first: RuntimeValue = .object(["id": .number(0), "title": .string("旧内容")])
+        let fixture = FilmMetadataHTTPFixture(response: { _ in Self.entry(items: [first]) })
+        defer { fixture.close() }
+        let client = try fixture.connection()
+        addTeardownBlock { await client.close() }
+        let model = FilmHomeModel(sources: [DoubanFilmSource { client }])
+        defer { model.close() }
+        let initial = try XCTUnwrap(model.loadIfNeeded()); await initial.value
+        let original = model.sections
+        XCTAssertEqual(original.map { $0.items.map(\.id) }, Array(repeating: ["0"], count: 4))
+        for rows in [[RuntimeValue.object([:])],
+                     [.object(["id": .number(0), "title": .string("坏目标"), "playbackTarget": .null])]] {
+            fixture.setResponse(Self.entry(items: rows))
+            let failed = try XCTUnwrap(model.refresh()); await failed.value
+            XCTAssertEqual(model.error, .invalidResponse)
+            XCTAssertEqual(model.sections, original)
+            XCTAssertFalse(model.isLoading)
+        }
+        let last: RuntimeValue = .object(["id": .string("last"), "title": .string("新内容")])
+        fixture.setResponse(Self.entry(items: [first, .null, last]))
+        let recovered = try XCTUnwrap(model.refresh()); await recovered.value
+        XCTAssertNil(model.error)
+        XCTAssertEqual(model.sections.map { $0.items.map(\.id) }, Array(repeating: ["0", "last"], count: 4))
+        fixture.setResponse(Self.entry(items: []))
+        let empty = try XCTUnwrap(model.refresh()); await empty.value
+        XCTAssertNil(model.error)
+        XCTAssertEqual(model.sections.map { $0.items.count }, [0, 0, 0, 0])
+        XCTAssertFalse(model.isLoading)
+    }
+
+    @MainActor
+    func testCategoryAllBadPagesKeepContentAndOffsetUntilRetryOrTrueEmptySucceeds() async throws {
+        let first: RuntimeValue = .object(["id": .number(0), "title": .string("健康前项")])
+        let last: RuntimeValue = .object(["id": .number(1), "title": .string("健康后项")])
+        let rows = [first] + Array(repeating: RuntimeValue.object([:]), count: 22) + [last]
+        let fixture = FilmMetadataHTTPFixture(response: { _ in Self.entry(items: rows) })
+        defer { fixture.close() }
+        let client = try fixture.connection()
+        addTeardownBlock { await client.close() }
+        let model = FilmCategoryModel(category: .movie, source: DoubanFilmSource { client })
+        defer { model.close() }
+        let initial = try XCTUnwrap(model.loadIfNeeded()); await initial.value
+        XCTAssertEqual(model.items.map(\.id), ["0", "1"])
+        XCTAssertTrue(model.hasMore)
+        let original = model.items
+        for count in [1, 24] {
+            fixture.setResponse(Self.entry(items: Array(repeating: .object([:]), count: count)))
+            let failed = try XCTUnwrap(model.loadMore()); await failed.value
+            XCTAssertEqual(model.error, .invalidResponse)
+            XCTAssertEqual(model.items, original)
+            XCTAssertTrue(model.hasMore); XCTAssertFalse(model.isLoading)
+        }
+        let next: RuntimeValue = .object(["id": .number(2), "title": .string("重试成功")])
+        fixture.setResponse(Self.entry(items: [last] + Array(repeating: .object([:]), count: 22) + [next]))
+        let retry = try XCTUnwrap(model.loadMore()); await retry.value
+        XCTAssertNil(model.error)
+        XCTAssertEqual(model.items.map(\.id), ["0", "1", "2"])
+        XCTAssertTrue(model.hasMore)
+        let expanded = model.items
+        fixture.setResponse(Self.entry(items: Array(repeating: .object([:]), count: 24)))
+        let failedRefresh = try XCTUnwrap(model.refresh()); await failedRefresh.value
+        XCTAssertEqual(model.error, .invalidResponse)
+        XCTAssertEqual(model.items, expanded)
+        XCTAssertTrue(model.hasMore)
+        fixture.setResponse(Self.entry(items: []))
+        let end = try XCTUnwrap(model.loadMore()); await end.value
+        XCTAssertNil(model.error)
+        XCTAssertEqual(model.items, expanded)
+        XCTAssertFalse(model.hasMore)
+        XCTAssertNil(model.loadMore())
+        let emptyRefresh = try XCTUnwrap(model.refresh()); await emptyRefresh.value
+        XCTAssertNil(model.error)
+        XCTAssertTrue(model.items.isEmpty); XCTAssertFalse(model.hasMore)
+        XCTAssertEqual(fixture.inputs.compactMap { $0["query"]?.filmObject?["start"]?.filmInteger },
+                       [0, 24, 24, 24, 0, 48, 0])
+        XCTAssertEqual(fixture.inputs.map { $0["refresh"] == .bool(true) },
+                       [false, false, false, false, true, false, true])
     }
 
     func testSourcePropagatesRuntimeFailureInsteadOfReturningAnEmptyHome() async throws {
@@ -238,11 +379,14 @@ final class DoubanFilmSourceTests: XCTestCase {
 
     private static func entry(items: [RuntimeValue], status: String = "fresh", error: String? = nil) -> RuntimeValue {
         let items = items.map { value -> RuntimeValue in
-            var row = value.filmObject!
-            let id = row["id"]!.filmScalar!
+            guard var row = value.filmObject, let id = row["id"]?.filmScalar, !id.isEmpty,
+                  let title = row["title"]?.filmText, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return value
+            }
             let target: RuntimeObject = ["id": .string("fixture-" + id), "kind": .string("movie"),
-                "title": row["title"]!, "metadataProvider": .string("douban"), "metadataId": .string(id)]
-            row["businessId"] = target["id"]; row["playbackTarget"] = .object(target)
+                "title": .string(title), "metadataProvider": .string("douban"), "metadataId": .string(id)]
+            row["businessId"] = row["businessId"] ?? target["id"]
+            row["playbackTarget"] = row["playbackTarget"] ?? .object(target)
             return .object(row)
         }
         var cache: RuntimeObject = ["status": .string(status),

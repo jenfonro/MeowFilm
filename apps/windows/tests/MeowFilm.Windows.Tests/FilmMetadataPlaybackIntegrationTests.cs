@@ -37,10 +37,26 @@ public static class FilmMetadataPlaybackIntegrationTests
         await using var upstream = new MetadataUpstream();
         await using var host = await FilmMetadataRuntimeTests.RuntimeHost.OpenAsync(NewData());
         await upstream.ConfigureAsync(host);
-        var read = await ((IFilmSearchMetadata)host.Metadata).DetailAsync("tv", 7, default);
-        CompleteTmdb(read.Value, 7);
-        Check(read.Owner is not null && read.CacheEntry is { ValueKind: JsonValueKind.Object },
-            "the production data consumer supplies its real producer and original Node cache receipt");
+        var connection = await host.Client.CaptureConnectionAsync();
+        var client = new FilmPlaybackClient(connection.Client);
+        var input = new { provider = "tmdb", path = "/3/tv/7",
+            query = new { append_to_response = "credits,similar,images" }, imageSize = "original" };
+        var metadata = await client.CallAsync("data.metadata", input, connection.Revoked);
+        var entry = await client.CallAsync("data.cache.entry",
+            new { kind = "metadata", input.provider, input.path, input.query, input.imageSize }, connection.Revoked);
+        var target = new FilmPlaybackTarget("tmdb:tv:7", "tv", MetadataUpstream.TmdbTitle, "tmdb", "7");
+        CompleteTmdb(metadata, 7);
+        Check(entry.ValueKind == JsonValueKind.Object && entry.GetProperty("kind").GetString() == "metadata" &&
+            entry.GetProperty("provider").GetString() == input.provider && entry.GetProperty("path").GetString() == input.path &&
+            JsonElement.DeepEquals(entry.GetProperty("query"), FilmJson.Encode(new
+            { language = "zh-CN", append_to_response = "credits,similar,images" })) &&
+            entry.GetProperty("imageSize").GetString() == input.imageSize &&
+            entry.GetProperty("settings").GetProperty("revision").GetString() == await host.SettingsRevisionAsync() &&
+            entry.GetProperty("completeness").GetString() == "complete" && entry.GetProperty("fetchedAt").GetInt64() > 0 &&
+            entry.GetProperty("expiresAt").GetInt64() > entry.GetProperty("fetchedAt").GetInt64(),
+            "explicit runtime data setup retains the captured owner's exact metadata key, revision and original freshness receipt");
+        Check(JsonElement.DeepEquals(FilmMetadataRuntimeTests.MetadataBody(metadata, entry.GetProperty("value"), target),
+            entry.GetProperty("value")), "catalog identities decorate public metadata without changing any original complete cached content");
 
         var direct = new RejectPublicImages();
         var trusted = new ConcurrentQueue<string>();
@@ -52,9 +68,9 @@ public static class FilmMetadataPlaybackIntegrationTests
         var native = new FilmNativeProbe();
         var session = new FilmPlaybackSession(host.Client.CaptureConnectionAsync, native);
         await using var module = new FilmCapability(new NoHomeReads(), session, new FilmLibrary(new FilmMemoryStore()));
-        var target = new FilmPlaybackTarget("tmdb:tv:7", "tv", MetadataUpstream.TmdbTitle, "tmdb", "7");
-        var request = Handoff(target, read);
-        await module.OpenPlaybackAsync(new(target.Id, target.Title, "", ""), request);
+        var playbackRequest = new FilmPlaybackRequest(target, Sources: [], Metadata: metadata,
+            CacheEntries: FilmJson.Encode(new[] { entry })) { DataOwner = connection };
+        await module.OpenPlaybackAsync(new(target.Id, target.Title, "", ""), playbackRequest);
         var page = module.Playback!;
         var root = PlaybackWithPosterCard(module, out var poster);
         ArtworkScope.SetLoader(root, artwork);
@@ -72,7 +88,7 @@ public static class FilmMetadataPlaybackIntegrationTests
         Check(poster.Source is { IsFrozen: true, PixelWidth: > 0 } &&
             trusted.Contains("/v1/tmdb/images/original/poster.png") && direct.Reads == 0,
             "a normal poster card bound to the real playback metadata decodes the original reference through the App's trusted artwork owner");
-        CompleteTmdb(await host.Metadata.DetailAsync("tv", 7, default), 7);
+        CompleteTmdb(await client.CallAsync("data.metadata", input, connection.Revoked), 7);
         Check(upstream.Count("/tmdb/3/tv/7") == 1 && upstream.Count("/tmdb/3/tv/7/season/1") == 1 &&
             upstream.Count("/tmdb/3/tv/7/season/2") == 0 && upstream.Count("/tmdb/3/tv/7/season/0") == 0,
             "the original complete receipt, playback initialization and a repeated consumer read share one detail and only the selected season");
@@ -147,13 +163,24 @@ public static class FilmMetadataPlaybackIntegrationTests
         await upstream.ConfigureAsync(host);
         var input = new { provider = "douban", path = "/rexxar/api/v2/tv/77", query = new { } };
         var identity = new { kind = "metadata", input.provider, input.path, input.query };
-        var read = await FilmSearchDataClient.ReadAsync(host.Client, "metadata", input, identity, default);
-        string reference = read.Value.GetProperty("pic").GetProperty("normal").GetString()!;
-        Check(reference == "/v1/douban/images/poster.png" && read.Owner is not null &&
-            read.CacheEntry is { ValueKind: JsonValueKind.Object } &&
-            read.Value.GetProperty("raw").GetProperty("original").GetString() == "  豆瓣原资料  ",
-            "the public production data consumer keeps the real complete Douban receipt and relative image reference");
         var connection = await host.Client.CaptureConnectionAsync();
+        var client = new FilmPlaybackClient(connection.Client);
+        var metadata = await client.CallAsync("data.metadata", input, connection.Revoked);
+        var entry = await client.CallAsync("data.cache.entry", identity, connection.Revoked);
+        var target = new FilmPlaybackTarget("douban:tv:77", "tv", MetadataUpstream.DoubanTitle, "douban", "77");
+        string reference = metadata.GetProperty("pic").GetProperty("normal").GetString()!;
+        Check(reference == "/v1/douban/images/poster.png" && entry.ValueKind == JsonValueKind.Object &&
+            entry.GetProperty("kind").GetString() == identity.kind && entry.GetProperty("provider").GetString() == input.provider &&
+            entry.GetProperty("path").GetString() == input.path && JsonElement.DeepEquals(entry.GetProperty("query"), FilmJson.Encode(input.query)) &&
+            !entry.TryGetProperty("imageSize", out _) &&
+            entry.GetProperty("settings").GetProperty("revision").GetString() ==
+                (await host.WaitSettingsAsync("douban")).GetProperty("revision").GetString() &&
+            entry.GetProperty("completeness").GetString() == "complete" && entry.GetProperty("fetchedAt").GetInt64() > 0 &&
+            entry.GetProperty("expiresAt").GetInt64() > entry.GetProperty("fetchedAt").GetInt64() &&
+            metadata.GetProperty("raw").GetProperty("original").GetString() == "  豆瓣原资料  ",
+            "explicit runtime data setup keeps the real complete Douban receipt and relative image reference");
+        Check(JsonElement.DeepEquals(FilmMetadataRuntimeTests.MetadataBody(metadata, entry.GetProperty("value"), target),
+            entry.GetProperty("value")), "the public Douban locator leaves the exact original cached detail and picture reference untouched");
         upstream.AllowDoubanImages = true;
         try
         {
@@ -187,8 +214,9 @@ public static class FilmMetadataPlaybackIntegrationTests
         var native = new FilmNativeProbe();
         var session = new FilmPlaybackSession(host.Client.CaptureConnectionAsync, native);
         await using var module = new FilmCapability(new NoHomeReads(), session, new FilmLibrary(new FilmMemoryStore()));
-        var target = new FilmPlaybackTarget("douban:tv:77", "tv", MetadataUpstream.DoubanTitle, "douban", "77");
-        await module.OpenPlaybackAsync(new(target.Id, target.Title, "", ""), Handoff(target, read));
+        var playbackRequest = new FilmPlaybackRequest(target, Sources: [], Metadata: metadata,
+            CacheEntries: FilmJson.Encode(new[] { entry })) { DataOwner = connection };
+        await module.OpenPlaybackAsync(new(target.Id, target.Title, "", ""), playbackRequest);
         var page = module.Playback!;
         var root = PlaybackWithPosterCard(module, out var poster);
         ArtworkScope.SetLoader(root, artwork);
@@ -248,9 +276,6 @@ public static class FilmMetadataPlaybackIntegrationTests
         upstream.PrintCounts("Douban");
     }
 
-    private static FilmPlaybackRequest Handoff(FilmPlaybackTarget target, FilmSearchData read) =>
-        new(target, Sources: [], Metadata: read.Value,
-            CacheEntries: FilmJson.Encode(new[] { read.CacheEntry!.Value })) { DataOwner = read.Owner };
     private static JsonElement Season(FilmPlaybackPage page, int number) =>
         page.CaptureRequest.Metadata!.Value.GetProperty("seasons").EnumerateArray()
             .Single(row => row.GetProperty("season_number").GetInt32() == number);
@@ -386,12 +411,15 @@ public static class FilmMetadataPlaybackIntegrationTests
         {
             await host.Metadata.SaveSettingsAsync(new Dictionary<string, object?>
             { ["apiBase"] = server.BaseUrl + "/tmdb/3", ["imageBase"] = server.BaseUrl + "/tmdb-images/t/p" });
-            var reply = await host.Client.CallAsync("douban.data.settings.update", new
+            await host.WaitSettingsAsync("tmdb");
+            await host.Metadata.SaveDoubanSettingsAsync(new Dictionary<string, object?>
             {
-                apiBase = server.BaseUrl + "/douban", searchBase = server.BaseUrl + "/douban",
-                imageBase = server.BaseUrl + "/douban-images", cookie = DoubanCookie
+                ["apiBase"] = server.BaseUrl + "/douban", ["searchBase"] = server.BaseUrl + "/douban",
+                ["imageBase"] = server.BaseUrl + "/douban-images", ["cookie"] = DoubanCookie
             });
-            Check(reply.GetProperty("ok").GetBoolean() && reply.GetProperty("contract").GetString() == "douban.data.v1",
+            await host.WaitSettingsAsync("douban");
+            Check(host.Metadata.Settings!.ApiBase == server.BaseUrl + "/tmdb/3" &&
+                (await host.Metadata.GetDoubanSettingsAsync()).ApiBase == server.BaseUrl + "/douban",
                 "all real metadata and image traffic is configured to this one synthetic loopback upstream");
         }
         private async Task ServeAsync()

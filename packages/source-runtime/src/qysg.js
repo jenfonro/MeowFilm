@@ -82,17 +82,22 @@ function bookValue(value, source, maximumNodes, baseUrl, maximumParseBytes) {
 
 function chapterValue(value, index, baseUrl) {
   const parsed = parseValue(value);
-  const input = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  sourceRequire(parsed && typeof parsed === 'object' && !Array.isArray(parsed), 'SCRIPT_PROTOCOL_ERROR');
+  const input = parsed;
+  const name = input.name ?? input.title ?? '', url = input.chapterUrl ?? input.chapterId ?? input.url ?? '';
+  const title = input.title ?? name;
+  sourceRequire(typeof name === 'string' && typeof title === 'string' &&
+    typeof url === 'string' && (name || url), 'SCRIPT_PROTOCOL_ERROR');
   return {
-    name: String(input.name ?? input.title ?? ''),
-    chapterUrl: absolute(input.chapterUrl ?? input.chapterId ?? input.url, baseUrl),
-    index: Number.isSafeInteger(input.index) ? input.index : index,
+    name,
+    chapterUrl: absolute(url, baseUrl),
+    index,
     isPay: Boolean(input.isPay),
     isVip: Boolean(input.isVip),
     isVolume: Boolean(input.isVolume),
     tag: String(input.tag ?? ''),
-    title: String(input.title ?? input.name ?? ''),
-    url: absolute(input.chapterUrl ?? input.chapterId ?? input.url, baseUrl),
+    title,
+    url: absolute(url, baseUrl),
     updateTime: String(input.updateTime ?? input.time ?? ''),
     variable: input.variable ?? null,
   };
@@ -338,9 +343,7 @@ export class QysgAdapter {
     const baseUrl = absolute(payload.tocUrl ?? payload.book?.tocUrl ?? payload.url ??
       payload.baseUrl, bookUrl) || bookUrl;
     const chapters = listValue(value, ['chapters', 'list'])
-      .map((item, index) => chapterValue(item, index, baseUrl))
-      .filter(chapter => chapter.name || chapter.chapterUrl);
-    chapters.forEach((chapter, index) => { chapter.index = index; });
+      .map((item, index) => chapterValue(item, index, baseUrl));
     return { chapters };
   }
 

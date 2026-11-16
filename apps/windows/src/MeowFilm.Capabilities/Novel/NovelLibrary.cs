@@ -17,6 +17,15 @@ public sealed class NovelLibrary(IDocumentStore store)
     public IReadOnlyList<NovelEntry> Entries => saved?.Entries ?? [];
     public NovelAppearance Appearance => saved?.Appearance ?? new();
     public IReadOnlyList<NovelRule> Rules => saved?.Rules ?? [];
+    private static readonly JsonElement EmptyRules = NovelJson.Value(Array.Empty<NovelRule>());
+    internal JsonElement RuleInputs
+    {
+        get
+        {
+            var raw = saved is null ? default : Section(saved.Raw, "rules");
+            return raw.ValueKind == JsonValueKind.Undefined ? EmptyRules : raw;
+        }
+    }
     public event EventHandler? Changed;
     public Task InitializeAsync(CancellationToken token = default) => work.Run(async ct =>
     {
@@ -98,7 +107,12 @@ public sealed class NovelLibrary(IDocumentStore store)
     {
         var rules = ReadRecords<NovelRule>(raw, "id", (r, value) =>
             SingleString(value, "pattern") && r.Name is not null && r.Group is not null && r.Replacement is not null &&
-            r.Scope is not null && r.ExcludeScope is not null);
+            r.Scope is not null && r.ExcludeScope is not null,
+            value => ReplaceMembers(value, new Dictionary<string, JsonElement>
+            {
+                ["name"] = NovelJson.Value(Field(value, "name", "")),
+                ["group"] = NovelJson.Value(Field(value, "group", ""))
+            }).Deserialize<NovelRule>(ReadOptions)!);
         var previous = before.ToDictionary(r => r.Id, StringComparer.Ordinal);
         for (int index = 0; index < rules.Length; index++)
             if (previous.TryGetValue(rules[index].Id, out var old) && JsonElement.DeepEquals(NovelJson.Value(old), NovelJson.Value(rules[index])))
@@ -110,7 +124,8 @@ public sealed class NovelLibrary(IDocumentStore store)
     private static string[] Ids(JsonElement value, string key) => value.ValueKind == JsonValueKind.Object
         ? value.EnumerateObject().Where(p => p.NameEquals(key) && p.Value.ValueKind == JsonValueKind.String)
             .Select(p => p.Value.GetString()!).Where(id => id.Length > 0).ToArray() : [];
-    private static T[] ReadRecords<T>(JsonElement raw, string key, Func<T, JsonElement, bool> readable)
+    private static T[] ReadRecords<T>(JsonElement raw, string key, Func<T, JsonElement, bool> readable,
+        Func<JsonElement, T>? project = null)
     {
         if (raw.ValueKind != JsonValueKind.Array) return [];
         var counts = raw.EnumerateArray().SelectMany(value => Ids(value, key)).GroupBy(id => id, StringComparer.Ordinal)
@@ -122,7 +137,7 @@ public sealed class NovelLibrary(IDocumentStore store)
             if (ids.Length != 1 || !SingleString(value, key) || counts[ids[0]] != 1) continue;
             try
             {
-                if (value.Deserialize<T>(ReadOptions) is { } record && readable(record, value)) result.Add(record);
+                if ((project is null ? value.Deserialize<T>(ReadOptions) : project(value)) is { } record && readable(record, value)) result.Add(record);
             }
             catch (JsonException) { } // Keep the original slot; only its usable projection is absent.
         }
