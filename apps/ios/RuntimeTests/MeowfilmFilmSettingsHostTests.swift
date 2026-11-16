@@ -85,10 +85,11 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
 
     func testNodeMobileRulesUseSameSavedAndDraftEntryAndKeepIsolatedUTF16() async throws {
         let resources = try await hostResources(), client = try await resources.scriptSession.connection()
-        let service = FilmRuleService(connection: { client })
+        let service = FilmRuleService(settingsDocument: resources.filmSettings[.rules], connection: { client })
         let original = try await client.call(module: .film, operation: "rules.get").filmRequiredObject().filmValue("rules")
         addTeardownBlock {
-            _ = try await client.call(module: .film, operation: "rules.set", parameters: .object(["rules": original]))
+            _ = try resources.filmSettings[.rules].update { _ in .object(["version": .number(1), "rules": original]) }
+            try await self.waitForNativeRuntimeSettings(.rules, resources: resources)
             await service.close()
         }
         do {
@@ -97,6 +98,7 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
                 episodeRules: [.init(pattern: "第([0-9]+)集", replace: "第$1集", flags: "u")],
                 movieRules: [.init(pattern: "电影", replace: "影片", flags: "g")], aggregateRegexRules: ["高清"])
             _ = try await service.save(rules)
+            try await waitForNativeRuntimeSettings(.rules, resources: resources)
             for request in [FilmRuleRequest(section: .episode, text: "广告第12集"),
                             .init(section: .movie, text: "电影"), .init(section: .search, text: "高清斗破", query: "斗破")] {
                 let saved = try await service.process(request)
@@ -120,6 +122,7 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
             let stillUnchanged = try await client.call(module: .film, operation: "rules.get")
             XCTAssertEqual(stillUnchanged, bytes)
             _ = try await service.save(utf16Rules)
+            try await waitForNativeRuntimeSettings(.rules, resources: resources)
             let utf16Saved = try await service.process(.init(section: .movie, text: "🎬"))
             XCTAssertEqual(utf16Saved, utf16Draft)
             XCTAssertEqual(try JSONDecoder().decode(FilmRuleResult.self, from: JSONEncoder().encode(utf16Saved)), utf16Saved)
@@ -151,16 +154,18 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
 
     func testNodeMobileGroupSaveAndDraftPreviewPreserveAssociatedSavedGroups() async throws {
         let resources = try await hostResources(), client = try await resources.scriptSession.connection()
-        let service = FilmRuleService(connection: { client })
+        let service = FilmRuleService(settingsDocument: resources.filmSettings[.rules], connection: { client })
         let original = try await client.call(module: .film, operation: "rules.get").filmRequiredObject().filmValue("rules")
         addTeardownBlock {
-            _ = try await client.call(module: .film, operation: "rules.set", parameters: .object(["rules": original]))
+            _ = try resources.filmSettings[.rules].update { _ in .object(["version": .number(1), "rules": original]) }
+            try await self.waitForNativeRuntimeSettings(.rules, resources: resources)
             await service.close()
         }
         let saved = FilmRuleSet(episodeCleanRegexRules: ["^广告"],
                                 episodeRules: [.init(pattern: "第([0-9]+)集", replace: "E$1")],
                                 movieRules: [.init(pattern: "电影", replace: "影片")])
         _ = try await service.save(saved)
+        try await waitForNativeRuntimeSettings(.rules, resources: resources)
         let before = try await client.call(module: .film, operation: "rules.get")
         let defaults = try await service.defaults(.episode)
         XCTAssertEqual(defaults.count, 3)
@@ -177,6 +182,7 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
         XCTAssertEqual(committed.episodeRules, saved.episodeRules)
         XCTAssertEqual(committed.movieRules, saved.movieRules)
         XCTAssertEqual(committed.aggregateRegexRules, saved.aggregateRegexRules)
+        try await waitForNativeRuntimeSettings(.rules, resources: resources)
         let result = try await service.process(.init(section: .episode, text: "草稿第12集"))
         XCTAssertEqual(result.rewrittenText?.displayString, "E12")
     }
@@ -184,15 +190,17 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
     /// Fixed dashboard/server expectations, now through the real App RPC path.
     func testNodeMobileEntryMatchesEverySharedReferenceCaseTwice() async throws {
         let resources = try await hostResources(), client = try await resources.scriptSession.connection()
-        let service = FilmRuleService(connection: { client })
+        let service = FilmRuleService(settingsDocument: resources.filmSettings[.rules], connection: { client })
         let original = try await client.call(module: .film, operation: "rules.get").filmRequiredObject().filmValue("rules")
         addTeardownBlock {
-            _ = try await client.call(module: .film, operation: "rules.set", parameters: .object(["rules": original]))
+            _ = try resources.filmSettings[.rules].update { _ in .object(["version": .number(1), "rules": original]) }
+            try await self.waitForNativeRuntimeSettings(.rules, resources: resources)
             await service.close()
         }
         try await service.clearData()
         let initial = try await service.savedSnapshot()
         for section in FilmRuleSection.allCases { _ = try await service.restoreDefaults(section) }
+        try await waitForNativeRuntimeSettings(.rules, resources: resources)
         let restored = try await service.savedSnapshot()
         let before = try await client.call(module: .film, operation: "rules.get")
         let fixtures = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(FilmRuleNodeMobileReferenceCases.json.utf8)) as? [[String: Any]])
@@ -246,7 +254,7 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
 
     func testNodeMobileUnicodeAssertionsCapturesAndStatefulRulesRepeatExactly() async throws {
         let resources = try await hostResources(), client = try await resources.scriptSession.connection()
-        let service = FilmRuleService(connection: { client })
+        let service = FilmRuleService(settingsDocument: resources.filmSettings[.rules], connection: { client })
         addTeardownBlock { await service.close() }
         let cases: [(String, String, String, String, String)] = [
             (#"(\p{Script=Han}+)"#, "$1!", "gu", "猫🎬第12集", "猫!🎬第!12集!"),
@@ -269,7 +277,7 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
 
     func testNodeMobileRuleCancellationDeadlineCompilationAndGlobalDeletionDrainThenRecover() async throws {
         let resources = try await hostResources(), client = try await resources.scriptSession.connection()
-        let service = FilmRuleService(connection: { client })
+        let service = FilmRuleService(settingsDocument: resources.filmSettings[.rules], connection: { client })
         addTeardownBlock { await service.close() }
         let cases: [(FilmRuleSection, FilmRuleSet, String)] = [
             (.movie, .init(movieRules: [.init(pattern: "^(a+)+$", replace: "x")]), String(repeating: "a", count: 64) + "!"),
@@ -313,11 +321,16 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try DocumentStore(baseURL: directory, namespace: FilmSourceService.documentNamespace)
         let transport = CatScriptTransport(connectionProvider: { try await resources.scriptSession.connection() })
-        let service = FilmSourceService(transport: transport, storeFactory: { store })
+        let service = FilmSourceService(transport: transport, storeFactory: { store },
+            settingsDocument: resources.filmSettings[.catSources],
+            runtimeSourceRoot: MeowfilmScriptRuntime.dataDirectory.appendingPathComponent("cat"))
         let id = "ios-host-" + UUID().uuidString.lowercased()
         let key = FilmSourceKey(installationId: id, siteKey: "fixture")
+        let newID = id + "-new"
+        let newKey = FilmSourceKey(installationId: newID, siteKey: "fixture")
         do {
-            let installed = try await service.importLocal(name: "真实 Cat", source: filmCatScript("v1"), installationId: id)
+            _ = try await service.importLocal(name: "真实 Cat", source: filmCatScript("v1"), installationId: id)
+            let installed = try await waitForNativeCat(id, service: service)
             XCTAssertTrue(installed.enabled)
             XCTAssertTrue(installed.canDetect)
             XCTAssertEqual(installed.sourceType, "local")
@@ -328,7 +341,9 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
             XCTAssertFalse(result.mediaPlaybackVerified)
             let options = FilmVideoOptions(enabled: false, homeVisible: false, searchEnabled: false, aggregateImages: true)
             try await service.saveVideoOptions(key, options: options, order: -7)
-            let rebuilt = FilmSourceService(transport: transport, storeFactory: { store })
+            let rebuilt = FilmSourceService(transport: transport, storeFactory: { store },
+            settingsDocument: resources.filmSettings[.catSources],
+            runtimeSourceRoot: MeowfilmScriptRuntime.dataDirectory.appendingPathComponent("cat"))
             try await rebuilt.initialize()
             let persisted = await rebuilt.snapshot
             XCTAssertEqual(persisted.videos.first { $0.key == key }?.options, options)
@@ -338,25 +353,44 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
             let restarted = try await service.restartCat(id)
             XCTAssertEqual(restarted.modifiedAt, installed.modifiedAt)
             _ = try await service.updateCat(id, source: filmCatScript("v2"))
-            try await service.refresh()
+            let updated = try await waitForNativeCat(id, service: service)
+            XCTAssertGreaterThan(updated.inputRevision, installed.inputRevision)
+            XCTAssertNotEqual(updated.sourceHash, installed.sourceHash)
             let deleted = await service.snapshot
             XCTAssertFalse(deleted.videos.contains { $0.key == key })
-            _ = try await service.importLocal(name: "真实 Cat", source: filmCatScript("v2"), installationId: id)
+            let beforeDuplicate = try store.read(key: FilmSourceService.documentKey)
+            let intentBeforeDuplicate = try resources.filmSettings[.catSources].read()
+            do {
+                _ = try await service.importLocal(name: "真实 Cat", source: filmCatScript("v2"), installationId: id)
+                XCTFail("A duplicate installation ID must not restore a deleted video")
+            } catch { XCTAssertEqual((error as? FilmSourceError)?.code, "STORAGE_CONFLICT") }
+            XCTAssertEqual(try store.read(key: FilmSourceService.documentKey), beforeDuplicate)
+            XCTAssertEqual(try resources.filmSettings[.catSources].read(), intentBeforeDuplicate)
+            let rejected = await service.snapshot
+            XCTAssertEqual(rejected.videos, deleted.videos)
+            let document = try JSONDecoder().decode(FilmSourceDocument.self, from: XCTUnwrap(beforeDuplicate))
+            XCTAssertTrue(document.deleted.contains(key))
+            _ = try await service.importLocal(name: "真实 Cat", source: filmCatScript("v2"), installationId: newID)
+            _ = try await waitForNativeCat(newID, service: service)
             let restored = await service.snapshot
-            XCTAssertTrue(restored.videos.contains { $0.key == key })
-            _ = try await service.enableCat(id, enabled: false)
-            do { _ = try await service.detect(key); XCTFail("Disabled detection") }
+            XCTAssertFalse(restored.videos.contains { $0.key == key })
+            XCTAssertTrue(restored.videos.contains { $0.key == newKey })
+            XCTAssertEqual(restored.videos.first { $0.key == newKey }?.options, FilmVideoOptions())
+            _ = try await service.enableCat(newID, enabled: false)
+            _ = try await waitForNativeCat(newID, service: service)
+            do { _ = try await service.detect(newKey); XCTFail("Disabled detection") }
             catch { XCTAssertEqual((error as? FilmSourceError)?.code, "DISABLED") }
-            do { _ = try await service.restartCat(id); XCTFail("Disabled restart") }
+            do { _ = try await service.restartCat(newID); XCTFail("Disabled restart") }
             catch { XCTAssertEqual((error as? FilmSourceError)?.code, "DISABLED") }
+            try await service.deleteCat(newID)
             try await service.deleteCat(id)
             await service.close()
             let connection = try await resources.scriptSession.connection()
             XCTAssertFalse(connection.isClosed)
         } catch {
             let snapshot = await service.snapshot
-            if snapshot.cats.contains(where: { $0.installationId == id }) {
-                do { try await service.deleteCat(id) } catch { XCTFail("Cat cleanup: \(error)") }
+            for cleanupID in [id, newID] where snapshot.cats.contains(where: { $0.installationId == cleanupID }) {
+                do { try await service.deleteCat(cleanupID) } catch { XCTFail("Cat cleanup: \(error)") }
             }
             await service.close()
             throw error
@@ -370,10 +404,15 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try DocumentStore(baseURL: directory, namespace: FilmSourceService.documentNamespace)
         let transport = CatScriptTransport(connectionProvider: { try await resources.scriptSession.connection() })
-        let service = FilmSourceService(transport: transport, storeFactory: { store })
+        let service = FilmSourceService(transport: transport, storeFactory: { store },
+            settingsDocument: resources.filmSettings[.catSources],
+            runtimeSourceRoot: MeowfilmScriptRuntime.dataDirectory.appendingPathComponent("cat"))
         let id = "ios-identity-" + UUID().uuidString.lowercased()
         let composed = FilmSourceKey(installationId: id, siteKey: "\u{00E9}")
         let decomposed = FilmSourceKey(installationId: id, siteKey: "e\u{0301}")
+        let newID = id + "-new"
+        let newComposed = FilmSourceKey(installationId: newID, siteKey: "\u{00E9}")
+        let newDecomposed = FilmSourceKey(installationId: newID, siteKey: "e\u{0301}")
         let source = #"""
         const http = require('http');
         let server;
@@ -390,7 +429,8 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
         module.exports.stop = () => { server?.closeAllConnections(); server?.close(); };
         """#
         do {
-            let cat = try await service.importLocal(name: "Identity fixture", source: source, installationId: id)
+            _ = try await service.importLocal(name: "Identity fixture", source: source, installationId: id)
+            let cat = try await waitForNativeCat(id, service: service)
             XCTAssertEqual(cat.sites.count, 2, "Real Cat Map accepts both raw keys")
             var snapshot = await service.snapshot
             XCTAssertEqual(Set(snapshot.videos.filter { $0.key.installationId == id }.map(\.key)), Set([composed, decomposed]))
@@ -403,23 +443,49 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
             XCTAssertEqual(remaining.map(\.key), [decomposed])
             XCTAssertEqual(remaining.first?.options, options)
             XCTAssertEqual(remaining.first?.api, "/identity/two")
-            let rebuilt = FilmSourceService(transport: transport, storeFactory: { store })
+            let rebuilt = FilmSourceService(transport: transport, storeFactory: { store },
+            settingsDocument: resources.filmSettings[.catSources],
+            runtimeSourceRoot: MeowfilmScriptRuntime.dataDirectory.appendingPathComponent("cat"))
             try await rebuilt.initialize()
             let persisted = await rebuilt.snapshot
             let persistedSites = persisted.videos.filter { $0.key.installationId == id }
             XCTAssertEqual(persistedSites.map(\.key), [decomposed])
             XCTAssertEqual(persistedSites.first?.key.siteKey.utf8.map { $0 }, [0x65, 0xCC, 0x81])
             await rebuilt.close()
-            _ = try await service.importLocal(name: "Identity fixture", source: source, installationId: id)
+            let beforeDuplicate = try store.read(key: FilmSourceService.documentKey)
+            let intentBeforeDuplicate = try resources.filmSettings[.catSources].read()
+            do {
+                _ = try await service.importLocal(name: "Identity fixture", source: source, installationId: id)
+                XCTFail("A duplicate installation ID must preserve exact-key tombstones and options")
+            } catch { XCTAssertEqual((error as? FilmSourceError)?.code, "STORAGE_CONFLICT") }
+            XCTAssertEqual(try store.read(key: FilmSourceService.documentKey), beforeDuplicate)
+            XCTAssertEqual(try resources.filmSettings[.catSources].read(), intentBeforeDuplicate)
             snapshot = await service.snapshot
-            XCTAssertEqual(Set(snapshot.videos.filter { $0.key.installationId == id }.map(\.key)), Set([composed, decomposed]))
+            XCTAssertEqual(snapshot.videos.filter { $0.key.installationId == id }.map(\.key), [decomposed])
+            XCTAssertEqual(snapshot.videos.first { $0.key == decomposed }?.options, options)
+            let document = try JSONDecoder().decode(FilmSourceDocument.self, from: XCTUnwrap(beforeDuplicate))
+            XCTAssertTrue(document.deleted.contains(composed))
+            _ = try await service.importLocal(name: "Identity fixture", source: source, installationId: newID)
+            let newCat = try await waitForNativeCat(newID, service: service)
+            XCTAssertEqual(newCat.sites.count, 2)
+            snapshot = await service.snapshot
+            XCTAssertEqual(Set(snapshot.videos.filter { $0.key.installationId == newID }.map(\.key)),
+                Set([newComposed, newDecomposed]))
+            XCTAssertEqual(snapshot.videos.filter { $0.key.installationId == id }.map(\.key), [decomposed])
+            XCTAssertEqual(snapshot.videos.first { $0.key == decomposed }?.options, options)
+            XCTAssertEqual(snapshot.videos.first { $0.key == newDecomposed }?.options, FilmVideoOptions())
+            try await service.deleteCat(newID)
+            snapshot = await service.snapshot
+            XCTAssertFalse(snapshot.videos.contains { $0.key.installationId == newID })
+            XCTAssertEqual(snapshot.videos.filter { $0.key.installationId == id }.map(\.key), [decomposed])
             XCTAssertEqual(snapshot.videos.first { $0.key == decomposed }?.options, options)
             try await service.deleteCat(id)
             await service.close()
         } catch {
-            // Clean by the runtime installation ID even if parsing its result
-            // failed before the local owner could publish the installation.
-            _ = try? await transport.call("uninstall", ["installationId": .string(id)])
+            let snapshot = await service.snapshot
+            for cleanupID in [id, newID] where snapshot.cats.contains(where: { $0.installationId == cleanupID }) {
+                do { try await service.deleteCat(cleanupID) } catch { XCTFail("Cat cleanup: \(error)") }
+            }
             await service.close()
             throw error
         }
@@ -436,18 +502,18 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
         let gate = RealCatResultGate(connection: connection, paused: { paused.fulfill() })
         let transport = CatScriptTransport(request: { operation, parameters in
             try await gate.call(operation, parameters)
-        }, upload: { id, revision, bytes in
-            try await connection.upload(module: .cat, installationID: id,
-                sourceRevision: revision, source: bytes)
         })
         let raw = CatScriptTransport(connectionProvider: { connection })
-        let service = FilmSourceService(transport: transport, storeFactory: { store })
+        let service = FilmSourceService(transport: transport, storeFactory: { store },
+            settingsDocument: resources.filmSettings[.catSources],
+            runtimeSourceRoot: MeowfilmScriptRuntime.dataDirectory.appendingPathComponent("cat"))
         let id = "ios-fence-" + UUID().uuidString.lowercased()
         let key = FilmSourceKey(installationId: id, siteKey: "fixture")
         var detection: Task<FilmSourceDetection, Error>?
         do {
-            let installed = try await service.importLocal(name: "Detection fence fixture",
+            _ = try await service.importLocal(name: "Detection fence fixture",
                 source: filmCatScript("fence", largeSearchResult: true), installationId: id)
+            let installed = try await waitForNativeCat(id, service: service)
             let options = FilmVideoOptions(enabled: false, homeVisible: false, searchEnabled: false, aggregateImages: true)
             try await service.saveVideoOptions(key, options: options, order: -11)
             let bytes = try store.read(key: FilmSourceService.documentKey)
@@ -488,7 +554,10 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
             detection?.cancel()
             await gate.release()
             _ = await detection?.result
-            _ = try? await raw.call("uninstall", ["installationId": .string(id)])
+            let snapshot = await service.snapshot
+            if snapshot.cats.contains(where: { $0.installationId == id }) {
+                do { try await service.deleteCat(id) } catch { XCTFail("Cat cleanup: \(error)") }
+            }
             await service.close()
             throw error
         }
@@ -528,12 +597,14 @@ final class MeowfilmCatColdStartPrepareTests: XCTestCase {
         for id in filmColdIDs {
             let before = await service.snapshot
             if before.cats.contains(where: { $0.installationId == id }) { try await service.deleteCat(id) }
-            let cat = try await service.importLocal(name: id, source: filmCatScript(id), installationId: id)
+            _ = try await service.importLocal(name: id, source: filmCatScript(id), installationId: id)
+            let cat = try await waitForNativeCat(id, service: service)
             XCTAssertEqual(cat.sites.first?.name, "Fixture \(id) starts=1 checks=0")
         }
         let key = FilmSourceKey(installationId: filmColdIDs[0], siteKey: "fixture")
         try await service.deleteVideo(key)
         _ = try await service.enableCat(filmColdIDs[1], enabled: false)
+        _ = try await waitForNativeCat(filmColdIDs[1], service: service)
         let disabledKey = FilmSourceKey(installationId: filmColdIDs[1], siteKey: "fixture")
         try await service.saveVideoOptions(disabledKey, options: .init(enabled: false, homeVisible: false,
             searchEnabled: false, aggregateImages: true), order: -9)
@@ -550,6 +621,8 @@ final class MeowfilmCatColdStartRestoreTests: XCTestCase {
         addTeardownBlock {
             for id in filmColdIDs { try await service.deleteCat(id) }
         }
+        _ = try await waitForNativeCat(filmColdIDs[0], service: service)
+        _ = try await waitForNativeCat(filmColdIDs[1], service: service)
         let snapshot = await service.snapshot
         let enabled = try XCTUnwrap(snapshot.cats.first { $0.installationId == filmColdIDs[0] })
         let disabled = try XCTUnwrap(snapshot.cats.first { $0.installationId == filmColdIDs[1] })
@@ -561,7 +634,8 @@ final class MeowfilmCatColdStartRestoreTests: XCTestCase {
         let video = try XCTUnwrap(snapshot.videos.first { $0.key.installationId == disabled.installationId })
         XCTAssertEqual(video.order, -9)
         XCTAssertEqual(video.options, .init(enabled: false, homeVisible: false, searchEnabled: false, aggregateImages: true))
-        let resumed = try await service.enableCat(disabled.installationId, enabled: true)
+        _ = try await service.enableCat(disabled.installationId, enabled: true)
+        let resumed = try await waitForNativeCat(disabled.installationId, service: service)
         XCTAssertEqual(resumed.sites.first?.name, "Fixture \(filmColdIDs[1]) starts=2 checks=0")
         let result = try await service.detect(video.key)
         XCTAssertEqual(result.result, "valid", result.error ?? "")

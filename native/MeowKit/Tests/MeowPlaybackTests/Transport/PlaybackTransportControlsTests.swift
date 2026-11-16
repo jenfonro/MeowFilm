@@ -25,8 +25,8 @@ final class PlaybackTransportControlsTests: XCTestCase {
             let restored = PlaybackController(volumePreferences: PlaybackVolumePreferences(defaults: defaults))
             let next = restored.playAttempt(resource: resource, owner: "music", autoplay: false)
             XCTAssertEqual(restored.volume, 0.35)
-            XCTAssertEqual(restored.player.volume, 0.35)
-            XCTAssertEqual(restored.player.rate, 0)
+            XCTAssertEqual(restored.volume, 0.35)
+            XCTAssertEqual(restored.actualRate, 0)
             XCTAssertEqual(restored.preferredRate, 1, "Reference speed is not a persistent preference")
             XCTAssertEqual(preferences.volume(for: "film"), 0.6)
             restored.stop(attempt: next)
@@ -59,9 +59,9 @@ final class PlaybackTransportControlsTests: XCTestCase {
             let first = controller.playAttempt(resource: resource, owner: "music", autoplay: false)
             XCTAssertTrue(controller.setPreferredRate(1.5, attempt: first))
             XCTAssertTrue(controller.setVolume(0.4, attempt: first))
-            XCTAssertEqual(controller.player.defaultRate, 1.5)
-            XCTAssertEqual(controller.player.volume, 0.4)
-            XCTAssertEqual(controller.player.rate, 0, "A control change is not play intent")
+            XCTAssertEqual(controller.preferredRate, 1.5)
+            XCTAssertEqual(controller.volume, 0.4)
+            XCTAssertEqual(controller.actualRate, 0, "A control change is not play intent")
             for rate in [Double.nan, .infinity, 0, 3.1] {
                 XCTAssertFalse(controller.setPreferredRate(rate, attempt: first))
             }

@@ -35,7 +35,7 @@ final class FilmRuleTextTests: XCTestCase {
 
     func testRPCCodeUnitArraysKeepEveryResultFieldAndNestedError() async throws {
         let json = #"{"section":"search","type":"error","text":[55296],"inputText":[56320],"processedText":[55296,120,57343],"matched":false,"matchedRuleIndex":null,"rewriteApplied":false,"rewrittenText":null,"groupKey":[55296,120,57343],"trailingDigits":"","errors":[{"group":"search","ruleIndex":1,"text":[57343]}],"previews":[[55296],[56320]]}"#
-        let rpc = FilmRuleRPC(), service = rpc.service
+        let rpc = FilmRuleRPC(), service = rpc.service(try FilmNativeSettingsStore(self, block: .rules).document)
         await rpc.setResponse(try RuntimeJSON.decode(Data(json.utf8)))
         let result = try await service.process(.init(section: .search, text: "original"))
         XCTAssertEqual(result.text.utf16, [0xD800]); XCTAssertEqual(result.inputText.utf16, [0xDC00])

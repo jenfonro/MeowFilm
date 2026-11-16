@@ -9,6 +9,8 @@ struct MusicNativeAutomaticSyncRuntime {
     var observers: [UUID: AsyncStream<MusicAutomaticLibrarySyncEvent>.Continuation] = [:]
     var task: Task<MusicLibrarySyncState, Error>?
     var authorization: MusicQueueAuthorization?
+    var settingsSync: (id: UUID, authorization: MusicQueueAuthorization,
+                       task: Task<Result<MusicLibrarySyncState, MusicServiceError>, Never>)?
     var saving: UUID?
     var binding: UUID?
     var attemptedIntent: (preferences: Int, mutation: Int)?
@@ -85,6 +87,8 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
     /// Call at the start of NativeMusicService.clearTransient(). The existing
     /// access.register cancellation also fences a nonisolated protection event.
     func invalidateAutomaticLibrarySync() {
+        automaticLibrarySyncRuntime.settingsSync?.authorization.revoke()
+        automaticLibrarySyncRuntime.settingsSync?.task.cancel()
         automaticLibrarySyncRuntime.authorization?.revoke()
         automaticLibrarySyncRuntime.task?.cancel()
         automaticLibrarySyncRuntime.saving = nil
@@ -140,17 +144,14 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
     public func saveAutomaticLibrarySync(_ preferences: MusicAutomaticLibrarySyncPreferences, requestID: UUID,
                                         authorization: MusicQueueAuthorization) async throws -> MusicAutomaticLibrarySyncSaveResult {
         try check(); try authorization.check()
-        try musicRequire(automaticLibrarySyncRuntime.saving == nil, .busy)
         let selected = try automaticSelections(preferences.selections), own = epoch
         try musicRequire((0..<9_007_199_254_740_990).contains(preferences.revision), .limit)
         let savedRevision = preferences.revision + 1
-        automaticLibrarySyncRuntime.saving = requestID
-        defer {
-            if automaticLibrarySyncRuntime.saving == requestID { automaticLibrarySyncRuntime.saving = nil }
-            publishAutomaticLibrarySync(.refreshed)
-        }
         // Persist OFF immediately, even if an old network operation won't
         // cooperate. Its next checkpoint fails the library revision fence.
+        let previous = automaticLibrarySyncRuntime.settingsSync?.task, drain = librarySyncRun?.drain
+        automaticLibrarySyncRuntime.settingsSync?.authorization.revoke()
+        previous?.cancel()
         automaticLibrarySyncRuntime.authorization?.revoke()
         automaticLibrarySyncRuntime.task?.cancel()
         librarySyncRun?.cancel()
@@ -161,25 +162,50 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
             ledger.phase = .idle; ledger.issues = []
         }
         let committed = MusicAutomaticLibrarySyncPreferences(revision: savedRevision, selections: selected)
+        // The service now owns the accepted action's authorization and drain.
+        // Page departure cannot revoke it; access/new settings still can.
+        let permission = authorization, accessID = UUID()
+        automaticLibrarySyncRuntime.saving = requestID
+        let task = Task {
+            await withTaskCancellationHandler {
+                await self.completeAutomaticSettingsSync(committed, requestID: requestID, accessID: accessID,
+                    epoch: own, authorization: permission, previous: previous, drain: drain)
+            } onCancel: { permission.revoke() }
+        }
+        automaticLibrarySyncRuntime.settingsSync = (requestID, permission, task)
+        access.register(accessID) { permission.revoke(); task.cancel() }
+        do { try permission.register(accessID) { task.cancel() } }
+        catch { task.cancel() }
+        publishAutomaticLibrarySync(.refreshed)
+        return .init(preferences: committed, synchronization: task)
+    }
+
+    private func completeAutomaticSettingsSync(_ committed: MusicAutomaticLibrarySyncPreferences,
+        requestID: UUID, accessID: UUID, epoch own: UUID, authorization: MusicQueueAuthorization,
+        previous: Task<Result<MusicLibrarySyncState, MusicServiceError>, Never>?,
+        drain: (@Sendable () async -> Void)?) async -> Result<MusicLibrarySyncState, MusicServiceError> {
+        defer {
+            authorization.remove(accessID); authorization.revoke(); access.remove(accessID)
+            if automaticLibrarySyncRuntime.settingsSync?.id == requestID { automaticLibrarySyncRuntime.settingsSync = nil }
+            if automaticLibrarySyncRuntime.saving == requestID { automaticLibrarySyncRuntime.saving = nil }
+            publishAutomaticLibrarySync(.refreshed)
+        }
+        // Only retirement waits here. Superseded intents never execute later.
+        _ = await previous?.value
+        await drain?()
         do {
-            if selected.isEmpty {
-                return .init(preferences: committed, synchronization: .success(try await librarySyncState()))
-            }
-            if let draining = automaticLibrarySyncRuntime.task { _ = await draining.result }
             try check(own); try authorization.check()
             guard automaticLibrarySyncRuntime.saving == requestID else { throw MusicServiceError.staleAccess }
-            try await bindAutomaticLibraryAccounts(revision: savedRevision, authorization: authorization)
+            if committed.selections.isEmpty { return .success(try await librarySyncState()) }
+            try await bindAutomaticLibraryAccounts(revision: committed.revision, authorization: authorization)
             let state = try await runAutomaticLibrarySync(.init(id: requestID, reason: .manual,
-                preferenceRevision: savedRevision, authorization: authorization), bind: false)
-            return .init(preferences: committed, synchronization: .success(state))
+                preferenceRevision: committed.revision, authorization: authorization), bind: false)
+            return .success(state)
         } catch {
             let failure = error as? MusicServiceError ?? MusicServiceError.sanitized(error)
-            do { try recordAutomaticSyncFailure(error, expected: savedRevision, authorization: authorization) }
-            catch {
-                return .init(preferences: committed,
-                    synchronization: .failure(error as? MusicServiceError ?? MusicServiceError.sanitized(error)))
-            }
-            return .init(preferences: committed, synchronization: .failure(failure))
+            do { try recordAutomaticSyncFailure(error, expected: committed.revision, authorization: authorization) }
+            catch { return .failure(error as? MusicServiceError ?? MusicServiceError.sanitized(error)) }
+            return .failure(failure)
         }
     }
 

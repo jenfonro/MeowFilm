@@ -1421,31 +1421,56 @@ final class FilmPlaybackUIKitTests: XCTestCase {
     }
 
     func testAutoPrepareUIEditsADraftAndOnlySuccessfulSavePublishesPreferences() async throws {
-        let store = FilmUIKitPlaybackSettingsStore()
-        let owner = FilmPlaybackSettingsModel(transport: store.transport)
+        let store = try FilmUIKitPlaybackSettingsStore(self)
+        let owner = FilmPlaybackSettingsModel(transport: store.transport, settingsDocument: store.document)
         let page = FilmPlaybackPreferencesController(owner: owner, area: .autoPrepare,
                                                      themeProvider: FilmPlaybackUIKitTheme())
         let window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor { owner.preferences != nil && !owner.busy }
+        try await waitFor { owner.preferences != nil && !owner.busy && !owner.preferencesBusy }
         await settle()
+        let storedBefore = try await store.preferenceBytes()
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(.defaults))
         let control = try await visibleSwitch("film.preferences.auto-prepare", page)
         XCTAssertTrue(control.isOn)
         control.isOn = false; control.sendActions(for: .valueChanged)
         XCTAssertEqual(owner.draft?.iosAutoPrepare, false)
         XCTAssertEqual(owner.preferences?.iosAutoPrepare, true)
-        await store.setSaveFailure(true)
+        let draft = try XCTUnwrap(owner.draft)
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(.defaults))
+        try await store.setSaveFailure(true)
+        XCTAssertThrowsError(try store.document.read()) {
+            XCTAssertEqual($0 as? FilmSettingsStorageError, .storageFailure)
+        }
         try headerSave(page).sendActions(for: .touchUpInside)
         let failure = try await presentedAlert(page, title: "错误", style: .alert)
         XCTAssertEqual(owner.preferences?.iosAutoPrepare, true)
         XCTAssertEqual(owner.draft?.iosAutoPrepare, false)
-        await store.setSaveFailure(false)
+        XCTAssertEqual(owner.draft, draft)
+        let failedChanges = await store.notifications()
+        XCTAssertTrue(failedChanges.isEmpty)
+        try await store.setSaveFailure(false)
+        let restoredBytes = try await store.preferenceBytes()
+        XCTAssertEqual(restoredBytes, storedBefore, "A failed save must preserve the committed bytes")
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(.defaults))
         try await runnerAction { $0.alerts.buttons["重试"].tap() }
-        try await waitFor { owner.preferences?.iosAutoPrepare == false && !owner.busy }
+        try await waitFor { owner.preferences?.iosAutoPrepare == false && !owner.busy && !owner.preferencesBusy }
         _ = try await presentedAlert(page, title: "已保存", style: .alert, after: failure)
+        XCTAssertEqual(owner.preferences, draft)
+        XCTAssertEqual(owner.draft, draft)
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(draft))
+        let savedBytes = try await store.preferenceBytes()
+        XCTAssertNotEqual(savedBytes, storedBefore)
+        let changes = await store.notifications()
+        XCTAssertEqual(changes, ["film.preferences"])
+        let reopened = FilmPlaybackSettingsModel(transport: store.transport, settingsDocument: store.document)
+        try await reopened.loadPreferences()
+        XCTAssertEqual(reopened.preferences, draft)
+        let reopenedChanges = await store.notifications()
+        XCTAssertEqual(reopenedChanges, changes)
         let calls = await store.calls()
-        XCTAssertEqual(calls.map(\.operation), ["settings.get", "settings.set", "settings.set"])
+        XCTAssertTrue(calls.isEmpty, "Preference load, failed save, retry and reopen must not use RPC")
     }
 
     func testManualEditorPreservesTypedZeroAndPlainShareFieldsAndSupportsRemoval() async throws {
@@ -1453,8 +1478,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         item.value["id"] = .string("manual-fixture")
         item.value["sourceKey"] = .string("source-key"); item.value["detailId"] = .number(0)
         item.value["seasonHint"] = .number(0); item.value["failureCount"] = .number(2)
-        let store = FilmUIKitPlaybackSettingsStore(manual: [item.value])
-        let owner = FilmPlaybackSettingsModel(transport: store.transport)
+        let store = try FilmUIKitPlaybackSettingsStore(self, manual: [item.value])
+        let owner = FilmPlaybackSettingsModel(transport: store.transport, settingsDocument: store.document)
         try await owner.loadLibrary()
         let page = FilmManualMatchEditor(owner: owner, item: item, themeProvider: FilmPlaybackUIKitTheme())
         let window = try mount(page)
@@ -1485,17 +1510,25 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         editor.table.layoutIfNeeded()
         XCTAssertFalse(try XCTUnwrap(view("film.manual.share", editor.view) as? UITextField).isSecureTextEntry)
         XCTAssertFalse(try XCTUnwrap(view("film.manual.password", editor.view) as? UITextField).isSecureTextEntry)
+        let finalCalls = await store.calls()
+        XCTAssertEqual(finalCalls.map(\.operation), ["library.get", "manual.update", "manual.update"])
+        XCTAssertEqual(finalCalls.last?.input, .object([
+            "action": .string("remove"), "id": .string("manual-fixture"),
+        ]))
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(.defaults))
+        let changes = await store.notifications()
+        XCTAssertTrue(changes.isEmpty)
     }
 
     func testPreferenceUIReordersAllDimensionsAndOnlyRestoresTheSelectedGroup() async throws {
-        let store = FilmUIKitPlaybackSettingsStore()
-        let owner = FilmPlaybackSettingsModel(transport: store.transport)
+        let store = try FilmUIKitPlaybackSettingsStore(self)
+        let owner = FilmPlaybackSettingsModel(transport: store.transport, settingsDocument: store.document)
         let page = FilmPlaybackPreferencesController(owner: owner, area: .preferences,
                                                      themeProvider: FilmPlaybackUIKitTheme())
         let window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor { owner.draft != nil && !owner.busy }
+        try await waitFor { owner.draft != nil && !owner.busy && !owner.preferencesBusy }
         owner.edit { $0.keywords = ["DDP", "H.265"]; $0.iosAutoPrepare = false }
         await settle()
         try select("film.preferences.dimension.pan", page)
@@ -1525,23 +1558,28 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(owner.draft?.keywords, ["H.265", "DDP"])
         XCTAssertEqual(owner.draft?.iosAutoPrepare, false)
         XCTAssertEqual(owner.preferences, .defaults, "Editing and restore must not publish a durable save")
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(.defaults))
+        let draftChanges = await store.notifications()
+        XCTAssertTrue(draftChanges.isEmpty)
         try headerSave(page).sendActions(for: .touchUpInside)
-        try await waitFor { owner.preferences?.keywords == ["H.265", "DDP"] && !owner.busy }
-        let writes = await store.calls().filter { $0.operation == "settings.set" }
-        XCTAssertEqual(writes.count, 1)
-        XCTAssertEqual(writes[0].input, owner.draft?.value)
+        try await waitFor { owner.preferences?.keywords == ["H.265", "DDP"] && !owner.busy && !owner.preferencesBusy }
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(try XCTUnwrap(owner.draft)))
+        let changes = await store.notifications()
+        XCTAssertEqual(changes, ["film.preferences"])
+        let calls = await store.calls()
+        XCTAssertTrue(calls.isEmpty, "Preference reads and saves must use the native document")
         _ = try await presentedAlert(page, title: "已保存", style: .alert, after: panMenu)
     }
 
     func testSiteCleanUICanRemoveAddSaveAndRestoreKeywordsWithoutChangingPlaybackOrder() async throws {
-        let store = FilmUIKitPlaybackSettingsStore()
-        let owner = FilmPlaybackSettingsModel(transport: store.transport)
+        let store = try FilmUIKitPlaybackSettingsStore(self)
+        let owner = FilmPlaybackSettingsModel(transport: store.transport, settingsDocument: store.document)
         let page = FilmPlaybackPreferencesController(owner: owner, area: .siteClean,
                                                      themeProvider: FilmPlaybackUIKitTheme())
         let window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor { owner.draft != nil && !owner.busy }
+        try await waitFor { owner.draft != nil && !owner.busy && !owner.preferencesBusy }
         await settle()
         _ = try await visibleCell("film.preferences.keywords.row", page)
         let keywords = try XCTUnwrap(view("film.preferences.keywords", page.view) as? UITextField)
@@ -1554,7 +1592,11 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertFalse(owner.draft?.siteCleanKeywords.contains("直播") == true)
         let draft = try XCTUnwrap(owner.draft)
         try headerSave(page).sendActions(for: .touchUpInside)
-        try await waitFor { owner.preferences == draft && !owner.busy }
+        try await waitFor { owner.preferences == draft && !owner.busy && !owner.preferencesBusy }
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(draft))
+        let savedBytes = try await store.preferenceBytes()
+        let savedChanges = await store.notifications()
+        XCTAssertEqual(savedChanges, ["film.preferences"])
         _ = try await presentedAlert(page, title: "已保存", style: .alert)
         try await runnerAction { $0.alerts.buttons["确定"].tap() }
         try await waitFor("The saved notice was acknowledged through its UI action") {
@@ -1566,6 +1608,12 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(owner.draft?.ruleOrder, draft.ruleOrder)
         XCTAssertEqual(owner.draft?.panOrder, draft.panOrder)
         XCTAssertEqual(owner.preferences, draft, "Restoring the draft alone must not save")
+        let restoredBytes = try await store.preferenceBytes()
+        XCTAssertEqual(restoredBytes, savedBytes)
+        let restoredChanges = await store.notifications()
+        XCTAssertEqual(restoredChanges, savedChanges)
+        let calls = await store.calls()
+        XCTAssertTrue(calls.isEmpty, "Site-clean draft restoration must not call the runtime or persist")
     }
 
     func testBlocksRequireConfirmationAndUseExactOrBulkReceiptsWithoutChangingHistory() async throws {
@@ -1575,9 +1623,9 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             "detailId": .number(0), "lineId": .number(0)])
         let otherBlock: RuntimeValue = .object(["targetId": .string("other-target"), "sourceKey": .string("source-key"),
             "detailId": .number(1), "lineId": .number(0)])
-        let store = FilmUIKitPlaybackSettingsStore(manual: [["id": .bool(false)]],
+        let store = try FilmUIKitPlaybackSettingsStore(self, manual: [["id": .bool(false)]],
             history: [history], blocks: [.null, block, otherBlock])
-        let owner = FilmPlaybackSettingsModel(transport: store.transport)
+        let owner = FilmPlaybackSettingsModel(transport: store.transport, settingsDocument: store.document)
         let blocks = FilmPlaybackLibraryController(owner: owner, area: .blocks,
                                                    themeProvider: FilmPlaybackUIKitTheme())
         let blockWindow = try mount(blocks)
@@ -1608,11 +1656,16 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let stored = await store.librarySnapshot()
         XCTAssertEqual(stored.filmObject?["history"], .array([history]), "Settings do not remove or rewrite playback history")
         XCTAssertEqual(page.sections.first?.rows.map(\.title), ["暂无记录"])
+        let calls = await store.calls()
+        XCTAssertEqual(calls.map(\.operation), ["library.get", "library.remove", "library.remove"])
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(.defaults))
+        let changes = await store.notifications()
+        XCTAssertTrue(changes.isEmpty)
     }
 
     func testMetadataCacheRowsSendOnlyTheChosenInvalidations() async throws {
-        let store = FilmUIKitPlaybackSettingsStore()
-        let owner = FilmPlaybackSettingsModel(transport: store.transport)
+        let store = try FilmUIKitPlaybackSettingsStore(self)
+        let owner = FilmPlaybackSettingsModel(transport: store.transport, settingsDocument: store.document)
         let page = FilmMetadataCacheSettingsViewController(owner: owner, themeProvider: FilmPlaybackUIKitTheme())
         let window = try mount(page)
         defer { unmount(page, window) }
@@ -1629,6 +1682,13 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             try await runnerAction { $0.alerts.buttons["确定"].tap() }
             try await waitFor { form.presentedViewController == nil && form.canPresentPageAlert }
         }
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(.defaults))
+        let changes = await store.notifications()
+        XCTAssertTrue(changes.isEmpty)
+    }
+
+    private func preferenceEnvelope(_ preferences: FilmPlaybackPreferences) -> RuntimeValue {
+        .object(["version": .number(1), "preferences": preferences.value])
     }
 
     private func blockSnapshot(_ id: String, current: Bool, sequence: Int = 1) throws -> RuntimeValue {

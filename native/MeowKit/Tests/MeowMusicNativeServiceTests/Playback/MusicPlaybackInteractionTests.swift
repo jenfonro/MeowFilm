@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-import AVFoundation
+import Combine
 import MeowContracts
 @testable import MeowPlayback
 @testable import MeowMusicFeature
@@ -583,21 +583,23 @@ private actor PlaybackInteractionScripts: MusicScriptResolving {
         }
         if advanceDuringWait {
             let advanced = expectation(description: "Donor really advanced beyond the synchronization tolerance")
-            let observation = player.controller.player.addBoundaryTimeObserver(
-                forTimes: [NSValue(time: CMTime(seconds: 0.5, preferredTimescale: 600))], queue: .main) {
-                    advanced.fulfill()
+            var observed = false
+            let observation = player.controller.$snapshot.sink { snapshot in
+                if !observed, snapshot.phase == .playing, snapshot.position >= 0.5 {
+                    observed = true; advanced.fulfill()
                 }
+            }
             _ = player.controller.resume(attempt: original)
             await fulfillment(of: [advanced], timeout: 5)
-            player.controller.player.removeTimeObserver(observation)
+            observation.cancel()
             _ = player.controller.pause(attempt: original)
-            XCTAssertGreaterThan(player.controller.player.currentTime().seconds, 0.25)
+            XCTAssertGreaterThan(player.controller.currentPosition, 0.25)
         }
-        let position = player.controller.player.currentTime().seconds
+        let position = player.controller.currentPosition
         await gate.release()
         if cancelSynchronization { await cancellation.started(); task.cancel(); await cancellation.release() }
         await task.value; await model.flushPlaybackFacts()
-        print("REGRESSION E4 seek=\(seekDuringWait) quality=\(model.lastSelection?.quality ?? "nil") position=\(player.controller.player.currentTime().seconds) nativeError=\(String(describing: player.commitFailure)) error=\(model.error ?? "nil")")
+        print("REGRESSION E4 seek=\(seekDuringWait) quality=\(model.lastSelection?.quality ?? "nil") position=\(player.controller.currentPosition) nativeError=\(String(describing: player.commitFailure)) error=\(model.error ?? "nil")")
         if cancelSynchronization {
             XCTAssertEqual(player.controller.currentAttempt, original)
             XCTAssertEqual(model.lastSelection?.quality, "128k")
@@ -605,7 +607,7 @@ private actor PlaybackInteractionScripts: MusicScriptResolving {
             XCTAssertEqual(model.lastSelection?.quality, "flac", "An intervening user seek must be synchronized, not abort the switch")
             XCTAssertNotEqual(player.controller.currentAttempt, original)
         }
-        XCTAssertEqual(player.controller.player.currentTime().seconds, seekAfterSynchronization ? 60 : position, accuracy: 0.25)
+        XCTAssertEqual(player.controller.currentPosition, seekAfterSynchronization ? 60 : position, accuracy: 0.25)
         XCTAssertEqual(player.controller.preferredRate, 1.5)
         XCTAssertEqual(player.controller.volume, 0.37)
         XCTAssertEqual(player.controller.snapshot.phase, .paused)

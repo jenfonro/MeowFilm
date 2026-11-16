@@ -2,6 +2,7 @@ import UIKit
 import Combine
 import MeowContracts
 import MeowPlayback
+import MeowPlaybackVideo
 import MeowMusicFeature
 import MeowMusicPlatform
 import MeowMusicNativeService
@@ -17,7 +18,7 @@ private let musicAccessGeneration: UInt64 = 1
 
 @MainActor
 final class MeowfilmAssembly: ObservableObject {
-    let playback = PlaybackController(volumePreferences: PlaybackVolumePreferences())
+    let playback = PlaybackController(volumePreferences: PlaybackVolumePreferences(), videoDecoderFactory: makePlaybackVideoDecoder)
     let appearance = MusicAppearancePreferencesStore()
     let filmLibrary = FilmLibrary()
     lazy var filmSources: [any FilmSource] = [DoubanFilmSource { [weak self] in
@@ -142,9 +143,10 @@ final class MeowfilmAssembly: ObservableObject {
         }
         let playbackSettings = FilmPlaybackSettingsModel(transport: FilmPlaybackTransport {
             try await resources.scriptSession.connection()
-        })
+        }, settingsDocument: resources.filmSettings[.preferences])
         playbackSettings.playbackSnapshot = { [weak self] in self?.filmPlayback?.snapshot }
-        let pan = PanAccountsModel(service: PanAccountService(connection: { try await resources.scriptSession.connection() }))
+        let pan = PanAccountsModel(service: PanAccountService(document: resources.filmSettings[.panAccounts],
+            connection: { try await resources.scriptSession.connection() }))
         let filmSettings = FilmSettingsModel(rules: resources.filmRules, sources: resources.filmSourceSettings,
                                              tmdb: tmdb, douban: douban, pan: pan, playback: playbackSettings)
         self.filmSettings = filmSettings

@@ -3,6 +3,7 @@ import { request as httpsRequest } from 'node:https';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { readFileSync, existsSync, mkdirSync, statSync, rmSync } from 'node:fs';
 import { resolve, join, isAbsolute } from 'node:path';
 import { parse } from 'acorn';
@@ -21,7 +22,7 @@ import { CatProxyResources, proxyPlaylistInput, readProxyPlaylist, proxyPlaylist
   resolveProxyManifest } from './cat-media-proxy.js';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const same = isDeepStrictEqual;
 const execution = spec => spec && [spec.sourceHash, spec.config, spec.version, spec.enabled, spec.inputIdentity];
 const sameExecution = (a, b) => same(execution(a), execution(b));
 const hopByHop = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
@@ -315,6 +316,7 @@ export class CatRuntime {
   deleteSource(sourceHash) {
     try {
       requireValue(/^[a-f0-9]{64}$/.test(sourceHash), 'CORRUPT_STORAGE');
+      if (this.configuration && this.settings.read().scripts.some(script => script.localHash === sourceHash)) return;
       const file = this.sourcePath(sourceHash);
       rmSync(file, { maxRetries: 3, retryDelay: 100 });
     } catch (error) {
@@ -510,7 +512,7 @@ export class CatRuntime {
       if (!sameExecution(previousSettings.get(id), diskScripts.get(id))) {
         this.cancelManagement(id, fault('STALE_SESSION'));
         this.captureInitialization(id)();
-        this.settled.delete(id);
+        if (this.configuration) this.settled.delete(id);
       }
     }
     // Publishing settings also updates gateway/worker snapshots. It does not

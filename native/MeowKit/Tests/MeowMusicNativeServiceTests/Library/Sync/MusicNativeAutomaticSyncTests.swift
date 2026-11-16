@@ -11,7 +11,7 @@ import MeowMusicFeature
         let result = try await service.saveAutomaticLibrarySync(
             .init(revision: saved.revision, selections: [.init(platform: .netease, favorites: favorites, playlists: playlists)]),
             requestID: UUID(), authorization: .init())
-        return try result.synchronization.get()
+        return try await result.synchronization.value.get()
     }
     private func run(_ service: NativeMusicService, _ reason: MusicAutomaticLibrarySyncRequest.Reason = .localMutation) async throws -> MusicLibrarySyncState {
         try await service.synchronizeAutomaticLibrary(.init(reason: reason, authorization: .init()))
@@ -33,7 +33,7 @@ import MeowMusicFeature
             let selected = MusicLibrarySyncSelection(platform: platform, playlists: true)
             let saved = try await service.saveAutomaticLibrarySync(
                 .init(revision: initial.revision, selections: [selected]), requestID: UUID(), authorization: .init())
-            _ = try saved.synchronization.get()
+            _ = try await saved.synchronization.value.get()
             let document = try NativeSyncFixture.document(store), ledger = try MusicNativeSyncLedger.load(document.library)
             XCTAssertEqual(ledger.automatic.bindings[platform.rawValue]?.accountID, accountID)
             XCTAssertEqual(ledger.automatic.bindings[platform.rawValue]?.scope, scope)
@@ -129,6 +129,132 @@ import MeowMusicFeature
         let after = await peer.counts()
         XCTAssertEqual(after.0, before.0); XCTAssertEqual(after.1, before.1)
         await restored.close()
+    }
+
+    func testLocalSaveReturnsWhileItsImmediateSynchronizationIsBlocked() async throws {
+        let gate = NativeMusicGate(), peer = NativeSyncPeer()
+        await peer.configure(gate: gate)
+        let store = try NativeSyncFixture.store(), service = try await NativeMusicFixture.service(store, accounts: peer)
+        let permission = MusicQueueAuthorization(), returned = expectation(description: "local CAS receipt")
+        let saving = Task {
+            let receipt = try await service.saveAutomaticLibrarySync(
+                .init(selections: [.init(platform: .netease, playlists: true)]),
+                requestID: UUID(), authorization: permission)
+            returned.fulfill()
+            return receipt
+        }
+        await gate.started()
+        await fulfillment(of: [returned], timeout: 2)
+        let preferences = try await service.automaticLibrarySyncPreferences()
+        XCTAssertEqual(preferences.revision, 1); XCTAssertTrue(permission.isActive)
+        XCTAssertEqual(preferences.selections, [.init(platform: .netease, playlists: true)])
+        let counts = await peer.counts()
+        XCTAssertEqual(counts.1, 1, "Saving still starts one real immediate synchronization")
+        await gate.release()
+        let receipt = try await saving.value
+        let result = try await receipt.synchronization.value.get()
+        XCTAssertEqual(result.phase, .synced); XCTAssertFalse(permission.isActive)
+        await service.close()
+    }
+
+    func testNewLocalSavesSupersedeBlockedSettingsSyncWithoutQueuingOldIntents() async throws {
+        let store = try NativeSyncFixture.store(), peer = NativeSyncPeer(), gate = NativeMusicGate()
+        let service = try await NativeMusicFixture.service(store, accounts: peer)
+        _ = try await service.createPlaylist(name: "Local", refs: [])
+        await peer.configure(gate: gate)
+        let firstPermission = MusicQueueAuthorization()
+        let first = try await service.saveAutomaticLibrarySync(
+            .init(selections: [.init(platform: .netease, playlists: true)]),
+            requestID: UUID(), authorization: firstPermission)
+        await gate.started()
+        let before = await peer.counts(), secondPermission = MusicQueueAuthorization()
+        let second = try await service.saveAutomaticLibrarySync(
+            .init(revision: first.preferences.revision, selections: [.init(platform: .netease, favorites: true)]),
+            requestID: UUID(), authorization: secondPermission)
+        let off = try await service.saveAutomaticLibrarySync(.init(revision: second.preferences.revision),
+            requestID: UUID(), authorization: .init())
+        let checkpoint = store.snapshot().0, waiting = await peer.counts()
+        XCTAssertFalse(firstPermission.isActive); XCTAssertFalse(secondPermission.isActive)
+        XCTAssertEqual(off.preferences.revision, 3); XCTAssertTrue(off.preferences.selections.isEmpty)
+        XCTAssertEqual(waiting.0, before.0); XCTAssertEqual(waiting.1, before.1)
+        await gate.release()
+        if case .success = await first.synchronization.value { XCTFail("Retired round succeeded") }
+        if case .success = await second.synchronization.value { XCTFail("Superseded intent ran later") }
+        _ = try await off.synchronization.value.get()
+        let after = await peer.counts(), writes = await peer.calls()
+        XCTAssertEqual(after.0, before.0); XCTAssertEqual(after.1, before.1)
+        XCTAssertTrue(writes.isEmpty); XCTAssertEqual(store.snapshot().0, checkpoint)
+        await service.close()
+    }
+
+    func testCancellingReturnedSynchronizationRevokesDispatchAndDrainsItsLatePull() async throws {
+        let store = try NativeSyncFixture.store(), peer = NativeSyncPeer(), gate = NativeMusicGate()
+        let service = try await NativeMusicFixture.service(store, accounts: peer)
+        _ = try await service.createPlaylist(name: "Local", refs: [])
+        await peer.configure(gate: gate)
+        let permission = MusicQueueAuthorization()
+        let receipt = try await service.saveAutomaticLibrarySync(
+            .init(selections: [.init(platform: .netease, playlists: true)]),
+            requestID: UUID(), authorization: permission)
+        await gate.started()
+        receipt.synchronization.cancel()
+        XCTAssertFalse(permission.isActive)
+        let checkpoint = store.snapshot().0
+        await gate.release()
+        if case .success = await receipt.synchronization.value { XCTFail("Cancelled business result") }
+        let writes = await peer.calls()
+        XCTAssertTrue(writes.isEmpty); XCTAssertEqual(store.snapshot().0, checkpoint)
+        let preferences = try await service.automaticLibrarySyncPreferences()
+        XCTAssertEqual(preferences, receipt.preferences, "Business cancellation cannot roll back local settings")
+        await service.close()
+    }
+
+    func testProtectionRevokesAcceptedSettingsSyncBeforeActorDrainCompletes() async throws {
+        let store = try NativeSyncFixture.store(), peer = NativeSyncPeer(), gate = NativeMusicGate()
+        let service = try await NativeMusicFixture.service(store, accounts: peer)
+        await peer.configure(gate: gate)
+        let permission = MusicQueueAuthorization()
+        let receipt = try await service.saveAutomaticLibrarySync(
+            .init(selections: [.init(platform: .netease, playlists: true)]),
+            requestID: UUID(), authorization: permission)
+        await gate.started()
+        let retiring = expectation(description: "scope retirement entered before its drain")
+        let events = await service.automaticLibrarySyncEvents()
+        let observation = Task { for await _ in events {}; retiring.fulfill() }
+        service.revokeAccess(generation: 1)
+        XCTAssertFalse(permission.isActive, "The synchronous protection fence cannot wait for actor reentry")
+        var drained = false
+        let transition = Task { try await service.setAccess(available: false, generation: 2); drained = true }
+        let checkpoint = store.snapshot().0
+        await fulfillment(of: [retiring], timeout: 2)
+        XCTAssertFalse(drained)
+        await gate.release()
+        try await transition.value; await observation.value
+        if case .success = await receipt.synchronization.value { XCTFail("Revoked scope succeeded") }
+        XCTAssertTrue(drained); XCTAssertEqual(store.snapshot().0, checkpoint)
+        let writes = await peer.calls(); XCTAssertTrue(writes.isEmpty)
+        await service.close()
+    }
+
+    func testCloseCancelsAndDrainsSettingsAccountBindingBeforeAnyEngineRunExists() async throws {
+        let store = try NativeSyncFixture.store(), peer = AutomaticFailurePeer(), gate = NativeMusicGate()
+        await peer.blockBinding(gate)
+        let service = try await NativeMusicFixture.service(store, accounts: peer), permission = MusicQueueAuthorization()
+        let receipt = try await service.saveAutomaticLibrarySync(
+            .init(selections: [.init(platform: .netease, playlists: true)]),
+            requestID: UUID(), authorization: permission)
+        await gate.started()
+        let checkpoint = store.snapshot().0, revoked = expectation(description: "close revoked accepted business")
+        let stream = permission.revocations()
+        let observation = Task { for await _ in stream { revoked.fulfill(); return } }
+        var closed = false
+        let closing = Task { await service.close(); closed = true }
+        await fulfillment(of: [revoked], timeout: 2)
+        XCTAssertFalse(closed, "Cancellation is not proof the non-cooperative binding physically drained")
+        await gate.release(); await closing.value; await observation.value
+        if case .success = await receipt.synchronization.value { XCTFail("Closed binding succeeded") }
+        let writes = await peer.calls()
+        XCTAssertTrue(closed); XCTAssertTrue(writes.isEmpty); XCTAssertEqual(store.snapshot().0, checkpoint)
     }
 
     func testCreateMembersFavoritesPureOrderAndDeleteProduceFreshBoundPlans() async throws {
@@ -237,11 +363,14 @@ import MeowMusicFeature
 private actor AutomaticFailurePeer: MusicNativeAccountProviding, MusicNativeLibrarySyncProviding {
     private let base = NativeSyncPeer()
     private var known = true, offline = false, begins = 0
+    private var bindingGate: NativeMusicGate?
+    func blockBinding(_ gate: NativeMusicGate) { bindingGate = gate }
     func configure(known: Bool, offline: Bool) { self.known = known; self.offline = offline }
     func beginCount() -> Int { begins }
     func calls() async -> [MusicLibrarySyncMutation] { await base.calls() }
     func beginLibrarySync(platform: MusicAccountPlatform) async throws -> MusicLibrarySyncSession {
         begins += 1
+        if let bindingGate { await bindingGate.wait() }
         guard known else { throw MusicServiceError.authRequired }
         return try await base.beginLibrarySync(platform: platform)
     }

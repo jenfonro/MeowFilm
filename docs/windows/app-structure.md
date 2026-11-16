@@ -71,7 +71,7 @@ Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，
 
 App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能力数量和 `IDesktopModule.Id` 不要求等于脚本模块数量或名称。增加不依赖脚本的原生能力不会被迫增加 Node 模块；脚本清单只决定 App 启动时的 JS 载荷与协议版本。
 
-当前 App 依次注册音乐、`FilmCapability` 和 `NovelCapability`，因此启动页保持音乐推荐。影视能力拥有规则设置草稿及 Node 回执快照、视频源、元数据设置、搜索与播放会话消费者；首页通过元数据适配读取豆瓣，正式播放实现通过 `FilmPlaybackSession` 消费 Node film，而不是由首页本地 preview 提供片源。共享 NativePlayback／libVLC 与私有锁定 FFmpeg 解复用桥的边界见[原生媒体实现](media-playback.md)。App 另通过 `AppLauncher.createPages` 装配 `SearchResultsPage`，Desktop 只消费中性 `IDesktopSearchPage`；影视规则及搜索 JS 只在 Node 载荷执行，Capabilities 不嵌入规则／搜索程序，也不保留客户端引擎回退。小说规则消费者借用同一运行器，原生 UI 和数据 owner 不迁移。原生导航／搜索已接入正式播放会话与小说详情；实现接通、构建、原生测试与真实媒体验证分别记录，不代表整 App 已全部通过。搜索交接只见[共同契约](../common/film/search.md)。影视首页见[影视首页](film-home.md)，设置见[影视设置](film-settings.md)，端侧搜索接通状态和原生测试清单见[影视搜索](film-search.md)。
+当前 App 依次注册音乐、`FilmCapability` 和 `NovelCapability`，因此启动页保持音乐推荐。影视能力拥有规则设置草稿及 Node 回执快照、视频源、元数据设置、搜索与播放会话消费者；首页通过元数据适配读取豆瓣，正式播放实现通过 `FilmPlaybackSession` 消费 Node film，而不是由首页本地 preview 提供片源。电影由独立 FilmPlayback／FilmKernel 持有解码、WASAPI 设备时钟及 D3D11 原生 HDR／DOVI 输出；经 App 既有仲裁器与音乐 NativeAudioPlayback 互斥准入；不借用音乐 PCM／时钟或旧 LibVLC，旧路径本次不迁移。固定来源、许可及构建与真实输出的验证边界见[原生媒体实现](media-playback.md)。App 另通过 `AppLauncher.createPages` 装配 `SearchResultsPage`，Desktop 只消费中性 `IDesktopSearchPage`；影视规则及搜索 JS 只在 Node 载荷执行，Capabilities 不嵌入规则／搜索程序，也不保留客户端引擎回退。小说规则消费者借用同一运行器，原生 UI 和数据 owner 不迁移。原生导航／搜索已接入正式播放会话与小说详情；实现接通、构建、原生测试与真实媒体验证分别记录，不代表整 App 已全部通过。搜索交接只见[共同契约](../common/film/search.md)。影视首页见[影视首页](film-home.md)，设置见[影视设置](film-settings.md)，端侧搜索接通状态和原生测试清单见[影视搜索](film-search.md)。
 
 
 ## 同进程清除本机数据

@@ -1,25 +1,24 @@
 #if os(iOS) || os(macOS)
 import Foundation
 import MeowContracts
-import MeowVideoKernel
 
 @MainActor
 final class PlaybackVideoTransport {
     var systemRelease: Task<NativePlaybackError?, Never>?
     let media: PlaybackVideoMediaLease
     let title: String
-    let kernel: VideoSession
-    var output: VideoSampleOutput { kernel.output }
+    let kernel: any PlaybackVideoDecoding
+    var output: any PlaybackVideoOutput { kernel.output }
     private var input: PlaybackVideoInput?
     private var closing: Task<Void, Error>?
     private(set) var attempt: PlayAttempt?
     var position: Double { kernel.position }
-    var duration: Double? { kernel.info?.duration }
+    var duration: Double? { kernel.duration }
     private var pictureInPicture: (any PlaybackVideoPictureInPictureControlling)?
 
-    init(media: PlaybackVideoMediaLease, input: PlaybackVideoInput) throws {
+    init(media: PlaybackVideoMediaLease, input: PlaybackVideoInput, decoder: any PlaybackVideoDecoding) throws {
         self.media = media; self.input = input; title = input.title
-        kernel = try VideoSession()
+        kernel = decoder
     }
 
     func prepare() async throws {
@@ -29,13 +28,17 @@ final class PlaybackVideoTransport {
         do {
             try await kernel.prepare(url: input.url, format: format,
                 clearKeys: input.decryption?.withKeyMaterial { $0 } ?? [:],
-                position: input.startPosition)
+                position: input.startPosition, headers: input.requestContext.headers)
             self.input = nil
         } catch { throw PlaybackVideoLease.error(error) }
     }
 
     func align(to position: Double) async throws { try await kernel.align(to: position) }
     func renderFirstVideoFrame() async throws { try await kernel.renderFirstVideoFrame() }
+    func validateForCommit() throws {
+        do { try kernel.validateForCommit() }
+        catch { throw PlaybackVideoLease.error(error) }
+    }
     func commit(attempt: PlayAttempt, rate: Float, volume: Float) {
         self.attempt = attempt
         kernel.commit(rate: rate, volume: volume)
@@ -83,6 +86,12 @@ final class PlaybackVideoTransport {
         }
         lease.installPictureInPictureState(pictureInPicture?.state ?? .unavailable,
                                            transport: self, attempt: attempt)
+        #if os(iOS)
+        output.onDisplayLayerChanged = { [weak self, weak lease, weak controller] in
+            guard let self, let lease, let controller, controller.isCurrent(attempt) else { return }
+            self.pictureInPicture?.rebind(transport: self, lease: lease, controller: controller, attempt: attempt)
+        }
+        #endif
     }
     func startPictureInPicture(attempt: PlayAttempt) -> Bool {
         guard self.attempt == attempt else { return false }

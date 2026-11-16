@@ -21,6 +21,7 @@ struct MeowfilmResources: Sendable {
     let musicPlatform: MusicPlatformClient
     let musicScripts: NativeMusicScriptService
     let scriptSession: RuntimeSession
+    let filmSettings: MeowfilmNativeSettings
     let filmRules: FilmRuleService
     let filmSourceSettings: FilmSourceService
     let filmMetadata: FilmTMDBService
@@ -57,7 +58,11 @@ struct MeowfilmResources: Sendable {
             maximumDocumentBytes: 4 * 1024 * 1024))
         musicHomeSnapshot = MusicNativeHomeSnapshotDocument(storeFactory: Self.documentFactory(
             base: cacheRoot, namespace: MusicNativeHomeSnapshotDocument.namespace))
-        let scriptSession = RuntimeSession(launcher: MeowfilmScriptRuntime.launcher)
+        let filmSettings = try MeowfilmNativeSettings(documentsRoot: libraryRoot,
+            runtimeRoot: MeowfilmScriptRuntime.dataDirectory)
+        self.filmSettings = filmSettings
+        let scriptSession = RuntimeSession(launcher: MeowfilmScriptRuntime.launcher(settings: filmSettings.access))
+        filmSettings.attach(scriptSession)
         self.scriptSession = scriptSession
         let connection: @Sendable () async throws -> RuntimeHTTPClient = {
             try await scriptSession.connection()
@@ -68,11 +73,14 @@ struct MeowfilmResources: Sendable {
         novelRules = NovelRuleProcessor(runtime: novelRuntime)
         musicScripts = NativeMusicScriptService(connection: connection)
         musicPlatform = MusicPlatformClient(connection: connection)
-        filmMetadata = FilmTMDBService(connection: connection)
-        filmDoubanSettings = FilmDoubanSettingsService(connection: connection)
-        filmRules = FilmRuleService(connection: connection)
+        filmMetadata = FilmTMDBService(settingsDocument: filmSettings[.tmdb], connection: connection)
+        filmDoubanSettings = FilmDoubanSettingsService(settingsDocument: filmSettings[.douban])
+        filmRules = FilmRuleService(settingsDocument: filmSettings[.rules], connection: connection)
         filmSourceSettings = FilmSourceService(transport: CatScriptTransport(connectionProvider: connection),
-            storeFactory: Self.documentFactory(base: libraryRoot, namespace: FilmSourceService.documentNamespace))
+            storeFactory: Self.documentFactory(base: libraryRoot, namespace: FilmSourceService.documentNamespace),
+            settingsDocument: filmSettings[.catSources],
+            runtimeSourceRoot: MeowfilmScriptRuntime.dataDirectory.appendingPathComponent("cat"),
+            observeConnection: { await scriptSession.connectionIfStarted() })
         musicAccountGate = try? MusicAccountAccessGate(
             bundleIdentifier: MeowfilmIdentity.bundleIdentifier,
             urlCacheStore: try? Self.documentFactory(base: cacheRoot, namespace: "music.platform.audio-locators.v1")(),

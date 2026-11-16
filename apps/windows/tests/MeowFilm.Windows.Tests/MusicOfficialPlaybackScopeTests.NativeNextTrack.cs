@@ -2,7 +2,6 @@ using System.Buffers.Binary;
 using System.IO;
 using System.Reflection;
 using System.Windows.Threading;
-using LibVLCSharp.Shared;
 using MeowFilm.Capabilities;
 using MeowFilm.Media;
 
@@ -18,7 +17,7 @@ public static partial class MusicOfficialPlaybackScopeTests
             yield return Case("native next track retires active sequential audio cached=" + cached +
                 (waiting ? " while awaiting uncached bytes" : ""), async () =>
             {
-                await using var player = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
+                await using var player = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
                 await using var f = await Scene.Create(files: true, playback: new NativeMusicPlayback(player), bytes: LongWave());
                 if (waiting) f.Files.PrefixLength = 512 * 1024;
                 var first = MusicSongFixture.Online("wy", "first", "Track first", "Artist", duration: 120);
@@ -37,13 +36,15 @@ public static partial class MusicOfficialPlaybackScopeTests
                 await Until(() => player.IsPlaying);
                 Check(player.HasMedia && player.Identity == f.Module.QueueSurfaceRows[0].EntryId,
                     "the first actual native input is playing before next");
-                var session = typeof(NativePlayback).GetField("_session", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(player)!;
-                var retired = (MediaPlayer)session.GetType().GetField("Player", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(session)!;
+                var session = typeof(NativeAudioPlayback).GetField("session", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(player)!;
+                bool Retired() => session.GetType().GetField("release", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .GetValue(session) is Task { IsCompletedSuccessfully: true };
                 string? previous = player.Identity;
                 Task seek = Task.CompletedTask;
                 if (waiting)
                 {
-                    var input = session.GetType().GetField("ReadInput", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(session)!;
+                    var decoder = session.GetType().GetProperty("Decoder", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(session)!;
+                    var input = decoder.GetType().GetField("_input", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(decoder)!;
                     var stream = (Stream)input.GetType().GetField("_stream", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(input)!;
                     seek = player.SeekAsync(70);
                     await Until(() => stream.Position > f.Files.PrefixLength);
@@ -53,17 +54,18 @@ public static partial class MusicOfficialPlaybackScopeTests
                 await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                 if (waiting)
                 {
-                    await Until(() => retired.NativeReference == IntPtr.Zero);
+                    await Until(Retired);
                     Check(!next.IsCompleted, "native retirement does not require the upstream to deliver its held body");
                     f.Files.ReleaseBody.TrySetResult();
                 }
                 await next.WaitAsync(TimeSpan.FromSeconds(8));
-                await seek;
+                try { await seek; }
+                catch (OperationCanceledException) when (waiting) { }
                 await Until(() => player.IsPlaying);
                 Check(player.Identity != previous && player.Identity == f.Module.QueueSurfaceRows.Single(row => row.IsCurrent).EntryId &&
                     f.Module.CurrentSongId == second["songId"]!.GetValue<string>() && player.HasMedia && !f.Module.Busy,
                     "next settles at the exact new native queue input");
-                Check(retired.NativeReference == IntPtr.Zero, "the active first native player is released, not abandoned");
+                Check(Retired(), "the active first audio output and decoder are released, not abandoned");
                 Check(f.Module.Status == "" && player.LastErrorCode is null, f.Module.Status);
                 await player.StopAsync();
                 Check(!player.HasMedia && player.OwnerId is null, "the replacement remains stoppable");

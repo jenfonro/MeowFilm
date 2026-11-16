@@ -11,6 +11,8 @@ let package = Package(
         .library(name: "MeowStorage", targets: ["MeowStorage"]),
         .library(name: "MeowAccounts", targets: ["MeowAccounts"]),
         .library(name: "MeowPlayback", targets: ["MeowPlayback"]),
+        .library(name: "MeowAudio", targets: ["MeowAudio"]),
+        .library(name: "MeowPlaybackVideo", targets: ["MeowPlaybackVideo"]),
         .library(name: "MeowUI", targets: ["MeowUI"]),
         .library(name: "MeowRuntime", targets: ["MeowRuntime"]),
         .library(name: "MeowMusicFeature", targets: ["MeowMusicFeature"]),
@@ -20,19 +22,23 @@ let package = Package(
         .library(name: "MeowNovelFeature", targets: ["MeowNovelFeature"])
     ],
     dependencies: [
-        .package(path: "../VideoKernel")
+        .package(path: "../VideoKernel"),
+        .package(path: "../AudioKernel")
     ],
     targets: [
         .target(name: "MeowContracts", dependencies: []),
         .target(name: "MeowJSON", dependencies: []),
         .target(name: "MeowStorage", dependencies: ["MeowContracts"]),
         .target(name: "MeowAccounts", dependencies: ["MeowContracts"]),
-        .target(name: "MeowPlayback", dependencies: ["MeowContracts",
+        .target(name: "MeowAudio", dependencies: [
+            .product(name: "CMeowAudioKernel", package: "audiokernel")]),
+        .target(name: "MeowPlayback", dependencies: ["MeowContracts", "MeowAudio"]),
+        .target(name: "MeowPlaybackVideo", dependencies: ["MeowPlayback",
             .product(name: "MeowVideoKernel", package: "videokernel")]),
         .target(name: "MeowUI", dependencies: []),
         .target(name: "MeowRuntime", dependencies: []),
         .target(name: "MeowMusicFeature", dependencies: ["MeowContracts", "MeowStorage", "MeowPlayback", "MeowUI"]),
-        .target(name: "MeowMusicPlatform", dependencies: ["MeowMusicFeature", "MeowContracts", "MeowJSON", "MeowAccounts", "MeowStorage", "MeowRuntime", "MeowUI"]),
+        .target(name: "MeowMusicPlatform", dependencies: ["MeowMusicFeature", "MeowAudio", "MeowContracts", "MeowJSON", "MeowAccounts", "MeowStorage", "MeowRuntime", "MeowUI"]),
         .target(name: "MeowMusicNativeService", dependencies: ["MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowMusicPlatform", "MeowRuntime", "MeowStorage"]),
         .target(name: "MeowFilmFeature", dependencies: ["MeowUI", "MeowJSON", "MeowStorage", "MeowRuntime"]),
         .target(name: "MeowNovelFeature", dependencies: ["MeowUI", "MeowStorage", "MeowRuntime"]),
@@ -44,7 +50,8 @@ let package = Package(
         .testTarget(name: "MeowMusicFeatureTests", dependencies: ["MeowContracts", "MeowMusicFeature", "MeowPlayback", "MeowStorage", "MeowUI"]),
         .testTarget(name: "MeowMusicNativeServiceTests", dependencies: ["MeowAccounts", "MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowMusicNativeService", "MeowMusicPlatform", "MeowMusicTestSupport", "MeowPlayback", "MeowRuntime", "MeowStorage"]),
         .testTarget(name: "MeowMusicPlatformTests", dependencies: ["MeowAccounts", "MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicTestSupport", "MeowRuntime", "MeowStorage"]),
-        .testTarget(name: "MeowPlaybackTests", dependencies: ["MeowContracts", "MeowMusicFeature", "MeowPlayback"],
+        .testTarget(name: "MeowPlaybackTests", dependencies: ["MeowContracts", "MeowMusicFeature", "MeowPlayback", "MeowAudio", "MeowPlaybackVideo",
+            .product(name: "MeowVideoKernel", package: "videokernel")],
                     resources: [.copy("Video/Fixtures")]),
         .testTarget(name: "MeowRuntimeTests", dependencies: ["MeowJSON", "MeowRuntime"]),
         .testTarget(name: "MeowUITests", dependencies: ["MeowUI"]),

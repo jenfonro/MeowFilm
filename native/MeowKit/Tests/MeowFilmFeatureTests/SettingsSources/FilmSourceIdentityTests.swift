@@ -32,7 +32,7 @@ final class FilmSourceIdentityTests: XCTestCase {
                           FilmSourceSite(key: decomposed, name: "Site", api: "/api", actions: [], methods: [:]))
     }
 
-    func testEquivalentLookingKeysKeepOptionsDeletionDetectionAndReimportSeparateAcrossRebuild() async throws {
+    func testEquivalentLookingKeysKeepOptionsDeletionDetectionAndIntentEditsSeparateAcrossRebuild() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: base) }
@@ -40,7 +40,8 @@ final class FilmSourceIdentityTests: XCTestCase {
         let runtime = SourcesRuntimeFixture()
         try await setSites([composed, decomposed], runtime: runtime)
         let transport = runtime.transport
-        var service = FilmSourceService(transport: transport, storeFactory: { store })
+        var service = FilmSourceService(transport: transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            runtimeSourceRoot: base.appendingPathComponent("cat"))
         let first = FilmSourceKey(installationId: "a", siteKey: composed)
         let second = FilmSourceKey(installationId: "a", siteKey: decomposed)
         try await service.refresh()
@@ -60,7 +61,8 @@ final class FilmSourceIdentityTests: XCTestCase {
         XCTAssertFalse(calls.isEmpty)
         XCTAssertTrue(calls.allSatisfy { Array($0.utf8) == Array(decomposed.utf8) }, "Wire must preserve exact siteId")
         await service.close()
-        service = FilmSourceService(transport: transport, storeFactory: { store })
+        service = FilmSourceService(transport: transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await service.initialize()
         snapshot = await service.snapshot
         XCTAssertEqual(snapshot.videos.filter { $0.key.installationId == "a" }.count, 2)
@@ -78,29 +80,31 @@ final class FilmSourceIdentityTests: XCTestCase {
         XCTAssertEqual(snapshot.videos.first { $0.key == second }?.order, -3)
         await service.close()
 
-        let rebuilt = FilmSourceService(transport: transport, storeFactory: { store })
+        let rebuilt = FilmSourceService(transport: transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await rebuilt.initialize()
         snapshot = await rebuilt.snapshot
         XCTAssertFalse(snapshot.videos.contains { $0.key == first })
         XCTAssertEqual(snapshot.videos.first { $0.key == second }?.detection, result)
         try await rebuilt.refresh()
-        _ = try await rebuilt.importNetwork(name: "A", sourceURL: "https://example.invalid/a.js", installationId: "a")
+        _ = try await rebuilt.editCat("a", name: "A", sourceURL: "https://example.invalid/a.js")
         snapshot = await rebuilt.snapshot
-        XCTAssertEqual(snapshot.videos.filter { $0.key.installationId == "a" }.count, 2)
-        XCTAssertEqual(snapshot.videos.first { $0.key == first }?.options, .init())
+        XCTAssertEqual(snapshot.videos.filter { $0.key.installationId == "a" }.count, 1)
+        XCTAssertFalse(snapshot.videos.contains { $0.key == first }, "An intent save is not permission to restore a tombstone")
         XCTAssertEqual(snapshot.videos.first { $0.key == second }?.options, secondOptions)
         XCTAssertEqual(snapshot.videos.first { $0.key == second }?.detection, result)
         try await rebuilt.deleteVideo(second)
         try await rebuilt.refresh()
         snapshot = await rebuilt.snapshot
-        XCTAssertTrue(snapshot.videos.contains { $0.key == first })
+        XCTAssertFalse(snapshot.videos.contains { $0.key == first })
         XCTAssertFalse(snapshot.videos.contains { $0.key == second })
         await rebuilt.close()
 
-        let finalOwner = FilmSourceService(transport: transport, storeFactory: { store })
+        let finalOwner = FilmSourceService(transport: transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await finalOwner.initialize()
         snapshot = await finalOwner.snapshot
-        XCTAssertTrue(snapshot.videos.contains { $0.key == first })
+        XCTAssertFalse(snapshot.videos.contains { $0.key == first })
         XCTAssertFalse(snapshot.videos.contains { $0.key == second })
         await finalOwner.close()
     }
@@ -113,7 +117,8 @@ final class FilmSourceIdentityTests: XCTestCase {
             let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
             let runtime = SourcesRuntimeFixture()
             try await setSites([composed], runtime: runtime)
-            let service = FilmSourceService(transport: runtime.transport, storeFactory: { store })
+            let service = FilmSourceService(transport: runtime.transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            runtimeSourceRoot: base.appendingPathComponent("cat"))
             let old = FilmSourceKey(installationId: "a", siteKey: composed)
             let new = FilmSourceKey(installationId: "a", siteKey: decomposed)
             try await service.refresh()

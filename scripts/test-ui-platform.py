@@ -48,14 +48,15 @@ def main():
         raise ValueError("Result bundle already exists: " + str(result))
     log = result.with_suffix(".log")
     log.parent.mkdir(parents=True, exist_ok=True)
-    preparation = run([
-        sys.executable, "-I", "-B", "scripts/prepare-ios-video-kernel.py",
-        "--target", "ios-simulator-" + platform.machine(),
-    ])
-    if preparation.returncode:
-        log.write_text(preparation.stdout, encoding="utf-8")
-        print("Video kernel preparation failed; see " + str(log), file=sys.stderr)
-        return preparation.returncode
+    for kernel in ("audio", "video"):
+        preparation = run([
+            sys.executable, "-I", "-B", "scripts/prepare-ios-" + kernel + "-kernel.py",
+            "--target", "ios-simulator-" + platform.machine(),
+        ])
+        if preparation.returncode:
+            log.write_text(preparation.stdout, encoding="utf-8")
+            print(kernel + " kernel preparation failed; see " + str(log), file=sys.stderr)
+            return preparation.returncode
     command = [
         "xcodebuild",
         "-project", "apps/ios/Meowfilm.xcodeproj",

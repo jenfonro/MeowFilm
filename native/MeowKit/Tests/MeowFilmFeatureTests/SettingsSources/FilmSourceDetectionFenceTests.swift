@@ -12,7 +12,8 @@ final class FilmSourceDetectionFenceTests: XCTestCase {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
-        return (FilmSourceService(transport: fixture.transport, storeFactory: { store }), store, base)
+        return (FilmSourceService(transport: fixture.transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            runtimeSourceRoot: base.appendingPathComponent("cat")), store, base)
     }
 
     func testHostGenerationChangeAfterFinalValueIsCapturedCannotPersistOldDetection() async throws {
@@ -58,7 +59,8 @@ final class FilmSourceDetectionFenceTests: XCTestCase {
         XCTAssertEqual(Array(calls.suffix(2)), ["invoke", "status"])
         let completed = await fixture.completedResults
         XCTAssertEqual(completed, 1)
-        let rebuilt = FilmSourceService(transport: unavailableCatTransport("OFFLINE"), storeFactory: { store })
+        let rebuilt = FilmSourceService(transport: unavailableCatTransport("OFFLINE"), storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await rebuilt.initialize()
         let snapshot = await rebuilt.snapshot
         XCTAssertEqual(snapshot.videos.first { $0.key == key }?.detection, result)
@@ -149,8 +151,7 @@ private actor DetectionValueFixture {
     }
 
     nonisolated var transport: CatScriptTransport {
-        CatScriptTransport(request: { operation, params in try await self.request(operation, params) },
-            upload: { _, _, _ in throw FilmSourceError(code: "UNEXPECTED_UPLOAD") })
+        CatScriptTransport(request: { operation, params in try await self.request(operation, params) })
     }
 
     func release() { open = true; pending?.resume(); pending = nil }

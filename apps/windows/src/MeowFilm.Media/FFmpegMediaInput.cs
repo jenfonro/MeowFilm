@@ -28,7 +28,10 @@ internal sealed class FFmpegMediaInput : IAsyncDisposable
         CancellationToken token)
     {
         _http = new(address, headers, options, token);
-        _open = _http.Open; _location = _http.Location; _read = _http.Read; _seek = _http.Seek; _close = _http.Close;
+        _open = _http.Open; _location = _http.Location;
+        _read = (state, handle, buffer, length) => _http.Read(state, handle, buffer, length);
+        _seek = (state, handle, offset, whence) => _http.Seek(state, handle, offset, whence);
+        _close = _http.Close;
         _interrupted = _ => _http.Cancelled ? 1 : 0;
         _failed = (_, code) =>
         {

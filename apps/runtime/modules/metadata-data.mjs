@@ -7,6 +7,7 @@ function createMetadataModule(id, { dataRoot, request = createMetadataRequest(),
   if (typeof request !== 'function') throw metadataFailure('INVALID_REQUEST');
   const spec = contracts[id], store = createMetadataSettings(dataRoot, id, nativeSettings);
   const lifetime = new AbortController(), active = new Set(), streams = new Set();
+  let configuration = new AbortController();
   const images = createMetadataImageTransport();
   let closed = false, closing, cleanupFailure;
   const failure = error => ({ ok: false, contract: spec.contract,
@@ -18,7 +19,7 @@ function createMetadataModule(id, { dataRoot, request = createMetadataRequest(),
   }
   function signalFor(context) {
     if (closed) throw metadataFailure('CLOSED');
-    const signal = context?.signal ? AbortSignal.any([lifetime.signal, context.signal]) : lifetime.signal;
+    const signal = AbortSignal.any([lifetime.signal, configuration.signal, ...(context?.signal ? [context.signal] : [])]);
     if (signal.aborted) throw metadataFailure('CANCELLED');
     return signal;
   }
@@ -48,7 +49,11 @@ function createMetadataModule(id, { dataRoot, request = createMetadataRequest(),
   });
   return Object.freeze({
     id, version: spec.version, contract: spec.contract, methods,
-    settingsChanged() { store.invalidate(); },
+    settingsChanged() {
+      store.invalidate();
+      configuration.abort();
+      configuration = new AbortController();
+    },
     image(path, context) {
       return track((async () => {
         try {

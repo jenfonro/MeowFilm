@@ -4,6 +4,7 @@
     "avformat",
     "avcodec",
     "avutil",
+    "avfilter",
     "swresample",
     "swscale"
   ],
@@ -16,9 +17,10 @@
       "licenses": {
         "COPYING.LGPLv2.1": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30",
         "COPYING.LGPLv3": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
-        "LICENSE.md": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af"
+        "LICENSE.md": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af",
+        "COPYING.GPLv3": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
       },
-      "inventorySHA256": "f192dd8ca7bc2358cbe681f6e92c588ce28fd800f34d5c2c7370e7d5ebaf3c10"
+      "inventorySHA256": "9967f9d4ef0e797fd19adb4f799b46a72bfbe6aab5392213714e0e414124681d"
     },
     "ksplayer": {
       "revision": "d0d063ab1f045735129b6617591ad2148d88d5db",
@@ -28,15 +30,36 @@
         "LICENSE": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
       },
       "inventorySHA256": "9034debfed30ce27ac5020c23753c9caec5f5553f51b8b44adf3cea3775cbf2e"
+    },
+    "ffmpegkit": {
+      "revision": "c32be9bfb628042737ad3ef622e930c5c7b15954",
+      "version": "6.1.4",
+      "url": "https://raw.githubusercontent.com/kingslay/FFmpegKit/c32be9bfb628042737ad3ef622e930c5c7b15954/",
+      "files": {
+        "Sources/FFmpegKit/FFmpegKit.c": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "Sources/FFmpegKit/include/avcodec_shim.h": "331174b4ef2fa14ee133701bbcf27e6d99d5eae73b9604de1e5856af631e860e",
+        "Sources/FFmpegKit/include/avdevice_shim.h": "8abac6d79cfd89d021daeaed351b37e9ab3d7acf38c0cea71d62eb51b0b46228",
+        "Sources/FFmpegKit/include/avfilter_shim.h": "3668bb7e1e2eb5d197446e05c2da1c8c86075d45df62c025edeb1e789b4dedd5",
+        "Sources/FFmpegKit/include/avformat_shim.h": "26cf5b0fb4bada80e1e4dfa2e0c4134d7d35d71774f12b89e0a04047f60a821c",
+        "Sources/FFmpegKit/include/avutil_shim.h": "7d8ef67f89af72dc5a15dcb0beb6b372d4d03da3391b6687445c139f4870b7e0",
+        "Sources/FFmpegKit/include/swresample_shim.h": "f2de03b7796b7f3be01b9cd0afb5c2edc805fb0ca10f0c3db2f3a1ca5ddbcaf9",
+        "Sources/FFmpegKit/include/swscale_shim.h": "eb3882e0b151afebffc7c87b1d9005b0d8468c27ca2010c694fd250526738933",
+        "LICENSE": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+        "Package.swift": "b20f1897e2fa10134637d499df84d92e714443bec653d8ec6927903bff4a1be9"
+      },
+      "licenses": {
+        "LICENSE": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+      },
+      "inventorySHA256": "52f391f7b6e4a8a974fbe0f669adfa6258c0e90196560769dbc47418562b6cde"
     }
   },
   "patch": {
     "path": "native/VideoKernel/patches/ffmpeg-native-output.patch",
-    "sha256": "b9c93b45787a3b93d74bfbd1bccbe391cdf29053cfe968beded496d0292c9b0a",
+    "sha256": "443df2a2c24c93743ee77de706ec0615fbf652d7404b10318862335346392874",
     "files": {
       "libavcodec/videotoolbox.c": {
         "upstream": "85abc859e1b1e44fa5995d32a108bba4385e03bedcf892cfbb1d30f28bdc5f56",
-        "patched": "95a887ea85e285474e7ced473595c491e3d16814ce8cbd1dff95ea8fb6b3113e"
+        "patched": "e08c95b3f4ba7349ce1b3fd5145bfc97075e3abbd8f40ce1d299c33877786050"
       },
       "libavformat/mov.c": {
         "upstream": "7ed52b0e5932026058a55483e72880eb592cdef048b0cec15e9ea7e922ad0347",
@@ -53,6 +76,10 @@
       "libavformat/dashdec.c": {
         "upstream": "50f4368e09137d961ba7965ac4e664b48bc3358efcfc1a44df19cb897832ea86",
         "patched": "f82f9abd967207fc99dbf74e37e178747ae1f57aef43adc96fbaf07328f5e687"
+      },
+      "libavformat/http.c": {
+        "upstream": "2d28c561f60aa7a5508f486ee1d80ec1d6e1bbd6c18b686c7bf128ca30b20c58",
+        "patched": "840dc0c0645cf765348d97a6d451304c27743621041a592ef876f9f7b1c62eee"
       }
     }
   },
@@ -99,8 +126,8 @@
     "--disable-encoders",
     "--disable-muxers",
     "--disable-avdevice",
-    "--disable-avfilter",
-    "--disable-gpl",
+    "--enable-avfilter",
+    "--enable-gpl",
     "--disable-nonfree",
     "--enable-version3",
     "--enable-libxml2",
@@ -123,6 +150,30 @@
     "HEVC_VIDEOTOOLBOX_HWACCEL",
     "H264_VIDEOTOOLBOX_HWACCEL",
     "TLS_PROTOCOL",
-    "HTTP_PROTOCOL"
+    "HTTP_PROTOCOL",
+    "AVFILTER",
+    "ATEMPO_FILTER",
+    "ARESAMPLE_FILTER",
+    "SCALE_FILTER",
+    "FORMAT_FILTER",
+    "TRANSPOSE_FILTER",
+    "ROTATE_FILTER",
+    "HFLIP_FILTER",
+    "VFLIP_FILTER",
+    "YADIF_FILTER",
+    "IDET_FILTER"
+  ],
+  "corePackage": {
+    "path": "native/KSPlayer",
+    "manifest": "native/KSPlayer/Provenance/source-manifest.json",
+    "manifestSHA256": "5160cb6b69660c3367605080ab6422f68bb7b4d5adbf1138c8f419d3d4a7e393",
+    "patch": "native/KSPlayer/patches/core-only.patch",
+    "patchSHA256": "3bdd6bb1c830d76c626e924e96b44dbb68b52b32fd8b1e715f0a6dec08d6c570"
+  },
+  "requiredFilterSymbols": [
+    "ff_asrc_abuffer",
+    "ff_vsrc_buffer",
+    "ff_asink_abuffer",
+    "ff_vsink_buffer"
   ]
 }

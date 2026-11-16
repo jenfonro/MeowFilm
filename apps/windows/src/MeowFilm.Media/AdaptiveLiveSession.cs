@@ -113,7 +113,7 @@ internal sealed class AdaptiveLiveSession
                 }
             }
             catch (Exception error) when (!token.IsCancellationRequested && !lifetime.IsCancellationRequested &&
-                Transient(HttpMediaInput.Classify(error)) && ++playlist.Failures <= 2)
+                Transient(NativeHttpMediaPolicy.Classify(error)) && ++playlist.Failures <= 2)
             {
                 playlist.Next = began + Ticks(previous.Target / 2.0);
                 // Keep the last validated window for at most two scheduled retry attempts.

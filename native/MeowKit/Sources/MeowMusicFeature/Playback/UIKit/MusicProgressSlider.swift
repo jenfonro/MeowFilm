@@ -4,7 +4,7 @@ import UIKit
 /// UISlider tracks a touch that starts on its thumb. Any other touch on the
 /// track is followed here with the same UIControl events, so the seek owner
 /// keeps one fence and commit path. Buffer ranges and chorus are display
-/// projections of the admitted AVPlayer item, not another playback clock.
+/// projections of admitted native playback, not another playback clock.
 @MainActor
 final class MusicProgressSlider: UISlider {
     var buffers: [Range<Double>] = [] { didSet { setNeedsLayout() } }

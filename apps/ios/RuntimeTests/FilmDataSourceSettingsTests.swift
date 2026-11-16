@@ -2,19 +2,20 @@ import XCTest
 import UIKit
 import Combine
 @testable import MeowRuntime
+import MeowStorage
 import MeowUI
 @testable import MeowFilmFeature
 
 @MainActor
 final class FilmDataSourceSettingsTests: XCTestCase {
     func testDoubanDefaultsAndEveryPresetUseServerProxyAddresses() async throws {
-        let wire = DataSourceSettingsWire(), client = try client(wire)
-        addTeardownBlock { await client.close() }
+        let storage = try DataSourceSettingsStorage(self)
         var saved = 0
-        let model = FilmDoubanSettingsModel(service: .init(connection: { client })) { saved += 1 }
+        let model = FilmDoubanSettingsModel(service: FilmDoubanSettingsService(
+            settingsDocument: storage.documents[.douban])) { saved += 1 }
         try await model.load()
         XCTAssertEqual(model.dataRoute, .direct); XCTAssertEqual(model.imageRoute, .direct)
-        XCTAssertEqual(wire.writes.count, 0, "Loading settings must not write defaults")
+        XCTAssertNil(try storage.documents[.douban].read(), "Loading settings must not write defaults")
         let expectedData: [(FilmDoubanDataRoute, String, String)] = [
             (.direct, "https://m.douban.com", ""),
             (.cors, "https://m.douban.com", "https://ciao-cors.is-an.org/"),
@@ -24,13 +25,13 @@ final class FilmDataSourceSettingsTests: XCTestCase {
         for (route, base, proxy) in expectedData {
             model.dataRoute = route
             try await model.save()
-            let patch = try XCTUnwrap(wire.writes.last)
-            XCTAssertEqual(patch["apiBase"], .string(base))
-            XCTAssertEqual(patch["searchBase"], .string("https://search.douban.com"))
-            XCTAssertEqual(patch["apiProxy"], .string(proxy))
-            XCTAssertEqual(patch["imageBase"], .string("https://img3.doubanio.com"))
-            XCTAssertEqual(patch["imageProxy"], .string(""))
-            XCTAssertEqual(patch["cookie"], .string(""))
+            let settings = try storage.values(.douban)
+            XCTAssertEqual(settings["apiBase"], .string(base))
+            XCTAssertEqual(settings["searchBase"], .string("https://search.douban.com"))
+            XCTAssertEqual(settings["apiProxy"], .string(proxy))
+            XCTAssertEqual(settings["imageBase"], .string("https://img3.doubanio.com"))
+            XCTAssertEqual(settings["imageProxy"], .string(""))
+            XCTAssertEqual(settings["cookie"], .string(""))
             XCTAssertEqual(model.dataRoute, route)
         }
         let expectedImages: [(FilmDoubanImageRoute, String)] = [
@@ -41,10 +42,11 @@ final class FilmDataSourceSettingsTests: XCTestCase {
         for (route, base) in expectedImages {
             model.imageRoute = route
             try await model.save()
-            XCTAssertEqual(wire.writes.last?["imageBase"], .string(base))
-            XCTAssertEqual(wire.writes.last?["imageProxy"], .string(""))
-            XCTAssertEqual(wire.writes.last?["apiBase"], .string("https://m.douban.cmliussss.com"))
-            XCTAssertEqual(wire.writes.last?["apiProxy"], .string(""))
+            let settings = try storage.values(.douban)
+            XCTAssertEqual(settings["imageBase"], .string(base))
+            XCTAssertEqual(settings["imageProxy"], .string(""))
+            XCTAssertEqual(settings["apiBase"], .string("https://m.douban.cmliussss.com"))
+            XCTAssertEqual(settings["apiProxy"], .string(""))
             XCTAssertEqual(model.imageRoute, route)
         }
         XCTAssertEqual(saved, 7)
@@ -58,114 +60,160 @@ final class FilmDataSourceSettingsTests: XCTestCase {
                 "apiProxy": .string(""), "imageBase": .string("https://img3.doubanio.com"),
                 "imageProxy": .string(""), "cookie": .string(""),
             ]
-            let wire = DataSourceSettingsWire(douban: initial), client = try client(wire)
-            addTeardownBlock { await client.close() }
-            let model = FilmDoubanSettingsModel(service: .init(connection: { client }), didSave: {})
+            let storage = try DataSourceSettingsStorage(self)
+            try storage.seed(initial, for: .douban)
+            let before = try storage.bytes(.douban)
+            let model = FilmDoubanSettingsModel(service: FilmDoubanSettingsService(
+                settingsDocument: storage.documents[.douban]), didSave: {})
             try await model.load()
             XCTAssertEqual(model.dataRoute, route)
             XCTAssertEqual(model.imageRoute, .direct)
-            XCTAssertEqual(wire.writes.count, 0)
+            XCTAssertEqual(try storage.bytes(.douban), before)
             try await model.save()
-            XCTAssertEqual(wire.writes.last, initial)
-            await client.close()
+            XCTAssertEqual(try storage.values(.douban), initial)
+            XCTAssertEqual(try storage.bytes(.douban), before)
         }
     }
 
     func testCustomProxyPrefixesAndIndependentRoutesSurviveLoadAndSave() async throws {
         let initial = doubanCustomSettings
-        let wire = DataSourceSettingsWire(douban: initial), client = try client(wire)
-        addTeardownBlock { await client.close() }
-        let model = FilmDoubanSettingsModel(service: .init(connection: { client }), didSave: {})
+        let storage = try DataSourceSettingsStorage(self)
+        try storage.seed(initial, for: .douban)
+        let model = FilmDoubanSettingsModel(service: FilmDoubanSettingsService(
+            settingsDocument: storage.documents[.douban]), didSave: {})
         try await model.load()
         XCTAssertEqual(model.dataRoute, .custom); XCTAssertEqual(model.imageRoute, .custom)
         XCTAssertEqual(model.cookie, "synthetic_cookie=initial")
         try await model.save()
-        XCTAssertEqual(wire.writes.last, initial)
+        XCTAssertEqual(try storage.values(.douban), initial)
         model.dataRoute = .direct
         try await model.save()
-        XCTAssertEqual(wire.writes.last?["imageBase"], initial["imageBase"])
-        XCTAssertEqual(wire.writes.last?["imageProxy"], initial["imageProxy"])
-        XCTAssertEqual(wire.writes.last?["cookie"], initial["cookie"])
+        let direct = try storage.values(.douban)
+        XCTAssertEqual(direct["imageBase"], initial["imageBase"])
+        XCTAssertEqual(direct["imageProxy"], initial["imageProxy"])
+        XCTAssertEqual(direct["cookie"], initial["cookie"])
         model.imageRoute = .cdnTX
         try await model.save()
-        XCTAssertEqual(wire.writes.last?["apiBase"], .string("https://m.douban.com"))
-        XCTAssertEqual(wire.writes.last?["apiProxy"], .string(""))
+        let settings = try storage.values(.douban)
+        XCTAssertEqual(settings["apiBase"], .string("https://m.douban.com"))
+        XCTAssertEqual(settings["apiProxy"], .string(""))
     }
 
     func testDoubanCookieEchoReplaceAndEmptySaveWithFailuresKeepingTheDraft() async throws {
-        let wire = DataSourceSettingsWire(douban: doubanCustomSettings), client = try client(wire)
-        addTeardownBlock { await client.close() }
+        let storage = try DataSourceSettingsStorage(self)
+        try storage.seed(doubanCustomSettings, for: .douban)
         var notifications = 0
-        let model = FilmDoubanSettingsModel(service: .init(connection: { client })) { notifications += 1 }
+        let model = FilmDoubanSettingsModel(service: FilmDoubanSettingsService(
+            settingsDocument: storage.documents[.douban])) { notifications += 1 }
         try await model.load()
         try await model.save()
-        XCTAssertEqual(wire.writes.last?["cookie"], .string("synthetic_cookie=initial"))
+        XCTAssertEqual(try storage.values(.douban)["cookie"], .string("synthetic_cookie=initial"))
         XCTAssertEqual(model.cookie, "synthetic_cookie=initial")
+        let before = try storage.bytes(.douban)
         model.cookie = ""
-        wire.fail = true
+        try storage.setSaveFailure(true, for: .douban)
         do { try await model.save(); XCTFail("Storage failure must remain a failure") }
-        catch { XCTAssertEqual(error as? RuntimeHTTPError, .remote("STORAGE_ERROR")) }
+        catch { XCTAssertEqual(error as? FilmSettingsStorageError, .storageFailure) }
         XCTAssertEqual(model.cookie, ""); XCTAssertEqual(model.saved?.cookie, "synthetic_cookie=initial")
         XCTAssertFalse(model.busy); XCTAssertEqual(notifications, 1)
         model.cookie = "synthetic_cookie=replacement"
         model.apiProxy = "https://new.example.invalid/nested/"
         let saved = model.saved
-        do { try await model.save(); XCTFail("Failed replacement must preserve input") } catch {}
+        do { try await model.save(); XCTFail("Failed replacement must preserve input") }
+        catch { XCTAssertEqual(error as? FilmSettingsStorageError, .storageFailure) }
         XCTAssertEqual(model.saved, saved)
         XCTAssertEqual(model.cookie, "synthetic_cookie=replacement")
         XCTAssertEqual(model.apiProxy, "https://new.example.invalid/nested/")
         XCTAssertEqual(notifications, 1)
-        wire.fail = false
+        try storage.setSaveFailure(false, for: .douban)
+        XCTAssertEqual(try storage.bytes(.douban), before)
+        XCTAssertEqual(try storage.values(.douban), doubanCustomSettings)
         try await model.save()
-        XCTAssertEqual(wire.writes.last?["cookie"], .string("synthetic_cookie=replacement"))
+        XCTAssertEqual(try storage.values(.douban)["cookie"], .string("synthetic_cookie=replacement"))
+        XCTAssertEqual(try storage.values(.douban)["apiProxy"], .string("https://new.example.invalid/nested/"))
         XCTAssertEqual(model.cookie, "synthetic_cookie=replacement"); XCTAssertEqual(notifications, 2)
         model.cookie = ""
         try await model.save()
-        XCTAssertEqual(wire.writes.last?["cookie"], .string(""))
+        XCTAssertEqual(try storage.values(.douban)["cookie"], .string(""))
         XCTAssertEqual(model.saved?.cookie, ""); XCTAssertEqual(model.cookie, "")
+        XCTAssertEqual(notifications, 3)
+        let reopened = try FilmRuntimeTestSettings(root: storage.root)
+        let restored = FilmDoubanSettingsModel(service: FilmDoubanSettingsService(
+            settingsDocument: reopened[.douban])) { notifications += 1 }
+        try await restored.load()
+        XCTAssertEqual(restored.saved, model.saved)
         XCTAssertEqual(notifications, 3)
     }
 
     func testTMDBSingleTokenEchoClearAndFailedDraftPreserveAllOptions() async throws {
-        let wire = DataSourceSettingsWire(), client = try client(wire)
-        addTeardownBlock { await client.close() }
+        let storage = try DataSourceSettingsStorage(self)
+        try storage.seed(tmdbInitialSettings, for: .tmdb)
         var notifications = 0
-        let model = FilmTMDBSettingsModel(service: .init(connection: { client })) { notifications += 1 }
+        let model = FilmTMDBSettingsModel(service: FilmTMDBService(
+            settingsDocument: storage.documents[.tmdb], connection: {
+                XCTFail("Native settings must not request a runtime connection")
+                throw FilmSearchError.unavailable
+            })) { notifications += 1 }
         try await model.load()
         XCTAssertEqual(model.apiToken, "Bearer synthetic.old.token")
         XCTAssertEqual(model.apiBase, ""); XCTAssertEqual(model.imageBase, "")
         try await model.save()
-        XCTAssertEqual(wire.writes.last?["apiKey"], .string("Bearer synthetic.old.token"))
-        XCTAssertEqual(wire.writes.last?["accessToken"], .string(""))
+        XCTAssertEqual(try storage.values(.tmdb)["apiKey"], .string("Bearer synthetic.old.token"))
+        XCTAssertEqual(try storage.values(.tmdb)["accessToken"], .string(""))
+        let before = try storage.bytes(.tmdb), saved = model.saved
         model.apiToken = ""
-        wire.fail = true
-        do { try await model.save(); XCTFail("Failure must keep the empty draft") } catch {}
+        try storage.setSaveFailure(true, for: .tmdb)
+        do { try await model.save(); XCTFail("Failure must keep the empty draft") }
+        catch { XCTAssertEqual(error as? FilmSettingsStorageError, .storageFailure) }
         XCTAssertEqual(model.apiToken, ""); XCTAssertEqual(model.saved?.apiToken, "Bearer synthetic.old.token")
         XCTAssertEqual(notifications, 1)
         model.apiToken = "synthetic-new-v3-key"
         model.apiBase = "https://custom.example.invalid/nested/tmdb/3"
         model.language = "en-US"; model.region = "US"; model.includeAdult = true
-        do { try await model.save(); XCTFail("Failure must retain replacement and options") } catch {}
+        do { try await model.save(); XCTFail("Failure must retain replacement and options") }
+        catch { XCTAssertEqual(error as? FilmSettingsStorageError, .storageFailure) }
         XCTAssertEqual(model.apiToken, "synthetic-new-v3-key")
         XCTAssertEqual(model.apiBase, "https://custom.example.invalid/nested/tmdb/3")
-        wire.fail = false
+        XCTAssertEqual(model.language, "en-US"); XCTAssertEqual(model.region, "US")
+        XCTAssertTrue(model.includeAdult); XCTAssertFalse(model.busy)
+        XCTAssertEqual(model.saved, saved); XCTAssertEqual(notifications, 1)
+        try storage.setSaveFailure(false, for: .tmdb)
+        XCTAssertEqual(try storage.bytes(.tmdb), before)
         try await model.save()
         XCTAssertEqual(model.apiToken, "synthetic-new-v3-key")
+        XCTAssertEqual(try storage.values(.tmdb)["apiKey"], .string("synthetic-new-v3-key"))
+        XCTAssertEqual(try storage.values(.tmdb)["apiBase"], .string("https://custom.example.invalid/nested/tmdb/3"))
         XCTAssertEqual(model.saved?.accessToken, "")
         XCTAssertEqual(model.saved?.language, "en-US"); XCTAssertEqual(model.saved?.region, "US")
         XCTAssertEqual(model.saved?.includeAdult, true)
         model.apiToken = ""
         try await model.save()
-        XCTAssertEqual(wire.writes.last?["apiKey"], .string("")); XCTAssertEqual(wire.writes.last?["accessToken"], .string(""))
+        XCTAssertEqual(try storage.values(.tmdb)["apiKey"], .string(""))
+        XCTAssertEqual(try storage.values(.tmdb)["accessToken"], .string(""))
         XCTAssertEqual(model.saved?.apiToken, "")
+        XCTAssertEqual(notifications, 3)
+        let reopened = try FilmRuntimeTestSettings(root: storage.root)
+        let restored = FilmTMDBSettingsModel(service: FilmTMDBService(
+            settingsDocument: reopened[.tmdb], connection: {
+                XCTFail("Reopening native settings must not request a runtime connection")
+                throw FilmSearchError.unavailable
+            })) { notifications += 1 }
+        try await restored.load()
+        XCTAssertEqual(restored.saved, model.saved)
         XCTAssertEqual(notifications, 3)
     }
 
     func testDataSourceFormStacksFullWidthFieldsAndKeepsProviderDraftsAndCustomExpansionIndependent() async throws {
-        let wire = DataSourceSettingsWire(), client = try client(wire)
-        addTeardownBlock { await client.close() }
-        let tmdb = FilmTMDBSettingsModel(service: .init(connection: { client }), didSave: {})
-        let douban = FilmDoubanSettingsModel(service: .init(connection: { client }), didSave: {})
+        let storage = try DataSourceSettingsStorage(self)
+        try storage.seed(tmdbInitialSettings, for: .tmdb)
+        let before = try storage.bytes(.tmdb)
+        let tmdb = FilmTMDBSettingsModel(service: FilmTMDBService(
+            settingsDocument: storage.documents[.tmdb], connection: {
+                XCTFail("Editing native settings must not request a runtime connection")
+                throw FilmSearchError.unavailable
+            }), didSave: {})
+        let douban = FilmDoubanSettingsModel(service: FilmDoubanSettingsService(
+            settingsDocument: storage.documents[.douban]), didSave: {})
         try await tmdb.load(); try await douban.load()
         let page = FilmDataSourceSettingsViewController(tmdb: tmdb, douban: douban, themeProvider: DataSourceSettingsTheme())
         page.loadViewIfNeeded()
@@ -202,15 +250,10 @@ final class FilmDataSourceSettingsTests: XCTestCase {
         provider.selectedSegmentIndex = 1; provider.sendActions(for: .valueChanged)
         XCTAssertEqual(try field(form, "film.douban.cookie").text, "synthetic_cookie=draft")
         XCTAssertEqual(douban.dataRoute, .custom); XCTAssertEqual(douban.imageRoute, .custom)
-        XCTAssertEqual(wire.writes.count, 0)
+        XCTAssertEqual(try storage.bytes(.tmdb), before)
+        XCTAssertNil(try storage.documents[.douban].read())
     }
 
-    private func client(_ wire: DataSourceSettingsWire) throws -> RuntimeHTTPClient {
-        DataSourceSettingsProtocol.set { wire.receive($0) }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [DataSourceSettingsProtocol.self]
-        return try RuntimeHTTPClient(baseURL: URL(string: "http://127.0.0.1:43111")!, configuration: configuration)
-    }
     private func field(_ form: FilmDataSourceFormController, _ id: String) throws -> UITextField {
         func fields(_ view: UIView) -> [UITextField] {
             if let field = view as? UITextField { return [field] }
@@ -240,86 +283,47 @@ private let doubanCustomSettings: RuntimeObject = [
     "imageProxy": .string("https://pictures.example.invalid/nested/"), "cookie": .string("synthetic_cookie=initial"),
 ]
 
-private final class DataSourceSettingsWire: @unchecked Sendable {
-    private let lock = NSLock()
-    private var values: [String: RuntimeObject]
-    private var recorded: [RuntimeObject] = []
-    private var failing = false
-    var writes: [RuntimeObject] { lock.lock(); defer { lock.unlock() }; return recorded }
-    var fail: Bool {
-        get { lock.lock(); defer { lock.unlock() }; return failing }
-        set { lock.lock(); defer { lock.unlock() }; failing = newValue }
-    }
-    init(douban: RuntimeObject = [
-        "apiBase": .string("https://m.douban.com"), "searchBase": .string("https://search.douban.com"),
-        "imageBase": .string("https://img3.doubanio.com"), "apiProxy": .string(""), "imageProxy": .string(""),
-        "cookie": .string(""),
-    ]) {
-        values = ["douban": douban, "tmdb": [
-            "apiBase": .string("https://api.themoviedb.org/3"), "imageBase": .string("https://image.tmdb.org"),
-            "apiKey": .string("synthetic-old-key"), "accessToken": .string("Bearer synthetic.old.token"),
-            "language": .string("zh-CN"), "region": .string("CN"), "includeAdult": .bool(false),
-        ]]
-    }
-    func receive(_ transport: DataSourceSettingsProtocol) {
-        lock.lock(); defer { lock.unlock() }
-        let path = transport.request.url!.path.components(separatedBy: "/")
-        XCTAssertEqual(transport.request.httpMethod, "POST")
-        XCTAssertEqual(path.count, 4)
-        guard path.count == 4, var value = values[path[2]] else { return XCTFail("Unexpected settings route") }
-        let contract = path[2] + ".data.v1"
-        if path[3] == "settings.update" {
-            guard case .object(let patch)? = try? RuntimeJSON.decode(transport.body()) else {
-                return XCTFail("Settings updates require an object")
-            }
-            recorded.append(patch)
-            if failing {
-                transport.reply(.object(["ok": .bool(false), "contract": .string(contract), "code": .string("STORAGE_ERROR")]))
-                return
-            }
-            for (key, item) in patch {
-                if path[2] == "tmdb", item == .string(""), key == "apiBase" {
-                    value[key] = .string("https://api.themoviedb.org/3")
-                } else if path[2] == "tmdb", item == .string(""), key == "imageBase" {
-                    value[key] = .string("https://image.tmdb.org")
-                } else { value[key] = item }
-            }
-            values[path[2]] = value
-        } else { XCTAssertEqual(path[3], "settings.get") }
-        transport.reply(.object(["ok": .bool(true), "contract": .string(contract), "value": .object(value)]))
-    }
-}
+private let tmdbInitialSettings: RuntimeObject = [
+    "apiBase": .string("https://api.themoviedb.org/3"), "imageBase": .string("https://image.tmdb.org"),
+    "apiKey": .string("synthetic-old-key"), "accessToken": .string("Bearer synthetic.old.token"),
+    "language": .string("zh-CN"), "region": .string("CN"), "includeAdult": .bool(false),
+]
 
-private final class DataSourceSettingsProtocol: URLProtocol, @unchecked Sendable {
-    private static let lock = NSLock()
-    private static var handler: (@Sendable (DataSourceSettingsProtocol) -> Void)?
-    static func set(_ value: @escaping @Sendable (DataSourceSettingsProtocol) -> Void) {
-        lock.lock(); handler = value; lock.unlock()
+private struct DataSourceSettingsStorage {
+    let root: URL
+    let documents: FilmRuntimeTestSettings
+
+    init(_ test: XCTestCase) throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("film-data-source-settings-" + UUID().uuidString.lowercased(), isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        test.addTeardownBlock { try FileManager.default.removeItem(at: root) }
+        self.root = root
+        documents = try FilmRuntimeTestSettings(root: root)
     }
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-    override func startLoading() {
-        Self.lock.lock(); let callback = Self.handler; Self.lock.unlock()
-        callback?(self)
+    func seed(_ settings: RuntimeObject, for block: FilmSettingsBlock) throws {
+        _ = try documents[block].update { _ in
+            .object(["version": .number(1), "settings": .object(settings)])
+        }
     }
-    override func stopLoading() {}
-    func reply(_ value: RuntimeValue) {
-        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: [
-            "Content-Type": "application/json", "X-Meow-Request-Id": request.value(forHTTPHeaderField: "X-Meow-Request-Id")!,
-        ])!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: try! RuntimeJSON.encode(value))
-        client?.urlProtocolDidFinishLoading(self)
+    func values(_ block: FilmSettingsBlock) throws -> RuntimeObject {
+        let envelope = try XCTUnwrap(try documents[block].read()?.filmObject)
+        XCTAssertEqual(envelope["version"], .number(1))
+        return try XCTUnwrap(envelope["settings"]?.filmObject)
     }
-    func body() -> Data {
-        if let body = request.httpBody { return body }
-        guard let stream = request.httpBodyStream else { return Data() }
-        stream.open(); defer { stream.close() }
-        var data = Data(), bytes = [UInt8](repeating: 0, count: 4096)
-        while true {
-            let count = stream.read(&bytes, maxLength: bytes.count)
-            if count <= 0 { return data }
-            data.append(contentsOf: bytes.prefix(count))
+    func bytes(_ block: FilmSettingsBlock) throws -> Data? {
+        try DocumentStore(baseURL: root, namespace: block.namespace).read(key: FilmSettingsDocument.key)
+    }
+    func setSaveFailure(_ failing: Bool, for block: FilmSettingsBlock) throws {
+        let file = root.appendingPathComponent(block.namespace).appendingPathComponent(FilmSettingsDocument.key + ".json")
+        let saved = file.appendingPathExtension("saved")
+        if failing {
+            try FileManager.default.moveItem(at: file, to: saved)
+            do { try FileManager.default.createSymbolicLink(at: file, withDestinationURL: saved) }
+            catch { try FileManager.default.moveItem(at: saved, to: file); throw error }
+        } else {
+            try FileManager.default.removeItem(at: file)
+            try FileManager.default.moveItem(at: saved, to: file)
         }
     }
 }

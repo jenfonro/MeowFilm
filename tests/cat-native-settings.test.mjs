@@ -229,3 +229,57 @@ test('native Cat RPC cannot become a second source configuration writer', async 
   }
   assert.equal(f.latest.scripts[0].name, '猫源');
 });
+
+test('native Cat reloads compare member values rather than private-channel JSON member order',
+  { timeout: 30000 }, async t => {
+    const f = fixture(t);
+    let cached = structuredClone(f.latest), reversed = false;
+    const module = createCatScriptModule({ dataRoot: f.root, configuration: {
+      read: () => structuredClone(cached),
+      async reload() {
+        reversed = !reversed;
+        cached = structuredClone(f.latest);
+        cached.scripts = cached.scripts.map(script => Object.fromEntries(
+          reversed ? Object.entries(script).reverse() : Object.entries(script)));
+        return structuredClone(cached);
+      },
+    } });
+    try {
+      const first = await state(module, 1);
+      assert.deepEqual(await home(module, first), { value: 'first' });
+      await module.settingsChanged();
+      const unchanged = await state(module, 1);
+      assert.equal(unchanged.generation, first.generation);
+      assert.equal(unchanged.sourceHash, first.sourceHash);
+      assert.equal(unchanged.error, null);
+      const restarted = await call(module, 'restart', { installationId: 'cat' });
+      assert.equal(restarted.state, 'ready');
+      assert.deepEqual(await home(module, restarted), { value: 'first' });
+      assert.deepEqual(f.latest.scripts[0], cached.scripts[0]);
+    } finally { await module.close(); }
+  });
+
+test('native localHash keeps an uninstalled selected input alive when another installation retires the same source bytes',
+  { timeout: 30000 }, async t => {
+    const f = fixture(t), module = f.start(), first = await state(module, 1);
+    const url = await server(t, (_request, response) => response.end(source('network')));
+    const cached = join(f.root, 'sources', first.sourceHash + '.js');
+    f.latest = configuration(network(f.latest.scripts[0], url, 2));
+    f.latest.scripts.push({ installationId: 'retained', name: '保留的本地输入', sourceType: 'local',
+      sourceUrl: null, localPath: null, localHash: first.sourceHash, enabled: false, inputRevision: 1 });
+    await module.settingsChanged();
+    assert.deepEqual(await home(module, await state(module, 2)), { value: 'network' });
+    assert.equal(existsSync(cached), true, 'retiring another installation must respect a saved native localHash');
+    await module.close();
+    f.latest.scripts[1].enabled = true;
+    const restarted = f.start(), deadline = Date.now() + 10000;
+    let retained;
+    do {
+      retained = (await call(restarted, 'status')).instances.find(item => item.installationId === 'retained');
+      if (retained?.state === 'ready') break;
+      assert.ok(Date.now() < deadline, JSON.stringify(retained));
+      await new Promise(resolve => setTimeout(resolve, 10));
+    } while (true);
+    assert.deepEqual(await call(restarted, 'invoke', { installationId: retained.installationId,
+      generation: retained.generation, siteId: 'default', operation: 'home', payload: {} }), { value: 'first' });
+  });

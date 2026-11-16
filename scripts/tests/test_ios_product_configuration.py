@@ -134,11 +134,11 @@ class ProductConfigurationTests(unittest.TestCase):
         self.assertNotIn("DEVELOPMENT_TEAM", project)
         self.assertNotIn("PROVISIONING_PROFILE", project)
 
-    def test_video_kernel_licenses_are_shipped_once_as_app_resources(self):
+    def test_media_kernel_licenses_are_shipped_once_as_app_resources(self):
         project = self.project("Meowfilm")
         resources = next(line for line in project.splitlines() if "isa = PBXResourcesBuildPhase;" in line)
         for filename in ("NOTICE.md", "GPL-3.0-only.txt", "LGPL-2.1-only.txt", "LGPL-3.0-only.txt",
-                         "FFmpeg-LICENSE.md", "FFmpeg-IJG-NOTICE.txt"):
+                         "FFmpeg-LICENSE.md", "FFmpeg-IJG-NOTICE.txt", "FFmpeg-audio-NOTICES.txt"):
             references = [line.split()[0] for line in project.splitlines()
                           if f'path = "../../LICENSES/{filename}";' in line]
             self.assertEqual(len(references), 1, filename)

@@ -27,7 +27,7 @@ packages/netease-token/、apps/runtime/modules/netease-token.mjs
   原生订阅按需借用的独立 token 模块、官方 SDK Worker 与锁定 jsdom
 ```
 
-通用运行器不依赖平台目录。音乐官方账号、目录、曲库、歌词、播放等原生业务由调用方管理；默认装配的脚本安装、源码、来源地址和私有数据由运行器持久管理。客户端可保存来源列表、检测结果等供原生界面直接读取的快照，不形成第二套安装管理或脚本存储。Windows 正式 App 的[原生设置适配](../windows/native-settings.md)另由原生唯一保存猫源来源意图，公共 Cat owner 仍管理实际源码、安装事实、Worker 与私有卷；该差异不改变音乐脚本 owner 或未注入适配的 iOS／通用行为。通用 `createRuntime()` 默认入口描述 `aggregate`，装配以下三个模块：
+通用运行器不依赖平台目录。音乐官方账号、目录、曲库、歌词、播放等原生业务由调用方管理；脚本安装、源码和私有数据由运行器持久管理。来源地址默认随运行器安装保存；显式注入原生猫源配置时，可编辑来源意图独立由原生保存，运行器只保留真实安装事实，见[Cat 契约](cat-script-runtime.md#原生来源意图注入)。客户端可保存来源列表、检测结果等供原生界面直接读取的快照，不形成第二套安装管理或脚本存储。通用 `createRuntime()` 默认入口描述 `aggregate`，装配以下三个模块：
 
 | 模块 | 响应契约 | 输入职责 |
 | --- | --- | --- |
@@ -38,6 +38,8 @@ packages/netease-token/、apps/runtime/modules/netease-token.mjs
 受信调用方可显式启用 `pan@0.1.0/pan.runtime.v1` 的[网盘账号、分享与取址能力](pan-runtime.md)、`tmdb@0.1.0/tmdb.data.v1` 与 `douban@0.1.0/douban.data.v1` 的[元数据能力](metadata-data.md)，以及 `film@0.1.0/film.playback.v1` 的[影视播放业务](film-playback.md)。这些是 Node 内置业务，不是新的脚本执行所有者；通用默认三模块不变。
 
 iOS 与 Windows 的正式 App entry 在同一 HTTP 会话中按 `music,cat,source,pan,tmdb,douban,film,netease,music-platform` 顺序装配九模块。`connectFilmPlayback` 复用前六个 provider owner 并连接变更撤权，不另建来源或账号实例；随后追加[网易实时 token 模块](netease-token.md)与借用其能力的[音乐平台模块](music-platform.md)，不改变默认三模块。film 持有智能播放会话、业务缓存及新增本地播放资料；原生收藏、客户端规则与图片缓存仍由原 owner 管理。iOS 受信启动及内置原生 framework 见[iOS 运行底座](../ios/runtime-preflight.md)，Windows launcher、HTTP 消费者和原生引擎包装见[平台接入](../windows/app-runtime.md)与[打包](../windows/runtime-packaging.md)。通用运行器不保留旧 wire 或旧引擎。模块装配不等于原生导航／搜索交接、实际媒体输出或设备验证已完成；搜索交接规则只见[共同契约](../common/film/search.md)，不据此声明 Android 已接入。
+
+普通设置可由平台显式注入原生 owner，执行与配置保存互不替代；共同边界见[原生设置存储与通知](../common/settings-storage.md)，公共适配见 [Runtime HTTP](runtime-bridge.md#原生设置注入)。未注入的独立入口仍沿用各模块的 Node 设置文档，不自动访问平台存储。
 
 ## 三类执行所有者
 

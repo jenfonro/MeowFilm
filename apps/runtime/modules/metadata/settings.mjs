@@ -48,8 +48,8 @@ function validate(id, value) {
   return result;
 }
 
-/** The runtime owns this document. The native host supplies a private data root,
- * not a second settings database. PrivateDocuments is atomic, not encryption. */
+/** Native assembly supplies a read capability; standalone assembly owns its
+ * document. PrivateDocuments is atomic storage, not encryption. */
 export function createMetadataSettings(dataRoot, id, nativeSettings) {
   const documents = nativeSettings ? null : new PrivateDocuments(dataRoot, id);
   let snapshot, reload = false;

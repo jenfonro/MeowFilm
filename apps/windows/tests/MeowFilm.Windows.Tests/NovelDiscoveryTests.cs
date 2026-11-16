@@ -1,8 +1,9 @@
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Automation;
+using System.Windows.Automation.Peers;
+using System.Windows.Automation.Provider;
 using System.Windows.Controls;
-using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
@@ -30,6 +31,8 @@ public static class NovelDiscoveryTests
             () => NovelTests.Sta(NoRankings));
         yield return new("novel discovery categories: one channel row shares compact themed filter chrome and settings navigation",
             () => NovelTests.Sta(CategoryPresentation));
+        yield return new("novel discovery channels: overflow floats all choices without moving content and keeps selected channels visible",
+            () => NovelTests.Sta(ChannelOverflow));
         yield return new("novel discovery notices: import results emit once and do not replay on channel changes or page refresh",
             () => NovelTests.Sta(ImportNotice));
         yield return new("novel discovery response: required web interaction stays a visible failure rather than an empty ranking",
@@ -159,9 +162,8 @@ public static class NovelDiscoveryTests
             var filterScroll = NovelTests.Find<ScrollViewer>(row).Single();
             Check(filterScroll.HorizontalScrollBarVisibility == ScrollBarVisibility.Auto &&
                 filterScroll.VerticalScrollBarVisibility == ScrollBarVisibility.Disabled);
-            Check(choices[0].Focus(), "The selected filter cannot receive keyboard focus.");
-            choices[0].RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(choices[0])!, 0, Key.End)
-                { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+            Check(choices[1].Focus(), "The filter cannot receive keyboard focus.");
+            Select(choices[1]);
             await Until(() => module.ExploreKind == Kinds[5] && !module.LoadingDiscovery); await Render(window);
             Check(NovelTests.Find<RadioButton>(module.View).Single(choice => Equals(choice.Content, "畅销榜")).IsKeyboardFocusWithin);
             row = NovelTests.Find<Grid>(module.View).Single(grid => AutomationProperties.GetName(grid) == "当前频道筛选");
@@ -169,8 +171,12 @@ public static class NovelDiscoveryTests
             source = NovelTests.Find<ComboBox>(module.View).Single(box => AutomationProperties.GetAutomationId(box) == "novel.discovery.source");
             filterScroll = NovelTests.Find<ScrollViewer>(row).Single();
             var custom = new SolidColorBrush(Color.FromRgb(222, 235, 230));
-            module.View.Resources["MeowFilm.Brush.ItemHover"] = custom; await Render(window);
+            module.View.Resources["MeowFilm.Brush.FloatingSurface"] = custom; await Render(window);
             Check(ReferenceEquals(capsule.Background, custom), "Filter chrome ignored a changed theme resource.");
+            var soft = new SolidColorBrush(Color.FromArgb(40, 25, 160, 100));
+            module.View.Resources["MeowFilm.Brush.AccentSoft"] = soft; await Render(window);
+            Check(ReferenceEquals(NovelTests.Find<RadioButton>(row).Single(choice => choice.IsChecked == true).Background, soft),
+                "The selected chip did not follow the soft theme accent.");
             DesktopTheme.SetIsHighContrast(root, true); await Render(window);
             var selected = NovelTests.Find<RadioButton>(row).Single(choice => choice.IsChecked == true);
             Check(capsule.Background == SystemColors.WindowBrush && selected.Background == SystemColors.HighlightBrush &&
@@ -182,6 +188,92 @@ public static class NovelDiscoveryTests
         }
         finally { window.Close(); }
     }
+
+    private static async Task ChannelOverflow()
+    {
+        await using var store = new NovelTests.MemoryStore();
+        await using var configurationStore = new NovelTests.MemoryStore();
+        var kinds = Enumerable.Range(1, 16).Select(index =>
+            new NovelKind($"榜{(char)('A' + index - 1)}", $"https://catalog.invalid/rank/{index}")).ToArray();
+        var runtime = new DiscoveryRuntime(kinds);
+        await using var module = new NovelCapability(Sources(runtime, configurationStore), new NovelLibrary(store), new NovelRuleProgram(runtime));
+        await module.InitializeAsync(default); await module.NavigateAsync(NovelCapability.HomeRoute, default);
+        var root = new Grid(); root.Children.Add(module.View);
+        var window = GeneralAppearanceTests.Window(root); window.Width = 860; window.Height = 600; window.Show();
+        try
+        {
+            await Render(window);
+            var bar = NovelTests.Find<NovelDiscoveryChannelBar>(module.View).Single();
+            var more = NovelTests.Find<Button>(bar).Single(button => AutomationProperties.GetAutomationId(button) == "novel.discovery.channels.expand");
+            var channels = Channels(module);
+            Check(channels.Length == kinds.Length && channels.Count(tab => tab.IsVisible) is > 0 and < 16 &&
+                more.IsVisible && bar.ActualHeight == 44);
+            Check(NovelTests.Find<ScrollViewer>(bar).All(scroll => scroll.HorizontalScrollBarVisibility == ScrollBarVisibility.Disabled),
+                "The channel bar still exposes horizontal scrolling.");
+            var books = NovelTests.Find<NovelBookGrid>(module.View).Single();
+            var position = books.TranslatePoint(new(), module.View);
+            int requests = runtime.Calls.Count;
+            Invoke(more); await Render(window);
+            var expansion = NovelTests.Find<Border>(bar).Single(border =>
+                AutomationProperties.GetAutomationId(border) == "novel.discovery.channels.expanded");
+            var choices = NovelTests.Find<RadioButton>(expansion).ToArray();
+            Check(expansion.IsVisible && choices.Select(tab => tab.Content).SequenceEqual(kinds.Select(kind => (object)kind.Title)) &&
+                choices.All(tab => tab.IsVisible) && expansion.ActualWidth <= bar.ActualWidth &&
+                books.TranslatePoint(new(), module.View) == position && runtime.Calls.Count == requests,
+                $"Expansion: visible={expansion.IsVisible}; choices={choices.Length}/{kinds.Length}, " +
+                $"visibleChoices={choices.Count(tab => tab.IsVisible)}; width={expansion.ActualWidth}/{bar.ActualWidth}; " +
+                $"books={books.TranslatePoint(new(), module.View)}/{position}; requests={runtime.Calls.Count}/{requests}.");
+            var hit = VisualTreeHelper.HitTest(module.View, choices[0].TranslatePoint(
+                new(choices[0].ActualWidth / 2, choices[0].ActualHeight / 2), module.View));
+            Check(hit is not null && expansion.IsAncestorOf(hit.VisualHit), "The expanded row is painted behind book content.");
+            Invoke(more); await Render(window);
+            Check(!expansion.IsVisible && runtime.Calls.Count == requests, "The arrow did not collapse without a request.");
+            Invoke(more); await Render(window);
+            var current = Channels(module).Single(tab => tab.IsChecked == true);
+            current.Focus(); current.RaiseEvent(new RoutedEventArgs(RadioButton.ClickEvent)); await Render(window);
+            Check(!expansion.IsVisible && runtime.Calls.Count == requests,
+                "Choosing the current first-row channel left its expansion open or requested data.");
+            Invoke(more); await Render(window);
+            choices = NovelTests.Find<RadioButton>(expansion).ToArray();
+            Select(choices[^1]);
+            await Until(() => module.ExploreKind == kinds[^1] && !module.LoadingDiscovery); await Render(window);
+            Check(!expansion.IsVisible && Channels(module).Single(tab => tab.IsChecked == true).IsVisible &&
+                Channels(module).Single(tab => tab.IsChecked == true).IsKeyboardFocusWithin,
+                "An overflow selection did not close and return to the visible first row.");
+            bar = NovelTests.Find<NovelDiscoveryChannelBar>(module.View).Single();
+            more = NovelTests.Find<Button>(bar).Single(button => AutomationProperties.GetAutomationId(button) == "novel.discovery.channels.expand");
+            Invoke(more); await Render(window);
+            expansion = NovelTests.Find<Border>(bar).Single(border =>
+                AutomationProperties.GetAutomationId(border) == "novel.discovery.channels.expanded");
+            DesktopTheme.SetIsHighContrast(root, true); await Render(window);
+            Check(expansion.Background == SystemColors.WindowBrush,
+                "The floating channel surface ignored high contrast.");
+            window.Width = 2000; await Render(window);
+            Check(!expansion.IsVisible && !more.IsVisible && Channels(module).All(tab => tab.IsVisible),
+                "A wider window did not restore one row and remove the overflow arrow.");
+            window.Width = 860; await Render(window);
+            Invoke(more); await Render(window);
+            Check(expansion.IsVisible);
+            await module.NavigateAsync(NovelCapability.CategoriesRoute, default); await Render(window);
+            Check(!expansion.IsVisible && Channels(module).Single(tab => tab.IsChecked == true).IsVisible,
+                "Leaving home kept an old floating row or hid the current category.");
+            bar = NovelTests.Find<NovelDiscoveryChannelBar>(module.View).Single();
+            more = NovelTests.Find<Button>(bar).Single(button => AutomationProperties.GetAutomationId(button) == "novel.discovery.channels.expand");
+            Invoke(more); await Render(window);
+            expansion = NovelTests.Find<Border>(bar).Single(border =>
+                AutomationProperties.GetAutomationId(border) == "novel.discovery.channels.expanded");
+            module.View.Visibility = Visibility.Collapsed; await Render(window);
+            Check(!expansion.IsVisible &&
+                !NovelTests.Find<Canvas>(bar).Any(canvas => canvas.Visibility == Visibility.Visible),
+                "A hidden page kept its expansion owner alive.");
+        }
+        finally { window.Close(); }
+    }
+
+    private static void Select(RadioButton choice) =>
+        ((ISelectionItemProvider)new RadioButtonAutomationPeer(choice).GetPattern(PatternInterface.SelectionItem)).Select();
+    private static void Invoke(Button button) =>
+        ((IInvokeProvider)new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke)).Invoke();
 
     private static NovelSourceService Sources(DiscoveryRuntime runtime, NovelTests.MemoryStore store)
     {
@@ -288,7 +380,7 @@ public static class NovelDiscoveryTests
         .Where(tab => tab.GroupName == "novel.discovery.channels").ToArray();
     private static async Task Render(Window window)
     {
-        await Dispatcher.Yield(DispatcherPriority.Render); window.UpdateLayout();
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle); window.UpdateLayout();
     }
     private static async Task Until(Func<bool> ready)
     {

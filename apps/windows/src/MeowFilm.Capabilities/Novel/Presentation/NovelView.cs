@@ -54,7 +54,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         IsVisibleChanged += (_, _) =>
         {
             if (disposed) return;
-            if (!IsVisible) { module.CancelPresentation(); module.Session?.Cancel(); module.RunUi(_ => SavePositionAsync()); }
+            if (!IsVisible) { discoveryChannelBar?.Close(); module.CancelPresentation(); module.Session?.Cancel(); module.RunUi(_ => SavePositionAsync()); }
             else if (module.Route == NovelCapability.ReaderRoute)
                 module.RefreshReaderSettings();
         };
@@ -71,6 +71,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         bool reading = module.Route == NovelCapability.ReaderRoute && module.Session is not null;
         if (reading)
         {
+            discoveryChannelBar?.Close();
             body.Margin = new(0); body.Content = reader;
             purchase.Visibility = module.Session is { Chapter: { IsVip: true, IsPay: false } } session &&
                 module.Sources.Sources.Any(s => s.InstallationId == session.Book.InstallationId && s.Enabled && s.Actions.Contains("payAction")) ? Visibility.Visible : Visibility.Collapsed;
@@ -94,6 +95,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
             {
                 if (module.Route is NovelCapability.HomeRoute or NovelCapability.CategoriesRoute) RememberDiscoveryFocus();
                 else discoveryFocus = null;
+                discoveryChannelBar?.Close(); discoveryChannelBar = null;
                 if (body.Content is ScrollViewer old) scrollPositions[renderedRoute] = old.VerticalOffset;
                 body.Content = module.Route switch
                 {
@@ -322,5 +324,5 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     internal async Task DrainSavesAsync() { await automaticOperation; await saves.PauseAsync(); }
     internal void Resume() { saves.Resume(); surface.ResumeImages(); }
     internal Task DrainImagesAsync() => surface.DrainImagesAsync();
-    public void Dispose() { if (disposed) return; disposed = true; PauseReading(); save.Stop(); DetachWindow(); surface.Dispose(); }
+    public void Dispose() { if (disposed) return; disposed = true; discoveryChannelBar?.Close(); PauseReading(); save.Stop(); DetachWindow(); surface.Dispose(); }
 }

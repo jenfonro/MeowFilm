@@ -1,7 +1,7 @@
 import Foundation
 
 /// Native media input, never a UI snapshot, log payload or persisted history.
-/// Required HTTP headers have already been applied by the runtime media owner.
+/// Direct media carries its own request context; runtime receipts leave it empty.
 public struct PlaybackVideoInput: Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     public enum Format: String, Sendable {
         case automatic, progressive, hls, dash
@@ -22,16 +22,19 @@ public struct PlaybackVideoInput: Sendable, CustomStringConvertible, CustomDebug
     public let format: Format
     public let startPosition: TimeInterval
     public let decryption: PlaybackVideoDecryption?
+    public let requestContext: PlaybackVideoRequestContext
 
     public init(resourceID: String, url: URL, title: String, format: Format = .automatic,
                 startPosition: TimeInterval = 0,
-                decryption: PlaybackVideoDecryption? = nil) throws {
+                decryption: PlaybackVideoDecryption? = nil,
+                requestContext: PlaybackVideoRequestContext = .empty) throws {
         guard !resourceID.isEmpty, startPosition.isFinite, startPosition >= 0,
               ["http", "https", "file"].contains(url.scheme?.lowercased() ?? ""),
               url.isFileURL || url.host?.isEmpty == false else { throw ContractError.invalidURL }
         self.resourceID = resourceID; self.url = url; self.title = title
         self.format = format; self.startPosition = startPosition
         self.decryption = decryption
+        self.requestContext = requestContext
     }
 
     public var description: String { "PlaybackVideoInput(redacted)" }

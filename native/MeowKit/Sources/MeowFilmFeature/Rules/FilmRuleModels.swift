@@ -35,9 +35,17 @@ public struct FilmMatchRule: Codable, Equatable, Sendable {
         self.replace = replace
         self.flags = flags
     }
+
+    private enum CodingKeys: String, CodingKey { case pattern, replace, flags }
+    public init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        pattern = try fields.decode(String.self, forKey: .pattern)
+        replace = fields.contains(.replace) ? try fields.decode(String.self, forKey: .replace) : ""
+        flags = fields.contains(.flags) ? try fields.decode(String.self, forKey: .flags) : ""
+    }
 }
 
-/// A value snapshot acknowledged by the Node owner.
+/// A value snapshot of the native rules settings document.
 public struct FilmRuleSet: Codable, Equatable, Sendable {
     public var episodeCleanRegexRules: [String]
     public var episodeRules: [FilmMatchRule]

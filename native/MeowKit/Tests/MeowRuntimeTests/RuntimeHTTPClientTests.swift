@@ -138,6 +138,24 @@ final class RuntimeHTTPClientTests: XCTestCase {
         .object(["ok": .bool(true), "contract": .string(contract), "value": value])
     }
 
+    func testNativeMetadataSettingsWriteDenialsRetainTheirModuleErrorCode() async throws {
+        let client = try client()
+        for module in [RuntimeModule.tmdb, .douban] {
+            RuntimeTestURLProtocol.fixture.set { request, transport in
+                XCTAssertEqual(request.url?.path, "/v1/\(module.rawValue)/settings.update")
+                transport.respond(.object(["ok": .bool(false), "contract": .string(module.contract),
+                                           "code": .string("PERMISSION_DENIED")]))
+            }
+            do {
+                _ = try await client.call(module: module, operation: "settings.update")
+                XCTFail("The native-owned settings writer must be denied")
+            } catch RuntimeHTTPError.remote(let code) {
+                XCTAssertEqual(code, "PERMISSION_DENIED")
+            }
+        }
+        await client.close()
+    }
+
     func testDispatchAuthorizationRunsOnceBeforeHTTPAndRetainsItsActualFailure() async throws {
         let client = try client(), authorization = RuntimeLaunchRecord()
         let parameters: RuntimeValue = .object(["platform": .string("wy"),

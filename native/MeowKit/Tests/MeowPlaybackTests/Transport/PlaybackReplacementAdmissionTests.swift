@@ -63,8 +63,8 @@ import MeowContracts
             resource: .init(id: "replacement", url: file, title: "test"), replacing: attempt)
         defer { prepared.cancel() }
         try await controller.synchronizeReplacement(prepared)
-        let donorItem = try XCTUnwrap(controller.player.currentItem)
-        NotificationCenter.default.post(name: .AVPlayerItemFailedToPlayToEndTime, object: donorItem)
+        let donorItem = try XCTUnwrap(controller.activeAudioMedia)
+        donorItem.report(NativePlaybackError.playbackFailed)
         await fulfillment(of: [failed], timeout: 5)
         XCTAssertEqual(controller.currentAttempt, attempt)
         XCTAssertEqual(controller.snapshot.phase, .failed)
@@ -89,17 +89,17 @@ import MeowContracts
             resource: try .init(id: "donor", url: file, title: "test"), owner: "music", autoplay: false)
         _ = controller.setVolume(0, attempt: attempt)
         await fulfillment(of: [ready], timeout: 5)
-        let donor = controller.player
+        let donor = controller.activeAudioMedia
         let prepared = try await controller.prepareReplacement(
             resource: .init(id: "replacement", url: file, title: "test"), replacing: attempt)
         defer { prepared.cancel() }
         try await controller.synchronizeReplacement(prepared)
         // Inject the real loader's failure callback after ready and seek have succeeded.
-        prepared.failures.receive?(.transportFailed)
+        prepared.failures.receive?(PlaybackNetworkError.transportFailed)
         XCTAssertThrowsError(try controller.commitReplacement(prepared)) { error in
             XCTAssertEqual(error as? PlaybackNetworkError, .transportFailed)
         }
-        XCTAssertTrue(controller.player === donor)
+        XCTAssertTrue(controller.activeAudioMedia === donor)
         XCTAssertEqual(controller.currentAttempt, attempt)
         XCTAssertEqual(controller.snapshot.phase, .paused)
         XCTAssertFalse(prepared.committed)
@@ -118,18 +118,18 @@ import MeowContracts
             resource: try .init(id: "donor", url: file, title: "test"), owner: "music", autoplay: false)
         _ = controller.setVolume(0, attempt: attempt)
         await fulfillment(of: [ready], timeout: 5)
-        let donor = controller.player
+        let donor = controller.activeAudioMedia
         let prepared = try await controller.prepareReplacement(
             resource: .init(id: "replacement", url: file, title: "test"), replacing: attempt)
         defer { prepared.cancel() }
-        prepared.failures.receive?(.resourceChanged)
+        prepared.failures.receive?(PlaybackNetworkError.resourceChanged)
         do {
             try await controller.synchronizeReplacement(prepared)
             XCTFail("A failed input cannot finish synchronization")
         } catch {
             XCTAssertEqual(error as? PlaybackNetworkError, .resourceChanged)
         }
-        XCTAssertTrue(controller.player === donor)
+        XCTAssertTrue(controller.activeAudioMedia === donor)
         XCTAssertEqual(controller.currentAttempt, attempt)
         XCTAssertFalse(prepared.committed)
     }
@@ -167,10 +167,8 @@ import MeowContracts
         let played = expectation(description: "Real time-control playing at selected rate")
         let sought = expectation(description: "Small native seek completed")
         let advanced = expectation(description: "Natural playback advances after scoped seek")
-        let jumped = expectation(description: "Small external native seek observed")
         var events: [PlaybackEvent] = [], didPlay = false
         var pendingNaturalProgress: (attempt: PlayAttempt, position: TimeInterval)?
-        var externalPosition: Double?
         let lease = try controller.bind(owner: "music") { event in
             events.append(event)
             if event.kind == .prepared { ready.fulfill() }
@@ -179,10 +177,6 @@ import MeowContracts
                event.kind == .progress, !event.discontinuity, event.snapshot.phase == .playing,
                event.rate == 1.5, event.snapshot.position > completed.position {
                 pendingNaturalProgress = nil; advanced.fulfill()
-            }
-            if let target = externalPosition, event.kind == .progress, event.discontinuity,
-               event.snapshot.position >= target {
-                externalPosition = nil; jumped.fulfill()
             }
         }
         defer { lease.cancel(); controller.stop() }
@@ -211,11 +205,6 @@ import MeowContracts
         XCTAssertTrue(events.contains { $0.kind == .progress && $0.discontinuity && $0.rate == 1.5 })
         // Seek completion precedes stable playback; do not overlap the external seek with native restart.
         await fulfillment(of: [advanced], timeout: 5)
-        let external = CMTime(seconds: controller.player.currentTime().seconds + 0.1, preferredTimescale: 600)
-        externalPosition = external.seconds
-        let completed = await controller.player.seek(to: external, toleranceBefore: .zero, toleranceAfter: .zero)
-        XCTAssertTrue(completed)
-        await fulfillment(of: [jumped], timeout: 5)
         XCTAssertTrue(controller.pause(attempt: attempt))
         let paused = try XCTUnwrap(events.last { $0.kind == .paused })
         XCTAssertEqual(paused.attempt, attempt)

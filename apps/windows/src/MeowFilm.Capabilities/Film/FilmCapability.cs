@@ -67,7 +67,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         : this(source, null, null, search, metadata, playback, library) { }
 
     public FilmCapability(FilmRuleService rules, FilmSourceService sources, IRuntimeClient runtime,
-        IDocumentStore storage, NativePlayback playback,
+        IDocumentStore storage, FilmPlayback playback,
         Func<CancellationToken, Task<RuntimeConnection>> capture, FilmMetadataService metadata)
         : this(new DoubanFilmHomeSource(runtime), rules, sources,
             new FilmSearchService(capture, sources, metadata.ResolveImage),

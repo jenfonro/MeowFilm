@@ -13,6 +13,8 @@ public final class PanLoginModel: ObservableObject {
     @Published public private(set) var progress: PanLoginProgress?
     @Published public private(set) var busy = false
     @Published public private(set) var confirmed = false
+    @Published public private(set) var saved = false
+    public var completed: Bool { confirmed || saved }
     @Published private(set) var notice: PanAccountNotice?
     public var validateChallenge: (PanLoginChallenge.Payload) throws -> Void = { _ in }
     private let service: PanAccountService
@@ -24,7 +26,6 @@ public final class PanLoginModel: ObservableObject {
     private var closed = false
     private var starting: Task<Void, Never>?
     private(set) var polling: Task<Void, Never>?
-    private var saving: Task<Void, Never>?
     private(set) var closing: Task<Void, Never>?
 
     public convenience init(provider: PanProvider, service: PanAccountService,
@@ -39,29 +40,29 @@ public final class PanLoginModel: ObservableObject {
         self.pause = pause; self.update = update
         method = provider.login ? .qr : .manual
     }
-    public var canRetry: Bool { method == .qr && !busy && !confirmed && (progress == .expired || progress == .cancelled || notice != nil) }
+    public var canRetry: Bool { method == .qr && !busy && !completed && (progress == .expired || progress == .cancelled || notice != nil) }
 
     public func setVisible(_ value: Bool) {
         guard !closed else { return }
         visible = value
         if value {
-            if method == .qr, !confirmed, challenge == nil { start() }
+            if method == .qr, !completed, challenge == nil { start() }
         } else if method == .qr { stopQR() }
     }
     public func selectMethod(_ value: PanLoginMethod) {
-        guard !closed, !confirmed, saving == nil, value != method,
+        guard !closed, !completed, !busy || method == .qr, value != method,
               value == .manual || provider.login else { return }
         stopQR(); method = value; notice = nil; progress = nil; draft.removeAll()
         if visible, method == .qr { start() }
     }
     @discardableResult
     public func retry() -> Task<Void, Never>? {
-        guard visible, !closed, method == .qr, !confirmed else { return nil }
+        guard visible, !closed, method == .qr, !completed else { return nil }
         stopQR(); return start()
     }
     @discardableResult
     public func start() -> Task<Void, Never>? {
-        guard visible, !closed, method == .qr, !confirmed, starting == nil, polling == nil else { return starting }
+        guard visible, !closed, method == .qr, !completed, starting == nil, polling == nil else { return starting }
         notice = nil; busy = true; progress = nil
         let ticket = UUID(); generation = ticket
         let provider = provider.id
@@ -89,41 +90,17 @@ public final class PanLoginModel: ObservableObject {
         return task
     }
 
-    @discardableResult
-    public func save() -> Task<Void, Never>? {
-        guard visible, !closed, method == .manual, saving == nil, !confirmed else { return nil }
-        let credentials: RuntimeValue
-        do { credentials = try provider.credentials(from: draft) }
-        catch { notice = PanAccountNotice(error); return nil }
-        notice = nil; busy = true
-        let ticket = UUID(); generation = ticket
-        let provider = provider.id
-        let receipt = operations.perform(provider) { [service] in
-            try await service.replace(provider, credentials: credentials)
+    public func save() {
+        guard visible, !closed, method == .manual, !busy, !completed else { return }
+        notice = nil; generation = UUID()
+        do {
+            let credentials = try provider.credentials(from: draft)
+            let account = try service.replace(provider.id, credentials: credentials)
+            update(account)
+            saved = true; draft.removeAll()
+        } catch {
+            if !panCancelled(error) { notice = PanAccountNotice(error) }
         }
-        let task = Task { [weak self, service] in
-            defer { self?.saving = nil; self?.busy = false }
-            do {
-                let saved = try await receipt.value
-                guard let self, isCurrent(ticket), !Task.isCancelled else { return }
-                update(saved)
-                let checked = try await service.refresh(provider)
-                guard isCurrent(ticket) else { return }
-                update(checked)
-                guard checked.status == .signedIn else { throw PanAccountError.unconfirmed }
-                complete()
-            } catch {
-                guard let self, isCurrent(ticket) else { return }
-                if panAuthenticationFailed(error) {
-                    let account = try? await service.accounts().first { $0.provider == provider }
-                    guard isCurrent(ticket) else { return }
-                    if let account { update(account) }
-                }
-                if !panCancelled(error) { notice = PanAccountNotice(error) }
-            }
-        }
-        saving = task
-        return task
     }
 
     public func close() {
@@ -146,7 +123,7 @@ public final class PanLoginModel: ObservableObject {
                     switch receipt.progress {
                     case .confirmed:
                         guard let account = receipt.account else { throw PanAccountError.unconfirmed }
-                        update(account); complete(); polling = nil; return
+                        update(try service.current(account)); complete(); polling = nil; return
                     case .expired, .cancelled:
                         self.challenge = nil; polling = nil
                         cancel(challenge.sessionID); return
@@ -177,7 +154,7 @@ public final class PanLoginModel: ObservableObject {
         if let challenge, !confirmed { cancel(challenge.sessionID) }
         challenge = nil
         closing = operations.drain(provider.id)
-        if saving == nil { busy = false }
+        busy = false
     }
     private func cancel(_ id: String) {
         let ticket = generation

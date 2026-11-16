@@ -24,7 +24,7 @@
 
 无 `searchReference` 的元数据入口重入保留原始 `target`、metadata seed 和入口信息，以既有 `resumeTarget` 携带当前准确 `source`／坐标；不限豆瓣入口。Node 根据原入口恢复确认资料，当前 source 仍只用于准确执行，不因此重新授予自动准备。搜索重入继续由 reference 的 owner 重读入口；原本没有元数据的 source／group 不补造元数据 provenance。
 
-`FilmPlaybackModel`／`MeowfilmFilmMedia` 的媒体接缝把真实 attempt 交给共享 MeowPlayback 的两阶段 prepare／commit；播放状态来自实际内核输出，不用本地计时模拟。锁定的 MeowVideoKernel 处理媒体，Node 仍拥有业务会话及媒体资源授权。影片收藏继续由稳定 `FilmLibrary` 持有，用 `meowfilm.film.library.v1` 保存来源与影片复合身份；不复制进 Node 新增的历史／人工匹配／屏蔽／偏好库，也不写音乐曲库。
+`FilmPlaybackModel`／`MeowfilmFilmMedia` 的媒体接缝把真实 attempt 交给共享 MeowPlayback 的两阶段 prepare／commit；播放状态来自实际内核输出，不用本地计时模拟。MeowVideoKernel 适配固定源码 KSMEPlayer 的真实解码／原生输出，保留完整渲染视图及实际首帧确认；核心关闭等待真实输入、解码、轨道、音频与渲染工作退出后才释放媒体 receipt。直连输入的 HTTP headers／Cookie 通过每实例 KSOptions 注入，运行器 receipt 保持空原生上下文。Node 仍拥有业务会话及媒体资源授权，见[共同原生播放契约](../common/film/playback.md)。影片收藏继续由稳定 `FilmLibrary` 持有，用 `meowfilm.film.library.v1` 保存来源与影片复合身份；不复制进 Node 新增的历史／人工匹配／屏蔽／偏好库，也不写音乐曲库。
 
 媒体准备或真实播放失败的 `media.failed` 回执携带已有原生适配器的有限 `code`，不发送异常正文、URL 或凭据。运行器区分取回执、准备和播放阶段，保留真实原生失败原因；候选续选的过程错误不重复弹出最终错误。客户端沿用准确 attempt、取消、资源释放与系统 owner 边界，不因错误码扩展改变手动准确播放或自动准备策略。
 

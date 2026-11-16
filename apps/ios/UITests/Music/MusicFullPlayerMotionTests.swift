@@ -211,7 +211,7 @@ final class MusicFullPlayerMotionTests: XCTestCase {
         XCTAssertEqual(scroll.contentOffset.x, scroll.bounds.width, accuracy: 0.001)
         XCTAssertTrue(scroll.delegate === page)
         XCTAssertTrue(scroll.isScrollEnabled)
-        XCTAssertFalse(content.clock.playing, "The fixture never starts an AVPlayer item")
+        XCTAssertFalse(content.clock.playing, "The fixture never starts audio output")
         arm.layer.removeAllAnimations()
         // Seed a held model pose: these tests check whether the owner preserves
         // or retires it, while MusicRecordMotionTests cover CA rotation itself.

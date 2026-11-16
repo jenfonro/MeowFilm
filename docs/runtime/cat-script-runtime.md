@@ -10,11 +10,13 @@ version: 0.2.0
 contract: cat.script.v2
 ```
 
-`createCatScriptModule({dataRoot})` 接收受信调用方选定的稳定绝对数据目录。公共独立入口见 [Runtime HTTP](runtime-bridge.md)；模块负责完整源码候选、设置、安装、Node Worker、私有卷、服务端口、Cat 调用和关闭。iOS 接入见[影视设置](../ios/film-settings.md#猫源与公共宿主)，Windows 接入见[平台接入](../windows/app-runtime.md)；不提供旧 wire 兼容。
+`createCatScriptModule({dataRoot,configuration?})` 接收受信调用方选定的稳定绝对数据目录。公共独立入口见 [Runtime HTTP](runtime-bridge.md)；模块负责完整源码候选、安装、Node Worker、私有卷、服务端口、Cat 调用和关闭。未注入 `configuration` 时也拥有来源设置；注入后的边界见[原生来源意图](#原生来源意图注入)。iOS 接入见[影视设置](../ios/film-settings.md#猫源与公共宿主)，Windows 接入见[平台接入](../windows/app-runtime.md)；不提供旧 wire 兼容。
 
-以下导入、管理事务及 version 1 设置文件描述未注入 `configuration` 的默认装配，iOS 保持该路径。Windows 正式 App 注入原生来源配置后，`install/import/edit/enable/uninstall` 返回 `PERMISSION_DENIED`；新增、编辑、启停与删除由原生唯一提交，`update` 只接受 installationId，从当前来源读取输入，不接收 sourceRevision。`start/status/refresh/restart/invoke` 仍消费公共 Cat owner；refresh 可按最新来源意图下载、加载和替换。版本 2 文件只保存运行器安装事实，列表结果另带 `inputRevision`；原生意图、哈希核对、保存通知和旧文件采用见 [Windows 原生设置](../windows/native-settings.md#猫源意图与安装事实)，不把默认导入回滚承诺套用到已提交的原生来源变更。
+以下导入、管理事务及 version 1 设置文件描述未注入 `configuration` 的默认装配。iOS／Windows 正式 App 注入原生来源配置后，`install/import/edit/enable/uninstall` 返回 `PERMISSION_DENIED`；新增、编辑、启停与删除由原生唯一提交，`update` 只接受 installationId，从当前来源读取输入，不接收 sourceRevision。`start/status/refresh/restart/invoke` 仍消费公共 Cat owner；refresh 可按最新来源意图下载、加载和替换。版本 2 文件只保存运行器安装事实，列表结果另带 `inputRevision`；共同边界见[原生来源意图注入](#原生来源意图注入)，Windows 接线见[原生设置](../windows/native-settings.md#猫源意图与安装事实)，不把默认导入回滚承诺套用到已提交的原生来源变更。
 
 ## HTTP 与完整导入
+
+本节的上传及来源写入方法描述无 `configuration` 注入的独立模式；注入模式的拒写与更新行为见[下文](#原生来源意图注入)。状态、调用、管理同步和资源生命周期仍共用同一模块。
 
 逻辑方法均以 `cat.script.` 为前缀，由公共客户端映射为 `POST /v1/cat/{operation}`：
 
@@ -78,7 +80,7 @@ Cat 工厂启动参数提供当前网站／账户协议的默认命名空间：`
 
 ## 设置文件
 
-`<dataRoot>/settings.json` 是唯一持久设置事实来源：
+无 `configuration` 注入时，`<dataRoot>/settings.json` 是唯一持久设置事实来源：
 
 ```json
 {
@@ -122,9 +124,25 @@ schema version 保持 1。真实旧记录仅有 `installationId/sourceHash/enabl
 
 importedAt 和 updatedAt 均为 epoch 毫秒或 null。新安装成功时记录 importedAt，updatedAt 初始为 null；显示修改时间取 `updatedAt ?? importedAt`。内容成功改变才记录 updatedAt；编辑、无变化、失败、启停和重启不刷新。旧记录的未知 importedAt 保持 null，后续成功内容更新可记录 updatedAt。updateState 只允许 idle/updated/unchanged/failed，updateError 在 failed 时为错误码字符串，其余为 null。首次成功导入为 idle，成功重新导入按内容是否改变为 updated/unchanged。
 
-`start` 完成数据根、设置读取和聚合 server 监听后返回与 `status` 相同的快照，各已启用脚本随后在各自 Worker 启动；慢实例不阻止另一实例或 status，不增加并发数量配置。每个目标实例启动时读取一次当前源码，按实际字节检查 16 MiB 上限并解码，不做全量源码预检；禁用实例不读取源码，也无需创建 host revision。源码缺失、非法编码、超限或引擎语法/执行错误只使对应实例失败并列入 `failures`，不阻止聚合入口或其他实例就绪。合法手工编辑即使改变长度，也可在停用后重新启用或进程重启时运行；运行中不监视文件变化。
+`start` 完成数据根、设置读取和聚合 server 监听后返回与 `status` 相同的快照，各已启用脚本随后在各自 Worker 启动；慢实例不阻止另一实例或 status，不增加并发数量配置。每个目标实例启动时读取一次当前源码，按实际字节检查 16 MiB 上限并解码，不做全量源码预检；禁用实例不读取源码，也无需创建 host revision。源码缺失、非法编码、超限或引擎语法/执行错误只使对应实例失败并列入 `failures`，不阻止聚合入口或其他实例就绪。无注入模式允许合法手工编辑后重新启用或冷启动运行；运行中不监视文件变化。注入模式还校验来源文件摘要，不能用改写旧文件代替保存新意图。
 
 每个 enabled installation 使用独立 worker thread 直接运行 CatSession、Node 脚本、私有卷访问和 listener；主线程保留 ScriptHost 记录、CatRuntime 网关、设置文件与平台适配器。实例就绪即可调用；尚未启动或正在启动的实例在 `status` 中报告 `starting`，对它的 `invoke`、管理和会话访问立即返回 `STARTING`，不隐藏等待；聚合 HTTP 入口对 `STARTING` 返回 503。禁用实例的调用和管理访问返回 `DISABLED`。同 installation 的安装、启用、刷新目标和卸载有序，设置提交按发布顺序处理；不以全局初始化队列阻塞其他 installation。与目标一致的实例不重复启动。每次切换先等旧 Worker 和资源真实退出，再在同卷启动候选；update 失败恢复旧源码，refresh 失败则报告真实 failed。正常运行变量自然保留，不保存/恢复执行内存，不新增闲置回收。
+
+## 原生来源意图注入
+
+App 可注入受信 `configuration:{read,reload}`。`read()` 返回已读取的原生意图快照，`reload()` 重新读取唯一原生文档；不开放给脚本或普通 HTTP 调用方。共同保存与通知语义见[原生设置契约](../common/settings-storage.md)，iOS 文件保护及迁移见[存储](../ios/storage.md#影视设置)。
+
+原生文档为 `{version:1,port,providers,mappings,scripts}`。每条 script 只含 `installationId,name,sourceType,sourceUrl,localPath,localHash,enabled,inputRevision`；`inputRevision` 为正安全整数。网络源持 HTTP(S) `sourceUrl`、空 `localPath/localHash`；本地源持 SHA-256 `localHash`、空 `sourceUrl`，可由受信平台提供绝对 `localPath`。iOS 固定 `localPath:null`，获准输入交接到同一运行器的 `sources/<localHash>.js`，不另建源码或安装仓库。
+
+意图及安装事实按结构值比较，JSON 对象成员的编码顺序不构成来源变化；源码摘要与原生文档 CAS 指纹仍按各自原始字节计算。
+
+注入模式下 `<dataRoot>/settings.json` 为 `{version:2,scripts:[...]}` 安装事实，仅保存 `installationId,sourceHash,version,config,loadedIdentity,importedAt,updatedAt,updateState,updateError,sites`。来源名称、类型、地址、启用意图、聚合配置不在此形成第二份可编辑值。`loadedIdentity` 绑定实际采用的类型、输入 revision 及 URL／本地摘要，和当前意图分别保存；公开状态增加 `inputRevision`，不公开 `localPath/localHash`。
+
+冷启动及 `cat.sources` 通知重读意图。已启用项尚无实际源码、输入身份改变或文件缺失时，由 Node 按当前意图读取本地输入或下载网络来源，再验证并装载；本地切网络不会拿旧本地文件冒充新网络输入。通知发起的实际应用归模块生命周期管理，不因短通知请求结束而取消；迟到结果核对最新输入身份，不能覆盖后保存意图。原生保存成功不代表安装或 ready，客户端清单仅采用匹配当前 `inputRevision` 的 ready 状态。
+
+HTTP `install/import/edit/enable/uninstall` 在注入模式返回 `PERMISSION_DENIED`；`update` 不接受上传 `sourceRevision`，只更新当前已保存输入。状态、重启、调用及显式管理同步仍由运行器执行。未注入的独立入口继续使用上述 v1 来源文件及 HTTP 写入，不隐式探测或迁移原生设置。
+
+源码及私有卷仍只由运行器管理。旧源码回收同时保护安装事实的 `sourceHash` 与当前原生意图的 `localHash`，包括尚未装载或停用的输入；不扫描删除未知文件。来源意图移除后由运行器清理对应安装事实与资源，不由客户端直接改安装文件。
 
 ## Worker 中的直接 Node 执行
 

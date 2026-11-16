@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const shared = new Set(['MeowFilm.Core', 'MeowFilm.Platform', 'MeowFilm.Desktop', 'MeowFilm.Media', 'MeowFilm.SystemMedia']);
+const shared = new Set(['MeowFilm.Core', 'MeowFilm.Platform', 'MeowFilm.Desktop', 'MeowFilm.Media', 'MeowFilm.Audio', 'MeowFilm.SystemMedia']);
 const DEFAULT_PROPERTIES = Object.freeze({
   Configuration: 'Release', RuntimeIdentifier: 'win-x64', SelfContained: 'true',
   TargetLatestRuntimePatch: 'true', VlcWindowsX64Enabled: 'true',
@@ -17,7 +17,7 @@ function inside(base, path) {
 }
 function evaluateProject(project, properties) {
   return JSON.parse(execFileSync('dotnet', ['msbuild', project, '-nologo',
-    '-getProperty:MSBuildProjectName,AssemblyName', '-getItem:ProjectReference',
+    '-getProperty:MSBuildProjectName,AssemblyName', '-getItem:ProjectReference,PackageReference',
     ...Object.entries(properties).map(([name, value]) => `-p:${name}=${value}`)],
   { cwd: dirname(project), windowsHide: true, encoding: 'utf8' }));
 }
@@ -43,7 +43,14 @@ export function verifyWindowsProjects(directory = root, {
     const dependencies = references.map(visit);
     if (shared.has(name) && dependencies.some(item => !shared.has(item.name)))
       fail('shared project depends on application or business: ' + name);
-    const entry = { name, assembly };
+    const packages = new Set([
+      ...(result.Items.PackageReference ?? []).map(item => item.Identity),
+      ...dependencies.flatMap(item => [...item.packages]),
+    ]);
+    if (name === 'MeowFilm.Audio' && (dependencies.some(item => item.name !== 'MeowFilm.Core') ||
+        [...packages].some(item => /^(LibVLCSharp(?:\.|$)|VideoLAN\.LibVLC(?:\.|$))/i.test(item))))
+      fail('audio core depends on a video engine');
+    const entry = { name, assembly, packages };
     graph.set(path, entry);
     visiting.delete(path);
     return entry;

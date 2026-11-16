@@ -5,26 +5,31 @@ import MeowRuntime
 @MainActor
 final class FilmPlaybackSettingsModelTests: XCTestCase {
     func testFailedSaveKeepsPublishedPreferencesAndEditableDraft() async throws {
-        let server = FilmPlaybackWireServer(handler: { operation, _ in
-            if operation == "settings.set" { throw FilmPlaybackError(code: "STORAGE_ERROR") }
-            return FilmPlaybackPreferences.defaults.value
+        let server = FilmPlaybackWireServer(handler: { _, _ in
+            XCTFail("Preferences must never request the runtime")
+            throw FilmPlaybackError.closed
         })
-        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        let store = try FilmNativeSettingsStore(self, block: .preferences, maximumBytes: 1024)
+        let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.document)
         try await model.loadPreferences()
-        model.edit { $0.iosAutoPrepare = false; $0.siteCleanKeywords = [] }
+        model.edit { $0.iosAutoPrepare = false; $0.siteCleanKeywords = []; $0.keywords = [String(repeating: "x", count: 2000)] }
         do { try await model.savePreferences(); XCTFail("A failed persistence receipt must be reported") }
-        catch { XCTAssertEqual(error as? FilmPlaybackError, .init(code: "STORAGE_ERROR")) }
+        catch { XCTAssertEqual(error as? FilmSettingsStorageError, .storageFailure) }
         XCTAssertEqual(model.preferences, .defaults)
         XCTAssertEqual(model.draft?.iosAutoPrepare, false)
         XCTAssertEqual(model.draft?.siteCleanKeywords, [])
         XCTAssertFalse(model.busy)
+        XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        model.edit { $0.keywords = [] }
+        try await model.savePreferences()
+        XCTAssertEqual(model.preferences, model.draft)
+        XCTAssertEqual(store.notifications, ["film.preferences"])
     }
 
     func testSuccessfulReceiptPublishesCompletePreferencesAndEmptyKeywordLists() async throws {
-        let server = FilmPlaybackWireServer(handler: { operation, value in
-            operation == "settings.set" ? value : FilmPlaybackPreferences.defaults.value
-        })
-        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        let server = FilmPlaybackWireServer(handler: { _, _ in XCTFail("No preferences RPC"); throw FilmPlaybackError.closed })
+        let store = try FilmNativeSettingsStore(self, block: .preferences)
+        let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.document)
         try await model.loadPreferences()
         model.edit {
             $0.ruleOrder = [.keyword, .pan, .quality]
@@ -35,13 +40,18 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         try await model.savePreferences()
         XCTAssertEqual(model.preferences, draft)
         XCTAssertEqual(model.draft, draft)
-        let writes = await server.calls().filter { $0.0 == "settings.set" }
-        XCTAssertEqual(writes.map(\.1), [draft.value])
+        let calls = await server.calls()
+        XCTAssertTrue(calls.isEmpty)
+        XCTAssertEqual(try store.document.read()?.filmObject?["preferences"], draft.value)
+        XCTAssertEqual(store.notifications, ["film.preferences"])
+        let reopened = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.makeDocument())
+        try await reopened.loadPreferences()
+        XCTAssertEqual(reopened.preferences, draft)
     }
 
     func testRestoreOnlyChangesTheSelectedGroup() async throws {
-        let server = FilmPlaybackWireServer(handler: { _, _ in FilmPlaybackPreferences.defaults.value })
-        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        let server = FilmPlaybackWireServer(handler: { _, _ in XCTFail("No preferences RPC"); throw FilmPlaybackError.closed })
+        let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: try FilmNativeSettingsStore(self, block: .preferences).document)
         try await model.loadPreferences()
         model.edit {
             $0.ruleOrder = [.keyword, .pan, .quality]
@@ -57,7 +67,7 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         XCTAssertEqual(model.draft?.iosAutoPrepare, false)
         XCTAssertEqual(model.preferences, .defaults, "Draft restoration is not a persistence receipt")
         let calls = await server.calls()
-        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.count, 0)
     }
 
     func testManualPageUsesHistoryIdentityAndKeepsHealthyRowsDespiteUnrelatedMaterials() async throws {
@@ -73,7 +83,7 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         fields["blocks"] = .object(["unused": .array([])])
         let receipt = RuntimeValue.object(fields)
         let server = FilmPlaybackWireServer(handler: { _, _ in receipt })
-        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: try FilmNativeSettingsStore(self, block: .preferences).document)
         try await model.loadLibrary()
         XCTAssertEqual(model.library?.area, .manual)
         XCTAssertEqual(model.library?.manual, [first, second])
@@ -92,10 +102,10 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         rules.append(.string("future-rule")); providers.append(.object(["unused": .bool(true)]))
         fields["ruleOrder"] = .array(rules); fields["panOrder"] = .array(providers)
         let original = RuntimeValue.object(fields)
-        let server = FilmPlaybackWireServer(handler: { operation, parameters in
-            operation == "settings.get" ? original : parameters
-        })
-        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        let server = FilmPlaybackWireServer(handler: { _, _ in XCTFail("No preferences RPC"); throw FilmPlaybackError.closed })
+        let store = try FilmNativeSettingsStore(self, block: .preferences)
+        try store.seed(store.envelope(original, key: "preferences"))
+        let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.document)
         try await model.loadPreferences()
         model.edit { $0.keywords = ["新关键词"] }
         try await model.savePreferences()
@@ -119,7 +129,7 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
             "blocks": .array([.null, block, .object(["targetId": .string("missing-identity")])]),
         ])
         let server = FilmPlaybackWireServer(handler: { _, _ in receipt })
-        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: try FilmNativeSettingsStore(self, block: .preferences).document)
         try await model.loadLibrary(area: .blocks)
         XCTAssertEqual(model.library?.area, .blocks)
         let saved = try XCTUnwrap(model.library?.blocks.first)
@@ -156,7 +166,7 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
             }
             return .array([.object(first.value), .bool(false)])
         })
-        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: try FilmNativeSettingsStore(self, block: .preferences).document)
         try await model.loadLibrary()
         try await model.saveManual(first)
         XCTAssertEqual(model.library?.manual, [first])
@@ -166,7 +176,7 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         let unusable = FilmPlaybackWireServer(handler: { operation, _ in
             operation == "library.get" ? FilmPlaybackFixture.library(manual: [.object(first.value)]) : .array([.null])
         })
-        let failed = FilmPlaybackSettingsModel(transport: unusable.transport)
+        let failed = FilmPlaybackSettingsModel(transport: unusable.transport, settingsDocument: try FilmNativeSettingsStore(self, block: .preferences).document)
         try await failed.loadLibrary()
         let before = failed.library
         do { try await failed.saveManual(second); XCTFail("An unusable receipt must not publish an empty library.") }
@@ -190,7 +200,7 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
             }
             return FilmPlaybackFixture.library(manual: [])
         })
-        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: try FilmNativeSettingsStore(self, block: .preferences).document)
         try await model.loadLibrary()
         try await model.saveManual(savedItem)
         XCTAssertEqual(model.library?.manual, [savedItem])
@@ -208,7 +218,7 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
             "detailId": .number(0), "lineId": .number(0),
         ]))
         let server = FilmPlaybackWireServer(handler: { _, _ in FilmPlaybackFixture.library() })
-        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: try FilmNativeSettingsStore(self, block: .preferences).document)
         try await model.removeBlock(block)
         try await model.removeBlock()
         let calls = await server.calls()
@@ -220,19 +230,18 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
     func testMetadataCacheScopesOnlyInvalidateTheSelectedProvidersAndKeepSettingsAndLibrary() async throws {
         for (scope, providers) in [(FilmMetadataCacheScope.douban, ["douban"]), (.tmdb, ["tmdb"]), (.both, ["douban", "tmdb"])] {
             let server = FilmPlaybackWireServer(handler: { operation, _ in
-                if operation == "settings.get" { return FilmPlaybackPreferences.defaults.value }
                 if operation == "library.get" { return FilmPlaybackFixture.library() }
                 return .null
             })
-            let model = FilmPlaybackSettingsModel(transport: server.transport)
+            let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: try FilmNativeSettingsStore(self, block: .preferences).document)
             try await model.loadPreferences(); try await model.loadLibrary()
             let library = model.library
             try await model.clearMetadataCache(scope)
             let calls = await server.calls()
-            XCTAssertEqual(calls.prefix(2).map(\.0), ["settings.get", "library.get"])
-            XCTAssertEqual(calls.dropFirst(2).map(\.0), Array(repeating: "data.invalidate", count: providers.count))
-            XCTAssertEqual(Set(calls.dropFirst(2).compactMap { $0.1.filmObject?["domain"]?.filmText }), Set(providers))
-            XCTAssertTrue(calls.dropFirst(2).allSatisfy { $0.1.filmObject?.count == 1 })
+            XCTAssertEqual(calls.prefix(1).map(\.0), ["library.get"])
+            XCTAssertEqual(calls.dropFirst(1).map(\.0), Array(repeating: "data.invalidate", count: providers.count))
+            XCTAssertEqual(Set(calls.dropFirst(1).compactMap { $0.1.filmObject?["domain"]?.filmText }), Set(providers))
+            XCTAssertTrue(calls.dropFirst(1).allSatisfy { $0.1.filmObject?.count == 1 })
             XCTAssertEqual(model.preferences, .defaults)
             XCTAssertEqual(model.library, library)
             XCTAssertFalse(model.busy)
@@ -246,7 +255,7 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
             await gate.wait()
             return .null
         })
-        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: try FilmNativeSettingsStore(self, block: .preferences).document)
         let clear = Task { try await model.clearMetadataCache(.both) }
         await server.awaitCalls(2)
         XCTAssertTrue(model.busy)
@@ -260,23 +269,114 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         XCTAssertEqual(calls.count, 2)
     }
 
-    func testBusySaveIsNotReportedAsSuccessOrSentTwice() async throws {
+    func testBusyOnlineOperationCannotBlockNativePreferencesAndDoesNotReceiveSettingsRPC() async throws {
         let gate = FilmPlaybackGate()
-        let server = FilmPlaybackWireServer(handler: { operation, value in
-            if operation == "settings.set" { await gate.wait(); return value }
-            return FilmPlaybackPreferences.defaults.value
+        let server = FilmPlaybackWireServer(handler: { _, _ in
+            await gate.wait()
+            return FilmPlaybackFixture.library()
         })
-        let model = FilmPlaybackSettingsModel(transport: server.transport)
+        let store = try FilmNativeSettingsStore(self, block: .preferences)
+        let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.document)
         try await model.loadPreferences()
-        let save = Task { try await model.savePreferences() }
-        await server.awaitCalls(2)
+        model.edit { $0.iosAutoPrepare = false }
+        let reading = Task { try await model.loadLibrary() }
+        await server.awaitCalls(1)
         XCTAssertTrue(model.busy)
-        do { try await model.savePreferences(); XCTFail("A second save must not fabricate a receipt") }
-        catch { XCTAssertEqual(error as? FilmPlaybackError, .init(code: "BUSY")) }
-        await gate.release()
-        try await save.value
-        let writes = await server.calls().filter { $0.0 == "settings.set" }
-        XCTAssertEqual(writes.count, 1)
+        try await model.loadPreferences()
+        try await model.savePreferences()
+        XCTAssertTrue(model.busy, "The unrelated online operation is still pending")
+        XCTAssertFalse(model.preferencesBusy)
+        XCTAssertEqual(model.preferences?.iosAutoPrepare, false)
+        XCTAssertEqual(store.notifications, ["film.preferences"])
+        await gate.release(); try await reading.value
+        XCTAssertEqual(model.preferences?.iosAutoPrepare, false)
+        let calls = await server.calls()
+        XCTAssertEqual(calls.map(\.0), ["library.get"])
         XCTAssertFalse(model.busy)
+    }
+
+    func testOnlyEditedPreferenceFieldsAreNormalizedAndOtherRawJSONSurvives() async throws {
+        let store = try FilmNativeSettingsStore(self, block: .preferences)
+        let raw: RuntimeValue = .object([
+            "ruleOrder": .array([.string("future"), .null]), "panOrder": .number(7),
+            "keywords": .object(["future": .bool(true)]), "iosAutoPrepare": .string("not-a-bool"),
+            "future": .object(["nested": .array([.null, .number(0)])]),
+        ])
+        try store.seed(store.envelope(raw, key: "preferences"))
+        let server = FilmPlaybackWireServer(handler: { _, _ in XCTFail("No preferences RPC"); throw FilmPlaybackError.closed })
+        let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.document)
+        try await model.loadPreferences()
+        XCTAssertEqual(model.preferences?.value, raw)
+        model.edit { $0.iosAutoPrepare = true }
+        try await model.savePreferences()
+        var expected = try raw.filmRequiredObject(); expected["iosAutoPrepare"] = .bool(true)
+        XCTAssertEqual(model.preferences?.value, .object(expected))
+        XCTAssertNil(model.preferences?.value.filmObject?["siteCleanKeywords"], "Missing untouched fields stay missing")
+        model.restoreDraft(.ruleOrder)
+        try await model.savePreferences()
+        expected["ruleOrder"] = FilmPlaybackPreferences.defaults.value.filmObject?["ruleOrder"]
+        XCTAssertEqual(model.preferences?.value, .object(expected))
+        let reloaded = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.makeDocument())
+        try await reloaded.loadPreferences()
+        XCTAssertEqual(reloaded.preferences?.value, .object(expected))
+    }
+
+    func testPreferenceNormalizationRejectsInvalidDraftsAtomicallyBeforeCommit() async throws {
+        let store = try FilmNativeSettingsStore(self, block: .preferences)
+        let server = FilmPlaybackWireServer(handler: { _, _ in XCTFail("No preferences RPC"); throw FilmPlaybackError.closed })
+        let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.document)
+        try await model.loadPreferences()
+        model.edit { $0.ruleOrder = [.quality, .quality, .pan]; $0.keywords = ["valid"] }
+        await filmRuleFailure(FilmPlaybackError(code: "INVALID_PREFERENCES")) { try await model.savePreferences() }
+        XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        model.restoreDraft(.ruleOrder)
+        model.edit { $0.keywords = [" Name ", "name"]; $0.iosAutoPrepare = false }
+        await filmRuleFailure(FilmPlaybackError(code: "INVALID_PREFERENCES")) { try await model.savePreferences() }
+        XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        XCTAssertEqual(model.preferences, .defaults)
+        XCTAssertEqual(model.draft?.keywords, [" Name ", "name"])
+        model.edit { $0.keywords = ["\u{feff}\u{00a0}Name\u{feff}", "\u{0085}keep\u{0085}"]; $0.panOrder = [.quark] }
+        try await model.savePreferences()
+        XCTAssertEqual(model.preferences?.keywords, ["Name", "\u{0085}keep\u{0085}"])
+        XCTAssertEqual(model.preferences?.panOrder, [.quark, .yidong, .tianyi, .uc, .baidu])
+        XCTAssertEqual(model.preferences?.iosAutoPrepare, false)
+        model.edit { $0.panOrder = []; $0.keywords = []; $0.siteCleanKeywords = [] }
+        try await model.savePreferences()
+        XCTAssertEqual(model.preferences?.panOrder, FilmPlaybackPreferences.defaults.panOrder)
+        XCTAssertEqual(model.preferences?.keywords, []); XCTAssertEqual(model.preferences?.siteCleanKeywords, [])
+        XCTAssertEqual(store.notifications, ["film.preferences", "film.preferences"])
+    }
+
+    func testPreferenceEditMergesLatestOtherFieldsAndUnchangedUnknownBranch() async throws {
+        let store = try FilmNativeSettingsStore(self, block: .preferences)
+        let server = FilmPlaybackWireServer(handler: { _, _ in XCTFail("No preferences RPC"); throw FilmPlaybackError.closed })
+        let first = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.document)
+        let second = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.makeDocument())
+        try await first.loadPreferences(); try await second.loadPreferences()
+        first.edit { $0.keywords = ["new"] }; try await first.savePreferences()
+        second.edit { $0.iosAutoPrepare = false }; try await second.savePreferences()
+        XCTAssertEqual(second.preferences?.keywords, ["new"])
+        XCTAssertEqual(second.preferences?.iosAutoPrepare, false)
+        XCTAssertEqual(store.notifications, ["film.preferences", "film.preferences"])
+        second.edit { $0.keywords = ["  new  "] }
+        try await second.savePreferences()
+        XCTAssertEqual(second.draft?.keywords, ["new"])
+        XCTAssertEqual(store.notifications.count, 2, "Normalization equal to current bytes is not a new commit")
+    }
+
+    func testCancelledNativePreferenceSaveDoesNotWriteAndCanResumeWithoutRuntime() async throws {
+        let store = try FilmNativeSettingsStore(self, block: .preferences)
+        let server = FilmPlaybackWireServer(handler: { _, _ in XCTFail("No preferences RPC"); throw FilmPlaybackError.closed })
+        let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.document)
+        try await model.loadPreferences(); model.edit { $0.keywords = ["pending"] }
+        let gate = FilmRuleGate()
+        let save = Task { await gate.wait(); try await model.savePreferences() }
+        save.cancel(); await gate.release()
+        await filmRuleCancelled { try await save.value }
+        XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        XCTAssertEqual(model.draft?.keywords, ["pending"]); XCTAssertFalse(model.busy)
+        try await model.savePreferences()
+        XCTAssertEqual(model.preferences?.keywords, ["pending"])
+        XCTAssertEqual(store.notifications, ["film.preferences"])
     }
 }

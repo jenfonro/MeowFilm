@@ -1,8 +1,8 @@
 # 网盘能力 `pan.runtime.v1`
 
-`@meowfilm/pan-runtime@0.1.0` 是通用运行器的内置 Node 能力，不运行外部脚本，不创建 Worker 或额外进程。它消费网盘凭据，负责分享枚举、必要单文件转存、登录及取播放地址；默认使用运行器凭据文档，也可注入受信 store，不拥有影视搜索、播放选路、媒体代理、账号页面或客户端缓存。
+`@meowfilm/pan-runtime@0.1.0` 是通用运行器的内置 Node 能力，不运行外部脚本，不创建 Worker 或额外进程。它负责网盘凭据使用、分享枚举、必要单文件转存、登录及取播放地址；不拥有影视搜索、播放选路、媒体代理、账号页面或客户端缓存。凭据持久化默认归 Node，受信装配可注入唯一原生 store。
 
-本模块仅提供 provider 能力。iOS／Windows 正式 App entry 已在九模块中装配 pan，film 与设置页的在线操作复用同一个 provider owner。iOS 使用默认运行器文档；Windows 注入同一原生凭据文档的私密 store，普通保存与退出由原生执行，在线生成凭据仍经此 store 原子回写，不另存运行器明文副本；详见 [Windows 原生设置](../windows/native-settings.md#网盘凭据回写)。这不等于账号 UI、真实登录／转存或平台播放已验证，具体业务与边界见[影视播放契约](film-playback.md)。
+本模块仅提供 provider 能力。iOS／Windows 正式 App entry 已在九模块中装配 pan，film 与设置页复用同一份账号事实，不建立两份可写凭据。这不等于账号 UI、真实登录／转存或平台播放已验证，具体业务与边界见[影视播放契约](film-playback.md)。
 
 ## 受信装配
 
@@ -44,11 +44,11 @@ await runtime.close();
 
 普通操作忽略未消费参数，不按字段白名单拒绝请求。`settings.set` 只提取所选 provider 定义的凭据字段，其他字段不会进入持久配置、认证或网络；已定义的字段仍按实际凭据类型及 HTTP 头要求处理。只含未知凭据字段的请求投影为空配置，仍遵循整份替换语义。顶层附加的 `method/url/headers` 等不能改变实际操作或目标，clear 也不会消费附带的 credentials。此处只规定请求投影，不改变本地账号文档的恢复、格式或持久化组织。
 
-账号状态中的 `status` 只有 `signedIn/expired/signedOut`。无凭据为 `signedOut`；已有凭据且本进程未收到明确账号认证失败时为 `signedIn`，不是永久有效性保证。`refresh` 成功后为 `signedIn`，明确账号认证失败后为 `expired`；网络、超时、上游格式等错误不改变此前状态，也不删除凭据。此观察状态不另建持久库；重启后的验证请求时机由端侧决定，Windows 进入设置不自动刷新。分享密码错误不作为账号失效依据。
+运行器账号状态中的 `status` 为 `signedIn/expired/signedOut`。无凭据为 `signedOut`；已有凭据且本进程未收到明确账号认证失败时为 `signedIn`，不是永久有效性保证。`refresh` 成功后为 `signedIn`，明确账号认证失败后为 `expired`；网络、超时、上游格式等错误不改变此前状态，也不删除凭据。此观察状态不另建持久库，配置读取本身不执行验证；原生离线配置投影与显式验证见[设置页](#设置页)。分享密码错误不作为账号失效依据。
 
-七个 provider 均支持 `refresh`。Cookie-only 账号使用只读账号接口检测，不列分享、不转存；支持密码或 token 的账号按其协议刷新。天翼只有 Cookie 时也可检测；用户名与密码仍用于普通登录，不绕过验证码。手动配置后由客户端显式刷新，只有成功回执才将本次登录视为完成。
+七个 provider 均支持 `refresh`。Cookie-only 账号使用只读账号接口检测，不列分享、不转存；支持密码或 token 的账号按其协议刷新。天翼只有 Cookie 时也可检测；用户名与密码仍用于普通登录，不绕过验证码。本地保存凭据不等于验证成功；需要验证时显式刷新，只有真实在线回执才报告已验证。
 
-默认未注入 store 时，配置明文原子保存在 `<dataRoot>/pan/accounts.json`：
+未注入 store 时，配置明文原子保存在 `<dataRoot>/pan/accounts.json`：
 
 ```json
 {"version":1,"accounts":{"baidu":{"revision":1,"credentials":{"cookie":"synthetic-example"}}}}
@@ -59,6 +59,12 @@ await runtime.close();
 写入先同步暂存文件，再以原子 rename 为提交点；成功后的磁盘与内存配置一致，不承诺断电时目录项的额外耐久性保证。
 
 手动换号／clear 撤销旧代次的进行中网络、登录和文件引用，旧结果不得覆盖新配置。自动刷新只 patch 当前代次，轮换凭据持久化成功后才报告成功。
+
+### 原生凭据 store
+
+`createPanService`／`createPanRuntimeModule` 可接收受信 `store`，提供 `read/write/close` 和可选 `reload`；文档仍为上述 v1 格式。注入后不创建第二份 `accounts.json`。`settingsChanged()` 通过串行变更边界重读同一原生 owner，撤销旧账号代次的请求、登录及引用。
+
+`settings.set/clear` HTTP 接口仍保留，但实际写入也必须经过 supplied store；它们不绕过原生 CAS。iOS／Windows 普通页面直接调用原生 owner，运行器通过私密 `pan.accounts` 内容 CAS 写回扫码及刷新所得凭据。新凭据持久化成功才发布 confirmed／refreshed；手动换号、清除或其他块内容变化导致旧 fingerprint 冲突时，旧请求不能覆盖新值。共同规则见[原生设置契约](../common/settings-storage.md#在线取得凭据的安全回写)，iOS 私密能力见[运行底座](../ios/runtime-preflight.md#原生设置私密通道)，Windows 接线见[原生设置](../windows/native-settings.md#网盘凭据回写)。
 
 ## 分享与播放
 
@@ -104,11 +110,15 @@ TV 只接受明确账号内的 `kind:"stored"` 引用，不 list、不转存、�
 
 ## 设置页
 
-两端影视设置中的「网盘账号」只展示平台、状态、操作三列，沿用音乐账号设置的主题和登录浮层元素。未登录显示登录；已登录显示刷新与退出登录；失效显示重新登录与退出登录。不增加第四种账号状态；操作失败走应用统一通知。Windows 的初次本地读取不显示顶部进度条，在线操作进度不因此删除。
+影视设置中的「网盘账号」保留平台、状态、操作三列及现有主题、登录浮层。未登录显示登录；已登录显示刷新与退出登录；失效显示重新登录与退出登录。操作失败走应用统一通知，在线操作可显示自身进度，不为原生配置读取增加进度条。
 
-百度、夸克和 UC 默认扫码，可切换手动 Cookie；其余 provider 按其凭据字段手动登录。手动输入只持有当前浮层草稿，不读取或回显已有秘密，提交使用 `settings.set` 的整份替换语义。二维码 `url` 使用客户端二维码编码能力，`image` 解码运行器交付的 data URI，不套用音乐平台的域名约束。
+百度、夸克和 UC 默认扫码，可切换手动 Cookie；其余 provider 按其凭据字段手动登录。手动输入只持有当前浮层草稿，不读取或回显已有秘密，提交采用账号配置的整份替换语义。二维码 `url` 使用客户端二维码编码能力，`image` 解码运行器交付的 data URI，不套用音乐平台的域名约束。
 
-iOS 表格读取 `providers/settings.get`，对已配置账号调用 `refresh`；退出登录使用 `settings.clear`。Windows 表格直接读取原生设置，不自动请求 refresh，手动提交与退出等待原生 CAS 回执；二维码及显式验证仍调用运行器。客户端按页面及单行操作代次隔离迟到结果，不用本地按钮完成代替实际持久化回执。已经受理的手动保存与退出保留真实写入回执；关闭后不继续该表单的验证，重新进入及后继账号操作需等待旧写入排空，避免迟到保存或清除覆盖换号。关闭浮层不会清除已经保存的账号，真正退出登录必须取得对应 owner 的清除回执。
+Windows 表格直接读取原生设置，不自动请求 refresh，手动提交与退出等待原生 CAS 回执；二维码及显式验证仍调用运行器，配置读取不显示顶部进度条。页面及单行操作代次隔离迟到结果，关闭浮层不清除已保存账号；保护与回写见[原生设置](../windows/native-settings.md#网盘凭据回写)。
+
+iOS 的 `PanAccountService(document:request:)`／`PanAccountService(document:connection:)` 直接读取原生配置；`providers/accounts/replace/clear` 不请求运行器，页面进入不自动 refresh。已有凭据但无匹配当前内容的在线观察显示「未验证」，不把 configured 当作 signedIn。手动保存及退出在原生事务完成后结算，不等待验证或旧在线工作排空；扫码、显式刷新仍请求运行器，离线真实失败。关闭浮层不清除已保存账号，手动保存完成不冒充扫码 confirmed。文件保护与状态接线见[iOS 设置](../ios/film-settings.md#网盘账号)。
+
+未采用原生存储的消费者继续使用 `providers/settings.get` 与 `settings.set/clear`，不能把 Node HTTP 写入当作本地同步事务。页面及单行操作都须隔离迟到结果，已经接纳的持久化按真实回执结算；在线登录关闭、离页及后台取消轮询，但已 confirmed 的账号不因关闭浮层退出。端侧实际接线分别以平台文档为准，不将一端验证结果视为另一端通过。
 
 百度未扫码时 `/channel/unicast` 可能等待超过 30 秒才返回 pending；该请求的上游预算为 40 秒，并取二维码 session 剩余有效期的较小值，仍受调用方取消控制。其他二维码请求保持 30 秒。调用百度 `pan.login.poll` 时使用现有单次调用 deadline 选项留出 45 秒：
 

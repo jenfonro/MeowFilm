@@ -219,5 +219,27 @@ let package = Package(name: "Fixture", products: [
         self.write("native/MeowKit/Sources/MeowJSON/Fixture.swift", "import MeowVideoKernel\n")
         self.assertTrue(any("Undeclared imports for MeowJSON" in error for error in scope.check(self.root)))
 
+    def test_audio_kernel_has_an_explicit_native_dependency_and_no_video_closure(self):
+        path = self.root / "native/MeowKit/Package.swift"
+        audio = '.target(name: "MeowAudio", dependencies: [.product(name: "CMeowAudioKernel", package: "audiokernel")])'
+        text = path.read_text().replace("targets: [\n", "targets: [\n" + audio +
+            ',\n.target(name: "MeowPlayback", dependencies: ["MeowAudio"]),\n')
+        text = self.add_package(text, "../AudioKernel")
+        path.write_text(text)
+        self.write("native/MeowKit/Sources/MeowAudio/Fixture.swift", "import CMeowAudioKernel\n")
+        self.write("native/MeowKit/Sources/MeowPlayback/Fixture.swift", "import MeowAudio\n")
+        self.assertEqual(scope.check(self.root), [])
+        wrong = text.replace('package: "audiokernel"', 'package: "foreign"')
+        wrong = wrong.replace('.package(path: "../AudioKernel")',
+            '.package(path: "../AudioKernel"), .package(path: "../Foreign")')
+        path.write_text(wrong)
+        self.assertTrue(any("Unapproved local product" in error for error in scope.check(self.root)))
+        video = text.replace(audio, audio[:-2] +
+            ', .product(name: "MeowVideoKernel", package: "videokernel")])')
+        video = video.replace('.package(path: "../AudioKernel")',
+            '.package(path: "../AudioKernel"), .package(path: "../VideoKernel")')
+        path.write_text(video)
+        self.assertTrue(any("depends on video" in error for error in scope.check(self.root)))
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,8 @@
 import Foundation
 import MeowStorage
 
-/// The picker URL is consumed under its grant and never passed to the runtime.
+/// Transient picker bytes only. Saving hands them to the runtime-owned source
+/// store; neither this temporary picker URL nor script text enters settings.
 struct FilmScriptFileSnapshot: Sendable {
     let fileName: String
     let source: String
@@ -15,7 +16,7 @@ struct FilmScriptFileSnapshot: Sendable {
         guard values.isRegularFile == true, values.isSymbolicLink != true else { throw FileError.scriptRequired }
         // Share the same file-provider coordination, actual-byte resource bound,
         // cancellation and change detection as the service's fileURL entry.
-        var data = try await ImportedFileReader.read(url, maximumBytes: ImportedFileReader.maximumSupportedBytes)
+        var data = try await ImportedFileReader.read(url, maximumBytes: CatLocalSourceInput.maximumBytes)
         defer { data.resetBytes(in: 0..<data.count) }
         guard let source = String(data: data, encoding: .utf8) else { throw FileError.invalidUTF8 }
         return Self(fileName: url.lastPathComponent, source: source)

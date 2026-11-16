@@ -23,9 +23,14 @@ final class PlaybackVideoPictureInPicture: NSObject, AVPictureInPictureControlle
          controller: PlaybackController, attempt: PlayAttempt) {
         source = .init(transport: transport, lease: lease, playback: controller, attempt: attempt)
         super.init()
-        guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
+        bind(transport: transport)
+    }
+
+    private func bind(transport: PlaybackVideoTransport) {
+        guard AVPictureInPictureController.isPictureInPictureSupported(),
+              let displayLayer = transport.output.displayLayer else { return }
         let content = AVPictureInPictureController.ContentSource(
-            sampleBufferDisplayLayer: transport.output.displayLayer, playbackDelegate: source)
+            sampleBufferDisplayLayer: displayLayer, playbackDelegate: source)
         let pip = AVPictureInPictureController(contentSource: content)
         self.controller = pip; pip.delegate = self
         pip.canStartPictureInPictureAutomaticallyFromInline = false
@@ -51,12 +56,17 @@ final class PlaybackVideoPictureInPicture: NSObject, AVPictureInPictureControlle
     /// removed from old retirement. Never copy the preceding `.active` state.
     func rebind(transport: PlaybackVideoTransport, lease: PlaybackVideoLease,
                 controller: PlaybackController, attempt: PlayAttempt) {
+        guard let displayLayer = transport.output.displayLayer else { return }
         let owned = hasSystemOwner
         source = .init(transport: transport, lease: lease, playback: controller, attempt: attempt)
         if owned { systemOwnerAttempt = attempt }
         rebinding = true
-        self.controller?.contentSource = .init(
-            sampleBufferDisplayLayer: transport.output.displayLayer, playbackDelegate: source)
+        if let pictureInPicture = self.controller {
+            pictureInPicture.contentSource = .init(
+                sampleBufferDisplayLayer: displayLayer, playbackDelegate: source)
+        } else {
+            bind(transport: transport)
+        }
         rebinding = false
         // Do not call clients inside PlaybackController's commit transaction.
         // started carries the immediate OS observation; reconcile a stop/failure

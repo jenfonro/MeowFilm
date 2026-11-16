@@ -118,6 +118,50 @@ internal static class FFmpegVideoFixtures
             """;
     }
     internal static byte[] Progressive() => Join(VideoInit(), Join(Enumerable.Range(0, Seconds).Select(i => VideoFragment(i)).ToArray()));
+    internal static byte[] SubtitleMatroska()
+    {
+        // Finite standard EBML elements, no index/Cues or encoder dependency.
+        // All JPEGs are the same blue picture; only the subtitle changes pixels.
+        byte[] Element(string id, params byte[][] data)
+        {
+            byte[] body = Join(data);
+            int width = 1;
+            while ((ulong)body.Length >= (1UL << (7 * width)) - 1) width++;
+            ulong size = (1UL << (7 * width)) | (uint)body.Length;
+            var length = new byte[width];
+            for (int i = width - 1; i >= 0; i--) { length[i] = (byte)size; size >>= 8; }
+            return Join(Convert.FromHexString(id), length, body);
+        }
+        byte[] Number(string id, uint value)
+        {
+            byte[] bytes = U32(value);
+            int first = 0;
+            while (first < 3 && bytes[first] == 0) first++;
+            return Element(id, bytes[first..]);
+        }
+        byte[] header = Element("1A45DFA3", Number("4286", 1), Number("42F7", 1),
+            Number("42F2", 4), Number("42F3", 8), Element("4282", Text("matroska")),
+            Number("4287", 4), Number("4285", 2));
+        var duration = new byte[8];
+        BinaryPrimitives.WriteInt64BigEndian(duration, BitConverter.DoubleToInt64Bits(Seconds * 1000.0));
+        byte[] info = Element("1549A966", Number("2AD7B1", 1000000), Element("4489", duration),
+            Element("4D80", Text("Meowfilm synthetic fixture")), Element("5741", Text("Meowfilm tests")));
+        byte[] tracks = Element("1654AE6B",
+            Element("AE", Number("D7", 1), Number("73C5", 1), Number("83", 1),
+                Element("86", Text("V_MJPEG")), Number("23E383", 1000000000 / FramesPerSecond),
+                Element("E0", Number("B0", 160), Number("BA", 90))),
+            Element("AE", Number("D7", 2), Number("73C5", 2), Number("83", 17),
+                Number("88", 0), Element("86", Text("S_TEXT/UTF8"))));
+        byte[] jpeg = Jpeg(0);
+        byte[][] clusters = Enumerable.Range(0, Seconds).Select(second =>
+            Element("1F43B675", Number("E7", (uint)second * 1000),
+                Element("A0", Element("A1", [0x82, 0, 0, 0], Text("WHITE SUBTITLE")),
+                    Number("9B", 1000)),
+                Join(Enumerable.Range(0, FramesPerSecond).Select(frame =>
+                    Element("A3", [0x81], U16((uint)(frame * 1000 / FramesPerSecond)), [0x80], jpeg)).ToArray())))
+            .ToArray();
+        return Join(header, Element("18538067", info, tracks, Join(clusters)));
+    }
     internal static byte[] Main10TransportStream(byte[] annexB)
     {
         var starts = new List<int>();

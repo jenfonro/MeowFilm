@@ -11,6 +11,7 @@ meowfilm 的 iPhone 与 Windows 原生客户端：
 ```sh
 python3 -I -B scripts/generate-ios-project.py         # 生成 apps/ios/Meowfilm.xcodeproj
 python3 -I -B scripts/prepare-ios-runtime.py          # Node 24 + npm ci：准备内嵌运行器构建输入
+python3 -I -B scripts/prepare-ios-audio-kernel.py --target ios-arm64 # 锁定独立音乐内核；测试入口选择对应 Mac/模拟器目标
 python3 -I -B scripts/prepare-ios-video-kernel.py --target ios-arm64 # 锁定源码准备视频内核；测试入口选择对应 Mac/模拟器目标
 python3 -I -B scripts/check-source-scope.py           # 源码、依赖与工程成员检查
 python3 -I -B -m unittest discover -s scripts/tests -p "test_<area>.py" -v
@@ -52,17 +53,21 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
   - `RuntimeTests` — 真实 App 宿主的内嵌运行器与页面生命周期测试
   - `runtime` — iOS 受信启动／生命周期交接与公共 HTTP 运行器薄 entry
 - `native/MeowKit/` — iOS Swift Package
-  - `MeowContracts`、`MeowJSON`、`MeowStorage`、`MeowAccounts`、`MeowPlayback`、`MeowUI`、`MeowRuntime` — 共享能力
+  - `MeowContracts`、`MeowJSON`、`MeowStorage`、`MeowAccounts`、`MeowAudio`、`MeowPlayback`、`MeowPlaybackVideo`、`MeowUI`、`MeowRuntime` — 共享能力与平台播放适配
   - `MeowMusicFeature`、`MeowMusicPlatform`、`MeowMusicNativeService` — 音乐界面、平台和原生业务
   - `MeowFilmFeature` — 影视数据源、首页、详情、收藏、规则设置与来源管理
   - `MeowNovelFeature` — 小说发现、搜索、书架／历史、阅读器、书源与净化设置
-- `native/VideoKernel/` — Apple 平台视频解码与 sample-buffer 输出；锁定 FFmpeg 源码及本地适配，不拥有业务或系统媒体会话
+- `native/AudioKernel/` — 独立音乐解码 C ABI 与锁定音频依赖，不拥有业务或系统媒体会话
+- `native/VideoKernel/` — 电影静默候选、实际首帧、命令与资源排空适配，不拥有业务或系统媒体会话
+- `native/KSPlayer/` — 固定源码播放核心、FFmpeg 依赖及原生音视频输出，不编译上游播放控件或 Demo
 - `apps/windows/app/` — Windows 应用入口与装配
+- `apps/windows/native/FilmKernel/` — Windows 电影独立解复用、解码、WASAPI 时钟与 D3D11 原生 HDR 输出；固定 KSPlayer 机制来源及静态依赖，不包含上游 UI 或音乐 owner
 - `apps/windows/src/` — Windows 原生库
-  - `MeowFilm.Core` — 基础契约
+  - `MeowFilm.Core` — 基础契约、中性播放作用域／读取租约与受控 HTTP 输入机制
   - `MeowFilm.Platform` — 本地文档存储与敏感信息保护、私密启动管道、HTTP 子进程会话、文件授权
   - `MeowFilm.Desktop` — 窗口、导航、设置入口、主题、通知
-  - `MeowFilm.Media` — 媒体播放与自适应流
+  - `MeowFilm.Audio` — 独立音乐解码、PCM／DSP 与 WASAPI 输出
+  - `MeowFilm.Media` — 视频播放与自适应流
   - `MeowFilm.SystemMedia` — 系统媒体传输控件
   - `MeowFilm.AppHost` — 启动、注入与关闭
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）

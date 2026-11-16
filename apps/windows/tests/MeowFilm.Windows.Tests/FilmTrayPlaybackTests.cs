@@ -29,6 +29,7 @@ public static class FilmTrayPlaybackTests
         yield return Test("real system media settings fence disabled Film startup and queued requests across restart", SystemMediaSettings);
         yield return Test("system media re-enable publishes the current typed native Film clock", NativeSystemMediaClock);
         yield return Test("system pause and resume never start a page selection without accepted media", SystemTransport);
+        yield return Test("independent audio system route ignores paused video clock changes", IndependentAudioRoute);
     }
 
     private static TestCase Test(string name, Func<Task> body) =>
@@ -64,6 +65,23 @@ public static class FilmTrayPlaybackTests
             "typed system commands resume only the current media after an unrelated browse selection");
     }
 
+    private static async Task IndependentAudioRoute()
+    {
+        await using var scene = await Scene.Create();
+        await scene.Play();
+        await scene.Film.PausePlaybackAsync();
+        scene.PublishMusic();
+        await scene.Film.SeekPlaybackAsync(41);
+        Check(scene.Backend.Last is { OwnerId: "music", Identity: "music-output", PositionSeconds: 7 },
+            "an inactive video clock cannot replace the independent current audio source");
+        int controls = scene.Rig.Native.Controls.Count;
+        scene.Backend.Request(SystemPlaybackCommand.Seek, 15);
+        await Until(() => scene.Music.FallbackCalls.Count == 1);
+        Check(scene.Music.FallbackCalls.Single() == "seek" && scene.Rig.Native.Controls.Count == controls &&
+            scene.Port.FallbackCalls.Count == 0,
+            "audio seek never reaches the retained paused Film occurrence");
+    }
+
     private static async Task CancelClose()
     {
         await using var scene = await Scene.Create();
@@ -91,15 +109,17 @@ public static class FilmTrayPlaybackTests
         // Deliver a posted Film command only after the actual player owner has changed.
         int controls = scene.Rig.Native.Controls.Count;
         scene.Backend.Request(SystemPlaybackCommand.Pause);
-        scene.Port.PublishMusic();
+        scene.PublishMusic();
         await scene.Rig.Native.TakeMusicAsync();
         await Pump();
-        Check(scene.Rig.Native.Controls.Count == controls && scene.Port.FallbackCalls.Count == 0,
+        Check(scene.Rig.Native.Controls.Count == controls && scene.Music.FallbackCalls.Count == 0 &&
+            scene.Port.FallbackCalls.Count == 0,
             "the captured old Film request cannot pause a replacement music owner");
         scene.Backend.Request(SystemPlaybackCommand.Pause);
-        await Until(() => scene.Port.FallbackCalls.Count == 1);
-        Check(scene.Port.FallbackCalls.Single() == "pause" && scene.Backend.Last?.Identity == "music-output",
-            "a fresh music request still uses the original native route, not a retired Film occurrence");
+        await Until(() => scene.Music.FallbackCalls.Count == 1);
+        Check(scene.Music.FallbackCalls.Single() == "pause" && scene.Port.FallbackCalls.Count == 0 &&
+            scene.Backend.Last?.Identity == "music-output",
+            "a fresh music request uses the independent audio route, not a retired Film occurrence");
     }
 
     private static async Task TrayAndLeave(bool otherModule)
@@ -398,6 +418,7 @@ public static class FilmTrayPlaybackTests
         internal readonly TrayIcon Tray = new();
         internal readonly Backend Backend = new();
         internal readonly NativePort Port;
+        internal readonly MusicPort Music = new();
         internal readonly AppMediaWindowAttachment Attachment;
         internal readonly AppMediaControlSettings MediaControls;
         internal readonly AppShutdown Lifecycle;
@@ -406,6 +427,7 @@ public static class FilmTrayPlaybackTests
         private readonly TaskCompletionSource closed = Gate();
         internal int ShutdownCalls, CancelCalls;
         internal Task? ShutdownWork;
+        private string activeOwner = "film";
         internal bool IsClosed => closed.Task.IsCompleted;
         internal int Started => Rig.Runtime.Calls.Count(call => call.Method == "film.session.command" &&
             FilmJson.Text(call.Parameters, "action") == "media.started");
@@ -432,7 +454,7 @@ public static class FilmTrayPlaybackTests
             Shell.Closed += (_, _) => closed.TrySetResult();
             Port = new(Rig.Native);
             Attachment = new(Shell, mediaControls);
-            var systemMedia = new AppSystemMediaAttachment(Shell, Port, Film, Backend,
+            var systemMedia = new AppSystemMediaAttachment(Shell, Music, Port, Film, () => activeOwner, Backend,
                 [new("music"), new("film", _ => Film.StepAsync(true), _ => Film.StepAsync(false),
                     Kind: SystemPlaybackKind.Video, Play: _ => Film.ResumePlaybackAsync())],
                 enabled: mediaControls.IsAvailable && mediaControls.Preferences.SystemMediaEnabled);
@@ -471,6 +493,11 @@ public static class FilmTrayPlaybackTests
             await Until(() => Rig.Native.SettledIdentity == "tray-output" && Started == 1 &&
                 Backend.Last is { HasMedia: true, Identity: "tray-output" });
         }
+        internal void PublishMusic()
+        {
+            activeOwner = "music";
+            Music.Publish();
+        }
         internal T ShellElement<T>(string name) where T : FrameworkElement =>
             Shell.FindName(name) as T ?? throw new InvalidOperationException("Missing shell element: " + name);
         internal T DialogElement<T>(string name) where T : FrameworkElement =>
@@ -488,10 +515,9 @@ public static class FilmTrayPlaybackTests
         }
         internal void Leave(bool otherModule)
         {
-            var list = ShellElement<ListBox>("NavigationList");
-            list.SelectedItem = list.Items.OfType<ShellNavigationEntry>().Single(entry => otherModule
-                ? entry.Owner.Module.Id == "other"
-                : entry.Owner.Module.Id == "film" && entry.Route == FilmCapability.HomeRoute);
+            var list = ShellElement<ListBox>("ModuleNavigationList");
+            list.SelectedItem = list.Items.OfType<ModuleSession>().Single(session =>
+                session.Module.Id == (otherModule ? "other" : "film"));
         }
         internal async Task WaitClosed()
         {
@@ -530,20 +556,13 @@ public static class FilmTrayPlaybackTests
 
     private sealed class NativePort(FilmNativeProbe native) : ISystemPlayback
     {
-        private SystemPlaybackState? music;
-        private PropertyChangedEventHandler? changed;
         internal readonly List<string> FallbackCalls = [];
-        public SystemPlaybackState State => music ?? new(native.Scope?.OwnerId, native.Identity, "native donor",
+        public SystemPlaybackState State => new(native.Scope?.OwnerId, native.Identity, "native donor",
             native.HasOutput, native.HasOutput && !native.Paused, native.Position, native.Duration);
         public event PropertyChangedEventHandler? PropertyChanged
         {
-            add { changed += value; native.PropertyChanged += value; }
-            remove { changed -= value; native.PropertyChanged -= value; }
-        }
-        internal void PublishMusic()
-        {
-            music = new("music", "music-output", "other owner", true, true, 7, 120);
-            changed?.Invoke(this, new(null));
+            add => native.PropertyChanged += value;
+            remove => native.PropertyChanged -= value;
         }
         public Task PlayAsync() => Fallback("play");
         public Task PauseAsync() => Fallback("pause");
@@ -551,7 +570,27 @@ public static class FilmTrayPlaybackTests
         public Task SeekAsync(double seconds) => Fallback("seek");
         private Task Fallback(string command)
         {
-            Check(music is not null, "unexpected direct native fallback for Film");
+            FallbackCalls.Add(command);
+            throw new InvalidOperationException("Unexpected direct native fallback for Film");
+        }
+    }
+
+    private sealed class MusicPort : ISystemPlayback
+    {
+        internal readonly List<string> FallbackCalls = [];
+        public SystemPlaybackState State { get; private set; } = new(null, null, "", false, false, 0, 0);
+        public event PropertyChangedEventHandler? PropertyChanged;
+        internal void Publish()
+        {
+            State = new("music", "music-output", "other owner", true, true, 7, 120);
+            PropertyChanged?.Invoke(this, new(null));
+        }
+        public Task PlayAsync() => Fallback("play");
+        public Task PauseAsync() => Fallback("pause");
+        public Task StopAsync() => Fallback("stop");
+        public Task SeekAsync(double seconds) => Fallback("seek");
+        private Task Fallback(string command)
+        {
             FallbackCalls.Add(command);
             return Task.CompletedTask;
         }

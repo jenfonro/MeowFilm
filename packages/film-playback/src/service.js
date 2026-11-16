@@ -2315,8 +2315,9 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
         requireValue(Number.isFinite(input.position) && input.position >= 0 &&
           Number.isFinite(input.duration) && input.duration >= 0 && typeof input.paused === 'boolean');
         const changedPause = session.paused !== input.paused;
+        const changedPausedPosition = input.paused && session.position !== input.position;
         session.position = input.position; session.duration = input.duration; session.paused = input.paused;
-        if (changedPause || now() - session.lastHistoryWrite >= 12_000) saveHistory(session);
+        if (changedPause || changedPausedPosition || now() - session.lastHistoryWrite >= 12_000) saveHistory(session);
         report(session, 'progress', session.current, changedPause); publish(session); break;
       }
       case 'media.ended': {

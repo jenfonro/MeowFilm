@@ -1,0 +1,5 @@
+[wrap-file]
+directory = SPIRV-Cross-vulkan-sdk-1.4.309.0
+source_url = https://codeload.github.com/KhronosGroup/SPIRV-Cross/tar.gz/vulkan-sdk-1.4.309.0
+source_filename = spirv-cross-vulkan-sdk-1.4.309.0.tar.gz
+source_hash = cf4f12a767d63f63024e61750e372ffdc95567513b99ed9be6f21f474b328ddd

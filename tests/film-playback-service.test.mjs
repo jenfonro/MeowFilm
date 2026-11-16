@@ -11,6 +11,7 @@ import { createPlaybackService } from '../packages/film-playback/src/service.js'
 import { createPlaybackData } from '../packages/film-playback/src/data.js';
 import { createPlaybackCache } from '../packages/film-playback/src/cache.js';
 import { defaultPreferences } from '../packages/film-playback/src/policy.js';
+import { playbackFeedbackFailure } from '../packages/film-playback/src/identity.js';
 import { bindRuleSnapshot, invokeFilmRules } from '../packages/film-playback/src/rules.js';
 
 const ruleRoot = mkdtempSync(join(tmpdir(), 'film-rules-playback-'));
@@ -74,6 +75,9 @@ function fixture(overrides = {}) {
     async search(value, query, page) { calls.push(['search', value.key, query, page]); return { page, hasMore: false,
       items: [{ vod_id: `detail-${value.key}`, vod_name: query }] }; },
     async detail(value, id) { calls.push(['detail', value.key, id]); return detail(['Film.1080p', 'Film.720p']); },
+    async detailEntry(value, id, options) {
+      return { value: await this.detail(value, id, options), fetchedAt: clock, expiresAt: clock + 3_600_000 };
+    },
     async expand(value, line) { calls.push(['expand', value.key, line.id]); return line; },
     async resolve(candidate) { calls.push(['resolve', candidate.source.key, candidate.name]);
       return { url: `https://media.invalid/${encodeURIComponent(candidate.name)}`, watchReport: false,
@@ -2255,6 +2259,38 @@ test('shortvideo prepares known neighbor address and real media bytes without al
   await f.command(sessionId, 'next'); const next = await f.pending(sessionId);
   assert.equal(next.candidate.episode, 2); assert.equal(next.position, 0);
   assert.equal(f.calls.filter(call => call[0] === 'resolve').length, resolves);
+});
+
+test('Windows film kernel errors preserve the finite native prepare and playback stages', () => {
+  for (const code of ['FILM_FORMAT_UNSUPPORTED', 'FILM_ENCRYPTION_UNSUPPORTED', 'FILM_DECODE_FAILED',
+    'FILM_AUDIO_FAILED', 'FILM_RENDER_FAILED', 'FILM_HDR_DISPLAY_UNSUPPORTED',
+    'FILM_DOVI_UNSUPPORTED', 'FILM_DEVICE_LOST']) {
+    for (const stage of ['prepare', 'playback'])
+      assert.deepEqual(playbackFeedbackFailure(code, stage), { code, stage });
+  }
+  assert.throws(() => playbackFeedbackFailure('FILM_UNKNOWN_ERROR', 'prepare'), { code: 'INVALID_REQUEST' });
+});
+
+test('paused native seek persists history before the periodic playing progress deadline', async t => {
+  const f = fixture(); t.after(() => f.service.close());
+  const { sessionId } = await f.open({ platform: 'windows' });
+  await until(() => f.snapshot(sessionId).stage !== 'loading');
+  assert.equal(f.snapshot(sessionId).error, null);
+  const attempt = await f.current(sessionId);
+  await f.command(sessionId, 'media.progress', { attemptId: attempt.id, position: 1, duration: 60, paused: true });
+  assert.equal(f.library.read().history[0].position, 1);
+  f.advance(1);
+  await f.command(sessionId, 'media.progress', { attemptId: attempt.id, position: 7, duration: 60, paused: true });
+  assert.equal(f.library.read().history[0].position, 7);
+  assert.equal(f.library.read().history[0].paused, true);
+  assert.equal(f.snapshot(sessionId).current.attemptId, attempt.id);
+  await f.command(sessionId, 'media.progress', { attemptId: attempt.id, position: 7, duration: 60, paused: false });
+  f.advance(1);
+  await f.command(sessionId, 'media.progress', { attemptId: attempt.id, position: 8, duration: 60, paused: false });
+  assert.equal(f.library.read().history[0].position, 7);
+  f.advance(12_000);
+  await f.command(sessionId, 'media.progress', { attemptId: attempt.id, position: 20, duration: 60, paused: false });
+  assert.equal(f.library.read().history[0].position, 20);
 });
 
 test('watch reporting is opt-in and driven only by output/progress/stopped, bound to original attempt', async t => {

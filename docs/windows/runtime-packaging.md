@@ -47,7 +47,7 @@ Windows 平台模块按序为 `music@0.8.0`、`cat@0.2.0`、`source@0.3.0`、`pa
 
 影视规则与搜索程序、小说纯规则程序属于 Node 载荷，由公共 script-host 原生 addon 执行并使用独立 Runtime／Context。Windows Capabilities 不再内嵌规则或搜索 JS 资源，Platform 不再构建／复制独立规则 DLL，App 不登记客户端影视规则文档。影视规则唯一存储、预览及搜索投影通过现有 film HTTP／SSE 访问；小说规则配置仍由原生持有，完整快照交给 source 的固定规则 RPC 执行。缺失运行器时返回真实错误，不保留旧引擎依赖或回退。源码与许可使用 `scripts/script-host-native.json` 的共同锁和构建回执。
 
-视频内核同样不属于 Node 载荷。`MeowFilm.Media.csproj` 通过 `scripts/windows/build-video-kernel.ps1` 增量构建并复制私有 `libmeowfilm_ffmpeg_plugin.dll` 和 receipt；输入由 `apps/windows/native/VideoKernel/video-kernel.lock.json` 锁定 FFmpeg 8.1.2、VLC 3.0.24 SDK、libxml2、ABI／架构及配置。现有 libVLC 仍唯一解码／渲染，插件只解复用，具体见[原生媒体实现](media-playback.md)。原生 DLL 构建证据不代表合并后 Media C#、整 App、真实帧或最终分发闭包已验证；不得手动替换 DLL 或放宽运行器 native scope。
+电影内核同样不属于 Node 载荷。`MeowFilm.Media.csproj` 通过 `scripts/windows/build-film-kernel.ps1` 增量构建独立 `meowfilm_film_kernel.dll`、生成绑定身份和 receipt，随 App 放在 `film-kernel/`；`apps/windows/native/FilmKernel/film-kernel.lock.json` 固定 FFmpeg 8.1.2、libplacebo 7.387.0、libass 等 16 个来源及源码／许可证哈希，Jinja／MarkupSafe 仅用于构建。Windows 中央许可清单复用原有正文，并增加 LGPLv3、IJG 声明及 `FilmKernel-THIRD-PARTY-NOTICES.txt`，固定来源与静态分发义务见 `LICENSES/NOTICE.md`。音乐和旧 LibVLC／VideoKernel 的构建与许可保持原样：`build-video-kernel.ps1` 仍构建旧 demux 插件，但它不再是电影核心，具体见[原生媒体实现](media-playback.md)。原生 DLL、构建回执、源码锁和许可复制各有独立职责，不能代替整 App、真实媒体输出或最终静态分发闭包的验收。不得手动替换 DLL 或放宽运行器 native scope。
 
 ## 验证入口
 

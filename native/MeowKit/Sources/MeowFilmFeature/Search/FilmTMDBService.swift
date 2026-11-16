@@ -2,6 +2,11 @@ import Foundation
 import MeowRuntime
 
 public struct FilmTMDBSettings: Equatable, Sendable {
+    static let defaultValue: RuntimeValue = .object([
+        "apiBase": .string("https://api.themoviedb.org/3"), "imageBase": .string("https://image.tmdb.org"),
+        "apiKey": .string(""), "accessToken": .string(""), "language": .string("zh-CN"),
+        "region": .string("CN"), "includeAdult": .bool(false),
+    ])
     public let apiBase: String
     public let imageBase: String
     public let apiKey: String
@@ -23,11 +28,15 @@ public struct FilmTMDBSettings: Equatable, Sendable {
     }
 }
 
-/// A borrower of the App runtime. Settings and upstream credentials belong only
-/// to tmdb.data.v1; no native settings file or second HTTP owner is created.
+/// Native settings are independent of the borrowed runtime. Metadata and image
+/// requests still use the runtime's upstream owner.
 public struct FilmTMDBService: FilmSearchMetadataReading {
+    private let settingsDocument: FilmSettingsDocument
     private let connection: @Sendable () async throws -> RuntimeHTTPClient
-    public init(connection: @escaping @Sendable () async throws -> RuntimeHTTPClient) { self.connection = connection }
+    public init(settingsDocument: FilmSettingsDocument,
+                connection: @escaping @Sendable () async throws -> RuntimeHTTPClient) {
+        self.settingsDocument = settingsDocument; self.connection = connection
+    }
     public func search(query: String) async throws -> RuntimeValue {
         try await searchRead(query: query).value
     }
@@ -61,18 +70,104 @@ public struct FilmTMDBService: FilmSearchMetadataReading {
         return .init(value: value, producer: client, cacheEntry: entry == .null ? nil : entry)
     }
     public func settings() async throws -> FilmTMDBSettings {
-        let client = try await connection()
-        let value = try await client.call(module: .tmdb, operation: "settings.get")
-        return try FilmTMDBSettings(value)
+        try Task.checkCancellation()
+        let value = try FilmTMDBSettings(FilmMetadataSettingsDocument.read(settingsDocument, defaults: FilmTMDBSettings.defaultValue))
+        try Task.checkCancellation()
+        return value
     }
     public func updateSettings(_ patch: RuntimeObject) async throws -> FilmTMDBSettings {
-        let client = try await connection()
-        let value = try await client.call(module: .tmdb, operation: "settings.update", parameters: .object(patch))
-        return try FilmTMDBSettings(value)
+        try Task.checkCancellation()
+        return try FilmTMDBSettings(FilmMetadataSettingsDocument.update(settingsDocument, defaults: FilmTMDBSettings.defaultValue, patch: patch))
     }
     public func imageURL(path: String) -> URL? { RuntimeHTTPClient.metadataImageURL(path) }
     public func readImage(_ reference: URL) async throws -> Data {
         let client = try await connection()
         return try await client.readMetadataImage(reference)
+    }
+}
+
+/// Settings encoding and validation only; no upstream request or runtime lookup.
+enum FilmMetadataSettingsDocument {
+    private static let inputWhitespace = CharacterSet(charactersIn:
+        "\u{0009}\u{000a}\u{000b}\u{000c}\u{000d}\u{0020}\u{00a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}")
+
+    static func read(_ document: FilmSettingsDocument, defaults: RuntimeValue) throws -> RuntimeValue {
+        try settings(document.read(), defaults: defaults)
+    }
+
+    static func update(_ document: FilmSettingsDocument, defaults: RuntimeValue, patch: RuntimeObject) throws -> RuntimeValue {
+        let saved = try document.update { current in
+            var values = try settings(current, defaults: defaults).filmRequiredObject()
+            for (key, value) in patch {
+                guard defaults.filmObject?[key] != nil else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
+                values[key] = value
+            }
+            let normalized = try normalize(values, defaults: defaults.filmObject!)
+            var envelope = current?.filmObject ?? ["version": .number(1)]
+            envelope["settings"] = .object(normalized)
+            return .object(envelope)
+        }
+        return saved.filmObject!["settings"]!
+    }
+
+    private static func settings(_ document: RuntimeValue?, defaults: RuntimeValue) throws -> RuntimeValue {
+        guard let document else { return defaults }
+        guard let fields = document.filmObject, fields["version"] == .number(1),
+              let settings = fields["settings"]?.filmObject, settings.count == defaults.filmObject?.count,
+              settings.allSatisfy({ key, value in
+                  guard let expected = defaults.filmObject?[key] else { return false }
+                  if case .bool = expected { if case .bool = value { return true }; return false }
+                  return value.filmText != nil
+              }) else { throw FilmSettingsStorageError.invalidDocument }
+        return .object(settings)
+    }
+
+    private static func normalize(_ values: RuntimeObject, defaults: RuntimeObject) throws -> RuntimeObject {
+        var result = RuntimeObject()
+        for (key, expected) in defaults {
+            guard let value = values[key] else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
+            if key == "includeAdult" {
+                guard case .bool = value else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
+                result[key] = value
+            } else {
+                guard let text = value.filmText,
+                      !text.unicodeScalars.contains(where: { $0.value <= 0x1f || $0.value == 0x7f }) else {
+                    throw RuntimeHTTPError.remote("INVALID_REQUEST")
+                }
+                if key.hasSuffix("Base") || key.hasSuffix("Proxy") {
+                    let input = text.isEmpty && defaults["includeAdult"] != nil ? expected.filmText! : text
+                    result[key] = .string(try endpoint(input, proxy: key.hasSuffix("Proxy")))
+                } else {
+                    result[key] = .string(text.trimmingCharacters(in: inputWhitespace))
+                }
+            }
+        }
+        return result
+    }
+
+    private static func endpoint(_ text: String, proxy: Bool) throws -> String {
+        if proxy && text.isEmpty { return "" }
+        let invalid = RuntimeHTTPError.remote("INVALID_REQUEST")
+        guard text.lowercased().hasPrefix("http://") || text.lowercased().hasPrefix("https://"),
+              !text.unicodeScalars.contains(where: { $0.properties.isWhitespace || $0.value == 0xfeff }),
+              !text.contains("\\"), !text.contains("#"), proxy || !text.contains("?") else { throw invalid }
+        let slots = ["{url}", "{encodedUrl}"].reduce(0) { $0 + text.components(separatedBy: $1).count - 1 }
+        guard slots <= (proxy ? 1 : 0) else { throw invalid }
+        let substituted = text.replacingOccurrences(of: "{url}", with: "https%3A%2F%2Fexample.invalid%2F")
+            .replacingOccurrences(of: "{encodedUrl}", with: "https%3A%2F%2Fexample.invalid%2F")
+        guard !substituted.contains("{"), !substituted.contains("}"),
+              var url = URLComponents(string: substituted),
+              let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = url.host, !host.isEmpty, let parsed = url.url, parsed.host?.isEmpty == false,
+              url.port.map({ (0...65535).contains($0) }) ?? true else { throw invalid }
+        if slots > 0 {
+            let authority = text.components(separatedBy: "://")[1].prefix { $0 != "/" && $0 != "?" }
+            guard !authority.isEmpty, !authority.contains("{"), !authority.contains("}") else { throw invalid }
+        }
+        if proxy { return scheme + text[text.firstIndex(of: ":")!...] }
+        url.scheme = scheme; url.host = host.lowercased()
+        if scheme == "https" && url.port == 443 || scheme == "http" && url.port == 80 { url.port = nil }
+        guard let canonical = url.url?.standardized.absoluteString else { throw invalid }
+        return String(canonical.reversed().drop(while: { $0 == "/" }).reversed())
     }
 }
