@@ -43,7 +43,7 @@ public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
         self.onLibraryChanged = onLibraryChanged
     }
     public var canSync: Bool {
-        active && isAvailable && presentationActive && !busy && settingsTask == nil && pendingConfirmation == nil &&
+        active && isAvailable && presentationActive && !busy && settingsTask == nil && completionTask == nil && pendingConfirmation == nil &&
             selections.contains { !$0.kinds.isEmpty }
     }
     public func prepareConfirmation() {
@@ -85,16 +85,17 @@ public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
         if let playlists { value.playlists = playlists }
         selections.removeAll { $0.platform == platform }; selections.append(value)
         if let automatic, let revision = automaticRevision {
-            let own = epoch, id = UUID(), permission = MusicQueueAuthorization()
+            let own = epoch, access = accessGeneration, id = UUID(), permission = MusicQueueAuthorization()
             let preferences = MusicAutomaticLibrarySyncPreferences(revision: revision, selections: selections)
+            completionTask?.cancel(); completionTask = nil
             busy = true; error = nil
             let keys = [
                 favorites == nil ? nil : "library/automatic/" + platform.rawValue + "/favorites",
                 playlists == nil ? nil : "library/automatic/" + platform.rawValue + "/playlists"
             ].compactMap { $0 }
             let task = settingsReceipts.submit(settings: keys, operation: "保存自动同步设置") {
-                defer { permission.revoke() }
-                return try await automatic.saveAutomaticLibrarySync(preferences, requestID: id, authorization: permission)
+                do { return try await automatic.saveAutomaticLibrarySync(preferences, requestID: id, authorization: permission) }
+                catch { permission.revoke(); throw error }
             }
             settingsTask = task
             Task { [weak self] in
@@ -102,7 +103,13 @@ public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
                 guard let self else { return }
                 settingsTask = nil
                 guard current(own) else {
-                    if active, isAvailable, presentationActive { await load() }
+                    if active, isAvailable, presentationActive {
+                        await load()
+                        if accessGeneration == access, case .success(let receipt) = result,
+                           automaticRevision == receipt.preferences.revision {
+                            observeSettingsSynchronization(receipt, own: epoch)
+                        }
+                    }
                     return
                 }
                 busy = false
@@ -110,11 +117,8 @@ public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
                 case .success(let receipt):
                     selections = receipt.preferences.selections
                     automaticRevision = receipt.preferences.revision
-                    switch receipt.synchronization {
-                    case .success(let value): state = value; error = nil
-                    case .failure(let failure): error = failure.localizedDescription
-                    }
-                    await onLibraryChanged()
+                    error = nil
+                    observeSettingsSynchronization(receipt, own: own)
                 case .failure(let failure):
                     let problem = failure as? MusicServiceError ?? MusicServiceError.sanitized(failure)
                     error = problem == .commitUnconfirmed ? nil : problem.localizedDescription
@@ -123,6 +127,19 @@ public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
                     if current(own), problem != .commitUnconfirmed { error = problem.localizedDescription }
                 }
             }
+        }
+    }
+    private func observeSettingsSynchronization(_ receipt: MusicAutomaticLibrarySyncSaveResult, own: UUID) {
+        completionTask?.cancel()
+        completionTask = Task { [weak self] in
+            let result = await receipt.synchronization.value
+            guard let self, current(own), automaticRevision == receipt.preferences.revision else { return }
+            completionTask = nil
+            switch result {
+            case .success(let value): state = value; error = nil
+            case .failure(let failure): error = failure.localizedDescription
+            }
+            await onLibraryChanged()
         }
     }
     public func activate(available: Bool, generation: UUID) {

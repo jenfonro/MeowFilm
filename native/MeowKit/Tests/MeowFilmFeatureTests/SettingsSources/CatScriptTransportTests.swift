@@ -16,10 +16,8 @@ final class CatScriptTransportTests: XCTestCase {
             let result = try await fixture.transport.call("status")
             XCTAssertEqual(result, value)
             let requests = await fixture.requests
-            let uploads = await fixture.uploads
             XCTAssertEqual(requests.map(\.0), ["status"])
             XCTAssertEqual(requests.first?.1, .object([:]))
-            XCTAssertTrue(uploads.isEmpty)
         }
     }
 
@@ -42,78 +40,6 @@ final class CatScriptTransportTests: XCTestCase {
         XCTAssertEqual(parameters.catField("payload"), payload)
         XCTAssertEqual(parameters.catField("payload")?.catField("é"), .string("composed"))
         XCTAssertEqual(parameters.catField("payload")?.catField("e\u{0301}"), .string("decomposed"))
-    }
-
-    func testSourceUploadUsesCompleteRawBytesAndReceiptRevisionForInstallAndUpdate() async throws {
-        for operation in ["install", "update"] {
-            let source = "// 中文源码\n" + String(repeating: "x", count: 65_537)
-            let value = RuntimeValue.object(["generation": .number(7)])
-            let fixture = CatHTTPFixture(result: value)
-            var params: [String: RuntimeValue] = ["installationId": .string("a")]
-            if operation == "install" { params["enabled"] = .bool(true) }
-            let result = try await fixture.transport.withSource(source, operation: operation, params: params)
-            XCTAssertEqual(result, value)
-            let uploads = await fixture.uploads
-            let upload = try XCTUnwrap(uploads.first)
-            XCTAssertEqual(uploads.count, 1)
-            XCTAssertEqual(upload.0, "a")
-            XCTAssertGreaterThan(upload.1, 0)
-            XCTAssertLessThanOrEqual(upload.1, 9_007_199_254_740_991)
-            XCTAssertEqual(upload.2, Data(source.utf8))
-            let requests = await fixture.requests
-            XCTAssertEqual(requests.map(\.0), [operation])
-            params["sourceRevision"] = .number(Double(upload.1))
-            XCTAssertEqual(requests.first?.1, .object(RuntimeObject(params)))
-        }
-    }
-
-    func testMalformedUploadReceiptCannotConsumeCandidate() async throws {
-        for field in ["installationId", "sourceRevision", "sourceBytes"] {
-            let fixture = CatHTTPFixture(uploadFault: field)
-            do {
-                _ = try await fixture.transport.withSource("source", operation: "install", params: ["installationId": .string("a")])
-                XCTFail("Invalid receipt: \(field)")
-            } catch let error as FilmSourceError { XCTAssertEqual(error.code, "INVALID_RESPONSE") }
-            let uploads = await fixture.uploads
-            let requests = await fixture.requests
-            XCTAssertEqual(uploads.count, 1)
-            XCTAssertTrue(requests.isEmpty)
-        }
-    }
-
-    func testUploadAndConsumeFailureReturnErrorWithoutRetrying() async throws {
-        for duringUpload in [false, true] {
-            let fixture = CatHTTPFixture(requestError: duringUpload ? nil : .remote("COMMIT_UNKNOWN"),
-                uploadError: duringUpload ? .remote("SCRIPT_PROTOCOL_ERROR") : nil)
-            do {
-                _ = try await fixture.transport.withSource("source", operation: "install", params: ["installationId": .string("a")])
-                XCTFail("Failed management input")
-            } catch let error as FilmSourceError {
-                XCTAssertEqual(error.code, duringUpload ? "SCRIPT_PROTOCOL_ERROR" : "COMMIT_UNKNOWN")
-            }
-            let uploads = await fixture.uploads
-            let requests = await fixture.requests
-            XCTAssertEqual(uploads.count, 1)
-            XCTAssertEqual(requests.map(\.0), duringUpload ? [] : ["install"])
-        }
-    }
-
-    func testCancellationDuringUploadRejectsLateReceiptAndDoesNotInstall() async throws {
-        let runtime = SourcesRuntimeFixture()
-        await runtime.pause("upload")
-        let task = Task {
-            try await runtime.transport.withSource("source", operation: "install", params: ["installationId": .string("a")])
-        }
-        await runtime.waitUntilPaused()
-        task.cancel()
-        await runtime.waitUntilCancelled()
-        let beforeRelease = await runtime.calls
-        XCTAssertEqual(beforeRelease, ["upload"])
-        await runtime.release()
-        do { _ = try await task.value; XCTFail("Cancelled input must not be consumed") }
-        catch { XCTAssertTrue(error is CancellationError, "\(error)") }
-        let calls = await runtime.calls
-        XCTAssertEqual(calls, ["upload"])
     }
 
     func testCancellationDuringRequestRejectsLateValue() async throws {
@@ -175,21 +101,15 @@ final class CatScriptTransportTests: XCTestCase {
 
 private actor CatHTTPFixture {
     let result: RuntimeValue
-    let uploadFault: String?
     let requestError: RuntimeHTTPError?
-    let uploadError: RuntimeHTTPError?
     var requests: [(String, RuntimeValue)] = []
-    var uploads: [(String, Int, Data)] = []
 
-    init(result: RuntimeValue = .object([:]), uploadFault: String? = nil,
-         requestError: RuntimeHTTPError? = nil, uploadError: RuntimeHTTPError? = nil) {
-        self.result = result; self.uploadFault = uploadFault
-        self.requestError = requestError; self.uploadError = uploadError
+    init(result: RuntimeValue = .object([:]), requestError: RuntimeHTTPError? = nil) {
+        self.result = result; self.requestError = requestError
     }
 
     nonisolated var transport: CatScriptTransport {
-        CatScriptTransport(request: { operation, params in try await self.request(operation, params) },
-            upload: { id, revision, source in try await self.upload(id, revision, source) })
+        CatScriptTransport(request: { operation, params in try await self.request(operation, params) })
     }
 
     private func request(_ operation: String, _ params: RuntimeValue) throws -> RuntimeValue {
@@ -198,17 +118,4 @@ private actor CatHTTPFixture {
         return result
     }
 
-    private func upload(_ id: String, _ revision: Int, _ source: Data) throws -> RuntimeValue {
-        uploads.append((id, revision, source))
-        if let uploadError { throw uploadError }
-        var receipt: RuntimeObject = ["installationId": .string(id), "sourceRevision": .number(Double(revision)),
-            "sourceBytes": .number(Double(source.count)), "contentHash": .string("fixture-content")]
-        switch uploadFault {
-        case "installationId": receipt["installationId"] = .string("other")
-        case "sourceRevision": receipt["sourceRevision"] = .number(0)
-        case "sourceBytes": receipt["sourceBytes"] = .number(Double(source.count + 1))
-        default: break
-        }
-        return .object(receipt)
-    }
 }

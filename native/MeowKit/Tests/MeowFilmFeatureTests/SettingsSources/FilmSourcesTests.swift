@@ -9,7 +9,8 @@ final class FilmSourcesTests: XCTestCase {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
-        let owner = FilmSourceService(transport: runtime.transport, storeFactory: { store })
+        let owner = FilmSourceService(transport: runtime.transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            runtimeSourceRoot: base.appendingPathComponent("cat"))
         return (owner, base, store)
     }
 
@@ -52,7 +53,8 @@ final class FilmSourcesTests: XCTestCase {
             defer { try? FileManager.default.removeItem(at: base) }
             let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
             let owner = FilmSourceService(transport: unavailableCatTransport("HOST_UNAVAILABLE"),
-                storeFactory: { store })
+                storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            runtimeSourceRoot: base.appendingPathComponent("cat"))
             let stream = await owner.snapshots()
             var iterator = stream.makeAsyncIterator()
             let initial = await iterator.next()
@@ -80,51 +82,26 @@ final class FilmSourcesTests: XCTestCase {
         await owner.close()
     }
 
-    func testLocalAndNetworkImportsEnableByDefaultAndKeepCandidateRevisionSeparate() async throws {
+    func testNewLocalAndNetworkIntentSaveWithoutHTTPInstallOrDownload() async throws {
         let runtime = SourcesRuntimeFixture()
         let (owner, base, _) = try makeOwner(runtime)
         defer { try? FileManager.default.removeItem(at: base) }
-        let source = "// 中文\n" + String(repeating: "x", count: 65_537)
-        let local = try await owner.importLocal(name: "Local", source: source, installationId: "local")
-        XCTAssertTrue(local.enabled)
+        let local = try await owner.importLocal(name: "Local", source: "// 中文\nmodule.exports = {}", installationId: "local")
+        let network = try await owner.importNetwork(name: "Network", sourceURL: "https://example.invalid/source.js", installationId: "network")
+        XCTAssertTrue(local.enabled && network.enabled)
         XCTAssertEqual(local.sourceType, "local")
         XCTAssertNil(local.sourceUrl)
-        let uploads = await runtime.uploads
-        let upload = try XCTUnwrap(uploads.first)
-        XCTAssertEqual(uploads.count, 1)
-        XCTAssertEqual(upload.0, "local")
-        XCTAssertEqual(upload.2, Data(source.utf8))
-        let requests = await runtime.requests
-        let install = try XCTUnwrap(requests.first { $0.0 == "install" }?.1)
-        XCTAssertEqual(install, .object(["installationId": .string("local"), "name": .string("Local"),
-            "sourceType": .string("local"), "sourceUrl": .null, "enabled": .bool(true),
-            "sourceRevision": .number(Double(upload.1))]))
-        let updated = try await owner.updateCat("local", source: "// replacement")
-        XCTAssertEqual(updated.sourceType, "local")
-        let updatedUploads = await runtime.uploads
-        XCTAssertEqual(updatedUploads.count, 2)
-        let updateRequests = await runtime.requests
-        XCTAssertEqual(updateRequests.first { $0.0 == "update" }?.1,
-            .object(["installationId": .string("local"), "sourceRevision": .number(Double(updatedUploads[1].1))]))
-        let network = try await owner.importNetwork(name: "Network", sourceURL: "https://example.invalid/source.js", installationId: "network")
-        XCTAssertTrue(network.enabled)
         XCTAssertEqual(network.sourceType, "network")
-        _ = try await owner.editCat("network", name: "Edited", sourceURL: "https://example.invalid/edited.js")
-        _ = try await owner.updateCat("network")
-        let finalRequests = await runtime.requests
-        XCTAssertEqual(finalRequests.first { $0.0 == "import" }?.1,
-            .object(["installationId": .string("network"), "name": .string("Network"),
-                "sourceUrl": .string("https://example.invalid/source.js"), "enabled": .bool(true)]))
-        XCTAssertEqual(finalRequests.first { $0.0 == "edit" }?.1,
-            .object(["installationId": .string("network"), "name": .string("Edited"),
-                "sourceUrl": .string("https://example.invalid/edited.js")]))
-        XCTAssertEqual(finalRequests.last { $0.0 == "update" }?.1, .object(["installationId": .string("network")]))
-        let finalUploads = await runtime.uploads
-        XCTAssertEqual(finalUploads.count, 2, "Network imports and updates download inside the runtime")
+        XCTAssertEqual(local.inputRevision, 1)
+        XCTAssertEqual(network.inputRevision, 1)
+        XCTAssertEqual(local.generation, 0)
+        XCTAssertEqual(network.generation, 0)
+        let calls = await runtime.calls
+        XCTAssertTrue(calls.isEmpty, "Native source intent saves cannot install, upload, or download")
         await owner.close()
     }
 
-    func testOptionsOrderingTombstonesAndExplicitReimportAreLocalAndDurable() async throws {
+    func testOptionsOrderingAndTombstonesSurviveNativeSourceEditsAndReopen() async throws {
         let runtime = SourcesRuntimeFixture()
         let (owner, base, store) = try makeOwner(runtime)
         defer { try? FileManager.default.removeItem(at: base) }
@@ -142,21 +119,22 @@ final class FilmSourcesTests: XCTestCase {
         snapshot = await owner.snapshot
         XCTAssertEqual(snapshot.videos.map(\.key), [b])
         let rebuilt = FilmSourceService(transport: runtime.transport,
-            storeFactory: { store })
+            storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await rebuilt.initialize()
         let restored = await rebuilt.snapshot
         XCTAssertEqual(restored.videos, snapshot.videos)
         XCTAssertEqual(restored.cats.map(\.generation), [0, 0])
         try await rebuilt.refresh()
-        _ = try await rebuilt.importNetwork(name: "A", sourceURL: "https://example.invalid/a.js", installationId: "a")
+        _ = try await rebuilt.editCat("a", name: "A", sourceURL: "https://example.invalid/a.js")
         let imported = await rebuilt.snapshot
-        XCTAssertEqual(Set(imported.videos.map(\.key)), Set([a, b]))
+        XCTAssertEqual(imported.videos.map(\.key), [b], "Source intent edits cannot restore deleted video sources")
         XCTAssertEqual(imported.videos.first { $0.key == b }?.options,
             .init(enabled: false, homeVisible: false, searchEnabled: false, aggregateImages: true))
         await owner.close(); await rebuilt.close()
     }
 
-    func testFailedAndStartingReimportsDoNotRestoreDeletedVideos() async throws {
+    func testFailedAndStartingActualLoadsDoNotUndoSavedIntentOrRestoreDeletedVideos() async throws {
         let runtime = SourcesRuntimeFixture()
         let (owner, base, _) = try makeOwner(runtime)
         defer { try? FileManager.default.removeItem(at: base) }
@@ -165,10 +143,10 @@ final class FilmSourcesTests: XCTestCase {
         try await owner.deleteVideo(key)
         for state in ["failed", "starting"] {
             await runtime.setState(state, id: "a")
-            do {
-                _ = try await owner.importNetwork(name: "A", sourceURL: "https://example.invalid/a.js", installationId: "a")
-                XCTFail("A non-ready import cannot restore tombstones")
-            } catch let error as FilmSourceError { XCTAssertEqual(error.code, "IMPORT_FAILED") }
+            try await owner.refresh()
+            let saved = try await owner.editCat("a", name: "Saved \(state)")
+            XCTAssertEqual(saved.name, "Saved \(state)")
+            XCTAssertEqual(saved.state, state)
             let snapshot = await owner.snapshot
             XCTAssertFalse(snapshot.videos.contains { $0.key == key })
             XCTAssertEqual(snapshot.cats.first { $0.installationId == "a" }?.sites.count, 1)
@@ -176,7 +154,7 @@ final class FilmSourcesTests: XCTestCase {
         await owner.close()
     }
 
-    func testReimportRestoresOnlyReadyReceiptSitesForItsOwnParent() async throws {
+    func testIntentReplacementAndLaterReadyStatusCannotRestoreOwnOrOtherParentTombstones() async throws {
         let runtime = SourcesRuntimeFixture()
         let (owner, base, _) = try makeOwner(runtime)
         defer { try? FileManager.default.removeItem(at: base) }
@@ -192,14 +170,14 @@ final class FilmSourcesTests: XCTestCase {
         try await owner.deleteVideo(a)
         try await owner.deleteVideo(other)
         try await owner.deleteVideo(b)
-        await runtime.setCat(SourcesRuntimeFixture.cat("a"))
-        _ = try await owner.importNetwork(name: "A", sourceURL: "https://example.invalid/a.js", installationId: "a")
-        var snapshot = await owner.snapshot
-        XCTAssertEqual(snapshot.videos.map(\.key), [a])
-        await runtime.setCat(.object(full))
+        _ = try await owner.editCat("a", name: "Replacement", sourceURL: "https://example.invalid/replacement.js")
+        let document = try sourceTestSettings(base)
+        try await runtime.acceptNativeSettings(document)
         try await owner.refresh()
-        snapshot = await owner.snapshot
-        XCTAssertEqual(snapshot.videos.map(\.key), [a], "Absent imported site remains deleted on later ordinary sync")
+        let snapshot = await owner.snapshot
+        XCTAssertTrue(snapshot.videos.isEmpty)
+        XCTAssertEqual(snapshot.cats.first { $0.installationId == "a" }?.inputRevision, 2)
+        XCTAssertTrue(try XCTUnwrap(snapshot.cats.first { $0.installationId == "a" }).canDetect)
         await owner.close()
     }
 
@@ -250,85 +228,81 @@ final class FilmSourcesTests: XCTestCase {
         await owner.close()
     }
 
-    func testCommittedManagementFailureReconcilesStatusWithoutRestoringTombstone() async throws {
-        for operation in ["update", "import"] {
-            let runtime = SourcesRuntimeFixture()
-            let (owner, base, store) = try makeOwner(runtime)
-            defer { try? FileManager.default.removeItem(at: base) }
-            try await owner.refresh()
-            let key = FilmSourceKey(installationId: "a", siteKey: "same")
-            try await owner.deleteVideo(key)
-            let before = try store.read(key: FilmSourceService.documentKey)
-            await runtime.failAfterCommit(operation, code: "COMMIT_UNKNOWN")
-            do {
-                if operation == "update" { _ = try await owner.updateCat("a") }
-                else { _ = try await owner.importNetwork(name: "Committed", sourceURL: "https://example.invalid/committed.js", installationId: "a") }
-                XCTFail("A committed error remains an error")
-            } catch let error as FilmSourceError { XCTAssertEqual(error.code, "COMMIT_UNKNOWN") }
-            let snapshot = await owner.snapshot
-            let cat = try XCTUnwrap(snapshot.cats.first { $0.installationId == "a" })
-            if operation == "update" {
-                XCTAssertEqual(cat.sourceHash, "committed-hash")
-                XCTAssertEqual(cat.updateState, "updated")
-            } else {
-                XCTAssertEqual(cat.name, "Committed")
-                XCTAssertEqual(cat.sourceUrl, "https://example.invalid/committed.js")
-            }
-            XCTAssertFalse(snapshot.videos.contains { $0.key == key }, "A failed import has no successful restore receipt")
-            XCTAssertNotEqual(try store.read(key: FilmSourceService.documentKey), before)
-            let calls = await runtime.calls
-            XCTAssertEqual(Array(calls.suffix(2)), [operation, "status"])
-            await owner.close()
-            let rebuilt = FilmSourceService(transport: runtime.transport, storeFactory: { store })
-            try await rebuilt.initialize()
-            let restored = await rebuilt.snapshot
-            XCTAssertEqual(restored.cats.first { $0.installationId == "a" }?.sourceHash, cat.sourceHash)
-            XCTAssertEqual(restored.cats.first { $0.installationId == "a" }?.name, cat.name)
-            XCTAssertFalse(restored.videos.contains { $0.key == key })
-            await rebuilt.close()
-        }
-    }
-
-    func testMalformedImportReceiptReconcilesCommittedStatusWithoutRestoringTombstone() async throws {
+    func testCommittedNetworkUpdateFailureReconcilesFactsWithoutRestoringTombstone() async throws {
         let runtime = SourcesRuntimeFixture()
         let (owner, base, store) = try makeOwner(runtime)
         defer { try? FileManager.default.removeItem(at: base) }
         try await owner.refresh()
         let key = FilmSourceKey(installationId: "a", siteKey: "same")
         try await owner.deleteVideo(key)
-        await runtime.returnNext("import", value: .object(["instances": .array([SourcesRuntimeFixture.cat("a")])]))
-        do {
-            _ = try await owner.importNetwork(name: "Committed", sourceURL: "https://example.invalid/committed.js", installationId: "a")
-            XCTFail("Import must return its instance directly")
-        } catch let error as FilmSourceError { XCTAssertEqual(error.code, "INVALID_RESPONSE") }
+        let before = try store.read(key: FilmSourceService.documentKey)
+        await runtime.failAfterCommit("update", code: "COMMIT_UNKNOWN")
+        do { _ = try await owner.updateCat("a"); XCTFail("A committed error remains an error") }
+        catch let error as FilmSourceError { XCTAssertEqual(error.code, "COMMIT_UNKNOWN") }
         let snapshot = await owner.snapshot
-        XCTAssertEqual(snapshot.cats.first { $0.installationId == "a" }?.name, "Committed")
+        let cat = try XCTUnwrap(snapshot.cats.first { $0.installationId == "a" })
+        XCTAssertEqual(cat.sourceHash, "committed-hash")
+        XCTAssertEqual(cat.updateState, "updated")
+        XCTAssertEqual(cat.inputRevision, 1)
         XCTAssertFalse(snapshot.videos.contains { $0.key == key })
+        XCTAssertNotEqual(try store.read(key: FilmSourceService.documentKey), before)
         let calls = await runtime.calls
-        XCTAssertEqual(Array(calls.suffix(2)), ["import", "status"])
+        XCTAssertEqual(Array(calls.suffix(2)), ["update", "status"])
         await owner.close()
-        let rebuilt = FilmSourceService(transport: unavailableCatTransport("OFFLINE"), storeFactory: { store })
+        let rebuilt = FilmSourceService(transport: unavailableCatTransport("OFFLINE"), storeFactory: { store },
+            settingsDocument: try sourceTestSettings(base), runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await rebuilt.initialize()
         let restored = await rebuilt.snapshot
-        XCTAssertEqual(restored.cats.first { $0.installationId == "a" }?.name, "Committed")
+        XCTAssertEqual(restored.cats.first { $0.installationId == "a" }?.sourceHash, cat.sourceHash)
+        XCTAssertEqual(restored.cats.first { $0.installationId == "a" }?.name, cat.name)
         XCTAssertFalse(restored.videos.contains { $0.key == key })
         await rebuilt.close()
     }
 
-    func testNewDeletionWinsAgainstInFlightReimport() async throws {
+    func testMalformedStatusCannotOverwriteSavedIntentOrRestoreTombstone() async throws {
+        let runtime = SourcesRuntimeFixture()
+        let (owner, base, store) = try makeOwner(runtime)
+        defer { try? FileManager.default.removeItem(at: base) }
+        try await owner.refresh()
+        let key = FilmSourceKey(installationId: "a", siteKey: "same")
+        try await owner.deleteVideo(key)
+        _ = try await owner.editCat("a", name: "Committed", sourceURL: "https://example.invalid/committed.js")
+        await runtime.returnNext("status", value: .object(["instances": .array([.object(["installationId": .string("a")])])]))
+        do { try await owner.refresh(); XCTFail("Malformed status") }
+        catch let error as FilmSourceError { XCTAssertEqual(error.code, "INVALID_RESPONSE") }
+        let snapshot = await owner.snapshot
+        XCTAssertEqual(snapshot.cats.first { $0.installationId == "a" }?.name, "Committed")
+        XCTAssertEqual(snapshot.cats.first { $0.installationId == "a" }?.inputRevision, 2)
+        XCTAssertFalse(snapshot.videos.contains { $0.key == key })
+        await owner.close()
+        let rebuilt = FilmSourceService(transport: unavailableCatTransport("OFFLINE"), storeFactory: { store },
+            settingsDocument: try sourceTestSettings(base), runtimeSourceRoot: base.appendingPathComponent("cat"))
+        try await rebuilt.initialize()
+        let restored = await rebuilt.snapshot
+        XCTAssertEqual(restored.cats.first { $0.installationId == "a" }?.name, "Committed")
+        XCTAssertEqual(restored.cats.first { $0.installationId == "a" }?.sourceUrl, "https://example.invalid/committed.js")
+        XCTAssertFalse(restored.videos.contains { $0.key == key })
+        await rebuilt.close()
+    }
+
+    func testNativeSourceEditAndNewDeletionDoNotWaitForInFlightRuntimeStatus() async throws {
         let runtime = SourcesRuntimeFixture()
         let (owner, base, _) = try makeOwner(runtime)
         defer { try? FileManager.default.removeItem(at: base) }
         try await owner.refresh()
         let key = FilmSourceKey(installationId: "a", siteKey: "same")
-        await runtime.pause("import")
-        let importing = Task { try await owner.importNetwork(name: "A", sourceURL: "https://example.invalid/a.js", installationId: "a") }
+        await runtime.pause("status")
+        let refreshing = Task { try await owner.refresh() }
         await runtime.waitUntilPaused()
+        _ = try await owner.editCat("a", name: "Saved", sourceURL: "https://example.invalid/new.js")
         try await owner.deleteVideo(key)
         await runtime.release()
-        _ = try await importing.value
+        try await refreshing.value
         let snapshot = await owner.snapshot
         XCTAssertFalse(snapshot.videos.contains { $0.key == key })
+        XCTAssertEqual(snapshot.cats.first { $0.installationId == "a" }?.inputRevision, 2)
+        XCTAssertEqual(snapshot.cats.first { $0.installationId == "a" }?.name, "Saved")
+        XCTAssertEqual(snapshot.cats.first { $0.installationId == "a" }?.generation, 0)
         await owner.close()
     }
 
@@ -372,7 +346,8 @@ final class FilmSourcesTests: XCTestCase {
         XCTAssertEqual(invocations[2].1, .object(["id": .string("v1"), "vod_id": .string("v1")]))
         XCTAssertEqual(invocations[3].1, .object(["flag": .string("线路"), "id": .string("episode"), "siteApi": .string("/api/a")]))
         XCTAssertEqual(invocations[4].1, .object(["wd": .string("斗破"), "page": .number(1)]))
-        let rebuilt = FilmSourceService(transport: unavailableCatTransport("OFFLINE"), storeFactory: { store })
+        let rebuilt = FilmSourceService(transport: unavailableCatTransport("OFFLINE"), storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await rebuilt.initialize()
         let snapshot = await rebuilt.snapshot
         XCTAssertEqual(snapshot.videos.first { $0.key == key }?.options, options)
@@ -410,8 +385,8 @@ final class FilmSourcesTests: XCTestCase {
         }
     }
 
-    func testPrepareShutdownDrainsAdmittedUploadAndManagementRequest() async throws {
-        for operation in ["upload", "install"] {
+    func testPrepareShutdownDrainsAdmittedNetworkUpdateAndStatusRequest() async throws {
+        for operation in ["update", "status"] {
             let runtime = SourcesRuntimeFixture()
             let (owner, base, store) = try makeOwner(runtime)
             defer { try? FileManager.default.removeItem(at: base) }
@@ -419,7 +394,7 @@ final class FilmSourcesTests: XCTestCase {
             let before = await owner.snapshot
             let bytes = try store.read(key: FilmSourceService.documentKey)
             await runtime.pause(operation)
-            let importing = Task { try await owner.importLocal(name: "Replacement", source: "source", installationId: "a") }
+            let importing = Task { try await owner.updateCat("a") }
             await runtime.waitUntilPaused()
             let prepared = expectation(description: "Shutdown drained \(operation)")
             prepared.isInverted = true
@@ -427,7 +402,7 @@ final class FilmSourcesTests: XCTestCase {
             await runtime.waitUntilCancelled()
             await fulfillment(of: [prepared], timeout: 0.05)
             let admittedCalls = await runtime.calls
-            XCTAssertEqual(admittedCalls.filter { $0 == operation }.count, 1)
+            XCTAssertEqual(admittedCalls.filter { $0 == operation }.count, operation == "status" ? 2 : 1)
             await runtime.release()
             do { _ = try await importing.value; XCTFail("Cancelled import cannot publish") }
             catch { XCTAssertTrue(error is CancellationError, "\(error)") }
@@ -436,8 +411,8 @@ final class FilmSourcesTests: XCTestCase {
             XCTAssertEqual(snapshot, before)
             XCTAssertEqual(try store.read(key: FilmSourceService.documentKey), bytes)
             let calls = await runtime.calls
-            XCTAssertEqual(calls.filter { $0 == "status" }.count, 1, "Cancellation must not admit reconciliation work")
-            XCTAssertEqual(calls.filter { $0 == "install" }.count, operation == "install" ? 1 : 0)
+            XCTAssertEqual(calls.filter { $0 == "status" }.count, operation == "status" ? 2 : 1, "Cancellation must not admit reconciliation work")
+            XCTAssertEqual(calls.filter { $0 == "update" }.count, 1)
             try await owner.resume()
             try await owner.refresh()
             await owner.close()
@@ -489,12 +464,9 @@ actor SourcesRuntimeFixture {
     private var committedFailures: [String: String] = [:]
     private var nextResults: [String: RuntimeValue] = [:]
     var requests: [(String, RuntimeValue)] = []
-    var uploads: [(String, Int, Data)] = []
-    private var candidates: [String: Int] = [:]
 
     nonisolated var transport: CatScriptTransport {
-        CatScriptTransport(request: { operation, params in try await self.request(operation, params) },
-            upload: { id, revision, source in try await self.upload(id, revision, source) })
+        CatScriptTransport(request: { operation, params in try await self.request(operation, params) })
     }
     func failNext(_ operation: String, code: String) { nextFailures[operation] = code }
     func failAfterCommit(_ operation: String, code: String) { committedFailures[operation] = code }
@@ -530,7 +502,7 @@ actor SourcesRuntimeFixture {
         .object(["installationId": .string(id), "name": .string(id.uppercased()), "sourceType": .string("network"),
             "sourceUrl": .string("https://example.invalid/\(id).js"), "enabled": .bool(enabled),
             "importedAt": .number(100), "updatedAt": .null, "updateState": .string("idle"), "updateError": .null,
-            "generation": .number(Double(generation)), "state": .string(state), "sourceHash": .string("hash"), "error": .null,
+            "inputRevision": .number(1), "generation": .number(Double(generation)), "state": .string(state), "sourceHash": .string("hash"), "error": .null,
             "sites": state == "ready" ? .array([.object(["key": .string("same"), "name": .string("站点"),
                 "api": .string("/api/\(id)"), "actions": .array(["home", "category", "detail", "play", "search"].map(RuntimeValue.string)),
                 "methods": .object(["home": .string("GET"), "play": .string("POST")])])]) : .array([])])
@@ -557,14 +529,18 @@ actor SourcesRuntimeFixture {
         }
     }
 
-    func upload(_ id: String, _ revision: Int, _ source: Data) async throws -> RuntimeValue {
-        calls.append("upload")
-        uploads.append((id, revision, source))
-        await suspendIfNeeded("upload")
-        if let code = nextFailures.removeValue(forKey: "upload") { throw RuntimeHTTPError.remote(code) }
-        candidates[id] = revision
-        return .object(["installationId": .string(id), "sourceRevision": .number(Double(revision)),
-            "sourceBytes": .number(Double(source.count)), "contentHash": .string("fixture-content")])
+    func acceptNativeSettings(_ document: FilmSettingsDocument) throws {
+        cats = try CatSourceSettings(document: document).read().map { input in
+            let old = cats.first { $0.catField("installationId") == .string(input.installationId) }
+            guard case .object(var fields) = old ?? Self.cat(input.installationId) else { preconditionFailure("Fixture") }
+            for (key, value) in ["name": RuntimeValue.string(input.name), "sourceType": .string(input.sourceType),
+                "sourceUrl": input.sourceUrl.map(RuntimeValue.string) ?? .null, "enabled": .bool(input.enabled),
+                "inputRevision": .number(Double(input.inputRevision)), "state": .string(input.enabled ? "ready" : "disabled")] {
+                fields[key] = value
+            }
+            if input.sourceType == "local" { fields["sourceHash"] = input.localHash.map(RuntimeValue.string) ?? .null }
+            return .object(fields)
+        }
     }
 
     func request(_ operation: String, _ params: RuntimeValue) async throws -> RuntimeValue {
@@ -577,23 +553,12 @@ actor SourcesRuntimeFixture {
         switch operation {
         case "status": result = .object(["instances": .array(cats)])
         case "start": result = .object([:])
-        case "install", "import", "edit", "update", "restart":
+        case "update", "restart":
             var cat = cats.first { $0.catField("installationId") == .string(id) } ?? Self.cat(id)
-            if operation == "install" || (operation == "update" && cat.catField("sourceType") == .string("local")) {
-                guard params.catField("sourceRevision")?.catInteger == candidates[id], candidates[id] != nil else {
-                    throw RuntimeHTTPError.remote("NOT_FOUND")
-                }
-                candidates[id] = nil
-            }
-            if operation == "update", cat.catField("sourceType") == .string("network"), params.catField("sourceRevision") != nil {
-                throw RuntimeHTTPError.remote("INVALID_ARGUMENT")
-            }
             if case .object(var fields) = cat {
                 for field in ["name", "sourceUrl", "enabled"] {
                     if let value = params.catField(field) { fields[field] = value }
                 }
-                if operation == "install" { fields["sourceType"] = .string("local") }
-                if operation == "import" { fields["sourceType"] = .string("network") }
                 if operation == "update", committedFailures[operation] != nil {
                     fields["sourceHash"] = .string("committed-hash")
                     fields["updateState"] = .string("updated")
@@ -603,12 +568,6 @@ actor SourcesRuntimeFixture {
             }
             setCat(cat)
             result = cat
-        case "enable":
-            let enabled = params.catField("enabled") == .bool(true)
-            let cat = Self.cat(id, state: enabled ? "ready" : "disabled", enabled: enabled)
-            cats[cats.firstIndex { $0.catField("installationId") == .string(id) }!] = cat
-            result = cat
-        case "uninstall": cats.removeAll { $0.catField("installationId") == .string(id) }; result = .object([:])
         case "invoke":
             invocationSiteKeys.append(params.catField("siteId")!.catText!)
             let action = params.catField("operation")!.catText!
@@ -635,6 +594,5 @@ actor SourcesRuntimeFixture {
 }
 
 func unavailableCatTransport(_ code: String) -> CatScriptTransport {
-    CatScriptTransport(request: { _, _ in throw FilmSourceError(code: code) },
-        upload: { _, _, _ in throw FilmSourceError(code: code) })
+    CatScriptTransport(request: { _, _ in throw FilmSourceError(code: code) })
 }

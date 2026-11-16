@@ -2,21 +2,21 @@ import Foundation
 import MeowRuntime
 
 struct FilmSourceDocument: Codable {
-    var version = 1
+    var version = 2
     var cats: [StoredFilmCat] = []
     var videos: [FilmVideoSource] = []
     var deleted: [FilmSourceKey] = []
 
     func validate() throws {
         let ids = Set(cats.map(\.installationId))
-        guard version == 1, ids.count == cats.count,
+        guard [1, 2].contains(version), ids.count == cats.count,
               cats.allSatisfy({ cat in !cat.installationId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-                  ["local", "network"].contains(cat.sourceType) &&
+                  cat.inputRevision >= 0 && cat.inputRevision <= 9_007_199_254_740_991 &&
                   Set(cat.sites.map { $0.identity(installationId: cat.installationId) }).count == cat.sites.count &&
                   cat.sites.allSatisfy({ !$0.key.isEmpty }) }),
               Set(videos.map(\.key)).count == videos.count,
               videos.allSatisfy({ ids.contains($0.key.installationId) && !$0.key.siteKey.isEmpty }),
-              deleted.allSatisfy({ ids.contains($0.installationId) }),
+              deleted.allSatisfy({ !$0.installationId.isEmpty && !$0.siteKey.isEmpty }),
               videos.allSatisfy({ !deleted.contains($0.key) }),
               videos.filter({ $0.options.aggregateImages }).count <= 1 else {
             throw FilmSourceError(code: "INVALID_DOCUMENT")
@@ -24,13 +24,10 @@ struct FilmSourceDocument: Codable {
     }
 }
 
-/// Persist only Node management metadata, never port, generation or script bytes.
+/// Read-only installation/probe metadata. No editable intent or script bytes.
 struct StoredFilmCat: Codable {
     let installationId: String
-    let name: String
-    let sourceType: String
-    let sourceUrl: String?
-    let enabled: Bool
+    let inputRevision: Int64
     let importedAt: Int64?
     let updatedAt: Int64?
     let updateState: String
@@ -39,17 +36,36 @@ struct StoredFilmCat: Codable {
     let sites: [FilmSourceSite]
 
     init(_ cat: FilmCatSource) {
-        installationId = cat.installationId; name = cat.name; sourceType = cat.sourceType
-        sourceUrl = cat.sourceUrl; enabled = cat.enabled; importedAt = cat.importedAt
+        installationId = cat.installationId; inputRevision = cat.inputRevision; importedAt = cat.importedAt
         updatedAt = cat.updatedAt; updateState = cat.updateState; updateError = cat.updateError
         sourceHash = cat.sourceHash; sites = cat.sites
     }
 
-    var snapshot: FilmCatSource {
-        FilmCatSource(installationId: installationId, name: name, sourceType: sourceType,
-            sourceUrl: sourceUrl, enabled: enabled, importedAt: importedAt, updatedAt: updatedAt,
-            updateState: updateState, updateError: updateError, generation: 0,
-            state: enabled ? "stopped" : "disabled", sourceHash: sourceHash, error: nil, sites: sites)
+    private enum CodingKeys: String, CodingKey {
+        case installationId, inputRevision, importedAt, updatedAt, updateState, updateError, sourceHash, sites
+    }
+
+    init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        installationId = try fields.decode(String.self, forKey: .installationId)
+        // A version-1 display cache has no native input revision. It cannot
+        // authorize a live generation or act as a source configuration.
+        inputRevision = try fields.decodeIfPresent(Int64.self, forKey: .inputRevision) ?? 0
+        importedAt = try fields.decodeIfPresent(Int64.self, forKey: .importedAt)
+        updatedAt = try fields.decodeIfPresent(Int64.self, forKey: .updatedAt)
+        updateState = try fields.decode(String.self, forKey: .updateState)
+        updateError = try fields.decodeIfPresent(String.self, forKey: .updateError)
+        sourceHash = try fields.decodeIfPresent(String.self, forKey: .sourceHash)
+        sites = try fields.decode([FilmSourceSite].self, forKey: .sites)
+    }
+
+    func snapshot(_ input: CatSourceConfiguration) -> FilmCatSource {
+        let current = inputRevision == input.inputRevision
+        return FilmCatSource(installationId: installationId, name: input.name, sourceType: input.sourceType,
+            sourceUrl: input.sourceUrl, enabled: input.enabled, importedAt: importedAt, updatedAt: updatedAt,
+            updateState: current ? updateState : "idle", updateError: current ? updateError : nil, generation: 0,
+            state: input.enabled ? "stopped" : "disabled", sourceHash: sourceHash, error: nil, sites: sites,
+            inputRevision: input.inputRevision)
     }
 }
 
@@ -59,6 +75,7 @@ func parseFilmCat(_ value: RuntimeValue) throws -> FilmCatSource {
         let timestamps = [cat.importedAt, cat.updatedAt].compactMap { $0 }
         guard !cat.installationId.isEmpty, !cat.name.isEmpty, ["local", "network"].contains(cat.sourceType),
               cat.generation >= 0, cat.generation <= 9_007_199_254_740_991,
+              cat.inputRevision > 0, cat.inputRevision <= 9_007_199_254_740_991,
               timestamps.allSatisfy({ $0 >= 0 && $0 <= 9_007_199_254_740_991 }),
               cat.sites.allSatisfy({ !$0.key.isEmpty }), Set(cat.sites.map { $0.identity(installationId: cat.installationId) }).count == cat.sites.count else {
             throw FilmSourceError(code: "INVALID_RESPONSE")

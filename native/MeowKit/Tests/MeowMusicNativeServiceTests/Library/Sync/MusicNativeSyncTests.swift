@@ -38,11 +38,11 @@ import MeowMusicFeature
         ])
         let service = try await NativeMusicFixture.service(NativeSyncFixture.store(), accounts: MultiPlatformSyncPeer([.netease: a, .qq: b]))
         let initial = try await service.automaticLibrarySyncPreferences()
-        _ = try await service.saveAutomaticLibrarySync(.init(revision: initial.revision,
-            selections: [.init(platform: .netease, favorites: true)]), requestID: UUID(), authorization: .init())
+        _ = try await (service.saveAutomaticLibrarySync(.init(revision: initial.revision,
+            selections: [.init(platform: .netease, favorites: true)]), requestID: UUID(), authorization: .init())).synchronization.value.get()
         let enabled = try await service.automaticLibrarySyncPreferences()
-        _ = try await service.saveAutomaticLibrarySync(.init(revision: enabled.revision),
-            requestID: UUID(), authorization: .init())
+        _ = try await (service.saveAutomaticLibrarySync(.init(revision: enabled.revision),
+            requestID: UUID(), authorization: .init())).synchronization.value.get()
         let lists = try await service.collections(), favorites = try XCTUnwrap(lists.first { $0.kind == "favorites" })
         _ = try await service.editPlaylist(favorites, name: nil, refs: [], order: nil)
 
@@ -57,8 +57,8 @@ import MeowMusicFeature
         XCTAssertTrue(bCalls.isEmpty); XCTAssertTrue(aBefore.isEmpty)
 
         let off = try await service.automaticLibrarySyncPreferences()
-        _ = try await service.saveAutomaticLibrarySync(.init(revision: off.revision,
-            selections: [.init(platform: .netease, favorites: true)]), requestID: UUID(), authorization: .init())
+        _ = try await (service.saveAutomaticLibrarySync(.init(revision: off.revision,
+            selections: [.init(platform: .netease, favorites: true)]), requestID: UUID(), authorization: .init())).synchronization.value.get()
         let aContents = await a.contents(), aCalls = await a.calls()
         XCTAssertEqual(aContents[0].members.map(\.nativeID), ["101"])
         XCTAssertEqual(aCalls.map(\.action), [.remove])
@@ -275,11 +275,11 @@ import MeowMusicFeature
         ])
         let service = try await NativeMusicFixture.service(store, accounts: peer)
         let initial = try await service.automaticLibrarySyncPreferences()
-        _ = try await service.saveAutomaticLibrarySync(.init(revision: initial.revision,
-            selections: [.init(platform: .netease, favorites: true)]), requestID: UUID(), authorization: .init())
+        _ = try await (service.saveAutomaticLibrarySync(.init(revision: initial.revision,
+            selections: [.init(platform: .netease, favorites: true)]), requestID: UUID(), authorization: .init())).synchronization.value.get()
         let enabled = try await service.automaticLibrarySyncPreferences()
-        _ = try await service.saveAutomaticLibrarySync(.init(revision: enabled.revision),
-            requestID: UUID(), authorization: .init())
+        _ = try await (service.saveAutomaticLibrarySync(.init(revision: enabled.revision),
+            requestID: UUID(), authorization: .init())).synchronization.value.get()
         let collections = try await service.collections(), favorites = try XCTUnwrap(collections.first { $0.kind == "favorites" })
         _ = try await service.editPlaylist(favorites, name: nil, refs: try await NativeSyncFixture.refs([b], service: service), order: nil)
         let aID = try await NativeSyncFixture.refs([a], service: service)[0].id
@@ -294,8 +294,8 @@ import MeowMusicFeature
         XCTAssertEqual(after.0, before.0); XCTAssertEqual(after.1, before.1)
         XCTAssertEqual(untouched[0].members.map(\.nativeID), ["101", "102"]); XCTAssertTrue(noWrites.isEmpty)
         let off = try await cold.automaticLibrarySyncPreferences()
-        _ = try await cold.saveAutomaticLibrarySync(.init(revision: off.revision,
-            selections: [.init(platform: .netease, favorites: true)]), requestID: UUID(), authorization: .init())
+        _ = try await (cold.saveAutomaticLibrarySync(.init(revision: off.revision,
+            selections: [.init(platform: .netease, favorites: true)]), requestID: UUID(), authorization: .init())).synchronization.value.get()
         let contents = await peer.contents(), calls = await peer.calls()
         XCTAssertEqual(contents[0].members.map(\.nativeID), ["102"])
         XCTAssertEqual(calls.map(\.action), [.remove]); XCTAssertEqual(calls[0].members.map(\.nativeID), ["101"])

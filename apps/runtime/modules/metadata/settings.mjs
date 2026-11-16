@@ -48,16 +48,17 @@ function validate(id, value) {
   return result;
 }
 
-/** The runtime owns this document. The native host supplies a private data root,
- * not a second settings database. PrivateDocuments is atomic, not encryption. */
-export function createMetadataSettings(dataRoot, id) {
-  const documents = new PrivateDocuments(dataRoot, id);
+/** Native assembly supplies a read capability; standalone assembly owns its
+ * document. PrivateDocuments is atomic storage, not encryption. */
+export function createMetadataSettings(dataRoot, id, nativeSettings) {
+  const documents = nativeSettings ? null : new PrivateDocuments(dataRoot, id);
   let snapshot, reload = false;
   const revision = value => createHash('sha256').update(JSON.stringify([id,
     Object.keys(defaults[id]).map(key => [key, value[key]])])).digest('hex');
   const same = (left, right) => Object.keys(defaults[id]).every(key => left[key] === right[key]);
   function load() {
     try {
+      if (nativeSettings) return validate(id, nativeSettings.read(id)?.settings ?? defaults[id]);
       const bytes = documents.read('settings.json');
       if (bytes === null) return { ...defaults[id] };
       // NodeMobile omits ICU, which fatal TextDecoder requires. Validate bytes
@@ -86,8 +87,10 @@ export function createMetadataSettings(dataRoot, id) {
   }
   return {
     read,
+    invalidate() { reload = true; },
     get: () => visible(read()),
     update(patch) {
+      if (nativeSettings) throw metadataFailure('PERMISSION_DENIED');
       if (!object(patch) || Object.keys(patch).some(key => !Object.hasOwn(defaults[id], key))) {
         throw metadataFailure('INVALID_REQUEST');
       }

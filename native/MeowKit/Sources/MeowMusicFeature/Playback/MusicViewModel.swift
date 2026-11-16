@@ -514,7 +514,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
                 beginPlaybackMetadata(); metadataState.lyricLines = []; metadataState.lyricState = "disabled"
             }
             else if let current, candidate?.occurrenceId == current.id {
-                await loadLyrics(occurrenceId: current.id)
+                beginPlaybackMetadata(refreshSources: true)
             }
         } catch {
             let failure = error as? MusicServiceError ?? MusicServiceError.sanitized(error)

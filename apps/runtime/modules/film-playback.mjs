@@ -4,14 +4,16 @@ import { createPlaybackCache, createPlaybackLibrary, createMediaService, createP
   fail, object, requireValue } from '@meowfilm/film-playback';
 
 /** App-owned business module, borrowing already-assembled provider owners. */
-export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now }) {
+export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, nativeSettings }) {
   requireValue(Array.isArray(modules));
   const owners = new Map(modules.map(module => [module.id, module]));
   const cache = createPlaybackCache({ now });
-  const library = createPlaybackLibrary({ dataRoot });
+  const library = createPlaybackLibrary({ dataRoot, ...(nativeSettings ? {
+    nativePreferences: () => nativeSettings.read('film.preferences')?.preferences ?? {}
+  } : {}) });
   const media = createMediaService();
   const data = createPlaybackData({ modules: owners, cache, now, dataRoot });
-  const rules = createFilmRulesService({ dataRoot });
+  const rules = createFilmRulesService({ dataRoot, nativeSettings });
   const search = createFilmSearchService({ data, rules, now });
   const service = createPlaybackService({ data, library, media, rules, now });
   const spec = contracts.film;
@@ -108,6 +110,16 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now }) 
   };
   return {
     id: 'film', version: spec.version, contract: spec.contract,
+    async settingsChanged(block) {
+      if (block === 'film.rules') await rules.settingsChanged();
+      else if (block === 'film.preferences') await service.settingsChanged();
+      else if (block === 'pan.accounts') await invalidate('pan');
+      else if (block === 'tmdb' || block === 'douban') await invalidate(block, undefined, true);
+      else if (block === 'cat.sources') {
+        const reply = await owners.get('cat').methods['cat.script.status']({});
+        await invalidate({ kind: 'source', engine: 'cat' }, reply.value?.instances);
+      }
+    },
     observesMutation,
     methods: Object.fromEntries(Object.entries(operations).map(([operation, handler]) =>
       [spec.prefix + operation, async (input, context) => {

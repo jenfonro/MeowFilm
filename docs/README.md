@@ -4,7 +4,7 @@
 
 ## 共同契约
 
-- [共同契约索引](common/README.md) — 按页面、音乐平台和验证职责维护，端侧 API、存储与实现差异仍在各端文档。
+- [共同契约索引](common/README.md) — 按页面、设置存储、音乐平台和验证职责维护，端侧 API、存储与实现差异仍在各端文档。
 
 ## 共用脚本运行时
 
@@ -31,7 +31,7 @@
 - [系统媒体、锁屏歌词与耳机控制](ios/system-media.md)
 - [网易云漫游、心动与队列推荐](ios/music-recommendations.md)
 - [影视首页与详情](ios/film.md)
-- [影视设置、原生规则与来源管理](ios/film-settings.md)
+- [影视设置、原生配置与来源管理](ios/film-settings.md)
 - [影视搜索](ios/film-search.md)
 - [小说、书架与原生阅读器](ios/novel.md)
 - [本地文档存储](ios/storage.md)

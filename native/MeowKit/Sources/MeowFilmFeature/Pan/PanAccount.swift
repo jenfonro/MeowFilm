@@ -42,6 +42,20 @@ public struct PanProvider: Equatable, Sendable, Identifiable {
     public let credentialFields: [PanCredentialField]
     public let login: Bool
     public let refresh: Bool
+    static let all = PanProviderID.allCases.map { id -> PanProvider in
+        let fields: [PanCredentialField]
+        switch id {
+        case .baidu, .quark, .uc: fields = [.cookie]
+        case .tianyi: fields = [.cookie, .username, .password]
+        case .yidong: fields = [.authorization, .refreshedAt]
+        case .quarkTV, .ucTV: fields = [.refreshToken, .deviceId, .accessToken, .expiresAt]
+        }
+        return PanProvider(id: id, credentialFields: fields,
+                           login: [.baidu, .quark, .uc].contains(id), refresh: true)
+    }
+    private init(id: PanProviderID, credentialFields: [PanCredentialField], login: Bool, refresh: Bool) {
+        self.id = id; self.credentialFields = credentialFields; self.login = login; self.refresh = refresh
+    }
     init(_ value: RuntimeValue) throws {
         guard let id = value.panField("provider")?.panString.flatMap(PanProviderID.init(rawValue:)),
               let fields = value.panField("credentialFields")?.panArray,
@@ -67,17 +81,20 @@ public struct PanProvider: Equatable, Sendable, Identifiable {
                 fields[field.rawValue] = .number(number)
             } else { fields[field.rawValue] = .string(text) }
         }
-        return .object(fields)
+        let credentials = RuntimeValue.object(fields)
+        try PanSettingsStore.validateCredentials(id, credentials)
+        return credentials
     }
 }
 
 public enum PanAccountStatus: String, Sendable, Equatable {
-    case signedIn, expired, signedOut
+    case signedIn, expired, signedOut, unverified
     public var title: String {
         switch self {
         case .signedIn: return "已登录"
         case .expired: return "失效"
         case .signedOut: return "未登录"
+        case .unverified: return "未验证"
         }
     }
     public var actions: [PanAccountAction] {
@@ -85,29 +102,41 @@ public enum PanAccountStatus: String, Sendable, Equatable {
         case .signedIn: return [.refresh, .logout]
         case .expired: return [.login, .logout]
         case .signedOut: return [.login]
+        case .unverified: return [.login, .refresh, .logout]
         }
     }
 }
 
 public enum PanAccountAction: Sendable, Equatable { case login, refresh, logout }
 
-/// A display snapshot only. Runtime never returns the credentials themselves.
+/// A display snapshot only. Native credentials imply `unverified`, never a
+/// successful login. Only an online receipt can publish signedIn or expired.
 public struct PanAccount: Equatable, Sendable {
     public let provider: PanProviderID
     public let revision: Int64
     public let configured: Bool
     public let fields: [String]
     public let status: PanAccountStatus
+    init(provider: PanProviderID, revision: Int64, fields: [String], status: PanAccountStatus) {
+        self.provider = provider; self.revision = revision; self.fields = fields
+        configured = !fields.isEmpty; self.status = status
+    }
     init(_ value: RuntimeValue) throws {
         guard let provider = value.panField("provider")?.panString.flatMap(PanProviderID.init(rawValue:)),
               let revision = value.panField("revision")?.panInteger,
               let configured = value.panField("configured")?.panBool,
               let status = value.panField("status")?.panString.flatMap(PanAccountStatus.init(rawValue:)),
+              status != .unverified,
               let fields = value.panField("fields")?.panArray else { throw PanAccountError.invalidResponse }
         self.provider = provider; self.revision = revision; self.configured = configured; self.status = status
         self.fields = try fields.map {
             guard let field = $0.panString else { throw PanAccountError.invalidResponse }
             return field
+        }
+        let allowed = PanProvider.all.first { $0.id == provider }!.credentialFields.map(\.rawValue)
+        guard Set(self.fields).count == self.fields.count, self.fields.allSatisfy(allowed.contains),
+              configured == !self.fields.isEmpty, configured || status == .signedOut else {
+            throw PanAccountError.invalidResponse
         }
     }
 }
@@ -144,6 +173,7 @@ struct PanAccountNotice: Identifiable, Equatable {
             case "TIMEOUT": message = "网盘请求超时"
             case "STORAGE_ERROR", "CORRUPT_STORAGE": message = "网盘账号保存失败"
             case "STALE_ACCOUNT": message = "网盘账号已变更"
+            case "INVALID_REQUEST": message = "网盘凭据无效"
             case "LOGIN_EXPIRED": message = "登录二维码已过期"
             default: message = "网盘操作失败"
             }

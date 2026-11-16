@@ -59,19 +59,21 @@ function linkedSignal(external, lifetime) {
 }
 
 /** Passive Cat protocol owner; the caller owns its data-root and session. */
-export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRuntime, clock } = {}) {
+export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRuntime, clock, configuration } = {}) {
   requireValue(typeof dataRoot === 'string' && typeof runtimeFactory === 'function');
   const sources = new SourceCandidates({ module: 'cat', fail: code => new ScriptHostError(code) });
   const lifetime = new AbortController();
   const pending = new Set();
   let runtime, closing, closed = false;
-  const get = () => runtime ??= runtimeFactory({ dataRoot, clock });
+  const get = () => runtime ??= runtimeFactory({ dataRoot, clock, configuration });
+  const nativeWrites = new Set(['install', 'import', 'edit', 'enable', 'uninstall']);
   const methods = {};
   function method(name, parameters, body) {
     methods['cat.script.' + name] = (input = {}, context = {}) => {
       const task = (async () => {
         try {
           if (closed) throw new ScriptHostError('HOST_CLOSED');
+          if (configuration && nativeWrites.has(name)) throw new ScriptHostError('PERMISSION_DENIED');
           requireValue(object(input));
           if (context.signal?.aborted) throw new ScriptHostError('CANCELLED');
           let captured;
@@ -139,6 +141,10 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
   });
   method('update', ['installationId', 'sourceRevision'], async (input, signal) => {
     identifier(input.installationId);
+    if (configuration) {
+      requireValue(input.sourceRevision === undefined);
+      return get().updateConfigured(input.installationId, { signal });
+    }
     if (input.sourceRevision !== undefined) integer(input.sourceRevision);
     const previous = (await get().status()).instances.find(item => item.installationId === input.installationId);
     if (!previous || previous.sourceHash === null) throw new ScriptHostError('NOT_FOUND');
@@ -209,5 +215,13 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
     })();
   }
   return { id: 'cat', version: contracts.cat.version, contract: catScriptContract,
+    async settingsChanged() {
+      if (!configuration || closed) throw new ScriptHostError('HOST_CLOSED');
+      await configuration.reload();
+      // Applying a saved input is owned by the module lifetime, not the short notification HTTP request.
+      const work = get().refresh({ signal: lifetime.signal });
+      pending.add(work);
+      work.finally(() => pending.delete(work)).catch(() => {});
+    },
     methods, upload, close };
 }

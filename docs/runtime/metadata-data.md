@@ -1,6 +1,6 @@
 # TMDB／豆瓣数据运行器
 
-本模块负责 GET 元数据获取、来源协议适配、设置持久化和图片流转发。不做跨源匹配、智能搜索、账号收藏／评分写入或元数据／图片持久缓存。TMDB 和豆瓣保留各自数据结构；标准来源图片字段投影为稳定的运行器相对路径，其他 HTTP(S) 图片保持可用 URL。
+本模块负责 GET 元数据获取、来源协议适配、设置消费和图片流转发；未注入原生设置时也负责设置持久化。不做跨源匹配、智能搜索、账号收藏／评分写入或元数据／图片持久缓存。TMDB 和豆瓣保留各自数据结构；标准来源图片字段投影为稳定的运行器相对路径，其他 HTTP(S) 图片保持可用 URL。
 
 ## 装配与会话
 
@@ -35,7 +35,7 @@ await runtime.start();
 
 ## 设置与凭据
 
-两模块均提供：
+两模块均提供以下 HTTP 方法；`settings.update` 仅在未注入原生设置时可写：
 
 - `settings.get {}`：读取完整设置（包括明文凭据）和不透明配置代次 `revision`。
 - `settings.update {…patch}`：原子更新指定字段；省略字段不变，凭据空字符串表示清除。成功返回与 get 同形的完整设置。
@@ -44,13 +44,19 @@ await runtime.start();
 
 `revision` 是设置 owner 从完整有效配置生成的不透明稳定身份；包括凭据在内的有效配置改变才换代，无变化更新和冷启动保持不变。调用方只比较是否相等，不解析其内容。影视业务缓存以此隔离配置，不复制或用明文凭据充当缓存身份。身份不另写第二套持久配置，也不包含明文凭据；业务元数据的持久化、组件完整度和定向刷新由 [film data owner](film-playback.md)统一处理。
 
-运行器独占 `<dataRoot>/tmdb/settings.json` 和 `<dataRoot>/douban/settings.json`，文档格式为 `{version:1,settings:{…}}`。首次访问恢复配置，之后使用内存快照；更新通过运行器完成，不支持绕过运行器并发外部编辑。首次未配置读取默认值，不写空文件。损坏文件明确失败，不当成缺失、不静默重置。
+无 `nativeSettings` 注入时，运行器独占 `<dataRoot>/tmdb/settings.json` 和 `<dataRoot>/douban/settings.json`，文档格式为 `{version:1,settings:{…}}`。首次访问恢复配置，之后使用内存快照；更新通过运行器完成，不支持绕过运行器并发外部编辑。首次未配置读取默认值，不写空文件。损坏文件明确失败，不当成缺失、不静默重置。
 
 恢复时先严格校验 UTF-8 字节，再解码并解析 JSON；保留 UTF-8 BOM 处理，不依赖内嵌 Node 的 ICU。非法字节返回 `CORRUPT_STORAGE`，不改写原文件。
 
-凭据由运行器保存和使用。客户端仅负责设置编辑和提交，不另建持久化事实来源，不在每次启动回灌。不向外部脚本实例授予此目录。
+此独立模式的凭据由运行器保存和使用，调用方不另建持久化事实来源或每次启动回灌；不向外部脚本实例授予此目录。
 
 **文件本身不额外加密**。复用 `PrivateDocuments` 的内部文档命名和原子写入；POSIX 新文件权限为 `0600`。宿主必须提供应用专用 dataRoot 并负责系统沙箱／目录权限，尤其 Windows 的 ACL。运行器自有存储允许系统与 App 管理的目录别名，不执行脚本文件系统的链接隔离检查。能够读取此目录的用户可以读取凭据。日志、调试导出及备份不得公开此目录；这不是 Keychain／DPAPI 保险库。
+
+### 原生设置注入
+
+`createTMDBDataModule`／`createDoubanDataModule` 可接收 `nativeSettings`，读取 `tmdb`／`douban` 块的同形文档。此时唯一持久值由原生 owner 保存，不再读取或写入上述 Node 设置文件；HTTP `settings.update` 返回 `PERMISSION_DENIED`，`settings.get` 仍返回当前快照。缺失使用默认值，损坏明确失败，不回退旧文件。
+
+App 冷启动先读配置，活跃块通知由装配层重读并调用模块 `settingsChanged()`，撤销旧配置在途请求及相关 film 缓存／会话资格。通知不携带凭据、不等待业务应用才结算本地保存。唯一事实来源与通知规则见[共同契约](../common/settings-storage.md)，iOS 的加密文档及生命周期见[存储](../ios/storage.md#影视设置)与[运行底座](../ios/runtime-preflight.md#原生设置私密通道)。未注入的公共入口继续保持上述独立模式。
 
 ### TMDB
 
@@ -94,7 +100,7 @@ get 返回 Cookie 原值。域名替换／路径前缀型代理直接配置 base
 
 双端“数据源”设置独立编辑 TMDB／豆瓣；iOS 保留同页 provider 切换。豆瓣数据代理、图片代理默认“无”，不提供服务器代理。数据选择包括 CORS 前缀 `https://ciao-cors.is-an.org/`、CMLiussss 腾讯云／阿里云 API CDN 和自定义包装前缀；API CDN 不伪造网页搜索 CDN，`searchBase` 仍为官方搜索地址。图片选择独立使用官方 `img3.doubanio.com` 直连（“无”）、CMLiussss 腾讯云／阿里云或自定义包装前缀。普通前缀按服务器语义接 `encodeURIComponent(targetURL)`；已有 `{url}`／`{encodedUrl}` 占位形式仍是原始运行器接口能力，不要求表单使用模板。
 
-Cookie 和 API TOKEN 明文读写，保存失败保留输入和原 saved 快照，成功后回显实际保存值。界面不再维护 configured 占位或“清除意图”，留空保存就是清空。客户端不复制持久化，不在启动时回灌；预设只在保存时生效。Cookie 只参与豆瓣数据／搜索请求，图片不从表单附加 Cookie 或 TMDB token。
+Cookie 和 API TOKEN 在设置表单中按原值读写，保存失败保留输入和原 saved 快照，成功后回显实际保存值；这不表示持久文件明文存放。界面不再维护 configured 占位或“清除意图”，留空保存就是清空。存储归属依是否注入而定，不复制第二份配置或在启动时回灌；预设只在保存时生效。Cookie 只参与豆瓣数据／搜索请求，图片不从表单附加 Cookie 或 TMDB token。
 
 通用设置的“缓存管理”调用 `film.data.invalidate`，`domain` 分别为 `douban`、`tmdb`；“清空豆瓣与 TMDB 缓存”等待两次失效均结算，任一失败则报告失败。运行器处理内存／持久缓存失效与旧在途排空，客户端不直接删文件、不重启、不清配置／账号／历史／人工匹配／屏蔽／收藏，也不把清缓存冒充配置保存或自动重搜。
 
@@ -241,10 +247,11 @@ Windows 运行器图片 GET 使用独立的可复用 handler；两个 `ReadImage
 | `WEB_INTERACTION_REQUIRED` | 豆瓣登录／网页验证要求 |
 | `STORAGE_ERROR` | 持久化读写失败；失败后重新读取真实文件，不承诺已提交 rename 回滚 |
 | `CORRUPT_STORAGE` | 已有配置损坏或版本不支持；保留原文件 |
+| `PERMISSION_DENIED` | 注入原生设置后，拒绝 HTTP 修改配置 |
 
 协议／会话错误仍使用 `runtime.http.v1` 的错误码。来源独立；一方失败不隐式调用另一方或合并数据。
 
-运行器测试使用合成 HTTP 上游与假凭据，覆盖结构、图片二进制、持久化恢复、代理切换和取消排空；不代表真实 TMDB 账号权限、豆瓣 Cookie／反爬条件已在线验收。iOS／Windows 通过二进制图片通道消费稳定相对引用，普通外部 HTTP(S) 图片也不设域名／回环访问门禁；客户端设置只编辑并提交运行器配置，不复制凭据持久化。douban provider 已由正式 App 装配并供 film 复用，但不据此声称原生搜索的豆瓣接线或合并后的平台验证已完成；搜索范围以[共同契约](../common/film/search.md)及上述端侧文档为准。
+运行器测试使用合成 HTTP 上游与假凭据，覆盖结构、图片二进制、持久化恢复、代理切换和取消排空；不代表真实 TMDB 账号权限、豆瓣 Cookie／反爬条件已在线验收。iOS／Windows 通过二进制图片通道消费稳定相对引用，普通外部 HTTP(S) 图片也不设域名／回环访问门禁；设置存储按上述注入边界区分，不复制凭据持久化。douban provider 已由正式 App 装配并供 film 复用，但不据此声称原生搜索的豆瓣接线或合并后的平台验证已完成；搜索范围以[共同契约](../common/film/search.md)及上述端侧文档为准。
 
 ## Film 元数据缓存边界
 

@@ -143,9 +143,10 @@ final class MeowfilmAssembly: ObservableObject {
         }
         let playbackSettings = FilmPlaybackSettingsModel(transport: FilmPlaybackTransport {
             try await resources.scriptSession.connection()
-        })
+        }, settingsDocument: resources.filmSettings[.preferences])
         playbackSettings.playbackSnapshot = { [weak self] in self?.filmPlayback?.snapshot }
-        let pan = PanAccountsModel(service: PanAccountService(connection: { try await resources.scriptSession.connection() }))
+        let pan = PanAccountsModel(service: PanAccountService(document: resources.filmSettings[.panAccounts],
+            connection: { try await resources.scriptSession.connection() }))
         let filmSettings = FilmSettingsModel(rules: resources.filmRules, sources: resources.filmSourceSettings,
                                              tmdb: tmdb, douban: douban, pan: pan, playback: playbackSettings)
         self.filmSettings = filmSettings

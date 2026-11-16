@@ -244,7 +244,7 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
             ]))
         }
 
-        let rules = FilmRuleService(connection: { client })
+        let rules = FilmRuleService(settingsDocument: resources.filmSettings[.rules], connection: { client })
         do {
             try await rules.initialize()
             // Source and film rules share the signed native carrier while

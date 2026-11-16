@@ -1,11 +1,13 @@
 import Foundation
+import CryptoKit
 import MeowRuntime
 
-/// Borrows the App runtime. Node alone owns rules and their persisted document;
-/// this actor keeps only the last acknowledged presentation snapshot.
+/// Native rule configuration and presentation snapshots. The borrowed runtime
+/// alone compiles and executes rules.
 public actor FilmRuleService {
     public typealias Request = @Sendable (String, RuntimeValue) async throws -> RuntimeValue
     private let request: Request
+    private let settingsDocument: FilmSettingsDocument
     private var saved: FilmRuleSet?
     public private(set) var revision: RuntimeValue?
     private var tail: Task<Void, Never>?
@@ -18,15 +20,20 @@ public actor FilmRuleService {
     private var closed = false
     private var closing: Task<Void, Never>?
 
-    public init(connection: @escaping @Sendable () async throws -> RuntimeHTTPClient) {
+    public init(settingsDocument: FilmSettingsDocument,
+                connection: @escaping @Sendable () async throws -> RuntimeHTTPClient) {
+        self.settingsDocument = settingsDocument
         let transport = FilmPlaybackTransport(connectionProvider: connection)
         request = { try await transport.call($0, parameters: $1) }
     }
 
-    public init(request: @escaping Request) { self.request = request }
+    public init(settingsDocument: FilmSettingsDocument, request: @escaping Request) {
+        self.settingsDocument = settingsDocument; self.request = request
+    }
 
     public func initialize() async throws {
-        try await run { service in try await service.refresh() }
+        try available()
+        try refresh()
     }
 
     public func savedSnapshot() throws -> FilmRuleSet {
@@ -37,29 +44,32 @@ public actor FilmRuleService {
 
     /// Whole-document API retained for existing non-page consumers.
     public func save(_ draft: FilmRuleSet) async throws -> FilmRuleSet {
-        try await run { service in
-            try await service.commit("rules.set", fields: ["rules": try Self.value(draft)])
-        }
+        try available()
+        return try saveLocal(draft)
     }
 
-    /// Node merges this group into its latest committed document atomically.
+    /// Merge only this group into the latest native document under its CAS.
     public func save(_ group: FilmRuleGroup, rules: [FilmMatchRule]) async throws -> FilmRuleSet {
-        try await run { service in
-            try await service.commit("rules.group.set", fields: Self.groupFields(group, rules: rules))
+        try available()
+        let document = try settingsDocument.update { current in
+            var snapshot = try FilmRuleSettings.read(current)
+            snapshot.replace(group, with: rules)
+            let normalized = FilmRuleSettings.normalize(snapshot)
+            var fields = try current?.filmObject?["rules"]?.filmObject ??
+                Self.value(FilmRuleSettings.initial).filmRequiredObject()
+            let key = FilmRuleSettings.key(group)
+            fields[key] = try Self.value(normalized).filmObject![key]
+            var envelope = current?.filmObject ?? ["version": .number(1)]
+            envelope["rules"] = .object(fields)
+            return .object(envelope)
         }
+        return try accept(FilmRuleSettings.read(document))
     }
 
     /// Defaults are a draft value; requesting them never writes the document.
     public func defaults(_ group: FilmRuleGroup) async throws -> [FilmMatchRule] {
-        try await run { service in
-            let response = try await service.request("rules.group.defaults", .object(["group": .string(group.rawValue)]))
-            try Task.checkCancellation()
-            if group.isClean {
-                let rows: [String] = try Self.decode(response)
-                return rows.map { .init(pattern: $0) }
-            }
-            return try Self.decode(response)
-        }
+        try available()
+        return FilmRuleSettings.restore.rules(in: group)
     }
 
     public func process(_ request: FilmRuleRequest, group: FilmRuleGroup,
@@ -77,11 +87,16 @@ public actor FilmRuleService {
     }
 
     public func restoreDefaults(_ section: FilmRuleSection, draft: FilmRuleSet? = nil) async throws -> FilmRuleSet {
-        try await run { service in
-            var fields: RuntimeObject = ["section": .string(section.rawValue)]
-            fields["rules"] = try draft.map(Self.value)
-            return try await service.commit("rules.restore", fields: fields)
+        try available()
+        let document = try settingsDocument.update { current in
+            var snapshot = try draft ?? FilmRuleSettings.read(current)
+            let defaults = FilmRuleSettings.restore
+            for group in FilmRuleGroup.allCases where group.section == section {
+                snapshot.replace(group, with: defaults.rules(in: group))
+            }
+            return try Self.document(current, rules: FilmRuleSettings.normalize(snapshot))
         }
+        return try accept(FilmRuleSettings.read(document))
     }
 
     /// Preview goes directly to Node, with no preliminary get or local execution.
@@ -95,16 +110,14 @@ public actor FilmRuleService {
     }
 
     public func normalizeNewMatchRule(_ pattern: String, replace: String = "") async throws -> FilmMatchRule? {
-        try await run { service in
-            try await service.invoke("rules.normalize", fields: ["kind": .string("match"),
-                "pattern": .string(pattern), "replace": .string(replace)])
-        }
+        try available()
+        return FilmRuleSettings.newMatch(pattern, replace: replace)
     }
 
     public func normalizeNewCleanRule(_ pattern: String) async throws -> String {
-        try await run { service in
-            try await service.invoke("rules.normalize", fields: ["kind": .string("clean"), "pattern": .string(pattern)])
-        }
+        try available()
+        guard let row = FilmRuleSettings.newMatch(pattern, replace: "") else { return "" }
+        return row.flags.isEmpty ? row.pattern : "/\(row.pattern)/\(row.flags)"
     }
 
     /// Stops admission and cancels/drains all accepted work. Cancelling the caller
@@ -146,9 +159,12 @@ public actor FilmRuleService {
         guard !closed else { throw FilmRuleServiceError.closed }
         guard preparationID == id else { throw FilmRuleServiceError.shuttingDown }
         try Task.checkCancellation()
-        // The RPC is admitted only after the old client work physically drains.
-        // An acknowledged clear publishes Node's fresh default snapshot.
-        let work = Task { try await self.commit("rules.clear", fields: [:]) }
+        // Clearing the settings must not start a runtime. Old previews have
+        // physically drained before native defaults can be committed.
+        let work = Task {
+            guard !self.closed else { throw FilmRuleServiceError.closed }
+            return try self.saveLocal(FilmRuleSettings.initial)
+        }
         clearWork = work
         _ = try await withTaskCancellationHandler {
             try await work.value
@@ -166,20 +182,33 @@ public actor FilmRuleService {
         await task.value
     }
 
-    private func refresh() async throws {
-        _ = try await commit("rules.get", fields: [:])
+    private func refresh() throws {
+        let rules = try FilmRuleSettings.read(settingsDocument.read())
+        try Task.checkCancellation()
+        _ = try accept(rules)
     }
 
-    private func commit(_ operation: String, fields: RuntimeObject) async throws -> FilmRuleSet {
-        let response = try await request(operation, .object(fields))
-        try Task.checkCancellation()
-        guard let receipt = response.filmObject, let rules = receipt["rules"],
-              let revision = receipt["revision"], revision != .null else {
-            throw FilmRuleServiceError.invalidResponse
+    private func saveLocal(_ draft: FilmRuleSet) throws -> FilmRuleSet {
+        let document = try settingsDocument.update { current in
+            try Self.document(current, rules: FilmRuleSettings.normalize(draft))
         }
-        let snapshot: FilmRuleSet = try Self.decode(rules)
+        return try accept(FilmRuleSettings.read(document))
+    }
+
+    private static func document(_ current: RuntimeValue?, rules: FilmRuleSet) throws -> RuntimeValue {
+        _ = try FilmRuleSettings.read(current)
+        var fields = current?.filmObject?["rules"]?.filmObject ?? RuntimeObject()
+        for (key, value) in try Self.value(rules).filmRequiredObject() { fields[key] = value }
+        var envelope = current?.filmObject ?? ["version": .number(1)]
+        envelope["rules"] = .object(fields)
+        return .object(envelope)
+    }
+
+    private func accept(_ snapshot: FilmRuleSet) throws -> FilmRuleSet {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let bytes = try encoder.encode(snapshot)
+        revision = .string(SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
         saved = snapshot
-        self.revision = revision
         return snapshot
     }
 
@@ -198,14 +227,18 @@ public actor FilmRuleService {
         catch { throw FilmRuleServiceError.invalidResponse }
     }
 
-    /// Serialize accepted client edits and their display receipts. Persistence,
-    /// concurrent owners and task rule snapshots are managed exclusively by Node.
-    private func run<Value: Sendable>(
-        _ operation: @escaping @Sendable (isolated FilmRuleService) async throws -> Value
-    ) async throws -> Value {
+    private func available() throws {
         guard !closed else { throw FilmRuleServiceError.closed }
         guard preparation == nil else { throw FilmRuleServiceError.shuttingDown }
         try Task.checkCancellation()
+    }
+
+    /// Only real previews share this cancellable runtime tail. Native settings
+    /// commit synchronously on the actor without waiting for runtime work.
+    private func run<Value: Sendable>(
+        _ operation: @escaping @Sendable (isolated FilmRuleService) async throws -> Value
+    ) async throws -> Value {
+        try available()
         let previous = tail
         let id = UUID()
         let work = Task {

@@ -165,7 +165,10 @@ final class FilmSearchAuthorizationScopeTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let store = try DocumentStore(baseURL: directory, namespace: FilmSourceService.documentNamespace)
         await runtime.setCat(SourcesRuntimeFixture.cat("b", state: "disabled", enabled: false))
-        let sources = FilmSourceService(transport: runtime.transport, storeFactory: { store })
+        let sources = FilmSourceService(transport: runtime.transport, storeFactory: { store },
+            settingsDocument: try sourceTestSettings(directory, cats: [
+                SourcesRuntimeFixture.cat("a"), SourcesRuntimeFixture.cat("b", state: "disabled", enabled: false)
+            ]), runtimeSourceRoot: directory.appendingPathComponent("cat"))
         try await sources.refresh()
         return (sources, directory)
     }

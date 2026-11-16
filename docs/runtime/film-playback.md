@@ -5,14 +5,22 @@
 `packages/film-playback` 是 App 本地的影视业务 owner。它借用已经装配的
 CatNode／source／pan／TMDB／豆瓣模块，负责规则、搜索聚合、匹配、候选排序、会话、数据缓存、
 历史、人工匹配、错误片源屏蔽和偏好。业务不连接 meowfilm-server 的登录、
-数据库或播放 API。收藏仍由现有客户端 owner 保存；规则在 Node 保存，客户端仅持编辑草稿与展示快照。
+数据库或播放 API。收藏仍由现有客户端 owner 保存。规则执行与业务会话归 Node；
+规则配置及偏好的存储归属依是否注入原生设置区分。
 
-本地资料库与规则文档分别位于 `<dataRoot>/film-playback/library.json` 和
-`<dataRoot>/film-rules/rules.json`。App 提供 `dataRoot`，owner 按正常文件系统路径语义访问，
+未注入 `nativeSettings` 时，本地资料库与规则文档分别位于
+`<dataRoot>/film-playback/library.json` 和 `<dataRoot>/film-rules/rules.json`，前者也保存偏好。
+App 提供 `dataRoot`，owner 按正常文件系统路径语义访问，
 支持根、祖先及模块目录别名和文档链接，按需创建目录。保存通过同目录独占临时文件、
 fsync 与 rename 原子替换文档路径；文件链接的其他目录项保留原内容。
 保存前比对已提交文档内容，外部改写返回 `STORAGE_CHANGED`；格式损坏与真实 I/O 失败
 分别返回 `CORRUPT_STORAGE`、`STORAGE_ERROR`，失败不发布新快照。
+
+注入 `nativeSettings` 后，规则与偏好只读 `film.rules`／`film.preferences` 原生块，
+不读写旧规则文件或把偏好写回 Node 资料库；资料库仍保存历史、人工匹配、屏蔽及点映选择。
+普通原生保存与按块通知见[共同契约](../common/settings-storage.md)，iOS 旧配置采用及保护
+见[存储](../ios/storage.md#已知-node-设置的单向迁移)。HTTP `settings.set` 及规则写入
+在注入模式返回 `PERMISSION_DENIED`，不形成第二个配置写 owner。
 
 双端 aggregate entry 显式装配九个模块（顺序见[音乐平台运行器](music-platform.md)）；通用 `createRuntime` 未显式启用
 pan／metadata／film 时保持原默认三个模块。`connectFilmPlayback` 在 provider
@@ -72,13 +80,16 @@ Windows 只使用内置原生输出，不提供外部播放器入口或子进程
 
 ### 规则与搜索
 
-规则文档由 `createFilmRulesService` 唯一读写；默认初始化、保存、恢复及清除均通过同一 owner。
+无原生注入时，规则文档由 `createFilmRulesService` 唯一读写，默认初始化、保存、恢复及清除
+均通过同一 owner。注入时此服务只消费当前原生快照；`rules.get`、默认值及预览仍可读取，
+`rules.set/group.set/restore/clear` 拒绝写入。iOS 的普通读取、分组保存、默认值与纯文本
+规范化在原生完成，不经这些 HTTP 写入方法；正则编译／执行仍只在 Node。
 分组接口的 `group` 为 `episodeClean`／`episode`／`movie`／`search`，分别对应
 `episodeCleanRegexRules`／`episodeRules`／`movieRules`／`aggregateRegexRules`。
 净化组 `rules` 是字符串数组，匹配组是 `{pattern,replace,flags}` 数组。空数组表示清空该组。
 组预览的 `request.section` 须与组一致（`episodeClean` 对应 `episode`）；关联的另一剧集组
 只取 Node 已保存配置，客户端其他组草稿不参与。分组保存仅归一化本组，其他组原样保留；
-写入失败不发布新快照。`rules.set`／`rules.restore` 保留 Windows 使用的整份提交语义。
+写入失败不发布新快照。未注入模式的 `rules.set`／`rules.restore` 保留整份提交语义。
 保存仅投影当前定义的规则字段；预览和识别直接消费实际使用的规则组，不在调用前或
 每次复用不可变快照时重新校验整棵规则树。未使用的组、查询及普通扩展不阻断本次计算；
 实际正则错误、文本表示边界、取消和预算仍按执行结果处理。

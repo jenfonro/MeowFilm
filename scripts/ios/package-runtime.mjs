@@ -208,6 +208,7 @@ export async function packageIOSRuntime({
     const sharedImports = new Map([
       ['../../../packages/script-host/src/native-engine.js', '../../node_modules/@meowfilm/script-host/src/native-engine.js'],
       ['../../runtime/bootstrap.mjs', '../bootstrap.mjs'],
+      ['../../runtime/native-settings.mjs', '../native-settings.mjs'],
       ['../../../runtime/modules/music-script.mjs', '../../modules/music-script.mjs'],
       ['../../../runtime/modules/cat-script.mjs', '../../modules/cat-script.mjs'],
       ['../../../runtime/modules/source-runtime.mjs', '../../modules/source-runtime.mjs'],
