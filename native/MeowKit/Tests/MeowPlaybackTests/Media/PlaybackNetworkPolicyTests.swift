@@ -2,9 +2,6 @@ import Foundation
 import XCTest
 import MeowContracts
 @testable import MeowPlayback
-#if canImport(AVFoundation)
-import AVFoundation
-#endif
 
 final class PlaybackNetworkPolicyTests: XCTestCase {
     private func plan(_ url: String = "https://media.example.invalid/file.mp4",
@@ -83,7 +80,7 @@ final class PlaybackNetworkPolicyTests: XCTestCase {
 
     func testHLSDoesNotSilentlyDropHeadersOrUseCustomScheme() throws {
         XCTAssertEqual(try plan("https://media.example.invalid/live.m3u8",
-                                headers: ["User-Agent": "test"]).route, .systemHTTP)
+                                headers: ["User-Agent": "test"]).route, .scopedHLS)
         for headers in [["Referer": "https://page.example.invalid/"], ["Authorization": "Bearer synthetic"]] {
             XCTAssertEqual(try plan("https://media.example.invalid/live.m3u8", headers: headers).route, .scopedHLS)
             XCTAssertThrowsError(try plan("https://media.example.invalid/live.m3u8", headers: headers,
@@ -96,36 +93,12 @@ final class PlaybackNetworkPolicyTests: XCTestCase {
         XCTAssertThrowsError(try plan("https://media.example.invalid/live.m3u8",
                                       headers: ["Cookie": "sid=synthetic"],
                                       options: .init(allowsScopedHLSLoopback: false))) {
-            XCTAssertEqual($0 as? PlaybackNetworkError, .hlsCookieScopeRequiresConsent)
+            XCTAssertEqual($0 as? PlaybackNetworkError, .hlsCustomHeadersUnavailable)
         }
         XCTAssertEqual(try plan("https://media.example.invalid/opaque", headers: ["Referer": "synthetic"],
                                 options: .init(format: .httpLiveStreaming)).route, .scopedHLS)
         XCTAssertThrowsError(try plan("https://media.example.invalid/live.m3u8",
                                       options: .init(format: .progressive)))
-    }
-
-    func testStandardCookiesAreExplicitSecureHostScopedAndNotWrittenToStorage() throws {
-        let value = try plan("https://media.example.invalid/live.m3u8",
-                             headers: ["User-Agent": "test", "Cookie": "sid=synthetic; empty="],
-                             options: .init(format: .httpLiveStreaming, allowsStandardHTTPCookiesForHLS: true))
-        XCTAssertEqual(value.route, .systemHTTP)
-        let cookies = try PlaybackNetworkPlan.standardCookies(value.headers["cookie"]!, url: value.url)
-        XCTAssertEqual(cookies.map(\.name), ["sid", "empty"])
-        XCTAssertTrue(cookies.allSatisfy { $0.domain == "media.example.invalid" && $0.path == "/" && $0.isSecure })
-        #if canImport(AVFoundation)
-        let options = try NativePlaybackAsset.systemOptions(value, ambientCookies: [])
-        XCTAssertEqual(options[AVURLAssetHTTPUserAgentKey] as? String, "test")
-        XCTAssertEqual((options[AVURLAssetHTTPCookiesKey] as? [HTTPCookie])?.count, 2)
-        XCTAssertThrowsError(try NativePlaybackAsset.systemOptions(value, ambientCookies: cookies)) {
-            XCTAssertEqual($0 as? PlaybackNetworkError, .nativeCookieStorageNotIsolated)
-        }
-        #endif
-        XCTAssertThrowsError(try plan("http://media.example.invalid/live.m3u8",
-                                      headers: ["Cookie": "sid=synthetic"],
-                                      options: .init(allowsStandardHTTPCookiesForHLS: true)))
-        for raw in ["", "sid=a; sid=b", "$Domain=example.invalid", "no-equals", "sid=a,other=b"] {
-            XCTAssertThrowsError(try PlaybackNetworkPlan.standardCookies(raw, url: value.url))
-        }
     }
 
     func testNetworkErrorsCannotContainResourceCredentials() {

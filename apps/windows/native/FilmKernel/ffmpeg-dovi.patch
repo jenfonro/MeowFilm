@@ -1,0 +1,218 @@
+--- a/libavcodec/packet.h
++++ b/libavcodec/packet.h
+@@ -38,6 +38,8 @@
+  * Types and functions for working with AVPacketSideData.
+  * @{
+  */
++#define FF_MEOWFILM_DOVI 1
++
+ enum AVPacketSideDataType {
+     /**
+      * An AV_PKT_DATA_PALETTE side data packet contains exactly AVPALETTE_SIZE
+@@ -368,6 +370,9 @@
+      */
+      AV_PKT_DATA_EXIF,
+ 
++    /** HEVC enhancement-layer configuration record (MP4 hvcE), private 8.1.2 backport. */
++    AV_PKT_DATA_HEVC_CONF,
++
+     /**
+      * The number of side data types.
+      * This is not part of the public API/ABI in the sense that it may
+--- a/libavcodec/packet.c
++++ b/libavcodec/packet.c
+@@ -299,6 +299,7 @@
+     case AV_PKT_DATA_PRFT:                       return "Producer Reference Time";
+     case AV_PKT_DATA_ICC_PROFILE:                return "ICC Profile";
+     case AV_PKT_DATA_DOVI_CONF:                  return "DOVI configuration record";
++    case AV_PKT_DATA_HEVC_CONF:                  return "HEVC enhancement configuration record";
+     case AV_PKT_DATA_S12M_TIMECODE:              return "SMPTE ST 12-1:2014 timecode";
+     case AV_PKT_DATA_DYNAMIC_HDR10_PLUS:         return "HDR10+ Dynamic Metadata (SMPTE 2094-40)";
+     case AV_PKT_DATA_AMBIENT_VIEWING_ENVIRONMENT:return "Ambient viewing environment";
+--- a/libavformat/mov.c
++++ b/libavformat/mov.c
+@@ -8690,6 +8690,28 @@
+     return ff_isom_parse_dvcc_dvvc(c->fc, st, buf, read_size);
+ }
+ 
++/* hvcE export backported from FFmpeg 0834db516348d253b2c51f969188501d324c698d
++ * (LGPL-2.1-or-later). Kept separate from BL hvcC, including when hvcE comes first. */
++static int mov_read_hvce(MOVContext *c, AVIOContext *pb, MOVAtom atom)
++{
++    AVStream *st = get_curr_st(c);
++    AVPacketSideData *sd;
++    int ret;
++
++    if (!st)
++        return 0;
++    if (atom.size < 23 || atom.size > INT_MAX - AV_INPUT_BUFFER_PADDING_SIZE)
++        return AVERROR_INVALIDDATA;
++
++    sd = av_packet_side_data_new(&st->codecpar->coded_side_data,
++                                 &st->codecpar->nb_coded_side_data,
++                                 AV_PKT_DATA_HEVC_CONF, atom.size, 0);
++    if (!sd)
++        return AVERROR(ENOMEM);
++    ret = ffio_read_size(pb, sd->data, atom.size);
++    return ret < 0 ? ret : 0;
++}
++
+ static int mov_read_lhvc(MOVContext *c, AVIOContext *pb, MOVAtom atom)
+ {
+     AVStream *st;
+@@ -9624,6 +9646,7 @@
+ { MKTAG('s','g','p','d'), mov_read_sgpd },
+ { MKTAG('s','b','g','p'), mov_read_sbgp },
+ { MKTAG('h','v','c','C'), mov_read_glbl },
++{ MKTAG('h','v','c','E'), mov_read_hvce },
+ { MKTAG('v','v','c','C'), mov_read_glbl },
+ { MKTAG('u','u','i','d'), mov_read_uuid },
+ { MKTAG('C','i','n', 0x8e), mov_read_targa_y216 },
+--- a/libavcodec/hevc/hevcdec.c
++++ b/libavcodec/hevc/hevcdec.c
+@@ -3733,36 +3733,35 @@
+         }
+     }
+ 
+-    /*
+-     * Check for RPU delimiter.
+-     *
+-     * Dolby Vision RPUs masquerade as unregistered NALs of type 62.
+-     *
+-     * We have to do this check here an create the rpu buffer, since RPUs are appended
+-     * to the end of an AU; they are the last non-EOB/EOS NAL in the AU.
+-     */
+-    if (s->pkt.nb_nals > 1 && s->pkt.nals[s->pkt.nb_nals - 1].type == HEVC_NAL_UNSPEC62 &&
+-        s->pkt.nals[s->pkt.nb_nals - 1].size > 2 && !s->pkt.nals[s->pkt.nb_nals - 1].nuh_layer_id
+-        && !s->pkt.nals[s->pkt.nb_nals - 1].temporal_id) {
+-        H2645NAL *nal = &s->pkt.nals[s->pkt.nb_nals - 1];
+-        if (s->rpu_buf) {
+-            av_buffer_unref(&s->rpu_buf);
+-            av_log(s->avctx, AV_LOG_WARNING, "Multiple Dolby Vision RPUs found in one AU. Skipping previous.\n");
+-        }
+-
+-        s->rpu_buf = av_buffer_alloc(nal->raw_size - 2);
++    /* An RPU belongs to this AU even when EL, EOS or EOB NALs follow it.
++     * P7's encapsulated EL must not hide the BL's dynamic metadata. */
++    H2645NAL *rpu = NULL;
++    for (i = 0; i < s->pkt.nb_nals; i++) {
++        H2645NAL *nal = &s->pkt.nals[i];
++        if (nal->type != HEVC_NAL_UNSPEC62)
++            continue;
++        if (rpu || nal->size <= 2 || nal->nuh_layer_id || nal->temporal_id) {
++            ret = AVERROR_INVALIDDATA;
++            goto fail;
++        }
++        rpu = nal;
++    }
++    if (rpu) {
++        av_buffer_unref(&s->rpu_buf);
++        s->rpu_buf = av_buffer_alloc(rpu->raw_size - 2);
+         if (!s->rpu_buf) {
+             ret = AVERROR(ENOMEM);
+             goto fail;
+         }
+-        memcpy(s->rpu_buf->data, nal->raw_data + 2, nal->raw_size - 2);
+-
+-        ret = ff_dovi_rpu_parse(&s->dovi_ctx, nal->data + 2, nal->size - 2,
+-                                s->avctx->err_recognition);
++        memcpy(s->rpu_buf->data, rpu->raw_data + 2, rpu->raw_size - 2);
++
++        /* Corrupt RPU data must not become valid-looking dynamic metadata. */
++        ret = ff_dovi_rpu_parse(&s->dovi_ctx, rpu->data + 2, rpu->size - 2,
++                                s->avctx->err_recognition | AV_EF_CRCCHECK | AV_EF_EXPLODE);
+         if (ret < 0) {
+             av_buffer_unref(&s->rpu_buf);
+-            av_log(s->avctx, AV_LOG_WARNING, "Error parsing DOVI NAL unit.\n");
+-            /* ignore */
++            av_log(s->avctx, AV_LOG_ERROR, "Error parsing DOVI NAL unit.\n");
++            goto fail; /* Never attach stale metadata after a rejected RPU. */
+         }
+     }
+ 
+--- a/libavcodec/dovi_rpudec.c
++++ b/libavcodec/dovi_rpudec.c
+@@ -340,6 +340,9 @@
+     return 0;
+ }
+ 
++/* RPU padding/CRC fixes backported from FFmpeg
++ * 0834db516348d253b2c51f969188501d324c698d (LGPL-2.1-or-later).
++ * Public structs and decoder API remain those of the locked 8.1.2. */
+ int ff_dovi_rpu_parse(DOVIContext *s, const uint8_t *rpu, size_t rpu_size,
+                       int err_recognition)
+ {
+@@ -405,6 +408,9 @@
+         VALIDATE(rpu[0], 25, 25); /* NAL prefix */
+         rpu++;
+         rpu_size--;
++        /* Strip trailing padding zero bytes */
++        while (rpu_size && !rpu[rpu_size - 1])
++            rpu_size--;
+     }
+ 
+     if ((ret = init_get_bits8(gb, rpu, rpu_size)) < 0)
+@@ -413,9 +419,9 @@
+     /* RPU header */
+     rpu_type = get_bits(gb, 6);
+     if (rpu_type != 2) {
+-        av_log(s->logctx, AV_LOG_WARNING, "Unrecognized RPU type "
+-               "%"PRIu8", ignoring\n", rpu_type);
+-        return 0;
++        av_log(s->logctx, AV_LOG_ERROR, "Unsupported RPU type %"PRIu8"\n", rpu_type);
++        ff_dovi_ctx_unref(s);
++        return AVERROR_PATCHWELCOME; /* Do not attach a previous RPU as this frame's metadata. */
+     }
+ 
+     hdr->rpu_type = rpu_type;
+@@ -708,7 +714,8 @@
+             return ret;
+         }
+ 
+-        if (get_bits_left(gb) > 48 /* padding + CRC32 + terminator */) {
++        /* ue(1) + ue(0) + level + CRC32 + terminator */
++        if (get_bits_left(gb) >= 3 + 1 + 8 + 32 + 8) {
+             if ((ret = parse_ext_blocks(s, gb, 2, dm_compression, err_recognition)) < 0) {
+                 ff_dovi_ctx_unref(s);
+                 return ret;
+@@ -719,18 +726,39 @@
+         av_refstruct_unref(&s->ext_blocks);
+     }
+ 
++    int aligned = get_bits_count(gb) % 8 == 0;
+     align_get_bits(gb);
++
++    /* The payload is followed by a CRC32 and a 0x80 terminator. Some encoders
++     * emit an extra zero padding byte before the CRC32 when the payload already
++     * ended on a byte boundary. A leading zero byte is then ambiguous: it may
++     * be that padding, or simply a CRC32 that starts with a zero byte. If only
++     * the padded position holds the terminator, assume the padding is real. If
++     * both do (the last CRC32 byte is 0x80 or there is stray 0x80 after real
++     * payload) the terminator position is ambiguous. Calculate CRC twice when
++     * AV_EF_CRCCHECK is requested. Note that this situation is extremely
++     * unlikely, there shouldn't be non-zero data after payload. */
++    int pad = aligned && show_bits(gb, 8) == 0;
+     skip_bits(gb, 32); /* CRC32 */
+-    if (get_bits(gb, 8) != 0x80) {
++    int term_unpadded = get_bits(gb, 8) == 0x80;       /* terminator w/o padding */
++    int term_padded = pad && show_bits(gb, 8) == 0x80; /* terminator w/ padding */
++
++    if (!term_unpadded && !term_padded) {
+         avpriv_request_sample(s->logctx, "Unexpected RPU format");
+         ff_dovi_ctx_unref(s);
+         return AVERROR_PATCHWELCOME;
+     }
+ 
+     if (err_recognition & AV_EF_CRCCHECK) {
++        if (term_padded && !term_unpadded)
++            skip_bits(gb, 8); /* unambiguously padded */
+         rpu_size = get_bits_count(gb) / 8;
+         uint32_t crc = av_bswap32(av_crc(av_crc_get_table(AV_CRC_32_IEEE),
+                                   -1, rpu, rpu_size - 1)); /* exclude 0x80 */
++        if (crc && term_padded && term_unpadded) {
++            crc = av_bswap32(av_crc(av_crc_get_table(AV_CRC_32_IEEE),
++                                    -1, rpu, rpu_size)); /* include padding byte */
++        }
+         if (crc) {
+             av_log(s->logctx, AV_LOG_ERROR, "RPU CRC mismatch: %X\n", crc);
+             if (err_recognition & AV_EF_EXPLODE) {

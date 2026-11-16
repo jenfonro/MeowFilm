@@ -11,7 +11,10 @@ enum FilmSearchWireFixture {
         source: .init(key: .init(installationId: "fixture", siteKey: "site"), name: "来源",
                       api: "fixture", actions: ["search"], methods: [:]))
     static func row(_ id: RuntimeValue = .number(0), key: String = "site:numeric-zero", title: String = "真实标题") -> RuntimeValue {
-        .object(["id": .string(key), "displayKey": .string(key), "detailId": id, "siteDetail": .string("0"),
+        .object(["businessId": .string(key), "playbackTarget": .object(["id": .string(key),
+            "kind": .string("source"), "title": .string(title),
+            "source": .object(["key": .string(site.key), "detailId": id])]),
+            "id": .string(key), "displayKey": .string(key), "detailId": id, "siteDetail": .string("0"),
             "title": .string(title), "rawTitle": .string(title), "sourceKind": .string("site"),
             "siteKey": .string(site.key), "siteId": .string("site"), "installationId": .string("fixture"),
             "generation": .number(1), "siteLabel": .string("来源"), "textBadge": .string("原备注"),
@@ -19,7 +22,10 @@ enum FilmSearchWireFixture {
                             "unknown": .object(["complete": .bool(true)])])])
     }
     static func group(_ members: [RuntimeValue], key: String = "group:opaque") -> RuntimeValue {
-        .object(["id": .string(key), "displayKey": .string(key), "title": .string("显示标题"),
+        .object(["businessId": .string(key), "playbackTarget": .object(["id": .string(key),
+            "kind": .string("group"), "title": .string("显示标题"),
+            "members": .array(members.map { .object(["sourceKey": .string(site.key), "detailId": $0.catField("detailId")!]) })]),
+            "id": .string(key), "displayKey": .string(key), "title": .string("显示标题"),
             "sourceKind": .string("site"), "siteLabel": .string("聚合"), "textBadge": .string("更新至12集"),
             "groupKey": .string("opaque-group"), "aggregateItems": .array(members)])
     }
@@ -27,25 +33,15 @@ enum FilmSearchWireFixture {
                          loading: Bool = false, hasMore: Bool = false, noSources: Bool = false,
                          site: String = "completed", metadata: String = "unavailable",
                          cards: [RuntimeValue] = [], raw: [RuntimeValue] = [], items: [RuntimeValue]? = nil,
-                         id: UUID = FilmSearchWireFixture.id) -> RuntimeValue {
+                         id: UUID = FilmSearchWireFixture.id,
+                         sources: [FilmPlaybackSource] = [FilmSearchWireFixture.site.playbackSource]) -> RuntimeValue {
         .object(["sessionId": .string(id.uuidString.lowercased()), "sequence": .number(Double(sequence)),
             "revision": .number(Double(sequence)), "query": .string(query),
             "loading": .bool(loading), "hasMore": .bool(hasMore), "noSources": .bool(noSources),
+            "sources": .array(sources.map { .object($0.value) }),
             "siteState": .string(site), "metadataState": .string(metadata), "siteItems": .array(items ?? raw),
             "tmdbItems": .array([]), "metadataSearch": .null, "metadataQuery": .string(query),
             "metadataDetails": .object([:]), "cards": .array(cards), "rawCards": .array(raw)])
-    }
-    static func handoff(target: FilmPlaybackTarget? = nil, selection: String = "group:opaque", revision: Int = 1,
-                        sources: [FilmPlaybackSource] = [site.playbackSource], results: [RuntimeValue] = [],
-                        hints: [RuntimeValue] = [], search: [RuntimeValue] = [], metadata: RuntimeValue = .null,
-                        entries: [RuntimeValue] = [], id: UUID = FilmSearchWireFixture.id) -> RuntimeValue {
-        let target = target ?? .init(id: selection, kind: .group, title: "Node准确标题",
-            members: [.object(["sourceKey": .string(site.key), "detailId": .number(0)])])
-        return .object(["target": .object(target.value), "sources": .array(sources.map { .object($0.value) }),
-            "query": .string("原查询"), "results": .array(results), "resultHints": .array(hints),
-            "search": .array(search), "metadata": metadata, "cacheEntries": .array(entries),
-            "selectionId": .string(selection), "revision": .number(Double(revision)),
-            "searchReference": .object(["sessionId": .string(id.uuidString.lowercased()), "selectionId": .string(selection)])])
     }
 }
 
@@ -53,7 +49,6 @@ actor FilmSearchRPCFixture {
     typealias Handler = @Sendable (String, RuntimeValue) async throws -> RuntimeValue
     var value: RuntimeValue
     var next: [RuntimeValue] = []
-    var handoff: RuntimeValue
     var calls: [(String, RuntimeValue)] = []
     var observationRequests: [(UUID, Int64)] = []
     private let handler: Handler?
@@ -62,20 +57,18 @@ actor FilmSearchRPCFixture {
     private var waiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var ready: [CheckedContinuation<Void, Never>] = []
     init(_ value: RuntimeValue = FilmSearchWireFixture.snapshot(),
-         handoff: RuntimeValue = FilmSearchWireFixture.handoff(), handler: Handler? = nil) {
-        self.value = value; self.handoff = handoff; self.handler = handler
+         handler: Handler? = nil) {
+        self.value = value; self.handler = handler
     }
     nonisolated func transport(owner: RuntimeHTTPClient? = nil) -> FilmSearchTransport {
         .init(request: { try await self.call($0, $1) }, observation: { try await self.observe($0, $1, $2) },
               producer: { owner })
     }
     func setNext(_ values: [RuntimeValue]) { next = values }
-    func setHandoff(_ value: RuntimeValue) { handoff = value }
     func call(_ operation: String, _ input: RuntimeValue) async throws -> RuntimeValue {
         calls.append((operation, input))
         if let handler { return try await handler(operation, input) }
         if operation == "search.release" { return .object(["released": .bool(true)]) }
-        if operation == "search.handoff" { return handoff }
         if operation == "search.command", !next.isEmpty { value = next.removeFirst() }
         return value
     }

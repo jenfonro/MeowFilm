@@ -25,7 +25,7 @@ public static class FilmPlaybackTests
             () => MusicQualityConsumerTests.Sta(EpisodeInteraction));
         yield return new("film-playback: unavailable player and responsive page keep scrolling in each region",
             () => MusicQualityConsumerTests.Sta(ResponsivePlayer));
-        yield return new("film-playback: recommendations and navigation restore exact identity and coordinates without old presentation state",
+        yield return new("film-playback: recommendations and navigation restore the original page directory and browsing state",
             () => MusicQualityConsumerTests.Sta(NavigationRecovery));
         yield return new("film-playback: a captured recommendation opens its exact identity after the displayed recommendation list changes",
             () => MusicQualityConsumerTests.Sta(StaleRecommendation));
@@ -247,16 +247,19 @@ public static class FilmPlaybackTests
         await Drain();
         string location = module.CaptureNavigationLocation();
         int calls = scene.Source.Calls;
-        Check(location.Contains(item.Id, StringComparison.Ordinal) && original.IsListLayout,
-            "captured navigation includes the exact film and selected coordinate");
+        module.RetainNavigationLocations(new HashSet<string>(StringComparer.Ordinal) { location });
+        var directory = original.EpisodeDirectory;
+        Check(location == FilmCapability.PlaybackRoute + ":" + original.NavigationIdentity && original.IsListLayout,
+            "captured navigation retains the page instance independently of the business and execution identities");
         scene.View.Visibility = Visibility.Collapsed;
         await Drain();
         scene.View.Visibility = Visibility.Visible;
         await module.RestoreNavigationAsync(location, default);
         await Drain();
-        Check(!ReferenceEquals(scene.Page, original) && !scene.Page.IsListLayout &&
+        Check(ReferenceEquals(scene.Page, original) && scene.Page.IsListLayout &&
+            ReferenceEquals(scene.Page.EpisodeDirectory, directory) &&
             scene.Page.Request.Target.Id == original.Request.Target.Id && ReferenceEquals(scene.Playback.DataContext, scene.Page),
-            "restoration creates an accurate request, not an old search or presentation object");
+            "restoration reuses the actual page, selected layout and directory");
         CheckSelection(scene, chosen);
         await module.NavigateAsync(FilmCapability.HomeRoute, default);
         var updatedCard = FilmPlaybackFixture.RefreshMetadata(item with { Title = item.Title + " 更新", Score = "8.8" });
@@ -290,8 +293,9 @@ public static class FilmPlaybackTests
         Check(module.CaptureNavigationLocation() != location, "different targets have different navigation locations");
         await module.RestoreNavigationAsync(location, default);
         await Drain();
-        Check(scene.Page.Request.Target.Id == original.Request.Target.Id && !scene.Page.IsListLayout,
-            "the original location remains restorable without retaining an old layout");
+        Check(ReferenceEquals(scene.Page, original) && scene.Page.IsListLayout &&
+            ReferenceEquals(scene.Page.EpisodeDirectory, directory),
+            "the original history location retains its page, layout and directory after recommendation navigation");
         CheckSelection(scene, chosen);
         Check(scene.Source.Calls == calls + 4,
             "only the actual home restoration revalidates its four sections; playback navigation does not reload the catalog");

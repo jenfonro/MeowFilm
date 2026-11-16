@@ -3,12 +3,14 @@ import { request as httpsRequest } from 'node:https';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { readFileSync, existsSync, mkdirSync, statSync, rmSync } from 'node:fs';
 import { resolve, join, isAbsolute } from 'node:path';
 import { parse } from 'acorn';
 import { ScriptHost } from './host.js';
 import { WorkerSession, workerResult } from './worker-session.js';
 import { CatSettingsFile, normalizeCatConfig, catName, catSourceURL } from './cat-settings.js';
+import { CatNativeSettings } from './cat-native-settings.js';
 import { downloadCatSource } from './cat-source-download.js';
 import { atomicWrite, removePrivateVolume } from './private-volume.js';
 import { clone, fault, identifier, requireValue, safeError } from './errors.js';
@@ -20,8 +22,8 @@ import { CatProxyResources, proxyPlaylistInput, readProxyPlaylist, proxyPlaylist
   resolveProxyManifest } from './cat-media-proxy.js';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-const execution = spec => spec && [spec.sourceHash, spec.config, spec.version, spec.enabled];
+const same = isDeepStrictEqual;
+const execution = spec => spec && [spec.sourceHash, spec.config, spec.version, spec.enabled, spec.inputIdentity];
 const sameExecution = (a, b) => same(execution(a), execution(b));
 const hopByHop = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
   'te', 'trailer', 'transfer-encoding', 'upgrade']);
@@ -47,13 +49,14 @@ function decodeSource(bytes) {
   } catch { throw fault('SCRIPT_PROTOCOL_ERROR'); }
 }
 
-/** Shared Cat owner. Platform supplies only the stable data directory; source,
- * settings, sandbox, Cat routing and management remain in this package. */
+/** Shared execution owner. A platform may supply native source intent; actual
+ * source files, installation facts, sandbox and routing remain in this package. */
 export class CatRuntime {
-  constructor({ dataRoot, network, onDiagnostic, onScriptError, onNetwork, limits, clock = Date.now } = {}) {
+  constructor({ dataRoot, network, onDiagnostic, onScriptError, onNetwork, limits, clock = Date.now, configuration } = {}) {
     requireValue(typeof dataRoot === 'string' && isAbsolute(dataRoot));
     this.dataRoot = resolve(dataRoot);
     this.network = network; this.onDiagnostic = onDiagnostic; this.onScriptError = onScriptError;
+    this.configuration = configuration;
     this.onNetwork = onNetwork; this.limits = limits; this.clock = clock;
     this.sessions = new Map(); this.snapshots = new Map(); this.proxies = new Map();
     this.candidates = new Map();
@@ -123,7 +126,8 @@ export class CatRuntime {
         mkdirSync(this.dataRoot, { recursive: true });
         this.sourcesRoot = join(this.dataRoot, 'sources');
         mkdirSync(this.sourcesRoot, { recursive: true });
-        this.settings = new CatSettingsFile(this.dataRoot);
+        this.settings = this.configuration ? new CatNativeSettings(this.dataRoot, this.configuration)
+          : new CatSettingsFile(this.dataRoot);
         this.host = new ScriptHost({ adapters: {
           cat: input => this.workerSession(input),
         }, network: this.network, onDiagnostic: this.onDiagnostic,
@@ -273,6 +277,10 @@ export class CatRuntime {
     const settings = clone(next), spec = this.candidateSpecs.get(installationId);
     if (spec) settings.scripts = [...settings.scripts.filter(script =>
       script.installationId !== installationId), clone(spec)];
+    if (this.configuration) settings.scripts = settings.scripts.map(script => {
+      const { localPath, localHash, inputIdentity, loadedIdentity, inputRevision, ...publicSettings } = script;
+      return publicSettings;
+    });
     return settings;
   }
   publishSettingsSnapshot(next) {
@@ -301,12 +309,14 @@ export class CatRuntime {
       requireValue(state.size <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
       const bytes = readFileSync(file);
       requireValue(bytes.length <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
+      if (this.configuration) requireValue(hash(bytes) === sourceHash, 'CORRUPT_STORAGE');
       return bytes;
     } catch (error) { throw safeError(error, 'CORRUPT_STORAGE'); }
   }
   deleteSource(sourceHash) {
     try {
       requireValue(/^[a-f0-9]{64}$/.test(sourceHash), 'CORRUPT_STORAGE');
+      if (this.configuration && this.settings.read().scripts.some(script => script.localHash === sourceHash)) return;
       const file = this.sourcePath(sourceHash);
       rmSync(file, { maxRetries: 3, retryDelay: 100 });
     } catch (error) {
@@ -346,6 +356,7 @@ export class CatRuntime {
             try { this.deleteSource(sourceHash); }
             catch (error) { this.failures.set(installationId, safeError(error, 'STORAGE_ERROR').code); }
           }
+          this.settings.prune?.(installationId);
         }
         if (failure) throw failure;
         return;
@@ -384,6 +395,10 @@ export class CatRuntime {
   }
   async applyChange({ spec, existing, signal }) {
     requireValue(!signal?.aborted, 'CANCELLED');
+    if (this.configuration && spec.enabled && (spec.sourceHash === null ||
+      spec.loadedIdentity !== spec.inputIdentity || !existsSync(this.sourcePath(spec.sourceHash)))) {
+      return this.applyConfiguredSource(spec, signal);
+    }
     const id = spec.installationId;
     this.settled.delete(id);
     this.candidateSpecs.set(id, spec);
@@ -421,6 +436,53 @@ export class CatRuntime {
       this.applied.set(id, spec);
     }
   }
+  configuredSource(spec, signal) {
+    if (spec.sourceType === 'network') return this.downloadSource(spec.sourceUrl, signal);
+    if (spec.localPath === null) return Promise.resolve(this.readSource(spec.localHash));
+    try {
+      const state = statSync(spec.localPath);
+      requireValue(state.isFile() && state.size <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
+      const bytes = readFileSync(spec.localPath);
+      requireValue(bytes.length <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
+      if (hash(bytes) !== spec.localHash) { bytes.fill(0); throw fault('STORAGE_CONFLICT'); }
+      return Promise.resolve(bytes);
+    } catch (error) { return Promise.reject(safeError(error, 'CORRUPT_STORAGE')); }
+  }
+  async applyConfiguredSource(spec, signal) {
+    const id = spec.installationId, scope = new ResourceScope(signal);
+    const task = { installationId: id, scope, restore: false };
+    this.managementTasks.add(task);
+    this.settled.delete(id);
+    let bytes;
+    try {
+      await this.stopInstance(id);
+      scope.assertOpen();
+      bytes = await this.configuredSource(spec, scope.signal);
+      const source = decodeSource(bytes);
+      this.validateSource(source);
+      await this.settings.reload();
+      scope.assertOpen();
+      requireValue(sameExecution(this.settings.read().scripts.find(value => value.installationId === id), spec),
+        'STALE_SESSION');
+      await this.replaceSource({ installationId: id, source }, task, { bytes });
+      this.settings.publish(this.settings.read());
+      this.failures.delete(id);
+    } catch (error) {
+      await this.settings.reload();
+      const current = this.settings.read().scripts.find(value => value.installationId === id);
+      if (current?.inputIdentity === spec.inputIdentity && current.enabled === spec.enabled) {
+        const code = safeError(error).code;
+        this.saveSpec(current, { ...current, updateState: 'failed', updateError: code });
+        this.failures.set(id, code);
+        this.applied.set(id, current);
+        this.settled.add(id);
+      }
+    } finally {
+      bytes?.fill(0);
+      this.managementTasks.delete(task);
+      scope.close();
+    }
+  }
   hostState(installationId) {
     try { return this.host.get(installationId); }
     catch (error) {
@@ -450,6 +512,7 @@ export class CatRuntime {
       if (!sameExecution(previousSettings.get(id), diskScripts.get(id))) {
         this.cancelManagement(id, fault('STALE_SESSION'));
         this.captureInitialization(id)();
+        if (this.configuration) this.settled.delete(id);
       }
     }
     // Publishing settings also updates gateway/worker snapshots. It does not
@@ -619,6 +682,9 @@ export class CatRuntime {
       importedAt: previous?.importedAt ?? null, updatedAt: previous?.updatedAt ?? null,
       updateState: previous?.updateState ?? 'idle', updateError: previous?.updateError ?? null,
       sites: previous?.sites ?? [],
+      ...(this.configuration ? { localPath: previous.localPath, localHash: previous.localHash,
+        inputRevision: previous.inputRevision, inputIdentity: previous.inputIdentity,
+        loadedIdentity: previous.inputIdentity } : {}),
     };
     if (spec.sourceType === 'network') catSourceURL(spec.sourceUrl);
     else requireValue(spec.sourceUrl === null);
@@ -734,13 +800,13 @@ export class CatRuntime {
     bytes ??= this.validateSource(source, proposal.contentHash);
     spec.sourceHash = proposal.contentHash ?? hash(bytes);
     task.scope.assertOpen();
-    const previousBytes = previous && existsSync(this.sourcePath(previous.sourceHash))
+    const previousBytes = previous?.sourceHash && existsSync(this.sourcePath(previous.sourceHash))
       ? this.readSource(previous.sourceHash) : null;
     let previousSource = this.sessions.get(installationId)?.revision.source ?? null;
     if (previousSource === null && previousBytes) {
       try { previousSource = decodeSource(previousBytes); } catch { /* An invalid old file can still be replaced. */ }
     }
-    const changed = Boolean(previous && previousSource !== source);
+    const changed = Boolean(previous?.sourceHash && previousSource !== source);
     if (update && !changed && (!spec.enabled || this.hostState(installationId)?.state === 'ready')) {
       this.saveSpec(previous, { ...previous, updateState: 'unchanged', updateError: null });
       return this.instance(installationId);
@@ -765,10 +831,16 @@ export class CatRuntime {
       task.scope.assertOpen();
       requireValue(!this.closed, 'HOST_CLOSED');
       const now = this.clock();
-      if (!previous) spec.importedAt = now;
+      if (!previous?.sourceHash) spec.importedAt = now;
       if (changed) spec.updatedAt = now;
-      spec.updateState = previous ? changed ? 'updated' : 'unchanged' : 'idle';
+      spec.updateState = previous?.sourceHash ? changed ? 'updated' : 'unchanged' : 'idle';
       spec.updateError = null;
+      if (this.configuration) {
+        await this.settings.reload();
+        task.scope.assertOpen();
+        requireValue(same(this.settings.read().scripts.find(script => script.installationId === installationId), previous),
+          'STALE_SESSION');
+      }
       // The candidate has passed activation (or syntax validation if disabled).
       // Until this point both the old source and its description remain durable.
       touchedSource = true;
@@ -795,7 +867,7 @@ export class CatRuntime {
             else if (!replacedBytes && !this.settings.read().scripts.some(script => script.sourceHash === spec.sourceHash))
               this.deleteSource(spec.sourceHash);
           }
-          if (!this.closed) {
+          if (!this.closed && (!this.configuration || task.restore)) {
             if (previous && previousSource !== null) {
               if (this.hostState(installationId)) await this.host.update(installationId, {
                 source: previousSource, config: previous.config, version: previous.version });
@@ -826,7 +898,7 @@ export class CatRuntime {
       this.candidateSpecs.delete(installationId);
       this.publishCandidate(installationId);
       this.sweepProxies();
-      if (committed && previous && previous.sourceHash !== spec.sourceHash &&
+      if (committed && previous?.sourceHash && previous.sourceHash !== spec.sourceHash &&
         !this.settings.value.scripts.some(script => script.sourceHash === previous.sourceHash)) {
         try { this.deleteSource(previous.sourceHash); }
         catch (error) { failure ??= error; }
@@ -850,6 +922,35 @@ export class CatRuntime {
       if (this.failures.has(installationId)) throw fault(this.failures.get(installationId));
       return this.instance(installationId);
     }, 'STALE_SESSION');
+  }
+  async updateConfigured(installationId, { signal } = {}) {
+    requireValue(this.configuration, 'PERMISSION_DENIED');
+    await this.start();
+    await this.settings.reload();
+    const identity = this.installedSpec(installationId).inputIdentity;
+    return this.manage(installationId, signal, async (task, prepared) => {
+      try {
+        task.scope.assertOpen();
+        if (prepared.error) throw prepared.error;
+        const current = this.installedSpec(installationId);
+        requireValue(current.inputIdentity === identity && current.inputIdentity === prepared.value.identity, 'STALE_SESSION');
+        return await this.replaceSource({ installationId, source: prepared.value.source }, task,
+          { bytes: prepared.value.bytes, update: true });
+      } catch (error) {
+        const latest = this.settings.read().scripts.find(spec => spec.installationId === installationId);
+        if (latest?.inputIdentity === identity)
+          this.saveSpec(latest, { ...latest, updateState: 'failed', updateError: safeError(error).code });
+        throw error;
+      } finally { prepared.value?.bytes.fill(0); }
+    }, 'STALE_SESSION', async task => {
+      const current = this.installedSpec(installationId);
+      requireValue(current.inputIdentity === identity, 'STALE_SESSION');
+      const bytes = await this.configuredSource(current, task.scope.signal);
+      try {
+        const source = decodeSource(bytes);
+        return { identity: current.inputIdentity, source, bytes: this.validateSource(source) };
+      } finally { bytes.fill(0); }
+    });
   }
   async setEnabled(installationId, enabled, { signal } = {}) {
     identifier(installationId); requireValue(typeof enabled === 'boolean');
@@ -890,6 +991,7 @@ export class CatRuntime {
     const spec = this.settings.value.scripts.find(script =>
       script.installationId === installationId);
     if (!spec?.enabled) return false;
+    if (this.configuration && spec.loadedIdentity !== spec.inputIdentity) return true;
     if (!this.settled.has(installationId) || !state) return true;
     if (!state.enabled) return false;
     return state.state === 'ready' && !snapshot;
@@ -904,7 +1006,7 @@ export class CatRuntime {
       : this.starting(installationId, state, snapshot) ? 'starting'
         : !state ? 'disabled'
           : !state.enabled ? 'disabled' : state.state;
-    return { installationId, generation: state?.generation ?? 0, state: status,
+    return { installationId, generation: status === 'ready' ? state.generation : state?.generation ?? 0, state: status,
       name: spec?.name ?? installationId, sourceType: spec?.sourceType ?? 'local',
       sourceUrl: spec?.sourceUrl ?? null, enabled: spec?.enabled ?? false,
       importedAt: spec?.importedAt ?? null, updatedAt: spec?.updatedAt ?? null,
@@ -914,6 +1016,7 @@ export class CatRuntime {
         : state?.contentHash ?? spec?.sourceHash ?? null,
       error: failure ?? state?.lastFailure ?? null,
       sites: clone(status === 'ready' ? this.hostSites(installationId) : spec?.sites ?? []),
+      ...(this.configuration ? { inputRevision: spec?.inputRevision ?? 0 } : {}),
       ...(status === 'ready' && snapshot ? {
         ...(snapshot.endpoint ? { managementUrl: snapshot.endpoint.managementUrl } : {}),
         endpoints: snapshot.endpoints.map(({ proxyId, ...endpoint }) => endpoint) } : {}) };

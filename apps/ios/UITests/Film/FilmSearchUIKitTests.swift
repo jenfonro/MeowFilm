@@ -15,7 +15,7 @@ final class FilmSearchUIKitTests: XCTestCase {
         let imageURL: (String) -> URL? = { mapped.append($0); return URL(string: $0) }
         var state = FilmSearchSnapshot(sessionID: sessionID, query: "原查询")
         state.cards = [a, b, c]
-        let initial = presentation.update(state.cards, sessionID: state.sessionID, imageURL: imageURL)
+        let initial = presentation.update(state.cards, imageURL: imageURL)
         let ids = presentation.identifiers, originalPoster = presentation.cards[ids[1]]?.content.item.posterURL
         XCTAssertTrue(initial.identifiersChanged)
         XCTAssertEqual(mapped, [a, b, c].map { $0.text("poster") })
@@ -24,18 +24,17 @@ final class FilmSearchUIKitTests: XCTestCase {
             state.sequence += 1; state.revision += 1; state.metadataState = status
             state.loading = status == .loading; state.hasMore = !state.loading
             state.metadataDetails["tv:7"] = .object(["overview": .string(status.rawValue)])
-            XCTAssertTrue(presentation.update(state.cards, sessionID: state.sessionID, imageURL: imageURL).isEmpty)
+            XCTAssertTrue(presentation.update(state.cards, imageURL: imageURL).isEmpty)
             XCTAssertTrue(mapped.isEmpty, "Progress and metadata-only updates must not map any cards")
             XCTAssertEqual(presentation.identifiers, ids)
         }
-        XCTAssertTrue(presentation.update(state.cards.map { FilmSearchCard(value: $0.value) },
-                                         sessionID: sessionID, imageURL: imageURL).isEmpty)
+        XCTAssertTrue(presentation.update(state.cards.map { FilmSearchCard(value: $0.value) }, imageURL: imageURL).isEmpty)
         XCTAssertTrue(mapped.isEmpty, "Equal card values do not require the same array storage")
 
         var badge = try b.value.filmRequiredObject()
         badge["textBadge"] = .string("更新至13集")
         let updatedB = FilmSearchCard(value: .object(badge))
-        let changedBadge = presentation.update([a, updatedB, c], sessionID: sessionID, imageURL: imageURL)
+        let changedBadge = presentation.update([a, updatedB, c], imageURL: imageURL)
         XCTAssertFalse(changedBadge.identifiersChanged)
         XCTAssertEqual(changedBadge.reconfigure, [ids[1]])
         XCTAssertEqual(mapped, [b.text("poster")], "An unchanged A/C must reuse their display projection")
@@ -46,50 +45,49 @@ final class FilmSearchUIKitTests: XCTestCase {
         facts["raw"] = .object(["detailId": .string("é")])
         facts["aggregateItems"] = .array([x.value])
         let updatedA = FilmSearchCard(value: .object(facts))
-        XCTAssertTrue(presentation.update([updatedA, updatedB, c], sessionID: sessionID, imageURL: imageURL).isEmpty)
+        XCTAssertTrue(presentation.update([updatedA, updatedB, c], imageURL: imageURL).isEmpty)
         XCTAssertEqual(mapped, [a.text("poster")])
         XCTAssertEqual(presentation.cards[ids[0]]?.selection, updatedA, "Raw/member changes refresh exact selection facts even without a display change")
         mapped.removeAll()
         facts["raw"] = .object(["detailId": .string("e\u{301}")])
         let exactA = FilmSearchCard(value: .object(facts))
-        XCTAssertTrue(presentation.update([exactA, updatedB, c], sessionID: sessionID, imageURL: imageURL).isEmpty)
+        XCTAssertTrue(presentation.update([exactA, updatedB, c], imageURL: imageURL).isEmpty)
         XCTAssertEqual(mapped, [a.text("poster")], "Canonically equivalent raw strings are still different protocol facts")
         XCTAssertEqual(presentation.cards[ids[0]]?.selection.value.catField("raw")?.catField("detailId"), .string("e\u{301}"))
         mapped.removeAll()
-        XCTAssertTrue(presentation.update([exactA, updatedB, c], sessionID: sessionID, imageURL: imageURL).isEmpty)
+        XCTAssertTrue(presentation.update([exactA, updatedB, c], imageURL: imageURL).isEmpty)
         XCTAssertTrue(mapped.isEmpty)
 
-        let inserted = presentation.update([x, c, exactA, updatedB], sessionID: sessionID, imageURL: imageURL)
+        let inserted = presentation.update([x, c, exactA, updatedB], imageURL: imageURL)
         XCTAssertTrue(inserted.identifiersChanged)
         XCTAssertTrue(inserted.reconfigure.isEmpty)
         XCTAssertEqual(mapped, [x.text("poster")], "Insertion maps X only, not the existing identities")
         mapped.removeAll()
-        let moved = presentation.update([exactA, c, updatedB], sessionID: sessionID, imageURL: imageURL)
+        let moved = presentation.update([exactA, c, updatedB], imageURL: imageURL)
         XCTAssertTrue(moved.identifiersChanged)
         XCTAssertTrue(moved.reconfigure.isEmpty)
         XCTAssertTrue(mapped.isEmpty, "Removal and reordering do not remap retained cards")
         XCTAssertEqual(presentation.identifiers, [ids[0], ids[2], ids[1]])
 
-        let nextSession = UUID()
-        let next = presentation.update([exactA, c, updatedB], sessionID: nextSession, imageURL: imageURL)
-        XCTAssertTrue(next.identifiersChanged)
+        let next = presentation.update([exactA, c, updatedB], imageURL: imageURL)
+        XCTAssertFalse(next.identifiersChanged)
         XCTAssertTrue(next.reconfigure.isEmpty)
-        XCTAssertEqual(mapped, [a, c, b].map { $0.text("poster") })
-        XCTAssertTrue(Set(ids).isDisjoint(with: presentation.identifiers), "Equal input from a new session cannot reuse the old session's identities")
+        XCTAssertTrue(mapped.isEmpty)
+        XCTAssertEqual(presentation.identifiers, [ids[0], ids[2], ids[1]])
         mapped.removeAll()
-        XCTAssertTrue(presentation.update([], sessionID: nextSession, imageURL: imageURL).identifiersChanged)
+        XCTAssertTrue(presentation.update([], imageURL: imageURL).identifiersChanged)
         XCTAssertTrue(presentation.cards.isEmpty)
-        XCTAssertTrue(presentation.update([], sessionID: nextSession, imageURL: imageURL).isEmpty)
+        XCTAssertTrue(presentation.update([], imageURL: imageURL).isEmpty)
         XCTAssertTrue(mapped.isEmpty)
 
         var opaque = try a.value.filmRequiredObject()
-        opaque["displayKey"] = .string("é")
-        _ = presentation.update([FilmSearchCard(value: .object(opaque))], sessionID: nextSession, imageURL: imageURL)
+        opaque["businessId"] = .string("é")
+        _ = presentation.update([FilmSearchCard(value: .object(opaque))], imageURL: imageURL)
         let composedID = try XCTUnwrap(presentation.identifiers.first)
         mapped.removeAll()
-        opaque["displayKey"] = .string("e\u{301}")
+        opaque["businessId"] = .string("e\u{301}")
         let opaqueCard = FilmSearchCard(value: .object(opaque))
-        let exactKey = presentation.update([opaqueCard], sessionID: nextSession, imageURL: imageURL)
+        let exactKey = presentation.update([opaqueCard], imageURL: imageURL)
         XCTAssertTrue(exactKey.identifiersChanged)
         XCTAssertTrue(exactKey.reconfigure.isEmpty)
         XCTAssertEqual(presentation.identifiers.map(\.displayKey), [Data("e\u{301}".utf8)])
@@ -99,15 +97,15 @@ final class FilmSearchUIKitTests: XCTestCase {
     }
 
     func testSearchPresentationKeepsStableIDsAcrossInsertMoveAndRemoval() {
-        let sessionID = UUID(), a = searchCard("a"), b = searchCard("b"), c = searchCard("c"), x = searchCard("x")
+        let a = searchCard("a"), b = searchCard("b"), c = searchCard("c"), x = searchCard("x")
         var presentation = FilmSearchResultsPresentation()
-        let initial = presentation.update([a, b, c], sessionID: sessionID, imageURL: { URL(string: $0) })
+        let initial = presentation.update([a, b, c], imageURL: { URL(string: $0) })
         let previous = presentation.identifiers
         XCTAssertTrue(initial.identifiersChanged)
         XCTAssertTrue(initial.reconfigure.isEmpty)
-        let unchanged = presentation.update([a, b, c], sessionID: sessionID, imageURL: { URL(string: $0) })
+        let unchanged = presentation.update([a, b, c], imageURL: { URL(string: $0) })
         XCTAssertTrue(unchanged.isEmpty, "Progress-only snapshots must not apply or reconfigure the collection")
-        let inserted = presentation.update([x, a, b, c], sessionID: sessionID, imageURL: { URL(string: $0) })
+        let inserted = presentation.update([x, a, b, c], imageURL: { URL(string: $0) })
         XCTAssertTrue(inserted.identifiersChanged)
         XCTAssertTrue(inserted.reconfigure.isEmpty, "A front insertion must not rebind the existing A/B/C identities")
         XCTAssertEqual(Array(presentation.identifiers.dropFirst()), previous)
@@ -115,26 +113,26 @@ final class FilmSearchUIKitTests: XCTestCase {
         for (id, card) in zip(previous, [a, b, c]) {
             XCTAssertEqual(presentation.cards[id]?.selection, card)
         }
-        let moved = presentation.update([c, x, a, b], sessionID: sessionID, imageURL: { URL(string: $0) })
+        let moved = presentation.update([c, x, a, b], imageURL: { URL(string: $0) })
         XCTAssertTrue(moved.identifiersChanged)
         XCTAssertTrue(moved.reconfigure.isEmpty)
         XCTAssertEqual(presentation.identifiers[0], previous[2])
-        let removed = presentation.update([c, a], sessionID: sessionID, imageURL: { URL(string: $0) })
+        let removed = presentation.update([c, a], imageURL: { URL(string: $0) })
         XCTAssertTrue(removed.identifiersChanged)
         XCTAssertTrue(removed.reconfigure.isEmpty)
         XCTAssertEqual(presentation.identifiers, [previous[2], previous[0]])
         XCTAssertEqual(presentation.cards.count, 2)
-        let cleared = presentation.update([], sessionID: sessionID, imageURL: { URL(string: $0) })
+        let cleared = presentation.update([], imageURL: { URL(string: $0) })
         XCTAssertTrue(cleared.identifiersChanged)
         XCTAssertTrue(cleared.reconfigure.isEmpty)
         XCTAssertTrue(presentation.cards.isEmpty)
-        XCTAssertTrue(presentation.update([], sessionID: sessionID, imageURL: { URL(string: $0) }).isEmpty)
+        XCTAssertTrue(presentation.update([], imageURL: { URL(string: $0) }).isEmpty)
     }
 
     func testSearchPresentationOnlyReconfiguresChangedDisplayFieldsAndKeepsLatestSelectionFacts() throws {
-        let sessionID = UUID(), a = searchCard("a"), b = searchCard("b"), c = searchCard("c")
+        let a = searchCard("a"), b = searchCard("b"), c = searchCard("c")
         var presentation = FilmSearchResultsPresentation()
-        _ = presentation.update([a, b, c], sessionID: sessionID, imageURL: { URL(string: $0) })
+        _ = presentation.update([a, b, c], imageURL: { URL(string: $0) })
         let ids = presentation.identifiers
         let poster = presentation.cards[ids[1]]?.content.item.posterURL
         var members = try a.value.filmRequiredObject(), badge = try b.value.filmRequiredObject()
@@ -142,69 +140,66 @@ final class FilmSearchUIKitTests: XCTestCase {
         members["aggregateItems"] = .array([searchCard("late-member").value])
         badge["textBadge"] = .string("更新至13集")
         let updatedA = FilmSearchCard(value: .object(members)), updatedB = FilmSearchCard(value: .object(badge))
-        let changed = presentation.update([updatedA, updatedB, c], sessionID: sessionID, imageURL: { URL(string: $0) })
+        let changed = presentation.update([updatedA, updatedB, c], imageURL: { URL(string: $0) })
         XCTAssertFalse(changed.identifiersChanged)
         XCTAssertEqual(changed.reconfigure, [ids[1]], "Only B's changed badge is a displayed-content update")
         XCTAssertEqual(presentation.cards[ids[1]]?.content.item.posterURL, poster)
         XCTAssertEqual(presentation.cards[ids[0]]?.selection, updatedA, "Selection keeps the latest complete facts without reconfiguring A")
-        XCTAssertTrue(presentation.update([updatedA, updatedB, c], sessionID: sessionID,
+        XCTAssertTrue(presentation.update([updatedA, updatedB, c],
                                          imageURL: { URL(string: $0) }).isEmpty)
     }
 
-    func testSearchPresentationTracksTitlePosterSourceLabelAndAccessibleIdentityChanges() throws {
-        let sessionID = UUID(), a = searchCard("a"), b = searchCard("b")
+    func testSearchPresentationTracksTitlePosterAndSourceLabelChanges() throws {
+        let a = searchCard("a"), b = searchCard("b")
         let variants: [(String, RuntimeValue)] = [
             ("title", .string("新的显示标题")), ("poster", .string("https://example.invalid/new.jpg")),
-            ("siteLabel", .string("新的来源标签")), ("siteKey", .string("new-source")),
+            ("siteLabel", .string("新的来源标签")),
         ]
         for (field, value) in variants {
             var presentation = FilmSearchResultsPresentation()
-            _ = presentation.update([a, b], sessionID: sessionID, imageURL: { URL(string: $0) })
+            _ = presentation.update([a, b], imageURL: { URL(string: $0) })
             let ids = presentation.identifiers
             var changed = try b.value.filmRequiredObject()
             changed[field] = value
-            let update = presentation.update([a, FilmSearchCard(value: .object(changed))],
-                sessionID: sessionID, imageURL: { URL(string: $0) })
+            let update = presentation.update([a, FilmSearchCard(value: .object(changed))], imageURL: { URL(string: $0) })
             XCTAssertFalse(update.identifiersChanged, field)
             XCTAssertEqual(update.reconfigure, [ids[1]], field)
         }
     }
 
-    func testSearchPresentationUsesExactOpaqueKeysAndScopesThemToTheirSession() throws {
-        let sessionID = UUID(), rows = [searchCard("é"), searchCard("e\u{301}")]
+    func testSearchPresentationKeepsExactOpaqueKeysAcrossExecutionSessions() throws {
+        let rows = [searchCard("é"), searchCard("e\u{301}")]
         var presentation = FilmSearchResultsPresentation()
-        _ = presentation.update(rows, sessionID: sessionID, imageURL: { URL(string: $0) })
+        _ = presentation.update(rows, imageURL: { URL(string: $0) })
         let ids = presentation.identifiers
         XCTAssertEqual(Set(ids).count, 2, "Protocol IDs are exact UTF-8, not normalized Swift String identities")
         var representative = try rows[0].value.filmRequiredObject()
         representative["id"] = .string("new-representative")
-        let changed = presentation.update([FilmSearchCard(value: .object(representative)), rows[1]],
-            sessionID: sessionID, imageURL: { URL(string: $0) })
+        let changed = presentation.update([FilmSearchCard(value: .object(representative)), rows[1]], imageURL: { URL(string: $0) })
         XCTAssertFalse(changed.identifiersChanged, "A stable displayKey does not follow the representative's item ID")
-        XCTAssertEqual(changed.reconfigure, [ids[0]], "The changed accessibility item ID is still displayed content")
-        let nextSession = UUID()
-        let newSession = presentation.update(rows, sessionID: nextSession, imageURL: { URL(string: $0) })
-        XCTAssertTrue(newSession.identifiersChanged)
-        XCTAssertTrue(newSession.reconfigure.isEmpty, "A new search session does not reconfigure an old session's items")
-        XCTAssertTrue(Set(ids).isDisjoint(with: presentation.identifiers))
+        XCTAssertTrue(changed.reconfigure.isEmpty, "Representative IDs do not replace the fixed business identity")
+        let newSession = presentation.update(rows, imageURL: { URL(string: $0) })
+        XCTAssertFalse(newSession.identifiersChanged)
+        XCTAssertTrue(newSession.reconfigure.isEmpty)
+        XCTAssertEqual(presentation.identifiers, ids)
     }
 
     func testSearchPresentationTreatsRawGroupAndTMDBTransitionsAsRealIdentities() {
-        let sessionID = UUID(), a = searchCard("site:a"), b = searchCard("site:b")
-        let group = FilmSearchCard(value: .object(["displayKey": .string("group:opaque"), "id": .string("group:opaque"),
+        let a = searchCard("site:a"), b = searchCard("site:b")
+        let group = FilmSearchCard(value: .object(["businessId": .string("group:opaque"), "displayKey": .string("group:opaque"), "id": .string("group:opaque"),
             "sourceKind": .string("site"), "title": .string("真实标题"), "siteLabel": .string("聚合"),
             "aggregateItems": .array([a.value, b.value])]))
-        let metadata = FilmSearchCard(value: .object(["displayKey": .string("tmdb:tv:7"), "id": .string("tmdb:tv:7"),
+        let metadata = FilmSearchCard(value: .object(["businessId": .string("tmdb:tv:7"), "displayKey": .string("tmdb:tv:7"), "id": .string("tmdb:tv:7"),
             "sourceKind": .string("tmdb"), "tmdbType": .string("tv"), "tmdbId": .number(7),
             "title": .string("真实标题"), "siteLabel": .string("剧集"), "aggregateItems": .array([a.value, b.value])]))
         var presentation = FilmSearchResultsPresentation()
-        _ = presentation.update([group], sessionID: sessionID, imageURL: { URL(string: $0) })
+        _ = presentation.update([group], imageURL: { URL(string: $0) })
         let grouped = presentation.identifiers
-        let raw = presentation.update([a, b], sessionID: sessionID, imageURL: { URL(string: $0) })
+        let raw = presentation.update([a, b], imageURL: { URL(string: $0) })
         XCTAssertTrue(raw.identifiersChanged)
         XCTAssertTrue(raw.reconfigure.isEmpty)
         XCTAssertTrue(Set(grouped).isDisjoint(with: presentation.identifiers))
-        let lateMetadata = presentation.update([metadata], sessionID: sessionID, imageURL: { URL(string: $0) })
+        let lateMetadata = presentation.update([metadata], imageURL: { URL(string: $0) })
         XCTAssertTrue(lateMetadata.identifiersChanged)
         XCTAssertTrue(lateMetadata.reconfigure.isEmpty)
         XCTAssertEqual(presentation.identifiers.map(\.displayKey), [Data("tmdb:tv:7".utf8)])
@@ -387,8 +382,8 @@ final class FilmSearchUIKitTests: XCTestCase {
         XCTAssertNotEqual(zero.detail.item.identity, stringZero.detail.item.identity)
         XCTAssertEqual(zero.detail.item.id, zero.selectedCard.id)
         XCTAssertEqual(stringZero.detail.item.id, stringZero.selectedCard.id)
-        let numericRequest = try await zero.playbackRequest(sources: [site.playbackSource], owner: nil)
-        let stringRequest = try await stringZero.playbackRequest(sources: [site.playbackSource], owner: nil)
+        let numericRequest = try zero.playbackRequest()
+        let stringRequest = try stringZero.playbackRequest()
         XCTAssertEqual(numericRequest.target.value["source"]?.filmObject?["detailId"], .number(0))
         XCTAssertEqual(stringRequest.target.value["source"]?.filmObject?["detailId"], .string("0"))
         let pages = [zero, stringZero].map {
@@ -410,7 +405,7 @@ final class FilmSearchUIKitTests: XCTestCase {
     }
 
     private func searchCard(_ key: String) -> FilmSearchCard {
-        .init(value: .object(["displayKey": .string(key), "id": .string(key), "sourceKind": .string("site"),
+        .init(value: .object(["businessId": .string(key), "displayKey": .string(key), "id": .string(key), "sourceKind": .string("site"),
             "title": .string("真实标题"), "siteKey": .string("source"), "siteLabel": .string("来源"),
             "textBadge": .string("更新至12集"), "poster": .string("https://example.invalid/\(key).jpg")]))
     }
@@ -464,26 +459,23 @@ private actor FilmSearchUIKitReads {
         if operation == "search.command" { round += 1 }
         let a = row(typedZero ? .number(0) : .string("é"), key: "site:a")
         let b = row(typedZero ? .string("0") : .string("e\u{301}"), key: "site:b")
-        if operation == "search.handoff" {
-            let selection = try input.filmRequiredObject().filmString("selectionId")
-            let target = FilmPlaybackTarget(id: selection, kind: .source, title: "Node单源", source: ["key": .string(Self.site.key), "detailId": selection == "site:a" ? .number(0) : .string("0")])
-            return .object(["target": .object(target.value), "sources": .array([.object(Self.site.playbackSource.value)]),
-                "selectionId": .string(selection), "revision": .number(1), "query": .string("原查询"),
-                "results": .array([]), "resultHints": .array([]), "search": .array([]), "metadata": .null, "cacheEntries": .array([]),
-                "searchReference": .object(["sessionId": .string(Self.id.uuidString.lowercased()), "selectionId": .string(selection)])])
-        }
         let rows: [RuntimeValue] = typedZero || round > 1 ? [a, b] : round == 1 ? [a] : []
-        let group: RuntimeValue = .object(["id": .string("group:opaque"), "displayKey": .string("group:opaque"), "title": .string("真实标题"),
+        let group: RuntimeValue = .object(["businessId": .string("group:opaque"), "playbackTarget": .object(["id": .string("group:opaque"),
+            "kind": .string("group"), "title": .string("真实标题"), "members": .array(rows.map { .object(["sourceKey": .string(Self.site.key), "detailId": $0.catField("detailId")!]) })]),
+            "id": .string("group:opaque"), "displayKey": .string("group:opaque"), "title": .string("真实标题"),
             "sourceKind": .string("site"), "siteLabel": .string(rows.count > 1 ? "聚合" : "同一来源"), "aggregateItems": .array(rows)])
         return .object(["sessionId": .string(Self.id.uuidString.lowercased()), "query": .string("原查询"),
             "round": .number(Double(round + 1)), "revision": .number(Double(round + 1)), "sequence": .number(Double(round + 1)),
             "siteState": .string(rows.isEmpty ? "failed" : "completed"), "metadataState": .string("unavailable"),
             "loading": .bool(false), "hasMore": .bool(!typedZero && round < 2), "noSources": .bool(false),
+            "sources": .array([.object(Self.site.playbackSource.value)]),
             "cards": .array(rows.isEmpty ? [] : [group]), "rawCards": .array(rows), "siteItems": .array(rows), "tmdbItems": .array([]),
             "metadataSearch": .null, "metadataQuery": .string("原查询"), "metadataDetails": .object([:])])
     }
     private func row(_ id: RuntimeValue, key: String) -> RuntimeValue {
-        .object(["id": .string(key), "displayKey": .string(key), "detailId": id,
+        .object(["businessId": .string(key), "playbackTarget": .object(["id": .string(key), "kind": .string("source"),
+            "title": .string("真实标题"), "source": .object(["key": .string(Self.site.key), "detailId": id])]),
+            "id": .string(key), "displayKey": .string(key), "detailId": id,
             "siteDetail": typedZero ? .string("0") : id, "title": .string("真实标题"), "sourceKind": .string("site"),
             "siteKey": .string(Self.site.key), "siteLabel": .string("同一来源"), "textBadge": .string("更新至12集"),
             "raw": .object(["vod_id": id, "vod_name": .string("真实标题"), "vod_remarks": .string("更新至12集")])])

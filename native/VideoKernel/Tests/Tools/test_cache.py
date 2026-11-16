@@ -40,7 +40,7 @@ def load_prepare(root, shared):
     spec.loader.exec_module(prepare)
     prepare.ROOT = root
     prepare.CACHE = root / ".cache/ios-video-kernel"
-    prepare.PACKAGE = root / "native/VideoKernel/.cache"
+    prepare.PACKAGE = root / "native/KSPlayer/.cache"
     prepare.LOCK_PATH = root / "scripts/ios-video-kernel.json"
     prepare.SHARED_CACHE = shared
     prepare.__file__ = str(root / "scripts/prepare-ios-video-kernel.py")

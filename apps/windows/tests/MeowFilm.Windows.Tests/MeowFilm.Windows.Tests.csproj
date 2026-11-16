@@ -4,14 +4,17 @@
     <WindowsSdkPackageVersion>10.0.19041.57</WindowsSdkPackageVersion>
     <OutputType>Exe</OutputType>
     <UseWPF>true</UseWPF>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationIcon>../../src/MeowFilm.Desktop/Assets/Meowfilm.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../app/AppSystemMediaAttachment.cs" Link="App/AppSystemMediaAttachment.cs" />
+    <Compile Include="../../app/AppPlaybackCoordinator.cs" Link="App/AppPlaybackCoordinator.cs" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="../../../../packages/novel-rules/test/fixtures.json" LogicalName="NovelFixtures.json" />
     <ProjectReference Include="../../src/MeowFilm.Core/MeowFilm.Core.csproj" />
+    <ProjectReference Include="../../src/MeowFilm.Audio/MeowFilm.Audio.csproj" />
     <ProjectReference Include="../../src/MeowFilm.Platform/MeowFilm.Platform.csproj" />
     <ProjectReference Include="../../src/MeowFilm.Capabilities/MeowFilm.Capabilities.csproj" />
     <ProjectReference Include="../../src/MeowFilm.AppHost/MeowFilm.AppHost.csproj" />

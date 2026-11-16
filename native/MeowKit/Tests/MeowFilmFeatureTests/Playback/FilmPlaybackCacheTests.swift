@@ -84,9 +84,8 @@ final class FilmPlaybackCacheTests: XCTestCase {
         XCTAssertEqual(media.pendingCancellations, cancellations)
         let calls = await server.calls()
         let checks = calls.filter { $0.1.filmObject?["action"] == .string("browse.refresh") }
-        XCTAssertEqual(checks.count, 2)
-        XCTAssertEqual(checks[0].1.filmObject?["refresh"], .bool(false))
-        XCTAssertNil(checks[1].1.filmObject?["refresh"])
+        XCTAssertEqual(checks.count, 1)
+        XCTAssertNil(checks[0].1.filmObject?["refresh"])
         XCTAssertFalse(calls.contains { $0.1.filmObject?["action"] == .string("play") })
         await model.close()
     }
@@ -354,11 +353,18 @@ final class FilmPlaybackCacheTests: XCTestCase {
     func testReliableTMDBSupplementFillsDoubanDisplayWithoutChangingIdentityCountsOrEpisodes() throws {
         let target = FilmPlaybackTarget(id: "douban:tv:100", kind: .tv, title: "豆瓣",
             metadataProvider: .douban, metadataID: "100", position: .init(season: 2, episode: 7))
+        let seasonTarget = FilmPlaybackTarget(id: target.id, kind: .tv, title: target.title,
+            metadataProvider: .douban, metadataID: "100", position: .init(season: 2))
+        let similarTarget = try FilmPlaybackTarget(.object([
+            "id": .string("tmdb:tv:1000"), "kind": .string("tv"), "title": .string("补充关联"),
+            "metadataProvider": .string("tmdb"), "metadataId": .number(1000)
+        ]))
         let main: RuntimeValue = .object([
             "title": .string("豆瓣主资料"), "intro": .string(""), "pic": .null, "backdrop_path": .null,
             "images": .object(["logos": .array([])]), "directors": .array([]), "actors": .array([]),
             "similar": .object(["results": .array([])]), "episodes_count": .number(9),
-            "seasons": .array([.object(["season_number": .number(2), "name": .string("主季度")])])
+            "seasons": .array([.object(["season_number": .number(2), "name": .string("主季度"),
+                "businessId": .string("douban:tv:100:season:2"), "playbackTarget": .object(seasonTarget.value)])])
         ])
         let supplement: RuntimeValue = .object([
             "provider": .string("tmdb"), "metadataId": .number(999), "kind": .string("tv"),
@@ -367,7 +373,8 @@ final class FilmPlaybackCacheTests: XCTestCase {
                 "backdrop_path": .string("/v1/tmdb/images/original/backdrop.jpg"),
                 "images": .object(["logos": .array([.object(["file_path": .string("/v1/tmdb/images/original/logo.png")])])]),
                 "credits": .object(["cast": .array([.object(["id": .number(1), "name": .string("补充演员")])])]),
-                "similar": .object(["results": .array([.object(["id": .number(1000), "name": .string("补充关联")])])]),
+                "similar": .object(["results": .array([.object(["id": .number(1000), "name": .string("补充关联"),
+                    "businessId": .string(similarTarget.id), "playbackTarget": .object(similarTarget.value)])])]),
                 "seasons": .array([.object(["season_number": .number(99)])]),
                 "number_of_seasons": .number(100), "number_of_episodes": .number(999)
             ])
@@ -384,7 +391,8 @@ final class FilmPlaybackCacheTests: XCTestCase {
         XCTAssertEqual(detail.backdropURL?.absoluteString, "/v1/tmdb/images/original/backdrop.jpg")
         XCTAssertEqual(detail.logoURL?.absoluteString, "/v1/tmdb/images/original/logo.png")
         XCTAssertEqual(detail.cast.map(\.name), ["补充演员"])
-        XCTAssertEqual(detail.similarItems.first?.identity, .init(sourceID: "tmdb", itemID: "1000", kind: .tv))
+        XCTAssertEqual(detail.similarItems.first?.identity, .init(sourceID: "tmdb", itemID: "1000", kind: .tv,
+            businessID: similarTarget.id, playbackTarget: similarTarget))
         XCTAssertEqual(detail.episodeCount, 9)
         XCTAssertEqual(detail.seasonCount, original.seasonCount)
         XCTAssertEqual(detail.seasons.map(\.number), [2])
@@ -427,7 +435,10 @@ final class FilmPlaybackCacheTests: XCTestCase {
         populated["backdrop_path"] = .string("https://artwork.invalid/main-backdrop.jpg")
         populated["images"] = .object(["logos": .array([.object(["file_path": .string("https://artwork.invalid/main-logo.png")])])])
         populated["actors"] = .array([.string("主演")])
-        populated["similar"] = .object(["results": .array([.object(["id": .string("main-similar"), "title": .string("主关联")])])])
+        let mainSimilarTarget = FilmPlaybackTarget(id: "douban:tv:main-similar", kind: .tv, title: "主关联",
+            metadataProvider: .douban, metadataID: "main-similar")
+        populated["similar"] = .object(["results": .array([.object(["id": .string("main-similar"), "title": .string("主关联"),
+            "businessId": .string(mainSimilarTarget.id), "playbackTarget": .object(mainSimilarTarget.value)])])])
         let nonempty = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(metadata: .object(populated),
             target: .object(target.value), metadataSupplement: supplement))
         let primary = FilmPlaybackPresentation.detail(nonempty, original: original)

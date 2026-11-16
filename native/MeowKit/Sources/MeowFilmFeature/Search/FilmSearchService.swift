@@ -75,12 +75,13 @@ public final class FilmSearchService {
     public func session(for keyword: String, reusing retained: FilmSearchSession? = nil) throws -> FilmSearchSession {
         guard !closed else { throw FilmSearchError.closed }
         let query = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
-        let reusable = [retained, current].compactMap { $0 }.first { candidate in
-            candidate.belongs(to: self) && !candidate.invalidated &&
-            candidate.snapshot.query.utf8.elementsEqual(query.utf8) &&
-            (sourceScope.map { !candidate.hasDifferentSources($0) } ?? true)
+        let previous = [retained, current].compactMap { $0 }.first { candidate in
+            candidate.belongs(to: self) && candidate.snapshot.query.utf8.elementsEqual(query.utf8)
         }
-        let session = reusable ?? FilmSearchSession(query: query, service: self)
+        let reusable = previous.flatMap { candidate in
+            !candidate.invalidated && (sourceScope.map { !candidate.hasDifferentSources($0) } ?? true) ? candidate : nil
+        }
+        let session = reusable ?? FilmSearchSession(query: query, service: self, presentation: previous?.snapshot)
         sessions.removeAll { $0.value == nil }
         if reusable == nil { sessions.append(WeakSession(session)) }
         if current !== session {
@@ -92,6 +93,11 @@ public final class FilmSearchService {
     }
 
     func ownsWork(for session: FilmSearchSession) -> Bool { !closed && current === session }
+
+    public func runtimeDidBecomeAvailable() {
+        guard !closed else { return }
+        current?.runtimeDidBecomeAvailable()
+    }
 
     /// Accepted settings changes revoke old queries without starting a new one.
     public func metadataSettingsChanged() {

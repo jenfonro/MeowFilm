@@ -49,8 +49,8 @@
  <Style x:Key="Novel.Discovery.Choice" TargetType="RadioButton" BasedOn="{StaticResource MeowFilm.FilterChip}">
   <Style.Triggers>
    <Trigger Property="IsChecked" Value="True">
-    <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.FloatingSurface}"/>
-    <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+    <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.AccentSoft}"/>
+    <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.AccentText}"/>
    </Trigger>
    <MultiTrigger><MultiTrigger.Conditions>
     <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsChecked" Value="True"/>

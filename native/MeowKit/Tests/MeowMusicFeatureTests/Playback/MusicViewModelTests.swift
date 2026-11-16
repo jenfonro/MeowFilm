@@ -1687,7 +1687,7 @@ final class MusicViewModelTests: XCTestCase {
     }
 
     /// Actual shared controller preflight: caller-controlled Range is rejected
-    /// before AVPlayerItem/network/audio activation; ordinary Referer is legal.
+    /// before decoder/network/audio activation; ordinary Referer is legal.
     @MainActor func testSharedControllerSynchronousPreflightFailureKeepsNativeUUIDAndRuntimeResource() async throws {
         let service = MusicModelService(), playback = PlaybackController()
         await service.setHeaders(["Range": "bytes=0-1"])
@@ -1695,7 +1695,7 @@ final class MusicViewModelTests: XCTestCase {
         var captured: [PlaybackEvent] = []
         let lease = try playback.bind(owner: "music") { event in captured.append(event); model.onPlaybackEvent(event) }
         await model.load(); await model.choose(musicSelection); await model.flushPlaybackFacts()
-        XCTAssertEqual(model.phase, .failed); XCTAssertNil(playback.player.currentItem)
+        XCTAssertEqual(model.phase, .failed); XCTAssertFalse(playback.hasActiveMusicInput)
         XCTAssertEqual(model.activeNativeAttemptID, captured.first?.attempt.id)
         XCTAssertEqual(model.activeResourceID, captured.first?.attempt.resourceID)
         let first = try XCTUnwrap(captured.first)

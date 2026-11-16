@@ -6,6 +6,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Desktop;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
@@ -23,16 +24,16 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     private FrameworkElement? popupAnchor;
 
     public FilmSettingsView(FilmRuleService rules, FilmSourceService sources, FilmMetadataService? metadata = null)
-        : this(rules, sources, null, () => null, metadata) { }
+        : this(rules, sources, sources.Storage, null, () => null, metadata) { }
 
-    internal FilmSettingsView(FilmRuleService rules, FilmSourceService sources,
+    internal FilmSettingsView(FilmRuleService rules, FilmSourceService sources, IDocumentStore store,
         FilmPlaybackSettings? business, Func<FilmPlaybackTarget?> target,
         FilmMetadataService? metadata = null)
     {
         this.rules = rules ?? throw new ArgumentNullException(nameof(rules));
         this.sources = sources ?? throw new ArgumentNullException(nameof(sources));
         this.metadata = metadata;
-        panAccounts = new(sources.Runtime);
+        panAccounts = new(sources.Runtime, store);
         InitializeComponent();
         PanPage.DataContext = panAccounts;
         if (business is not null)
@@ -47,6 +48,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
             editor.ActionRequested += Rule_ActionRequested;
             editor.DraftChanged += (_, _) => InvalidateRuleResults();
         }
+        ConfigureSourceLists();
         initialized = true;
     }
 
@@ -112,8 +114,8 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         }
         else if (!SourcesBusy && !SourcesFailed)
         {
-            if (!SourcesLoaded || section == "cats" && !catsRefreshed)
-                await LoadSourcesAsync(refresh: section == "cats");
+            if (!SourcesLoaded)
+                await LoadSourcesAsync();
             else SynchronizeSources();
         }
     }
@@ -149,22 +151,28 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
 
     private void Section_KeyDown(object sender, KeyEventArgs e)
     {
-        if (sender is not RadioButton current || e.Key is not (Key.Home or Key.End or Key.Left or Key.Right)) return;
+        if (sender is RadioButton current && NavigateSection(current, e.Key)) e.Handled = true;
+    }
+    internal bool NavigateSection(RadioButton current, Key key)
+    {
+        if (key is not (Key.Home or Key.End or Key.Left or Key.Right)) return false;
         var anchors = SettingsNavigation.Children.OfType<RadioButton>()
             .Concat(BusinessNavigation.Children.OfType<RadioButton>())
             .Where(anchor => anchor.IsVisible).ToArray();
         int index = Array.IndexOf(anchors, current);
-        int next = e.Key switch { Key.Home => 0, Key.End => anchors.Length - 1,
+        if (index < 0) return false;
+        int next = key switch { Key.Home => 0, Key.End => anchors.Length - 1,
             Key.Left => (index + anchors.Length - 1) % anchors.Length, _ => (index + 1) % anchors.Length };
         anchors[next].IsChecked = true; anchors[next].Focus(); anchors[next].BringIntoView();
-        e.Handled = true;
+        return true;
     }
 
     private void View_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (!initialized) return;
         ContentFrame.Margin = e.NewSize.Width < 700 || e.NewSize.Height < 450
-            ? new(16, 0, 16, 8) : new(32, 0, 32, 16);
+            ? new(16, 0, 16, 8) : new(32, 0, 32, 12);
+        if (compactSources != (e.NewSize.Width < 850)) UpdateSourceColumns(e.NewSize.Width < 850);
         if (ActionPopup.IsOpen) UpdatePopupSize();
     }
 
@@ -182,15 +190,13 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         PopupFields.Visibility = edit ? Visibility.Visible : Visibility.Collapsed;
         CatNameBox.Text = cat?.Name ?? "";
         CatUrlBox.Text = cat?.SourceUrl ?? "";
-        CatUrlField.Visibility = importType == "local" || cat is { SourceType: "local" } ? Visibility.Collapsed : Visibility.Visible;
-        ImportTargetField.Visibility = importType is null ? Visibility.Collapsed : Visibility.Visible;
-        if (importType is not null)
-        {
-            ImportTarget.ItemsSource = new[] { new ImportChoice(null, "新猫源") }
-                .Concat(sources.Cats.Where(value => value.SourceType == importType)
-                    .Select(value => new ImportChoice(value.InstallationId, value.Name))).ToArray();
-            ImportTarget.SelectedIndex = 0;
-        }
+        catFilePath = null;
+        originalCatType = cat?.SourceType;
+        CatFileButton.Content = cat?.LocalPath is { Length: > 0 } path ? System.IO.Path.GetFileName(path) : "选择文件";
+        CatTypeField.Visibility = edit && cat is not null ? Visibility.Visible : Visibility.Collapsed;
+        CatTypeBox.SelectedValue = importType ?? cat?.SourceType ?? "network";
+        UpdateCatInput();
+        PopupCancel.Visibility = Visibility.Visible;
         PopupAccept.Content = accept;
         AutomationProperties.SetName(PopupAccept, title + "：" + accept);
         AutomationProperties.SetName(PopupCancel, title + "：取消");
@@ -205,14 +211,32 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         PopupScroller.MaxHeight = Math.Max(100, ActualHeight - 64);
     }
 
-    private sealed record ImportChoice(string? InstallationId, string Name);
-    private void ImportTarget_Changed(object sender, SelectionChangedEventArgs e)
+    private string? catFilePath, originalCatType;
+    private string CatInputType => CatTypeBox.SelectedValue as string ?? "network";
+    private void CatType_Changed(object sender, SelectionChangedEventArgs e) => UpdateCatInput();
+    private void UpdateCatInput()
     {
-        if (ImportTarget.SelectedItem is not ImportChoice { InstallationId: { } id }) return;
-        var cat = sources.Cats.FirstOrDefault(value => value.InstallationId == id);
-        if (cat is null) return;
-        CatNameBox.Text = cat.Name;
-        CatUrlBox.Text = cat.SourceUrl ?? "";
+        if (CatUrlField is null || CatFileField is null) return;
+        bool local = CatInputType == "local";
+        CatUrlField.Visibility = local ? Visibility.Collapsed : Visibility.Visible;
+        CatFileField.Visibility = local ? Visibility.Visible : Visibility.Collapsed;
+    }
+    private void CatFile_Click(object sender, RoutedEventArgs e)
+    {
+        if (!Active || !ActionPopup.IsOpen) return;
+        ActionPopup.StaysOpen = true;
+        try
+        {
+            string? path = PickLocalScripts(Window.GetWindow(this), false, "选择猫源文件").FirstOrDefault();
+            if (path is not null && Active && ActionPopup.IsOpen) SelectCatFile(path);
+        }
+        finally { ActionPopup.StaysOpen = false; }
+    }
+    internal void SelectCatFile(string path)
+    {
+        catFilePath = path;
+        CatFileButton.Content = System.IO.Path.GetFileName(path);
+        if (string.IsNullOrWhiteSpace(CatNameBox.Text)) CatNameBox.Text = System.IO.Path.GetFileNameWithoutExtension(path);
     }
 
     private void ClosePopup(bool restoreFocus = true)
@@ -226,7 +250,8 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     private void ActionPopup_Opened(object? sender, EventArgs e)
     {
         if (PopupFields.Visibility == Visibility.Visible) { CatNameBox.Focus(); CatNameBox.SelectAll(); }
-        else PopupCancel.Focus();
+        else if (PopupCancel.Visibility == Visibility.Visible) PopupCancel.Focus();
+        else PopupAccept.Focus();
     }
 
     private void ActionPopup_Closed(object? sender, EventArgs e)
@@ -257,6 +282,10 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
             if (string.IsNullOrWhiteSpace(CatNameBox.Text))
             {
                 Notify("请输入猫源名称"); CatNameBox.Focus(); return;
+            }
+            if (CatInputType == "local" && catFilePath is null && originalCatType != "local")
+            {
+                Notify("请选择猫源文件"); CatFileButton.Focus(); return;
             }
             if (CatUrlField.Visibility == Visibility.Visible && string.IsNullOrWhiteSpace(CatUrlBox.Text))
             {

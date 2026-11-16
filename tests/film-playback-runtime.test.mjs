@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { connectFilmPlayback, createAppRuntime, createRuntimeClient,
   createCatScriptModule, createNeteaseTokenModule } from '../apps/runtime/entry.mjs';
+import { identity, sourceIdentity } from '../packages/film-playback/src/identity.js';
 
 const root = fileURLToPath(new URL('../tmp/test-results/film-playback/http/', import.meta.url));
 const deferred = () => {
@@ -27,9 +28,11 @@ async function until(work) {
 const okay = reply => { assert.equal(reply.ok, true, JSON.stringify(reply)); return reply.value; };
 const source = { key: 'film-source', engine: 'cat', installationId: 'script', siteId: 'fixture',
   generation: 1, name: 'Fixture source' };
-const movie = { id: 'film:fixture', kind: 'movie', title: 'Fixture Film' };
-const rawTarget = detailId => ({ id: `source:fixture:${detailId}`, kind: 'source', title: movie.title,
-  source: { key: source.key, detailId } });
+const movie = { id: 'tmdb:movie:17', kind: 'movie', title: 'Fixture Film',
+  metadataProvider: 'tmdb', metadataId: 17 };
+const rawTarget = detailId => ({ id: `source:${identity(sourceIdentity(source), detailId)}`,
+  kind: 'source', title: movie.title, source: { key: source.key, engine: source.engine,
+    installationId: source.installationId, siteId: source.siteId, detailId } });
 async function setup(t, { invoke, tokenProvider, metadata } = {}) {
   mkdirSync(root, { recursive: true });
   const directory = mkdtempSync(join(root, 'case-'));
@@ -89,7 +92,7 @@ async function setup(t, { invoke, tokenProvider, metadata } = {}) {
   const snapshot = async id => okay(await rpc('session.snapshot', { sessionId: id }));
   const command = async (id, action, input = {}) => okay(await rpc('session.command', { sessionId: id, action, ...input }));
   const open = async (input = {}) => {
-    const value = okay(await rpc('session.open', { platform: 'test', target: movie, sources: [source], ...input }));
+    const value = okay(await rpc('session.open', { platform: 'test', target: rawTarget(0), sources: [source], ...input }));
     await until(async () => (await snapshot(value.sessionId)).stage !== 'loading');
     return value.sessionId;
   };
@@ -138,7 +141,7 @@ test('film HTTP snapshots omit absent entrySurface and preserve supplied entry p
   for (const entrySurface of [undefined, 'home', 'search']) {
     const id = await f.open(entrySurface === undefined ? {} : { entrySurface });
     const value = await f.snapshot(id);
-    assert.deepEqual(value.entryTarget, movie);
+    assert.deepEqual(value.entryTarget, rawTarget(0));
     assert.equal(value.entryResolution, null);
     assert.equal(Object.hasOwn(value, 'entrySurface'), entrySurface !== undefined);
     if (entrySurface !== undefined) assert.equal(value.entrySurface, entrySurface);
@@ -155,7 +158,7 @@ test('film HTTP rejects a supplied empty entry group even with an exact resume t
     { ...empty, members: [{ sourceKey: source.key, detailId: 0 }] }]) {
     const reply = await f.rpc('session.open', { platform: 'test', target: empty, resumeTarget, sources: [source] });
     assert.equal(reply.ok, false);
-    assert.equal(reply.code, 'SOURCE_NOT_FOUND');
+    assert.equal(reply.code, 'INVALID_REQUEST');
   }
   assert.deepEqual(f.calls, []);
   assert.deepEqual(f.reads, []);
@@ -240,13 +243,14 @@ test('film HTTP no-match seed reentry restores exact group and hints without rep
   const episode = (await f.snapshot(first)).browsing.episodes[0];
   await f.command(first, 'select.candidate', { candidateId: episode.candidateId });
   const attempt = await f.pending(first), saved = await f.snapshot(first);
+  const resumeTarget = okay(await f.rpc('data.target', { target: saved.target, sources: [source] }));
   okay(await f.rpc('session.release', { sessionId: first }));
   const before = f.calls.length;
-  const second = await f.open({ platform: 'ios', target: seed, metadata: seedMetadata, resumeTarget: saved.target,
+  const second = await f.open({ platform: 'ios', target: seed, metadata: seedMetadata, resumeTarget,
     resultHints: [{ sourceKey: source.key, items: [{ id: row.source.detailId, title: row.title }] }] });
   const restored = await f.snapshot(second);
   assert.deepEqual(restored.entryTarget, seed);
-  assert.deepEqual(restored.target, saved.target);
+  assert.deepEqual(restored.target, resumeTarget);
   assert.equal(restored.entryResolution, 'unmatched');
   assert.deepEqual(restored.metadata, seedMetadata);
   assert.deepEqual(restored.sources.map(value => value.source), [row.source]);

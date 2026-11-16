@@ -4,8 +4,11 @@
 
 | 数据 | 存储 | 位置 |
 | --- | --- | --- |
+| 通用／音乐外观、音乐搜索偏好、播放音量 | 原生 UserDefaults | 当前 App domain，不经运行器 |
 | 永久歌曲仓库、引用队列、历史、设置（`music.library.v3`） | 普通文档 | Application Support 下 `meowfilm/documents`，参与备份 |
-| 影视规则 | Node 私有文档 | `meowfilm/script-runtime/film-rules/rules.json`，原生仅保编辑草稿／展示快照 |
+| 小说书架／历史、阅读排版与净化规则（`novel.library.v1`） | 普通文档 | `meowfilm/documents/novel.library.v1/library.json`，参与备份 |
+| 影视规则、智能播放偏好 | 普通文档 | `meowfilm/documents/{film.rules.v1,film.preferences.v1}/settings.json`，参与备份 |
+| 猫源来源意图、网盘凭据、TMDB／豆瓣配置 | 加密文档 | `meowfilm/documents/protected-settings` 下按 namespace/key 散列存放，排除备份 |
 | 视频映射／选项／删除记录 | 普通文档 | `meowfilm/documents/film.video-sources.v1`，参与备份 |
 | 音乐脚本安装、源码与私有数据 | Node 私有文档 | Application Support 下 `meowfilm/script-runtime/music`，参与备份 |
 | 共享图片／歌词（`music.presentation-resources.v1`）、来源观察（`music.source-checks.v1`）、首页展示（`music.home.display.v1`）、官方音频定位（`music.platform.audio-locators.v1`） | 普通文档 | Caches 下 `meowfilm/documents` |
@@ -32,7 +35,7 @@
 
 ## 加密文档
 
-`EncryptedDocumentStore` 提供通用敏感文档 API。当前音乐装配不再用它保存平台设备会话：匿名协议状态归 Node，原生账号凭据使用上表中的 Keychain store。
+`EncryptedDocumentStore` 提供通用敏感文档 API，影视四个敏感设置块使用该存储。音乐装配不再用它保存平台设备会话：匿名协议状态归 Node，原生音乐账号凭据使用上表中的 Keychain store。
 
 ### 密钥
 
@@ -52,6 +55,7 @@
 
 - 写入先在同目录 stage 完成加密、文件保护（`completeUntilFirstUserAuthentication`）、权限、备份排除和 fsync，再 rename 替换。读取不修改已有文件或目录的保护等级。
 - 覆盖或删除前先认证原文档。缺 key、错误 key、篡改、未知版本、锁定和 IO 失败使用封闭错误，不暴露路径、密钥或明文。
+- `compareAndSwap(key:expected:replacement:)` 在同一 store 锁内认证并解密当前内容，与 expected 明文字节精确比较后才加密原子替换。缺失／存在、内容不符返回 `revisionConflict`；不因冲突生成新密钥或修改原文档。
 - 命名空间已有任何文件但缺少 key 时，不创建新 key。
 - 默认上限：单文档明文 8 MiB、命名空间密文 32 MiB、文件 128 个；可配置硬上限分别为 64 MiB、256 MiB、1024 个。
 - 同一命名空间只能有一个存储实例。跨进程事务、恶意同进程代码和回滚攻击不在契约范围内。
@@ -69,7 +73,7 @@
 - 设置首页最底部独立分组 → 清空本机数据。二次确认说明不可撤销、清除范围以及需关闭并重新打开 App；取消不产生请求。
 - 确认后只持久写入 Application Support 下独立的 `meowfilm-reset.pending`（排除备份），停止播放、同步、脚本和业务访问，并切换为待重启界面。此时尚未清理；不会强制退出或在原进程热重建服务，前后台切换也不会执行清理。内嵌 Node 每进程只能启动一次。App 等待规则／来源 owner 取消排空、音乐模块终态、共享 bridge 和 Node 线程实际结束；仍需新进程才进行删除。
 - 下次冷启动由 `MeowfilmLaunchController` 在创建 `MeowfilmAssembly` 前执行清理。清除 Application Support/meowfilm、Caches/meowfilm、Caches/meowfilm.music.audio-resources.v1、临时目录下的 meowfilm（运行器回退位置），以及当前 App UserDefaults domain、App Cookie 与 URL 缓存。
-- Keychain 只清除当前账号精确 service `dev.meowfilm.aggregate.music.platform.accounts.v1`；不读取、枚举或清除旧设备／旧曲库 services。只删除本地 data-protection generic-password 项，不枚举整个 access group、不按 class 全删，不先读取或验证项的保护属性。侧载后的偏好域使用实际 bundle ID，Keychain service 仍使用稳定产品 ID。
+- Keychain 只清除当前账号与影视设置密钥的精确 services：`dev.meowfilm.aggregate.music.platform.accounts.v1`、`dev.meowfilm.aggregate.film.settings.keys.v1`；不读取、枚举或清除旧设备／旧曲库 services。只删除本地 data-protection generic-password 项，不枚举整个 access group、不按 class 全删，不先读取或验证项的保护属性。侧载后的偏好域使用实际 bundle ID，Keychain services 仍使用稳定产品 ID。
 - 不调用云端退出／歌单／收藏删除，不删除 App 外导入原文件、链接目标或其他 service。应用根目录中未知的本地文件也属于重置范围，不尝试解密损坏文档。
 - 清理可幂等重做，缺失项视为成功。只有全部完成才删除待清除标志并创建新业务装配；中断或任一失败保留标志，阻断业务启动，在统一信息框提供重试，不将部分清理报告为成功。签名权限问题不能靠清除自动修复。
 
@@ -79,10 +83,41 @@
 
 `NativeMusicScriptService` 仅适配 `music.script.v3`，不维护原生脚本 `DocumentStore`、下载器或反向 storage RPC。旧原生脚本数据不读取、迁移、双写或主动删除；用户明确清除本机数据时仍按整个应用数据根清理。
 
-Cat 继续使用 `meowfilm/script-runtime/cat`，客户端视频选项、排序、检测与删除记录仍属于 `film.video-sources.v1`。HTTP／引擎适配不改变这些目录或 namespace，不把公共独立入口的默认根目录套到旧安装上，再用空 status 清掉客户端记录；不新增自动数据迁移或清理。
+Cat 安装事实、源码与私有卷继续使用 `meowfilm/script-runtime/cat`，可编辑来源意图迁入下述原生设置块；客户端视频选项、排序、检测与删除记录仍属于 `film.video-sources.v1`。不把公共独立入口的默认根目录套到旧安装上，再用空 status 清掉客户端记录；除下述已知设置迁移外，不扫描／清理旧安装。
 
 内置官方源开关属于 `music.library.v3` 的 playback 记录 `officialSources`，值为 `wy`／`tx`／`kg` 的无重复数组；新建文档显式写入全部启用，当前格式文档必须包含该数组，空数组全部关闭，不接受缺失、null 或未知平台。写入使用既有 settingsRevision／文档 CAS，不创建第二份设置事实来源。
 
 ## 影视设置
 
-Node 在 `meowfilm/script-runtime/film-rules/rules.json` 唯一保存四组规则，通过 `film.rules.*` 读写；客户端不保存或回灌规则文档，不兼容旧客户端数据。`film.video-sources.v1/catalog` 仍由 DocumentStore CAS 保存客户端视频映射、排序、四选项、检测结果、猫源管理元数据及 tombstone，不存脚本源码、运行端口或 generation。Node 同目录树中的脚本安装和私有卷不等于拥有客户端视频选项。详细身份、删除恢复与调用边界见[影视设置](film-settings.md)。
+唯一 owner、离线提交、通知及在线回写语义只在[共同契约](../common/settings-storage.md)维护。iOS 的 `MeowfilmNativeSettings` 构造并共享六个 `FilmSettingsDocument`，页面与私密通道使用同一实例；不依赖 RuntimeSession 连接读取或保存。通知器弱引用既有会话，避免文档与受信读取能力反向延长会话生命周期；会话释放后仍可本地保存，不创建替代运行器。
+
+| `FilmSettingsBlock`／通知块 | namespace | 存储 |
+| --- | --- | --- |
+| `.catSources`／`cat.sources` | `film.cat-sources.v1` | 加密 |
+| `.panAccounts`／`pan.accounts` | `pan.accounts.v1` | 加密 |
+| `.tmdb`／`tmdb` | `film.tmdb.v1` | 加密 |
+| `.douban`／`douban` | `film.douban.v1` | 加密 |
+| `.rules`／`film.rules` | `film.rules.v1` | 普通 |
+| `.preferences`／`film.preferences` | `film.preferences.v1` | 普通 |
+
+每块 key 均为 `settings`。规则和偏好分别使用 `{version:1,rules}`、`{version:1,preferences}`；元数据为 `{version:1,settings}`，网盘为 `{version:1,accounts}`。猫源结构见[Cat 原生意图](../runtime/cat-script-runtime.md#原生来源意图注入)。文档包装层负责对象 JSON、8 MiB 明文字节边界及内容 CAS，领域消费者负责各自字段、默认值和有效性；本地 `update(_:)` 只在真实变更提交后调用通知。
+
+敏感块在上述 `protected-settings` 根下使用 AES-GCM；Keychain service 为 `dev.meowfilm.aggregate.film.settings.keys.v1`，每 namespace 一把 32 字节 key，沿用本页保护与失败规则。`snapshot()` 提供内容 fingerprint，受信 `compareAndSwap(expected:document:)` 只由 App 装配授予 pan 在线凭据回写，不反向通知同一运行器；私密帧见[运行底座](runtime-preflight.md#原生设置私密通道)。
+
+`film.video-sources.v1/catalog` 仍由 DocumentStore CAS 保存客户端视频映射、排序、四选项、检测结果、只读安装／站点展示元数据及 tombstone。新写内容为 v2，不保存来源的 name／sourceType／sourceUrl／enabled／localPath／localHash，也不存脚本源码、运行端口或 generation；可编辑字段只从 `.catSources` 投影。已有 v1 目录保留视频、检测、选项与墓碑，首次成功提交才去掉旧来源字段，不把只读投影当作已完成落盘。它不是来源意图或安装事实源，状态观察及串行边界见[影视设置](film-settings.md#猫源与公共宿主)。
+
+### 已知 Node 设置的单向迁移
+
+`MeowfilmNativeSettings.init` 在装配业务消费者／RuntimeSession 前执行 `FilmSettingsMigration.apply(runtimeRoot:documents:)`。下表路径相对同一 `meowfilm/script-runtime`，只读取这些已知输入，不搜索其他目录：
+
+| 块 | 旧路径 | 原生采用及旧资料处理 |
+| --- | --- | --- |
+| 猫源 | `cat/settings.json` v1 | 来源意图转入原生；原文件改为 v2 安装事实，保留源码引用、实际配置、sites 与更新时间 |
+| 网盘 | `pan/accounts.json` | 采用原凭据／revision 到加密文档，满足退役条件后移除旧文件 |
+| TMDB／豆瓣 | `{tmdb,douban}/settings.json` | 采用完整设置到对应加密文档，满足退役条件后移除旧文件 |
+| 四组规则 | `film-rules/rules.json` | 加入 v1 envelope，满足退役条件后移除旧文件 |
+| 智能偏好 | `film-playback/library.json` 的 `preferences` | 拆入独立原生文档；旧库只移除此字段，历史／人工匹配／屏蔽／点映资料原样保留 |
+
+已有原生文档优先，不用旧值覆盖；损坏原生或旧文档明确失败，不静默重置。旧输入须为受限普通文件、大小有效、结构合法且退役前内容仍与读取时一致；一般只有已采用值仍等于当前原生值才退役。猫源在原生值已存在时仍可把旧混合文件收敛为安装事实，但不重建或覆盖原生意图；已有 v2 事实而缺失原生意图为错误。未满足条件保留旧输入，注入模式仍只消费原生配置，不恢复双写。
+
+迁移可在中断后重入，不删除真实安装源码／私有卷或业务历史；原生设置密钥缺失、认证失败与格式错误不能触发旧文件回退。清除全部用户数据继续使用既有冷启动重置流程，不在当前进程热重建 Node。

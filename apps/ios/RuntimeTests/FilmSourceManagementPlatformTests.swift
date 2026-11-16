@@ -69,7 +69,7 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
     func testCatDetailEditAndLocalUpdateStayAtFourthLevelAndReturnToList() async throws {
         for action in ["edit", "update"] {
             let fixture = try makeFixture()
-            if action == "update" { await fixture.runtime.useLocalSource("a") }
+            if action == "update" { try await fixture.useLocalSource("a") }
             try await fixture.service.refresh()
             let theme = SourceListTheme()
             let page = FilmCatSourcesViewController(service: fixture.service, themeProvider: theme)
@@ -354,9 +354,14 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
     }
 
     func testLeavingBatchSettlesAcceptedWriteAndDoesNotSubmitNextSource() async throws {
-        for (operation, action) in [("uninstall", 4), ("enable", 0), ("restart", 3), ("update", 2)] {
+        for (operation, action) in [("delete", 4), ("enable", 0), ("restart", 3), ("update", 2)] {
             let fixture = try makeFixture()
             try await fixture.service.refresh()
+            if action == 0 {
+                _ = try await fixture.service.enableCat("a", enabled: false)
+                try await fixture.loadRuntime()
+                fixture.native.receipts.reset()
+            }
             let theme = SourceListTheme()
             let page = FilmCatSourcesViewController(service: fixture.service, themeProvider: theme)
             let navigation = PageNavigationController(themeProvider: theme)
@@ -365,7 +370,11 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
             await eventually { page.snapshot?.cats.count == 2 && page.canPresentPageAlert }
             try ManagementListTestUI.button("management.selectAll", in: page.manager).sendActions(for: .touchUpInside)
             let entered = expectation(description: operation + " admitted")
-            await fixture.runtime.pause(operation) { entered.fulfill() }
+            if action == 0 || action == 4 {
+                fixture.native.receipts.pauseNext { entered.fulfill() }
+            } else {
+                await fixture.runtime.pause(operation) { entered.fulfill() }
+            }
             if action == 4 { page.manager.deleteButton.sendActions(for: .touchUpInside) }
             else {
                 try ManagementListTestUI.activateMenu(
@@ -380,11 +389,17 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
             // Also covers a quick return: the old batch cannot resume merely
             // because the same retained list becomes visible again.
             page.pageDidBecomeHidden()
-            await fixture.runtime.release()
+            if action == 0 || action == 4 { fixture.native.receipts.release() }
+            else { await fixture.runtime.release() }
             await eventually { !page.busy }
             let calls = await fixture.runtime.mutations
-            XCTAssertEqual(calls.map(\.0), [operation])
-            XCTAssertEqual(calls.map(\.1), ["a"])
+            if action == 0 || action == 4 {
+                XCTAssertEqual(fixture.native.receipts.commits, ["a"])
+                XCTAssertTrue(calls.isEmpty, "Native batch writes do not call Node")
+            } else {
+                XCTAssertEqual(calls.map(\.0), [operation])
+                XCTAssertEqual(calls.map(\.1), ["a"])
+            }
             let saved = await fixture.service.snapshot
             if action == 4 { XCTAssertEqual(saved.cats.map(\.installationId), ["b"]) }
             if action == 2 { XCTAssertEqual(saved.cats.first?.updateState, "updated") }
@@ -397,7 +412,7 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
         for background in [false, true] {
             for fail in [false, true] {
                 let fixture = try makeFixture()
-                await fixture.runtime.useLocalSource("a"); await fixture.runtime.useLocalSource("b")
+                try await fixture.useLocalSource("a"); try await fixture.useLocalSource("b")
                 try await fixture.service.refresh()
                 let theme = SourceListTheme()
                 let page = FilmCatSourcesViewController(service: fixture.service, themeProvider: theme)
@@ -415,11 +430,24 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
                 editor.documentPicker(UIDocumentPickerViewController(forOpeningContentTypes: [.javaScript]),
                                       didPickDocumentsAt: [file])
                 await eventually { editor.file != nil && (try? self.row(editor, "film.cat.editor.save").enabled) == true }
-                let entered = expectation(description: "local update handed off")
-                await fixture.runtime.pause("update") { entered.fulfill() }
-                if fail { await fixture.runtime.fail("update", id: "a") }
+                let before = try fixture.native.document.read()
+                if fail { try fixture.native.receipts.setSaveFailure(true) }
+                let entered = expectation(description: "native local input committed")
+                if !fail { fixture.native.receipts.pauseNext { entered.fulfill() } }
                 try row(editor, "film.cat.editor.save").action?()
-                await fulfillment(of: [entered], timeout: 5)
+                if fail {
+                    await eventually { (editor.presentedViewController as? UIAlertController)?.title == "错误" &&
+                        (editor.presentedViewController as? UIAlertController)?.isBeingPresented == false }
+                    XCTAssertNotNil(editor.file, "A failed save retains the selected file")
+                    XCTAssertTrue(fixture.native.receipts.commits.isEmpty)
+                    try fixture.native.receipts.setSaveFailure(false)
+                    XCTAssertEqual(try fixture.native.document.read(), before)
+                    fixture.native.receipts.pauseNext { entered.fulfill() }
+                    editor.selectAlertChoice("重试")
+                    await fulfillment(of: [entered], timeout: 5)
+                } else {
+                    await fulfillment(of: [entered], timeout: 5)
+                }
                 if background {
                     NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
                     XCTAssertFalse(editor.isPageVisible)
@@ -431,22 +459,24 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
                 }
                 await eventually { editor.canPresentPageAlert }
                 XCTAssertTrue(editor.isPageActive)
-                await fixture.runtime.release()
+                fixture.native.receipts.release()
                 await eventually { (try? self.row(editor, "film.cat.editor.save").title) == "保存" }
                 XCTAssertTrue(navigation.topViewController === editor)
                 XCTAssertNil(editor.onSaved, "An invalidated handoff must not be revived by a retry")
                 if fail {
-                    await eventually { (editor.presentedViewController as? UIAlertController)?.title == "错误" &&
-                        (editor.presentedViewController as? UIAlertController)?.isBeingPresented == false }
                     XCTAssertNotNil(editor.file, "A failed save retains the selected file")
-                    editor.selectAlertChoice("重试")
                     await eventually { (editor.presentedViewController as? UIAlertController)?.title != "错误" &&
                         (try? self.row(editor, "film.cat.editor.save").title) == "保存" &&
-                        page.snapshot?.cats.first { $0.installationId == "a" }?.updateState == "updated" }
+                        page.snapshot?.cats.first { $0.installationId == "a" }?.inputRevision == 3 }
                 }
                 let calls = await fixture.runtime.mutations
-                XCTAssertEqual(calls.map(\.0), fail ? ["update", "update"] : ["update"])
-                XCTAssertEqual(calls.map(\.1), fail ? ["a", "a"] : ["a"])
+                XCTAssertTrue(calls.isEmpty, "Local source replacement commits without HTTP update/upload")
+                XCTAssertEqual(fixture.native.receipts.commits, ["a"])
+                let committed = await fixture.service.snapshot
+                XCTAssertEqual(committed.cats.first { $0.installationId == "a" }?.inputRevision, 3)
+                XCTAssertEqual(committed.cats.first { $0.installationId == "b" }?.inputRevision, 2)
+                try await fixture.loadRuntime()
+                try await fixture.service.refresh()
                 let saved = await fixture.service.snapshot
                 XCTAssertEqual(saved.cats.first { $0.installationId == "a" }?.updateState, "updated")
                 XCTAssertEqual(saved.cats.first { $0.installationId == "b" }?.updateState, "idle")
@@ -460,8 +490,8 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
     func testLocalBatchContinuesAfterFilePickerHidesEditorBeforeSave() async throws {
         for secondLocal in [false, true] {
             let fixture = try makeFixture()
-            await fixture.runtime.useLocalSource("a")
-            if secondLocal { await fixture.runtime.useLocalSource("b") }
+            try await fixture.useLocalSource("a")
+            if secondLocal { try await fixture.useLocalSource("b") }
             try await fixture.service.refresh()
             let theme = SourceListTheme()
             let page = FilmCatSourcesViewController(service: fixture.service, themeProvider: theme)
@@ -498,11 +528,14 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
                 await eventually { next.file != nil && (try? self.row(next, "film.cat.editor.save").enabled) == true }
                 try row(next, "film.cat.editor.save").action?()
             }
-            await eventually { navigation.topViewController === page && !page.busy &&
-                page.snapshot?.cats.allSatisfy { $0.updateState == "updated" } == true }
+            await eventually { navigation.topViewController === page && !page.busy }
+            try await fixture.loadRuntime()
+            try await fixture.service.refresh()
+            await eventually { page.snapshot?.cats.allSatisfy { $0.updateState == "updated" } == true }
             let calls = await fixture.runtime.mutations
-            XCTAssertEqual(calls.map(\.0), ["update", "update"])
-            XCTAssertEqual(calls.map(\.1), ["a", "b"])
+            XCTAssertEqual(calls.map(\.0), secondLocal ? [] : ["update"])
+            XCTAssertEqual(calls.map(\.1), secondLocal ? [] : ["b"])
+            XCTAssertEqual(fixture.native.receipts.commits, secondLocal ? ["a", "b"] : ["a"])
             XCTAssertEqual(navigation.viewControllers.count, 1)
             await fixture.service.close()
         }
@@ -513,7 +546,13 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
             for choice in ["重试", "取消"] {
                 let fixture = try makeFixture()
                 try await fixture.service.refresh()
-                await fixture.runtime.fail("enable", id: "b")
+                if action == 0 {
+                    _ = try await fixture.service.enableCat("a", enabled: false)
+                    _ = try await fixture.service.enableCat("b", enabled: false)
+                    try await fixture.loadRuntime()
+                    fixture.native.receipts.reset()
+                }
+                fixture.native.receipts.failAfterNextCommit()
                 let page = FilmCatSourcesViewController(service: fixture.service, themeProvider: SourceListTheme())
                 let window = try await host(page)
                 await eventually { page.snapshot?.cats.count == 2 && page.canPresentPageAlert }
@@ -521,16 +560,18 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
                 try ManagementListTestUI.activateMenu(action == 0 ? "启用所选" : "停用所选",
                                                      on: page.manager.footerMore)
                 await eventually { !page.busy && (page.presentedViewController as? UIAlertController)?.title == "错误" }
-                let initial = await fixture.runtime.mutations
-                XCTAssertEqual(initial.map(\.0), ["enable", "enable"])
-                XCTAssertEqual(initial.map(\.1), ["a", "b"])
+                XCTAssertEqual(fixture.native.receipts.commits, ["a"])
+                try fixture.native.receipts.setSaveFailure(false)
+                let partial = try CatSourceSettings(document: fixture.native.document).read()
+                XCTAssertEqual(partial.map(\.enabled), [action == 0, action != 0])
                 await eventually { (page.presentedViewController as? UIAlertController)?.isBeingPresented == false }
                 page.selectAlertChoice(choice)
                 await eventually { !page.busy && page.presentedViewController == nil }
                 let calls = await fixture.runtime.mutations
-                XCTAssertEqual(calls.map(\.1), choice == "重试" ? ["a", "b", "b"] : ["a", "b"])
+                XCTAssertTrue(calls.isEmpty)
+                XCTAssertEqual(fixture.native.receipts.commits, choice == "重试" ? ["a", "b"] : ["a"])
                 let saved = await fixture.service.snapshot
-                XCTAssertEqual(saved.cats.map(\.enabled), [action == 0, choice == "重试" ? action == 0 : true])
+                XCTAssertEqual(saved.cats.map(\.enabled), [action == 0, choice == "重试" ? action == 0 : action != 0])
                 XCTAssertEqual(saved.videos.count, 2)
                 unhost(window)
                 await fixture.service.close()
@@ -648,7 +689,12 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
 
     private func makeFixture() throws -> SourceListFixture {
         let fixture = try SourceListFixture()
-        addTeardownBlock { await fixture.service.close(); try FileManager.default.removeItem(at: fixture.base) }
+        addTeardownBlock {
+            fixture.native.receipts.release()
+            await fixture.runtime.release()
+            await fixture.service.close()
+            try FileManager.default.removeItem(at: fixture.base)
+        }
         return fixture
     }
     private func row(_ page: FilmSettingsListController, _ id: String) throws -> FilmSettingsRow {
@@ -703,49 +749,147 @@ private struct SourceListFixture {
     let base: URL
     let runtime: SourceListRuntime
     let service: FilmSourceService
+    let native: SourceListNativeSettings
     init() throws {
         base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
         let runtime = SourceListRuntime(); self.runtime = runtime
-        service = FilmSourceService(transport: .init(
-            request: { try await runtime.call($0, $1) },
-            upload: { try await runtime.upload($0, $1, $2) }),
-            storeFactory: { store })
+        let native = try SourceListNativeSettings(base); self.native = native
+        service = FilmSourceService(transport: .init(request: { try await runtime.call($0, $1) }),
+            storeFactory: { store }, settingsDocument: native.document,
+            runtimeSourceRoot: base.appendingPathComponent("cat"))
+    }
+    func useLocalSource(_ id: String) async throws {
+        _ = try await service.editCat(id, name: "来源 " + id, sourceType: "local", source: "// initial " + id)
+        try await runtime.acceptNativeSettings(native.document, resetUpdates: true)
+        native.receipts.reset()
+    }
+    func loadRuntime() async throws {
+        try await runtime.acceptNativeSettings(native.document)
+    }
+}
+
+private struct SourceListNativeSettings: Sendable {
+    let document: FilmSettingsDocument
+    let receipts: SourceListNativeReceipts
+    init(_ base: URL) throws {
+        let store = try DocumentStore(baseURL: base, namespace: FilmSettingsBlock.catSources.namespace)
+        let scripts = ["a", "b"].map { id in
+            CatSourceConfiguration(installationId: id, name: "来源 " + id, sourceType: "network",
+                sourceUrl: "https://example.invalid/\(id).js", localPath: nil, localHash: nil,
+                enabled: true, inputRevision: 1).value
+        }
+        try store.write(RuntimeJSON.encode(.object(["version": .number(1), "port": .number(0),
+            "providers": .object([:]), "mappings": .array([]), "scripts": .array(scripts)])),
+            key: FilmSettingsDocument.key)
+        let receipts = SourceListNativeReceipts(store: store, base: base, scripts: scripts)
+        self.receipts = receipts
+        document = FilmSettingsDocument(block: .catSources, storage: .plain { store },
+            changed: { _ in receipts.committed() })
+    }
+}
+
+/// Blocks only a synthetic native commit receipt, never a runtime apply. The
+/// symlink fault is reversible and does not depend on simulator user privileges.
+private final class SourceListNativeReceipts: @unchecked Sendable {
+    private let lock = NSLock()
+    private let store: DocumentStore
+    private let settingsFile: URL
+    private let savedFile: URL
+    private var previous: [RuntimeValue]
+    private var recorded: [String] = []
+    private var gate: (DispatchSemaphore, @Sendable () -> Void)?
+    private var failNext = false
+    private var failing = false
+
+    init(store: DocumentStore, base: URL, scripts: [RuntimeValue]) {
+        self.store = store; previous = scripts
+        settingsFile = base.appendingPathComponent(FilmSettingsBlock.catSources.namespace)
+            .appendingPathComponent(FilmSettingsDocument.key + ".json")
+        savedFile = settingsFile.appendingPathExtension("saved")
+    }
+    var commits: [String] { lock.lock(); defer { lock.unlock() }; return recorded }
+    func reset() { lock.lock(); recorded.removeAll(); lock.unlock() }
+    func pauseNext(_ entered: @escaping @Sendable () -> Void) {
+        lock.lock(); gate = (DispatchSemaphore(value: 0), entered); lock.unlock()
+    }
+    func release() {
+        lock.lock(); let gate = gate; self.gate = nil; lock.unlock()
+        gate?.0.signal()
+    }
+    func failAfterNextCommit() { lock.lock(); failNext = true; lock.unlock() }
+    func setSaveFailure(_ value: Bool) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard value != failing else { return }
+        if value {
+            try FileManager.default.moveItem(at: settingsFile, to: savedFile)
+            do { try FileManager.default.createSymbolicLink(at: settingsFile, withDestinationURL: savedFile) }
+            catch { try FileManager.default.moveItem(at: savedFile, to: settingsFile); throw error }
+        } else {
+            try FileManager.default.removeItem(at: settingsFile)
+            try FileManager.default.moveItem(at: savedFile, to: settingsFile)
+        }
+        failing = value
+    }
+    func committed() {
+        do {
+            let bytes = try XCTUnwrap(store.read(key: FilmSettingsDocument.key))
+            let scripts = try XCTUnwrap(RuntimeJSON.decode(bytes).catField("scripts")?.catArray)
+            lock.lock()
+            let ids = (previous + scripts).compactMap { $0.catField("installationId")?.catText }
+            let changed = ids.reduce(into: [String]()) { result, id in
+                guard !result.contains(id),
+                      previous.first(where: { $0.catField("installationId") == .string(id) }) !=
+                        scripts.first(where: { $0.catField("installationId") == .string(id) }) else { return }
+                result.append(id)
+            }
+            recorded += changed; previous = scripts
+            let gate = gate, fail = failNext; failNext = false
+            lock.unlock()
+            if fail { try setSaveFailure(true) }
+            if let gate { gate.1(); gate.0.wait() }
+        } catch { XCTFail("Synthetic native settings receipt failed") }
     }
 }
 
 private actor SourceListRuntime {
-    private var removed = Set<String>()
-    private var disabled = Set<String>()
     private var updated = Set<String>()
-    private var local = Set<String>()
+    private var inputs = ["a", "b"].map { id in
+        CatSourceConfiguration(installationId: id, name: "来源 " + id, sourceType: "network",
+            sourceUrl: "https://example.invalid/\(id).js", localPath: nil, localHash: nil,
+            enabled: true, inputRevision: 1)
+    }
     private var paused: String?
     private var entered: (@Sendable () -> Void)?
     private var waiter: CheckedContinuation<Void, Never>?
     private var failure: (operation: String, id: String)?
     private var probed: String?
-    private var candidates: [String: Int] = [:]
     private(set) var mutations: [(String, String)] = []
     private(set) var probes: [String] = []
-    func useLocalSource(_ id: String) { local.insert(id) }
+    func acceptNativeSettings(_ document: FilmSettingsDocument, resetUpdates: Bool = false) throws {
+        let saved = try CatSourceSettings(document: document).read()
+        if resetUpdates { updated.removeAll() }
+        else {
+            for input in saved {
+                if let old = inputs.first(where: { $0.installationId == input.installationId }),
+                   !input.hasSameInput(as: old) { updated.insert(input.installationId) }
+            }
+        }
+        inputs = saved
+    }
     func fail(_ operation: String, id: String) { failure = (operation, id) }
     func pause(_ operation: String, entered: @escaping @Sendable () -> Void) {
         paused = operation; self.entered = entered
     }
     func release() { waiter?.resume(); waiter = nil }
-    func upload(_ id: String, _ revision: Int, _ bytes: Data) -> RuntimeValue {
-        candidates[id] = revision
-        return .object(["installationId": .string(id), "sourceRevision": .number(Double(revision)),
-                        "sourceBytes": .number(Double(bytes.count))])
-    }
     func call(_ operation: String, _ parameters: RuntimeValue) async throws -> RuntimeValue {
         if operation == "status" {
             if let probed {
                 self.probed = nil
                 try failIfNeeded("detect", id: probed)
             }
-            return .object(["instances": .array(["a", "b"].filter { !removed.contains($0) }.map(cat))])
+            return .object(["instances": .array(inputs.map { cat($0.installationId) })])
         }
         guard case .object(let fields) = parameters, case .string(let id)? = fields["installationId"] else {
             throw FilmSourceError(code: "INVALID_ARGUMENT")
@@ -759,16 +903,7 @@ private actor SourceListRuntime {
         try failIfNeeded(operation, id: id)
         switch operation {
         case "invoke": probed = id; return .object(["list": .array([])])
-        case "uninstall": removed.insert(id); return .object(["failures": .array([])])
-        case "enable":
-            if fields["enabled"] == .bool(false) { disabled.insert(id) } else { disabled.remove(id) }
-        case "update":
-            if local.contains(id) {
-                guard case .number(let revision)? = fields["sourceRevision"], candidates[id] == Int(revision) else {
-                    throw FilmSourceError(code: "INVALID_SOURCE")
-                }
-            }
-            updated.insert(id)
+        case "update": updated.insert(id)
         case "restart": break
         default: throw FilmSourceError(code: "UNEXPECTED_OPERATION")
         }
@@ -780,14 +915,16 @@ private actor SourceListRuntime {
         throw FilmSourceError(code: operation.uppercased() + "_FAILED")
     }
     private func cat(_ id: String) -> RuntimeValue {
-        .object(["installationId": .string(id), "name": .string("来源 " + id),
-            "sourceType": .string(local.contains(id) ? "local" : "network"),
-            "sourceUrl": local.contains(id) ? .null : .string("https://example.invalid/\(id).js"),
-            "enabled": .bool(!disabled.contains(id)), "generation": .number(1),
-            "state": .string(disabled.contains(id) ? "disabled" : "ready"),
+        let input = inputs.first { $0.installationId == id }!
+        return .object(["installationId": .string(id), "name": .string(input.name),
+            "sourceType": .string(input.sourceType),
+            "sourceUrl": input.sourceUrl.map(RuntimeValue.string) ?? .null,
+            "enabled": .bool(input.enabled), "generation": .number(Double(input.inputRevision)),
+            "inputRevision": .number(Double(input.inputRevision)),
+            "state": .string(input.enabled ? "ready" : "disabled"),
             "importedAt": .number(1_700_000_000_000), "updatedAt": .null,
             "updateState": .string(updated.contains(id) ? "updated" : "idle"),
-            "updateError": .null, "sourceHash": .string("fixture"), "error": .null,
+            "updateError": .null, "sourceHash": .string(input.localHash ?? "fixture"), "error": .null,
             "sites": .array([.object(["key": .string("site"), "name": .string("视频 " + id),
                 "api": .string("/api/" + id), "actions": .array([.string("home")]), "methods": .object([:])])])])
     }

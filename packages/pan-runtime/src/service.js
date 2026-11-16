@@ -48,15 +48,9 @@ function capabilities(provider) {
     refresh: typeof provider.refresh === 'function',
   };
 }
-
-/** One in-process owner. Neither script engines nor platform credential bridges are required. */
-export function createPanService({ dataRoot, transport, now = Date.now } = {}) {
-  requireValue(typeof now === 'function' && (transport === undefined ||
-    typeof transport?.request === 'function' && typeof transport?.close === 'function'));
-  const store = new PanStore(dataRoot);
-  let document;
+function readDocument(value) {
   try {
-    document = store.read();
+    const document = value ?? { version: 1, accounts: {} };
     fields(document, ['version', 'accounts']);
     requireValue(document.version === 1 && object(document.accounts));
     for (const [id, record] of Object.entries(document.accounts)) {
@@ -64,8 +58,22 @@ export function createPanService({ dataRoot, transport, now = Date.now } = {}) {
       requireValue(integer(record.revision) && record.revision > 0);
       credentialValue(select(id), record.credentials);
     }
+    return clone(document);
+  } catch { throw new PanError('CORRUPT_STORAGE'); }
+}
+
+/** One in-process owner. Neither script engines nor platform credential bridges are required. */
+export function createPanService({ dataRoot, transport, now = Date.now, store: suppliedStore } = {}) {
+  requireValue(typeof now === 'function' && (transport === undefined ||
+    typeof transport?.request === 'function' && typeof transport?.close === 'function'));
+  const store = suppliedStore ?? new PanStore(dataRoot);
+  requireValue(typeof store.read === 'function' && typeof store.write === 'function' &&
+    typeof store.close === 'function' && (store.reload === undefined || typeof store.reload === 'function'));
+  let document;
+  try {
+    document = readDocument(store.read());
   } catch (error) {
-    throw error?.code === 'STORAGE_ERROR' ? error : new PanError('CORRUPT_STORAGE');
+    throw error instanceof PanError ? error : new PanError(error?.code === 'CLOSED' ? 'CLOSED' : 'STORAGE_ERROR');
   }
   const http = transport ?? createTransport();
   const accounts = new Map([...providers.keys()].map(id => [id, {
@@ -73,10 +81,11 @@ export function createPanService({ dataRoot, transport, now = Date.now } = {}) {
     credentials: clone(document.accounts[id]?.credentials ?? {}),
   }]));
   const pending = new Set(), controllers = new Set(), shared = new Map(), logins = new Map(), loginStarts = new Map();
-  let closed = false, closing;
+  let closed = false, closing, settingsError, changes = Promise.resolve();
 
   function assertCurrent(id, account, signal) {
     requireValue(!closed, 'CLOSED');
+    if (settingsError) throw settingsError;
     requireValue(accounts.get(id) === account, 'STALE_ACCOUNT');
     requireValue(!signal?.aborted, 'CANCELLED');
   }
@@ -87,25 +96,65 @@ export function createPanService({ dataRoot, transport, now = Date.now } = {}) {
     return { provider: id, revision: account.revision, configured: configured.length > 0, fields: configured,
       status: configured.length ? account.status ?? 'signedIn' : 'signedOut' };
   }
-  function persist(id, next) {
-    const nextDocument = { version: 1, accounts: { ...document.accounts,
-      [id]: { revision: next.revision, credentials: clone(next.credentials) } } };
-    store.write(nextDocument);
-    document = nextDocument;
-  }
-  function replace(id, credentials) {
-    const old = accounts.get(id);
-    requireValue(Number.isSafeInteger(old.revision + 1), 'STORAGE_ERROR');
-    const next = { revision: old.revision + 1, credentials };
-    persist(id, next);
-    accounts.set(id, next);
+  function invalidate(id, old, completedLogin) {
     for (const owner of controllers) if (owner.id === id && owner.account === old) owner.controller.abort();
     for (const login of logins.values()) {
-      if (login.provider.id === id && login.account === old && login.status !== 'confirmed') {
+      if (login !== completedLogin && login.provider.id === id && login.account === old)
         cancelLogin(login, 'cancelled');
-      }
     }
-    return accountStatus(id);
+  }
+  async function reload() {
+    let latest;
+    try { latest = readDocument(await (store.reload ? store.reload() : store.read())); }
+    catch (error) {
+      settingsError = error instanceof PanError ? error : new PanError(error?.code === 'CLOSED' ? 'CLOSED' : 'STORAGE_ERROR');
+      for (const owner of controllers) owner.controller.abort();
+      for (const login of logins.values()) cancelLogin(login, 'cancelled');
+      throw settingsError;
+    }
+    settingsError = undefined;
+    for (const id of providers.keys()) {
+      const record = latest.accounts[id] ?? { revision: 0, credentials: {} };
+      const old = accounts.get(id);
+      if (old.revision === record.revision && stable(old.credentials) === stable(record.credentials)) continue;
+      accounts.set(id, { revision: record.revision, credentials: clone(record.credentials) });
+      invalidate(id, old);
+    }
+    document = latest;
+  }
+  function change(run) {
+    const work = changes.then(() => {
+      requireValue(!closed, 'CLOSED');
+      return run();
+    });
+    changes = work.catch(() => {});
+    return track(work);
+  }
+  async function persist(id, next) {
+    if (settingsError) throw settingsError;
+    const nextDocument = { version: 1, accounts: { ...document.accounts,
+      [id]: { revision: next.revision, credentials: clone(next.credentials) } } };
+    try { await store.write(nextDocument); }
+    catch (error) {
+      if (error?.code === 'STORAGE_CONFLICT') {
+        await reload();
+        throw new PanError('STALE_ACCOUNT');
+      }
+      throw error instanceof PanError ? error : new PanError(error?.code === 'CLOSED' ? 'CLOSED' : 'STORAGE_ERROR');
+    }
+    document = nextDocument;
+  }
+  function replace(id, credentials, signal, expected, completedLogin) {
+    return change(async () => {
+      const old = accounts.get(id);
+      assertCurrent(id, expected ?? old, signal);
+      requireValue(Number.isSafeInteger(old.revision + 1), 'STORAGE_ERROR');
+      const next = { revision: old.revision + 1, credentials };
+      await persist(id, next);
+      accounts.set(id, next);
+      invalidate(id, old, completedLogin);
+      return accountStatus(id);
+    });
   }
   function track(promise) {
     pending.add(promise);
@@ -131,9 +180,14 @@ export function createPanService({ dataRoot, transport, now = Date.now } = {}) {
       get credentials() { assertCurrent(id, account, signal); return clone(account.credentials); },
       async updateCredentials(patch) {
         assertCurrent(id, account, signal);
-        const credentials = credentialValue(provider, { ...account.credentials, ...patch });
-        persist(id, { revision: account.revision, credentials });
-        account.credentials = credentials;
+        const update = credentialValue(provider, patch);
+        await change(async () => {
+          assertCurrent(id, account, signal);
+          const credentials = credentialValue(provider, { ...account.credentials, ...update });
+          await persist(id, { revision: account.revision, credentials });
+          account.credentials = credentials;
+        });
+        assertCurrent(id, account, signal);
       },
       async refresh() {
         requireValue(typeof provider.refresh === 'function', 'UNSUPPORTED_OPERATION');
@@ -261,7 +315,11 @@ export function createPanService({ dataRoot, transport, now = Date.now } = {}) {
       logins.set(sessionId, login);
       return { sessionId, provider: provider.id, challenge: clone(value.challenge), expiresAt: value.expiresAt,
         status: 'pending' };
-    } catch (error) { if (value?.session) provider.loginCancel?.(value.session); throw error; }
+    } catch (error) {
+      if (value?.session) provider.loginCancel?.(value.session);
+      assertCurrent(provider.id, account, startup.signal);
+      throw error;
+    }
     finally {
       startup.dispose();
       if (loginStarts.get(provider.id) === startup) loginStarts.delete(provider.id);
@@ -289,10 +347,7 @@ export function createPanService({ dataRoot, transport, now = Date.now } = {}) {
         if (response.status === 'confirmed') {
           const credentials = credentialValue(login.provider, response.credentials);
           // The completed session remains queryable; replacement revokes all *other* unfinished sessions.
-          const prior = login.status;
-          login.status = 'confirmed';
-          try { replace(login.provider.id, credentials); }
-          catch (error) { login.status = prior; throw error; }
+          await replace(login.provider.id, credentials, operation.signal, login.account, login);
           login.account = accounts.get(login.provider.id);
           cancelLogin(login, 'confirmed');
         } else if (response.status === 'expired') cancelLogin(login, 'expired');
@@ -327,7 +382,7 @@ export function createPanService({ dataRoot, transport, now = Date.now } = {}) {
     if (operation === 'settings.set' || operation === 'settings.clear') {
       const provider = select(params.provider);
       const credentials = operation === 'settings.set' ? credentialInput(provider, params.credentials) : {};
-      return replace(provider.id, credentials);
+      return replace(provider.id, credentials, signal);
     }
     if (operation === 'login.poll' || operation === 'login.cancel') {
       requireValue(typeof params.sessionId === 'string');
@@ -339,6 +394,7 @@ export function createPanService({ dataRoot, transport, now = Date.now } = {}) {
       }
       return pollLogin(login, params.sessionId, signal);
     }
+    if (settingsError) throw settingsError;
     requireValue(['list', 'prepare', 'play', 'refresh', 'login.start'].includes(operation), 'UNSUPPORTED_OPERATION');
     const provider = select(params.provider), account = accounts.get(provider.id);
     const owner = scope(provider.id, account, signal);
@@ -392,6 +448,7 @@ export function createPanService({ dataRoot, transport, now = Date.now } = {}) {
     }
   }
   return Object.freeze({
+    settingsChanged: () => change(reload),
     invoke(operation, params = {}, { signal } = {}) {
       return track(Promise.resolve().then(() => {
         requireValue(signal === undefined || signal instanceof AbortSignal);
@@ -406,7 +463,8 @@ export function createPanService({ dataRoot, transport, now = Date.now } = {}) {
         const results = await Promise.allSettled([Promise.resolve().then(() => http.close()), ...pending]);
         logins.clear();
         shared.clear();
-        await store.close();
+        try { await store.close(); }
+        catch { throw new PanError('STORAGE_ERROR'); }
         if (results[0].status === 'rejected') throw new PanError('PAN_FAILURE');
       })();
     },

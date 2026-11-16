@@ -588,7 +588,8 @@ final class FilmPlaybackModelTests: XCTestCase {
             let metadataSource: RuntimeValue = .object(["id": .string("confirmed"), "provider": .string("tmdb"),
                 "metadataId": .number(19), "kind": .string(kind.rawValue), "title": .string("可靠作品")])
             func candidate(_ id: String) -> RuntimeValue {
-                .object(["id": .string(id), "source": FilmPlaybackFixture.source, "lineId": .number(0),
+                .object(["businessId": .string(id), "playbackTarget": .object(target(id).value),
+                    "id": .string(id), "source": FilmPlaybackFixture.source, "lineId": .number(0),
                     "lineLabel": .string("原线路"), "name": .string("真实文件")])
             }
             func target(_ id: String) -> FilmPlaybackTarget {

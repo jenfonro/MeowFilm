@@ -23,10 +23,10 @@ public static partial class MusicUiTests
         yield return Case("unified search source cover options reach Node and its selected aggregate and raw covers render unchanged", UnifiedCovers);
         yield return Case("unified search isolated UTF16 display never rewrites opaque navigation identity or raw data", UnifiedText);
         yield return Case("unified search an older handoff cannot replace the newest selected card", UnifiedHandoffRace);
-        yield return Case("unified search unchanged display after generation replacement opens the new identity", UnifiedGenerationPlayback);
+        yield return Case("unified search generation replacement retains display and the stable business identity", UnifiedGenerationPlayback);
         yield return Case("unified search page distinguishes all-source failure from successful empty results", UnifiedFailureStatus);
-        yield return Case("unified search unreachable playback releases its cache and session observer", UnifiedPlaybackRelease);
         yield return Case("unified search playback restores retained history origin and current identities", UnifiedPlaybackRetention);
+        yield return Case("unified search recommendation history goes back and forward through the original film pages", UnifiedFilmHistoryOrder);
         yield return Case("unified search music card navigation leaves the projected view and back restores it", UnifiedMusicNavigation);
         yield return Case("unified search rapid tab changes and page exit cannot remount stale results", UnifiedRapidTabs);
         yield return Case("unified search pending film stop cannot overwrite a newer film submission", UnifiedStopNewQuery);
@@ -251,12 +251,14 @@ public static partial class MusicUiTests
         var original = f.Film.Playback!;
         f.Click("BackButton"); await SearchFixture.Until(() => f.SearchHost is not null && f.Status == "");
         f.Sources.Sources[0] = SearchFixture.Source("a", generation: 2); f.Sources.Publish();
-        Equal(0, f.Page.Cards.Count);
+        True(f.Page.Cards.Count == 1 && ReferenceEquals(f.Page.Cards.Single(), old),
+            "source revocation retires execution without clearing established cards");
         await f.Page.SubmitAsync("目标", "film", default); await SearchFixture.Settle(f.Film.Search.Current!);
         await f.Page.OpenCardAsync(f.Page.Cards.Single());
         True(!ReferenceEquals(original, f.Film.Playback) && f.Runtime.SearchOpens == 2 && original.SearchContext!.Session.Retired &&
-            f.Film.Playback!.Request.Sources![0].GetProperty("generation").GetInt64() == 2,
-            "source revocation requires explicit entry and preserves retired navigation identity");
+            f.Film.Playback!.Request.Sources![0].GetProperty("generation").GetInt64() == 2 &&
+            f.Film.Playback.Request.Target.Id == original.Request.Target.Id,
+            "a new explicit entry uses the current source generation without changing business identity");
     }
     private static async Task UnifiedCovers()
     {
@@ -350,7 +352,7 @@ public static partial class MusicUiTests
                 "opaque:one", "竞态", new("opaque:one", "group", "旧选择", Members: FilmJson.Encode(new[] { new { sourceKey = a.Key, detailId = "1" } })), [a.Wire])));
             try { await first; throw new InvalidOperationException("Superseded handoff published"); }
             catch (OperationCanceledException) { }
-            True(f.Film.Playback!.Request.Target.Id == "opaque:two" && f.Film.RetainedSearchPlaybackPages == 1,
+            True(f.Film.Playback!.Request.Target.Id == "opaque:two" && f.Film.RetainedPlaybackPages == 1,
                 "late first handoff cannot replace the newer selection or retain an unreachable page");
         }
         finally { release.TrySetResult(FilmSearchConsumerRuntime.Failure("CLOSED")); }
@@ -368,20 +370,6 @@ public static partial class MusicUiTests
         await f.Submit("无源", "film"); await SearchFixture.Settle(f.Film.Search.Current!);
         Equal("无可用搜索来源", f.Page.Status); Equal("TMDB 不可用", f.Page.MetadataStatus);
     }
-    private static async Task UnifiedPlaybackRelease()
-    {
-        await using var f = await UnifiedScene.Create();
-        await f.Submit("Q一", "film"); await SearchFixture.Settle(f.Film.Search.Current!);
-        await f.Page.OpenCardAsync(f.Page.Cards.Single());
-        var first = f.Film.Playback!; var session = first.SearchContext!.Session;
-        Equal(1, f.Film.RetainedSearchPlaybackPages); Equal(2, session.Subscribers);
-        f.Click("BackButton"); await SearchFixture.Until(() => f.SearchHost is not null && f.Status == "");
-        await f.Submit("Q二", "film"); await SearchFixture.Settle(f.Film.Search.Current!);
-        Equal(1, session.Subscribers);
-        await f.Page.OpenCardAsync(f.Page.Cards.Single());
-        await SearchFixture.Until(() => session.Subscribers == 0);
-        True(f.Film.RetainedSearchPlaybackPages == 1 && !ReferenceEquals(first, f.Film.Playback), "unreachable page releases its session retainer and observer");
-    }
     private static async Task UnifiedPlaybackRetention()
     {
         await using var f = await UnifiedScene.Create();
@@ -391,11 +379,32 @@ public static partial class MusicUiTests
         await f.Navigate(f.Film, FilmCapability.HomeRoute);
         await f.Submit("历史二", "film"); await SearchFixture.Settle(f.Film.Search.Current!);
         await f.Page.OpenCardAsync(f.Page.Cards.Single());
-        True(f.Film.RetainedSearchPlaybackPages == 2 && first.SearchContext!.Session.Subscribers == 1, "history keeps exact old page alive");
+        True(f.Film.RetainedPlaybackPages == 2 && first.SearchContext!.Session.Subscribers == 1, "history keeps exact old page alive");
         f.Click("BackButton"); await SearchFixture.Until(() => f.SearchHost is not null && f.Status == "");
         f.Click("BackButton"); await SearchFixture.Until(() => f.Film.IsHome && f.Status == "");
         f.Click("BackButton"); await SearchFixture.Until(() => ReferenceEquals(f.Film.Playback, first) && f.Film.IsPlayback && f.Status == "");
         True(f.Film.CaptureNavigationLocation() == location && first.SearchContext!.Query == "历史一", "back restores opaque navigation identity and the original selection");
+    }
+
+    private static async Task UnifiedFilmHistoryOrder()
+    {
+        await using var f = await UnifiedScene.Create();
+        await f.Submit("影视历史", "film"); await SearchFixture.Settle(f.Film.Search.Current!);
+        var search = f.Film.Search.Current;
+        await f.Page.OpenCardAsync(f.Page.Cards.Single());
+        var first = f.Film.Playback!;
+        var firstDirectory = first.EpisodeDirectory;
+        await f.Film.OpenRecommendationAsync(FilmPlaybackFixture.Card(number: 201));
+        await Drain();
+        await SearchFixture.Until(() => f.Film.Playback?.Item.Id == "tmdb:tv:201" && f.Status == "");
+        var second = f.Film.Playback!;
+        f.Click("BackButton"); await SearchFixture.Until(() => ReferenceEquals(f.Film.Playback, first) && f.Status == "");
+        True(f.SearchHost is null && ReferenceEquals(first.EpisodeDirectory, firstDirectory), "first back restores film A instead of jumping to search");
+        f.Click("BackButton"); await SearchFixture.Until(() => f.SearchHost is not null && f.Status == "");
+        True(ReferenceEquals(f.Film.Search.Current, search), "second back restores the original search page and binding");
+        f.Click("ForwardButton"); await SearchFixture.Until(() => f.SearchHost is null && ReferenceEquals(f.Film.Playback, first) && f.Status == "");
+        f.Click("ForwardButton"); await SearchFixture.Until(() => ReferenceEquals(f.Film.Playback, second) && f.Status == "");
+        True(f.Film.RetainedPlaybackPages == 2, "forward restores A then B without recreating their navigation instances");
     }
 
     private static async Task UnifiedMusicNavigation()

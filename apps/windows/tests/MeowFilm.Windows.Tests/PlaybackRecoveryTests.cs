@@ -9,7 +9,6 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Threading;
-using LibVLCSharp.Shared;
 using MeowFilm.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
@@ -36,7 +35,7 @@ public static partial class PlaybackRecoveryTests
         foreach (var test in SmartPlaybackParityCases()) yield return test;
         yield return Test("native explicit empty HTTP headers retain controlled failure classification without sending account credentials", async () =>
         {
-            await using var origin = WaveOrigin(); await using var native = Player(origin);
+            await using var origin = WaveOrigin(); await using var native = AudioPlayer();
             await Reject(() => native.OpenAsync("music", "entry", origin.Uri("old.wav"), "fixture",
                 new Dictionary<string, string>()), "anonymous 401");
             Check(native.LastErrorCode == PlaybackError.HttpUnauthorized &&
@@ -45,7 +44,7 @@ public static partial class PlaybackRecoveryTests
         });
         yield return Test("native authorized cache lease can continue online without losing pause position or leaking handle", async () =>
         {
-            await using var origin = WaveOrigin(); await using var native = Player(origin);
+            await using var origin = WaveOrigin(); await using var native = AudioPlayer();
             var lease = new CachedWave();
             await native.OpenReadAsync("music", "entry", lease, "fixture");
             await Decoded(native); await native.SeekAsync(18);
@@ -60,7 +59,7 @@ public static partial class PlaybackRecoveryTests
         });
         yield return Test("native failed continuation allows a fresh capability without replaying the consumed one", async () =>
         {
-            await using var origin = WaveOrigin(); await using var native = Player(origin);
+            await using var origin = WaveOrigin(); await using var native = AudioPlayer();
             await native.OpenAsync("music", "entry", origin.Uri("old.wav"), "fixture", origin.Headers);
             await Decoded(native); await native.SeekAsync(25);
             await Until(() => native.PositionSeconds >= 24, "position");
@@ -92,11 +91,11 @@ public static partial class PlaybackRecoveryTests
         });
         yield return Test("native handoff prepares a full-file lease without interruption and preserves live pause rate and volume", async () =>
         {
-            await using var origin = WaveOrigin(); await using var native = Player(origin);
+            await using var origin = WaveOrigin(); await using var native = AudioPlayer();
             var old = new CachedWave(); var next = new CachedWave();
             await native.OpenReadAsync("music", "entry", old, "fixture");
             await Decoded(native);
-            await native.SetRateAsync((await native.ReadTracksAsync())!.Scope, 1.6);
+            await native.SetRateAsync((await native.ReadRateAsync())!.Scope, 1.6);
             native.Volume = 37;
             await native.SeekAsync(18);
             await native.PrepareReadHandoffAsync(next, default);
@@ -108,13 +107,13 @@ public static partial class PlaybackRecoveryTests
             Check(old.Disposals == 1 && next.Disposals == 0 && native.Identity == "entry" &&
                 native.PauseRequested && !native.IsPlaying && native.Volume == 37 &&
                 Math.Abs(native.PositionSeconds - position) < 1 &&
-                Math.Abs((await native.ReadTracksAsync())!.Rate - 1.6) < .01, "handoff preserves playback intent and controls");
+                Math.Abs((await native.ReadRateAsync())!.RequestedRate - 1.6) < .01, "handoff preserves playback intent and controls");
             await native.StopAsync();
             Check(next.Disposals == 1, "the committed lease releases once");
         });
         yield return Test("native handoff cancelled after readiness cannot commit and stop releases an uncommitted lease", async () =>
         {
-            await using var origin = WaveOrigin(); await using var native = Player(origin);
+            await using var origin = WaveOrigin(); await using var native = AudioPlayer();
             await native.OpenAsync("music", "entry", origin.Uri("old.wav"), "fixture", origin.Headers);
             await Decoded(native);
             var accepted = Session(native);
@@ -280,6 +279,24 @@ public static partial class PlaybackRecoveryTests
                 f.App.HistoryWrites == 1 && f.App.FeedbackProbe.Starts == 1 && f.App.FeedbackProbe.Finishes.Count == 0,
                 "a failed candidate is never reopened over, nor becomes a feedback or history identity");
         });
+        foreach (string failure in new[] { PlaybackError.ReadFailed, PlaybackError.ReadFormatUnsupported })
+            yield return Test("music prepared network decoder failure keeps its existing retry boundary " + failure, async () =>
+            {
+                await using var f = await ControlledMusicFixture.Create();
+                await f.Play();
+                await Until(() => f.App.HistoryWrites == 1 && f.App.ConfirmWrites == 1, "initial decoder-handoff fixture");
+                await TxChoice(f.Module);
+                f.App.OfficialQuality = "flac";
+                f.Output.Plan(failure: failure);
+                f.Output.Plan();
+                await f.Module.SwitchQualityAsync("lossless");
+                bool retry = failure == PlaybackError.ReadFailed;
+                Check(f.Output.Prepares == (retry ? 2 : 1) && f.Output.Commits == (retry ? 1 : 0) &&
+                    f.Output.Reopens == 0 && f.Output.NetworkOpens == 1 && f.Output.IsPlaying &&
+                    f.App.HistoryWrites == 1 && f.App.ConfirmWrites == (retry ? 2 : 1) &&
+                    f.Module.CurrentQualityLabel == (retry ? "无损" : "高音质"),
+                    "read failure retains candidate fallback; unsupported decoder format is terminal without replacing the accepted input");
+            });
         yield return Test("official automatic fallback keeps the old source published until cross-recording commit", async () =>
         {
             await using var f = await ControlledMusicFixture.Create();
@@ -509,16 +526,16 @@ public static partial class PlaybackRecoveryTests
                 // for its observable completion without issuing Stop/Dispose here.
                 await Until(() => !f.Native.HasMedia, "cancelled accepted input retirement");
                 Check(!f.Native.HasMedia && !f.Origin.Requests.Any(r => r.Path == "/other.wav"), "late selection discarded");
-                Check(((MediaPlayer)Field(acceptedSession, "Player")!).NativeReference == IntPtr.Zero,
-                    "accepted native player physically released");
+                await Until(() => Field(acceptedSession, "release") is Task { IsCompletedSuccessfully: true },
+                    "accepted audio output and decoder physically released");
                 Check(f.App.Resolutions.Count == 2 && f.App.HistoryWrites == 1 &&
                     f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)),
                     "late selection cannot retry, record another play or invoke scripts");
             });
-        yield return Test("native paused continuation preserves position and releases old player", async () =>
+        yield return Test("native paused continuation preserves position and releases retired audio session", async () =>
         {
             await using var origin = WaveOrigin();
-            await using var native = Player(origin);
+            await using var native = AudioPlayer();
             await native.OpenAsync("music", "entry", origin.Uri("old.wav"), "fixture", origin.Headers);
             await Decoded(native);
             await native.SeekAsync(30); await Until(() => native.PositionSeconds >= 29, "old seek");
@@ -529,7 +546,7 @@ public static partial class PlaybackRecoveryTests
             Check(native.OwnerId == "music" && native.Identity == "entry", "identity retained");
             Check(native.PauseRequested && !native.IsPlaying, "no autoplay while paused");
             Check(point.ReopenedScope?.Generation > point.Scope.Generation, "new fenced native generation");
-            Check(((MediaPlayer)Field(old, "Player")!).NativeReference == IntPtr.Zero, "old player really released");
+            Check(Field(old, "release") is Task { IsCompletedSuccessfully: true }, "old audio renderer and decoder really released");
             await native.ResumeAsync(); await Decoded(native);
             await Until(() => native.PositionSeconds >= 29, "continued position");
             await Reject(() => native.ReopenAsync(point, origin.Uri("new.wav"), origin.Headers), "single-use point");
@@ -537,7 +554,7 @@ public static partial class PlaybackRecoveryTests
         foreach (var action in new[] { "stop", "replace", "revoke", "dispose" })
             yield return Test("native stale continuation after " + action, async () =>
             {
-                await using var origin = WaveOrigin(); await using var native = Player(origin);
+                await using var origin = WaveOrigin(); await using var native = AudioPlayer();
                 using var access = new CancellationTokenSource();
                 await native.OpenAsync("music", "old", origin.Uri("old.wav"), "fixture", origin.Headers, access.Token);
                 await Decoded(native);
@@ -556,7 +573,7 @@ public static partial class PlaybackRecoveryTests
             });
         yield return Test("native pending open pause fence and stop truly drain", async () =>
         {
-            await using var origin = WaveOrigin(); await using var native = Player(origin);
+            await using var origin = WaveOrigin(); await using var native = AudioPlayer();
             await native.OpenAsync("music", "entry", origin.Uri("old.wav"), "fixture", origin.Headers);
             await Decoded(native);
             var point = native.CaptureContinuation()!;
@@ -640,13 +657,14 @@ public static partial class PlaybackRecoveryTests
             string? nativeError = null;
             fixture.Native.PropertyChanged += (_, change) =>
             {
-                if (change.PropertyName == nameof(NativePlayback.LastErrorCode) &&
+                if (change.PropertyName == nameof(NativeAudioPlayback.LastErrorCode) &&
                     fixture.Native.LastErrorCode is { } error) nativeError ??= error;
             };
             await fixture.Play(); await Until(() => nativeError is not null, "actual native codec rejection");
-            Check(nativeError is PlaybackError.PlaybackFailed or PlaybackError.OpenFailed,
-                "opaque native failure remains separate from HTTP");
-            Check(fixture.App.Resolutions.Count == 1 && fixture.App.HistoryWrites <= 1, "not a URL retry");
+            Check(nativeError == PlaybackError.ReadFormatUnsupported, "unsupported WAV codec has a fixed decoder error");
+            Check(fixture.App.Resolutions.Count == 1 && fixture.App.HistoryWrites == 0 &&
+                !fixture.Native.HasMedia && !fixture.Native.IsPlaying && !fixture.Native.ContinuationPending,
+                "decoder rejection is terminal without a URL retry or successful history");
         });
         yield return Test("music format policy rejection does not invoke resolver again", async () =>
         {
@@ -665,7 +683,7 @@ public static partial class PlaybackRecoveryTests
             await fixture.Module.TogglePlaybackAsync();
             Check(fixture.Native.PauseRequested, "UI pause admitted while resolver awaits");
             var backend = new Backend();
-            await using var system = new SystemMediaSession(fixture.Native, backend, [new("music")]);
+            await using var system = new SystemMediaSession(new MusicSystemPlayback(fixture.Native), backend, [new("music")]);
             backend.Send(SystemPlaybackCommand.Pause); await Task.Delay(60);
             fixture.App.ReleaseRefresh.TrySetResult();
             await Until(() => fixture.Origin.Requests.Any(row => row.Path == "/new.wav") && !fixture.Native.ContinuationPending,
@@ -708,7 +726,7 @@ public static partial class PlaybackRecoveryTests
             });
         yield return Test("handoff native nonseekable refresh cannot play from zero", async () =>
         {
-            await using var origin = WaveOrigin(); await using var native = Player(origin);
+            await using var origin = WaveOrigin(); await using var native = AudioPlayer();
             await native.OpenAsync("music", "entry", origin.Uri("old.wav"), "fixture", origin.Headers);
             await Decoded(native);
             await native.SeekAsync(30); await Until(() => native.PositionSeconds >= 29, "position before nonseekable");
@@ -724,15 +742,25 @@ public static partial class PlaybackRecoveryTests
             }
             catch (PlaybackException error) { Check(error.Code == PlaybackError.NotSeekable, "exact seek rejection"); }
             Check(starts == 0 && !native.HasMedia && !native.IsPlaying, "never starts at zero");
-            Check(((MediaPlayer)Field(old, "Player")!).NativeReference == IntPtr.Zero, "old native retired");
+            Check(Field(old, "release") is Task { IsCompletedSuccessfully: true }, "old audio renderer and decoder retired");
         });
         yield return Test("handoff music fresh decoder failure terminates without third resolution", async () =>
         {
             await using var f = await MusicFixture.Create(firstFails: true);
             var bad = Wave(); bad[20] = 0xff; bad[21] = 0x7f;
             f.Origin.Route = path => path == "/old.wav" ? new Reply([]) { Status = 401 } : new Reply(bad, "audio/wav");
+            var failures = new List<string>();
+            f.Native.PropertyChanged += (_, change) =>
+            {
+                if (change.PropertyName == nameof(NativeAudioPlayback.LastErrorCode) &&
+                    f.Native.LastErrorCode is { } error) failures.Add(error);
+            };
             await f.Play();
-            await Until(() => !f.Native.HasMedia && f.Module.Status == "播放失败", "fresh codec terminal");
+            Check(failures.SequenceEqual(new[] { PlaybackError.HttpUnauthorized, PlaybackError.ReadFormatUnsupported }),
+                "one HTTP failure followed by the fixed decoder rejection");
+            Check(!f.Native.HasMedia && !f.Native.IsPlaying && !f.Native.ContinuationPending &&
+                f.Module.Status == f.Module.OperationErrorText(new MusicOperationException(PlaybackError.HttpUnauthorized)),
+                "the awaited failed open reports its command error and leaves no output or pending continuation");
             Check(f.App.Resolutions.Count == 2 && f.App.HistoryWrites == 0, "no retry or successful history");
             Check(f.Origin.Requests.Any(row => row.Path == "/new.wav"), "real refreshed native input attempted");
         });
@@ -1625,7 +1653,7 @@ public static partial class PlaybackRecoveryTests
                 else Check(f.Output.IsPlaying && f.Output.Reopens == 1 && f.Module.CurrentSource == id &&
                     !plan.Token.IsCancellationRequested, "unrelated exclusions cannot cancel or stop this allowed provider");
             });
-        foreach (string failure in new[] { "corrupt", "decode", "disabled" })
+        foreach (string failure in new[] { "corrupt", "decode", "format", "disabled" })
             yield return Test("playback interaction unusable complete handoff file " + failure, async () =>
             {
                 const string a = "16403cfe-2d04-4a41-9d9c-0db47b43cc8a";
@@ -1650,9 +1678,9 @@ public static partial class PlaybackRecoveryTests
                     await f.Module.RefreshSourceManagementAsync();
                     await f.Module.SetSourceEnabledAsync(f.Module.Sources.Single(row => row.InstallationId == a), false);
                 }
-                if (failure != "decode")
+                if (failure is not ("decode" or "format"))
                     await File.WriteAllBytesAsync(Path.Combine(f.CacheRoot!, file), [1, 2, 3]);
-                else f.Output.Plan(failure: PlaybackError.ReadFailed);
+                else f.Output.Plan(failure: failure == "format" ? PlaybackError.ReadFormatUnsupported : PlaybackError.ReadFailed);
                 string previousSource = f.Module.CurrentSource;
                 int resolves = f.App.Resolutions.Count;
                 f.Output.Plan();
@@ -2132,8 +2160,27 @@ public static partial class PlaybackRecoveryTests
         var origin = new Origin(); var bytes = Wave();
         origin.Route = _ => new Reply(bytes, "audio/wav"); return origin;
     }
-    private static NativePlayback Player(Origin origin) => new(Dispatcher.CurrentDispatcher, null,
-        NativeAudioOutput.Dummy, new NativeHttpMediaOptions(TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3)));
+    private static NativeAudioPlayback AudioPlayer() => new(Dispatcher.CurrentDispatcher, audioOutput: NativeAudioOutput.Dummy);
+    private static Task Decoded(NativeAudioPlayback player) => Until(() =>
+    {
+        if (player.LastErrorCode is { } error) throw new InvalidOperationException("native audio failed " + error);
+        return player.IsPlaying && player.PositionSeconds > 0;
+    }, "actual rendered audio samples");
+    private static object? Session(NativeAudioPlayback player) => Field(player, "session");
+    private sealed class MusicSystemPlayback(NativeAudioPlayback native) : ISystemPlayback
+    {
+        public SystemPlaybackState State => new(native.OwnerId, native.Identity, native.Title,
+            native.HasMedia || native.ContinuationPending, native.IsPlaying, native.PositionSeconds, native.DurationSeconds);
+        public event PropertyChangedEventHandler? PropertyChanged
+        {
+            add => native.PropertyChanged += value;
+            remove => native.PropertyChanged -= value;
+        }
+        public Task PlayAsync() => native.ResumeAsync();
+        public Task PauseAsync() => native.PauseAsync();
+        public Task StopAsync() => native.StopAsync();
+        public Task SeekAsync(double seconds) => native.SeekAsync(seconds);
+    }
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private static JsonElement Element(object value) => JsonSerializer.SerializeToElement(value, Json);
     private static void SameMusicTarget(List<JsonElement> resolutions)
@@ -2212,7 +2259,7 @@ public static partial class PlaybackRecoveryTests
         internal readonly MemoryStore CacheBacking = new();
         internal readonly CacheDocumentStore CacheStore;
         internal readonly MusicPlatformRuntimeFixture Runtime = new();
-        internal readonly NativePlayback Native;
+        internal readonly NativeAudioPlayback Native;
         internal readonly MusicApp App;
         internal readonly MusicCapability Module;
         private MusicFixture(bool firstFails, bool bothFail, bool expiry, bool official, string[]? platforms)
@@ -2222,7 +2269,7 @@ public static partial class PlaybackRecoveryTests
             Origin.RequireAuthorization = !official; // Official CDN is anonymous; credentials must not be added to make a fixture pass.
             Origin.Route = path => bothFail || firstFails && path == "/old.wav"
                 ? new Reply([]) { Status = 401 } : new Reply(bytes, "audio/wav");
-            Native = Player(Origin);
+            Native = new(audioOutput: NativeAudioOutput.Dummy);
             ScriptSource[] sources = [new("fixture-source", enabled: !official, platforms: platforms)];
             App = new(new MusicNativeApplication(Store, Runtime, CacheStore), Origin, expiry, official, sources);
             Runtime.OnRequest = App.ReadPlatform;
@@ -2314,7 +2361,7 @@ public static partial class PlaybackRecoveryTests
 
         yield return Test("native read continuation preserves position pause and releases replaced lease", async () =>
         {
-            await using var origin = WaveOrigin(); await using var native = Player(origin);
+            await using var origin = WaveOrigin(); await using var native = AudioPlayer();
             await native.OpenAsync("music", "entry", origin.Uri("old.wav"), "fixture", origin.Headers);
             await Decoded(native); await native.SeekAsync(18);
             await Until(() => native.PositionSeconds >= 17, "network position");

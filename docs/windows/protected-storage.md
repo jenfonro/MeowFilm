@@ -1,12 +1,12 @@
 # Windows local documents and sensitive storage
 
-The App uses the `aggregate` business data directory and the exact namespaces declared by `AppIdentity.NativeNamespaces`. `AppIdentity.ProtectedNamespaces` (`music.accounts.v2`) use CurrentUser DPAPI. App assembly passes this list through `AppDefinition` to `LocalDocumentStore`. Ordinary business records are raw JSON bytes; complete script sources are raw `.js` files.
+The App uses the `aggregate` business data directory and the exact namespaces declared by `AppIdentity.NativeNamespaces`. `AppIdentity.ProtectedNamespaces` (`music.accounts.v2`, `pan.accounts.v1`, `film.tmdb.v1`, `film.douban.v1`, `film.cat-sources.v1`) use CurrentUser DPAPI. App assembly passes this list through `AppDefinition` to `LocalDocumentStore`. Ordinary business records are raw JSON bytes; complete script sources are raw `.js` files.
 
 Rebuildable music snapshots use the sibling `aggregate-cache` directory (`AppDataPaths.Caches`) and `AppIdentity.CacheNamespaces`, with a separate `LocalDocumentStore` queue and root lock. `music.account-details.v2` uses CurrentUser DPAPI protection through `CacheProtectedNamespaces`; it contains no credential authority. The cache store and directory are opened lazily. `CacheDocumentStore` publishes memory snapshots immediately, owns ordered background writes, and drains accepted work before disposal. Cache reads that fail are misses; domain decoders only require the data actually used by consumers. Cache replacement never decodes the previous document and may rebuild unusable data. Cache I/O failures are diagnostics, not business CAS receipts or reconciliation gates. Public business `WriteAsync` remains strict CAS; the internal cache replacement entry point is available only to the disposable cache owner.
 
 The uninstaller's explicit delete-user-data choice covers both directories. Silent uninstall and the keep-data choice preserve both; normal playback-cache cleanup never deletes business documents.
 
-Native owners use the store directly. The script process has no reverse document API or native namespace grants. Its installation sources and private data belong to the common runtime under the explicit script data root.
+Native owners use the store directly. The script process has no general reverse document API or arbitrary native namespace grants. The PID-verified private pipe exposes only the [native settings capability](native-settings.md#私密配置能力) to trusted Node owners; user scripts do not receive it. Installation sources and script private data remain under the explicit runtime data root; Windows cat source intent and the listed ordinary settings have their sole persistence in native documents.
 
 ## Public store API (MeowFilm.Platform.Storage)
 
@@ -62,7 +62,7 @@ The readable names identify ordinary data and collections. Namespace/collection 
 
 ## Current format
 
-Only the current data and wire formats are supported. Music only reads the current account and account-details namespaces declared above; it does not identify or adopt previous account/device-session documents. Ordinary documents and v2 source collections use the new plaintext layout; old encrypted ordinary documents and v1 source chunks are not migrated, used as a fallback, or automatically deleted. This is a development format boundary, not a completed data migration. Corrupt/unsupported sensitive documents and inaccessible/unsafe target files are errors, not empty initial state. Cancellation cannot undo an acknowledged atomic commit.
+Only the current data and wire formats are supported. Music only reads the current account and account-details namespaces declared above; it does not identify or adopt previous account/device-session documents. Ordinary documents and v2 source collections use the new plaintext layout; old encrypted ordinary documents and v1 source chunks are not migrated, used as a fallback, or automatically deleted. This is a development format boundary, not a completed data migration. The separate [Windows runtime settings adoption](native-settings.md#旧设置采用) runs before native modules and Node start; it does not expand music account or source-format compatibility. Corrupt/unsupported sensitive documents and inaccessible/unsafe target files are errors, not empty initial state. Cancellation cannot undo an acknowledged atomic commit.
 
 
 ## Clear all local user data

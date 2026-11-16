@@ -21,9 +21,7 @@ final class HLSLoopbackRouteTests: XCTestCase {
         defer { route.invalidate() }
         let rootURL = try await readyHLS(route)
         XCTAssertEqual(rootURL.host, "127.0.0.1"); XCTAssertNotEqual(rootURL.port, 0)
-        let binding = NativePlaybackAsset(hls: route, url: rootURL)
-        XCTAssertEqual(binding.asset.url.scheme, "http")
-        XCTAssertFalse(binding.asset.url.absoluteString.contains(fixture.host))
+        XCTAssertFalse(rootURL.absoluteString.contains(fixture.host))
         let (master, masterResponse) = try await hlsFetch(rootURL)
         XCTAssertEqual(masterResponse.statusCode, 200)
         let variantPath = try XCTUnwrap(pathsInPlaylist(String(decoding: master, as: UTF8.self)).first)
@@ -172,21 +170,21 @@ final class HLSLoopbackRouteTests: XCTestCase {
         XCTAssertEqual(budget.usage, .init(activeTasks: 0, reservedPayloadBytes: 0))
     }
 
-    func testControllerPendingHLSStopKeepsUniquePlayerIdentityAndCannotInstallLateItem() async throws {
+    func testPendingHLSStopCannotCreateOutputOrInstallLateAudioMedia() async throws {
         let resource = try PlaybackResource(id: "same-business-resource", url: URL(string: "https://unrequested.fixture.invalid/live.m3u8")!,
                                             title: "测试", headers: ["Referer": "https://page.fixture.invalid/"])
         await MainActor.run {
-            let controller = PlaybackController(), original = controller.player
+            let controller = PlaybackController()
             let attempt = controller.playAttempt(resource: resource, owner: "film", autoplay: false)
             XCTAssertEqual(attempt.resourceID, resource.id)
             XCTAssertTrue(controller.requiresLocalMediaFetch)
-            XCTAssertFalse(controller.player.allowsExternalPlayback)
+            XCTAssertFalse(controller.hasMusicOutput)
             // Listener readiness dispatches back to this actor. Stop before it
-            // can create an item or perform any upstream request.
+            // can prepare audio media or perform any upstream request.
             controller.stop()
             XCTAssertFalse(controller.requiresLocalMediaFetch)
-            XCTAssertTrue(controller.player === original)
-            XCTAssertNil(controller.player.currentItem)
+            XCTAssertFalse(controller.hasMusicOutput)
+            XCTAssertNil(controller.activeAudioMedia)
             XCTAssertEqual(controller.snapshot.phase, .idle)
         }
     }

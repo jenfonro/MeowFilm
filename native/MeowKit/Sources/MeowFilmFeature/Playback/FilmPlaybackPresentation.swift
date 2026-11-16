@@ -17,7 +17,8 @@ enum FilmPlaybackPresentation {
             (provider == .tmdb && original.item.kind != nil && original.item.kind != kind) {
             baseline = .init(item: .init(sourceID: provider.rawValue,
                 id: metadataID ?? snapshot.target.id,
-                title: displayMetadata?.title ?? snapshot.target.title, kind: kind))
+                title: displayMetadata?.title ?? snapshot.target.title, kind: kind,
+                businessID: displayMetadata?.businessID, playbackTarget: displayMetadata?.playbackTarget))
         } else { baseline = original }
         let fields = snapshot.metadata.filmObject ?? [:]
         let hasDetail = succeeded(snapshot.metadataCache, component: "detail")
@@ -33,7 +34,9 @@ enum FilmPlaybackPresentation {
                             posterURL: image(poster) ?? supplementalPoster ?? (poster == nil && !hasDetail ? baseline.item.posterURL : nil),
                             largePosterURL: large ?? supplementalPoster ?? (poster == nil && !hasDetail ? baseline.item.largePosterURL : nil),
                             score: rating == nil && !hasDetail ? baseline.item.score : score.map { String(format: "%.1f", $0) } ?? "",
-                            subtitle: baseline.item.subtitle, metadataSeed: baseline.item.metadataSeed)
+                            subtitle: baseline.item.subtitle, metadataSeed: baseline.item.metadataSeed,
+                            businessID: fields["businessId"]?.filmText ?? baseline.item.businessID,
+                            playbackTarget: fields["playbackTarget"].flatMap { try? FilmPlaybackTarget($0) } ?? baseline.item.playbackTarget)
         let seasonField = field(fields, "doubanSeasons", "seasons")
         let seasonRows = seasonField == nil && !succeeded(snapshot.metadataCache, component: "seasons")
             ? displayMetadata?.seasons : seasonField?.filmArray ?? []
@@ -43,17 +46,18 @@ enum FilmPlaybackPresentation {
             let episodes = snapshot.episodes.filter { $0.position.season == number }.map {
                 episode($0, fallbackArtworkURL: poster ?? item.posterURL ?? item.largePosterURL)
             }
-            return .init(id: row["id"]?.filmScalar ?? "season-\(number)",
+            guard let businessID = row["businessId"]?.filmText,
+                  let target = row["playbackTarget"].flatMap({ try? FilmPlaybackTarget($0) }) else { return nil }
+            return .init(id: businessID,
                          title: text(row, "name", "title") ?? "第 \(number) 季", number: number,
-                         posterURL: poster, episodes: episodes)
+                         posterURL: poster, episodes: episodes, businessID: businessID, playbackTarget: target)
         } ?? baseline.seasons
         let primaryCast = cast(fields), supplementalCast = cast(supplement)
         let cast = primaryCast.flatMap { $0.isEmpty ? nil : $0 } ??
             supplementalCast.flatMap { $0.isEmpty ? nil : $0 } ?? primaryCast ??
             (succeeded(snapshot.metadataCache, component: "credits") ? [] : baseline.cast)
-        let primarySimilar = similar(fields, provider: provider, kind: kind)
-        let supplementalSimilar = similar(supplement, provider: .tmdb,
-                                           kind: snapshot.metadataSupplement.flatMap { FilmItemKind(rawValue: $0.kind.rawValue) })
+        let primarySimilar = similar(fields, provider: provider)
+        let supplementalSimilar = similar(supplement, provider: .tmdb)
         let similar = primarySimilar.flatMap { $0.isEmpty ? nil : $0 } ??
             supplementalSimilar.flatMap { $0.isEmpty ? nil : $0 } ?? primarySimilar ??
             (succeeded(snapshot.metadataCache, component: "similar") ? [] : baseline.similarItems)
@@ -81,7 +85,7 @@ enum FilmPlaybackPresentation {
         .init(id: value.displayID, title: value.name ?? "",
               number: value.position.episode, summary: value.raw["overview"]?.filmText ?? "",
               artworkURL: artwork(value.raw["still_path"]) ?? fallbackArtworkURL,
-              releaseDate: value.raw["air_date"]?.filmText)
+              releaseDate: value.raw["air_date"]?.filmText, businessID: value.businessID, playbackTarget: value.playbackTarget)
     }
 
     static func artwork(_ value: RuntimeValue?) -> URL? {
@@ -114,15 +118,17 @@ enum FilmPlaybackPresentation {
             (credits?["cast"]?.filmArray ?? fields["actors"]?.filmArray ?? []).compactMap { person($0) }
     }
 
-    private static func similar(_ fields: RuntimeObject, provider: FilmMetadataProvider?,
-                                kind: FilmItemKind?) -> [FilmItem]? {
+    private static func similar(_ fields: RuntimeObject, provider: FilmMetadataProvider?) -> [FilmItem]? {
         guard fields["similar"] != nil else { return nil }
         return (fields["similar"]?.filmObject?["results"]?.filmArray ?? []).compactMap { raw in
             guard let row = raw.filmObject, let id = row["id"]?.filmScalar,
-                  let title = text(row, "title", "name"), let provider else { return nil }
-            return .init(sourceID: provider.rawValue, id: id, title: title, kind: provider == .tmdb ? kind : nil,
+                  let title = text(row, "title", "name"), let provider,
+                  let businessID = row["businessId"]?.filmText,
+                  let target = row["playbackTarget"].flatMap({ try? FilmPlaybackTarget($0) }) else { return nil }
+            return .init(sourceID: provider.rawValue, id: id, title: title, kind: FilmItemKind(rawValue: target.kind.rawValue),
                          posterURL: artwork(row["poster_path"]),
-                         score: row["vote_average"]?.filmNumber.map { String(format: "%.1f", $0) } ?? "")
+                         score: row["vote_average"]?.filmNumber.map { String(format: "%.1f", $0) } ?? "",
+                         businessID: businessID, playbackTarget: target)
         }
     }
 

@@ -28,11 +28,11 @@
    </DockPanel>
   </DataTemplate>
  </ResourceDictionary></UserControl.Resources>
- <Grid Margin="0,16,12,0">
+ <Grid Margin="0,0,12,0">
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
   <DockPanel Margin="0,0,0,10">
-   <Button DockPanel.Dock="Right" Content="重试" Click="Retry_Click" Style="{StaticResource Settings.Button}" IsEnabled="{Binding Idle}"
-           Visibility="{Binding ReadFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.Name="重新读取智能播放设置"/>
+   <Button DockPanel.Dock="Right" Content="重试" Click="Retry_Click" Style="{StaticResource Settings.Button}" IsEnabled="{Binding CanRetryRead}"
+           Visibility="{Binding HasReadFailure,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.Name="重新读取智能播放设置"/>
    <TextBlock Text="{Binding Work}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/>
   </DockPanel>
   <ScrollViewer Grid.Row="1" Style="{StaticResource MeowFilm.SettingsScrollViewer}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
@@ -68,7 +68,7 @@
        </TextBlock>
       </Grid>
      </StackPanel></Border>
-     <Border Style="{StaticResource Settings.Section}" IsEnabled="{Binding Idle}"><StackPanel>
+     <Border Style="{StaticResource Settings.Section}" IsEnabled="{Binding CanEditLibrary}"><StackPanel>
       <DockPanel Margin="0,0,0,12"><Button x:Name="AddManual" Content="添加" Click="AddManual_Click" DockPanel.Dock="Right" Style="{StaticResource Settings.PrimaryButton}" AutomationProperties.Name="添加人工匹配"/><TextBlock Text="Manual 匹配源管理" Style="{StaticResource Settings.SectionTitle}"/></DockPanel>
       <Border Style="{StaticResource Settings.ListSurface}"><Grid MinHeight="180" MaxHeight="340">
        <Grid.ColumnDefinitions><ColumnDefinition Width="200"/><ColumnDefinition/></Grid.ColumnDefinitions>
@@ -103,7 +103,7 @@
        </Grid>
       </Grid></Border>
      </StackPanel></Border>
-     <Border Style="{StaticResource Settings.Section}" IsEnabled="{Binding Idle}"><StackPanel>
+     <Border Style="{StaticResource Settings.Section}" IsEnabled="{Binding CanEditLibrary}"><StackPanel>
       <DockPanel Margin="0,0,0,12"><Button x:Name="ClearRecords" Content="清空" Click="ClearRecords_Click" DockPanel.Dock="Right" Style="{StaticResource Settings.DangerButton}" AutomationProperties.Name="清空匹配禁用记录"/><TextBlock Text="匹配禁用管理" Style="{StaticResource Settings.SectionTitle}"/></DockPanel>
       <Border Style="{StaticResource Settings.ListSurface}"><Grid MinHeight="180" MaxHeight="340">
        <Grid.ColumnDefinitions><ColumnDefinition Width="200"/><ColumnDefinition/></Grid.ColumnDefinitions>

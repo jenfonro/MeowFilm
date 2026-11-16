@@ -1,27 +1,28 @@
 # Windows 脚本启动与 HTTP 会话
 
-`apps/windows/runtime/` 只保留 `bootstrap.mjs` 和 `entries/aggregate.mjs`。薄 entry 使用公共 `apps/runtime/entry.mjs` 按序装配 music／cat／source／pan／tmdb／douban／film／netease／music-platform 九模块，并指定 source 平台为 Windows。前六个 provider 构造后经 `connectFilmPlayback` 接入 film 及变更撤权 hook，再追加按需网易 token 模块和借用该 token owner 的音乐平台模块；不复制脚本执行、协议或业务实现。通用 `createRuntime()` 默认三模块不变。
+`apps/windows/runtime/` 保留受信 `bootstrap.mjs`、`entries/aggregate.mjs` 和私密设置管道适配 `native-settings.mjs`。薄 entry 使用公共 `apps/runtime/entry.mjs` 按序装配 music／cat／source／pan／tmdb／douban／film／netease／music-platform 九模块，并指定 source 平台为 Windows。前六个 provider 构造后经 `connectFilmPlayback` 接入 film 及变更撤权 hook，再追加按需网易 token 模块和借用该 token owner 的音乐平台模块；不复制脚本执行、协议或业务实现。通用 `createRuntime()` 默认三模块不变。
 
 ## 私密启动与存活句柄
 
 启动参数恰好为按序 `--meow-pipe meowfilm-<UUID> --meow-session <UUID>`；UUID 使用规范小写格式，不接受远程管道或任意地址。原生 launcher 创建单实例 `CurrentUserOnly` 管道服务器，启动独占子进程并通过 Job 管理，在发送配置前核对管道客户端 PID。session 表示运行代次，不是认证秘密。
 
-App 通过已验证的管道发送一行 UTF-8 JSON `{sessionId,dataRoot}`，Node 启动公共监听器后回复一行 `{protocol:"runtime.http.v1",baseUrl:"http://127.0.0.1:<port>"}`。`dataRoot` 由原生 `AppDataPaths.ScriptRuntime` 决定，是本机绝对目录。HTTP 不使用启动访问密钥；子进程清空非必要继承环境。
+App 通过已验证的管道发送一行 UTF-8 JSON `{sessionId,dataRoot,nativeSettings:true}`，Node 读取原生设置并启动公共监听器后回复一行 `{protocol:"runtime.http.v1",baseUrl:"http://127.0.0.1:<port>"}`。未装配原生设置的独立运行器会话仍发送 `{sessionId,dataRoot}`。`dataRoot` 由原生 `AppDataPaths.ScriptRuntime` 决定，是本机绝对目录。HTTP 不使用启动访问密钥；子进程清空非必要继承环境。
 
-启动控制行最多 64 KiB，连接及握手有期限；此边界不限制业务 HTTP body。握手后管道只作为持有的存活句柄，不发送 RPC、业务数据、心跳或反向能力请求。额外字节、EOF、error 或 close 都关闭实际公共运行器。普通 HTTP keepalive 连接结束不代表会话退出。
+启动控制行最多 64 KiB，连接及握手有期限；此边界不限制业务 HTTP body。装配原生设置时，管道另外承载按块读取及网盘凭据 CAS 回写，协议、范围与 8 MiB 帧限见[原生设置](native-settings.md#私密配置能力)；它不是通用 RPC、业务文件访问或心跳通道。未装配该能力时额外字节仍非法；坏帧、EOF、error 或 close 都关闭实际公共运行器。普通 HTTP keepalive 连接结束不代表会话退出。
 
 ## 完整 HTTP 请求
 
 `RuntimeHttpClient` 接受合法 HTTP(S) 根端点，包括域名、非回环和默认端口；App 默认使用启动握手返回的本机 URL。不走系统代理、不跟随重定向、不自动重放业务。每次请求携带独立 UUID `X-Meow-Request-Id`，核对响应 ID、内容类型、状态及严格信封；公开契约见 [Runtime bridge](../runtime/runtime-bridge.md)。
 
 - `GET /v1/describe` 核对 `runtime.http.v1`、`aggregate`、准确模块及完整方法清单，顺序为：`music@0.8.0` / `music.script.v3`、`cat@0.2.0` / `cat.script.v2`、`source@0.3.0` / `source.runtime.v2`、`pan@0.1.0` / `pan.runtime.v1`、`tmdb@0.1.0` / `tmdb.data.v1`、`douban@0.1.0` / `douban.data.v1`、`film@0.1.0` / `film.playback.v1`、`netease@0.1.0` / `netease.token.v1`、`music-platform@0.1.0` / `music.platform.v1`；缺项、多项、重复项或不符版本不接受。
+- Windows `RuntimeHttpProtocol` 操作表由 `scripts/windows/verify-app-structure.mjs` 与公共 `apps/runtime/contracts.mjs` 机械核对版本、契约、前缀及完整方法集合；包含稳定业务目标解析 `film.data.target`，不因客户端漏同步而放宽启动校验。
 - 普通调用为 `POST /v1/{module}/{operation}`，参数直接是 JSON，成功信封为 `{ok:true,contract,value}`，失败为 `{ok:false,contract,code}`；结果不再是 JSON 字符串。
 - 源码经 `UploadSourceAsync` 完整 raw PUT，由 installationId 与明确 sourceRevision 绑定。异步上传借用调用方字节直到实际发送任务结束，包括取消；业务层不管理 begin/chunk/read/release。
 - `ReadImageAsync` 只接受运行器相对图片引用，经同一客户端携带请求 ID；成功读二进制、错误解包 `502` 所属模块信封，取消等待物理响应释放。元数据消费者保留其图片预算，小说完整正文图片使用无额度重载；图片契约见[元数据运行器](../runtime/metadata-data.md)与[书源仓库](../runtime/source-library.md)。
 - 单请求取消终止其 HTTP 交换，不撤销其他请求或共同启动。App 的 epoch fence 拒绝旧代次迟到结果；恢复不会重放业务。
 - 小说纯规则只走 `source.runtime.rules.process`／`POST /v1/source/rules.process`。一次 transform 发送完整 rules 与 conversion，Node 按规则逐条计时；该路由不使用短固定 HTTP 批次总时限，由调用 owner 或连接取消并等待实际交换结束。其他 source 方法仍保持默认 30 秒，网易 token 保持 60 秒。
 
-业务 JSON 保留 64 层、严格 UTF-8、Unicode、无重复键和安全数值契约，不加总大小配额。源码的 16 MiB 是公共输入契约。原生文档、账号和敏感信息不通过反向 RPC 暴露给运行器。
+业务 JSON 保留 64 层、严格 UTF-8、Unicode、无重复键和安全数值契约，不加总大小配额。源码的 16 MiB 是公共输入契约。没有通用反向文档 RPC；只有上述私密设置能力向受信 Node owner 提供指定设置块及所需凭据，不向用户脚本提供原生存储入口。
 
 ## 所有权与关闭
 

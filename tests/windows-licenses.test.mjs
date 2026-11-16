@@ -29,9 +29,11 @@ const sources = [
   'npm-node-compat-BSD-3-Clause.txt', 'npm-node-compat-ISC.txt', 'npm-node-compat-MIT.txt',
   'SkiaSharp-MIT.txt', 'SkiaSharp-THIRD-PARTY-NOTICES.txt',
   'GPL-2.0-only.txt', 'LGPL-2.1-only.txt', 'FFmpeg-LICENSE.md', 'libxml2-MIT.txt',
+  'LGPL-3.0-only.txt', 'FFmpeg-IJG-NOTICE.txt', 'FilmKernel-THIRD-PARTY-NOTICES.txt',
   'GCC-Runtime-Library-Exception-3.1.txt',
   'MinGW-w64-runtime-NOTICE.txt', 'winpthreads-LICENSE.txt',
   'WebView2-LICENSE.txt', 'WebView2-NOTICE.txt',
+  'NAudio-MIT.txt', 'FFmpeg.AutoGen-MIT.txt', 'dotnet-runtime-MIT.txt', 'FFmpeg-audio-NOTICES.txt',
 ].map(name => ({ source: `LICENSES/${name}`, path: name }));
 function boundedPath(path) {
   const rel = relative(temporary, path);

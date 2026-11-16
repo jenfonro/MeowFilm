@@ -273,6 +273,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         for cancel in operations.values { cancel() }
         await drainOperations()
         if let run = librarySyncRun { await run.drain() }
+        if let sync = automaticLibrarySyncRuntime.settingsSync { _ = await sync.task.value }
         await drainSimilarWork()
         await audioFileCache?.cancelPending()
     }
@@ -315,6 +316,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         await playbackFeedback.flush()
         await (accounts as? any MusicNativeFeedbackLifecycleProviding)?.flushPendingPlaybackFeedback()
         if let task = automaticLibrarySyncRuntime.task { _ = await task.result }
+        if let sync = automaticLibrarySyncRuntime.settingsSync { _ = await sync.task.value }
         await audioFileCache?.close()
     }
     func clearTransient() {

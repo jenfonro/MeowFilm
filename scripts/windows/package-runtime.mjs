@@ -107,7 +107,7 @@ function relocate(source, imports, dynamicImports = new Map()) {
 /**
  * Offline Windows wrapper. The shared packager alone resolves dependencies,
  * retains licenses, validates the lock and creates a NEW output directory.
- * This wrapper adds only the platform bootstrap and thin entry.
+ * This wrapper adds only the platform bootstrap, private settings helper and thin entry.
  * Native-owned domains never ship their old ordinary JS business closure.
  * It never installs/downloads Node, copies node.exe or imports app code.
  */
@@ -178,7 +178,7 @@ export async function packageWindowsRuntime({
       'NATIVE_TARGET_MISMATCH', 'Windows runtime requires the win-x64 native build');
     const occupied = audit();
     const allowedSources = new Set([
-      'bootstrap.mjs', 'entries/aggregate.mjs',
+      'bootstrap.mjs', 'native-settings.mjs', 'entries/aggregate.mjs',
     ]);
     const sourceDirectory = checkedPath(root, WINDOWS_SOURCE);
     const sourceTree = inventory(sourceDirectory);
@@ -218,13 +218,18 @@ export async function packageWindowsRuntime({
       ['node:net', 'node:net'],
       ['node:path', 'node:path'],
       ['@meowfilm/runtime-bridge', '@meowfilm/runtime-bridge'],
+      ['./native-settings.mjs', './native-settings.mjs'],
+    ]);
+    const settingsImports = new Map([
+      ['@meowfilm/runtime-bridge', '@meowfilm/runtime-bridge'],
     ]);
     const entryImports = new Map([
       ['../bootstrap.mjs', '../bootstrap.mjs'],
       ['../../../runtime/entry.mjs', '../../entry.mjs'],
     ]);
     for (const [relative, imports, dynamicImports = new Map()] of [
-      ['bootstrap.mjs', bootstrapImports], ['entries/aggregate.mjs', entryImports],
+      ['bootstrap.mjs', bootstrapImports], ['native-settings.mjs', settingsImports],
+      ['entries/aggregate.mjs', entryImports],
     ]) {
       const source = `${WINDOWS_SOURCE}/${relative}`, path = `${WINDOWS_OUTPUT}/${relative}`;
       const input = readStable(root, source);

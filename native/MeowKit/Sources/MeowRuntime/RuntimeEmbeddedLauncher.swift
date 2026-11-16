@@ -38,30 +38,39 @@ public struct RuntimePayload: Sendable, Equatable {
     }
 }
 
-/// A private socketpair transfers one trusted configuration and one endpoint.
-/// Its subsequent EOF requests shutdown; business calls use ordinary HTTP.
+/// A private socketpair transfers trusted startup and native settings frames.
+/// EOF requests shutdown; business calls use ordinary HTTP.
 public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendable {
     public typealias Start = @Sendable (_ arguments: [String]) -> Int32
     private let payload: @Sendable () throws -> RuntimePayload
     private let dataDirectory: URL
     private let stackSize: Int
     private let start: Start
+    private let settings: RuntimeSettingsAccess?
     private let lock = NSLock()
     private var started = false
     private var closed = false
     private var running = false
     private var channel: RuntimeBootstrapChannel?
     private var client: RuntimeHTTPClient?
+    private var endpoint: URL?
     private var exitWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(payload: @escaping @Sendable () throws -> RuntimePayload, dataDirectory: URL,
-                stackSize: Int = 8 * 1024 * 1024, start: @escaping Start) {
+                stackSize: Int = 8 * 1024 * 1024, settings: RuntimeSettingsAccess? = nil, start: @escaping Start) {
         self.payload = payload; self.dataDirectory = dataDirectory
-        self.stackSize = stackSize; self.start = start
+        self.stackSize = stackSize; self.settings = settings; self.start = start
     }
 
     public func connect() async throws -> RuntimeHTTPClient {
-        try reserveLaunch()
+        if let existing = try reserveLaunch() {
+            let replacement = try RuntimeHTTPClient(baseURL: existing)
+            do {
+                try await replacement.validateAppModules()
+                guard publish(replacement) else { throw RuntimeHTTPError.closed }
+                return replacement
+            } catch { await replacement.close(); throw error }
+        }
         let payload: RuntimePayload
         do { payload = try self.payload() } catch { throw RuntimeLaunchError.payloadUnavailable }
         var descriptors: [Int32] = [-1, -1]
@@ -70,11 +79,13 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
         _ = setsockopt(descriptors[0], SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
         _ = setsockopt(descriptors[1], SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
         let sessionID = UUID().uuidString.lowercased()
-        let configuration = try RuntimeJSON.encode(.object([
+        var fields: RuntimeObject = [
             "sessionId": .string(sessionID),
             "dataRoot": .string(dataDirectory.path)
-        ]))
-        let channel = RuntimeBootstrapChannel(descriptor: descriptors[0]) { [weak self] in self?.bootstrapEnded() }
+        ]
+        if settings != nil { fields["nativeSettings"] = .bool(true) }
+        let configuration = try RuntimeJSON.encode(.object(fields))
+        let channel = RuntimeBootstrapChannel(descriptor: descriptors[0], settings: settings) { [weak self] in self?.bootstrapEnded() }
         guard admit(channel) else {
             channel.disposeUnstarted()
             _ = Darwin.close(descriptors[1])
@@ -97,7 +108,7 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
         do {
             let baseURL = try await channel.endpoint(configuration: configuration)
             let client = try RuntimeHTTPClient(baseURL: baseURL)
-            guard publish(client) else { await client.close(); throw RuntimeHTTPError.closed }
+            guard publish(client, endpoint: baseURL) else { await client.close(); throw RuntimeHTTPError.closed }
             return client
         } catch {
             await close()
@@ -124,11 +135,15 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
         }
     }
 
-    private func reserveLaunch() throws {
+    private func reserveLaunch() throws -> URL? {
         lock.lock(); defer { lock.unlock() }
         guard !closed else { throw RuntimeHTTPError.closed }
-        guard !started else { throw RuntimeLaunchError.alreadyStarted }
+        if started {
+            guard running, client?.isClosed == true, let endpoint else { throw RuntimeLaunchError.alreadyStarted }
+            return endpoint
+        }
         started = true
+        return nil
     }
 
     private func admit(_ channel: RuntimeBootstrapChannel) -> Bool {
@@ -139,10 +154,11 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
         return true
     }
 
-    private func publish(_ client: RuntimeHTTPClient) -> Bool {
+    private func publish(_ client: RuntimeHTTPClient, endpoint: URL? = nil) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard !closed, running else { return false }
         self.client = client
+        if let endpoint { self.endpoint = endpoint }
         return true
     }
 
@@ -186,17 +202,20 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
     }
 }
 
-/// Exactly one JSON line in each direction. The reader retains its descriptor
-/// until EOF; shutdown never closes a descriptor under a blocked read.
+/// The sole reader retains its descriptor until EOF. Shutdown never closes a
+/// descriptor under a blocked read or admits further native settings requests.
 private final class RuntimeBootstrapChannel: @unchecked Sendable {
+    private static let maximumFrameBytes = 8 * 1024 * 1024
     private let lock = NSLock()
     private var descriptor: Int32
     private var finished = false
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
     private let onClose: @Sendable () -> Void
+    private let settings: RuntimeSettingsAccess?
+    private var closing = false
 
-    init(descriptor: Int32, onClose: @escaping @Sendable () -> Void) {
-        self.descriptor = descriptor; self.onClose = onClose
+    init(descriptor: Int32, settings: RuntimeSettingsAccess?, onClose: @escaping @Sendable () -> Void) {
+        self.descriptor = descriptor; self.settings = settings; self.onClose = onClose
     }
 
     func endpoint(configuration: Data) async throws -> URL {
@@ -204,37 +223,41 @@ private final class RuntimeBootstrapChannel: @unchecked Sendable {
             DispatchQueue.global(qos: .userInitiated).async { [self] in
                 defer { disposeUnstarted(); onClose(); didClose() }
                 let descriptor = currentDescriptor()
+                var ready = false
                 do {
                     var line = configuration
                     line.append(10)
                     try write(line, descriptor: descriptor)
                     var received = Data(), bytes = [UInt8](repeating: 0, count: 4096)
-                    var ready = false
                     while true {
                         let count = Darwin.read(descriptor, &bytes, bytes.count)
                         if count < 0, errno == EINTR { continue }
                         guard count > 0 else {
-                            if !ready { continuation.resume(throwing: RuntimeHTTPError.closed) }
+                            if !ready {
+                                continuation.resume(throwing: received.isEmpty ? RuntimeHTTPError.closed : .invalidResponse)
+                            }
                             return
                         }
-                        if ready {
-                            // The trusted peer must send no further messages.
-                            requestClose()
-                            onClose()
-                            continue
-                        }
                         received.append(contentsOf: bytes.prefix(count))
-                        guard let newline = received.firstIndex(of: 10) else { continue }
-                        guard newline == received.index(before: received.endIndex),
-                              case .object(let reply) = try RuntimeJSON.decode(received.prefix(upTo: newline)),
-                              reply.count == 1, case .string(let address)? = reply["baseUrl"],
-                              let url = URL(string: address) else { throw RuntimeHTTPError.invalidResponse }
-                        ready = true
-                        continuation.resume(returning: url)
+                        while let newline = received.firstIndex(of: 10) {
+                            guard received.distance(from: received.startIndex, to: newline) <= Self.maximumFrameBytes,
+                                  case .object(let reply) = try RuntimeJSON.decode(received.prefix(upTo: newline)) else {
+                                throw RuntimeHTTPError.invalidResponse
+                            }
+                            received.removeSubrange(...newline)
+                            if reply.count == 1, case .string(let address)? = reply["baseUrl"],
+                               !ready, let url = URL(string: address) {
+                                ready = true
+                                continuation.resume(returning: url)
+                            } else {
+                                try respond(reply, descriptor: descriptor)
+                            }
+                        }
+                        guard received.count <= Self.maximumFrameBytes else { throw RuntimeHTTPError.invalidResponse }
                     }
                 } catch {
                     requestClose()
-                    continuation.resume(throwing: error as? RuntimeHTTPError ?? RuntimeHTTPError.invalidResponse)
+                    if !ready { continuation.resume(throwing: error as? RuntimeHTTPError ?? RuntimeHTTPError.invalidResponse) }
                 }
             }
         }
@@ -242,6 +265,7 @@ private final class RuntimeBootstrapChannel: @unchecked Sendable {
 
     func requestClose() {
         lock.lock(); defer { lock.unlock() }
+        closing = true
         if descriptor >= 0 { _ = Darwin.shutdown(descriptor, SHUT_WR) }
     }
 
@@ -276,6 +300,42 @@ private final class RuntimeBootstrapChannel: @unchecked Sendable {
     private func currentDescriptor() -> Int32 {
         lock.lock(); defer { lock.unlock() }
         return descriptor
+    }
+
+    private func respond(_ request: RuntimeObject, descriptor: Int32) throws {
+        lock.lock()
+        let closing = closing
+        lock.unlock()
+        guard !closing, let settings,
+              case .string(let kind)? = request["kind"],
+              case .string(let block)? = request["block"], settings.blocks.contains(block),
+              case .number(let id)? = request["id"], id >= 1, id <= 9_007_199_254_740_991,
+              id.rounded(.towardZero) == id,
+              kind == "settings.read" && request.count == 3 ||
+                kind == "settings.write" && request.count == 5 && settings.writableBlocks.contains(block),
+              kind != "settings.write" || request["document"] != nil && request["expected"] != nil else {
+            throw RuntimeHTTPError.invalidResponse
+        }
+        var reply: RuntimeObject = ["kind": .string("settings.result"), "id": .number(id)]
+        do {
+            let snapshot: RuntimeSettingsSnapshot
+            if kind == "settings.read" { snapshot = try settings.read(block) }
+            else {
+                guard case .object? = request["document"], case .object? = request["expected"] else {
+                    throw RuntimeHTTPError.invalidResponse
+                }
+                snapshot = try settings.write(block, request["document"]!, request["expected"]!)
+            }
+            reply["ok"] = .bool(true)
+            reply["document"] = snapshot.document ?? .null
+            reply["fingerprint"] = snapshot.fingerprint
+        } catch let error as RuntimeSettingsAccessError {
+            reply["ok"] = .bool(false)
+            reply["code"] = .string(error == .conflict ? "STORAGE_CONFLICT" : "STORAGE_ERROR")
+        }
+        let bytes = try RuntimeJSON.encode(.object(reply))
+        guard bytes.count <= Self.maximumFrameBytes else { throw RuntimeHTTPError.invalidResponse }
+        try write(bytes + Data([10]), descriptor: descriptor)
     }
 
     private func write(_ data: Data, descriptor: Int32) throws {

@@ -291,6 +291,40 @@ public static class FilmPresentationTests
                 .Single(option => option.Label == "最新电影").IsSelected &&
                 source.Calls.Last().Section.Category == "最新",
                 "filter interaction refreshes the bound data page");
+            var filterGroups = Visuals(filters).OfType<Border>()
+                .Where(border => border.Child is ItemsControl).ToArray();
+            var selectedFilters = filterButtons.Where(button => ((FilmFilterOption)button.Tag).IsSelected).ToArray();
+            var floatingSurface = new SolidColorBrush(Color.FromRgb(245, 250, 248));
+            var accentSoft = new SolidColorBrush(Color.FromArgb(40, 25, 160, 100));
+            var accentText = new SolidColorBrush(Color.FromRgb(20, 110, 70));
+            view.Resources["MeowFilm.Brush.FloatingSurface"] = floatingSurface;
+            view.Resources["MeowFilm.Brush.AccentSoft"] = accentSoft;
+            view.Resources["MeowFilm.Brush.AccentText"] = accentText;
+            await Drain();
+            Check(filterGroups.Length == 2 &&
+                filterGroups.All(group => ReferenceEquals(group.Background, floatingSurface)) &&
+                selectedFilters.Length == 2 && selectedFilters.All(button =>
+                    ReferenceEquals(button.Background, accentSoft) && ReferenceEquals(button.Foreground, accentText)),
+                "real film filter capsules and selected chips follow the shared surface and accent resources");
+            DesktopTheme.SetIsHighContrast(window, true);
+            await Drain();
+            Check(filterGroups.All(group => group.Background == SystemColors.WindowBrush &&
+                    group.BorderBrush == SystemColors.WindowTextBrush && group.BorderThickness == new Thickness(1)) &&
+                filterButtons.All(button => ((FilmFilterOption)button.Tag).IsSelected
+                    ? button.Background == SystemColors.HighlightBrush && button.Foreground == SystemColors.HighlightTextBrush
+                    : button.Background == SystemColors.WindowBrush && button.Foreground == SystemColors.WindowTextBrush),
+                "high contrast replaces theme filter colors with system surfaces, borders and selection colors");
+            DesktopTheme.SetIsHighContrast(window, false);
+            await Drain();
+            Check(filterGroups.All(group => ReferenceEquals(group.Background, floatingSurface) &&
+                    group.BorderThickness == new Thickness(0)) &&
+                selectedFilters.All(button =>
+                    ReferenceEquals(button.Background, accentSoft) && ReferenceEquals(button.Foreground, accentText)),
+                "leaving high contrast restores the current filter surface and soft accent");
+            view.Resources.Remove("MeowFilm.Brush.FloatingSurface");
+            view.Resources.Remove("MeowFilm.Brush.AccentSoft");
+            view.Resources.Remove("MeowFilm.Brush.AccentText");
+            await Drain();
             var grid = Visuals(items).OfType<AdaptiveCardPanel>().Single();
             var firstRow = Visuals(items).OfType<FilmCard>().Where(card =>
                 card.TranslatePoint(new Point(), grid).Y < 1).ToArray();

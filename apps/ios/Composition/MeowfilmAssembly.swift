@@ -2,6 +2,7 @@ import UIKit
 import Combine
 import MeowContracts
 import MeowPlayback
+import MeowPlaybackVideo
 import MeowMusicFeature
 import MeowMusicPlatform
 import MeowMusicNativeService
@@ -17,7 +18,7 @@ private let musicAccessGeneration: UInt64 = 1
 
 @MainActor
 final class MeowfilmAssembly: ObservableObject {
-    let playback = PlaybackController(volumePreferences: PlaybackVolumePreferences())
+    let playback = PlaybackController(volumePreferences: PlaybackVolumePreferences(), videoDecoderFactory: makePlaybackVideoDecoder)
     let appearance = MusicAppearancePreferencesStore()
     let filmLibrary = FilmLibrary()
     lazy var filmSources: [any FilmSource] = [DoubanFilmSource { [weak self] in
@@ -42,6 +43,7 @@ final class MeowfilmAssembly: ObservableObject {
     private(set) var resources: MeowfilmResources?
     private var startup: Task<Void, Never>?
     private var scriptStartup: Task<Void, Never>?
+    private var runtimeAvailability: Task<Void, Never>?
     private var stopping: Task<Void, Never>?
     private var loading: Task<Void, Never>?
     private var closed = false
@@ -129,6 +131,13 @@ final class MeowfilmAssembly: ObservableObject {
             return
         }
         self.resources = resources
+        runtimeAvailability = Task { [weak self] in
+            for await _ in await resources.scriptSession.connections() {
+                guard !Task.isCancelled, let self, !self.closed else { return }
+                self.filmSearch?.runtimeDidBecomeAvailable()
+                self.filmPlayback?.runtimeDidBecomeAvailable()
+            }
+        }
         filmSearch = FilmSearchService(sources: resources.filmSourceSettings,
             connection: { try await resources.scriptSession.connection() })
         let novel = NovelFeature(library: resources.novelLibrary, rules: resources.novelRules, runtime: resources.novelRuntime)
@@ -142,9 +151,10 @@ final class MeowfilmAssembly: ObservableObject {
         }
         let playbackSettings = FilmPlaybackSettingsModel(transport: FilmPlaybackTransport {
             try await resources.scriptSession.connection()
-        })
+        }, settingsDocument: resources.filmSettings[.preferences])
         playbackSettings.playbackSnapshot = { [weak self] in self?.filmPlayback?.snapshot }
-        let pan = PanAccountsModel(service: PanAccountService(connection: { try await resources.scriptSession.connection() }))
+        let pan = PanAccountsModel(service: PanAccountService(document: resources.filmSettings[.panAccounts],
+            connection: { try await resources.scriptSession.connection() }))
         let filmSettings = FilmSettingsModel(rules: resources.filmRules, sources: resources.filmSourceSettings,
                                              tmdb: tmdb, douban: douban, pan: pan, playback: playbackSettings)
         self.filmSettings = filmSettings
@@ -268,18 +278,25 @@ final class MeowfilmAssembly: ObservableObject {
     func makeFilmPlayback(item: FilmItem, kind: FilmPlaybackKind,
                           entrySurface: String? = nil) throws -> FilmPlaybackModel {
         guard !closed, let resources else { throw FilmPlaybackError(code: "CLOSED") }
-        guard let provider = FilmMetadataProvider(rawValue: item.sourceID), (kind == .movie || kind == .tv) else {
-            // A catalog item has no script installation/detail prototype. The
-            // search route supplies its full request rather than guessing one.
-            throw FilmPlaybackError(code: "INVALID_REQUEST")
-        }
-        let target = FilmPlaybackTarget(id: "\(provider.rawValue):\(kind.rawValue):\(item.id)",
-                                        kind: kind, title: item.title, metadataProvider: provider, metadataID: item.id)
         let metadata = try item.metadataSeed.map(RuntimeJSON.decode)
         return try makeFilmPlayback { [weak self] in
             guard let self else { throw FilmPlaybackError(code: "CLOSED") }
-            return FilmPlaybackRequest(target: target, sources: try await self.filmPlaybackSources(resources: resources),
-                                       metadata: metadata, entrySurface: entrySurface)
+            let sources = try await self.filmPlaybackSources(resources: resources)
+            let target: FilmPlaybackTarget
+            if let supplied = item.playbackTarget { target = supplied }
+            else {
+                guard let provider = FilmMetadataProvider(rawValue: item.sourceID), kind == .movie || kind == .tv else {
+                    throw FilmPlaybackError(code: "INVALID_REQUEST")
+                }
+                // Existing saved records supply accurate provider fields. Node
+                // confirms the address; the client never constructs a business ID.
+                let raw: RuntimeObject = ["kind": .string(kind.rawValue), "title": .string(item.title),
+                    "metadataProvider": .string(provider.rawValue), "metadataId": .string(item.id)]
+                let client = try await resources.scriptSession.connection()
+                target = try FilmPlaybackTarget(await client.call(module: .film, operation: "data.target",
+                    parameters: .object(["target": .object(raw), "sources": .array(sources.map { .object($0.value) })])))
+            }
+            return FilmPlaybackRequest(target: target, sources: sources, metadata: metadata, entrySurface: entrySurface)
         }
     }
 
@@ -288,12 +305,11 @@ final class MeowfilmAssembly: ObservableObject {
         return try makeFilmPlayback(searchContext: context) { [weak self, context] in
             guard let self else { throw FilmPlaybackError(code: "CLOSED") }
             let sources = try await self.filmPlaybackSources(resources: resources)
-            return try await context.playbackRequest(sources: sources, owner: resources.scriptSession.connection())
+            return try await context.playbackRequest(sources: sources)
         }
     }
 
-    /// The final search handoff can supply its complete request and cache seeds
-    /// without a second search/cache adapter in App composition.
+    /// The fixed Node target can open independently of a live search reference.
     func makeFilmPlayback(searchContext: FilmSearchContext? = nil,
                           request: @escaping @Sendable () async throws -> FilmPlaybackRequest) throws -> FilmPlaybackModel {
         guard !closed, let resources else { throw FilmPlaybackError(code: "CLOSED") }
@@ -352,6 +368,7 @@ final class MeowfilmAssembly: ObservableObject {
         music?.prepareForClose()
         filmSettings?.close()
         automaticSync?.stop()
+        runtimeAvailability?.cancel(); runtimeAvailability = nil
         startup?.cancel(); scriptStartup?.cancel(); loading?.cancel(); commandRefresh?.cancel()
         systemMetadata?.close(); systemMetadata = nil
         commandObservation?.cancel()
@@ -437,6 +454,7 @@ final class MeowfilmAssembly: ObservableObject {
     }
 
     deinit {
+        runtimeAvailability?.cancel()
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         startup?.cancel(); scriptStartup?.cancel(); loading?.cancel(); commandRefresh?.cancel()
         let closeMusic = closeMusic, service = service, resources = resources, lease = lease

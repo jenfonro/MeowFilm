@@ -12,6 +12,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = false };
     private readonly IDocumentStore store;
     private readonly CatScriptTransport transport;
+    private readonly CatSourceSettings settings;
     private readonly IRuntimeRecovery? recovery;
     private readonly SemaphoreSlim stateGate = new(1, 1), managementGate = new(1, 1);
     private readonly CancellationTokenSource lifetime = new();
@@ -36,11 +37,13 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         ArgumentNullException.ThrowIfNull(store);
         Runtime = runtime;
         transport = new(runtime);
+        settings = new(store);
         recovery = runtime as IRuntimeRecovery;
         this.store = store;
     }
 
     internal IRuntimeClient Runtime { get; }
+    internal IDocumentStore Storage => store;
     public IReadOnlyList<FilmCatSource> Cats => Volatile.Read(ref snapshot).Cats;
     public IReadOnlyList<FilmVideoSource> Videos => Volatile.Read(ref snapshot).Videos;
     public string? RuntimeError => Volatile.Read(ref runtimeError);
@@ -122,118 +125,168 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         }
     }
 
-    public Task<FilmCatSource> ImportLocalAsync(string name, string source, string? installationId = null,
+    public async Task<FilmCatSource> ImportLocalAsync(string name, string filePath, string? installationId = null,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(name);
-        ArgumentException.ThrowIfNullOrWhiteSpace(source);
+        CatSourceSettings.ValidateSource(name, "local", null);
+        var input = await CatSourceSettings.SelectLocalAsync(filePath, cancellationToken).ConfigureAwait(false);
         string id = installationId ?? Guid.NewGuid().ToString("N");
-        return ManageAsync(id, async token =>
-        {
-            long sourceRevision = await transport.UploadSourceAsync(id, source, token).ConfigureAwait(false);
-            return await transport.CallAsync("install", new
-            {
-                installationId = id, sourceRevision, name, sourceType = "local", sourceUrl = (string?)null, enabled = true
-            }, token).ConfigureAwait(false);
-        }, reimport: true, cancellationToken);
+        return await SaveCatConfigurationAsync(id, configured =>
+            configured.Any(cat => cat.InstallationId == id) ? throw new FilmSourceException("STORAGE_CONFLICT") :
+                [.. configured, new(id, name.Trim(), "local", null, input.Path, input.Hash, true, 1)],
+            cancellationToken).ConfigureAwait(false);
     }
 
     public Task<FilmCatSource> ImportNetworkAsync(string name, string sourceUrl, string? installationId = null,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(name);
-        ArgumentException.ThrowIfNullOrWhiteSpace(sourceUrl);
+        CatSourceSettings.ValidateSource(name, "network", sourceUrl);
         string id = installationId ?? Guid.NewGuid().ToString("N");
-        return ManageAsync(id, token => transport.CallAsync("import", new
-        {
-            installationId = id, name, sourceUrl, enabled = true
-        }, token), reimport: true, cancellationToken);
+        return SaveCatConfigurationAsync(id, configured =>
+            configured.Any(cat => cat.InstallationId == id) ? throw new FilmSourceException("STORAGE_CONFLICT") :
+                [.. configured, new(id, name.Trim(), "network", sourceUrl, null, null, true, 1)], cancellationToken);
     }
 
     public Task<FilmCatSource> EditCatAsync(string installationId, string name, string? sourceUrl = null,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(name);
-        return ManageAsync(installationId, token => transport.CallAsync("edit",
-            sourceUrl is null ? new { installationId, name } :
-                (object)new { installationId, name, sourceUrl }, token), false, cancellationToken);
+        var current = FindCat(installationId);
+        return EditCatAsync(installationId, name, current.SourceType, sourceUrl ?? current.SourceUrl,
+            null, cancellationToken);
     }
 
-    public Task<FilmCatSource> UpdateCatAsync(string installationId, string? source = null,
-        CancellationToken cancellationToken = default) => ManageAsync(installationId, async token =>
+    public async Task<FilmCatSource> EditCatAsync(string installationId, string name, string sourceType,
+        string? sourceUrl, string? localPath, CancellationToken cancellationToken = default)
+    {
+        CatSourceSettings.ValidateSource(name, sourceType, sourceType == "network" ? sourceUrl : null);
+        (string Path, string Hash)? input = localPath is null ? null :
+            await CatSourceSettings.SelectLocalAsync(localPath, cancellationToken).ConfigureAwait(false);
+        return await SaveCatConfigurationAsync(installationId, configured => configured.Select(cat =>
+        {
+            if (cat.InstallationId != installationId) return cat;
+            string? path = sourceType == "local" ? input?.Path ?? (cat.SourceType == "local" ? cat.LocalPath : null) : null;
+            string? hash = sourceType == "local" ? input?.Hash ?? (cat.SourceType == "local" ? cat.LocalHash : null) : null;
+            if (sourceType == "local" && hash is null) throw new FilmSourceException("INVALID_ARGUMENT");
+            string? url = sourceType == "network" ? sourceUrl : null;
+            bool changed = cat.SourceType != sourceType || cat.SourceUrl != url ||
+                cat.LocalPath != path || cat.LocalHash != hash;
+            return cat with { Name = name.Trim(), SourceType = sourceType, SourceUrl = url,
+                LocalPath = path, LocalHash = hash, InputRevision = cat.InputRevision + (changed ? 1 : 0) };
+        }), cancellationToken, requireExisting: true).ConfigureAwait(false);
+    }
+
+    public Task<FilmCatSource> UpdateCatAsync(string installationId, string? filePath = null,
+        CancellationToken cancellationToken = default)
     {
         var cat = FindCat(installationId);
         if (cat.SourceType == "local")
         {
-            ArgumentException.ThrowIfNullOrWhiteSpace(source);
-            long sourceRevision = await transport.UploadSourceAsync(installationId, source, token).ConfigureAwait(false);
-            return await transport.CallAsync("update", new { installationId, sourceRevision }, token).ConfigureAwait(false);
+            ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+            return EditCatAsync(installationId, cat.Name, "local", null, filePath, cancellationToken);
         }
-        if (source is not null) throw new ArgumentException("Network updates use the saved URL.", nameof(source));
-        return await transport.CallAsync("update", new { installationId }, token).ConfigureAwait(false);
-    }, false, cancellationToken);
+        if (filePath is not null) throw new ArgumentException("Network updates use the saved URL.", nameof(filePath));
+        return ManageAsync(installationId, token => transport.CallAsync("update", new { installationId }, token),
+            cancellationToken);
+    }
 
     public Task<FilmCatSource> RestartCatAsync(string installationId, CancellationToken cancellationToken = default) =>
-        ManageAsync(installationId, token =>
-        {
-            if (!FindCat(installationId).Enabled) throw new FilmSourceException("DISABLED");
-            return transport.CallAsync("restart", new { installationId }, token);
-        }, false, cancellationToken);
+        ManageAsync(installationId, token => transport.CallAsync("restart", new { installationId }, token),
+            cancellationToken, requireEnabled: true);
 
     public Task<FilmCatSource> EnableCatAsync(string installationId, bool enabled,
-        CancellationToken cancellationToken = default) => ManageAsync(installationId,
-        token => transport.CallAsync("enable", new { installationId, enabled }, token), false, cancellationToken);
+        CancellationToken cancellationToken = default) => SaveCatConfigurationAsync(installationId,
+        configured => configured.Select(cat => cat.InstallationId == installationId ? cat with { Enabled = enabled } : cat),
+        cancellationToken, requireExisting: true);
 
     public Task DeleteCatAsync(string installationId, CancellationToken cancellationToken = default) =>
-        RunAsync(token => InManagementAsync(async () =>
+        RunAsync(token => InStateAsync(async ct =>
         {
-            await InitializeCoreAsync(token).ConfigureAwait(false);
-            await InStateAsync(_ =>
+            await LoadAsync(ct).ConfigureAwait(false);
+            FindCat(installationId);
+            var configured = await settings.ChangeAsync(cats => cats.Where(cat => cat.InstallationId != installationId), ct)
+                .ConfigureAwait(false);
+            ConfigurationChanged();
+            InvalidateCat(installationId);
+            ApplyConfiguration(configured);
+        }, token), cancellationToken);
+
+    private Task<FilmCatSource> SaveCatConfigurationAsync(string id,
+        Func<IReadOnlyList<CatSourceConfiguration>, IEnumerable<CatSourceConfiguration>> edit,
+        CancellationToken token, bool requireExisting = false) => RunAsync(async ct =>
+    {
+        FilmCatSource result = null!;
+        await InStateAsync(async admission =>
+        {
+            await LoadAsync(admission).ConfigureAwait(false);
+            if (requireExisting) FindCat(id);
+            var configured = await settings.ChangeAsync(edit, admission).ConfigureAwait(false);
+            // No runtime acknowledgement or cache write can revoke this native commit.
+            ApplyConfiguration(configured);
+            ConfigurationChanged();
+            result = FindCat(id);
+        }, ct).ConfigureAwait(false);
+        return result;
+    }, token);
+
+    private bool RuntimeActive => recovery?.State is RuntimeConnectionState.Starting or RuntimeConnectionState.Ready ||
+        Runtime is IRuntimeSession { IsConnected: true };
+
+    private FilmCatSource[] ConfiguredCats(IReadOnlyList<CatSourceConfiguration> configured, IEnumerable<FilmCatSource> received)
+    {
+        var incoming = received.ToDictionary(cat => cat.InstallationId, StringComparer.Ordinal);
+        return configured.Select(input =>
+        {
+            incoming.TryGetValue(input.InstallationId, out var observed);
+            var cached = observed ?? Cats.FirstOrDefault(cat => cat.InstallationId == input.InstallationId);
+            bool current = observed is not null && observed.InputRevision == input.InputRevision &&
+                observed.Enabled == input.Enabled && observed.SourceType == input.SourceType && observed.SourceUrl == input.SourceUrl;
+            var value = cached ?? new FilmCatSource(input.InstallationId, input.Name, input.SourceType, input.SourceUrl,
+                input.Enabled, null, null, "idle", null, 0, "stopped", null, null, []);
+            return value with
             {
-                FindCat(installationId);
-                InvalidateCat(installationId);
-                changingCats.Add(installationId);
-                return Task.CompletedTask;
-            }, token).ConfigureAwait(false);
+                Name = input.Name, SourceType = input.SourceType, SourceUrl = input.SourceUrl,
+                LocalPath = input.LocalPath, Enabled = input.Enabled, InputRevision = input.InputRevision,
+                Generation = current ? value.Generation : 0,
+                State = current ? value.State : !input.Enabled ? "disabled" : RuntimeActive ? "starting" : "stopped",
+                Error = current ? value.Error : null,
+                UpdateState = current || cached?.InputRevision == input.InputRevision ? value.UpdateState : "idle",
+                UpdateError = current || cached?.InputRevision == input.InputRevision ? value.UpdateError : null
+            };
+        }).ToArray();
+    }
+
+    private void ApplyConfiguration(IReadOnlyList<CatSourceConfiguration> configured)
+    {
+        var cats = ConfiguredCats(configured, Cats);
+        var ids = cats.Select(cat => cat.InstallationId).ToHashSet(StringComparer.Ordinal);
+        foreach (var previous in Cats)
+            if (cats.FirstOrDefault(cat => cat.InstallationId == previous.InstallationId) is not { } next ||
+                next.InputRevision != previous.InputRevision || next.Enabled != previous.Enabled)
+                InvalidateCat(previous.InstallationId);
+        Volatile.Write(ref snapshot, new Snapshot(Freeze(cats), Freeze(Videos.Where(video => ids.Contains(video.Key.InstallationId)))));
+    }
+
+    private void ConfigurationChanged()
+    {
+        if (!RuntimeActive || Runtime is not IRuntimeConnectionSource source) return;
+        var task = RunAsync(async token =>
+        {
             try
             {
-                JsonElement receipt;
-                try { receipt = await transport.CallAsync("uninstall", new { installationId }, token).ConfigureAwait(false); }
-                catch (FilmSourceException)
-                {
-                    // An error receipt can follow a committed uninstall; status decides what remains.
-                    await ReconcileManagementFailureAsync(installationId).ConfigureAwait(false);
-                    throw;
-                }
-                string? cleanupError = null;
-                if (receipt.ValueKind == JsonValueKind.Object && receipt.TryGetProperty("failures", out var failures) &&
-                    failures.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (var failure in failures.EnumerateArray())
-                    {
-                        if (CatScriptTransport.OptionalText(failure, "installationId") != installationId) continue;
-                        cleanupError = CatScriptTransport.OptionalText(failure, "code") ?? "INVALID_RESPONSE";
-                        break;
-                    }
-                }
-                // The uninstall receipt commits this deletion even if the subsequent status call fails.
-                await InStateAsync(async ct =>
-                {
-                    var cats = Cats.Where(cat => cat.InstallationId != installationId).ToArray();
-                    var videos = Sorted(Videos.Where(video => video.Key.InstallationId != installationId));
-                    await CommitAsync(cats, videos, document.Deleted.Where(key => key.InstallationId != installationId), ct, installationId)
-                        .ConfigureAwait(false);
-                }, token).ConfigureAwait(false);
-                await SynchronizeAsync(null, token).ConfigureAwait(false);
-                if (cleanupError is not null) throw new FilmSourceException(cleanupError);
+                var connection = await source.CaptureConnectionAsync(token).ConfigureAwait(false);
+                using var activeConnection = CancellationTokenSource.CreateLinkedTokenSource(token, connection.Revoked);
+                var reply = await connection.Client.CallAsync("runtime.settings.changed", new { block = "cat.sources" },
+                    TimeSpan.FromSeconds(5), activeConnection.Token).ConfigureAwait(false);
+                if (!reply.GetProperty("ok").GetBoolean()) throw new BridgeException(reply.GetProperty("code").GetString()!);
+                await InManagementAsync(() => SynchronizeAsync(null, activeConnection.Token), activeConnection.Token).ConfigureAwait(false);
+                await AwaitStartupAsync(activeConnection.Token).ConfigureAwait(false);
             }
-            catch (Exception error) when (error is OperationCanceledException or BridgeException or DocumentStoreException)
-            {
-                await ReconcileManagementFailureAsync(installationId).ConfigureAwait(false);
-                throw;
-            }
-            finally { await EndCatChangeAsync(installationId).ConfigureAwait(false); }
-        }, token), cancellationToken);
+            catch (OperationCanceledException) { }
+            catch (Exception error) { await ReportRuntimeErrorAsync(error).ConfigureAwait(false); }
+        }, CancellationToken.None);
+        _ = ObserveAsync(task);
+        static async Task ObserveAsync(Task work) { try { await work.ConfigureAwait(false); } catch { } }
+    }
 
     public Task DeleteVideoAsync(FilmSourceKey key, CancellationToken cancellationToken = default) =>
         RunAsync(token => InStateAsync(async ct =>
@@ -258,6 +311,21 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
             .OrderBy(video => video.Order).ThenBy(video => order is not null && video.Key == key ? 0 : 1);
         await CommitAsync(Cats, videos, document.Deleted, ct).ConfigureAwait(false);
     }, token), cancellationToken);
+
+    public Task ReorderVideosAsync(IReadOnlyList<FilmSourceKey> order, CancellationToken cancellationToken = default)
+    {
+        var keys = order.ToArray();
+        return RunAsync(token => InStateAsync(async ct =>
+        {
+            await LoadAsync(ct).ConfigureAwait(false);
+            var byKey = Videos.ToDictionary(video => video.Key);
+            if (keys.Length != byKey.Count || keys.Distinct().Count() != keys.Length ||
+                keys.Any(key => !byKey.ContainsKey(key))) throw new FilmSourceException("STORAGE_CONFLICT");
+            if (keys.SequenceEqual(Videos.Select(video => video.Key))) return;
+            await CommitAsync(Cats, keys.Select((key, index) => byKey[key] with { Order = index }),
+                document.Deleted, ct).ConfigureAwait(false);
+        }, token), cancellationToken);
+    }
 
     public Task<FilmSourceDetection> DetectAsync(FilmSourceKey key, CancellationToken cancellationToken = default) =>
         RunAsync(async token =>
@@ -301,7 +369,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         }, cancellationToken);
 
     private Task<FilmCatSource> ManageAsync(string id, Func<CancellationToken, Task<JsonElement>> operation,
-        bool reimport, CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool requireEnabled = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         return RunAsync(async token =>
@@ -310,39 +378,25 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
             await InManagementAsync(async () =>
             {
                 await InitializeCoreAsync(token).ConfigureAwait(false);
-                IReadOnlySet<FilmSourceKey>? restoreKeys = null;
                 await InStateAsync(_ =>
                 {
-                    if (!reimport) FindCat(id);
-                    else restoreKeys = document.Deleted.Where(key => key.InstallationId == id).ToHashSet();
+                    var cat = FindCat(id);
+                    if (requireEnabled && !cat.Enabled) throw new FilmSourceException("DISABLED");
                     InvalidateCat(id);
                     changingCats.Add(id);
                     return Task.CompletedTask;
                 }, token).ConfigureAwait(false);
                 try
                 {
-                    JsonElement receipt;
-                    try { receipt = await operation(token).ConfigureAwait(false); }
+                    try { await operation(token).ConfigureAwait(false); }
                     catch (FilmSourceException)
                     {
                         // Failed management may have persisted updateState/updateError in Node.
                         await ReconcileManagementFailureAsync(id).ConfigureAwait(false);
                         throw;
                     }
-                    FilmCatSource? restored = null;
-                    if (reimport)
-                    {
-                        CatScriptTransport.Require(receipt.ValueKind == JsonValueKind.Object);
-                        var instance = receipt.TryGetProperty("instances", out var instances)
-                            ? instances.EnumerateArray().FirstOrDefault(value => CatScriptTransport.OptionalText(value, "installationId") == id)
-                            : receipt;
-                        var imported = ParseCat(instance);
-                        if (imported.InstallationId != id) throw new FilmSourceException("INVALID_RESPONSE");
-                        if (imported.State == "ready" && imported.Enabled) restored = imported;
-                    }
-                    await SynchronizeAsync(restored, token, restoreKeys).ConfigureAwait(false);
+                    await SynchronizeAsync(null, token).ConfigureAwait(false);
                     result = FindCat(id);
-                    if (reimport && restored is null) throw new FilmSourceException("IMPORT_FAILED", result.Error);
                 }
                 catch (Exception error) when (error is OperationCanceledException or BridgeException or DocumentStoreException)
                 {
@@ -386,7 +440,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         }
     }
 
-    private async Task SynchronizeAsync(FilmCatSource? restored, CancellationToken token, IReadOnlySet<FilmSourceKey>? restoreKeys = null)
+    private async Task SynchronizeAsync(FilmCatSource? _, CancellationToken token)
     {
         await InitializeCoreAsync(token).ConfigureAwait(false);
         FilmCatSource[] incoming;
@@ -405,6 +459,8 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         }
         await InStateAsync(async ct =>
         {
+            var configured = await settings.ReadAsync(ct).ConfigureAwait(false);
+            incoming = ConfiguredCats(configured, incoming);
             var ids = incoming.Select(cat => cat.InstallationId).ToHashSet(StringComparer.Ordinal);
             var deleted = document.Deleted.Where(key => ids.Contains(key.InstallationId)).ToHashSet();
             var videos = Videos.Where(video => ids.Contains(video.Key.InstallationId)).ToList();
@@ -425,13 +481,6 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
                 cats.Add(cat);
                 if (!authoritativeSites) continue;
                 var siteKeys = cat.Sites.Select(site => site.Key).ToHashSet(StringComparer.Ordinal);
-                if (restored is not null && restored.InstallationId == cat.InstallationId &&
-                    restored.Generation == cat.Generation && restored.SourceHash == cat.SourceHash)
-                {
-                    var imported = restored.Sites.Select(site => site.Key).ToHashSet(StringComparer.Ordinal);
-                    deleted.RemoveWhere(key => key.InstallationId == cat.InstallationId &&
-                        siteKeys.Contains(key.SiteKey) && imported.Contains(key.SiteKey) && restoreKeys?.Contains(key) == true);
-                }
                 foreach (var removed in videos.Where(video => video.Key.InstallationId == cat.InstallationId &&
                     !siteKeys.Contains(video.Key.SiteKey))) InvalidateProbe(removed.Key);
                 videos.RemoveAll(video => video.Key.InstallationId == cat.InstallationId && !siteKeys.Contains(video.Key.SiteKey));
@@ -508,8 +557,9 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
             var loadedVideos = ReadUnique(rawVideos, ReadVideoKey, ReadStoredVideo)
                 .Where(video => counts[video.Key] == 1 && !deleted.Contains(video.Key) && !ambiguousDeleted.Contains(video.Key)).ToArray();
             var loaded = new StoredState(1, loadedCats, loadedVideos, deleted);
-            var cats = loaded.Cats.Select(cat => cat.ToSnapshot()).ToArray();
-            var videos = loaded.Videos.OrderBy(video => video.Order).Select(FreezeVideo).ToArray();
+            var cats = ConfiguredCats(await settings.ReadAsync(token).ConfigureAwait(false), loaded.Cats.Select(cat => cat.ToSnapshot()));
+            var ids = cats.Select(cat => cat.InstallationId).ToHashSet(StringComparer.Ordinal);
+            var videos = loaded.Videos.Where(video => ids.Contains(video.Key.InstallationId)).OrderBy(video => video.Order).Select(FreezeVideo).ToArray();
             token.ThrowIfCancellationRequested();
             foreach (var key in probes.Keys.ToArray()) InvalidateProbe(key);
             document = loaded with { Videos = Freeze(videos) };
@@ -865,9 +915,11 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
                 })));
         }).ToArray();
         CatScriptTransport.Require(described.Select(site => site.Key).Distinct(StringComparer.Ordinal).Count() == described.Length);
-        return new(id, name, type, Optional("sourceUrl"), value.GetProperty("enabled").GetBoolean(),
+        return new FilmCatSource(id, name, type, Optional("sourceUrl"), value.GetProperty("enabled").GetBoolean(),
             Timestamp("importedAt"), Timestamp("updatedAt"), update, Optional("updateError"),
-            CatScriptTransport.Integer(value, "generation"), Text("state"), Optional("sourceHash"), Optional("error"), Freeze(described));
+            CatScriptTransport.Integer(value, "generation"), Text("state"), Optional("sourceHash"), Optional("error"), Freeze(described))
+            { InputRevision = FilmJson.Member(value, "inputRevision") is { ValueKind: JsonValueKind.Number } revision &&
+                revision.TryGetInt64(out long number) && number is > 0 and <= BridgeCodec.MaximumSafeInteger ? number : 0 };
     }
 
     private sealed record Snapshot(IReadOnlyList<FilmCatSource> Cats, IReadOnlyList<FilmVideoSource> Videos);
@@ -876,12 +928,13 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     // Only a local cache of Node management metadata; no port, generation, source bytes or runtime ownership.
     private sealed record StoredCat(string InstallationId, string Name, string SourceType, string? SourceUrl,
         bool Enabled, long? ImportedAt, long? UpdatedAt, string UpdateState, string? UpdateError,
-        string? SourceHash, IReadOnlyList<FilmSourceSite> Sites)
+        string? SourceHash, IReadOnlyList<FilmSourceSite> Sites, long InputRevision = 0)
     {
         internal static StoredCat From(FilmCatSource cat) => new(cat.InstallationId, cat.Name, cat.SourceType,
-            cat.SourceUrl, cat.Enabled, cat.ImportedAt, cat.UpdatedAt, cat.UpdateState, cat.UpdateError, cat.SourceHash, cat.Sites);
+            cat.SourceUrl, cat.Enabled, cat.ImportedAt, cat.UpdatedAt, cat.UpdateState, cat.UpdateError, cat.SourceHash, cat.Sites,
+            cat.InputRevision);
         internal FilmCatSource ToSnapshot() => new(InstallationId, Name, SourceType, SourceUrl, Enabled,
             ImportedAt, UpdatedAt, UpdateState, UpdateError, 0, Enabled ? "stopped" : "disabled",
-            SourceHash, null, Freeze(Sites.Select(FreezeSite)));
+            SourceHash, null, Freeze(Sites.Select(FreezeSite))) { InputRevision = InputRevision };
     }
 }

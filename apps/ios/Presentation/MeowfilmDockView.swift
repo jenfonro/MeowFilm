@@ -10,9 +10,6 @@ final class MeowfilmDockView: UIView {
     private let surface: MusicPlayerSurface
     private let navigation = UIStackView()
     private let navigationHost = UIView()
-    private let opaqueBackdrop: WindowGradientView
-    private let fadedBackdrop: WindowGradientView
-    private let fadeMask = CAGradientLayer()
     private let stack = UIStackView()
     private var buttons: [MeowfilmPrimaryPage: UIButton] = [:]
     private var selected = MeowfilmPrimaryPage.recommend
@@ -28,19 +25,10 @@ final class MeowfilmDockView: UIView {
         static let unselected = UIColor.darkGray
     }
 
-    init(surface: MusicPlayerSurface, themeProvider: any PageThemeProviding) {
+    init(surface: MusicPlayerSurface) {
         self.surface = surface
-        opaqueBackdrop = WindowGradientView(themeProvider: themeProvider)
-        fadedBackdrop = WindowGradientView(themeProvider: themeProvider)
         super.init(frame: .zero)
         backgroundColor = .clear
-        for backdrop in [opaqueBackdrop, fadedBackdrop] as [UIView] {
-            backdrop.isUserInteractionEnabled = false
-            addSubview(backdrop)
-            backdrop.pinEdges(to: self)
-        }
-        fadeMask.colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
-        fadedBackdrop.layer.mask = fadeMask
         navigation.axis = .horizontal
         navigation.distribution = .fillEqually
         for page in [MeowfilmPrimaryPage.recommend, .film, .novel, .library] {
@@ -91,7 +79,6 @@ final class MeowfilmDockView: UIView {
             self.superview?.layoutIfNeeded()
         }
         renderNavigation()
-        updateBackdrop()
     }
 
     @available(*, unavailable)
@@ -102,28 +89,9 @@ final class MeowfilmDockView: UIView {
         stackBottom?.constant = -safeAreaInsets.bottom
     }
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        // Taller than the dock so the mask still covers it while it animates smaller.
-        let height = max(superview?.bounds.height ?? 0, bounds.height, 1)
-        let top = stack.frame.minY
-        let start = min(1, max(0, top / height))
-        let end = min(1, max(start, (top + surfaceHeight.constant) / height))
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        fadeMask.frame = CGRect(x: 0, y: 0, width: bounds.width, height: height)
-        fadeMask.locations = [NSNumber(value: Double(start)), NSNumber(value: Double(end))]
-        CATransaction.commit()
-    }
-
-    func select(_ page: MeowfilmPrimaryPage, duration: TimeInterval = 0) {
+    func select(_ page: MeowfilmPrimaryPage) {
         selected = page
         renderNavigation()
-        if duration > 0 && window != nil {
-            UIView.animate(withDuration: duration) { self.updateBackdrop() }
-        } else {
-            updateBackdrop()
-        }
     }
 
     func setNavigationVisible(_ visible: Bool) {
@@ -134,23 +102,15 @@ final class MeowfilmDockView: UIView {
         navigationHost.accessibilityElementsHidden = !visible
         navigationHeight.constant = visible ? PageLayoutMetrics.navigation : 0
         surfaceHeight.constant = playerSurfaceVisible ? surface.dockHeight : 0
+        isUserInteractionEnabled = occupiesBottom
     }
 
     func setPlayerSurfaceVisible(_ visible: Bool) {
         playerSurfaceVisible = visible
         surfaceHost.isHidden = !visible
         surfaceHeight.constant = visible ? surface.dockHeight : 0
-        updateBackdrop()
-        setNeedsLayout()
-    }
-
-    /// The recommend page fades its content out beside the capsule; every other
-    /// page ends its content above the capsule.
-    func updateBackdrop() {
-        opaqueBackdrop.isHidden = !occupiesBottom
-        fadedBackdrop.isHidden = !occupiesBottom
         isUserInteractionEnabled = occupiesBottom
-        opaqueBackdrop.alpha = navigationVisible && selected == .recommend ? 0 : 1
+        setNeedsLayout()
     }
 
     private func renderNavigation() {

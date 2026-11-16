@@ -4,6 +4,25 @@ import XCTest
 
 @MainActor
 final class FilmLibraryTests: XCTestCase {
+    func testFavoritesSaveTheSuppliedTargetAndRecognizeExistingLegacyRecords() throws {
+        let suite = "MeowFilmFeatureTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(Data(#"[{"sourceID":"tmdb","itemID":"19","kind":"tv"}]"#.utf8),
+                     forKey: FilmLibrary.storageKey)
+        let target = FilmPlaybackTarget(id: "node-content", kind: .tv, title: "影片", metadataProvider: .tmdb, metadataID: "19")
+        let item = FilmItem(sourceID: "tmdb", id: "19", title: "影片", kind: .tv,
+                            businessID: "node-content", playbackTarget: target)
+        let library = FilmLibrary(defaults: defaults)
+        XCTAssertTrue(library.contains(item))
+        XCTAssertFalse(try library.toggle(item))
+        XCTAssertTrue(try library.toggle(item))
+        let restored = FilmLibrary(defaults: defaults)
+        let record = try XCTUnwrap(restored.favorites.first)
+        XCTAssertEqual(record.businessID, item.businessID)
+        XCTAssertEqual(record.playbackTarget, target)
+    }
+
     func testFavoritesPersistWithSourceAndItemAsSeparateIdentityFields() throws {
         let suite = "MeowFilmFeatureTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

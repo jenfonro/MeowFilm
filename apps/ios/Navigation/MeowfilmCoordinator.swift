@@ -47,14 +47,14 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             guard let self else { return }
             let primary = page === self.main
             self.root.setRootVisible(primary, animated: animated)
-            self.root.setPlayerSurfaceVisible(!self.isSettingsBranchVisible)
+            self.root.setSettingsVisible(self.isSettingsBranchVisible)
             self.root.setReadingVisible(page is NovelReaderViewController || self.navigation.viewControllers.contains { $0 is NovelReaderViewController })
         }
         navigation.didShowPage = { [weak self] page in
             guard let self else { return }
             self.root.setRootVisible(page === self.main, animated: false)
-            self.root.setPlayerSurfaceVisible(!self.isSettingsBranchVisible)
-            if !(page is FilmDetailViewController), self.filmPlayer == nil {
+            self.root.setSettingsVisible(self.isSettingsBranchVisible)
+            if !self.isSettingsBranchVisible, !(page is FilmDetailViewController), self.filmPlayer == nil {
                 self.activateFilmPage(page)
             }
             self.root.setReadingVisible(self.navigation.viewControllers.contains { $0 is NovelReaderViewController })
@@ -269,7 +269,8 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         let item = FilmItem(sourceID: item.sourceID, id: item.id, title: item.title,
                             kind: FilmItemKind(rawValue: kind.rawValue) ?? item.kind,
                             posterURL: item.posterURL, largePosterURL: item.largePosterURL,
-                            score: item.score, subtitle: item.subtitle, metadataSeed: item.metadataSeed)
+                            score: item.score, subtitle: item.subtitle, metadataSeed: item.metadataSeed,
+                            businessID: item.businessID, playbackTarget: item.playbackTarget)
         let model: FilmPlaybackModel
         do { model = try assembly.makeFilmPlayback(item: item, kind: kind, entrySurface: entrySurface) }
         catch {

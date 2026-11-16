@@ -1,6 +1,9 @@
 #if os(iOS) || os(macOS)
 import XCTest
 import MeowContracts
+import KSPlayer
+import MeowVideoKernel
+@testable import MeowPlaybackVideo
 @testable import MeowPlayback
 
 @MainActor
@@ -32,7 +35,7 @@ final class PlaybackVideoCommitAdmissionTests: XCTestCase {
     }
 
     func testBusinessWaitKeepsPreparedReceiptAndDonorThenUsesLatestPositionAndPause() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         var events: [PlaybackVideoEvent] = []
         let film = try bindWindowedVideo(controller, owner: "film") { events.append($0) }
         let donorMedia = try PlaybackVideoMediaLease(attemptID: "donor", input: input("donor")) {}
@@ -70,7 +73,7 @@ final class PlaybackVideoCommitAdmissionTests: XCTestCase {
     }
 
     func testTemporaryFalseAfterWaitReusesPreparedCandidateRatherThanFailing() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         var events: [PlaybackVideoEvent.Kind] = []
         let film = try bindWindowedVideo(controller, owner: "film") { events.append($0.kind) }
         let gate = CommitGate(entered: expectation(description: "reentered business wait"))
@@ -107,7 +110,7 @@ final class PlaybackVideoCommitAdmissionTests: XCTestCase {
     }
 
     private func assertGateClosesDuringNativeOutput(preservePosition: Bool) async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         var events: [PlaybackVideoEvent] = []
         let film = try bindWindowedVideo(controller, owner: "film") { events.append($0) }
         let donorMedia = try PlaybackVideoMediaLease(attemptID: "donor", input: input("donor")) {}
@@ -149,7 +152,7 @@ final class PlaybackVideoCommitAdmissionTests: XCTestCase {
     }
 
     func testTaskCancellationDuringBusinessWaitDrainsWithoutStarted() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         var events: [PlaybackVideoEvent.Kind] = []
         let film = try bindWindowedVideo(controller, owner: "film") { events.append($0.kind) }
         let gate = CommitGate(entered: expectation(description: "waiting for business request"))
@@ -174,7 +177,7 @@ final class PlaybackVideoCommitAdmissionTests: XCTestCase {
     }
 
     func testCancelPendingDrainsBlockedCandidateWithoutWaitingForBusinessAndKeepsDonor() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         var events: [PlaybackVideoEvent] = []
         let film = try bindWindowedVideo(controller, owner: "film") { events.append($0) }
         let donorMedia = try PlaybackVideoMediaLease(attemptID: "donor", input: input("donor")) {}
@@ -208,7 +211,7 @@ final class PlaybackVideoCommitAdmissionTests: XCTestCase {
     }
 
     func testCloseIndependentlyDrainsBlockedCandidateAndDonorBeforeGateReturns() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         var events: [PlaybackVideoEvent] = []
         let film = try bindWindowedVideo(controller, owner: "film") { events.append($0) }
         var donorReleased = 0
@@ -242,7 +245,7 @@ final class PlaybackVideoCommitAdmissionTests: XCTestCase {
     }
 
     func testNewMusicAdmissionDuringBusinessWaitStillRejectsCandidateAfterRelease() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         var events: [PlaybackVideoEvent.Kind] = []
         let film = try bindWindowedVideo(controller, owner: "film") { events.append($0.kind) }
         let gate = CommitGate(entered: expectation(description: "candidate waiting"))
@@ -268,7 +271,7 @@ final class PlaybackVideoCommitAdmissionTests: XCTestCase {
     }
 
     func testDefaultCallbacksStillCommitActualFrameAndPreservePause() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         var events: [PlaybackVideoEvent.Kind] = []
         let film = try bindWindowedVideo(controller, owner: "film") { events.append($0.kind) }
         var released = 0
@@ -283,10 +286,58 @@ final class PlaybackVideoCommitAdmissionTests: XCTestCase {
         XCTAssertEqual(released, 1)
     }
 
+    func testNativeFailureAfterFirstFrameRejectsCommitWithoutRetiringHealthyDonor() async throws {
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
+        var handoffs = 0, donorReleases = 0, candidateReleases = 0
+        let film = try bindWindowedVideo(controller, owner: "film", willCommit: {
+            handoffs += 1
+            return nil
+        }) { _ in }
+        let donor = try await film.play(.init(attemptID: "healthy-donor", input: input("healthy-donor")) {
+            donorReleases += 1
+        }, paused: true)
+        let media = try PlaybackVideoMediaLease(attemptID: "failed-candidate", input: input("failed-candidate")) {
+            candidateReleases += 1
+        }
+        let native = try VideoSession()
+        let candidate = try PlaybackVideoTransport(media: media, input: XCTUnwrap(media.takeInput()),
+                                                   decoder: makePlaybackVideoDecoder(session: native))
+        try await candidate.prepare()
+        #if os(iOS)
+        film.surface.stage(candidate.output.presentationView)
+        #else
+        let window = try PlaybackVideoTestWindow()
+        window.stage(candidate)
+        defer { window.close() }
+        #endif
+        try await candidate.renderFirstVideoFrame()
+        let admission = controller.admitVideo(owner: film.owner, candidate: candidate)
+        #if os(iOS)
+        try await controller.prepareVideoAudio(admission: admission, owner: film.owner, paused: true)
+        #endif
+        // Only the native failure delivery is injected. The candidate above
+        // really decoded and presented a frame; the donor remains a real owner.
+        let sender = KSMEPlayer(url: try input("sender").url, options: KSOptions())
+        native.finish(player: sender, error: NSError(domain: "SyntheticNativeFailure", code: Int.max))
+        await sender.shutdownAndWait()
+        do {
+            _ = try controller.commitVideo(candidate, lease: film, admission: admission, paused: true)
+            XCTFail("a stale first-frame witness cannot admit a failed core")
+        } catch { XCTAssertEqual(error as? PlaybackVideoError, .decodingFailed) }
+        XCTAssertEqual(controller.currentAttempt, donor)
+        XCTAssertEqual(film.currentAttempt, donor)
+        XCTAssertEqual(donorReleases, 0)
+        XCTAssertEqual(handoffs, 1, "only the original healthy commit may capture a handoff")
+        try await candidate.close()
+        XCTAssertEqual(candidateReleases, 1)
+        try await film.close()
+        XCTAssertEqual(donorReleases, 1)
+    }
+
     func testCloseJoinsCandidateAlreadyRetiringFromCancelFailureOrReplacement() async throws {
         for trigger in ["cancel", "failure", "replacement"] {
             for releaseFails in [false, true] {
-                let controller = PlaybackController()
+                let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
                 var events: [PlaybackVideoEvent] = []
                 let film = try bindWindowedVideo(controller, owner: "film") { events.append($0) }
                 let business = CommitGate(entered: expectation(description: "business wait"))
@@ -369,7 +420,7 @@ final class PlaybackVideoCommitAdmissionTests: XCTestCase {
     }
 
     func testRetiringCandidateCloseDoesNotStopNewMusicOwner() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         let film = try bindWindowedVideo(controller, owner: "film") { _ in }
         let business = CommitGate(entered: expectation(description: "business wait"))
         let release = CommitGate(entered: expectation(description: "release wait"))
@@ -398,7 +449,7 @@ final class PlaybackVideoCommitAdmissionTests: XCTestCase {
     func testNativeBudgetAccumulatesAcrossBusinessGatesAndRejectsExpiredFinalCheckpoint() async throws {
         for preservePosition in [false, true] {
             for closeGateAtDeadline in [false, true] {
-                let controller = PlaybackController()
+                let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
                 var instant = ContinuousClock.now
                 var events: [PlaybackVideoEvent] = []
                 let window = try PlaybackVideoTestWindow()
@@ -445,7 +496,7 @@ final class PlaybackVideoCommitAdmissionTests: XCTestCase {
     }
 
     func testBusinessWaitAloneDoesNotConsumeNativeAlignmentBudget() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         var instant = ContinuousClock.now
         let window = try PlaybackVideoTestWindow()
         let film = PlaybackVideoLease(controller: controller, owner: "film", now: { instant },

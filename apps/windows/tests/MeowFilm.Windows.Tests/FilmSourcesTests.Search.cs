@@ -8,7 +8,7 @@ public static partial class FilmSourcesTests
     {
         var runtime = new Runtime();
         runtime.Add("a"); runtime.Add("b"); runtime.Add("disabled"); runtime.Nodes["disabled"].Enabled = false;
-        await using var service = new FilmSourceService(runtime, new Store());
+        await using var service = new FilmSourceService(runtime, new Store(runtime));
         await service.RefreshAsync();
         await service.SaveVideoOptionsAsync(Key("b"), new(true, true, false, false));
         await service.SaveVideoOptionsAsync(Key("a"), new(true, false, true, true), order: 17);

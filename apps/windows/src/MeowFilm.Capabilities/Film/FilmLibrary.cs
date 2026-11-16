@@ -61,7 +61,7 @@ public sealed class FilmLibrary(IDocumentStore store) : IAsyncDisposable
         if (target.Kind is "source" or "group" && target.Source is { ValueKind: JsonValueKind.Object } source)
         {
             var identity = new Dictionary<string, JsonElement>();
-            foreach (string name in new[] { "key", "detailId", "lineId" })
+            foreach (string name in new[] { "key", "engine", "installationId", "siteId", "detailId", "lineId" })
                 if (source.TryGetProperty(name, out var field)) identity.Add(name, field);
             target = target with { Source = FilmJson.Encode(identity) };
         }

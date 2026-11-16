@@ -173,6 +173,10 @@ public static class AppLauncher
                 Directory.CreateDirectory(paths.Documents);
                 store = new LocalDocumentStore(paths.Documents, definition.NativeNamespaces,
                     definition.NativeCollections, definition.ProtectedNamespaces);
+                var settingsNamespaces = AppIdentity.RuntimeSettingsNamespaces
+                    .Where(pair => definition.NativeNamespaces.Contains(pair.Value))
+                    .ToDictionary(pair => pair.Key, pair => pair.Value);
+                await AppSettingsMigration.ApplyAsync(store, paths.ScriptRuntime, settingsNamespaces, cancellationToken);
                 runtime = new AppRuntimeConnectionHost(async token =>
                 {
                     // Native pages and business owners never wait for this start:
@@ -182,7 +186,9 @@ public static class AppLauncher
                         definition.RuntimeModules), token).ConfigureAwait(false);
                     token.ThrowIfCancellationRequested();
                     return await NodeRuntime.StartAsync(Path.Combine(root, "node.exe"), bundle,
-                        definition.RuntimeModules, paths.ScriptRuntime, token, ownerRevoked: token).ConfigureAwait(false);
+                        definition.RuntimeModules, paths.ScriptRuntime, token, ownerRevoked: token,
+                        settingsStore: settingsNamespaces.Count == 0 ? null : store,
+                        settingsNamespaces: settingsNamespaces).ConfigureAwait(false);
                 });
                 cancellationToken.ThrowIfCancellationRequested();
                 createModules(runtime, store, modules);

@@ -12,10 +12,11 @@ const failureCode = id => ({ music: 'SCRIPT_FAILURE', source: 'SOURCE_FAILURE',
 
 /** Lifecycle session configuration; no platform bootstrap or persistent identity. */
 export function createAppRuntime({ sessionId,
-  product = 'aggregate', modules, assemble } = {}) {
+  product = 'aggregate', modules, assemble, settingsChanged } = {}) {
   validateSession({ sessionId });
   if (typeof product !== 'string' || !/^[a-z][a-z0-9-]{0,63}$(?![\s\S])/.test(product) ||
-      assemble !== undefined && (modules !== undefined || typeof assemble !== 'function')) invalid();
+      assemble !== undefined && (modules !== undefined || typeof assemble !== 'function') ||
+      settingsChanged !== undefined && typeof settingsChanged !== 'function') invalid();
   let disposed = false, disposal, shutdown, closing;
   const dispose = () => disposal ??= (async () => {
     disposed = true;
@@ -53,6 +54,24 @@ export function createAppRuntime({ sessionId,
     if (method === 'GET' && url.pathname === '/v1/describe' && !url.search) {
       return { contract: HTTP_PROTOCOL, codes: publicCodes,
         handler: () => success({ protocol: HTTP_PROTOCOL, product, modules: descriptors }) };
+    }
+    if (method === 'POST' && url.pathname === '/v1/settings/changed' && !url.search && settingsChanged) {
+      return { contract: HTTP_PROTOCOL, codes: publicCodes, contentType: 'application/json',
+        validate(input) {
+          if (input === null || typeof input !== 'object' || Array.isArray(input) ||
+              Object.keys(input).length !== 1 || typeof input.block !== 'string' ||
+              !/^[a-z][a-z0-9.]{0,63}$(?![\s\S])/.test(input.block)) invalid();
+        },
+        handler: async input => {
+          try {
+            if (disposed) throw new BridgeError('CLOSED');
+            await settingsChanged(input.block);
+            return success({ notified: true });
+          } catch (error) {
+            return { ok: false, contract: HTTP_PROTOCOL,
+              code: publicCodes.has(error?.code) ? error.code : 'INVALID_RESPONSE' };
+          }
+        } };
     }
     if (method === 'POST' && url.pathname === '/v1/close' && !url.search) {
       return { contract: HTTP_PROTOCOL, codes: publicCodes, contentType: 'application/json',

@@ -69,7 +69,15 @@ public static class FilmCacheConsumerTests
         {
             title = "豆瓣主资料", intro = "", pic = new { normal = "" },
             seasons = new[] { new { season_number = 1, name = "豆瓣第一季",
-                episodes = new[] { new { season = 1, episode = 1 }, new { season = 1, episode = 2 } } } }
+                businessId = "douban:tv:100:season:1",
+                playbackTarget = new FilmPlaybackTarget(target.Id, "tv", target.Title, "douban", "100", Season: 1).Wire(),
+                episodes = new[]
+                {
+                    new { season = 1, episode = 1, businessId = "douban:tv:100:season:1:episode:1",
+                        playbackTarget = new FilmPlaybackTarget(target.Id, "tv", target.Title, "douban", "100", Season: 1, Episode: 1).Wire() },
+                    new { season = 1, episode = 2, businessId = "douban:tv:100:season:1:episode:2",
+                        playbackTarget = new FilmPlaybackTarget(target.Id, "tv", target.Title, "douban", "100", Season: 1, Episode: 2).Wire() }
+                } } }
         });
         var card = new FilmCardItem(target.Id, target.Title, "https://fixture.invalid/old.jpg", "9")
         { PlaybackContext = new(target, Metadata: detail) };
@@ -83,7 +91,9 @@ public static class FilmCacheConsumerTests
                 images = new { logos = new[] { new { file_path = "/v1/tmdb/images/original/logo.png" } } },
                 credits = new { crew = new[] { new { name = "补充导演", job = "Director" } },
                     cast = new[] { new { name = "补充演员" } } },
-                similar = new { results = new[] { new { id = 901, name = "相关推荐", poster_path = "" } } },
+                similar = new { results = new[] { new { id = 901, name = "相关推荐", poster_path = "",
+                    businessId = "tmdb:tv:901",
+                    playbackTarget = new FilmPlaybackTarget("tmdb:tv:901", "tv", "相关推荐", "tmdb", "901").Wire() } } },
                 seasons = new[] { new { season_number = 99, episode_count = 999 } }, number_of_episodes = 999
             }
         });
@@ -115,7 +125,12 @@ public static class FilmCacheConsumerTests
         root["metadata"]!["logo_path"] = "/v1/douban/images/logo.png";
         root["metadata"]!["directors"] = JsonNode.Parse("[{\"name\":\"主导演\"}]");
         root["metadata"]!["actors"] = JsonNode.Parse("[{\"name\":\"主演员\"}]");
-        root["metadata"]!["similar"] = JsonNode.Parse("""{"results":[{"id":"101","title":"豆瓣推荐","pic":{"normal":"/v1/douban/images/similar.jpg"}}]}""");
+        root["metadata"]!["similar"] = JsonNode.Parse(FilmJson.Encode(new { results = new[]
+        {
+            new { id = "101", title = "豆瓣推荐", pic = new { normal = "/v1/douban/images/similar.jpg" },
+                businessId = "douban:tv:101",
+                playbackTarget = new FilmPlaybackTarget("douban:tv:101", "tv", "豆瓣推荐", "douban", "101").Wire() }
+        } }).GetRawText());
         page.Apply(new(JsonSerializer.SerializeToElement(root)));
         Check(page.Overview == "主简介" && page.Poster == "/v1/douban/images/main.jpg" &&
             page.Backdrop == "/v1/douban/images/backdrop.jpg" && page.Logo == "/v1/douban/images/logo.png" &&
@@ -153,8 +168,12 @@ public static class FilmCacheConsumerTests
             seasons = new[] { new { id = "100", title = "关联第一季" }, new { id = "200", title = "关联第二季" } },
             doubanSeasons = new[]
             {
-                new { season_number = 1, name = "豆瓣第一季", metadataId = "100", episode_count = 3 },
-                new { season_number = 2, name = "豆瓣第二季", metadataId = "200", episode_count = 2 }
+                new { season_number = 1, name = "豆瓣第一季", metadataId = "100", episode_count = 3,
+                    businessId = "douban:tv:100:season:1",
+                    playbackTarget = new FilmPlaybackTarget("douban:tv:100", "tv", target.Title, "douban", "100", Season: 1).Wire() },
+                new { season_number = 2, name = "豆瓣第二季", metadataId = "200", episode_count = 2,
+                    businessId = "douban:tv:200:season:2",
+                    playbackTarget = new FilmPlaybackTarget("douban:tv:200", "tv", target.Title, "douban", "200", Season: 2).Wire() }
             }
         });
         var card = new FilmCardItem(target.Id, target.Title, "", "") { PlaybackContext = new(target, Metadata: detail) };
@@ -163,8 +182,10 @@ public static class FilmCacheConsumerTests
             entryResolution: "matched").GetRawText())!.AsObject();
         root["episodes"] = JsonNode.Parse("""
             [
-              {"season":2,"episode":1,"globalEpisode":4,"name":"准确映射集名","still_path":"/v1/tmdb/images/still.jpg","runtime":46,"overview":"准确逐集简介"},
-              {"season":2,"episode":2,"globalEpisode":5}
+              {"season":2,"episode":1,"globalEpisode":4,"name":"准确映射集名","still_path":"/v1/tmdb/images/still.jpg","runtime":46,"overview":"准确逐集简介",
+                "businessId":"douban:tv:200:season:2:episode:1","playbackTarget":{"id":"douban:tv:200","kind":"tv","title":"豆瓣分季","metadataProvider":"douban","metadataId":"200","season":2,"episode":1}},
+              {"season":2,"episode":2,"globalEpisode":5,"businessId":"douban:tv:200:season:2:episode:2",
+                "playbackTarget":{"id":"douban:tv:200","kind":"tv","title":"豆瓣分季","metadataProvider":"douban","metadataId":"200","season":2,"episode":2}}
             ]
             """);
         page.Apply(new(JsonSerializer.SerializeToElement(root)));
@@ -188,8 +209,12 @@ public static class FilmCacheConsumerTests
             """);
         root["browsing"] = JsonNode.Parse("""
             {"sourceId":"site","lineId":0,"season":2,"loading":false,"lines":[],"episodes":[
-              {"candidateId":"file-1","season":2,"episode":1,"globalEpisode":4,"name":"原始文件一"},
-              {"candidateId":"file-2","season":2,"episode":2,"globalEpisode":5,"name":"原始文件二"}
+              {"candidateId":"file-1","season":2,"episode":1,"globalEpisode":4,"name":"原始文件一","businessId":"fixture:file:file-1",
+                "playbackTarget":{"id":"fixture:source","kind":"source","title":"资源 file-1","season":2,"episode":1,"globalEpisode":4,
+                  "source":{"key":"cat:fixture:site:1","engine":"cat","installationId":"fixture","siteId":"site","detailId":0,"lineId":0,"candidateId":"file-1"}}},
+              {"candidateId":"file-2","season":2,"episode":2,"globalEpisode":5,"name":"原始文件二","businessId":"fixture:file:file-2",
+                "playbackTarget":{"id":"fixture:source","kind":"source","title":"资源 file-2","season":2,"episode":2,"globalEpisode":5,
+                  "source":{"key":"cat:fixture:site:1","engine":"cat","installationId":"fixture","siteId":"site","detailId":0,"lineId":0,"candidateId":"file-2"}}}
             ]}
             """);
         page.Apply(new(JsonSerializer.SerializeToElement(root)));
@@ -203,7 +228,11 @@ public static class FilmCacheConsumerTests
         Check(page.Seasons.Count == 0,
             "a successful empty trusted season list cannot be replaced by raw or old season fields");
         root["metadata"] = JsonNode.Parse("""
-            {"name":"TMDB分季","seasons":[{"season_number":0,"name":"特别篇"},{"season_number":1,"name":"第一季"}]}
+            {"name":"TMDB分季","seasons":[
+              {"season_number":0,"name":"特别篇","businessId":"tmdb:tv:900:season:0",
+                "playbackTarget":{"id":"tmdb:tv:900","kind":"tv","title":"TMDB分季","metadataProvider":"tmdb","metadataId":"900","season":0}},
+              {"season_number":1,"name":"第一季","businessId":"tmdb:tv:900:season:1",
+                "playbackTarget":{"id":"tmdb:tv:900","kind":"tv","title":"TMDB分季","metadataProvider":"tmdb","metadataId":"900","season":1}}]}
             """);
         root["metadataSources"] = JsonNode.Parse("""[{"id":"tmdb:900","provider":"tmdb","metadataId":"900","kind":"tv"}]""");
         root["metadataSourceId"] = "tmdb:900";
@@ -225,11 +254,9 @@ public static class FilmCacheConsumerTests
         await rig.Session.ResumePresentationAsync();
         var calls = rig.Runtime.Calls.Skip(before).Where(call => call.Method != "film.session.command" ||
             FilmJson.Text(call.Parameters, "action") != "media.progress").ToArray();
-        Check(calls.Length == 1 && calls[0].Method == "film.session.command" &&
-            FilmJson.Text(calls[0].Parameters, "action") == "browse.refresh" &&
-            FilmJson.Member(calls[0].Parameters, "refresh").ValueKind == JsonValueKind.False &&
+        Check(calls.Length == 0 && rig.Page.CurrentAttemptId == "cache-current" &&
             rig.Native.Commits == 1 && rig.Native.Stops == 0 && rig.Session.HasOutput,
-            "a live event subscription does not let a display snapshot block owner freshness checks");
+            "an active SSE observation is reused without a forced refresh, another snapshot or an address read");
     }
 
     private static async Task RefreshDoesNotPlay()
@@ -341,64 +368,113 @@ public static class FilmCacheConsumerTests
     {
         await using var rig = new FilmPlaybackRig();
         await rig.OpenAsync();
+        var notices = new List<string>();
+        rig.Session.OperationFailed += (_, code) => notices.Add(code);
+        rig.Runtime.Change(root =>
+            root["sources"] = JsonNode.Parse("""[{"id":"cold","title":"冷目录"},{"id":"other","title":"其他来源"}]"""));
+        await Until(() => rig.Page.Sources.Any(source => source.Id == "other"));
+        var initialEpisodes = rig.Page.Episodes;
+        var initialCandidates = rig.Page.Candidates;
+        var initialBrowsing = rig.Page.RawBrowsing.Clone();
+        var target = rig.Page.ActiveTarget;
         rig.Runtime.Change(root =>
         {
-            root["sources"] = JsonNode.Parse("""[{"id":"cold","title":"冷目录"},{"id":"other","title":"其他来源"}]""");
             root["browsing"] = DirectoryBrowsing("cold", content: false, error: "TIMEOUT");
             root["candidates"] = new JsonArray();
         });
-        await Until(() => rig.Page.SourceId == "cold" && rig.Page.ListError.Length > 0);
-        Check(rig.Page.Episodes.Count == 0 && rig.Page.Candidates.Count == 0 && !rig.Page.CanBrowseRaw &&
-            rig.Page.ListStatus == "请求超时，请重试" && rig.Page.Sources.Any(source => source.Id == "other"),
-            "a cold directory failure has no fabricated cached items and leaves source recovery available");
+        await Until(() => notices.SequenceEqual(["TIMEOUT"]));
+        Check(rig.Page.SourceId is null && ReferenceEquals(rig.Page.Episodes, initialEpisodes) &&
+            ReferenceEquals(rig.Page.Candidates, initialCandidates) &&
+            JsonElement.DeepEquals(rig.Page.RawBrowsing, initialBrowsing) && rig.Page.ActiveTarget == target &&
+            !rig.Page.CanBrowseRaw && rig.Page.ListStatus == "请求超时，请重试" &&
+            FilmJson.Text(rig.Session.SnapshotFor(rig.Page)!.Browsing, "sourceId") == "cold" &&
+            FilmJson.Array(rig.Session.SnapshotFor(rig.Page)!.Browsing, "originalEpisodes").Length == 0 &&
+            rig.Page.Sources.Where(source => source.Id is not null).Select(source => source.Id).SequenceEqual(["cold", "other"]),
+            "a cold directory failure reports its exact execution error without fabricating a new source or replacing successful metadata display");
         rig.Runtime.Change(root =>
         {
             root["browsing"] = DirectoryBrowsing("cold", content: true);
             root["candidates"] = JsonNode.Parse(FilmJson.Encode(new[] { Candidate("cache-current") }).GetRawText());
         });
         await Until(() => rig.Page.CanBrowseRaw && rig.Page.Episodes.Count == 1);
+        var episode = rig.Page.Episodes.Single();
+        var candidate = rig.Page.Candidates.Single();
+        var browsing = rig.Page.RawBrowsing.Clone();
         var directory = new FilmDirectoryDialog(rig.Page);
         try
         {
             rig.Runtime.Change(root => root["browsing"]!["error"] = "TIMEOUT");
-            await Until(() => rig.Page.ListError.Length > 0);
-            Check(rig.Page.Episodes.Count == 0 && rig.Page.Candidates.Count == 0 &&
-                !rig.Page.CanBrowseRaw && !directory.IsCurrent(rig.Page),
-                "browsing.error invalidates ordinary list and directory consumers even when a response still carries old rows");
+            await Until(() => notices.SequenceEqual(["TIMEOUT", "TIMEOUT"]));
+            Check(rig.Page.SourceId == "cold" && ReferenceEquals(rig.Page.Episodes.Single(), episode) &&
+                ReferenceEquals(rig.Page.Candidates.Single(), candidate) &&
+                JsonElement.DeepEquals(rig.Page.RawBrowsing, browsing) && rig.Page.ActiveTarget == target &&
+                rig.Page.CanBrowseRaw && !directory.IsCurrent(rig.Page) && rig.Page.ListStatus == "请求超时，请重试",
+                "browsing.error preserves the exact successful source and files while fencing the failed execution's directory action");
             rig.Runtime.Change(root => root["browsing"]!["error"] = null);
-            await Until(() => rig.Page.CanBrowseRaw && rig.Page.Episodes.Count == 1);
+            await Until(() => directory.IsCurrent(rig.Page));
+            Check(ReferenceEquals(rig.Page.Episodes.Single(), episode) &&
+                ReferenceEquals(rig.Page.Candidates.Single(), candidate) && JsonElement.DeepEquals(rig.Page.RawBrowsing, browsing),
+                "successful same-source recovery reuses the exact displayed directory rather than rebuilding its identity");
             rig.Runtime.Change(root =>
             {
                 root["browsing"] = DirectoryBrowsing("other", content: false);
                 root["browsing"]!["loading"] = true;
             });
-            await Until(() => rig.Page.SourceId == "other" && rig.Page.ListLoading);
-            Check(rig.Page.Episodes.Count == 0 && rig.Page.Candidates.Count == 0 &&
-                !rig.Page.CanBrowseRaw && !directory.IsCurrent(rig.Page),
-                "ordinary replacement loading cannot retain the previous source's candidates or directory");
+            await Until(() => rig.Page.ListLoading);
+            Check(rig.Page.SourceId == "cold" && ReferenceEquals(rig.Page.Episodes.Single(), episode) &&
+                ReferenceEquals(rig.Page.Candidates.Single(), candidate) && JsonElement.DeepEquals(rig.Page.RawBrowsing, browsing) &&
+                FilmJson.Text(rig.Session.SnapshotFor(rig.Page)!.Browsing, "sourceId") == "other" &&
+                rig.Page.CanBrowseRaw && !directory.IsCurrent(rig.Page),
+                "replacement loading keeps the exact successful cold-source display separate from the other execution and disables its old directory action");
             rig.Runtime.Change(root =>
             {
                 root["browsing"]!["loading"] = false;
                 root["browsing"]!["error"] = "UPSTREAM_FORMAT";
             });
-            await Until(() => rig.Page.ListError.Length > 0);
-            Check(rig.Page.Episodes.Count == 0 && rig.Page.Candidates.Count == 0 &&
-                !rig.Page.CanBrowseRaw && !directory.IsCurrent(rig.Page) && rig.Page.ListStatus == "上游数据格式错误",
-                "a replacement source failure displays only its classified error, never the former identity's items");
+            await Until(() => notices.SequenceEqual(["TIMEOUT", "TIMEOUT", "UPSTREAM_FORMAT"]));
+            Check(rig.Page.SourceId == "cold" && ReferenceEquals(rig.Page.Episodes.Single(), episode) &&
+                ReferenceEquals(rig.Page.Candidates.Single(), candidate) && JsonElement.DeepEquals(rig.Page.RawBrowsing, browsing) &&
+                rig.Page.ActiveTarget == target && rig.Page.CanBrowseRaw && !directory.IsCurrent(rig.Page) &&
+                FilmJson.Text(rig.Session.SnapshotFor(rig.Page)!.Browsing, "sourceId") == "other" &&
+                rig.Page.ListStatus == "上游数据格式错误",
+                "a failed replacement reports the exact other-source error without relabeling or discarding the successful cold-source files");
+            rig.Runtime.Change(root =>
+            {
+                root["browsing"] = DirectoryBrowsing("other", content: true);
+                var replacement = Candidate("cache-other");
+                foreach (var row in new[] { root["browsing"]!["episodes"]![0]!, root["browsing"]!["originalEpisodes"]![0]! })
+                {
+                    row["id"] = "file-other"; row["candidateId"] = "cache-other"; row["name"] = "其他文件";
+                    row["path"] = "/其他目录/其他.mp4"; row["businessId"] = FilmJson.Text(replacement, "businessId");
+                    row["playbackTarget"] = JsonNode.Parse(replacement.GetProperty("playbackTarget").GetRawText());
+                }
+                root["candidates"] = JsonNode.Parse(FilmJson.Encode(new[] { replacement }).GetRawText());
+            });
+            await Until(() => rig.Page.SourceId == "other" && rig.Page.ListError == "");
+            Check(rig.Page.Episodes.Single() is { CandidateId: "cache-other", OriginalName: "其他文件" } &&
+                rig.Page.Candidates.Single().Id == "cache-other" && rig.Page.ActiveTarget == target &&
+                FilmJson.Text(FilmJson.Array(rig.Page.RawBrowsing, "originalEpisodes").Single(), "path") == "/其他目录/其他.mp4" &&
+                !directory.IsCurrent(rig.Page) && rig.Native.Commits == 0 && rig.Native.Stops == 0 &&
+                !rig.Session.HasOutput && !rig.Runtime.Calls.Any(call => call.Method == "film.session.attempt"),
+                "only an actual other-source success replaces the directory with its exact files without reading or creating native media");
         }
         finally { directory.Close(); }
     }
 
-    private static JsonNode DirectoryBrowsing(string sourceId, bool content, string? error = null) => JsonNode.Parse(
-        FilmJson.Encode(new
+    private static JsonNode DirectoryBrowsing(string sourceId, bool content, string? error = null)
+    {
+        var candidate = Candidate("cache-current");
+        var file = new { id = "file-current", candidateId = "cache-current", name = "准确文件",
+            path = "/准确目录/文件.mp4", season = 1, episode = 1,
+            businessId = FilmJson.Text(candidate, "businessId"), playbackTarget = candidate.GetProperty("playbackTarget") };
+        return JsonNode.Parse(FilmJson.Encode(new
         {
             sourceId, lineId = 0, season = 1, loading = false, error,
             lines = new[] { new { id = 0, label = "准确线路" } },
-            episodes = content ? new[] { new { id = "file-current", candidateId = "cache-current", name = "准确文件",
-                path = "/准确目录/文件.mp4", season = 1, episode = 1 } } : [],
-            originalEpisodes = content ? new[] { new { id = "file-current", candidateId = "cache-current", name = "准确文件",
-                path = "/准确目录/文件.mp4", season = 1, episode = 1 } } : []
+            episodes = content ? new[] { file } : [],
+            originalEpisodes = content ? new[] { file } : []
         }).GetRawText())!;
+    }
 
     private static async Task RetryPending()
     {

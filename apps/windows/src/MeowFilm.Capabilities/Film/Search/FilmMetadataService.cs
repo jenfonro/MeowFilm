@@ -1,6 +1,8 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Windows.Threading;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
@@ -13,9 +15,22 @@ public sealed record FilmMetadataSettings(string ApiBase, string ImageBase,
 public sealed record FilmDoubanSettings(string ApiBase, string SearchBase, string ImageBase,
     string ApiProxy, string ImageProxy, string Cookie);
 
-/// <summary>Metadata settings and cache actions through the App runtime, which owns persistence and credentials.</summary>
-public sealed class FilmMetadataService(IRuntimeClient runtime) : IAsyncDisposable
+/// <summary>Native settings owner; upstream metadata requests remain in the runtime.</summary>
+public sealed class FilmMetadataService(IRuntimeClient runtime, IDocumentStore store) : IAsyncDisposable
 {
+    private readonly SettingsDocument tmdb = new(store, "film.tmdb.v1"), douban = new(store, "film.douban.v1");
+    private static readonly JsonElement TmdbDefaults = FilmJson.Encode(new
+    {
+        apiBase = "https://api.themoviedb.org/3", imageBase = "https://image.tmdb.org",
+        apiKey = "", accessToken = "", language = "zh-CN", region = "CN", includeAdult = false
+    });
+    private static readonly JsonElement DoubanDefaults = FilmJson.Encode(new
+    {
+        apiBase = "https://m.douban.com", searchBase = "https://search.douban.com",
+        imageBase = "https://img3.doubanio.com", apiProxy = "", imageProxy = "", cookie = ""
+    });
+    private static readonly char[] InputWhitespace =
+        "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff".ToCharArray();
     private readonly Dispatcher dispatcher = Dispatcher.CurrentDispatcher;
     private readonly HashSet<Task> pending = [];
     private CancellationTokenSource reads = new();
@@ -27,7 +42,7 @@ public sealed class FilmMetadataService(IRuntimeClient runtime) : IAsyncDisposab
     public string ResolveImage(string path) => path;
 
     public Task<FilmMetadataSettings> GetSettingsAsync(CancellationToken token = default)
-        => RunAsync("tmdb.data.settings.get", new { }, value =>
+        => SettingsAsync(tmdb, TmdbDefaults, null, value =>
         {
             var snapshot = ParseSettings(value);
             Settings = snapshot;
@@ -37,23 +52,96 @@ public sealed class FilmMetadataService(IRuntimeClient runtime) : IAsyncDisposab
     public Task<FilmMetadataSettings> SaveSettingsAsync(IReadOnlyDictionary<string, object?> patch,
         CancellationToken token = default)
     {
-        // Once admitted, a settings write waits for the runtime receipt even when the view leaves.
-        // A cancelled UI wait cannot tell whether the runtime committed a credential update.
-        return RunAsync("tmdb.data.settings.update", patch, value =>
+        return SettingsAsync(tmdb, TmdbDefaults, patch, value =>
         {
             var snapshot = ParseSettings(value);
             Settings = snapshot;
             Saved?.Invoke(this, EventArgs.Empty);
             return snapshot;
-        }, token, writing: true);
+        }, token, "tmdb");
     }
 
     public Task<FilmDoubanSettings> GetDoubanSettingsAsync(CancellationToken token = default) =>
-        RunAsync("douban.data.settings.get", new { }, ParseDoubanSettings, token);
+        SettingsAsync(douban, DoubanDefaults, null, ParseDoubanSettings, token);
 
     public Task<FilmDoubanSettings> SaveDoubanSettingsAsync(IReadOnlyDictionary<string, object?> patch,
         CancellationToken token = default) =>
-        RunAsync("douban.data.settings.update", patch, ParseDoubanSettings, token, writing: true);
+        SettingsAsync(douban, DoubanDefaults, patch, ParseDoubanSettings, token, "douban");
+
+    private Task<T> SettingsAsync<T>(SettingsDocument document, JsonElement defaults,
+        IReadOnlyDictionary<string, object?>? patch, Func<JsonElement, T> receive, CancellationToken token, string? block = null)
+    {
+        dispatcher.VerifyAccess();
+        ObjectDisposedException.ThrowIf(closed, this);
+        if (stopping) throw new BridgeException("CLOSED");
+        token.ThrowIfCancellationRequested();
+        var work = ExchangeAsync();
+        pending.Add(work);
+        _ = ReleaseAsync(work);
+        return work;
+        async Task<T> ExchangeAsync()
+        {
+            using var request = patch is null ? CancellationTokenSource.CreateLinkedTokenSource(token, reads.Token) : null;
+            JsonElement settings;
+            if (patch is null)
+                settings = (await document.ReadAsync(request!.Token))?.GetProperty("settings") ?? defaults;
+            else
+            {
+                var saved = await document.UpdateAsync(current =>
+                {
+                    var values = (current?.GetProperty("settings") ?? defaults).EnumerateObject()
+                        .ToDictionary(item => item.Name, item => (object?)item.Value.Clone());
+                    foreach (var (key, value) in patch)
+                    {
+                        if (!values.ContainsKey(key)) throw new BridgeException("INVALID_REQUEST");
+                        values[key] = value;
+                    }
+                    var next = NormalizeSettings(FilmJson.Encode(values), defaults);
+                    return FilmJson.Encode(new { version = 1, settings = next });
+                }, token);
+                settings = saved.GetProperty("settings");
+                (runtime as IRuntimeSettingsNotifications)?.SettingsChanged(block!);
+            }
+            return receive(settings);
+        }
+    }
+
+    private static JsonElement NormalizeSettings(JsonElement value, JsonElement defaults)
+    {
+        var result = new Dictionary<string, object?>();
+        foreach (var property in defaults.EnumerateObject())
+        {
+            var item = value.GetProperty(property.Name);
+            if (property.Name == "includeAdult")
+            {
+                if (item.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) throw new BridgeException("INVALID_REQUEST");
+                result[property.Name] = item.GetBoolean();
+                continue;
+            }
+            if (item.ValueKind != JsonValueKind.String || item.GetString()!.Any(unit => unit <= '\u001f' || unit == '\u007f'))
+                throw new BridgeException("INVALID_REQUEST");
+            string text = item.GetString()!;
+            bool proxy = property.Name.EndsWith("Proxy", StringComparison.Ordinal);
+            if (!property.Name.EndsWith("Base", StringComparison.Ordinal) && !proxy)
+            {
+                result[property.Name] = text.Trim(InputWhitespace);
+                continue;
+            }
+            if (text.Length == 0 && defaults.TryGetProperty("includeAdult", out _)) text = property.Value.GetString()!;
+            if (text.Length == 0 && proxy) { result[property.Name] = text; continue; }
+            var slots = Regex.Matches(text, @"\{(?:url|encodedUrl)\}");
+            string address = Regex.Replace(text, @"\{(?:url|encodedUrl)\}", "https%3A%2F%2Fexample.invalid%2F");
+            if (!Regex.IsMatch(text, @"^https?://", RegexOptions.IgnoreCase) ||
+                text != text.Trim() || address.Any(char.IsWhiteSpace) || address.Contains('\\') ||
+                address.Contains('{') || address.Contains('}') || slots.Count > (proxy ? 1 : 0) ||
+                slots.Count > 0 && !Regex.IsMatch(text, @"^https?://[^/?#{}]+[/?]", RegexOptions.IgnoreCase) ||
+                !Uri.TryCreate(address, UriKind.Absolute, out var url) || url.Scheme is not ("http" or "https") ||
+                text.Contains('#') || !proxy && text.Contains('?'))
+                throw new BridgeException("INVALID_REQUEST");
+            result[property.Name] = proxy ? url.Scheme + text[text.IndexOf(':')..] : url.AbsoluteUri.TrimEnd('/');
+        }
+        return FilmJson.Encode(result);
+    }
 
     public Task ClearCacheAsync(string provider, CancellationToken token = default) =>
         RunAsync("film.data.invalidate", new { domain = provider }, _ => true, token, writing: true);

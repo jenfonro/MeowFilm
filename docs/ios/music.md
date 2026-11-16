@@ -67,7 +67,8 @@
 - 真实媒体样本校准歌词单调时基，词间动画按实际边界续接；布局和主题刷新只重建几何，不重新从旧样本开始。暂停冻结，确认的 seek 位置直接校准，复用／隐藏停止旧行的动画和边界调度。可恢复歌词归当前共享展示资源，按永久 songID／sourceKey 关联，不用内容指纹生成歌曲身份，也不读取历史显示缓存。
 - 完整播放器的左右滑动切歌仅接收从可见圆形唱片内开始的触摸，盘外空白与矩形角落不触发；已开始的拖动可继续到盘外。进度条圆点及系统为它保留的触控范围（iOS 26 实测为圆点中心左右约 22pt）沿用系统拖动与松手惯性；轨道其他位置点按即跳到该处，按下后可继续拖动，进度跟随手指，期间不叠加系统拖动。完整播放器和展开的小播放器行为一致；松手通过原有播放身份校验提交一次跳转，取消、换曲、权限失效或页面不可见不提交旧操作。
 - 收起的胶囊主体左拖下一首、右拖上一首：当前标题与只读相邻标题在裁剪视口内跟手平移，标题间隔 16pt；封面、外壳、播放和队列按钮不移动，拖动期间暂停标题跑马灯。原生单指横向拖动松手即提交一次既有导航命令，不另设半程或速度门槛；以 260ms 移入真实选中项，不等待音源搜索或播放准备。无可切换项／提交拒绝以 200ms 回弹，未知下一首只显示导航标签，不预选歌曲或推进随机历史。取消、身份／队列／推荐意图失效、大小改变、展开卡片、退后台或离窗清理旧过渡；减少动态效果保留跟手位移并跳过松手动画。主体点击等待拖动判定失败后才打开全屏，封面、播放、队列及展开态控件保留自己的触摸，不由主体手势接管。
-- 胶囊与卡片各自持有封面、播放／暂停和队列按钮，共享同一封面图片、播放状态与动作；胶囊进度环不变形成卡片按钮。两种封面及卡片的收藏、上一曲、播放／暂停、下一曲、队列预先按底边布局，展开／收起时不换位补位、不独立从屏幕底部滑入，仅随同一外壳形变显隐；封面保留各自尺寸与位置，异步图片到达只替换内容，不附加缩放或图片过渡。非当前形态的控件不接收触摸或辅助功能访问，封面裁在外壳内。标题与卡片外壳保留原有形变及减少动态效果行为。
+- 胶囊与卡片各自持有封面、播放／暂停和队列按钮，共享同一封面图片、播放状态与动作；胶囊进度环不变形成卡片按钮。封面、标题／歌手、进度／时间与控制区统一相对外壳上沿布局，随外壳同一动画曲线移动、显隐并裁剪，不分别设置动画或将部分元素固定在下沿。封面保留各自固定尺寸与圆角，异步图片到达只替换内容，不附加缩放或图片过渡。非当前形态的控件不接收触摸或辅助功能访问，封面裁在外壳内。标题与卡片外壳保留原有形变及减少动态效果行为。
+- 底部遮挡由页面根视图固定持有，不放在会形变的播放器 Dock 内：首页采用 58pt 固定渐隐及导航／安全区实心底板，搜索／结果等非根页面采用固定实心遮挡。播放器展开、收起、快速反向及内容布局变化均不改变遮挡范围；仅页面策略、窗口尺寸和安全区变化重新布局。
 - 网易云标准音质不做本地会员拦截，以平台实际返回决定能否播放。
 - 高音质检查真实权益；试听、受保护或无权限资源不能作为完整歌曲。
 - 页面显示平台实际返回的音质，不用请求音质代替。
@@ -175,13 +176,23 @@ Node 保管匿名设备及 prepare；Swift 账号 owner 保留 Keychain、安全
 
 ## 设置保存回执
 
-`MusicSettingsReceiptOwner` 由稳定原生存储范围持有，公开 `begin/settle/submit/flush`，`unknown` 由 Coordinator 接到现有全局错误呈现。quality、official、metadata、home、feedback、自动同步和脚本设置使用各自字段 key；FM 交回真实设置范围。Appearance 的同步 UserDefaults 没有 unknown 回执。共同结算及因果规则见[设置回执](../common/music/settings-receipts.md)，相关关闭页／重开竞态未运行验证。
+通用外观及音乐搜索偏好直接使用 UserDefaults；音质、官方源、metadata、首页来源、播放反馈和自动同步选择由 `NativeMusicService` 的 `music.library.v3` 原生文档 CAS 保存，账号凭据由原生 Keychain owner 保存，具体保护见[本地存储](storage.md)。这些存储入口不通过运行器，本地设置保存回执不等待歌词读取、账号绑定或后续同步。账号资料补全和真实同步仍是各自 owner 的在线业务；音乐脚本的安装、来源及执行仍归运行器，不迁入这份原生设置。配置与执行的共同边界见[设置存储契约](../common/settings-storage.md)。
+
+`MusicSettingsReceiptOwner` 由稳定原生存储范围持有，公开 `begin/settle/submit/flush`，`unknown` 由 Coordinator 接到现有全局错误呈现。quality、official、metadata、home、feedback、自动同步和脚本设置使用各自字段 key；FM 交回真实设置范围。Appearance 的同步 UserDefaults 没有 unknown 回执。共同结算及因果规则见[设置回执](../common/music/settings-receipts.md)。
+
+`MusicViewModel.updateSettings` 保留真实提交后的权威状态回读及失败回执；活跃歌曲的歌词刷新经 `beginPlaybackMetadata(refreshSources: true)` 交给既有 `playbackMetadata`，不等待其 `flush`。禁用歌词使旧结果失效；歌词读取、缓存及关闭时的取消／实际排空仍由原 metadata owner 管理，不因保存提前结算而省略。
+
+`saveAutomaticLibrarySync` 在原生 CAS 后返回 `MusicAutomaticLibrarySyncSaveResult`：已提交的 `preferences` 与独立的 `synchronization: Task<Result<MusicLibrarySyncState, MusicServiceError>, Never>`。`MusicLibrarySyncViewModel` 的设置回执与 `busy` 只随本地提交结算，另行观察同步句柄；仅当前页面代次与偏好 revision 仍匹配时发布业务状态／错误并调用原 `onLibraryChanged`。页面离开只停止该观察，不取消已接受的同步，也不向失效页面发布迟到错误。
+
+`NativeMusicService` 持有已接受动作的授权，仍立即调度账号绑定和一轮真实同步；同步失败不撤销已保存偏好。新保存撤销旧工作，其业务阶段等待旧工作实际排空后再按当前授权及 revision 执行，不执行被替代的旧意图，也不新增离线重试队列。访问撤销、`setAccess`、`close` 及显式取消同步句柄立即撤销业务授权；服务负责实际排空，包括尚在账号绑定、尚未建立同步 engine run 的工作，完成后才清理授权与任务登记。
 
 ## 缓存
 
 共同归属、清理和换图规则见[共享图片与展示资源](../common/music/presentation-resources.md)。iOS 当前音乐 `ArtworkImages` 借用 `MusicNativePresentationCache` 的图片字节 port，namespace 为 `music.presentation-resources.v1`。图片原网络字节与 songID／sourceKey 关联的歌词共用 256 MiB／30 天预算；内存沿 24 MiB／128 项，单图网络 4 MiB，ImageIO 缩略及现有解码限制保留。播放器独占图片持久副本已删除；影视／小说入口不使用这个音乐磁盘 port。
 
-`MusicNativeAudioFileCache.preparePlayback` 继续提供从起点增长的顺序文件，AVAssetResourceLoader 的读取／seek 不改变下载位置。音频本身沿原 256 MiB／30 天预算。实际播放调用展示资源续期；单音频淘汰不删共享图／健康歌词，显式全部播放缓存清理仍覆盖原种类。音乐业务文档的实际字节限制及 CAS 保留。
+`MusicNativeAudioFileCache.preparePlayback` 继续提供从起点增长的顺序文件，受控音频字节输入的读取／seek 不改变下载位置。音频本身沿原 256 MiB／30 天预算。实际播放调用展示资源续期；单音频淘汰不删共享图／健康歌词，显式全部播放缓存清理仍覆盖原种类。音乐业务文档的实际字节限制及 CAS 保留。
+
+播放与缓存完整解码共用[独立音乐核心](music-audio-core.md)。缓存检查保留源结构、AudioFile 元数据及每个编码包的完整性核对，再由同一 FFmpeg decoder 消耗全部 PCM 至实际 EOF；不创建输出，不把重采样后的 float 精度冒充源位深。
 
 生产音频缓存直接打开系统提供的 Caches 基目录，再逐级以 `openat`／`O_NOFOLLOW` 打开本应用缓存子目录，不逐个读取沙盒外的祖先目录。目录打开不提供 `/` 默认值，测试也必须显式传入已存在的私有基目录。重开时沿同一基目录核对目录身份，保留私有权限、独占锁和真机 Data Protection 校验。
 

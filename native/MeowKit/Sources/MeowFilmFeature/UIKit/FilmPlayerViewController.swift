@@ -10,6 +10,7 @@ public protocol FilmPlaybackPage: AnyObject {
 /// Passive controls over the App's one native video surface.
 @MainActor
 public final class FilmPlayerViewController: PageViewController, FilmPlaybackPage {
+    private let presentationOwner = UUID()
     public var filmPlaybackModel: FilmPlaybackModel? { model }
     public var onDismiss: (() -> Void)?
     private let model: FilmPlaybackModel
@@ -65,6 +66,7 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
     }
 
     public override func pageDidBecomeVisible() {
+        model.setPresentationVisible(true, owner: presentationOwner)
         model.open()
         controlsRequested = true
         render()
@@ -76,6 +78,7 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
     }
 
     public override func pageDidBecomeHidden() {
+        model.setPresentationVisible(false, owner: presentationOwner)
         cancelAutoHide()
         settingsPanel.isHidden = true
         settings.isSelected = false
@@ -327,8 +330,8 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         let kind = snapshot.map { value in
             value.metadataSources.first { $0.id == value.metadataSourceID }?.kind ?? value.target.kind
         }
-        titleLabel.text = snapshot?.target.title
-        let candidate = snapshot?.current?.candidate ?? snapshot?.attempt?.candidate
+        titleLabel.text = model.presentation?.target.title
+        let candidate = model.executionStage == nil ? nil : snapshot?.current?.candidate ?? snapshot?.attempt?.candidate
         sourceLabel.text = candidate.map { [$0.source.name, $0.lineLabel, $0.name].filter { !$0.isEmpty }.joined(separator: " · ") }
         let playing = state.attemptID != nil
         play.isEnabled = playing || snapshot != nil
@@ -362,9 +365,9 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         pan.accessibilityValue = pan.configuration?.title; quality.accessibilityValue = quality.configuration?.title
         scale.accessibilityValue = scaleMode.title
         selectMenu(pan, value: candidate?.provider); selectMenu(quality, value: candidate?.quality)
-        let busy = state.buffering || ["loading", "searching", "resolving", "pending"].contains(snapshot?.stage ?? "")
+        let busy = state.buffering || ["loading", "searching", "resolving", "pending"].contains(model.executionStage ?? "")
         if busy { activity.startAnimating() } else { activity.stopAnimating() }
-        stateLabel.text = busy ? "准备中" : snapshot?.stage == "ended" ? "播放结束" : nil
+        stateLabel.text = busy ? "准备中" : model.executionStage == "ended" ? "播放结束" : nil
         let reported = snapshot?.reportError.map { FilmPlaybackError(code: $0) }
         let metadata = snapshot?.metadataError.map { FilmPlaybackError(code: $0) }
         let session = snapshot?.error.map { FilmPlaybackError(code: $0) }

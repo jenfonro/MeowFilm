@@ -17,6 +17,19 @@ function fixture(t, dataRoot = mkdtempSync(join(tmpdir(), 'film-rules-owner-')))
 }
 const request = { section: 'search', text: '[草稿]真实电影2', query: '真实电影2' };
 
+test('native rule configuration reloads without a runtime writer or repeated save normalization', async t => {
+  const dataRoot = mkdtempSync(join(tmpdir(), 'film-native-rules-owner-'));
+  let document = { version: 1, rules: { ...empty(), episodeRules: [{ pattern: '\\\\\\\\d', replace: 'native', flags: 'g' }] } };
+  const service = createFilmRulesService({ dataRoot, nativeSettings: { read: () => structuredClone(document) } });
+  t.after(async () => { await service.close(); rmSync(dataRoot, { recursive: true, force: true }); });
+  assert.deepEqual((await service.get()).rules, document.rules);
+  assert.equal(existsSync(join(dataRoot, 'film-rules', 'rules.json')), false);
+  await assert.rejects(service.set({ rules: empty() }), { code: 'PERMISSION_DENIED' });
+  document = { version: 1, rules: { ...empty(), aggregateRegexRules: ['native-latest'] } };
+  await service.settingsChanged();
+  assert.deepEqual((await service.get()).rules, document.rules);
+});
+
 test('real QuickJS owner initializes defaults and reopens only its current document, including saved empty groups', async t => {
   const f = fixture(t);
   const initial = await f.service.get();

@@ -20,17 +20,35 @@ enum FilmUIKitPlaybackFixture {
         return .object(fields)
     }
     static func episodes(season: Int = 1, numbers: [Int] = [2, 5]) -> [RuntimeValue] {
-        numbers.map { .object(["season": .number(Double(season)), "episode": .number(Double($0)),
-                               "name": .string("真实第 \($0) 集"), "overview": .string("分季资料")]) }
+        numbers.map { number in
+            var address = target().filmObject!
+            address["season"] = .number(Double(season)); address["episode"] = .number(Double(number))
+            return .object(["businessId": .string("fixture-season-\(season)-episode-\(number)"),
+                            "playbackTarget": .object(address), "season": .number(Double(season)),
+                            "episode": .number(Double(number)), "name": .string("真实第 \(number) 集"),
+                            "overview": .string("分季资料")])
+        }
+    }
+    static func sourceTarget(source: RuntimeValue = source, candidateID: String? = nil) -> RuntimeValue {
+        var pointer = RuntimeObject(uniqueKeysWithValues: source.filmObject!.filter {
+            ["key", "engine", "installationId", "siteId", "detailId"].contains($0.key)
+        })
+        pointer["lineId"] = .number(0)
+        pointer["candidateId"] = candidateID.map(RuntimeValue.string)
+        return .object(["id": .string("fixture-target"), "kind": .string("source"),
+                        "title": .string("星海航线"), "source": .object(pointer)])
     }
     static func file(_ id: String, name: String, path: String? = nil) -> RuntimeValue {
-        var fields: RuntimeObject = ["id": .string("file-\(id)"), "candidateId": .string("candidate-\(id)"),
+        var fields: RuntimeObject = ["businessId": .string("candidate-\(id)"),
+                                     "playbackTarget": sourceTarget(candidateID: "candidate-\(id)"),
+                                     "id": .string("file-\(id)"), "candidateId": .string("candidate-\(id)"),
                                      "name": .string(name)]
         fields["path"] = path.map(RuntimeValue.string)
         return .object(fields)
     }
     static func candidate(_ id: String = "candidate-first") -> RuntimeValue {
-        .object(["id": .string(id), "source": source, "lineId": .number(0),
+        .object(["businessId": .string(id), "playbackTarget": sourceTarget(candidateID: id),
+                 "id": .string(id), "source": source, "lineId": .number(0),
                  "lineLabel": .string("未知原标签"), "name": .string("正片 \(id)")])
     }
     static func browsing(sourceID: String? = nil, season: Int? = 1, files: [RuntimeValue] = [],
@@ -39,14 +57,17 @@ enum FilmUIKitPlaybackFixture {
             "sourceId": sourceID.map(RuntimeValue.string) ?? .null,
             "lineId": sourceID == nil ? .null : .number(0),
             "loading": .bool(false), "error": error.map(RuntimeValue.string) ?? .null,
-            "lines": .array(sourceID == nil ? [] : [.object(["id": .number(0), "label": .string("未知原标签")])]),
+            "lines": .array(sourceID == nil ? [] : [.object(["businessId": .string("fixture-line-0"),
+                "playbackTarget": sourceTarget(), "id": .number(0), "label": .string("未知原标签")])]),
             "episodes": .array(files), "originalEpisodes": .array(original),
         ]
         fields["season"] = season.map { .number(Double($0)) }
         return .object(fields)
     }
     static func metadataSources(_ providers: [FilmMetadataProvider], kind: FilmPlaybackKind = .tv) -> [RuntimeValue] {
-        providers.map { .object(["id": .string("confirmed-\($0.rawValue)"), "provider": .string($0.rawValue),
+        providers.map { .object(["businessId": .string("fixture-metadata-\($0.rawValue)"),
+                                  "playbackTarget": target(kind: kind, provider: $0),
+                                  "id": .string("confirmed-\($0.rawValue)"), "provider": .string($0.rawValue),
                                   "metadataId": .number($0 == .tmdb ? 19 : 0), "kind": .string(kind.rawValue),
                                   "title": .string("星海航线")]) }
     }
@@ -62,19 +83,29 @@ enum FilmUIKitPlaybackFixture {
             "target": target(kind: kind, provider: provider), "stage": .string(attemptID == nil ? "idle" : "pending"),
             "entryTarget": target(kind: kind, provider: provider), "entryResolution": .null,
             "error": .null, "metadata": .object(["name": .string("星海航线"),
-                "seasons": .array([.object(["id": .number(1), "season_number": .number(1), "name": .string("第一季")]),
-                                   .object(["id": .number(2), "season_number": .number(2), "name": .string("第二季")])])]),
+                "seasons": .array([.object(["businessId": .string("fixture-season-1"), "playbackTarget": target(kind: kind, provider: provider),
+                "id": .number(1), "season_number": .number(1), "name": .string("第一季")]),
+                                   .object(["businessId": .string("fixture-season-2"), "playbackTarget": target(kind: kind, provider: provider),
+                "id": .number(2), "season_number": .number(2), "name": .string("第二季")])])]),
             "metadataSources": .array(metadataSources ?? self.metadataSources([provider], kind: kind)),
             "metadataSourceId": .string("confirmed-\(provider.rawValue)"),
             "metadataError": metadataError.map(RuntimeValue.string) ?? .null,
             "sources": .array([
-                .object(["id": .string("result-a"), "title": .string("星海航线"), "source": source,
+                .object(["businessId": .string("source-fixture-a"), "playbackTarget": sourceTarget(),
+                         "id": .string("result-a"), "title": .string("星海航线"), "source": source,
                          "state": .string("ready"), "error": .null]),
-                .object(["id": .string("result-b"), "title": .string("失败站点"), "source": .object(otherDetail),
+                .object(["businessId": .string("source-fixture-b"), "playbackTarget": sourceTarget(source: .object(otherDetail)),
+                         "id": .string("result-b"), "title": .string("失败站点"), "source": .object(otherDetail),
                          "state": .string("error"), "error": .string("UPSTREAM_HTTP")]),
             ]),
             "browsing": browsing ?? self.browsing(),
-            "episodes": .array(episodes ?? (kind == .movie ? [] : self.episodes())),
+            "episodes": .array((episodes ?? (kind == .movie ? [] : self.episodes())).map { value in
+                var row = value.filmObject!, address = target(kind: kind, provider: provider).filmObject!
+                address["season"] = row["season"]; address["episode"] = row["episode"]
+                row["businessId"] = .string("fixture-season-\(row["season"]!.filmInteger!)-episode-\(row["episode"]!.filmInteger!)")
+                row["playbackTarget"] = .object(address)
+                return .object(row)
+            }),
             "candidates": .array(candidates), "current": .null, "attempt": .null,
             "searchComplete": .bool(false),
             "shortVideo": .bool(shortVideo), "previewEpisodes": .bool(false), "reportError": .null,

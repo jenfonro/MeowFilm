@@ -1,16 +1,20 @@
 using System.Text.Json;
+using System.IO;
+using MeowFilm.AppHost;
+using MeowFilm.Platform.Storage;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Media;
 using static MeowFilm.Windows.Tests.FilmPlaybackNativeFixture;
 
 namespace MeowFilm.Windows.Tests;
 
 // Selected independently; these require the actual packaged aggregate, Cat
-// Worker, private native demux, libVLC and WPF video surface. No external network source.
+// Worker, film decode/render kernel and WPF video surface. No external network source.
 public static class FilmPlaybackNativeIntegrationTests
 {
     private static TestCase Case(string name, Func<Task> body) =>
@@ -54,7 +58,18 @@ public static class FilmPlaybackNativeIntegrationTests
         Check(menuCommands == 0 && (await f.CallsAsync()).Length == 0,
             "opening the source menu dispatches no Film command or Cat operation");
 
-        f.MoreButton().RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        picker.ApplyTemplate();
+        var popup = picker.Template.FindName("PART_Popup", picker) as Popup ??
+            throw new InvalidOperationException("Missing source picker template popup");
+        var more = picker.Template.FindName("SearchMoreSourcesButton", picker) as Button ??
+            throw new InvalidOperationException("Missing source picker template search-more button");
+        picker.IsDropDownOpen = true;
+        await Until(() => picker.IsDropDownOpen && popup.IsOpen &&
+            more.IsLoaded && more.IsVisible && more.IsEnabled,
+            "the real source popup exposes its loaded visible enabled search-more button");
+        more.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        await Until(() => !picker.IsDropDownOpen && !popup.IsOpen,
+            "the actual search-more action closes its source popup");
         await Until(async () =>
         {
             var state = await f.SnapshotAsync(owner.Id);
@@ -67,8 +82,12 @@ public static class FilmPlaybackNativeIntegrationTests
             "load more calls exactly search on each unfinished station, never detail/list/play");
         beforeMenu = f.Traffic.BusinessCalls;
         picker.IsDropDownOpen = true;
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-        Check(picker.IsDropDownOpen && picker.Items.Count == Sites.Length, "the populated real source menu opened");
+        await Until(() => picker.IsDropDownOpen && popup.IsOpen, "the populated real source menu opened");
+        Check(picker.Items.Cast<FilmSelection>().SequenceEqual(owner.Page.Sources) &&
+            picker.Items.Cast<FilmSelection>().Count(row => row.Id is not null) == Sites.Length &&
+            picker.Items.Cast<FilmSelection>().Where(row => row.MetadataSourceId is not null)
+                .SequenceEqual(owner.Page.MetadataSources),
+            "the source menu contains the exact real station and metadata choices, without placeholders");
         picker.IsDropDownOpen = false;
         await f.SnapshotAsync(owner.Id);
         menuCommands += f.Traffic.BusinessCalls - beforeMenu;
@@ -93,7 +112,7 @@ public static class FilmPlaybackNativeIntegrationTests
         var browseReads = FilmJson.Array(await f.WorkerStateAsync(), "reads");
         var browseHistory = await f.HistoryAsync();
         var browseReports = await f.ReportsAsync();
-        Check(browseReads.Length == 0 && browseHistory.Length == 0 && browseReports.Length == 0 && !f.Native.HasMedia,
+        Check(browseReads.Length == 0 && browseHistory.Length == 0 && browseReports.Length == 0 && !f.Native.HasOutput,
             "search and directory browsing are not media output or viewing");
         Observe("browse-counts", new
         {
@@ -112,7 +131,7 @@ public static class FilmPlaybackNativeIntegrationTests
             "explicit native play persists actual viewing");
         await owner.Session.CloseSessionAsync();
         await f.SessionGoneAsync(owner.Id);
-        await ResourceGoneAsync(f.Traffic.Receipts(owner.Id).Single(row => row.AttemptId == attempt));
+        await f.ResourceRetiredAsync(f.Traffic.Receipts(owner.Id).Single(row => row.AttemptId == attempt));
         f.NoBackgroundFailures();
     }
 
@@ -125,16 +144,26 @@ public static class FilmPlaybackNativeIntegrationTests
         var before = await f.WorkerStateAsync();
         var pending = await f.SnapshotAsync(owner.Id);
         var connection = await f.Runtime.CaptureConnectionAsync();
-        Check(receipt.MediaOrigin is { Scheme: "http", Host: "127.0.0.1" } origin &&
-            receipt.Address.GetLeftPart(UriPartial.Authority) + "/" == origin.AbsoluteUri &&
-            origin != connection.BusinessOrigin, "Cat's real owner returns a distinct controlled media capability");
+        if (headers)
+            Check(receipt.MediaOrigin is { Scheme: "http", Host: "127.0.0.1" } origin &&
+                receipt.Address.GetLeftPart(UriPartial.Authority) + "/" == origin.AbsoluteUri &&
+                origin != connection.BusinessOrigin, "declared headers select the real controlled media stream");
+        else
+        {
+            var status = Okay(await f.Runtime.CallAsync("cat.script.status", new { }), "cat.script.v2");
+            var aggregate = new Uri(FilmJson.RequiredText(FilmJson.Member(status, "aggregate"), "origin"));
+            Check(receipt.MediaOrigin is null && receipt.Address.IsLoopback &&
+                receipt.Address.GetLeftPart(UriPartial.Authority) == aggregate.GetLeftPart(UriPartial.Authority) &&
+                receipt.Address.AbsolutePath.StartsWith($"/proxy/{Installation}/{f.Generation}/", StringComparison.Ordinal) &&
+                aggregate != connection.BusinessOrigin, "headerless media uses this exact live Cat aggregate without a film stream");
+        }
         Check(FilmJson.Text(pending, "stage") == "pending" &&
             FilmJson.Text(FilmJson.Member(pending, "attempt"), "id") == receipt.AttemptId,
             "address receipt is pending, not claimed as media success");
         var beforeHistory = await f.HistoryAsync();
         var beforeReports = await f.ReportsAsync();
         var beforeReads = FilmJson.Array(before, "reads");
-        Check(!f.Native.HasMedia && f.Native.ObservedVideoOutput is null &&
+        Check(!f.Native.HasOutput && f.Native.Output is null &&
             beforeHistory.Length == 0 && beforeReports.Length == 0 &&
             beforeReads.Length == 0 && f.Traffic.Commands("media.started").Length == 0,
             "a real returned URL alone cannot read bytes, publish video, write history or report viewing");
@@ -148,8 +177,8 @@ public static class FilmPlaybackNativeIntegrationTests
         Observe("before-native", new
         {
             headers, reports, generation = f.Generation, stage = FilmJson.Text(pending, "stage"),
-            calls = initialCalls, videoPictures = f.Native.ObservedVideoOutput?.DisplayedPictures ?? 0,
-            nativeHasMedia = f.Native.HasMedia, mediaReads = beforeReads.Length,
+            calls = initialCalls, videoPictures = f.Native.Output?.SubmittedPictures ?? 0,
+            nativeHasOutput = f.Native.HasOutput, mediaReads = beforeReads.Length,
             history = beforeHistory.Length, watchReports = beforeReports.Length,
             searchComplete = FilmJson.Bool(pending, "searchComplete")
         });
@@ -157,7 +186,7 @@ public static class FilmPlaybackNativeIntegrationTests
         gate.Release(); // Deliver exactly the actual receipt, not a fabricated event or native result.
         string attempt = await f.OutputAsync(owner);
         Check(attempt == receipt.AttemptId, "the prepared resource is the actual native occurrence");
-        var nativePlayer = f.CurrentPlayer();
+        var nativeAllocation = f.CurrentAllocation();
         await Until(async () => (await f.HistoryAsync()).Any(row => FilmJson.Text(row, "targetId") == owner.TargetId &&
             FilmJson.Text(row, "sourceKey") == SourceKey("alpha")), "actual Windows history after output");
         var after = await f.WorkerStateAsync();
@@ -187,7 +216,7 @@ public static class FilmPlaybackNativeIntegrationTests
         await owner.Page.SeekAsync(Math.Max(0, owner.Page.Duration - .5));
         await owner.Session.SetPausedAsync(false);
         await Until(async () => f.NativeEnded == 1 && f.Traffic.Commands("media.ended").Any(call => call.Completed) &&
-            FilmJson.Text(await f.SnapshotAsync(owner.Id), "stage") == "ended", "real libVLC natural end reaches Node");
+            FilmJson.Text(await f.SnapshotAsync(owner.Id), "stage") == "ended", "real decoder/clock natural end reaches Node");
         await Until(async () => (await f.HistoryAsync()).Any(row => FilmJson.Bool(row, "ended") &&
             FilmJson.Number(row, "position") > 1 && FilmJson.Number(row, "duration") > 1), "real ended history");
         if (reports)
@@ -205,13 +234,14 @@ public static class FilmPlaybackNativeIntegrationTests
             "natural terminal feedback uses the exact original native identity");
         await owner.Session.CloseSessionAsync();
         await f.SessionGoneAsync(owner.Id);
-        await ResourceGoneAsync(receipt);
-        Check(nativePlayer.NativeReference == IntPtr.Zero && !f.Native.HasMedia, "close proves actual native retirement");
+        await f.ResourceRetiredAsync(receipt);
+        Check(nativeAllocation.PhysicallyReleased && !f.Native.HasOutput, "close proves actual native retirement");
         Observe("natural-end", new
         {
             headers, reportsEnabled = reports, nativeEnded = f.NativeEnded,
             actualHistory = await f.HistoryAsync(), actualReports = watch,
-            nativeReleased = nativePlayer.NativeReference == IntPtr.Zero, resource404 = true, sessionGone = true
+            nativeReleased = nativeAllocation.PhysicallyReleased, resourceReleased = true,
+            controlledStream404 = headers, sharedCatDirectRetained = !headers, sessionGone = true
         });
         f.NoBackgroundFailures();
     }
@@ -219,9 +249,11 @@ public static class FilmPlaybackNativeIntegrationTests
     private static async Task ReplacementAsync()
     {
         await using var f = await FilmPlaybackNativeFixture.CreateAsync(headers: true, longVideo: true);
+        int activeFailures = 0;
+        f.Native.Failed += (_, _) => activeFailures++;
         var owner = await f.OpenAsync();
         string first = await f.OutputAsync(owner);
-        var firstPlayer = f.CurrentPlayer();
+        var firstAllocation = f.CurrentAllocation();
         await owner.Page.SeekAsync(7);
         await Until(async () => Math.Abs(f.Native.PositionSeconds - 7) < .5 &&
             Math.Abs(FilmJson.Number(FilmJson.Member(await f.SnapshotAsync(owner.Id), "current"), "position") - 7) < .5,
@@ -231,19 +263,19 @@ public static class FilmPlaybackNativeIntegrationTests
             f.Native.Identity == id, "replacement actually commits a new native occurrence");
         // Observe preserved pause before any test command could repair it.
         string replacement = await f.OutputAsync(owner, pauseAfterOutput: false);
-        var donorPlayer = f.CurrentPlayer();
-        Check(replacement != first && !ReferenceEquals(firstPlayer, donorPlayer) &&
-            firstPlayer.NativeReference == IntPtr.Zero && f.Native.PauseRequested && !f.Native.IsPlaying &&
+        var donorAllocation = f.CurrentAllocation();
+        Check(replacement != first && !firstAllocation.Matches(donorAllocation) &&
+            firstAllocation.PhysicallyReleased && f.Native.PauseRequested && !owner.Session.IsPlaying &&
             Math.Abs(f.Native.PositionSeconds - 7) < .5, "same-episode replacement retained actual native time and pause, not merely a DTO");
         var good = f.Traffic.Receipts(owner.Id).Single(row => row.AttemptId == replacement);
-        await ResourceGoneAsync(f.Traffic.Receipts(owner.Id).Single(row => row.AttemptId == first));
+        await f.ResourceRetiredAsync(f.Traffic.Receipts(owner.Id).Single(row => row.AttemptId == first));
         var currentCandidate = FilmJson.Member(FilmJson.Member(await f.SnapshotAsync(owner.Id), "current"), "candidate");
         Check(FilmJson.Text(FilmJson.Member(currentCandidate, "source"), "key") == SourceKey("beta"),
             "the new native occurrence is the selected alternate source");
         Observe("same-episode", new
         {
             oldAttempt = first, newAttempt = replacement, realPosition = f.Native.PositionSeconds,
-            realPaused = f.Native.PauseRequested, oldNativeReleased = firstPlayer.NativeReference == IntPtr.Zero
+            realPaused = f.Native.PauseRequested, oldNativeReleased = firstAllocation.PhysicallyReleased
         });
 
         await owner.Page.CommandAsync("switch");
@@ -251,16 +283,20 @@ public static class FilmPlaybackNativeIntegrationTests
             FilmJson.Text(await f.SnapshotAsync(owner.Id), "stage") is "unavailable" or "error",
             "malformed candidate fails through the real native decoder and exhausts remaining alternatives");
         var failed = f.Traffic.Commands("media.failed").Single(call => call.Completed);
+        var failureSnapshot = await f.SnapshotAsync(owner.Id);
+        Check(FilmJson.Text(failureSnapshot, "error") == PlaybackError.OpenFailed &&
+            FilmJson.Text(failureSnapshot, "errorStage") == "prepare",
+            "the intentionally malformed candidate reports its actual bounded prepare error");
         var rejected = f.Traffic.Receipts(owner.Id).Single(row => row.AttemptId == failed.Attempt);
         var rejectedReads = FilmJson.Array(await f.WorkerStateAsync(), "reads")
             .Where(row => FilmJson.Text(row, "site") == "broken").ToArray();
         Check(rejectedReads.Length > 0 && rejectedReads.All(row => FilmJson.Bool(row, "headerAccepted")),
             "the bad candidate reached the real demux through its authorized bytes, not an adapter stub failure");
-        Check(f.Native.Identity == replacement && owner.Session.HasOutput && ReferenceEquals(f.CurrentPlayer(), donorPlayer) &&
-            donorPlayer.NativeReference != IntPtr.Zero && f.Native.PauseRequested && Math.Abs(f.Native.PositionSeconds - 7) < .5 &&
+        Check(f.Native.Identity == replacement && owner.Session.HasOutput && donorAllocation.IsCurrent &&
+            donorAllocation.IsAlive && f.Native.PauseRequested && Math.Abs(f.Native.PositionSeconds - 7) < .5 &&
             !f.Traffic.Commands("media.started").Any(call => call.Attempt == failed.Attempt),
             "real failed preparation cannot retire or reset its still healthy same-episode donor");
-        await ResourceGoneAsync(rejected);
+        await f.ResourceRetiredAsync(rejected);
         var watch = await f.ReportsAsync();
         Check(watch.All(row => FilmJson.Text(row, "site") != "broken") &&
             (await f.HistoryAsync()).All(row => FilmJson.Text(row, "sourceKey") != SourceKey("broken")),
@@ -273,9 +309,10 @@ public static class FilmPlaybackNativeIntegrationTests
         });
         await owner.Session.CloseSessionAsync();
         await f.SessionGoneAsync(owner.Id);
-        await ResourceGoneAsync(good);
-        Check(donorPlayer.NativeReference == IntPtr.Zero, "close really releases the preserved donor");
-        f.NoBackgroundFailures();
+        await f.ResourceRetiredAsync(good);
+        Check(donorAllocation.PhysicallyReleased, "close really releases the preserved donor");
+        Check(f.FailureCodes.SequenceEqual([PlaybackError.OpenFailed]) && activeFailures == 0,
+            "only the intentional candidate prepare failure is notified; the healthy donor never emits active failure");
     }
 
     private static async Task CloseRaceAsync()
@@ -283,24 +320,24 @@ public static class FilmPlaybackNativeIntegrationTests
         await using var f = await FilmPlaybackNativeFixture.CreateAsync(headers: true, longVideo: true);
         var old = await f.OpenAsync();
         string oldAttempt = await f.OutputAsync(old);
-        var oldPlayer = f.CurrentPlayer();
+        var oldAllocation = f.CurrentAllocation();
         var gate = f.Traffic.HoldNextReceipt();
         await old.Page.CommandAsync("switch");
         var late = await gate.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(12));
         var closing = old.Session.CloseSessionAsync();
         Check(!closing.IsCompleted, "old close waits for its actually admitted native consumer receipt");
-        // Independent stable Film owner, but still the App's SAME NativePlayback/libVLC.
+        // Independent stable Film owner, but still the App's SAME FilmPlayback.
         var next = await f.OpenAsync(targetId: "film:native-successor");
         string nextAttempt = await f.OutputAsync(next);
-        var nextPlayer = f.CurrentPlayer();
+        var nextAllocation = f.CurrentAllocation();
         Check(nextAttempt != oldAttempt && nextAttempt != late.AttemptId, "successor is a distinct actual occurrence");
         gate.Release();
         await closing.WaitAsync(TimeSpan.FromSeconds(12));
         await old.Session.DisposeAsync();
         await f.SessionGoneAsync(old.Id);
-        foreach (var receipt in f.Traffic.Receipts(old.Id)) await ResourceGoneAsync(receipt);
-        Check(oldPlayer.NativeReference == IntPtr.Zero && f.Native.Identity == nextAttempt &&
-            next.Session.HasOutput && ReferenceEquals(f.CurrentPlayer(), nextPlayer) && nextPlayer.NativeReference != IntPtr.Zero &&
+        foreach (var receipt in f.Traffic.Receipts(old.Id)) await f.ResourceRetiredAsync(receipt);
+        Check(oldAllocation.PhysicallyReleased && f.Native.Identity == nextAttempt &&
+            next.Session.HasOutput && nextAllocation.IsCurrent && nextAllocation.IsAlive &&
             !f.Traffic.Commands("media.started").Any(call => call.Attempt == late.AttemptId),
             "settled old close/discard/release and its late real receipt cannot stop or publish over the newer owner");
         try { await old.Page.CommandAsync("stop"); throw new InvalidOperationException("Old page unexpectedly controlled the successor."); }
@@ -308,14 +345,14 @@ public static class FilmPlaybackNativeIntegrationTests
         Observe("late-close", new
         {
             oldSession = old.Id, newSession = next.Id, lateAttempt = late.AttemptId, keptAttempt = nextAttempt,
-            actualOldPlayerReleased = oldPlayer.NativeReference == IntPtr.Zero,
-            newPlayerStillOwned = nextPlayer.NativeReference != IntPtr.Zero,
+            actualOldAllocationReleased = oldAllocation.PhysicallyReleased,
+            newAllocationStillOwned = nextAllocation.IsAlive,
             oldSessionGone = true, oldResources404 = true, oldConsumerSettled = closing.IsCompletedSuccessfully
         });
         await next.Session.CloseSessionAsync();
         await f.SessionGoneAsync(next.Id);
-        foreach (var receipt in f.Traffic.Receipts(next.Id)) await ResourceGoneAsync(receipt);
-        Check(nextPlayer.NativeReference == IntPtr.Zero && !f.Native.HasMedia, "the successor also has one real final drain");
+        foreach (var receipt in f.Traffic.Receipts(next.Id)) await f.ResourceRetiredAsync(receipt);
+        Check(nextAllocation.PhysicallyReleased && !f.Native.HasOutput, "the successor also has one real final drain");
         f.NoBackgroundFailures();
     }
 
@@ -327,8 +364,8 @@ public static class FilmPlaybackNativeIntegrationTests
         var allocation = f.CaptureNative();
         var epoch = await f.Runtime.CaptureConnectionAsync();
         long pictures = allocation.Pictures;
-        Check(pictures > 0 && allocation.Player.NativeReference != IntPtr.Zero &&
-            f.Native.IsPlaying && !f.Native.PauseRequested, "the terminal victim is a genuinely playing private-demux/VLC occurrence");
+        Check(pictures > 0 && allocation.IsAlive &&
+            owner.Session.IsPlaying && !f.Native.PauseRequested, "the terminal victim is a genuinely playing movie decoder/render occurrence");
         RuntimeTraffic.ReceiptGate? gate = null;
         string? candidate = null;
         try
@@ -344,13 +381,13 @@ public static class FilmPlaybackNativeIntegrationTests
                     FilmJson.Text(FilmJson.Member(snapshot, "attempt"), "id") == candidate &&
                     FilmJson.Text(FilmJson.Member(snapshot, "current"), "attemptId") == attempt &&
                     f.Native.Identity == attempt && owner.Session.HasOutput &&
-                    ReferenceEquals(f.CurrentPlayer(), allocation.Player) && !f.Native.PauseRequested &&
+                    allocation.IsCurrent && !f.Native.PauseRequested &&
                     !f.Traffic.Commands("media.started").Any(call => call.Attempt == candidate),
                     "a real admitted Node candidate waits behind its receipt while the exact old donor still plays");
                 Observe("terminal-pending", new
                 {
                     currentAttempt = attempt, pendingAttempt = candidate, candidateReceiptReal = true,
-                    donorPictures = allocation.Pictures, donorStillPlaying = f.Native.IsPlaying
+                    donorPictures = allocation.Pictures, donorStillPlaying = owner.Session.IsPlaying
                 });
             }
             pictures = allocation.Pictures;
@@ -360,7 +397,7 @@ public static class FilmPlaybackNativeIntegrationTests
                 "real frames and clock keep advancing after only the HTTP observation drains");
             Check(f.Runtime.IsConnected && !epoch.Revoked.IsCancellationRequested &&
                 owner.Session.HasOutput && f.Native.Identity == attempt &&
-                ReferenceEquals(f.CurrentPlayer(), allocation.Player) && allocation.Player.NativeReference != IntPtr.Zero,
+                allocation.IsCurrent && allocation.IsAlive,
                 "disposing a real SSE subscription cannot revoke the process or stop its current native output");
             Observe("sse-keeps-native", new
             {
@@ -372,11 +409,11 @@ public static class FilmPlaybackNativeIntegrationTests
         }
         finally { gate?.Release(); }
 
-        await Until(() => allocation.PhysicallyReleased && !f.Native.HasMedia && !owner.Session.HasOutput &&
-            AdaptiveMediaTests.Session(f.Native) is null &&
-            AdaptiveMediaTests.Field(f.Native, "_handoffSession") is null,
-            "runtime lifetime revocation alone joins actual VLC, private demux, readers and resource release");
-        Check(epoch.Revoked.IsCancellationRequested && allocation.Player.NativeReference == IntPtr.Zero,
+        await Until(() => allocation.PhysicallyReleased && !f.Native.HasOutput && !owner.Session.HasOutput &&
+            f.CurrentSession is null &&
+            AdaptiveMediaTests.Field(f.Native, "pending") is null,
+            "runtime lifetime revocation alone joins actual movie decode/render/audio workers, readers and resource release");
+        Check(epoch.Revoked.IsCancellationRequested && allocation.PhysicallyReleased,
             "physical native retirement precedes any test close/stop cleanup");
         // Only after physical retirement: a missing RPC ACK is not a claim of remote release.
         var receipts = f.Traffic.Receipts(owner.Id);
@@ -394,13 +431,13 @@ public static class FilmPlaybackNativeIntegrationTests
             "an already returned candidate cannot publish after its exact process epoch dies");
         // This is cleanup, deliberately after the independent physical-stop assertions.
         await owner.Session.CloseSessionAsync().WaitAsync(TimeSpan.FromSeconds(12));
-        Check(allocation.PhysicallyReleased && !f.Native.HasMedia &&
+        Check(allocation.PhysicallyReleased && !f.Native.HasOutput &&
             (candidate is null || !f.Traffic.Commands("media.started").Any(call => call.Attempt == candidate)),
             "settled late consumers cannot revive a retired donor or commit the pending candidate");
         Observe("terminal-native-drain", new
         {
             pendingScenario = pending, oldAttempt = attempt, pendingAttempt = candidate,
-            nativePointerReleased = allocation.Player.NativeReference == IntPtr.Zero,
+            nativePointerReleased = allocation.PhysicallyReleased,
             demuxReadersAndResourceReleased = allocation.PhysicallyReleased,
             runtimeDrain = f.Runtime.Completion.IsCompletedSuccessfully, resourceCount = receipts.Length,
             releaseAck = false, releaseCode, failureCodes = f.FailureCodes
@@ -438,10 +475,13 @@ public static class FilmPlaybackNativeIntegrationTests
         finally { gate.Release(); }
         await f.SessionGoneAsync(owner.Id);
         var receipts = f.Traffic.Receipts(owner.Id);
-        foreach (var receipt in receipts) await ResourceGoneAsync(receipt);
-        Check(allocation.PhysicallyReleased && !f.Native.HasMedia, "actual first-process media and private inputs drain before cold restart");
+        foreach (var receipt in receipts) await f.ResourceRetiredAsync(receipt);
+        Check(allocation.PhysicallyReleased && !f.Native.HasOutput, "actual first-process media and private inputs drain before cold restart");
 
-        var settings = new FilmPlaybackSettings(f.Runtime);
+        string root = Path.GetDirectoryName(f.DataRoot)!;
+        await using var store = new LocalDocumentStore(Path.Combine(root, "documents"), AppIdentity.NativeNamespaces,
+            AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
+        var settings = new FilmPlaybackSettings(f.Runtime, store);
         var preferences = new FilmPreferences(["keyword", "pan", "quality"],
             ["baidu", "uc", "quark", "tianyi", "yidong"], ["原始优先词", "第二关键词"],
             ["本地净化词", "直播"], false);
@@ -449,7 +489,7 @@ public static class FilmPlaybackNativeIntegrationTests
         Check(committed.RuleOrder.SequenceEqual(preferences.RuleOrder) && committed.PanOrder.SequenceEqual(preferences.PanOrder) &&
             committed.Keywords.SequenceEqual(preferences.Keywords) &&
             committed.SiteCleanKeywords.SequenceEqual(preferences.SiteCleanKeywords) && !committed.IosAutoPrepare,
-            "formal settings receipt preserves all nondefault orders and values");
+            "native document receipt preserves all nondefault orders and values without a runtime acknowledgement");
         var siteManual = FilmJson.Encode(new
         {
             id = "native-site-manual", targetId = owner.TargetId, kind = "site", name = "本机站点",
@@ -491,10 +531,17 @@ public static class FilmPlaybackNativeIntegrationTests
             "the durable library never stores this run's media capability, private demux URL or signed media address");
         f.NoBackgroundFailures();
         await f.DisposeAsync(); // Close the actual first Node, not merely another library object.
-        var restored = await f.ReadInSecondProcessAsync();
-        Check(JsonElement.DeepEquals(before, restored.Library) &&
+        await store.DisposeAsync();
+        await using var next = await FilmMetadataRuntimeTests.RuntimeHost.OpenAsync(root);
+        var restored = (Library: await next.FilmAsync("library.get", new { }),
+            Preferences: await next.WaitSettingsAsync("film.preferences"));
+        Check(next.ProcessId != f.Runtime.ProcessId && File.ReadAllText(Path.Combine(f.DataRoot, "film-playback", "library.json")) == stored,
+            "the real cold native-settings runtime has a new process and its read-only business access preserves the durable library bytes");
+        JsonElement Business(JsonElement value) => FilmJson.Encode(value.EnumerateObject()
+            .Where(item => item.Name != "preferences").ToDictionary(item => item.Name, item => item.Value.Clone()));
+        Check(JsonElement.DeepEquals(Business(before), Business(restored.Library)) &&
             JsonElement.DeepEquals(FilmJson.Encode(preferences), restored.Preferences),
-            "a second actual process reads the identical committed preferences, manual, blocks and native history");
+            "a second actual process consumes native preferences and reads identical Node-owned manual blocks and history");
         Observe("durable-library", new
         {
             historyCount = FilmJson.Array(restored.Library, "history").Length,

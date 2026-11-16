@@ -83,6 +83,9 @@ public sealed partial class NativePlayback
                         frame.TrySetResult(true);
                 };
                 PropertyChanged += progress;
+                using var output = await AcquireOutputAsync(attempt.Token);
+                if (!IsCurrent(session) || Volatile.Read(ref state.Paused) != 0) return true;
+                attempt.Token.ThrowIfCancellationRequested();
                 accepted = await Task.Run(() =>
                 {
                     if (!IsCurrent(session) || Volatile.Read(ref state.Paused) != 0 || attempt.IsCancellationRequested) return false;
@@ -172,6 +175,12 @@ public sealed partial class NativePlayback
         {
             ThrowIfDisposed();
             if (!IsLiveCommandCurrent(session, state, command)) return false;
+            using var output = !pause ? await AcquireOutputAsync(session.OutputLifetime.Token) : null;
+            if (!pause)
+            {
+                ThrowIfDisposed();
+                if (!IsLiveCommandCurrent(session, state, command)) return false;
+            }
             applied = await Task.Run(() =>
             {
                 if (!IsLiveCommandCurrent(session, state, command)) return false;
@@ -183,6 +192,7 @@ public sealed partial class NativePlayback
             if (pause && applied && IsLiveCommandCurrent(session, state, command))
                 Set(ref _isPlaying, false, nameof(IsPlaying));
         }
+        catch (OperationCanceledException) when (!IsLiveCommandCurrent(session, state, command)) { return false; }
         catch (PlaybackException) { throw; }
         catch { failure = PlaybackError.CommandFailed; }
         finally { _commands.Release(); }

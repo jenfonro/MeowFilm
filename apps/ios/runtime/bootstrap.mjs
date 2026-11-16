@@ -4,6 +4,7 @@ import { Socket } from 'node:net';
 import { BridgeError, decodeJSONValue, validateSession } from '@meowfilm/runtime-bridge';
 import { duplicateBootstrapDescriptor } from '../../../packages/script-host/src/native-engine.js';
 import { createAppRuntime } from '../../runtime/bootstrap.mjs';
+import { createNativeSettings, nativeSettingsFrameBytes } from '../../runtime/native-settings.mjs';
 
 const startupStages = new Set([
   'arguments', 'native-binding', 'bootstrap-channel', 'configuration', 'assembly',
@@ -31,7 +32,7 @@ export function parseIOSLaunchArguments(argv) {
 export function parseIOSConfiguration(bytes) {
   const value = decodeJSONValue(bytes);
   if (value === null || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).length !== 2 || !Object.hasOwn(value, 'sessionId') ||
+      Object.keys(value).length !== (value.nativeSettings === true ? 3 : 2) || !Object.hasOwn(value, 'sessionId') ||
       !Object.hasOwn(value, 'dataRoot') ||
       typeof value.dataRoot !== 'string' || !isAbsolute(value.dataRoot) ||
       /[\u0000-\u001f\u007f]/.test(value.dataRoot)) throw new BridgeError('INVALID_REQUEST');
@@ -53,9 +54,9 @@ export function installIOSFailureBoundary(runtime, { target = process, report = 
   return fail;
 }
 
-/** One configuration, one endpoint, then EOF. Business traffic is HTTP only. */
+/** One configuration and endpoint; optional settings frames stay on the private channel. */
 export async function startIOSAppRuntime({
-  product, assemble, argv = process.argv.slice(2), onStage = () => {},
+  product, assemble, settingsChanged, argv = process.argv.slice(2), onStage = () => {},
 } = {}) {
   onStage('arguments');
   const { descriptor } = parseIOSLaunchArguments(argv);
@@ -69,30 +70,42 @@ export async function startIOSAppRuntime({
     closeSync(duplicate);
     throw error;
   }
-  let runtime, stopping, ended = false;
+  let runtime, settings, stopping, stopError, ended = false;
   const close = () => stopping ??= (async () => {
     ended = true;
+    settings?.close();
     try { await runtime?.close(); }
     finally { channel.destroy(); }
   })();
-  const stop = () => { void close().catch(() => {}); };
-  channel.once('end', stop);
-  channel.once('close', stop);
-  channel.on('error', stop);
+  const stop = code => {
+    stopError ??= new BridgeError(code);
+    void close().catch(() => {});
+  };
+  const disconnected = () => stop('CLOSED');
+  channel.once('end', disconnected);
+  channel.once('close', disconnected);
+  channel.on('error', disconnected);
   installIOSFailureBoundary({ close });
   try {
     onStage('configuration');
-    if (typeof assemble !== 'function') throw new BridgeError('INVALID_REQUEST');
-    const configuration = await readConfiguration(channel);
-    if (ended) throw new BridgeError('CLOSED');
+    if (typeof assemble !== 'function' || settingsChanged !== undefined && typeof settingsChanged !== 'function')
+      throw new BridgeError('INVALID_REQUEST');
+    const configuration = await readConfiguration(channel, value => {
+      if (value.nativeSettings === true) settings = createNativeSettings(channel, stop);
+      channel.on('data', bytes => settings ? settings.accept(bytes) : stop('INVALID_REQUEST'));
+    });
+    if (ended) throw stopError;
+    await settings?.initialize();
+    if (ended) throw stopError;
     onStage('assembly');
     runtime = createAppRuntime({ product,
       sessionId: configuration.sessionId,
       assemble: () => {
-        const modules = assemble({ dataRoot: configuration.dataRoot });
+        const modules = assemble({ dataRoot: configuration.dataRoot, settings });
         onStage('assembly');
         return modules;
       },
+      ...(settings && settingsChanged ? { settingsChanged: block => settingsChanged(block, { settings }) } : {}),
     });
     onStage('listen');
     await runtime.start();
@@ -107,12 +120,13 @@ export async function startIOSAppRuntime({
       close,
     });
   } catch (error) {
+    const failure = ended && stopError ? stopError : error;
     await close().catch(() => {});
-    throw error;
+    throw failure;
   }
 }
 
-function readConfiguration(channel) {
+function readConfiguration(channel, configured) {
   return new Promise((resolve, reject) => {
     let chunks = [], length = 0, settled = false;
     const finish = (error, value) => {
@@ -128,13 +142,13 @@ function readConfiguration(channel) {
     const failed = () => finish(new BridgeError('CLOSED'));
     const data = bytes => {
       chunks.push(bytes); length += bytes.length;
+      if (length > nativeSettingsFrameBytes) { finish(new BridgeError('INVALID_REQUEST')); return; }
       const newline = bytes.indexOf(10);
       if (newline === -1) return;
       try {
         if (newline !== bytes.length - 1) throw new BridgeError('INVALID_REQUEST');
         const value = parseIOSConfiguration(Buffer.concat(chunks, length).subarray(0, -1));
-        // Once configured, the channel only accepts the native owner's EOF.
-        channel.on('data', () => channel.destroy());
+        configured(value);
         finish(undefined, value);
       } catch (error) { finish(error); }
     };

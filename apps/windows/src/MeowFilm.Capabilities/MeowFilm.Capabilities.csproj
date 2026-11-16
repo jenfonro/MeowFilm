@@ -4,6 +4,7 @@
     <UseWPF>true</UseWPF>
   </PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="Film/Rules/FilmRuleDefaults.json" LogicalName="MeowFilm.FilmRuleDefaults.json" />
     <Resource Include="Accounts/Presentation/Assets/*.png" />
     <Resource Include="Film/Presentation/Assets/*.jpg" />
   </ItemGroup>
@@ -14,5 +15,6 @@
     <ProjectReference Include="../MeowFilm.Desktop/MeowFilm.Desktop.csproj" />
     <ProjectReference Include="../MeowFilm.Platform/MeowFilm.Platform.csproj" />
     <ProjectReference Include="../MeowFilm.Media/MeowFilm.Media.csproj" />
+    <ProjectReference Include="../MeowFilm.Audio/MeowFilm.Audio.csproj" />
   </ItemGroup>
 </Project>

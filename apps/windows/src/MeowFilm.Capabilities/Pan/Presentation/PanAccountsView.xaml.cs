@@ -141,10 +141,10 @@ public partial class PanAccountsView : UserControl
         loginAnchor = button;
         await owner.OpenLoginAsync(row);
     }
-    private async void Refresh_Click(object sender, RoutedEventArgs e)
+    private async void EditCredentials_Click(object sender, RoutedEventArgs e)
     {
         if (Active && Owner is { } owner && sender is Button { DataContext: PanAccountRow row })
-            await owner.RefreshAsync(row);
+            await owner.OpenCredentialsAsync(row);
     }
     private async void Reload_Click(object sender, RoutedEventArgs e)
     {

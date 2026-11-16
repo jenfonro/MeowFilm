@@ -20,6 +20,7 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
         {
             if (!IsVisible) module.SuspendPresentation(
                 hiddenToTray: Window.GetWindow(this) is ShellWindow { IsHiddenToTray: true });
+            else module.ResumePresentation();
         };
     }
 

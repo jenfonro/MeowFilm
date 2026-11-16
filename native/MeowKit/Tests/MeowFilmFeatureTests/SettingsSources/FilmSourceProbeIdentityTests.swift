@@ -33,7 +33,8 @@ final class FilmSourceProbeIdentityTests: XCTestCase {
             try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: base) }
             let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
-            let service = FilmSourceService(transport: fixture.transport, storeFactory: { store })
+            let service = FilmSourceService(transport: fixture.transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            runtimeSourceRoot: base.appendingPathComponent("cat"))
             let key = FilmSourceKey(installationId: "a", siteKey: "same")
             let options = FilmVideoOptions(enabled: false, homeVisible: false, searchEnabled: false, aggregateImages: true)
             try await service.refresh()
@@ -50,7 +51,8 @@ final class FilmSourceProbeIdentityTests: XCTestCase {
             XCTAssertEqual(snapshot.videos.first { $0.key == key }?.options, options)
             XCTAssertEqual(snapshot.videos.first { $0.key == key }?.detection, result)
             await service.close()
-            let rebuilt = FilmSourceService(transport: fixture.transport, storeFactory: { store })
+            let rebuilt = FilmSourceService(transport: fixture.transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            runtimeSourceRoot: base.appendingPathComponent("cat"))
             try await rebuilt.initialize()
             let restored = await rebuilt.snapshot
             XCTAssertEqual(restored.videos.first { $0.key == key }?.detection, result)
@@ -196,7 +198,8 @@ final class FilmSourceProbeIdentityTests: XCTestCase {
             try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: base) }
             let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
-            let service = FilmSourceService(transport: fixture.transport, storeFactory: { store })
+            let service = FilmSourceService(transport: fixture.transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            runtimeSourceRoot: base.appendingPathComponent("cat"))
             let key = FilmSourceKey(installationId: "a", siteKey: "same")
             let options = FilmVideoOptions(enabled: false, homeVisible: false, searchEnabled: false, aggregateImages: true)
             try await service.refresh()
@@ -215,7 +218,8 @@ final class FilmSourceProbeIdentityTests: XCTestCase {
             XCTAssertEqual(snapshot.videos.first { $0.key == key }?.detection, result)
             XCTAssertEqual(snapshot.videos.first { $0.key == key }?.options, options)
             await service.close()
-            let rebuilt = FilmSourceService(transport: fixture.transport, storeFactory: { store })
+            let rebuilt = FilmSourceService(transport: fixture.transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            runtimeSourceRoot: base.appendingPathComponent("cat"))
             try await rebuilt.initialize()
             let restored = await rebuilt.snapshot
             let saved = try XCTUnwrap(restored.videos.first { $0.key == key })
@@ -344,8 +348,7 @@ private actor ProbeIdentityFixture {
     init(reply: @escaping @Sendable (String, RuntimeValue) -> RuntimeValue?) { self.reply = reply }
 
     nonisolated var transport: CatScriptTransport {
-        CatScriptTransport(request: { operation, params in try await self.request(operation, params) },
-            upload: { _, _, _ in throw FilmSourceError(code: "UNEXPECTED_UPLOAD") })
+        CatScriptTransport(request: { operation, params in try await self.request(operation, params) })
     }
 
     private func request(_ operation: String, _ params: RuntimeValue) async throws -> RuntimeValue {

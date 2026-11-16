@@ -192,7 +192,7 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
         }
         let first = try XCTUnwrap(model.mediaState.attemptID)
         XCTAssertEqual(assembly.playback.currentAttempt?.owner, "film")
-        XCTAssertNil(assembly.playback.player.currentItem, "film does not create an AVPlayer bypass")
+        XCTAssertFalse(assembly.playback.hasActiveMusicInput, "film does not create a music output bypass")
         XCTAssertGreaterThan(model.mediaState.duration, 2)
         model.pauseOrResume()
         try await waitForHost { model.mediaState.paused }

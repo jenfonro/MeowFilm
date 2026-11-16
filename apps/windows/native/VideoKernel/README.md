@@ -1,6 +1,6 @@
 # Windows private demux bridge
 
-`NativePlayback` and pinned libVLC 3.0.24 remain the only playback/decode/render
+`NativePlayback` and pinned libVLC 3.0.24 remain the only video playback/decode/render
 owner. This access-demux plugin feeds FFmpeg 8.1.2 packets and codec parameters
 to VLC `es_out`. It is not a decoder, transcoder, remux stream or HTTP server.
 

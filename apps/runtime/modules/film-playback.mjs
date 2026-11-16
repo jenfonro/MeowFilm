@@ -1,19 +1,22 @@
 import { contracts } from '../contracts.mjs';
 import { createPlaybackCache, createPlaybackLibrary, createMediaService, createPlaybackData,
-  createPlaybackService, createFilmRulesService, createFilmSearchService,
+  createPlaybackService, createFilmRulesService, createFilmSearchService, createFilmCatalog,
   fail, object, requireValue } from '@meowfilm/film-playback';
 
 /** App-owned business module, borrowing already-assembled provider owners. */
-export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now }) {
+export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, nativeSettings }) {
   requireValue(Array.isArray(modules));
   const owners = new Map(modules.map(module => [module.id, module]));
   const cache = createPlaybackCache({ now });
-  const library = createPlaybackLibrary({ dataRoot });
+  const library = createPlaybackLibrary({ dataRoot, ...(nativeSettings ? {
+    nativePreferences: () => nativeSettings.read('film.preferences')?.preferences ?? {}
+  } : {}) });
+  const catalog = createFilmCatalog({ library });
   const media = createMediaService();
   const data = createPlaybackData({ modules: owners, cache, now, dataRoot });
-  const rules = createFilmRulesService({ dataRoot });
-  const search = createFilmSearchService({ data, rules, now });
-  const service = createPlaybackService({ data, library, media, rules, now });
+  const rules = createFilmRulesService({ dataRoot, nativeSettings });
+  const search = createFilmSearchService({ data, rules, catalog, now });
+  const service = createPlaybackService({ data, library, media, rules, catalog, now });
   const spec = contracts.film;
   let closed = false, closing;
   const sourceMutations = {
@@ -53,18 +56,20 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now }) 
   }
   const operations = {
     'session.open': async input => {
-      if (!input.searchReference) return service.open(input);
       const reference = input.searchReference;
-      requireValue(object(reference));
-      const handoff = search.handoff({ ...reference, sources: input.sources });
-      // The Node-owned selection, not a displayed title or client cache seed,
-      // supplies the initial target, provenance and fixed recognition rules.
-      return service.open({ ...input, ...handoff },
-        { ruleSnapshot: search.ruleSnapshot(reference), searchHandoff: handoff });
+      if (reference) requireValue(object(reference));
+      const handoff = reference && search.findHandoff({ ...reference, sources: input.sources });
+      const value = handoff ? { ...input, ...handoff } : { ...input, searchReference: undefined };
+      value.target = catalog.resolve(value.target, value.sources);
+      if (value.resumeTarget && !(value.resumeTarget.kind === 'group' && !value.resumeTarget.members?.length))
+        value.resumeTarget = catalog.resolve(value.resumeTarget, value.sources);
+      return service.open(value, handoff
+        ? { ruleSnapshot: search.ruleSnapshot(reference), searchHandoff: handoff } : undefined);
     },
     'session.command': input => {
       if (input.action !== 'search.update' || !input.searchReference) return service.command(input);
-      const handoff = search.handoff({ ...input.searchReference, sources: input.sources });
+      const handoff = search.findHandoff({ ...input.searchReference, sources: input.sources });
+      if (!handoff) return service.snapshot(input);
       return service.command({ ...input, ...handoff, sessionId: input.sessionId },
         { searchHandoff: handoff });
     },
@@ -74,7 +79,10 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now }) 
     'session.media.release': input => service.releaseMedia(input),
     'settings.get': () => service.settings(),
     'settings.set': input => service.setSettings(input),
-    'library.get': () => service.library(),
+    'library.get': () => {
+      const value = service.library();
+      return { ...value, history: value.history.map(catalog.history) };
+    },
     'library.remove': input => service.removeLibrary(input),
     'manual.update': input => service.updateManual(input),
     'rules.get': () => rules.snapshot(),
@@ -91,14 +99,20 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now }) 
     'search.command': input => search.command(input),
     'search.release': input => search.release(input),
     'search.handoff': input => search.handoff(input),
+    'data.target': input => catalog.resolve(input.target, input.sources),
     'data.catalog': (input, signal) => data.catalog(input.source, input.action, input.payload,
-      { signal, refresh: input.refresh }),
-    'data.search': (input, signal) => data.search(input.source, input.query, input.page, { signal, refresh: input.refresh }),
-    'data.detail': (input, signal) => data.detail(input.source, input.detailId, { signal, refresh: input.refresh }),
+      { signal, refresh: input.refresh }).then(value => catalog.sourceRows(input.source, value)),
+    'data.search': (input, signal) => data.search(input.source, input.query, input.page, { signal, refresh: input.refresh })
+      .then(value => ({ ...value, raw: catalog.sourceRows(input.source, value.raw),
+        items: catalog.sourceRows(input.source, { items: value.items }).items })),
+    'data.detail': (input, signal) => data.detail(input.source, input.detailId, { signal, refresh: input.refresh })
+      .then(value => catalog.directory(input.source, value)),
     'data.metadata': (input, signal) => data.metadata(input.provider, input.path, input.query,
-      { signal, imageSize: input.imageSize, refresh: input.refresh }),
+      { signal, imageSize: input.imageSize, refresh: input.refresh })
+      .then(value => catalog.metadata(input.provider, input.path, value)),
     'data.metadata.entry': (input, signal) => data.metadataEntry(input.provider, input.path, input.query,
-      { signal, imageSize: input.imageSize, refresh: input.refresh }),
+      { signal, imageSize: input.imageSize, refresh: input.refresh })
+      .then(entry => ({ ...entry, value: catalog.metadata(input.provider, input.path, entry.value) })),
     'data.cache.entry': (input, signal) => data.cachedEntry(input, { signal }).then(value => value ?? null),
     'data.invalidate': async input => {
       requireValue(typeof input.domain === 'string' && input.domain.length > 0);
@@ -108,6 +122,16 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now }) 
   };
   return {
     id: 'film', version: spec.version, contract: spec.contract,
+    async settingsChanged(block) {
+      if (block === 'film.rules') await rules.settingsChanged();
+      else if (block === 'film.preferences') await service.settingsChanged();
+      else if (block === 'pan.accounts') await invalidate('pan');
+      else if (block === 'tmdb' || block === 'douban') await invalidate(block, undefined, true);
+      else if (block === 'cat.sources') {
+        const reply = await owners.get('cat').methods['cat.script.status']({});
+        await invalidate({ kind: 'source', engine: 'cat' }, reply.value?.instances);
+      }
+    },
     observesMutation,
     methods: Object.fromEntries(Object.entries(operations).map(([operation, handler]) =>
       [spec.prefix + operation, async (input, context) => {

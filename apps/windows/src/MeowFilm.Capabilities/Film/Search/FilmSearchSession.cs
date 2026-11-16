@@ -35,17 +35,18 @@ public sealed class FilmSearchSession
     internal FilmPlaybackClient? Client { get; set; }
     internal IReadOnlyList<JsonElement> SourceSnapshot { get; set; } = [];
     internal CancellationTokenSource? Observation { get; set; }
+    internal CancellationTokenSource Execution { get; private set; } = new();
     internal Task Observing { get; set; } = Task.CompletedTask;
     internal Task Work { get; set; } = Task.CompletedTask;
     internal SemaphoreSlim Control { get; } = new(1, 1);
     internal bool Stopped { get; set; }
     internal bool Commanding { get; set; }
     internal bool Resuming { get; set; }
+    internal bool Rebinding { get; private set; }
     internal long Publication { get; set; }
     internal bool Retired { get; set; }
     internal int Subscribers => (Changed?.GetInvocationList().Length ?? 0) +
         (ReferenceChanged?.GetInvocationList().Length ?? 0);
-    internal int Retainers { get; set; }
     internal Task? Releasing { get; set; }
     internal Task? Stopping { get; set; }
     internal HashSet<Task> Handoffs { get; } = [];
@@ -62,7 +63,9 @@ public sealed class FilmSearchSession
         Bind(snapshot);
         long revision = snapshot.Revision;
         if (revision < Revision || revision == Revision && !refresh) return false;
-        var next = snapshot.Display!;
+        bool unavailable = snapshot.SitesState is FilmSearchChannelState.Error or FilmSearchChannelState.Unavailable &&
+            snapshot.MetadataState is FilmSearchChannelState.Error or FilmSearchChannelState.Unavailable;
+        var next = Rebinding && (snapshot.Loading || unavailable) && Display is not null ? Display : snapshot.Display!;
         if (!ReferenceEquals(Display, next))
         {
             foreach (var update in next.Updates)
@@ -76,11 +79,13 @@ public sealed class FilmSearchSession
             Display = next;
         }
         Revision = revision; Round = snapshot.Round;
+        if (!snapshot.Loading && !unavailable) Rebinding = false;
         SitesState = snapshot.NoSources && snapshot.SitesState == FilmSearchChannelState.Completed
             ? FilmSearchChannelState.NoSources : snapshot.SitesState;
         MetadataState = snapshot.MetadataState; Loading = snapshot.Loading; HasMore = snapshot.HasMore;
         MetadataQuery = snapshot.MetadataQuery; MetadataSearchPayload = snapshot.MetadataSearch;
         Items = next.Cards.Items; RawItems = next.RawCards.Items; Snapshot = snapshot.Snapshot; Error = "";
+        SourceSnapshot = snapshot.Snapshot.GetProperty("sources").EnumerateArray().Select(source => source.Clone()).ToArray();
         Notify();
         return true;
     }
@@ -108,6 +113,14 @@ public sealed class FilmSearchSession
         if (SitesState == FilmSearchChannelState.Loading) SitesState = FilmSearchChannelState.Cancelled;
         if (MetadataState == FilmSearchChannelState.Loading) MetadataState = FilmSearchChannelState.Cancelled;
         Notify();
+    }
+    internal void ResetBinding()
+    {
+        Id = ""; Revision = ReferenceRevision = -1;
+        Connection = null; Client = null;
+        Observation?.Dispose(); Observation = null; Observing = Task.CompletedTask;
+        Execution.Dispose(); Execution = new();
+        Rebinding = true;
     }
     internal void Fail(Exception error)
     {

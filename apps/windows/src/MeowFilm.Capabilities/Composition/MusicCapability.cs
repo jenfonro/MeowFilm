@@ -41,12 +41,12 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private bool stopping, disposed, recorded, queueSaved = true, playbackSubscribed;
     private string? openedEntry;
 
-    public MusicCapability(IRuntimeClient runtime, IDocumentStore store, NativePlayback playback, string? playbackCacheRoot = null,
+    public MusicCapability(IRuntimeClient runtime, IDocumentStore store, NativeAudioPlayback playback, string? playbackCacheRoot = null,
         CacheDocumentStore? cacheStore = null)
         : this(cacheStore is null ? new MusicNativeApplication(store, runtime) : new MusicNativeApplication(store, runtime, cacheStore),
             store, new NativeMusicPlayback(playback), playbackCacheRoot: playbackCacheRoot, cacheStore: cacheStore) { }
 
-    public MusicCapability(IMusicApplication application, IDocumentStore store, NativePlayback playback,
+    public MusicCapability(IMusicApplication application, IDocumentStore store, NativeAudioPlayback playback,
         IMusicDialogs? dialogs = null, string? playbackCacheRoot = null, CacheDocumentStore? cacheStore = null)
         : this(application, store, new NativeMusicPlayback(playback), dialogs, playbackCacheRoot, cacheStore) { }
 

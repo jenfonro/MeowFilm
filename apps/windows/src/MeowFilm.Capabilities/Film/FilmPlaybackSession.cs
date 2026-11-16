@@ -52,6 +52,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     private (FilmPlaybackPage Page, JsonElement Parameters, long Generation)? searchUpdate;
     private Task? searchUpdating;
     private CancellationTokenSource? observation;
+    private CancellationTokenSource? opening;
     private CancellationTokenRegistration runtimeRevoke;
     private Task? observing, closing, disposal;
     private Input? pending, current;
@@ -114,9 +115,12 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     }
     internal void RequirePage(FilmPlaybackPage value)
     {
-        if (!IsCurrentPage(value)) throw new FilmPlaybackException("STALE_SESSION");
+        if (!IsCurrentPage(value) || !HasSession) throw new FilmPlaybackException("STALE_SESSION");
     }
     internal bool IsCurrentPage(FilmPlaybackPage value) => ReferenceEquals(page, value) && !closed && closing is null;
+    internal bool IsOpeningPage(FilmPlaybackPage value) =>
+        opening is not null && openRequest is { } request && ReferenceEquals(request.Page, value);
+    internal FilmPlaybackSnapshot? SnapshotFor(FilmPlaybackPage value) => IsCurrentPage(value) ? snapshot : null;
     internal void RetainOwner(FilmPlaybackPage value, Window? owner)
     {
         if (!ReferenceEquals(page, value)) return;
@@ -136,7 +140,18 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
         openRequest = (targetPage, ownedParameters);
         var retirement = CloseSessionAsync();
         long generation = ++ownerGeneration;
-        return Track(OpenCoreAsync(targetPage, ownedParameters, token, retirement, generation, reconnect: false));
+        return Track(PrepareAsync(targetPage, ownedParameters, token, retirement, generation, reconnect: false));
+    }
+
+    private async Task PrepareAsync(FilmPlaybackPage targetPage, JsonElement parameters, CancellationToken token,
+        Task retirement, long generation, bool reconnect)
+    {
+        using var preparation = CancellationTokenSource.CreateLinkedTokenSource(token);
+        opening = preparation;
+        try { await OpenCoreAsync(targetPage, parameters, preparation.Token, retirement, generation, reconnect); }
+        catch (OperationCanceledException) when (preparation.IsCancellationRequested &&
+            !token.IsCancellationRequested && generation != ownerGeneration) { }
+        finally { if (ReferenceEquals(opening, preparation)) opening = null; }
     }
 
     private async Task OpenCoreAsync(FilmPlaybackPage targetPage, JsonElement openParameters, CancellationToken token,
@@ -250,10 +265,15 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
         {
             if (openRequest is not { } request || closed) throw new FilmPlaybackException("STALE_SESSION");
             request = (request.Page, FilmPlaybackOpen.RememberResults(request.Parameters, snapshot));
+            var restore = JsonNode.Parse(request.Parameters.GetRawText())!.AsObject();
+            restore["restoreOnly"] = true;
+            if (request.Page.CaptureRequest.Browsing is { } browsing)
+                restore["browsing"] = JsonNode.Parse(browsing.GetRawText());
+            request = (request.Page, JsonSerializer.SerializeToElement(restore, FilmJson.Options));
             openRequest = request;
             var retirement = CloseSessionAsync();
             long reopeningGeneration = ++ownerGeneration;
-            await Track(OpenCoreAsync(request.Page, request.Parameters, CancellationToken.None, retirement, reopeningGeneration,
+            await Track(PrepareAsync(request.Page, request.Parameters, CancellationToken.None, retirement, reopeningGeneration,
                 reconnect: true));
             return;
         }
@@ -265,7 +285,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
         if (oldObserving is not null) await oldObserving;
         var latest = new FilmPlaybackSnapshot(await client.CallAsync("session.snapshot", new { sessionId = state.SessionId.ToString() }));
         if (generation != ownerGeneration || closing is not null) throw new FilmPlaybackException("STALE_SESSION");
-        Apply(latest);
+        Apply(latest, scheduleMedia: false);
         if (current is { Started: false, Retiring: false, TerminalReported: false } input && HasOutput &&
             latest.AttemptId == input.Receipt.AttemptId && !FilmJson.Bool(latest.Attempt, "prepareOnly"))
         {
@@ -285,7 +305,6 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
         async Task ResumeCoreAsync()
         {
             if (observing is not { IsCompleted: false }) await ReconnectAsync();
-            await CommandAsync("browse.refresh", new { refresh = false });
         }
     }
 
@@ -800,7 +819,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     {
         if (current is not { } input) return;
         if (media.Scope is { } scope && scope.Identity == input.Receipt.AttemptId) input.NativeScope = scope;
-        if (args.PropertyName is "OwnerId" or "Identity" or "ObservedVideoOutput" or "HasMedia")
+        if (args.PropertyName is "Scope" or "Identity" or "HasOutput")
         {
             // Native publication changes several properties before its atomic
             // committed callback. Recheck this captured input after that turn,
@@ -928,6 +947,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
         closing = completion.Task;
         ownerGeneration++; intentGeneration++;
         searchUpdate = null; searchScope = []; searchSelection = null;
+        opening?.Cancel();
         pendingPublication?.Cancel();
         NotifyMedia();
         _ = FinishAsync();
@@ -970,7 +990,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
                     }
                     pending = null; current = null; processingId = ""; revokedPublicationId = ""; continuingFrom = "";
                     snapshot = null; rpc = null; connection = null; retainedWindow = null; presenting = false;
-                    page?.ReleaseDirectories();
+                    page?.ExecutionEnded();
                     rate = 1; aspect = null;
                     runtimeRevoke.Dispose();
                     pendingPublication = null;

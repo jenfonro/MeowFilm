@@ -49,24 +49,28 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
     internal void PostNotice(string text) => notice.Post(text);
     private void BuildLayout()
     {
-        var layout = new DockPanel { Margin = new(32, 20, 24, 20) };
-        var header = new DockPanel { Margin = new(0, 0, 0, 12) };
-        var appearance = NovelUi.Button("阅读排版", () => Run(EditAppearanceAsync)); appearance.Margin = new(0);
+        var layout = new Grid(); layout.SetResourceReference(StyleProperty, "MeowFilm.SettingsPage");
+        var navigationRow = new RowDefinition(); navigationRow.SetResourceReference(StyleProperty, "MeowFilm.SettingsNavigationRow");
+        layout.RowDefinitions.Add(navigationRow); layout.RowDefinitions.Add(new());
+        var header = new DockPanel();
+        var bar = new Border { Child = header }; bar.SetResourceReference(StyleProperty, "MeowFilm.SettingsNavigationBar");
+        var appearance = NovelUi.Button("阅读排版", () => Run(EditAppearanceAsync)); appearance.Margin = new(0); appearance.Height = appearance.MinHeight = 32; appearance.Padding = new(12, 0, 12, 0);
         DockPanel.SetDock(appearance, Dock.Right); header.Children.Add(appearance);
         var navigation = new StackPanel { Orientation = Orientation.Horizontal };
         foreach (var (id, title) in new[] { ("sources", "书源管理"), ("rules", "替换净化") })
         {
-            var area = new RadioButton { Content = title, GroupName = "novel-settings-area", IsChecked = tab == id, Margin = new(0, 0, 28, 0) };
+            var area = new RadioButton { Content = title, GroupName = "novel-settings-area", IsChecked = tab == id };
             area.SetResourceReference(StyleProperty, "MeowFilm.SettingsArea"); AutomationProperties.SetName(area, title);
             area.Checked += (_, _) => { if (tab == id) return; tab = id; BuildLayout(); Refresh(); };
             navigation.Children.Add(area);
         }
         header.Children.Add(navigation);
-        DockPanel.SetDock(header, Dock.Top); layout.Children.Add(header);
+        layout.Children.Add(bar);
         // A manager belongs to one tree at a time, including when switching tabs.
         if (sourceList.Parent is Panel sourceParent) sourceParent.Children.Remove(sourceList);
         if (ruleList.Parent is Panel ruleParent) ruleParent.Children.Remove(ruleList);
-        layout.Children.Add(tab == "sources" ? sourceList : ruleList); body.Content = layout;
+        var manager = tab == "sources" ? sourceList : ruleList; Grid.SetRow(manager, 1); manager.Margin = new(0, 8, 12, 0);
+        layout.Children.Add(manager); body.Content = layout;
     }
     public void Refresh() { if (disposed) return; RefreshSources(); RefreshRules(); }
     private IReadOnlyList<NovelSource> VisibleSources()

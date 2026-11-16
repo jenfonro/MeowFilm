@@ -53,15 +53,19 @@ final class DoubanFilmSourceTests: XCTestCase {
         }
     }
 
-    func testParsingUsesUpstreamIdentityPosterFallbacksAndNormalizedScores() throws {
+    func testParsingKeepsRuntimeBusinessIdentityPosterFallbacksAndNormalizedScores() throws {
         let payload = Data(#"""
         {"items":[
-          {"id":100,"title":" 第一部 ","pic":{"normal":"http://img1.doubanio.com/a.jpg",
+          {"businessId":"bad-first","playbackTarget":null,"id":100,"title":"坏目标先项"},
+          {"businessId":"fixture-100","playbackTarget":{"id":"fixture-100","kind":"movie","title":"第一部","metadataProvider":"douban","metadataId":"100"},"id":100,"title":" 第一部 ","pic":{"normal":"http://img1.doubanio.com/a.jpg",
             "large":"https://img2.doubanio.com/a-large.jpg"},"rating":{"value":8.6},"card_subtitle":"真实副标题"},
           {"id":"blank","title":"   "},
-          {"id":"300","title":"第二部","pic":{"large":"https://img2.doubanio.com/large.jpg"},"rating":{"value":0}},
-          {"id":400,"title":"第三部","cover":{"url":"//img3.doubanio.com/cover.jpg"},"rating":{"value":"9.0"}},
-          {"id":"500","title":"第四部","cover_url":"https://user@artwork.invalid/private.jpg","rating":{"value":"NaN"}},
+          {"businessId":false,"playbackTarget":{"id":"bad-200","kind":"movie","title":"坏身份"},"id":200,"title":"坏身份"},
+          {"businessId":"bad-250","playbackTarget":{"id":"bad-250","kind":"future","title":"坏类型"},"id":250,"title":"坏类型"},
+          {"id":"missing-target","title":"缺少新的身份材料"},
+          {"businessId":"fixture-300","playbackTarget":{"id":"fixture-300","kind":"movie","title":"第二部","metadataProvider":"douban","metadataId":"300"},"id":"300","title":"第二部","pic":{"large":"https://img2.doubanio.com/large.jpg"},"rating":{"value":0}},
+          {"businessId":"fixture-400","playbackTarget":{"id":"fixture-400","kind":"movie","title":"第三部","metadataProvider":"douban","metadataId":"400"},"id":400,"title":"第三部","cover":{"url":"//img3.doubanio.com/cover.jpg"},"rating":{"value":"9.0"}},
+          {"businessId":"fixture-500","playbackTarget":{"id":"fixture-500","kind":"movie","title":"第四部","metadataProvider":"douban","metadataId":"500"},"id":"500","title":"第四部","cover_url":"https://user@artwork.invalid/private.jpg","rating":{"value":"NaN"}},
           {"id":true,"title":"布尔值不是影片 ID"},
           {"title":"缺少稳定身份"},
           {"id":100,"title":"重复影片"},
@@ -72,6 +76,8 @@ final class DoubanFilmSourceTests: XCTestCase {
         XCTAssertEqual(items.map(\.id), ["100", "300", "400", "500"])
         XCTAssertEqual(items.map(\.sourceID), ["douban", "douban", "douban", "douban"])
         XCTAssertEqual(items[0].title, "第一部")
+        XCTAssertEqual(items[0].businessID, "fixture-100")
+        XCTAssertEqual(items[0].playbackTarget?.id, "fixture-100")
         XCTAssertEqual(items[0].posterURL?.absoluteString, "https://img.doubanio.cmliussss.net/a.jpg")
         XCTAssertEqual(items[0].largePosterURL?.absoluteString, "https://img.doubanio.cmliussss.net/a-large.jpg",
                        "Cards keep pic.normal while details receive the normalized pic.large")
@@ -114,7 +120,10 @@ final class DoubanFilmSourceTests: XCTestCase {
         XCTAssertEqual(try DoubanFilmSource.parse(Data(#"{"items":[]}"#.utf8)), [])
         for payload in ["[]", "{}", #"{"items":null}"#, #"{"items":{}}"#, "invalid JSON",
                         #"{"items":[{}]}"#, #"{"items":[{"title":"缺少身份"},{"id":"missing-title"}]}"#,
-                        #"{"items":[{"id":"1","title":"  "},null,{"id":true,"title":"错误身份"}]}"#] {
+                        #"{"items":[{"id":"1","title":"  "},null,{"id":true,"title":"错误身份"}]}"#,
+                        #"{"items":[{"id":"1","title":"缺少新身份"}]}"#,
+                        #"{"items":[{"id":"1","title":"坏身份","businessId":null,"playbackTarget":{"id":"1","kind":"movie","title":"坏身份"}}]}"#,
+                        #"{"items":[{"id":"1","title":"坏目标","businessId":"1","playbackTarget":{"id":"1","kind":"future","title":"坏目标"}}]}"#] {
             XCTAssertThrowsError(try DoubanFilmSource.parse(Data(payload.utf8))) {
                 XCTAssertEqual($0 as? FilmHomeError, .invalidResponse)
             }
@@ -131,6 +140,8 @@ final class DoubanFilmSourceTests: XCTestCase {
             [RuntimeValue.object([:])],
             [.object(["title": .string("缺少身份")]), .object(["id": .string("blank"), "title": .string(" ")])],
             Array(repeating: .object([:]), count: 24),
+            [.object(["id": .number(0), "title": .string("坏业务身份"), "businessId": .null])],
+            Array(repeating: .object(["id": .number(0), "title": .string("坏目标"), "playbackTarget": .object([:])]), count: 24),
         ] {
             fixture.setResponse(Self.entry(items: rows))
             do {
@@ -142,6 +153,32 @@ final class DoubanFilmSourceTests: XCTestCase {
                 XCTFail("An unusable nonempty page cannot advance or end pagination")
             } catch { XCTAssertEqual(error as? FilmHomeError, .invalidResponse) }
         }
+    }
+
+    func testNewIdentityFailuresStayLocalAndHealthyDuplicatesKeepRawOffsetsAndTargets() async throws {
+        let first: RuntimeValue = .object(["id": .number(0), "title": .string("健康前项")])
+        let lastTarget = FilmPlaybackTarget(id: "opaque-tv", kind: .tv, title: "健康后项",
+            metadataProvider: .douban, metadataID: "1")
+        let last: RuntimeValue = .object(["id": .number(1), "title": .string("健康后项"),
+            "businessId": .string("opaque-tv"), "playbackTarget": .object(lastTarget.value)])
+        let badFirst: RuntimeValue = .object(["id": .number(0), "title": .string("坏身份先项"), "businessId": .bool(false)])
+        let badLast: RuntimeValue = .object(["id": .number(1), "title": .string("坏目标先项"), "playbackTarget": .object([:])])
+        let rows = [badFirst, first] + Array(repeating: badLast, count: 21) + [last]
+        let fixture = FilmMetadataHTTPFixture(response: { _ in Self.entry(items: rows) })
+        defer { fixture.close() }
+        let client = try fixture.connection()
+        addTeardownBlock { await client.close() }
+        let source = DoubanFilmSource { client }
+        let page = try await source.loadCategory(.movie, filters: [:], offset: 24)
+        XCTAssertEqual(page.items.map(\.id), ["0", "1"])
+        XCTAssertEqual(page.items.map(\.businessID), ["fixture-0", "opaque-tv"])
+        XCTAssertEqual(page.items.map(\.kind), [.movie, .tv])
+        XCTAssertEqual(page.items.last?.playbackTarget, lastTarget)
+        XCTAssertEqual(page.nextOffset, 48)
+        XCTAssertEqual(fixture.inputs.first?["query"]?.filmObject?["start"], .number(24))
+        let home = try await source.loadHome()
+        XCTAssertEqual(home.map { $0.items.map(\.id) }, Array(repeating: ["0", "1"], count: 4))
+        XCTAssertTrue(home.allSatisfy { $0.items.last?.playbackTarget == lastTarget })
     }
 
     @MainActor
@@ -156,11 +193,14 @@ final class DoubanFilmSourceTests: XCTestCase {
         let initial = try XCTUnwrap(model.loadIfNeeded()); await initial.value
         let original = model.sections
         XCTAssertEqual(original.map { $0.items.map(\.id) }, Array(repeating: ["0"], count: 4))
-        fixture.setResponse(Self.entry(items: [.object([:])]))
-        let failed = try XCTUnwrap(model.refresh()); await failed.value
-        XCTAssertEqual(model.error, .invalidResponse)
-        XCTAssertEqual(model.sections, original)
-        XCTAssertFalse(model.isLoading)
+        for rows in [[RuntimeValue.object([:])],
+                     [.object(["id": .number(0), "title": .string("坏目标"), "playbackTarget": .null])]] {
+            fixture.setResponse(Self.entry(items: rows))
+            let failed = try XCTUnwrap(model.refresh()); await failed.value
+            XCTAssertEqual(model.error, .invalidResponse)
+            XCTAssertEqual(model.sections, original)
+            XCTAssertFalse(model.isLoading)
+        }
         let last: RuntimeValue = .object(["id": .string("last"), "title": .string("新内容")])
         fixture.setResponse(Self.entry(items: [first, .null, last]))
         let recovered = try XCTUnwrap(model.refresh()); await recovered.value
@@ -338,6 +378,17 @@ final class DoubanFilmSourceTests: XCTestCase {
     }
 
     private static func entry(items: [RuntimeValue], status: String = "fresh", error: String? = nil) -> RuntimeValue {
+        let items = items.map { value -> RuntimeValue in
+            guard var row = value.filmObject, let id = row["id"]?.filmScalar, !id.isEmpty,
+                  let title = row["title"]?.filmText, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return value
+            }
+            let target: RuntimeObject = ["id": .string("fixture-" + id), "kind": .string("movie"),
+                "title": .string(title), "metadataProvider": .string("douban"), "metadataId": .string(id)]
+            row["businessId"] = row["businessId"] ?? target["id"]
+            row["playbackTarget"] = row["playbackTarget"] ?? .object(target)
+            return .object(row)
+        }
         var cache: RuntimeObject = ["status": .string(status),
             "components": .object(["items": .object(["state": .string("ready")])])]
         cache["error"] = error.map { .object(["code": .string($0)]) }

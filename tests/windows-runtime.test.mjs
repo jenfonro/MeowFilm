@@ -412,6 +412,14 @@ for (const packaged of [false, true]) {
       assert.equal(manifest.transport, 'windows-http-v1');
       assert.equal(manifest.trustedNative[0].platform, 'win32');
       assert.equal(manifest.trustedNative[0].arch, process.arch);
+      const source = 'apps/windows/runtime/native-settings.mjs', path = 'app/windows/native-settings.mjs';
+      const bytes = readFileSync(join(root, source));
+      assert.deepEqual(readFileSync(join(payload, path)), bytes);
+      assert.deepEqual(manifest.inputs.filter(input => input.path === source), [{ path: source, sha256: sha256(bytes) }]);
+      assert.deepEqual(manifest.files.filter(file => file.path === path),
+        [{ path, bytes: bytes.length, sha256: sha256(bytes) }]);
+      assert.ok(manifest.relocations.find(item => item.path === 'app/windows/bootstrap.mjs').imports
+        .some(item => item.from === './native-settings.mjs' && item.to === './native-settings.mjs'));
       entry = join(payload, manifest.entry);
     }
     await bounded(runProduct(t, entry, payload, join(area, 'data'), manifest), windows.timeout);

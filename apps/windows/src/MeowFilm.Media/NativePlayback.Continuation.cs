@@ -2,29 +2,6 @@ using System.Windows.Threading;
 
 namespace MeowFilm.Media;
 
-/// <summary>Optional port. Resolution and retry policy belong to the caller, never the media engine.</summary>
-public interface INativePlaybackContinuation
-{
-    bool PauseRequested { get; }
-    string? LastErrorCode { get; }
-    NativePlaybackContinuation? CaptureContinuation();
-    Task ReopenAsync(NativePlaybackContinuation continuation, Uri uri,
-        IReadOnlyDictionary<string, string> headers, CancellationToken token = default);
-    Task ReopenReadAsync(NativePlaybackContinuation continuation, INativeMediaReadLease lease, CancellationToken token = default);
-}
-
-/// <summary>A single-use, in-memory capability; stop, replacement and authorization cancellation revoke it.</summary>
-public sealed class NativePlaybackContinuation
-{
-    internal NativePlaybackContinuation(NativePlaybackScope scope, double position, CancellationToken revoked)
-    { Scope = scope; PositionSeconds = position; Revoked = revoked; }
-    public NativePlaybackScope Scope { get; }
-    public double PositionSeconds { get; }
-    public CancellationToken Revoked { get; }
-    public NativePlaybackScope? ReopenedScope { get; internal set; }
-    internal bool Used;
-}
-
 public sealed partial class NativePlayback : INativePlaybackContinuation
 {
     private CancellationTokenSource? _continuationAuthority;
@@ -150,10 +127,16 @@ public sealed partial class NativePlayback : INativePlaybackContinuation
             if (!IsCurrent(session)) throw new OperationCanceledException();
             // Read intent only after preparation/seek; a Pause delivered during resolution wins.
             // No player is started audibly then paused as a substitute for paused startup.
-            if (!_pauseRequested) await Task.Run(() =>
+            if (!_pauseRequested)
             {
-                if (IsCurrent(session) && !_pauseRequested) session.Player.SetPause(false);
-            });
+                using var output = await AcquireOutputAsync(session.OutputLifetime.Token);
+                if (!IsCurrent(session)) throw new OperationCanceledException();
+                if (!_pauseRequested) await Task.Run(() =>
+                {
+                    if (IsCurrent(session) && !_pauseRequested) session.Player.SetPause(false);
+                });
+            }
+            if (!IsCurrent(session)) throw new OperationCanceledException();
             session.ContinuationReady = null;
             _continuation = null;
             PropertyChanged?.Invoke(this, new(nameof(ContinuationPending)));

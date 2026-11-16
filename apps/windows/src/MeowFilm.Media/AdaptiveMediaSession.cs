@@ -82,7 +82,7 @@ internal sealed class AdaptiveMediaSession : IAsyncDisposable
         {
             await session.DisposeAsync().ConfigureAwait(false);
             if (token.IsCancellationRequested) throw new OperationCanceledException(token);
-            throw new PlaybackException(HttpMediaInput.Classify(error));
+            throw new PlaybackException(NativeHttpMediaPolicy.Classify(error));
         }
         finally { Array.Clear(root); }
     }
@@ -93,7 +93,7 @@ internal sealed class AdaptiveMediaSession : IAsyncDisposable
     private void Fail(Exception error)
     {
         if (_lifetime.IsCancellationRequested) return;
-        string code = HttpMediaInput.Classify(error);
+        string code = NativeHttpMediaPolicy.Classify(error);
         if (Interlocked.CompareExchange(ref _error, code, null) is not null) return;
         Cancel();
         Failed?.Invoke(code); // Posts to dispatcher; never runs native Stop on a service thread.

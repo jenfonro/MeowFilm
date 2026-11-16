@@ -242,6 +242,12 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         _ = try await request(method: "POST", path: "/v1/close", body: Data("{}".utf8))
     }
 
+    public func settingsChanged(_ block: String) async throws {
+        let body = try RuntimeJSON.encode(.object(["block": .string(block)]))
+        let value = try await request(method: "POST", path: "/v1/settings/changed", body: body)
+        guard value == .object(["notified": .bool(true)]) else { throw RuntimeHTTPError.invalidResponse }
+    }
+
     public func close() async {
         invalidate()
         await state.acceptedRulesClient?.close()

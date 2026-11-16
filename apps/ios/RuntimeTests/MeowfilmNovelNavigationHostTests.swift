@@ -3,6 +3,7 @@ import UIKit
 import MeowUI
 import MeowMusicFeature
 import MeowRuntime
+@testable import MeowPlayback
 @testable import MeowNovelFeature
 @testable import Meowfilm
 
@@ -46,20 +47,20 @@ final class MeowfilmNovelNavigationHostTests: XCTestCase {
         try await wait { root.navigation.topViewController is NovelDetailViewController }; try await settle(root)
         let detail = try XCTUnwrap(root.navigation.topViewController as? NovelDetailViewController)
         XCTAssertFalse(root.dock?.isHidden == true)
-        let currentItem = assembly.playback.player.currentItem
+        let currentItem = assembly.playback.activeAudioMedia
         let read = try XCTUnwrap(views(detail.view).first { $0.accessibilityIdentifier == "novel.detail.read" } as? UIButton)
         read.sendActions(for: .touchUpInside)
         try await wait { root.navigation.topViewController is NovelReaderViewController }; try await settle(root)
         let reader = try XCTUnwrap(root.navigation.topViewController as? NovelReaderViewController)
         try await wait { reader.session.content != nil && !reader.session.loading }
         XCTAssertTrue(root.dock?.isHidden == true)
-        XCTAssertTrue(assembly.playback.player.currentItem === currentItem)
+        XCTAssertTrue(assembly.playback.activeAudioMedia === currentItem)
         root.view.layoutIfNeeded(); XCTAssertEqual(root.navigation.additionalSafeAreaInsets.bottom, 0, accuracy: 1)
         let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) })
         attachment.name = "novel-real-app-reader-hidden-dock"; attachment.lifetime = .keepAlways; add(attachment)
         root.navigation.popViewController(animated: false); try await wait { root.navigation.topViewController === detail }; try await settle(root)
         XCTAssertFalse(root.dock?.isHidden == true)
-        XCTAssertTrue(assembly.playback.player.currentItem === currentItem)
+        XCTAssertTrue(assembly.playback.activeAudioMedia === currentItem)
         root.navigation.popViewController(animated: false); try await wait { root.navigation.topViewController === main }; try await settle(root)
         coordinator.showSettings(); try await wait { root.navigation.topViewController is MeowfilmSettingsViewController }; try await settle(root)
         let settings = try XCTUnwrap(root.navigation.topViewController as? MeowfilmSettingsViewController)

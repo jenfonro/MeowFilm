@@ -21,7 +21,10 @@
 | `GET /v1/describe` | 无 body | `{protocol:"runtime.http.v1",product:"aggregate",modules:[{id,version,contract,methods}]}` |
 | `PUT /v1/{music\|cat\|source}/sources/{installationId}/{sourceRevision}?basename=...` | `application/octet-stream` 原始源码；Cat 无 basename | `{installationId,sourceRevision,sourceBytes,contentHash}` |
 | `POST /v1/{module}/{operation}` | `application/json`，body 即业务参数 | 业务值；`sources.list`、`management.describe` 等是字面 operation 段 |
+| `POST /v1/settings/changed` | `{block}`，仅显式注入 `settingsChanged` 的装配提供 | `{notified:true}`；重读已保存配置，不提交设置值 |
 | `POST /v1/close` | `{}` | 停止全部模块、取消其他交换并等待实际排空，成功值为 `{closed:true,cleanupComplete:true}` |
+
+设置通知不传设置值或凭据，不授予 HTTP 客户端原生读写能力，也不声明异步装载完成。现行消费者为 [Windows 原生设置适配](../windows/native-settings.md#私密配置能力)与 [iOS 原生设置适配](../ios/runtime-preflight.md#原生设置私密通道)；通用默认入口未装配此通知路由，模块版本与 describe 方法清单不因此改变。
 
 成功统一 `{ok:true,contract,value}`，失败统一 `{ok:false,contract,code}`。value 是直接对象、数组、标量或 null，不是另一份序列化 JSON。通用默认三模块为 `music@0.8.0/music.script.v3`、`cat@0.2.0/cat.script.v2`、`source@0.3.0/source.runtime.v2`。iOS／Windows 正式 App 按此前三项、`pan@0.1.0/pan.runtime.v1`、`tmdb@0.1.0/tmdb.data.v1`、`douban@0.1.0/douban.data.v1`、`film@0.1.0/film.playback.v1`、`netease@0.1.0/netease.token.v1`、`music-platform@0.1.0/music.platform.v1` 的顺序精确装配九模块；元数据见[元数据契约](metadata-data.md)，影视会话与媒体见[影视播放契约](film-playback.md)，实时 token 见[网易订阅 token](netease-token.md)，共同音乐配方见[音乐平台](music-platform.md)。
 
@@ -32,6 +35,16 @@
 普通 JSON 没有总字节上限或大小分流；不增加正文摘要、压缩、加解密或预解析加工。请求与响应严格 UTF-8，业务 JSON 深度最多 64，支持不同码点序列的 Unicode 键并原样保留；重复解码键、孤立 surrogate、非有限数、不安全整数、循环、BigInt、getter 及其他非 JSON 值拒绝。信封本身不挤占业务值的 64 层深度。源码保持 1 至 16 MiB 的输入契约及各协议 BOM 行为；config/metadata 的独立格式边界不等于普通正文配额。
 
 旧长度帧、stage/control/blob、Base64 传输、随机 token、offset、TTL 和 checksum 协议均已删除，没有兼容回退、续传或旧分块传输的 release 方法。影视的 `session.release`／`session.media.release` 释放业务会话／媒体资源，不是恢复旧传输协议，见[影视播放契约](film-playback.md)。底层 HTTP 分段读写属于标准流传输。媒体代理沿独立入口流式转发，不经控制 JSON 聚合。
+
+## 原生设置注入
+
+普通设置的唯一存储、离线提交与通知语义见[共同契约](../common/settings-storage.md)。`createAppRuntime({settingsChanged})` 可选提供上述通知路由，使用 `runtime.http.v1` 信封；它不增加业务模块、describe 方法或设置值传输接口。正文只允许一个 `block` 字段；具体块名由装配分派，非法或未知块不作为配置保存受理。
+
+`apps/runtime/native-settings.mjs` 为受信启动通道提供设置快照适配：启动时读齐六块，业务模块只读该原生值；后续通知重新读取对应块。元数据、影视规则和偏好的 HTTP 写设置方法在注入模式返回 `PERMISSION_DENIED`，Cat 来源意图也不由 HTTP 安装／编辑接口写入。pan 的在线凭据通过受限私密 CAS 能力写回同一原生 owner，不在公开 HTTP 增加读秘密的接口。各模块的确切读写接口见对应契约。
+
+该能力不由公共 HTTP 授予，不向脚本提供；原生密钥及存储路径不进入公开通知。iOS 使用既有受信 socketpair，帧及生命周期见 [iOS 启动边界](../ios/runtime-preflight.md#原生设置私密通道)。私密帧的 8 MiB 资源边界不改变普通 HTTP JSON 无总字节配额的契约，也不是恢复旧分块协议。
+
+未注入时，通用独立入口保持原有 Node 设置文档和管理接口，不探测原生目录、不隐式迁移，也不静默从原生失败回退到 Node 文件。平台接入情况及验证分别记录，不能由可选公共能力推断全部平台已切换。
 
 ## 原始流响应
 

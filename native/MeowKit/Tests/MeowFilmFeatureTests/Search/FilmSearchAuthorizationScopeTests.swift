@@ -8,33 +8,20 @@ import MeowStorage
 @MainActor
 final class FilmSearchAuthorizationScopeTests: XCTestCase {
     private typealias F = FilmSearchWireFixture
-    func testCurrentGenerationIsPassedToNodeWithoutBlessingOldFacts() async throws {
-        let rpc = FilmSearchRPCFixture(F.snapshot(cards: [F.group([F.row()])]))
+    func testSelectionKeepsOriginalAuthorizationAndDoesNotMintCacheEvidence() async throws {
+        let source = F.site.playbackSource
+        let rpc = FilmSearchRPCFixture(F.snapshot(cards: [F.group([F.row()])], sources: [source]))
         let service = filmSearchService(rpc), session = try service.session(for: "原查询")
         await session.drain()
         let context = session.context(for: try XCTUnwrap(session.snapshot.cards.first))
-        let current = FilmPlaybackSource(key: "current-key", engine: "cat", installationID: "fixture", siteID: "site",
-            generation: 2, name: "新来源")
-        let hints: [RuntimeValue] = [.object(["sourceKey": .string(F.site.key), "items": .array([F.row().catField("raw")!])])]
-        await rpc.setHandoff(F.handoff(sources: [current], hints: hints))
-        let request = try await context.playbackRequest(sources: [current], owner: nil)
-        XCTAssertEqual(request.sources, [current]); XCTAssertEqual(request.resultHints, hints)
-        XCTAssertTrue(request.results.isEmpty); XCTAssertTrue(request.search.isEmpty); XCTAssertTrue(request.cacheEntries.isEmpty)
-        let calls = await rpc.calls
-        XCTAssertEqual(calls.last?.1.filmObject?["sources"], .array([.object(current.value)]))
-        await service.close()
-    }
-
-    func testCrossRuntimeHandoffIsRejectedBeforeRPCAndDoesNotMintCacheEvidence() async throws {
-        let original = try RuntimeHTTPClient(baseURL: URL(string: "http://127.0.0.1:43211")!)
-        let different = try RuntimeHTTPClient(baseURL: URL(string: "http://127.0.0.1:43212")!)
-        defer { Task { await original.close(); await different.close() } }
-        let rpc = FilmSearchRPCFixture(F.snapshot(cards: [F.group([F.row()])]))
-        let service = filmSearchService(rpc, owner: original), session = try service.session(for: "原查询")
-        await session.drain()
-        let context = session.context(for: try XCTUnwrap(session.snapshot.cards.first))
-        do { _ = try await context.playbackRequest(sources: [F.site.playbackSource], owner: different); XCTFail("Different owner") }
-        catch { XCTAssertTrue(error is FilmSearchError) }
+        let next = FilmPlaybackSource(key: "new-key", engine: "cat", installationID: "fixture", siteID: "site",
+                                      generation: 2, name: "新来源")
+        await rpc.awaitObservation()
+        try await rpc.emit(F.snapshot(2, cards: [F.group([F.row()])], sources: [next]))
+        let request = try context.playbackRequest()
+        XCTAssertEqual(request.sources, [source])
+        XCTAssertTrue(request.results.isEmpty); XCTAssertTrue(request.resultHints.isEmpty)
+        XCTAssertTrue(request.search.isEmpty); XCTAssertTrue(request.cacheEntries.isEmpty)
         let calls = await rpc.calls
         XCTAssertEqual(calls.map(\.0), ["search.open"])
         await service.close()
@@ -111,6 +98,8 @@ final class FilmSearchAuthorizationScopeTests: XCTestCase {
         XCTAssertEqual(after.count, before.count, "A revoked consumer cannot schedule new work")
         let current = try service.session(for: "原查询", reusing: context.session)
         XCTAssertFalse(current === old)
+        XCTAssertEqual(current.snapshot.cards, old.snapshot.cards)
+        XCTAssertEqual(current.snapshot.rawCards, old.snapshot.rawCards)
         await current.drain()
         XCTAssertEqual(current.snapshot.sessionID, nextID, "Reentry does not wait for the revoked physical read")
         let calls = await rpc.calls.filter { $0.0 == "search.open" }
@@ -165,7 +154,10 @@ final class FilmSearchAuthorizationScopeTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let store = try DocumentStore(baseURL: directory, namespace: FilmSourceService.documentNamespace)
         await runtime.setCat(SourcesRuntimeFixture.cat("b", state: "disabled", enabled: false))
-        let sources = FilmSourceService(transport: runtime.transport, storeFactory: { store })
+        let sources = FilmSourceService(transport: runtime.transport, storeFactory: { store },
+            settingsDocument: try sourceTestSettings(directory, cats: [
+                SourcesRuntimeFixture.cat("a"), SourcesRuntimeFixture.cat("b", state: "disabled", enabled: false)
+            ]), runtimeSourceRoot: directory.appendingPathComponent("cat"))
         try await sources.refresh()
         return (sources, directory)
     }

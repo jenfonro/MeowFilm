@@ -46,6 +46,7 @@ test('iOS wrapper packages the nine-module App closure and separate pre-sign fra
   assert.ok(manifest.dependencies.some(dependency => dependency.name === '@meowfilm/film-playback'));
   assert.ok(manifest.dependencies.some(dependency => dependency.name === '@meowfilm/music-platform'));
   assert.ok(manifest.files.some(file => file.path === 'app/modules/music-platform.mjs'));
+  assert.ok(manifest.files.some(file => file.path === 'app/native-settings.mjs'));
   assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/music-platform/src/index.mjs'));
   assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/film-rules/film-rules.js'));
   assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/film-rules/playback-rules.js'));
@@ -75,12 +76,16 @@ test('iOS wrapper relocates only the fixed internal descriptor helper onto the p
     .includes(`from '${relocated}'`));
   assert.deepEqual(manifest.relocations.find(file => file.path === path).imports.find(value => value.from === source),
     { from: source, to: relocated });
+  assert.deepEqual(manifest.relocations.find(file => file.path === path).imports.find(value =>
+    value.from === '../../runtime/native-settings.mjs'),
+  { from: '../../runtime/native-settings.mjs', to: '../native-settings.mjs' });
   assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/script-host/src/native-engine.js'));
 });
 
 for (const [name, change, code] of [
   ['an extra platform source', f => f.write('apps/ios/runtime/entries/other.mjs', 'export {};'), 'IOS_CLOSURE'],
   ['a missing platform entry', f => f.remove('apps/ios/runtime/entries/aggregate.mjs'), 'IOS_CLOSURE'],
+  ['a missing private settings capability', f => f.remove('apps/runtime/native-settings.mjs'), 'IOS_CLOSURE'],
   ['a missing music module', f => f.remove('apps/runtime/modules/music-platform.mjs'), 'MISSING_SOURCE'],
   ['a missing music license', f => f.remove('LICENSES/KuGouMusicApi-MIT.txt'), 'MISSING_SOURCE'],
   ['an unexpected entry import', f => f.write('apps/ios/runtime/entries/aggregate.mjs',

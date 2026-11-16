@@ -8,11 +8,14 @@ import { discoverWorkspaces } from '../verify-dependency-lock.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const runtimeTrees = new Map([
-  ['apps/windows/runtime', { files: ['bootstrap.mjs', 'entries/aggregate.mjs'], directories: ['entries'] }],
+  ['apps/windows/runtime', { files: ['bootstrap.mjs', 'native-settings.mjs', 'entries/aggregate.mjs'], directories: ['entries'] }],
 ]);
-// The bootstrap may use only these platform capabilities; workspace subpaths
-// are checked against their package exports above, not this set.
-const windowsImports = new Set(['node:net', 'node:path', '@meowfilm/runtime-bridge']);
+// Each platform file may use only its declared capabilities; workspace subpaths
+// are checked against their package exports above, not these sets.
+const windowsImports = new Map([
+  ['apps/windows/runtime/bootstrap.mjs', new Set(['node:net', 'node:path', '@meowfilm/runtime-bridge'])],
+  ['apps/windows/runtime/native-settings.mjs', new Set(['@meowfilm/runtime-bridge'])],
+]);
 function fail(message) { throw new Error('Windows App structure: ' + message); }
 function samePath(a, b) {
   return process.platform === 'win32'
@@ -67,6 +70,25 @@ export function verifyAppStructure(directory = root) {
       fail('unexpected runtime source: ' + source);
   }
 
+  const protocolPath = 'apps/windows/src/MeowFilm.Core/Runtime/RuntimeHttpProtocol.cs';
+  if (files.includes(protocolPath)) {
+    const methods = text => [...text.matchAll(/["']([^"']+)["']/g)].map(([, method]) => method).sort();
+    const native = new Map([...readFileSync(join(directory, protocolPath), 'utf8').matchAll(
+      /\["([^"]+)"\]\s*=\s*new\("([^"]+)",\s*"([^"]+)",\s*"([^"]+)",\s*\[([^\]]*)\]/g,
+    )].map(([, id, version, contract, prefix, operations]) =>
+      [id, { version, contract, prefix, methods: methods(operations) }]));
+    const shared = new Map([...readFileSync(join(directory, 'apps/runtime/contracts.mjs'), 'utf8').matchAll(
+      /(?:'([^']+)'|([a-z][a-z-]*)):\s*\{\s*contract:\s*'([^']+)',\s*version:\s*'([^']+)',\s*prefix:\s*'([^']+)',\s*(?:upload:\s*true,\s*)?operations:\s*\[([^\]]*)\]/g,
+    )].map(([, quotedId, id, contract, version, prefix, operations]) =>
+      [quotedId ?? id, { version, contract, prefix, methods: methods(operations) }]));
+    if (!native.size || native.size !== shared.size ||
+        [...native.keys()].sort().join() !== [...shared.keys()].sort().join())
+      fail('runtime contract modules differ');
+    for (const [id, contract] of shared)
+      if (JSON.stringify(native.get(id)) !== JSON.stringify(contract))
+        fail('runtime contract mismatch: ' + id);
+  }
+
   let imports = 0, resources = 0;
   const embeddedResources = [];
   function sourceTarget(owner, specifier) {
@@ -118,7 +140,7 @@ export function verifyAppStructure(directory = root) {
             !SHARED_RUNTIME_BUILTINS.has(specifier) && !publicPackageImport(directory, packages, specifier, { kind }))
           fail('shared runtime platform import: ' + file + ' -> ' + specifier);
         if (file.startsWith('apps/windows/runtime/') &&
-            (file !== 'apps/windows/runtime/bootstrap.mjs' || !windowsImports.has(specifier)))
+            !windowsImports.get(file)?.has(specifier))
           fail('Windows runtime bypasses shared module: ' + file + ' -> ' + specifier);
       }
     }

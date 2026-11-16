@@ -66,7 +66,7 @@ final class PlaybackNowPlayingMetadataTests: XCTestCase {
             XCTAssertEqual(playback.nowPlayingMetadata?.title, "line")
             XCTAssertTrue(playback.clearNowPlayingMetadata(attempt: first))
             XCTAssertNil(playback.nowPlayingMetadata)
-            XCTAssertEqual(playback.player.rate, 0)
+            XCTAssertEqual(playback.actualRate, 0)
             XCTAssertEqual(playback.preferredRate, 1.5)
             XCTAssertEqual(playback.volume, 0.4)
             let next = playback.playAttempt(resource: resource, owner: "domain-b", autoplay: false)

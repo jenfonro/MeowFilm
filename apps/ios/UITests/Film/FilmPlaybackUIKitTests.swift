@@ -43,12 +43,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             XCTAssertNil(source.menu, "Loading is a control state, not a synthetic source")
 
             await model.open()?.value
-            let initialSequence = try XCTUnwrap(model.snapshot).sequence
             let window = try mount(page)
             try await visible(page)
-            try await waitFor("Appearance completes the ordinary browse refresh") {
-                model.snapshot.map { $0.sequence > initialSequence } == true
-            }
             await model.waitForPendingWork()
             await server.awaitObservation()
             await settle()
@@ -70,8 +66,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             XCTAssertEqual(selected.state, .on)
             XCTAssertTrue(media.inputs.isEmpty)
             let calls = await server.calls()
-            XCTAssertEqual(calls.map(\.operation), ["session.open", "session.command"])
-            XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh"])
+            XCTAssertEqual(calls.map(\.operation), ["session.open"])
+            XCTAssertEqual(calls.compactMap(\.action), [])
             unmount(page, window)
             await model.close()
         }
@@ -82,13 +78,9 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let server = FilmUIKitPlaybackServer(ready), media = FilmUIKitPlaybackMedia()
         let model = makeModel(server, media)
         await model.open()?.value
-        let initialSequence = try XCTUnwrap(model.snapshot).sequence
         let page = try detailPage(model), window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor("Appearance completes the ordinary browse refresh") {
-            model.snapshot.map { $0.sequence > initialSequence } == true
-        }
         await model.waitForPendingWork()
         let source = try button("film.detail.source", page.view)
         XCTAssertTrue(source.isEnabled)
@@ -110,7 +102,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(try menuAction("TMDB · 星海航线", source.menu).state, .off)
         XCTAssertEqual(source.accessibilityValue, "测试站 · 失败站点")
         let calls = await server.calls()
-        XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh", "browse"])
+        XCTAssertEqual(calls.compactMap(\.action), ["browse"])
         XCTAssertEqual(calls.last?.input.filmObject?["sourceId"], .string("result-b"))
         XCTAssertTrue(media.inputs.isEmpty, "Selecting a source is browsing, not media transport")
     }
@@ -120,23 +112,17 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let model = makeModel(server, media)
         await model.open()?.value
         await server.awaitObservation()
-        let initialSequence = try XCTUnwrap(model.snapshot).sequence
         let page = try detailPage(model)
         let window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor("Appearance completes the ordinary browse refresh") {
-            model.snapshot.map { $0.sequence > initialSequence } == true
-        }
         await model.waitForPendingWork()
         let source = try button("film.detail.source", page.view)
         XCTAssertEqual(source.menu?.children.compactMap { ($0 as? UIAction)?.title }, [
             "TMDB · 星海航线", "测试站 · 星海航线", "测试站 · 失败站点", "加载更多来源",
         ])
         let before = await server.calls()
-        XCTAssertEqual(before.map(\.operation), ["session.open", "session.command"])
-        XCTAssertEqual(before.last?.action, "browse.refresh")
-        XCTAssertEqual(before.last?.input.filmObject?["refresh"], .bool(false))
+        XCTAssertEqual(before.map(\.operation), ["session.open"])
         source.sendActions(for: .touchUpInside)
         let opened = await server.calls()
         XCTAssertEqual(opened.count, before.count, "Opening the menu must not start another source search")
@@ -177,9 +163,9 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         invoke(try menuAction("TMDB · 星海航线", mapping))
         await model.waitForPendingWork()
         let commands = await server.calls().filter { $0.operation == "session.command" }
-        XCTAssertEqual(commands.map(\.action), ["browse.refresh", "browse.metadata", "browse.metadata"])
-        XCTAssertNil(commands[1].input.filmObject?["keepSource"])
-        XCTAssertEqual(commands[2].input.filmObject?["keepSource"], .bool(true))
+        XCTAssertEqual(commands.map(\.action), ["browse.metadata", "browse.metadata"])
+        XCTAssertNil(commands[0].input.filmObject?["keepSource"])
+        XCTAssertEqual(commands[1].input.filmObject?["keepSource"], .bool(true))
         XCTAssertTrue(media.inputs.isEmpty)
     }
 
@@ -190,13 +176,9 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let server = FilmUIKitPlaybackServer(ready), media = FilmUIKitPlaybackMedia()
         let model = makeModel(server, media)
         await model.open()?.value
-        let initialSequence = try XCTUnwrap(model.snapshot).sequence
         let page = try detailPage(model), window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor("Appearance completes the ordinary browse refresh") {
-            model.snapshot.map { $0.sequence > initialSequence } == true
-        }
         await model.waitForPendingWork()
         XCTAssertNotNil(view("film.file.file-first", page.view))
         var failedBrowsing = try FilmUIKitPlaybackFixture.browsing(sourceID: "result-b",
@@ -226,11 +208,11 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertNotNil(view("film.file.file-first", page.view))
         XCTAssertTrue(try button("film.detail.play", page.view).isEnabled)
         let calls = await server.calls()
-        XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh", "browse", "browse"])
+        XCTAssertEqual(calls.compactMap(\.action), ["browse", "browse"])
         XCTAssertTrue(media.inputs.isEmpty)
     }
 
-    func testRefreshingBrowseKeepsMetadataEpisodesAndSourceFilesPlayableButColdLoadingDoesNot() async throws {
+    func testLoadingKeepsTheSameEpisodeViewsAndSeparatesDisplayFromExecution() async throws {
         for sourceID in [String?.none, "result-a"] {
             let file = FilmUIKitPlaybackFixture.file("first", name: "旧成功文件")
             var browsing = try FilmUIKitPlaybackFixture.browsing(sourceID: sourceID,
@@ -253,10 +235,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             fields["sequence"] = .number(Double(old.sequence) + 1)
             try await server.publish(.object(fields))
             await settle()
-            try await waitFor {
-                let row = self.view(rowID, page.view)
-                return row != nil && row !== oldRow
-            }
+            XCTAssertTrue(view(rowID, page.view) === oldRow)
             let row = try button(rowID, page.view)
             XCTAssertTrue(row.isEnabled)
             XCTAssertTrue(try XCTUnwrap(view("film.detail.episodes-state", page.view)).isHidden)
@@ -274,16 +253,17 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             browsing["refreshing"] = nil
             fields["browsing"] = .object(browsing)
             try await server.publish(.object(fields))
-            try await waitFor { self.view(rowID, page.view) == nil }
+            try await waitFor { !oldRow.isEnabled }
+            XCTAssertTrue(view(rowID, page.view) === oldRow)
             XCTAssertFalse(try button("film.detail.play", page.view).isEnabled)
-            XCTAssertEqual((view("film.detail.episodes-state", page.view) as? UILabel)?.text, "加载中")
+            XCTAssertTrue(try XCTUnwrap(view("film.detail.episodes-state", page.view)).isHidden)
             XCTAssertTrue(media.inputs.isEmpty)
             unmount(page, window)
             await model.close()
         }
     }
 
-    func testRefreshSessionFailureKeepsRowsWhileBrowsingFailureStillHidesThem() async throws {
+    func testFailureKeepsLoadedRowsAndBrowsingFailureRevokesPlayback() async throws {
         let file = FilmUIKitPlaybackFixture.file("first", name: "旧成功文件")
         var browsing = try FilmUIKitPlaybackFixture.browsing(sourceID: "result-a",
             files: [file], original: [file]).filmRequiredObject()
@@ -297,6 +277,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await visible(page)
         await model.waitForPendingWork()
         await server.awaitObservation()
+        let loadedRow = try button("film.file.file-first", page.view)
         fields["sequence"] = .number(Double(try XCTUnwrap(model.snapshot).sequence) + 1)
         fields["error"] = .string("UPSTREAM_HTTP")
         try await server.publish(.object(fields))
@@ -312,11 +293,12 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         fields["browsing"] = .object(browsing)
         fields["sequence"] = .number(Double(try XCTUnwrap(model.snapshot).sequence) + 1)
         try await server.publish(.object(fields))
-        try await waitFor { self.view("film.file.file-first", page.view) == nil }
+        try await waitFor { !loadedRow.isEnabled }
+        XCTAssertTrue(view("film.file.file-first", page.view) === loadedRow)
         XCTAssertFalse(try button("film.detail.play", page.view).isEnabled)
-        XCTAssertFalse(try hasDirectory(page))
+        XCTAssertTrue(try hasDirectory(page))
         XCTAssertTrue(try XCTUnwrap(model.snapshot).browsing.originalFiles.isEmpty)
-        XCTAssertNil((view("film.detail.episodes-state", page.view) as? UILabel)?.text)
+        XCTAssertEqual(model.presentation?.browsing.originalFiles.count, 1)
         let browsingAlert = try await presentedAlert(page, title: "错误", style: .alert, after: alert)
         XCTAssertEqual(browsingAlert.message, FilmPlaybackError(code: "STALE_SOURCE").localizedDescription)
         XCTAssertTrue(media.inputs.isEmpty)
@@ -328,25 +310,19 @@ final class FilmPlaybackUIKitTests: XCTestCase {
                 browsing: FilmUIKitPlaybackFixture.browsing(sourceID: sourceID)))
             let media = FilmUIKitPlaybackMedia(), model = makeModel(server, media)
             await model.open()?.value
-            let initialSequence = try XCTUnwrap(model.snapshot).sequence
             let page = try detailPage(model), window = try mount(page)
             try await visible(page)
-            try await waitFor("Appearance has completed the ordinary browse refresh") {
-                model.snapshot.map { $0.sequence > initialSequence } == true
-            }
             await model.waitForPendingWork()
             let initialRefreshes = await server.calls().filter { $0.action == "browse.refresh" }
-            XCTAssertEqual(initialRefreshes.count, 1)
-            XCTAssertEqual(initialRefreshes.first?.input.filmObject?["refresh"], .bool(false))
+            XCTAssertTrue(initialRefreshes.isEmpty)
             let source = try button("film.detail.source", page.view)
             let commands = try XCTUnwrap(source.menu?.children.compactMap { $0 as? UIMenu }.last)
             invoke(try menuAction(sourceID == nil ? "刷新资料" : "刷新目录", commands))
             await model.waitForPendingWork()
             let checks = await server.calls().filter { $0.action == "browse.refresh" }
-            XCTAssertEqual(checks.count, 2)
-            XCTAssertEqual(checks[0].input.filmObject?["refresh"], .bool(false))
-            XCTAssertNil(checks[1].input.filmObject?["refresh"])
-            XCTAssertNil(checks[1].input.filmObject?["sourceId"], "The owner locates the current browse identity.")
+            XCTAssertEqual(checks.count, 1)
+            XCTAssertNil(checks[0].input.filmObject?["refresh"])
+            XCTAssertNil(checks[0].input.filmObject?["sourceId"], "The owner locates the current browse identity.")
             XCTAssertTrue(media.inputs.isEmpty)
             unmount(page, window)
             await model.close()
@@ -396,7 +372,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await waitFor { page.presentedViewController == nil && page.canPresentPageAlert }
         await model.waitForPendingWork()
         let refreshes = await server.calls().filter { $0.action == "browse.refresh" }
-        XCTAssertEqual(refreshes.count, 2)
+        XCTAssertEqual(refreshes.count, 1)
         XCTAssertNil(refreshes.last?.input.filmObject?["refresh"])
         XCTAssertEqual(page.pageTitle, "旧资料标题")
         XCTAssertNil(model.snapshot?.metadataError)
@@ -464,7 +440,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             try await waitForDismissed(alert, on: page)
             await model.waitForPendingWork()
             let commands = await server.calls().compactMap(\.action)
-            XCTAssertEqual(commands, ["browse.refresh"])
+            XCTAssertEqual(commands, [])
             XCTAssertFalse(commands.contains("media.retry"))
             XCTAssertTrue(media.inputs.isEmpty)
             unmount(page, window)
@@ -547,15 +523,13 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let model = FilmPlaybackModel(transport: server.transport, media: media, request: { request })
         addTeardownBlock { await model.close() }
         await model.open()?.value
-        let initialSequence = try XCTUnwrap(model.snapshot).sequence
         let page = try detailPage(model), window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor { model.snapshot!.sequence > initialSequence }
         await model.waitForPendingWork()
         let initial = await server.calls()
-        XCTAssertEqual(initial.map(\.operation), ["session.open", "session.command"])
-        XCTAssertEqual(initial.compactMap(\.action), ["browse.refresh"])
+        XCTAssertEqual(initial.map(\.operation), ["session.open"])
+        XCTAssertEqual(initial.compactMap(\.action), [])
         XCTAssertEqual(initial.first?.input.filmObject?["target"], .object(request.target.value),
                        "The home identity goes to Node, not a client-side title-only reconstruction")
         XCTAssertEqual(initial.first?.input.filmObject?["entrySurface"], .string("home"))
@@ -599,7 +573,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         manualSearch.sendActions(for: .touchUpInside)
         await model.waitForPendingWork()
         let searched = await server.calls()
-        XCTAssertEqual(searched.compactMap(\.action), ["browse.refresh", "search.more"])
+        XCTAssertEqual(searched.compactMap(\.action), ["search.more"])
         XCTAssertEqual(searched.last?.input.filmObject?["sessionId"],
                        .string(FilmUIKitPlaybackFixture.sessionID.uuidString.lowercased()))
         XCTAssertNil(searched.last?.input.filmObject?["candidateId"])
@@ -619,7 +593,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertTrue(try hasDirectory(page))
         XCTAssertTrue(try button("film.detail.search", page.view).isHidden)
         let calls = await server.calls()
-        XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh", "search.more", "browse"])
+        XCTAssertEqual(calls.compactMap(\.action), ["search.more", "browse"])
         XCTAssertEqual(calls.last?.input.filmObject?["sourceId"], .string("found-site"))
         XCTAssertNil(calls.last?.input.filmObject?["lineId"])
         XCTAssertTrue(media.inputs.isEmpty)
@@ -670,7 +644,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(model.snapshot?.entrySurface, "home")
         XCTAssertNil(model.snapshot?.error)
         let calls = await server.calls()
-        XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh", "browse.refresh"])
+        XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh"])
         XCTAssertEqual(calls.last?.input.filmObject?["sessionId"],
                        .string(FilmUIKitPlaybackFixture.sessionID.uuidString.lowercased()))
         XCTAssertNil(calls.last?.input.filmObject?["refresh"])
@@ -831,8 +805,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await visible(page)
         try await waitFor { model.snapshot!.sequence > 1 }
         await model.waitForPendingWork()
-        let named = try button("film.episode.season-1-episode-1", page.view)
-        let unnamed = try button("film.episode.season-1-episode-2", page.view)
+        let named = try button("film.episode.fixture-season-1-episode-1", page.view)
+        let unnamed = try button("film.episode.fixture-season-1-episode-2", page.view)
         let firstImage = try XCTUnwrap(descendants(named).compactMap { $0 as? ArtworkView }.first)
         let secondImage = try XCTUnwrap(descendants(unnamed).compactMap { $0 as? ArtworkView }.first)
         try await waitFor { firstImage.image != nil && secondImage.image != nil }
@@ -856,7 +830,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         invoke(try menuAction("列表视图", menu.menu))
         let list = try XCTUnwrap(view("film.detail.episode-list", page.view) as? UIStackView)
         XCTAssertEqual(list.arrangedSubviews.compactMap(\.accessibilityIdentifier), [
-            "film.episode.season-1-episode-1", "film.episode.season-1-episode-2",
+            "film.episode.fixture-season-1-episode-1", "film.episode.fixture-season-1-episode-2",
         ])
         XCTAssertFalse(try XCTUnwrap(list.superview).isHidden)
         XCTAssertTrue(try XCTUnwrap(view("film.detail.episode-cards", page.view)).isHidden)
@@ -959,10 +933,10 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await waitFor { page.presentedViewController == nil && page.canPresentPageAlert }
         await model.waitForPendingWork()
         calls = await server.calls().filter { $0.operation == "session.command" }
-        XCTAssertEqual(calls.map(\.action), ["browse.refresh", "pan", "quality", "switch", "block"])
-        XCTAssertEqual(calls[1].input.filmObject?["provider"], .string("uc"))
-        XCTAssertEqual(calls[2].input.filmObject?["quality"], .string("4k_hdr"))
-        XCTAssertEqual(calls[4].input.filmObject?["attemptId"], .string("selected-A"))
+        XCTAssertEqual(calls.map(\.action), ["pan", "quality", "switch", "block"])
+        XCTAssertEqual(calls[0].input.filmObject?["provider"], .string("uc"))
+        XCTAssertEqual(calls[1].input.filmObject?["quality"], .string("4k_hdr"))
+        XCTAssertEqual(calls[3].input.filmObject?["attemptId"], .string("selected-A"))
         let blocked = await server.blockedAttempts()
         XCTAssertEqual(blocked, ["selected-A"])
     }
@@ -976,7 +950,6 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor("The normal entry refresh completes before confirming a source") { model.snapshot!.sequence > 1 }
         try button("film.player.block", page.view).sendActions(for: .touchUpInside)
         let confirmation = try await presentedAlert(page, title: "片源错误", style: .alert)
         let before = await server.calls().filter { $0.action == "block" }
@@ -1011,7 +984,6 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             let window = try mount(page)
             defer { unmount(page, window) }
             try await visible(page)
-            try await waitFor("The normal entry refresh completes before confirming a source") { model.snapshot!.sequence > 1 }
             let control = try button("film.player.block", page.view)
             control.sendActions(for: .touchUpInside)
             let cancellation = try await presentedAlert(page, title: "片源错误", style: .alert)
@@ -1021,18 +993,18 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             }
             await model.waitForPendingWork()
             let cancelled = await server.calls()
-            XCTAssertEqual(cancelled.map(\.operation), ["session.open", "session.command"])
-            XCTAssertEqual(cancelled.compactMap(\.action), ["browse.refresh"], "Cancellation adds no command after the ordinary entry check")
+            XCTAssertEqual(cancelled.map(\.operation), ["session.open"])
+            XCTAssertEqual(cancelled.compactMap(\.action), [], "Cancellation adds no command")
             let before = await server.blockedAttempts()
             XCTAssertTrue(before.isEmpty)
             control.sendActions(for: .touchUpInside)
             _ = try await presentedAlert(page, title: "片源错误", style: .alert, after: cancellation)
             try await runnerAction { $0.alerts.buttons["屏蔽并换源"].tap() }
             try await waitFor { page.presentedViewController == nil && page.canPresentPageAlert }
-            try await waitFor { model.snapshot?.sequence == 3 || model.actionError != nil }
+            try await waitFor { model.snapshot?.sequence == 2 || model.actionError != nil }
             await model.waitForPendingWork()
             let calls = await server.calls().filter { $0.operation == "session.command" }
-            XCTAssertEqual(calls.map(\.action), ["browse.refresh", "block"])
+            XCTAssertEqual(calls.map(\.action), ["block"])
             XCTAssertEqual(calls.last?.input.filmObject?["attemptId"], .string("attempt-A"),
                            "Current takes precedence over a different pending attempt; prepared-only uses its own ID")
             let blocked = await server.blockedAttempts()
@@ -1048,13 +1020,12 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor("The normal entry refresh completes before confirming a source") { model.snapshot!.sequence > 1 }
         try button("film.player.block", page.view).sendActions(for: .touchUpInside)
         await model.waitForPendingWork()
         XCTAssertNil(page.presentedViewController)
         let calls = await server.calls(), blocked = await server.blockedAttempts()
-        XCTAssertEqual(calls.map(\.operation), ["session.open", "session.command"])
-        XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh"])
+        XCTAssertEqual(calls.map(\.operation), ["session.open"])
+        XCTAssertEqual(calls.compactMap(\.action), [])
         XCTAssertTrue(blocked.isEmpty)
     }
 
@@ -1345,18 +1316,18 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertFalse(up.isEnabled); XCTAssertFalse(down.isEnabled)
         try await swipeVideo(up: true, in: page)
         var calls = await server.calls()
-        XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh"])
+        XCTAssertEqual(calls.compactMap(\.action), [])
         try await server.publish(FilmUIKitPlaybackFixture.snapshot(10, shortVideo: true))
         await settle()
         XCTAssertTrue(up.isEnabled); XCTAssertTrue(down.isEnabled)
         try await swipeVideo(up: true, in: page)
         await model.waitForPendingWork()
         calls = await server.calls()
-        XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh", "next"])
+        XCTAssertEqual(calls.compactMap(\.action), ["next"])
         try await swipeVideo(up: false, in: page)
         await model.waitForPendingWork()
         calls = await server.calls()
-        XCTAssertEqual(calls.compactMap(\.action), ["browse.refresh", "next", "previous"])
+        XCTAssertEqual(calls.compactMap(\.action), ["next", "previous"])
         XCTAssertTrue(media.inputs.isEmpty, "A swipe submits one business intent, not a parallel native prefetch")
     }
 
@@ -1430,31 +1401,56 @@ final class FilmPlaybackUIKitTests: XCTestCase {
     }
 
     func testAutoPrepareUIEditsADraftAndOnlySuccessfulSavePublishesPreferences() async throws {
-        let store = FilmUIKitPlaybackSettingsStore()
-        let owner = FilmPlaybackSettingsModel(transport: store.transport)
+        let store = try FilmUIKitPlaybackSettingsStore(self)
+        let owner = FilmPlaybackSettingsModel(transport: store.transport, settingsDocument: store.document)
         let page = FilmPlaybackPreferencesController(owner: owner, area: .autoPrepare,
                                                      themeProvider: FilmPlaybackUIKitTheme())
         let window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor { owner.preferences != nil && !owner.busy }
+        try await waitFor { owner.preferences != nil && !owner.busy && !owner.preferencesBusy }
         await settle()
+        let storedBefore = try await store.preferenceBytes()
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(.defaults))
         let control = try await visibleSwitch("film.preferences.auto-prepare", page)
         XCTAssertTrue(control.isOn)
         control.isOn = false; control.sendActions(for: .valueChanged)
         XCTAssertEqual(owner.draft?.iosAutoPrepare, false)
         XCTAssertEqual(owner.preferences?.iosAutoPrepare, true)
-        await store.setSaveFailure(true)
+        let draft = try XCTUnwrap(owner.draft)
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(.defaults))
+        try await store.setSaveFailure(true)
+        XCTAssertThrowsError(try store.document.read()) {
+            XCTAssertEqual($0 as? FilmSettingsStorageError, .storageFailure)
+        }
         try headerSave(page).sendActions(for: .touchUpInside)
         let failure = try await presentedAlert(page, title: "错误", style: .alert)
         XCTAssertEqual(owner.preferences?.iosAutoPrepare, true)
         XCTAssertEqual(owner.draft?.iosAutoPrepare, false)
-        await store.setSaveFailure(false)
+        XCTAssertEqual(owner.draft, draft)
+        let failedChanges = await store.notifications()
+        XCTAssertTrue(failedChanges.isEmpty)
+        try await store.setSaveFailure(false)
+        let restoredBytes = try await store.preferenceBytes()
+        XCTAssertEqual(restoredBytes, storedBefore, "A failed save must preserve the committed bytes")
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(.defaults))
         try await runnerAction { $0.alerts.buttons["重试"].tap() }
-        try await waitFor { owner.preferences?.iosAutoPrepare == false && !owner.busy }
+        try await waitFor { owner.preferences?.iosAutoPrepare == false && !owner.busy && !owner.preferencesBusy }
         _ = try await presentedAlert(page, title: "已保存", style: .alert, after: failure)
+        XCTAssertEqual(owner.preferences, draft)
+        XCTAssertEqual(owner.draft, draft)
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(draft))
+        let savedBytes = try await store.preferenceBytes()
+        XCTAssertNotEqual(savedBytes, storedBefore)
+        let changes = await store.notifications()
+        XCTAssertEqual(changes, ["film.preferences"])
+        let reopened = FilmPlaybackSettingsModel(transport: store.transport, settingsDocument: store.document)
+        try await reopened.loadPreferences()
+        XCTAssertEqual(reopened.preferences, draft)
+        let reopenedChanges = await store.notifications()
+        XCTAssertEqual(reopenedChanges, changes)
         let calls = await store.calls()
-        XCTAssertEqual(calls.map(\.operation), ["settings.get", "settings.set", "settings.set"])
+        XCTAssertTrue(calls.isEmpty, "Preference load, failed save, retry and reopen must not use RPC")
     }
 
     func testManualEditorPreservesTypedZeroAndPlainShareFieldsAndSupportsRemoval() async throws {
@@ -1462,8 +1458,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         item.value["id"] = .string("manual-fixture")
         item.value["sourceKey"] = .string("source-key"); item.value["detailId"] = .number(0)
         item.value["seasonHint"] = .number(0); item.value["failureCount"] = .number(2)
-        let store = FilmUIKitPlaybackSettingsStore(manual: [item.value])
-        let owner = FilmPlaybackSettingsModel(transport: store.transport)
+        let store = try FilmUIKitPlaybackSettingsStore(self, manual: [item.value])
+        let owner = FilmPlaybackSettingsModel(transport: store.transport, settingsDocument: store.document)
         try await owner.loadLibrary()
         let page = FilmManualMatchEditor(owner: owner, item: item, themeProvider: FilmPlaybackUIKitTheme())
         let window = try mount(page)
@@ -1494,17 +1490,25 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         editor.table.layoutIfNeeded()
         XCTAssertFalse(try XCTUnwrap(view("film.manual.share", editor.view) as? UITextField).isSecureTextEntry)
         XCTAssertFalse(try XCTUnwrap(view("film.manual.password", editor.view) as? UITextField).isSecureTextEntry)
+        let finalCalls = await store.calls()
+        XCTAssertEqual(finalCalls.map(\.operation), ["library.get", "manual.update", "manual.update"])
+        XCTAssertEqual(finalCalls.last?.input, .object([
+            "action": .string("remove"), "id": .string("manual-fixture"),
+        ]))
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(.defaults))
+        let changes = await store.notifications()
+        XCTAssertTrue(changes.isEmpty)
     }
 
     func testPreferenceUIReordersAllDimensionsAndOnlyRestoresTheSelectedGroup() async throws {
-        let store = FilmUIKitPlaybackSettingsStore()
-        let owner = FilmPlaybackSettingsModel(transport: store.transport)
+        let store = try FilmUIKitPlaybackSettingsStore(self)
+        let owner = FilmPlaybackSettingsModel(transport: store.transport, settingsDocument: store.document)
         let page = FilmPlaybackPreferencesController(owner: owner, area: .preferences,
                                                      themeProvider: FilmPlaybackUIKitTheme())
         let window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor { owner.draft != nil && !owner.busy }
+        try await waitFor { owner.draft != nil && !owner.busy && !owner.preferencesBusy }
         owner.edit { $0.keywords = ["DDP", "H.265"]; $0.iosAutoPrepare = false }
         await settle()
         try select("film.preferences.dimension.pan", page)
@@ -1534,23 +1538,28 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(owner.draft?.keywords, ["H.265", "DDP"])
         XCTAssertEqual(owner.draft?.iosAutoPrepare, false)
         XCTAssertEqual(owner.preferences, .defaults, "Editing and restore must not publish a durable save")
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(.defaults))
+        let draftChanges = await store.notifications()
+        XCTAssertTrue(draftChanges.isEmpty)
         try headerSave(page).sendActions(for: .touchUpInside)
-        try await waitFor { owner.preferences?.keywords == ["H.265", "DDP"] && !owner.busy }
-        let writes = await store.calls().filter { $0.operation == "settings.set" }
-        XCTAssertEqual(writes.count, 1)
-        XCTAssertEqual(writes[0].input, owner.draft?.value)
+        try await waitFor { owner.preferences?.keywords == ["H.265", "DDP"] && !owner.busy && !owner.preferencesBusy }
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(try XCTUnwrap(owner.draft)))
+        let changes = await store.notifications()
+        XCTAssertEqual(changes, ["film.preferences"])
+        let calls = await store.calls()
+        XCTAssertTrue(calls.isEmpty, "Preference reads and saves must use the native document")
         _ = try await presentedAlert(page, title: "已保存", style: .alert, after: panMenu)
     }
 
     func testSiteCleanUICanRemoveAddSaveAndRestoreKeywordsWithoutChangingPlaybackOrder() async throws {
-        let store = FilmUIKitPlaybackSettingsStore()
-        let owner = FilmPlaybackSettingsModel(transport: store.transport)
+        let store = try FilmUIKitPlaybackSettingsStore(self)
+        let owner = FilmPlaybackSettingsModel(transport: store.transport, settingsDocument: store.document)
         let page = FilmPlaybackPreferencesController(owner: owner, area: .siteClean,
                                                      themeProvider: FilmPlaybackUIKitTheme())
         let window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor { owner.draft != nil && !owner.busy }
+        try await waitFor { owner.draft != nil && !owner.busy && !owner.preferencesBusy }
         await settle()
         _ = try await visibleCell("film.preferences.keywords.row", page)
         let keywords = try XCTUnwrap(view("film.preferences.keywords", page.view) as? UITextField)
@@ -1563,7 +1572,11 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertFalse(owner.draft?.siteCleanKeywords.contains("直播") == true)
         let draft = try XCTUnwrap(owner.draft)
         try headerSave(page).sendActions(for: .touchUpInside)
-        try await waitFor { owner.preferences == draft && !owner.busy }
+        try await waitFor { owner.preferences == draft && !owner.busy && !owner.preferencesBusy }
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(draft))
+        let savedBytes = try await store.preferenceBytes()
+        let savedChanges = await store.notifications()
+        XCTAssertEqual(savedChanges, ["film.preferences"])
         _ = try await presentedAlert(page, title: "已保存", style: .alert)
         try await runnerAction { $0.alerts.buttons["确定"].tap() }
         try await waitFor("The saved notice was acknowledged through its UI action") {
@@ -1575,6 +1588,12 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(owner.draft?.ruleOrder, draft.ruleOrder)
         XCTAssertEqual(owner.draft?.panOrder, draft.panOrder)
         XCTAssertEqual(owner.preferences, draft, "Restoring the draft alone must not save")
+        let restoredBytes = try await store.preferenceBytes()
+        XCTAssertEqual(restoredBytes, savedBytes)
+        let restoredChanges = await store.notifications()
+        XCTAssertEqual(restoredChanges, savedChanges)
+        let calls = await store.calls()
+        XCTAssertTrue(calls.isEmpty, "Site-clean draft restoration must not call the runtime or persist")
     }
 
     func testBlocksRequireConfirmationAndUseExactOrBulkReceiptsWithoutChangingHistory() async throws {
@@ -1584,9 +1603,9 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             "detailId": .number(0), "lineId": .number(0)])
         let otherBlock: RuntimeValue = .object(["targetId": .string("other-target"), "sourceKey": .string("source-key"),
             "detailId": .number(1), "lineId": .number(0)])
-        let store = FilmUIKitPlaybackSettingsStore(manual: [["id": .bool(false)]],
+        let store = try FilmUIKitPlaybackSettingsStore(self, manual: [["id": .bool(false)]],
             history: [history], blocks: [.null, block, otherBlock])
-        let owner = FilmPlaybackSettingsModel(transport: store.transport)
+        let owner = FilmPlaybackSettingsModel(transport: store.transport, settingsDocument: store.document)
         let blocks = FilmPlaybackLibraryController(owner: owner, area: .blocks,
                                                    themeProvider: FilmPlaybackUIKitTheme())
         let blockWindow = try mount(blocks)
@@ -1617,11 +1636,16 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let stored = await store.librarySnapshot()
         XCTAssertEqual(stored.filmObject?["history"], .array([history]), "Settings do not remove or rewrite playback history")
         XCTAssertEqual(page.sections.first?.rows.map(\.title), ["暂无记录"])
+        let calls = await store.calls()
+        XCTAssertEqual(calls.map(\.operation), ["library.get", "library.remove", "library.remove"])
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(.defaults))
+        let changes = await store.notifications()
+        XCTAssertTrue(changes.isEmpty)
     }
 
     func testMetadataCacheRowsSendOnlyTheChosenInvalidations() async throws {
-        let store = FilmUIKitPlaybackSettingsStore()
-        let owner = FilmPlaybackSettingsModel(transport: store.transport)
+        let store = try FilmUIKitPlaybackSettingsStore(self)
+        let owner = FilmPlaybackSettingsModel(transport: store.transport, settingsDocument: store.document)
         let page = FilmMetadataCacheSettingsViewController(owner: owner, themeProvider: FilmPlaybackUIKitTheme())
         let window = try mount(page)
         defer { unmount(page, window) }
@@ -1638,6 +1662,13 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             try await runnerAction { $0.alerts.buttons["确定"].tap() }
             try await waitFor { form.presentedViewController == nil && form.canPresentPageAlert }
         }
+        XCTAssertEqual(try store.document.read(), preferenceEnvelope(.defaults))
+        let changes = await store.notifications()
+        XCTAssertTrue(changes.isEmpty)
+    }
+
+    private func preferenceEnvelope(_ preferences: FilmPlaybackPreferences) -> RuntimeValue {
+        .object(["version": .number(1), "preferences": preferences.value])
     }
 
     private func blockSnapshot(_ id: String, current: Bool, sequence: Int = 1) throws -> RuntimeValue {

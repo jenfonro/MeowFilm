@@ -1,6 +1,6 @@
 # Windows 原生离线媒体输入
 
-`INativeMediaReadLease` 与 `NativePlayback.OpenReadAsync` 是当前 App 播放已授权本地字节的唯一 Media 入口。租约代表已经由能力 owner 授权的不可变表示，不是路径、URL、下载记录或永久文件权限。
+`MeowFilm.Core` 中的 `INativeMediaReadLease` 是当前 App 播放已授权本地字节的入口：音乐交给 `NativeAudioPlayback.OpenReadAsync`，视频交给 `NativePlayback.OpenReadAsync`。音乐的 custom AVIO 直接读取租约，见[音乐核心](music-audio-core.md)；下文的视频归档适配不因此成为音乐输入。租约代表已经由能力 owner 授权的不可变表示，不是路径、URL、下载记录或永久文件权限。
 
 ## 租约契约
 

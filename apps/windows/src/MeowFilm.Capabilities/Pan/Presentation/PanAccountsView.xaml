@@ -13,9 +13,7 @@
  </UserControl.Resources>
  <Grid x:Name="Root" Margin="0,12,0,0">
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-  <StackPanel Margin="0,0,0,8">
-   <ProgressBar Height="3" IsIndeterminate="True" Visibility="{Binding IsLoading,Converter={StaticResource MeowFilm.BoolToVisibility}}"
-                AutomationProperties.Name="正在读取网盘账号"/>
+  <StackPanel Margin="0,0,0,8" Visibility="{Binding LoadFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}">
    <Button Content="重试" Click="Reload_Click" HorizontalAlignment="Left" Style="{StaticResource Settings.Button}"
            Visibility="{Binding LoadFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}"
            AutomationProperties.Name="重新读取网盘账号"/>
@@ -55,8 +53,8 @@
             </Style.Triggers>
            </Style></Button.Style>
           </Button>
-          <Button Content="刷新" Click="Refresh_Click" IsEnabled="{Binding CanRefresh}"
-                  AutomationProperties.Name="{Binding Name,StringFormat={}{0}刷新}">
+          <Button Content="编辑" Click="EditCredentials_Click" IsEnabled="{Binding CanEdit}"
+                  AutomationProperties.Name="{Binding Name,StringFormat={}{0}编辑凭据}">
            <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Settings.QuietButton}">
             <Setter Property="Visibility" Value="Collapsed"/>
             <Style.Triggers><DataTrigger Binding="{Binding Status}" Value="signedIn"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>

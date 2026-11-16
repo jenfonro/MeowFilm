@@ -15,6 +15,7 @@ public sealed partial class NovelView
     private long shownDiscoveryFailure;
     private bool showingDiscoveryFailure, changingDiscoveryShelf;
     private (string Id, IInputElement? Previous)? discoveryFocus;
+    private NovelDiscoveryChannelBar? discoveryChannelBar;
 
     private void AddDiscoveryTheme() => Resources.MergedDictionaries.Add(new()
         { Source = new Uri(DiscoveryThemeUri, UriKind.Relative) });
@@ -155,13 +156,13 @@ public sealed partial class NovelView
     }
     private FrameworkElement DiscoveryTabs(IEnumerable<NovelKind> kinds)
     {
-        var tabs = new StackPanel { Orientation = Orientation.Horizontal };
+        var tabs = new List<RadioButton>();
         foreach (var kind in kinds)
         {
-            tabs.Children.Add(DiscoveryTab(kind.Title, kind, module.ExploreKind?.Url == kind.Url,
+            tabs.Add(DiscoveryTab(kind.Title, kind, module.ExploreKind?.Url == kind.Url,
                 "novel.discovery.kind:" + kind.Url));
         }
-        return DiscoveryNavigation(tabs);
+        return discoveryChannelBar = new(tabs);
     }
     private RadioButton DiscoveryTab(string title, NovelKind kind, bool selected, string id)
     {
@@ -173,27 +174,25 @@ public sealed partial class NovelView
             if (kind.Url != module.ExploreKind?.Url)
                 module.RunUi(ct => module.LoadDiscoveryAsync(module.ExploreSource, kind, false, ct));
         };
-        tab.PreviewKeyDown += DiscoveryNavigation_KeyDown;
-        tab.Loaded += (_, _) => { if (tab.IsChecked == true) tab.BringIntoView(); };
         return tab;
     }
     private FrameworkElement DiscoveryChannels(IReadOnlyList<NovelDiscoveryGroup> groups)
     {
-        var tabs = new StackPanel { Orientation = Orientation.Horizontal };
+        var tabs = new List<RadioButton>();
         foreach (var group in groups)
         {
             if (string.IsNullOrWhiteSpace(group.Title))
             {
                 foreach (var kind in group.Kinds)
-                    tabs.Children.Add(DiscoveryTab(kind.Title, kind, module.ExploreKind?.Url == kind.Url,
+                    tabs.Add(DiscoveryTab(kind.Title, kind, module.ExploreKind?.Url == kind.Url,
                         "novel.discovery.kind:" + kind.Url));
                 continue;
             }
             var entry = group.Kinds.FirstOrDefault(kind => kind.Url == module.ExploreKind?.Url) ?? group.Kinds[0];
-            tabs.Children.Add(DiscoveryTab(group.Title, entry, group.Kinds.Any(kind => kind.Url == module.ExploreKind?.Url),
+            tabs.Add(DiscoveryTab(group.Title, entry, group.Kinds.Any(kind => kind.Url == module.ExploreKind?.Url),
                 "novel.discovery.group:" + group.Kinds[0].Url));
         }
-        return DiscoveryNavigation(tabs);
+        return discoveryChannelBar = new(tabs);
     }
     private static ScrollViewer DiscoveryNavigation(Panel choices)
     {
@@ -264,6 +263,7 @@ public sealed partial class NovelView
     private static Border DiscoveryRule(UIElement child)
     {
         var rule = new Border { Child = child, BorderThickness = new(0, 0, 0, 1), Margin = new(0, 0, 0, 16) };
+        Panel.SetZIndex(rule, 1);
         rule.SetResourceReference(Border.BorderBrushProperty, "MeowFilm.Brush.SidebarBorder"); return rule;
     }
     private FrameworkElement DiscoveryFilters(NovelDiscoveryGroup group)

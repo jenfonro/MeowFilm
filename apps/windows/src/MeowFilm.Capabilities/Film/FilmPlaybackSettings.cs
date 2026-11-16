@@ -1,5 +1,6 @@
 using System.Text.Json;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
@@ -25,19 +26,55 @@ internal sealed record FilmPreferences(string[] RuleOrder, string[] PanOrder, st
     internal JsonElement Wire(string? field)
     {
         var edited = FilmJson.Encode(this);
-        if (Original.ValueKind == JsonValueKind.Undefined) return edited;
-        return field is null ? FilmDocument.Merge(Original, FilmJson.Encode(Read(Original)), edited)
-            : FilmDocument.Set(Original, field, FilmJson.Member(edited, field));
+        var before = Original.ValueKind == JsonValueKind.Undefined ? default : FilmJson.Encode(Read(Original));
+        var next = Original.ValueKind == JsonValueKind.Undefined ? edited : Original;
+        // Detect edits before normalization so untouched raw fields retain their original shape.
+        foreach (string name in new[] { "ruleOrder", "panOrder", "keywords", "siteCleanKeywords", "iosAutoPrepare" })
+        {
+            var value = FilmJson.Member(edited, name);
+            if (field is not null ? name != field :
+                before.ValueKind != JsonValueKind.Undefined && FilmJson.Equal(FilmJson.Member(before, name), value)) continue;
+            next = FilmDocument.Set(next, name, Normalize(name, value));
+        }
+        return next;
+    }
+
+    private static readonly char[] InputWhitespace =
+        "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff".ToCharArray();
+    private static JsonElement Normalize(string field, JsonElement value)
+    {
+        if (field == "iosAutoPrepare") return value;
+        if (value.ValueKind != JsonValueKind.Array || value.EnumerateArray().Any(item => item.ValueKind != JsonValueKind.String))
+            throw new FilmPlaybackException("INVALID_PREFERENCES");
+        var items = value.EnumerateArray().Select(item => item.GetString()!.Trim(InputWhitespace)).ToArray();
+        if (items.Any(item => item.Length == 0) || items.Distinct(StringComparer.OrdinalIgnoreCase).Count() != items.Length)
+            throw new FilmPlaybackException("INVALID_PREFERENCES");
+        string[]? allowed = field == "ruleOrder" ? Defaults.RuleOrder : field == "panOrder" ? Defaults.PanOrder : null;
+        if (allowed is not null && (items.Any(item => !allowed.Contains(item)) ||
+            field == "ruleOrder" && items.Length != allowed.Length))
+            throw new FilmPlaybackException("INVALID_PREFERENCES");
+        if (field == "panOrder") items = items.Concat(allowed!.Where(item => !items.Contains(item))).ToArray();
+        return FilmJson.Encode(items);
     }
 }
 
-internal sealed class FilmPlaybackSettings(IRuntimeClient runtime)
+internal sealed class FilmPlaybackSettings(IRuntimeClient runtime, IDocumentStore store)
 {
     private readonly FilmPlaybackClient client = new(runtime);
+    private readonly SettingsDocument document = new(store, "film.preferences.v1");
     internal async Task<FilmPreferences> ReadPreferencesAsync(CancellationToken token) =>
-        FilmPreferences.Read(await client.CallAsync("settings.get", new { }, token));
-    internal async Task<FilmPreferences> SavePreferencesAsync(FilmPreferences preferences, string? field = null) =>
-        FilmPreferences.Read(await client.CallAsync("settings.set", preferences.Wire(field)));
+        (await document.ReadAsync(token)) is { } saved ? FilmPreferences.Read(saved.GetProperty("preferences")) : FilmPreferences.Defaults;
+    internal async Task<FilmPreferences> SavePreferencesAsync(FilmPreferences preferences, string? field = null)
+    {
+        var saved = await document.UpdateAsync(current =>
+        {
+            var before = current?.GetProperty("preferences") ?? FilmPreferences.Defaults.Wire(null);
+            var next = field is null ? preferences.Wire(null) : FilmDocument.Set(before, field, FilmJson.Member(preferences.Wire(field), field));
+            return FilmJson.Encode(new { version = 1, preferences = next });
+        });
+        (runtime as IRuntimeSettingsNotifications)?.SettingsChanged("film.preferences");
+        return FilmPreferences.Read(saved.GetProperty("preferences"));
+    }
     internal Task<JsonElement> ReadLibraryAsync(CancellationToken token) => client.CallAsync("library.get", new { }, token);
     internal Task<JsonElement> SaveManualAsync(JsonElement item) => client.CallAsync("manual.update", new { action = "save", item });
     internal Task<JsonElement> RemoveManualAsync(string id) => client.CallAsync("manual.update", new { action = "remove", id });
