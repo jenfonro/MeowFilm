@@ -19,16 +19,49 @@ public static class AppRuntimeClientTests
                 launches++;
                 throw new InvalidOperationException("must not run");
             });
+            IRuntimeLifetime lifetime = port;
+            BridgeTests.Equal(true, lifetime.ShutdownCompletion is null);
             BridgeTests.Equal(false, port.HasStarted);
             BridgeTests.Equal(RuntimeConnectionState.Dormant, port.State);
             await BridgeTests.Expect("CLOSED", () => port.CallAsync("music.script.sources.list"));
             BridgeTests.Equal(false, port.HasStarted);
             await port.DisposeAsync();
             await port.DisposeAsync();
+            BridgeTests.Equal(true, lifetime.ShutdownCompletion?.IsCompletedSuccessfully == true);
+            BridgeTests.Equal(true, ReferenceEquals(lifetime.ShutdownCompletion, port.DisposeAsync().AsTask()));
             BridgeTests.Equal(0, launches);
             await BridgeTests.Expect("CLOSED", () => port.CallAsync("music.script.sources.list"));
             try { port.Start(); throw new InvalidOperationException("expected closed"); }
             catch (BridgeException error) when (error.Code == "CLOSED") { }
+        });
+        yield return new("app-runtime: shutdown receipt is published before revocation and waits for physical drain", async () =>
+        {
+            var drain = Pending<bool>();
+            var session = new Session { DisposalDrain = drain.Task };
+            CancellationToken owner = default;
+            var port = new AppRuntimeClient(token => { owner = token; return Task.FromResult<IRuntimeSession>(session); });
+            IRuntimeLifetime lifetime = port;
+            port.Start();
+            await port.CallAsync("music.script.sources.list");
+            BridgeTests.Equal(true, lifetime.ShutdownCompletion is null);
+            Task? receiptAtRevocation = null;
+            using var borrowed = owner.Register(() => receiptAtRevocation = lifetime.ShutdownCompletion);
+            try
+            {
+                var close = port.DisposeAsync().AsTask();
+                BridgeTests.Equal(RuntimeConnectionState.Closed, port.State);
+                BridgeTests.Equal(true, owner.IsCancellationRequested);
+                BridgeTests.Equal(true, ReferenceEquals(close, receiptAtRevocation));
+                BridgeTests.Equal(true, ReferenceEquals(close, lifetime.ShutdownCompletion));
+                BridgeTests.Equal(true, ReferenceEquals(close, port.DisposeAsync().AsTask()));
+                BridgeTests.Equal(false, close.IsCompleted);
+                drain.SetResult(true);
+                await close;
+                BridgeTests.Equal(true, close.IsCompletedSuccessfully);
+                BridgeTests.Equal(true, ReferenceEquals(close, lifetime.ShutdownCompletion));
+                BridgeTests.Equal(1, session.Disposals);
+            }
+            finally { drain.TrySetResult(true); await port.DisposeAsync(); }
         });
         yield return new("app-runtime: one Start owns the session every caller shares", async () =>
         {
@@ -113,6 +146,28 @@ public static class AppRuntimeClientTests
             await BridgeTests.Expect("INTERNAL", () => port.CallAsync("music.script.sources.list"));
             await BridgeTests.Expect("INTERNAL", () => port.CallAsync("music.script.sources.list"));
             BridgeTests.Equal(1, launches);
+            await port.DisposeAsync();
+            BridgeTests.Equal(true, port.ShutdownCompletion?.IsCompletedSuccessfully == true);
+        });
+        yield return new("app-runtime: failed startup cleanup remains a failed shutdown receipt", async () =>
+        {
+            int launches = 0;
+            var port = new AppRuntimeClient(_ =>
+            {
+                launches++;
+                throw new RuntimeStartupCleanupException();
+            });
+            port.Start();
+            await BridgeTests.Expect("INTERNAL", () => port.CallAsync("music.script.sources.list"));
+            await BridgeTests.Expect("INTERNAL", () => port.CallAsync("music.script.sources.list"));
+            BridgeTests.Equal(true, port.ShutdownCompletion is null);
+            var close = port.DisposeAsync().AsTask();
+            await BridgeTests.Expect("INTERNAL", () => close);
+            await BridgeTests.Expect("INTERNAL", () => port.DisposeAsync().AsTask());
+            BridgeTests.Equal(true, close.IsFaulted);
+            BridgeTests.Equal(true, ReferenceEquals(close, port.ShutdownCompletion));
+            BridgeTests.Equal(true, ReferenceEquals(close, port.DisposeAsync().AsTask()));
+            BridgeTests.Equal(1, launches);
         });
         yield return new("app-runtime: pending response cannot publish after product disposal", async () =>
         {
@@ -130,10 +185,17 @@ public static class AppRuntimeClientTests
         {
             var session = new Session { FailDisposal = true };
             var port = new AppRuntimeClient(_ => Task.FromResult<IRuntimeSession>(session));
+            IRuntimeLifetime lifetime = port;
             port.Start();
             await port.CallAsync("music.script.sources.list");
+            BridgeTests.Equal(true, lifetime.ShutdownCompletion is null);
+            var close = port.DisposeAsync().AsTask();
+            await BridgeTests.Expect("INTERNAL", () => close);
+            BridgeTests.Equal(true, close.IsFaulted);
+            BridgeTests.Equal(true, ReferenceEquals(close, lifetime.ShutdownCompletion));
+            BridgeTests.Equal(true, ReferenceEquals(close, port.DisposeAsync().AsTask()));
             await BridgeTests.Expect("INTERNAL", () => port.DisposeAsync().AsTask());
-            await BridgeTests.Expect("INTERNAL", () => port.DisposeAsync().AsTask());
+            BridgeTests.Equal(true, ReferenceEquals(close, lifetime.ShutdownCompletion));
             BridgeTests.Equal(1, session.Disposals);
         });
         foreach (bool retry in new[] { false, true })
