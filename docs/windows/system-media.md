@@ -5,6 +5,7 @@
 ## 装配
 
 - App 窗口只附加一个 `SystemMediaSession` 和一个 `WindowsSystemMediaBackend`。
+- `SystemMediaWindowAttachment` 保留中性窗口生命周期 owner，公开构造入口接收 `Window`、`ISystemPlayback`、`ISystemMediaBackend`、owners 和 enabled。App 的 `AppSystemMediaAttachment` 组合此 helper，自己持有 typed 音乐／电影投影；helper 负责真实 `Closed` 的会话 suspend、设置转发和实际 `DisposeAsync`，不依赖某个具体播放内核。
 - `Program` 从 `ShellWindow.MediaControls` 获取启动时已恢复的设置，并显式调用音乐能力的 `AttachDesktopLyricsOwner(window)`；媒体动作统一交给 `ExecuteMediaShortcutAsync`，不创建第二播放器或隐式主窗口依赖。
 - `AppMediaWindowAttachment` 统一持有系统媒体附件、快捷键附件和设置订阅；初始及后续 SMTC 开关为 `IsAvailable && Preferences.SystemMediaEnabled`，不受全局快捷键开关或录制状态影响。未完成装配时的附件仍由入口持有并清理。
 - `ISystemPlayback` 投影当前播放器状态及 play、pause、stop、seek；外层附件持有 App 的 `AppSystemMediaAttachment`，以 App 输出协调器选中的 owner 选择独立音乐或视频来源。音乐来自 `NativeAudioPlayback`；Film 使用同一 `FilmCapability.PlaybackMedia`，包含当前原生输出的真实时钟和暂停状态。两个播放内核不共享解码／输出，SMTC 仍只有一个系统会话。
@@ -13,7 +14,7 @@
 
 ## 系统媒体快捷键开关
 
-- `SystemMediaSession` 两个构造函数在 `dispatcher` 后接收 `bool enabled = true`；`SystemMediaWindowAttachment` 与 App 的 `AppSystemMediaAttachment` 在 `owners` 后接收同一可选参数，默认保持现有系统媒体行为。
+- `SystemMediaSession` 只消费 `ISystemPlayback`，在 `dispatcher` 后接收 `bool enabled = true`；`SystemMediaWindowAttachment` 与 App 的 `AppSystemMediaAttachment` 在 `owners` 后接收同一可选参数，默认保持现有系统媒体行为。
 - `SetEnabled(bool enabled)` 在窗口所属 dispatcher 调用；窗口附件直接转发给会话。此开关只控制 Windows SMTC 通道，与自定义全局快捷键开关相互独立。
 - 初始关闭和运行中关闭都调用 backend `Disable`，立即撤销系统会话可操作状态，不停止当前播放。关闭期间拒绝系统请求，播放器状态更新不重新启用系统会话。
 - 关闭推进命令 generation，使关闭前尚未执行的 dispatcher 请求和串行队列请求失效；即使同一媒体立即重开，旧请求也不能恢复执行。已开始执行的命令沿用既有命令、取消与排空语义，切换开关不取消它们。
@@ -51,7 +52,7 @@
 
 系统 Play／Next／Previous 走各业务 owner 的恢复与切集入口。App typed attachment 将 Film 的 Pause／Stop／Seek 交回准确 Film owner；Film 的会话／attempt 围栏拒绝退休或替换后的操作。音乐直接控制交给 App 持有的 `NativeAudioPlayback`；两个播放器各自的命令门与 disposing 围栏继续管理原生操作。
 
-真正释放由 App 生命周期调用 attachment 的 `DisposeAsync`：正常关闭先完成模块 preparation 和 disposal，强制清理则等待 owner 的 Abort 实际完成。两条路径都在释放 attachment 后，才通过 App 的资源回调分别释放 `NativeAudioPlayback` 和 `NativePlayback`。准备失败后取消退出不会释放 attachment。
+真正释放由 App 生命周期调用 attachment 的 `DisposeAsync`：正常关闭先完成模块 preparation 和 disposal，强制清理则等待 owner 的 Abort 实际完成。两条路径都在释放 attachment 后，才通过 App 的资源回调分别释放 `NativeAudioPlayback` 和 `FilmPlayback`。准备失败后取消退出不会释放 attachment。
 
 实际 `Closed` 或附件 `DisposeAsync` 才永久封准入并解绑。系统媒体附件的重复 `DisposeAsync` 共享 session 的完成结果，实际关闭或会话释放调用不可恢复的 `Suspend`：
 

@@ -9,12 +9,12 @@
 ```text
 Windows App
  ├─ AppHost → Desktop / Platform
- ├─ Capabilities → Desktop / Platform / Media
- └─ SystemMedia → Media
-Platform / Desktop → Core
+ ├─ Capabilities → Desktop / Platform / Audio / Media
+ └─ SystemMedia
+Audio / Media / Platform / Desktop → Core
 ```
 
-Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口、一套导航与设置、一个原生播放协调、一个系统媒体会话。原生媒体基础设施由既有音频链和影视媒体共同使用；当前不装配下载能力。
+Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口、一套导航与设置、一个原生播放协调、一个系统媒体会话。原生媒体基础设施由既有音频链和影视媒体共同使用；当前不装配下载能力。`SystemMedia` 只消费本模块的中性 `ISystemPlayback`／`ISystemMediaBackend`，项目不引用具体播放工程；音乐／电影 typed 投影由 App 装配。
 
 `scripts/windows/verify-app-structure.mjs` 检查 Windows 源码、公共 `apps/runtime`／`packages`、Windows／共享引擎工具和 `scripts/` 根层的共享 Node `.mjs` 工具，不按文件名登记，也不递归扫描整个 `scripts`。iOS 专属工具放在 `scripts/ios/`，专属模板只在其生成运行时中解析；Windows 源码或工具不能反向导入这些工具或模板。相对导入、链接安全、运行时目录闭包和 WPF 资源检查保持；EmbeddedResource 的实际路径、逻辑身份及清单也由此检查。Windows 构建输入指纹采用相同源码／工具范围及生成目录排除规则，并包含本端配置、测试、共享引擎输入和随包许可；独立 iOS 代码、工具目录及测试不影响该指纹，共享引擎工具仍按整个职责目录计入。
 
@@ -71,7 +71,7 @@ Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，
 
 App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能力数量和 `IDesktopModule.Id` 不要求等于脚本模块数量或名称。增加不依赖脚本的原生能力不会被迫增加 Node 模块；脚本清单只决定 App 启动时的 JS 载荷与协议版本。
 
-当前 App 依次注册音乐、`FilmCapability` 和 `NovelCapability`，因此启动页保持音乐推荐。影视能力拥有规则设置草稿及 Node 回执快照、视频源、元数据设置、搜索与播放会话消费者；首页通过元数据适配读取豆瓣，正式播放实现通过 `FilmPlaybackSession` 消费 Node film，而不是由首页本地 preview 提供片源。电影由独立 FilmPlayback／FilmKernel 持有解码、WASAPI 设备时钟及 D3D11 原生 HDR／DOVI 输出；经 App 既有仲裁器与音乐 NativeAudioPlayback 互斥准入；不借用音乐 PCM／时钟或旧 LibVLC，旧路径本次不迁移。固定来源、许可及构建与真实输出的验证边界见[原生媒体实现](media-playback.md)。App 另通过 `AppLauncher.createPages` 装配 `SearchResultsPage`，Desktop 只消费中性 `IDesktopSearchPage`；影视规则及搜索 JS 只在 Node 载荷执行，Capabilities 不嵌入规则／搜索程序，也不保留客户端引擎回退。小说规则消费者借用同一运行器，原生 UI 和数据 owner 不迁移。原生导航／搜索已接入正式播放会话与小说详情；实现接通、构建、原生测试与真实媒体验证分别记录，不代表整 App 已全部通过。搜索交接只见[共同契约](../common/film/search.md)。影视首页见[影视首页](film-home.md)，设置见[影视设置](film-settings.md)，端侧搜索接通状态和原生测试清单见[影视搜索](film-search.md)。
+当前 App 依次注册音乐、`FilmCapability` 和 `NovelCapability`，因此启动页保持音乐推荐。影视能力拥有规则设置草稿及 Node 回执快照、视频源、元数据设置、搜索与播放会话消费者；首页通过元数据适配读取豆瓣，正式播放实现通过 `FilmPlaybackSession` 消费 Node film，而不是由首页本地 preview 提供片源。电影由独立 FilmPlayback／FilmKernel 持有解码、WASAPI 设备时钟及 D3D11 原生 HDR／DOVI 输出；经 App 既有仲裁器与音乐 NativeAudioPlayback 互斥准入，不借用音乐 PCM／时钟。Core 的 `NativeHttpMediaTransfer.CopyCompleteAsync` 供音乐缓存完整文件 producer 使用，缓存不依赖电影解码／输出。固定来源、许可及构建与真实输出的验证边界见[原生媒体实现](media-playback.md)。App 另通过 `AppLauncher.createPages` 装配 `SearchResultsPage`，Desktop 只消费中性 `IDesktopSearchPage`；影视规则及搜索 JS 只在 Node 载荷执行，Capabilities 不嵌入规则／搜索程序，也不保留客户端引擎回退。小说规则消费者借用同一运行器，原生 UI 和数据 owner 不迁移。原生导航／搜索已接入正式播放会话与小说详情；实现接通、构建、原生测试与真实媒体验证分别记录，不代表整 App 已全部通过。搜索交接只见[共同契约](../common/film/search.md)。影视首页见[影视首页](film-home.md)，设置见[影视设置](film-settings.md)，端侧搜索接通状态和原生测试清单见[影视搜索](film-search.md)。
 
 
 ## 同进程清除本机数据

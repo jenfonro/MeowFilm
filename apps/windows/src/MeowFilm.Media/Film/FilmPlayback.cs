@@ -177,19 +177,25 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         }
     }
 
+    /// <summary>False only defers a live candidate on business admission; retired inputs fail as superseded.</summary>
     public Task<bool> TryCommitAsync(RuntimeMediaPlaybackIntent intent, Func<bool> canCommit,
         Action committed, CancellationToken token = default) => Dispatch(async () =>
     {
         ThrowIfClosed();
         var session = pending;
-        if (session is null || !ReferenceEquals(session.Intent, intent)) return false;
+        if (session is null || !ReferenceEquals(session.Intent, intent))
+            throw new PlaybackException(PlaybackError.Superseded);
         await commands.WaitAsync();
-        // Another queued commit may have published this exact session while we
-        // waited. It is no longer our candidate to cancel or retire.
+        // A queued commit may have published this session while we waited.
+        // Preserve that winner; otherwise join the retired candidate's receipt.
         if (!ReferenceEquals(pending, session))
         {
-            commands.Release();
-            return false;
+            try
+            {
+                if (!ReferenceEquals(current, session)) await RetireAsync(session);
+                throw new PlaybackException(PlaybackError.Superseded);
+            }
+            finally { commands.Release(); }
         }
         var donor = current;
         bool donorPaused = paused;
@@ -201,16 +207,17 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         try
         {
             RequirePending(session); token.ThrowIfCancellationRequested();
+            if (intent.PreserveFrom is { } preserve && donor?.Scope != preserve)
+                throw new PlaybackException(PlaybackError.Superseded);
             if (!canCommit()) return false;
-            if (intent.PreserveFrom is { } preserve && donor?.Scope != preserve) return false;
-            try { permit = await AcquireOutputAsync(session.Token); }
-            catch when (!ReferenceEquals(pending, session)) { return false; }
+            permit = await AcquireOutputAsync(session.Token);
             // Admission may stop this owner or admit another candidate while
             // commands is released. Never retire an already-published duplicate.
-            if (!ReferenceEquals(pending, session)) return false;
             RequirePending(session); token.ThrowIfCancellationRequested();
-            if (!canCommit() || !ReferenceEquals(current, donor) ||
-                intent.PreserveFrom is { } expected && donor?.Scope != expected) return false;
+            if (!ReferenceEquals(current, donor) ||
+                intent.PreserveFrom is { } expected && donor?.Scope != expected)
+                throw new PlaybackException(PlaybackError.Superseded);
+            if (!canCommit()) return false;
             donorPaused = paused;
             if (intent.PreserveFrom is not null && donor is not null)
             {
@@ -220,7 +227,8 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
                 await Task.Run(() => FilmKernelNative.Check(kernel.Seek(session.Handle, align)));
             }
             RequirePending(session); token.ThrowIfCancellationRequested();
-            if (!canCommit() || !ReferenceEquals(current, donor)) return false;
+            if (!ReferenceEquals(current, donor)) throw new PlaybackException(PlaybackError.Superseded);
+            if (!canCommit()) return false;
             if (donor is not null && !silenced)
             {
                 FilmKernelNative.Check(kernel.Pause(donor.Handle, 1));
@@ -232,11 +240,12 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
                 FilmKernelNative.Check(kernel.Attach(donor.Handle, IntPtr.Zero));
                 detached = true;
             }
+            bool startPaused = intent.PreserveFrom is not null ? donorPaused : intent.Paused;
             FilmKernelNative.Check(kernel.Attach(session.Handle, surface.PictureHandle));
-            FilmKernelNative.Check(kernel.Start(session.Handle, intent.Paused ? 1 : 0));
+            FilmKernelNative.Check(kernel.Start(session.Handle, startPaused ? 1 : 0));
             var snapshot = kernel.Read(session.Handle);
             if (snapshot.Error != 0 || snapshot.State is not (2 or 3 or 4) ||
-                snapshot.SubmittedPictures == 0 || intent.Paused && snapshot.State != 3)
+                snapshot.SubmittedPictures == 0 || startPaused && snapshot.State != 3)
                 throw new PlaybackException(session.Error ?? (snapshot.Error == 0
                     ? PlaybackError.OpenFailed : FilmKernelNative.Code(snapshot.Error)));
             RequirePending(session); token.ThrowIfCancellationRequested();
@@ -244,7 +253,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
             published = true;
             Set(ref tracks, null, nameof(Tracks));
             Set(ref scope, session.Scope, nameof(Scope)); Changed(nameof(Identity));
-            Set(ref paused, intent.Paused, nameof(PauseRequested));
+            Set(ref paused, startPaused, nameof(PauseRequested));
             Set(ref hasOutput, true, nameof(HasOutput)); Set(ref lastError, null, nameof(LastErrorCode));
             Publish(snapshot);
             timer.Start();
@@ -253,6 +262,14 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         }
         catch (Exception error)
         {
+            // Stop cancels before taking commands, so cancellation may resume us
+            // before its retirement begins. Join the exact idempotent release,
+            // but never retire a duplicate commit's still-current winner.
+            if (!published && !ReferenceEquals(pending, session))
+            {
+                if (!ReferenceEquals(current, session)) await RetireAsync(session);
+                throw Safe(error);
+            }
             if (ReferenceEquals(current, session))
             {
                 current = null; ClearOutput();

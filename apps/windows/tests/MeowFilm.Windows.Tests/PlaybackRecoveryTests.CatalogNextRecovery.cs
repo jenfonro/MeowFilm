@@ -1,6 +1,6 @@
 using System.IO;
 using MeowFilm.Desktop;
-using static MeowFilm.Windows.Tests.AdaptiveMediaTests;
+using static MeowFilm.Windows.Tests.NativeMediaFixtures;
 
 namespace MeowFilm.Windows.Tests;
 

@@ -211,7 +211,7 @@ private final class AudioInputResult<T>: @unchecked Sendable {
 }
 
 private final class AudioProgressiveSink: ProgressiveMediaSink, @unchecked Sendable {
-    let range: ProgressiveReadRange?
+    let range: ProgressiveReadRange
     private let result = AudioInputResult<(Data, ProgressiveContentInformation)>()
     private var information: ProgressiveContentInformation?
     private var data = Data()

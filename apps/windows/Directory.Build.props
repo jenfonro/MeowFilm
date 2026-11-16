@@ -8,9 +8,6 @@
     <Deterministic>true</Deterministic>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
-    <VlcWindowsX64Enabled>true</VlcWindowsX64Enabled>
-    <VlcWindowsX86Enabled>false</VlcWindowsX86Enabled>
-    <VlcWindowsArm64Enabled>false</VlcWindowsArm64Enabled>
     <DebugType>portable</DebugType>
   </PropertyGroup>
 </Project>

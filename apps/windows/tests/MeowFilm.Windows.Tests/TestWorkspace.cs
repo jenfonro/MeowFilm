@@ -99,8 +99,6 @@ internal static class TestWorkspace
             "MEOW_FILM_COMPAT_TEST_DATA", "MEOWFILM_NATIVE_RECOMMENDATIONS_DATA" })
             if (Environment.GetEnvironmentVariable(name) is { } value)
                 Environment.SetEnvironmentVariable(name, ValidatePath(DataRoot, value, allowRoot: true));
-        if (Environment.GetEnvironmentVariable("MEOWFILM_TEST_VLC_ROOT") is { } vlc)
-            ValidatePath(AppContext.BaseDirectory, vlc);
         string temporary = DataPath("process-temp");
         Directory.CreateDirectory(temporary);
         Environment.SetEnvironmentVariable("TEMP", temporary);

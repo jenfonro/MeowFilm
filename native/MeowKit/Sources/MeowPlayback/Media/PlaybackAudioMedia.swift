@@ -22,7 +22,6 @@ final class PlaybackAudioMedia {
     var onFailure: (@MainActor (Error) -> Void)?
     var duration: Double? { session?.information?.duration }
     var position: Double { session?.position ?? 0 }
-    var localMediaFetch: Bool { resource.byteSource != nil || route != nil }
     var isReady: Bool { prepared && !cancelled && failure == nil }
 
     init(resource: PlaybackResource, options: PlaybackNetworkOptions = .init(), budget: PlaybackNetworkBudget) {

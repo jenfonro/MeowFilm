@@ -503,7 +503,7 @@ public static class FilmPlayerOverlayTests
         Check(seek.Value == 0 && scene.Rig.Native.Position == 0 && scene.NativeCount("seek") == seeks,
             $"an old keyboard release cannot seek the replacement occurrence; slider={seek.Value} native={scene.Rig.Native.Position} " +
             $"page={scene.Rig.Page.Position} seeks={scene.NativeCount("seek")}/{seeks} identity={scene.Rig.Page.MediaIdentity} " +
-            $"preserve={scene.Rig.Native.Intents.Last().PreserveCurrent}");
+            $"preserve={scene.Rig.Native.Intents.Last().PreserveFrom is not null}");
         RouteKey(seek, Key.Right);
         RouteKey(seek, Key.Right, release: true);
         await Until(() => Math.Abs(scene.Rig.Native.Position - .1) < .001);
@@ -561,7 +561,7 @@ public static class FilmPlayerOverlayTests
             $"an old occurrence's pointer transaction cannot seek or leave its preview on the replacement; slider={seek.Value} " +
             $"native={scene.Rig.Native.Position} page={scene.Rig.Page.Position} seeks={scene.NativeCount("seek")}/{seeks} " +
             $"scopeChanged={scene.Rig.Native.Scope != oldScope} identity={scene.Rig.Page.MediaIdentity} " +
-            $"time={scene.Element<TextBlock>("PlayerTime").Text}/{scene.Rig.Page.ProgressLabel} preserve={scene.Rig.Native.Intents.Last().PreserveCurrent}");
+            $"time={scene.Element<TextBlock>("PlayerTime").Text}/{scene.Rig.Page.ProgressLabel} preserve={scene.Rig.Native.Intents.Last().PreserveFrom is not null}");
     }
 
     private static async Task NativeHostRoundTrips()

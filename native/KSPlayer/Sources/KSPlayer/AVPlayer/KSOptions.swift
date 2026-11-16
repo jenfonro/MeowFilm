@@ -33,8 +33,6 @@ open class KSOptions {
     /// 当前 `packetQueue` 播完触发 `codecDidFinished` 时 swap，实现区间无 decode-forward 循环。
     /// 复用 `isLoopPlay` 的 packet queue 双缓冲；若同时设 `isLoopPlay = true`，以 isLoopPlay 为准。
     public var loopRange: ClosedRange<TimeInterval>?
-    /// seek完是否自动播放
-    public var isSeekedAutoPlay = KSOptions.isSeekedAutoPlay
     /*
      AVSEEK_FLAG_BACKWARD: 1
      AVSEEK_FLAG_BYTE: 2
@@ -47,7 +45,6 @@ open class KSOptions {
     public var cache = false
     //  record stream
     public var outputURL: URL?
-    public var avOptions = [String: Any]()
     /// Explicit FFmpeg demuxer name for opaque media URLs (for example "hls").
     public var inputFormat: String?
     public var formatContextOptions = [String: Any]()
@@ -58,8 +55,6 @@ open class KSOptions {
     public var nobuffer = false
     public var codecLowDelay = false
     public var startPlayTime: TimeInterval = 0
-    public var startPlayRate: Float = 1.0
-    public var registerRemoteControll: Bool = false // 默认支持来自系统控制中心的控制
     public var referer: String? {
         didSet {
             if let referer {
@@ -94,8 +89,6 @@ open class KSOptions {
     public var hardwareDecode = KSOptions.hardwareDecode
     public var asynchronousDecompression = KSOptions.asynchronousDecompression
     public var videoDisable = false
-    public var canStartPictureInPictureAutomaticallyFromInline = KSOptions.canStartPictureInPictureAutomaticallyFromInline
-    public var automaticWindowResize = true
     @Published
     public var videoInterlacingType: VideoInterlacingType?
     private var videoClockDelayCount = 0
@@ -142,31 +135,13 @@ open class KSOptions {
         decoderOptions["err_detect"] = "crccheck+bitstream+buffer+careful+explode"
     }
 
-    /**
-     you can add http-header or other options which mentions in https://developer.apple.com/reference/avfoundation/avurlasset/initialization_options
-
-     to add http-header init options like this
-     ```
-     options.appendHeader(["Referer":"https:www.xxx.com"])
-     ```
-     */
+    /// Appends HTTP request headers to this input's FFmpeg options.
     public func appendHeader(_ header: [String: String]) {
-        var oldValue = avOptions["AVURLAssetHTTPHeaderFieldsKey"] as? [String: String] ?? [
-            String: String
-        ]()
-        oldValue.merge(header) { _, new in new }
-        avOptions["AVURLAssetHTTPHeaderFieldsKey"] = oldValue
         var str = formatContextOptions["headers"] as? String ?? ""
         for (key, value) in header {
             str.append("\(key):\(value)\r\n")
         }
         formatContextOptions["headers"] = str
-    }
-
-    public func setCookie(_ cookies: [HTTPCookie]) {
-        avOptions[AVURLAssetHTTPCookiesKey] = cookies
-        let cookieStr = cookies.map { cookie in "\(cookie.name)=\(cookie.value)" }.joined(separator: "; ")
-        appendHeader(["Cookie": cookieStr])
     }
 
     // 缓冲算法函数
@@ -433,14 +408,6 @@ open class KSOptions {
         #endif
     }
 
-    open func playerLayerDeinit() {
-        #if os(tvOS) || os(xrOS)
-        runOnMainThread {
-            UIApplication.shared.windows.first?.avDisplayManager.preferredDisplayCriteria = nil
-        }
-        #endif
-    }
-
     open func liveAdaptivePlaybackRate(loadingState _: LoadingState) -> Float? {
         nil
 //        if loadingState.isFirst {
@@ -468,8 +435,6 @@ public enum VideoInterlacingType: String {
 }
 
 public extension KSOptions {
-    static var firstPlayerType: MediaPlayerProtocol.Type = KSMEPlayer.self
-    static var secondPlayerType: MediaPlayerProtocol.Type? = KSMEPlayer.self
     /// 最低缓存视频时间
     static var preferredForwardBufferDuration = 3.0
     /// 最大缓存视频时间
@@ -480,15 +445,9 @@ public extension KSOptions {
     static var isAccurateSeek = false
     /// Applies to short videos only
     static var isLoopPlay = false
-    /// 是否自动播放，默认true
-    static var isAutoPlay = true
-    /// seek完是否自动播放
-    static var isSeekedAutoPlay = true
     static var hardwareDecode = true
     // 默认不用自研的硬解，因为有些视频的AVPacket的pts顺序是不对的，只有解码后的AVFrame里面的pts是对的。
     static var asynchronousDecompression = false
-    static var isPipPopViewController = false
-    static var canStartPictureInPictureAutomaticallyFromInline = true
     static var preferredFrame = true
     static var useSystemHTTPProxy = false
     /// 日志级别

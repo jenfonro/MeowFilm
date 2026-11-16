@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json.Nodes;
 using System.Windows.Threading;
+using MeowFilm.Capabilities;
 using MeowFilm.Media;
 using static MeowFilm.Windows.Tests.FilmPlaybackFixture;
 
@@ -20,13 +22,27 @@ public static class FilmPlaybackKernelTests
         yield return Test("only commit acquires output and holds its permit through publication", OutputAdmission);
         yield return Test("output admission can asynchronously stop prepared film without gate inversion", AdmissionStopsFilm);
         yield return Test("output admission rechecks canCommit before starting native output", AdmissionRejected);
-        yield return Test("cancelled late output admission releases its permit and leaves the gate usable", AdmissionCancelled);
+        yield return Test("cancelled late output admission releases its permit and leaves the gate usable", () => AdmissionCancelled(false));
+        yield return Test("output admission cancellation is terminal rather than deferred", () => AdmissionCancelled(true));
+        yield return Test("cancelled output admission cannot hide a concurrent native lease release failure",
+            () => AdmissionRetirement(true));
+        yield return Test("cancelled output admission waits for the exact native retirement receipt",
+            () => AdmissionRetirement(false));
         yield return Test("output admission cannot publish a superseded candidate", AdmissionSuperseded);
+        yield return Test("an invalid donor terminates even when business admission is deferred", InvalidDonor);
+        yield return Test("stopping a prepared direct film drains its business attempt without retrying commit",
+            () => PendingBusinessStop(false));
+        yield return Test("cancelling direct film output admission drains its business attempt without reporting failure",
+            () => PendingBusinessStop(true));
         yield return Test("a late duplicate admission cannot retire the published owner", () => DuplicateAdmission(false));
         yield return Test("a failed late duplicate admission cannot retire the published owner", () => DuplicateAdmission(true));
         yield return Test("cancelled prepare awaits native release before disposing its lease", CancelledPrepare);
         yield return Test("superseded late prepare cannot replace or commit the latest candidate", SupersededPrepare);
         yield return Test("same episode aligns before start and a queued duplicate cannot retire the published owner", AlignedCommit);
+        foreach (bool sameEpisode in new[] { true, false })
+            foreach (bool pause in new[] { true, false })
+                yield return Test($"late donor pause={pause} same episode={sameEpisode} starts with the correct intent",
+                    () => LatestPause(sameEpisode, pause));
         yield return Test("cancelled late alignment cannot start and restores the donor pause intent", CancelledAlignment);
         yield return Test("active failure clears output and awaits actual native retirement", ActiveFailure);
         yield return Test("natural end reports the exact scope and final clock after native retirement", NaturalEnd);
@@ -41,7 +57,7 @@ public static class FilmPlaybackKernelTests
     }
 
     private static RuntimeMediaPlaybackIntent Intent(string identity, double position = 0, bool paused = false,
-        NativePlaybackScope? preserve = null) => new("film", identity, "Kernel fixture", position, paused, preserve);
+        NativePlaybackScope? preserve = null) => new("film", identity, position, paused, preserve);
 
     private static async Task OutputAdmission()
     {
@@ -90,7 +106,8 @@ public static class FilmPlaybackKernelTests
         Check(!commit.IsCompleted && owner.Lease.DisposeCalls == 0,
             "reentrant stop reaches native retirement and waits for its actual completion");
         releasing.Open();
-        Check(!await commit.WaitAsync(Limit) && publications == 0 && !playback.HasOutput &&
+        await Superseded(commit);
+        Check(publications == 0 && !playback.HasOutput &&
             permit.Disposals == 1 && rig.Kernel.Values(owner, "start").Length == 0,
             "stopping a prepared-only owner invalidates admission without deadlock or publication");
         Released(rig, owner);
@@ -117,7 +134,7 @@ public static class FilmPlaybackKernelTests
         Released(rig, owner);
     }
 
-    private static async Task AdmissionCancelled()
+    private static async Task AdmissionCancelled(bool throwsCancellation)
     {
         var owner = new Owner("admission-cancel");
         var permit = new OutputPermit();
@@ -127,16 +144,179 @@ public static class FilmPlaybackKernelTests
             await Task.Yield();
             cancellation.Cancel();
             Check(token.IsCancellationRequested, "admission receives the candidate's linked cancellation");
+            if (throwsCancellation) token.ThrowIfCancellationRequested();
             return permit; // Deliberately grant late despite cancellation.
         }, owner);
         var intent = Intent("admission-cancel");
         await rig.Prepare(owner, intent).WaitAsync(Limit);
         await Superseded(rig.Playback.TryCommitAsync(intent, () => true,
             () => throw new InvalidOperationException("Cancelled admission published"), cancellation.Token));
-        Check(permit.Disposals == 1 && !rig.Playback.HasOutput &&
+        Check(permit.Disposals == (throwsCancellation ? 0 : 1) && !rig.Playback.HasOutput &&
             rig.Kernel.Values(owner, "start").Length == 0, "a late grant cannot publish cancelled output");
         Released(rig, owner);
         await rig.Playback.StopAsync().WaitAsync(Limit);
+    }
+
+    private static async Task InvalidDonor()
+    {
+        var donor = new Owner("invalid-donor");
+        var candidate = new Owner("invalid-donor-candidate");
+        await using var rig = new Rig(donor, candidate);
+        var initial = Intent("invalid-donor");
+        await rig.Prepare(donor, initial);
+        await rig.Commit(initial);
+        var scope = rig.Playback.Scope!;
+        var intent = Intent("invalid-donor-candidate", preserve: scope with { Generation = scope.Generation + 1 });
+        await rig.Prepare(candidate, intent);
+        int admissions = 0, publications = 0;
+        await Superseded(rig.Playback.TryCommitAsync(intent, () => { admissions++; return false; },
+            () => publications++));
+        Check(admissions == 0 && publications == 0 && rig.Playback.Scope == scope &&
+            rig.Playback.HasOutput && donor.Lease.DisposeCalls == 0 &&
+            rig.Kernel.Values(candidate, "start").Length == 0,
+            "an invalid donor is terminal before consulting defer and cannot disturb healthy output");
+        Released(rig, candidate);
+    }
+
+    private static async Task AdmissionRetirement(bool failRelease)
+    {
+        var releasing = new NativeGate();
+        var owner = new Owner("admission-retirement") { ReleaseGate = releasing };
+        owner.Lease.FailRelease = failRelease;
+        var entered = Signal();
+        var waiting = Signal();
+        var rig = new Rig(async token =>
+        {
+            entered.TrySetResult();
+            await waiting.Task.WaitAsync(token);
+            throw new InvalidOperationException("Cancelled admission cannot grant output");
+        }, owner);
+        try
+        {
+            var intent = Intent("admission-retirement");
+            await rig.Prepare(owner, intent);
+            int publications = 0;
+            var commit = rig.Playback.TryCommitAsync(intent, () => true, () => publications++);
+            await entered.Task.WaitAsync(Limit);
+            var stop = rig.Playback.StopAsync();
+            await releasing.Arrival();
+            Check(!stop.IsCompleted && !commit.IsCompleted && owner.Lease.DisposeCalls == 0,
+                "neither cancellation nor clearing pending completes admission before exact native retirement");
+            releasing.Open();
+            if (failRelease) await Failure(stop, PlaybackError.ReleaseFailed);
+            else await stop.WaitAsync(Limit);
+            await Failure(commit, failRelease ? PlaybackError.ReleaseFailed : PlaybackError.Superseded);
+            Check(publications == 0 && !rig.Playback.HasOutput &&
+                rig.Kernel.Values(owner, "start").Length == 0,
+                "admission settles without publication and preserves the actual retirement outcome");
+            Released(rig, owner);
+        }
+        finally
+        {
+            releasing.Open();
+            try
+            {
+                if (failRelease) await Failure(rig.DisposeAsync().AsTask(), PlaybackError.ReleaseFailed);
+                else await rig.DisposeAsync();
+            }
+            finally
+            {
+                // The injected failure is after the probe's native release; no native worker can still use this HWND.
+                if (failRelease && owner.NativeReleased.Task.IsCompletedSuccessfully)
+                    ((FilmVideoSurface)rig.Playback.VideoView).Dispose();
+            }
+        }
+    }
+
+    private static async Task PendingBusinessStop(bool duringAdmission)
+    {
+        var preparing = new NativeGate();
+        var releasing = new NativeGate();
+        var stopped = new Owner("pending-business-stop") { PrepareGate = preparing, ReleaseGate = releasing };
+        var latest = new Owner("pending-business-latest");
+        var admission = Signal(); var admissionWait = Signal();
+        int requests = 0;
+        await using var rig = new Rig(duringAdmission ? async token =>
+        {
+            if (++requests == 1)
+            {
+                admission.TrySetResult();
+                await admissionWait.Task.WaitAsync(token);
+            }
+            return new OutputPermit();
+        } : null, stopped, latest);
+        await using var runtime = new FilmRuntimeProbe { Controlled = false };
+        await using var library = new FilmLibrary(new FilmMemoryStore());
+        await using var session = new FilmPlaybackSession(runtime.CaptureConnectionAsync, new FilmNativeMedia(rig.Playback));
+        var card = Card();
+        var page = new FilmPlaybackPage(card, card.PlaybackContext!, session, library);
+        await session.OpenAsync(page, new { platform = "windows", target = card.PlaybackContext!.Target.Wire() }, default);
+        var browsing = Signal(); var browseReply = Signal();
+        var resourceReleasing = Signal(); var resourceReleased = Signal();
+        var failures = new List<string>();
+        session.OperationFailed += (_, code) => failures.Add(code);
+        runtime.Intercept = async (method, input, _) =>
+        {
+            string id = FilmJson.Text(input, "attemptId");
+            if (!duringAdmission && method == "film.session.command" && FilmJson.Text(input, "action") == "browse")
+            { browsing.TrySetResult(); await browseReply.Task.WaitAsync(Limit); }
+            if (method == "film.session.media.release" && id == "stopped")
+            { resourceReleasing.TrySetResult(); await resourceReleased.Task.WaitAsync(Limit); }
+            var response = runtime.Handle(method, input);
+            if (method == "film.session.attempt")
+            {
+                var receipt = JsonNode.Parse(response.GetProperty("value").GetRawText())!.AsObject();
+                receipt["url"] = (id == "stopped" ? stopped : latest).Address.AbsoluteUri;
+                receipt["format"] = "mp4";
+                response = FilmRuntimeProbe.Ok(FilmJson.Encode(receipt));
+            }
+            return response;
+        };
+        try
+        {
+            var browse = page.CommandAsync("browse", new { sourceId = (string?)null });
+            if (!duringAdmission) await browsing.Task.WaitAsync(Limit);
+            else await browse.WaitAsync(Limit);
+            runtime.Attempt("stopped", Candidate("stopped"));
+            await preparing.Arrival();
+            preparing.Open();
+            await Until(() => rig.Kernel.Values(stopped, "read").Length > 0);
+            if (duringAdmission) await admission.Task.WaitAsync(Limit);
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(!session.HasOutput && runtime.Calls.Count(call => call.Method == "film.session.attempt") == 1,
+                "the first direct candidate waits for admission or business control with no accepted donor");
+            var stop = rig.Playback.StopAsync(); // The same native stop used by music output admission.
+            await releasing.Arrival();
+            Check(!stop.IsCompleted && !runtime.Released.Contains("stopped"),
+                "native retirement is not complete merely because pending publication was cleared");
+            releasing.Open();
+            await stop.WaitAsync(Limit);
+            browseReply.TrySetResult();
+            await browse.WaitAsync(Limit);
+            await resourceReleasing.Task.WaitAsync(Limit);
+            Check(stopped.NativeReleased.Task.IsCompletedSuccessfully &&
+                rig.Kernel.Values(stopped, "release").Length == 1 &&
+                rig.Kernel.Values(stopped, "start").Length == 0 && !session.HasOutput &&
+                !runtime.Calls.Any(call => call.Method == "film.session.command" &&
+                    FilmJson.Text(call.Parameters, "action") is "media.started" or "media.failed"),
+                "terminal native invalidation reaches exact business release without publication, failure or commit retry");
+            resourceReleased.TrySetResult();
+            await Until(() => runtime.Released.Contains("stopped"));
+            runtime.Attempt("latest", Candidate("latest"));
+            await Until(() => session.HasOutput && rig.Playback.Identity == "latest");
+            await session.CloseSessionAsync().WaitAsync(Limit);
+            Check(failures.Count == 0 && rig.Kernel.Values(latest, "start").Length == 1 &&
+                rig.Kernel.Values(latest, "release").Length == 1 &&
+                runtime.Calls.Count(call => call.Method == "film.session.media.release" &&
+                    FilmJson.Text(call.Parameters, "attemptId") == "stopped" &&
+                    FilmJson.Text(call.Parameters, "resourceId") == FilmJson.Text(runtime.Receipts["stopped"], "id")) == 1,
+                "business control remains usable and each direct occurrence retains its precise single release");
+        }
+        finally
+        {
+            preparing.Open(); releasing.Open();
+            browseReply.TrySetResult(); resourceReleased.TrySetResult();
+        }
     }
 
     private static async Task AdmissionSuperseded()
@@ -160,9 +340,9 @@ public static class FilmPlaybackKernelTests
         fixture = rig;
         var intent = Intent("admission-old");
         await rig.Prepare(old, intent).WaitAsync(Limit);
-        Check(!await rig.Playback.TryCommitAsync(intent, () => true,
-            () => throw new InvalidOperationException("Superseded admission published")).WaitAsync(Limit) &&
-            permits[0].Disposals == 1 && rig.Kernel.Values(old, "start").Length == 0,
+        await Superseded(rig.Playback.TryCommitAsync(intent, () => true,
+            () => throw new InvalidOperationException("Superseded admission published")));
+        Check(permits[0].Disposals == 1 && rig.Kernel.Values(old, "start").Length == 0,
             "a newer prepare can reenter admission and prevents stale publication");
         Released(rig, old);
         await rig.Commit(latestIntent);
@@ -198,7 +378,8 @@ public static class FilmPlaybackKernelTests
             Check(await rig.Playback.TryCommitAsync(intent, () => true, () => publications++).WaitAsync(Limit),
                 "a duplicate can acquire admission while the first callback awaits externally");
             resume.TrySetResult();
-            Check(!await first.WaitAsync(Limit) && publications == 1 && rig.Playback.HasOutput &&
+            await Failure(first, fail ? PlaybackError.CommandFailed : PlaybackError.Superseded);
+            Check(publications == 1 && rig.Playback.HasOutput &&
                 owner.Lease.DisposeCalls == 0 && rig.Kernel.Values(owner, "cancel").Length == 0 &&
                 secondPermit.Disposals == 1 && firstPermit.Disposals == (fail ? 0 : 1),
                 "late admission success or failure cannot retire another commit's published session");
@@ -275,8 +456,7 @@ public static class FilmPlaybackKernelTests
         Check(!prepare.IsCompleted && owner.Lease.DisposeCalls == 0 && !rig.Playback.HasOutput,
             "prepare cancellation remains incomplete while native release is blocked");
         int commits = 0;
-        Check(!await rig.Playback.TryCommitAsync(intent, () => true, () => commits++).WaitAsync(Limit),
-            "late successful prepare is no longer a committable candidate");
+        await Superseded(rig.Playback.TryCommitAsync(intent, () => true, () => commits++));
         releasing.Open();
         await Cancelled(prepare);
         Released(rig, owner);
@@ -304,8 +484,7 @@ public static class FilmPlaybackKernelTests
         await latestPrepare.WaitAsync(Limit);
         Released(rig, old);
         int oldCommits = 0;
-        Check(!await rig.Playback.TryCommitAsync(oldIntent, () => true, () => oldCommits++).WaitAsync(Limit),
-            "a retired intent cannot steal the latest prepared candidate");
+        await Superseded(rig.Playback.TryCommitAsync(oldIntent, () => true, () => oldCommits++));
         Check(!rig.Playback.HasOutput && rig.Playback.Scope is null, "neither preparation publishes output");
         await rig.Commit(latestIntent);
         Check(oldCommits == 0 && rig.Playback.Identity == latestIntent.Identity &&
@@ -320,7 +499,7 @@ public static class FilmPlaybackKernelTests
         var donor = new Owner("align-donor") { ReleaseGate = releasing };
         var candidate = new Owner("align-candidate") { SeekGate = seeking };
         await using var rig = new Rig(donor, candidate);
-        var original = Intent("align-donor", 4);
+        var original = Intent("align-donor", 4, paused: true);
         await rig.Prepare(donor, original).WaitAsync(Limit);
         await rig.Commit(original);
         var intent = Intent("align-candidate", 4, paused: true, preserve: rig.Playback.Scope);
@@ -349,8 +528,8 @@ public static class FilmPlaybackKernelTests
             rig.Playback.PauseRequested && donor.Lease.DisposeCalls == 0,
             "publication preserves alignment and pause intent while donor release is still joining");
         releasing.Open();
-        Check(await commit.WaitAsync(Limit) && !await duplicate.WaitAsync(Limit),
-            "only the first queued commit publishes the candidate");
+        Check(await commit.WaitAsync(Limit), "the first queued commit publishes the candidate");
+        await Superseded(duplicate);
         Released(rig, donor);
         Check(commits == 1 && rig.Kernel.Values(candidate, "start").SequenceEqual([1d]) &&
             rig.Kernel.Values(candidate, "cancel").Length == 0 && candidate.Lease.DisposeCalls == 0 &&
@@ -383,6 +562,36 @@ public static class FilmPlaybackKernelTests
         Check(rig.Playback.Scope == originalScope && rig.Playback.HasOutput && !rig.Playback.PauseRequested &&
             donor.Snapshot.State == 2 && rig.Kernel.Values(donor, "pause").SequenceEqual([1d, 0d]) &&
             donor.Lease.DisposeCalls == 0, "failed handoff restores the still-owned donor's playing intent");
+    }
+
+    private static async Task LatestPause(bool sameEpisode, bool pause)
+    {
+        var preparing = new NativeGate();
+        var donor = new Owner("pause-donor");
+        var candidate = new Owner("pause-candidate") { PrepareGate = preparing };
+        await using var rig = new Rig(donor, candidate);
+        var original = Intent("pause-donor", 23, paused: !pause);
+        await rig.Prepare(donor, original);
+        await rig.Commit(original);
+        var scope = rig.Playback.Scope!;
+        var intent = Intent("pause-candidate", 4, paused: !pause, preserve: sameEpisode ? scope : null);
+        var prepare = rig.Prepare(candidate, intent);
+        await preparing.Arrival();
+        var control = rig.Playback.SetPausedAsync(scope, pause);
+        Check(!control.IsCompleted, "the user's newer pause command waits for actual native preparation");
+        preparing.Open();
+        await prepare.WaitAsync(Limit);
+        await control.WaitAsync(Limit);
+        donor.Update(position: 137.75);
+        await rig.Commit(intent);
+        bool expected = sameEpisode ? pause : intent.Paused;
+        Check(rig.Playback.PauseRequested == expected && rig.Playback.Identity == intent.Identity &&
+            candidate.Snapshot.State == (expected ? 3 : 2) &&
+            rig.Kernel.Values(candidate, "start").SequenceEqual([expected ? 1d : 0d]) &&
+            rig.Playback.PositionSeconds == (sameEpisode ? 137.75 : 4) &&
+            rig.Kernel.Values(candidate, "seek").Length == (sameEpisode ? 1 : 0),
+            "same-content start uses the latest actual donor pause in both directions; new content retains its own intent");
+        Released(rig, donor);
     }
 
     private static async Task ActiveFailure()
@@ -508,8 +717,7 @@ public static class FilmPlaybackKernelTests
             rig.Playback.PositionSeconds == 0 && active.Lease.DisposeCalls == 0 && pending.Lease.DisposeCalls == 0,
             "stop immediately clears publication but awaits both native owners");
         int commits = 0;
-        Check(!await rig.Playback.TryCommitAsync(pendingIntent, () => true, () => commits++).WaitAsync(Limit),
-            "stop invalidates a prepared replacement before release completes");
+        await Superseded(rig.Playback.TryCommitAsync(pendingIntent, () => true, () => commits++));
         activeRelease.Open();
         await active.Lease.Disposed.Task.WaitAsync(Limit);
         Check(!stop.IsCompleted && pending.Lease.DisposeCalls == 0,
@@ -641,11 +849,13 @@ public static class FilmPlaybackKernelTests
         throw new InvalidOperationException("Expected cancelled preparation");
     }
 
-    private static async Task Superseded(Task task)
+    private static Task Superseded(Task task) => Failure(task, PlaybackError.Superseded);
+
+    private static async Task Failure(Task task, string code)
     {
         try { await task.WaitAsync(Limit); }
-        catch (PlaybackException error) when (error.Code == PlaybackError.Superseded) { return; }
-        throw new InvalidOperationException("Expected superseded commit");
+        catch (PlaybackException error) when (error.Code == code) { return; }
+        throw new InvalidOperationException("Expected " + code);
     }
 
     private static void Released(Rig rig, Owner owner) =>
@@ -754,6 +964,7 @@ public static class FilmPlaybackKernelTests
         internal readonly TaskCompletionSource Disposed = Signal();
         internal int DisposeCalls => Volatile.Read(ref disposals);
         internal volatile bool DisposedBeforeNativeRelease;
+        internal bool FailRelease;
         public Uri Address => owner.Address;
         public IReadOnlyDictionary<string, string> Headers { get; } = new Dictionary<string, string>();
         public CancellationToken Revoked => revoked.Token;
@@ -765,6 +976,7 @@ public static class FilmPlaybackKernelTests
                 revoked.Cancel(); revoked.Dispose();
                 Disposed.TrySetResult();
             }
+            if (FailRelease) throw new InvalidOperationException("Synthetic lease release failure");
             return ValueTask.CompletedTask;
         }
     }

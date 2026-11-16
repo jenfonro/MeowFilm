@@ -519,7 +519,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
                 input.Lease = input.Authority.CreateLease(receipt.ResourceId, receipt.Address, lifetime.Token);
             }
             bool sameEpisode = HasOutput && current is { } acceptedDonor && SameEpisode(acceptedDonor, input);
-            intent = new RuntimeMediaPlaybackIntent("film", id, receipt.Title,
+            intent = new RuntimeMediaPlaybackIntent("film", id,
                 receipt.Position, receipt.Paused, sameEpisode ? current!.NativeScope : null);
             await media.PrepareAsync(intent, receipt, input.Lease, lifetime.Token);
             prepared = true;
@@ -563,6 +563,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
         }
         catch (OperationCanceledException) when (!committed && (publication.IsCancellationRequested ||
             input?.Lifetime.IsCancellationRequested == true || generation != ownerGeneration)) { }
+        catch (PlaybackException error) when (!committed && error.Code == PlaybackError.Superseded) { }
         catch (Exception error)
         {
             if (committed)

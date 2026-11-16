@@ -41,8 +41,7 @@ try {
     $SelfContained = (-not $FrameworkDependent).ToString().ToLowerInvariant()
     $Rid = 'win-x64'
     $PublishProperties = @("-p:Configuration=$Configuration", "-p:RuntimeIdentifier=$Rid",
-        "-p:SelfContained=$SelfContained", '-p:TargetLatestRuntimePatch=true',
-        '-p:VlcWindowsX64Enabled=true', '-p:VlcWindowsX86Enabled=false', '-p:VlcWindowsArm64Enabled=false')
+        "-p:SelfContained=$SelfContained", '-p:TargetLatestRuntimePatch=true')
     & $WindowsDotnet restore $Project --locked-mode --configfile $WindowsNuGetConfig @PublishProperties `
         -p:ExcludeRestorePackageImports=true
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
