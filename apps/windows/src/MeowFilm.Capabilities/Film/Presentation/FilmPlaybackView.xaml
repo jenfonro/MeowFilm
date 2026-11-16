@@ -378,7 +378,7 @@
      <Grid x:Name="PlayerFrame" VerticalAlignment="Top" SizeChanged="Player_SizeChanged" AutomationProperties.Name="影片播放器">
       <Grid x:Name="VideoPicture" Background="Black" Height="{Binding ActualWidth,RelativeSource={RelativeSource Self},Converter={StaticResource Film.PlayerHeight}}">
        <ContentControl x:Name="VideoHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
-       <!-- Native video uses VideoView.Content so the controls share its supported foreground window. -->
+       <!-- Native video uses FilmVideoSurface.Content for the separate foreground controls window. -->
        <Grid x:Name="PlayerOverlay" Background="#01000000" Loaded="Overlay_Loaded" Unloaded="Overlay_Unloaded" SizeChanged="Overlay_SizeChanged" Focusable="True" FocusVisualStyle="{x:Null}"
              MouseMove="Player_MouseMove" MouseEnter="Player_MouseEnter" MouseLeave="Player_MouseLeave"
              PreviewMouseLeftButtonDown="Picture_MouseDown" PreviewMouseDown="Menu_MouseDown" PreviewKeyDown="Player_KeyDown">

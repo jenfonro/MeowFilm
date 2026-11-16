@@ -515,10 +515,9 @@ public static class FilmTrayPlaybackTests
         }
         internal void Leave(bool otherModule)
         {
-            var list = ShellElement<ListBox>("NavigationList");
-            list.SelectedItem = list.Items.OfType<ShellNavigationEntry>().Single(entry => otherModule
-                ? entry.Owner.Module.Id == "other"
-                : entry.Owner.Module.Id == "film" && entry.Route == FilmCapability.HomeRoute);
+            var list = ShellElement<ListBox>("ModuleNavigationList");
+            list.SelectedItem = list.Items.OfType<ModuleSession>().Single(session =>
+                session.Module.Id == (otherModule ? "other" : "film"));
         }
         internal async Task WaitClosed()
         {

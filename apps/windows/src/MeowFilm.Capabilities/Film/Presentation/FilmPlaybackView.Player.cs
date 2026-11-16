@@ -46,10 +46,6 @@ public partial class FilmPlaybackView
         if (mediaSurface is { } surface)
         {
             ClosePlayerMenus();
-            // VideoView resets its Content DP to null while keeping the child in
-            // its foreground window. A non-UI value forces its change callback
-            // to release that child even when Content already reads null.
-            surface.Content = string.Empty;
             surface.Content = null;
             mediaSurface = null;
         }

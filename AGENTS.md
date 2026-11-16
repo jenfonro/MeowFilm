@@ -59,6 +59,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `native/VideoKernel/` — 电影静默候选、实际首帧、命令与资源排空适配，不拥有业务或系统媒体会话
 - `native/KSPlayer/` — 固定源码播放核心、FFmpeg 依赖及原生音视频输出，不编译上游播放控件或 Demo
 - `apps/windows/app/` — Windows 应用入口与装配
+- `apps/windows/native/FilmKernel/` — Windows 电影独立解复用、解码、WASAPI 时钟与 D3D11 原生 HDR 输出；固定 KSPlayer 机制来源及静态依赖，不包含上游 UI 或音乐 owner
 - `apps/windows/src/` — Windows 原生库
   - `MeowFilm.Core` — 基础契约、中性播放作用域／读取租约与受控 HTTP 输入机制
   - `MeowFilm.Platform` — 本地文档存储与敏感信息保护、私密启动管道、HTTP 子进程会话、文件授权

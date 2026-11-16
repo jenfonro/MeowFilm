@@ -363,7 +363,7 @@ preferences、error、errorStage、reportError 和 prefetch；不含 URL、头�
 原生在真实输出后发送 `media.started {attemptId}`；
 `media.failed {attemptId,code?}` 只接受准确 pending／current attempt，按既有排除／续选规则处理；
 `media.progress {attemptId,position,duration,paused}` 为秒；`media.ended` 触发真实
-下一集或 ended。历史只在真实播放后写入，进度节流为 12 秒，暂停、停止、结束强制。
+下一集或 ended。历史只在真实播放后写入，播放中进度节流为 12 秒，暂停切换、暂停中位置变化、停止、结束强制。
 观看上报仅在 play 明确返回 `watchReport:true` 时调用正式 report action，准确保留
 原 flag/id，拒绝任意回调 URL。错误单独显示在 `reportError`。
 
@@ -372,6 +372,8 @@ preferences、error、errorStage、reportError 和 prefetch；不含 URL、头�
 `prepare`／`playback`，业务回执码为 `receipt`；最终 `error` 对应该反馈时附带可空
 `errorStage`。未传 code 仍走同一入口；通用 `FAILED` 归为 `UPSTREAM_ERROR`／`receipt`，
 不伪造原生原因，未登记码拒绝为 `INVALID_REQUEST`。反馈码仅进入快照，不作为 RPC 失败重新抛出。
+Windows FilmKernel 的格式、加密、解码、音频、渲染、HDR 显示、DOVI 与设备丢失错误
+使用其公开 `FILM_*` 有限码，仍按准确 attempt 归入原生 prepare／playback 阶段。
 同一次自动续选保留首次原生原因，后续取址泛错不覆盖；真实输出成功、定向重试或新的播放动作
 重置该原因，旧输出的反馈不能污染后发动作。Cat／source 请求失败按其有限公开码映射为
 HTTP、格式、脚本、权限、来源状态等类别，未知错误仍为 `UPSTREAM_ERROR`。

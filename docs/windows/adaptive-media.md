@@ -1,6 +1,6 @@
 # Windows 自适应媒体
 
-本文仅描述 `NativePlayback.OpenAsync`／`AdaptiveMediaSession` 的既有有限自适应路径：将受控 HLS／DASH 输入转换为当前原生播放器可消费的资源图。它不是下载管理器、平台代理或第二个播放器。影视 typed 输入走独立的锁定 FFmpeg 私有 AVIO 解复用桥，见[原生媒体实现](media-playback.md)；下列 parser／格式限制只适用于本文路径，不代表所有影视输入的支持范围。
+本文仅描述 `NativePlayback.OpenAsync`／`AdaptiveMediaSession` 的既有有限自适应路径：将受控 HLS／DASH 输入转换为当前原生播放器可消费的资源图。它不是下载管理器、平台代理或第二个播放器。影视 typed 输入走独立的 FilmKernel 解码／WASAPI／D3D11 输出与受控 AVIO，见[原生媒体实现](media-playback.md)；下列 parser／格式限制只适用于本文旧路径，不代表电影核心的支持范围。
 
 ## 入口和所有权
 
@@ -8,7 +8,7 @@
 - `AdaptiveManifest` 解析根清单和允许的子清单，建立有界资源图；不把任意 playlist 直接交给原生内核继续发现网络资源。
 - `AdaptiveMediaSession` 拥有上游传输、解析结果、资源、密钥、临时 capability 服务、取消和实际释放。
 - 既有本地表示服务绑定临时 `127.0.0.1` 端口，无 Origin／Host／随机请求头准入；实际资源路由／Range 仍解析，未知路由为 404。
-- 视频仍由一个 `NativePlayback`、一个 LibVLC engine 和一个当前 `MediaPlayer` 管理；音乐使用独立音频核心，不进入本路径。
+- 本文路径仍只有一个 `NativePlayback`、一个 LibVLC engine 和一个当前 `MediaPlayer`；电影 `FilmPlayback` 不使用它们。
 
 ## 当前支持边界
 

@@ -1,0 +1,307 @@
+{
+  "schema": 1,
+  "target": "windows-x86_64-ucrt",
+  "provenance": {
+    "ksPlayer": {
+      "revision": "d0d063ab1f045735129b6617591ad2148d88d5db",
+      "url": "https://codeload.github.com/kingslay/KSPlayer/tar.gz/d0d063ab1f045735129b6617591ad2148d88d5db",
+      "sha256": "db3ab9c6947f20cfb5a1b1e5a812fe74ad4a5e0cf331971e9ea135124c6c85f7",
+      "licenses": {
+        "LICENSE": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+      },
+      "inventorySHA256": "9034debfed30ce27ac5020c23753c9caec5f5553f51b8b44adf3cea3775cbf2e"
+    }
+  },
+  "sources": {
+    "ass": {
+      "version": "0.17.4",
+      "revision": "0.17.4",
+      "url": "https://codeload.github.com/libass/libass/tar.gz/0.17.4",
+      "sha256": "c287d180d93dc9c9021872574b618ac49027e84cc90e1289318b1ee68bb42251",
+      "treeSHA256": "997aa1de32a9dbb6f58f1c824bb4d39fc3c6617a5cb725ca804d49d046576f35",
+      "licenses": {
+        "COPYING": "f7e30699d02798351e7f839e3d3bfeb29ce65e44efa7735c225464c4fd7dfe9c"
+      },
+      "preparedTreeSHA256": "997aa1de32a9dbb6f58f1c824bb4d39fc3c6617a5cb725ca804d49d046576f35"
+    },
+    "bzip2": {
+      "version": "1.0.8",
+      "revision": "1.0.8",
+      "url": "https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz",
+      "sha256": "ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269",
+      "treeSHA256": "3c8f97f78cacbcbe0aaec5ce0c179835824245391b33d23e445c6aff0154d942",
+      "licenses": {
+        "LICENSE": "c6dbbf828498be844a89eaa3b84adbab3199e342eb5cb2ed2f0d4ba7ec0f38a3"
+      },
+      "preparedTreeSHA256": "3c8f97f78cacbcbe0aaec5ce0c179835824245391b33d23e445c6aff0154d942"
+    },
+    "dav1d": {
+      "version": "1.5.3",
+      "revision": "1.5.3",
+      "url": "https://codeload.github.com/videolan/dav1d/tar.gz/1.5.3",
+      "sha256": "cbe212b02faf8c6eed5b6d55ef8a6e363aaab83f15112e960701a9c3df813686",
+      "treeSHA256": "dccc5a6cd8316921096409746b5d5100482d48f130e727e083d8b6aa33ef3c01",
+      "licenses": {
+        "COPYING": "dd92c3c2247c5651606fc23a5e2d6a1ebc5ace9a3e49cbde0e12f05ad1cb1ee5"
+      },
+      "preparedTreeSHA256": "dccc5a6cd8316921096409746b5d5100482d48f130e727e083d8b6aa33ef3c01"
+    },
+    "fast_float": {
+      "revision": "97b54ca9e75f5303507699d27c6b4f4efe4641a1",
+      "url": "https://codeload.github.com/fastfloat/fast_float/tar.gz/97b54ca9e75f5303507699d27c6b4f4efe4641a1",
+      "sha256": "2b132274539286e41f37857cac22aa8441d21bd86d55de825a3342b149f66801",
+      "treeSHA256": "dfd8403e56ec63d664f1a865ab2d8ce062ba11caf8246ee942c236938d92123f",
+      "licenses": {
+        "LICENSE-APACHE": "097a889aa954d04e088b790b10a4014d6189561d0a6013935a73ce3d4ddaaf06",
+        "LICENSE-BOOST": "8d8291caf1cee26d23acf3eb67c9f9a2d58f1c681b16a4fbe8cbfb9e3c0b5a9b",
+        "LICENSE-MIT": "e562f3f974ced7e69dd1db77b820b36bcf8f30377f1aa105723fba449c53c4e6"
+      },
+      "preparedTreeSHA256": "dfd8403e56ec63d664f1a865ab2d8ce062ba11caf8246ee942c236938d92123f"
+    },
+    "ffmpeg": {
+      "version": "8.1.2",
+      "revision": "38b88335f99e76ed89ff3c93f877fdefce736c13",
+      "url": "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/38b88335f99e76ed89ff3c93f877fdefce736c13",
+      "sha256": "2ae7e42343cfffb811d15cfe98b6d005f082595fcdf034d30a4ff90cfed9f9c6",
+      "treeSHA256": "8d3e9cc79bc389c81c1a097883c168e7da80244ffcfb73e02e714c1870686f11",
+      "licenses": {
+        "COPYING.LGPLv2.1": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30",
+        "COPYING.LGPLv3": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
+        "LICENSE.md": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af"
+      },
+      "preparedTreeSHA256": "e8f3b3c1be233adccbbb6866657c5b799afc418d00ef57c81da73263e0773ce5"
+    },
+    "freetype": {
+      "version": "2.14.1",
+      "revision": "VER-2-14-1",
+      "url": "https://codeload.github.com/freetype/freetype/tar.gz/VER-2-14-1",
+      "sha256": "44bd69d1f0750603410cfd4f26f1c5523c5a3a087a2dfa8639b757dc7c6677be",
+      "treeSHA256": "2b81e5fabeca143d1c6e09a5abe0b6f5d23b57d0a1901f8eacf9042e06b7cfa5",
+      "licenses": {
+        "LICENSE.TXT": "bd36c8b474855fa294c2ec5c184544478ef3720aad37d65a6296a4f264fd2d3b",
+        "docs/FTL.TXT": "5a5ee54c5001bbad1cdc1a57cc3dd4c42199b2da09d39c7ee41fab002d02967f",
+        "docs/GPLv2.TXT": "c4120c6752c910c299e3bd9cb3a46ff262c268303ca2069b61f92f10a5656c18"
+      },
+      "preparedTreeSHA256": "2b81e5fabeca143d1c6e09a5abe0b6f5d23b57d0a1901f8eacf9042e06b7cfa5"
+    },
+    "fribidi": {
+      "version": "1.0.16",
+      "revision": "v1.0.16",
+      "url": "https://codeload.github.com/fribidi/fribidi/tar.gz/v1.0.16",
+      "sha256": "5a1d187a33daa58fcee2ad77f0eb9d136dd6fa4096239199ba31e850d397e8a8",
+      "treeSHA256": "3b87ed5f4204dbe7ca9ebafef1ecc6c53fd09e31bcd8dcd33137dbe2f46ad9b9",
+      "licenses": {
+        "COPYING": "32434afcc8666ba060e111d715bfdb6c2d5dd8a35fa4d3ab8ad67d8f850d2f2b"
+      },
+      "preparedTreeSHA256": "3b87ed5f4204dbe7ca9ebafef1ecc6c53fd09e31bcd8dcd33137dbe2f46ad9b9"
+    },
+    "glslang": {
+      "version": "15.1.0",
+      "revision": "15.1.0",
+      "url": "https://codeload.github.com/KhronosGroup/glslang/tar.gz/15.1.0",
+      "sha256": "4bdcd8cdb330313f0d4deed7be527b0ac1c115ff272e492853a6e98add61b4bc",
+      "treeSHA256": "441c67343575d5e1cede8a01e03f92dd4aaf7dc85b51fc71b524a88162ce3d80",
+      "licenses": {
+        "LICENSE.txt": "adb783e734e906d1f46db5df29991dbde84bdb0ceab502ac2febb44fe3c2b5f4"
+      },
+      "preparedTreeSHA256": "441c67343575d5e1cede8a01e03f92dd4aaf7dc85b51fc71b524a88162ce3d80"
+    },
+    "harfbuzz": {
+      "version": "11.5.1",
+      "revision": "11.5.1",
+      "url": "https://codeload.github.com/harfbuzz/harfbuzz/tar.gz/11.5.1",
+      "sha256": "624ddaa8211a57b538360555f7358dac9fa7a9e6000b65de06a91dbb392882ca",
+      "treeSHA256": "2c76e7364c9eaba8de50a0b4e147596f99184b72c12e845e93293f83e90b14b0",
+      "licenses": {
+        "COPYING": "ba8f810f2455c2f08e2d56bb49b72f37fcf68f1f4fade38977cfd7372050ad64"
+      },
+      "preparedTreeSHA256": "2c76e7364c9eaba8de50a0b4e147596f99184b72c12e845e93293f83e90b14b0"
+    },
+    "jinja": {
+      "revision": "15206881c006c79667fe5154fe80c01c65410679",
+      "url": "https://codeload.github.com/pallets/jinja/tar.gz/15206881c006c79667fe5154fe80c01c65410679",
+      "sha256": "b88a20dcc2e34072fcf4159325bc6c34cd4b29a81a8b83d15d2f28ba561da296",
+      "treeSHA256": "07c5eecd4dd958d4f61f0154cffce6e4cad7674da94489ee579a5ee10147bcb8",
+      "licenses": {
+        "LICENSE.txt": "3b49dcee4105eb37bac10faf1be260408fe85d252b8e9df2e0979fc1e094437b"
+      },
+      "preparedTreeSHA256": "07c5eecd4dd958d4f61f0154cffce6e4cad7674da94489ee579a5ee10147bcb8"
+    },
+    "markupsafe": {
+      "revision": "297fc8e356e6836a62087949245d09a28e9f1b13",
+      "url": "https://codeload.github.com/pallets/markupsafe/tar.gz/297fc8e356e6836a62087949245d09a28e9f1b13",
+      "sha256": "da7c010c9c81a66ac73036558c1fcb6212b50482f43211cd1254035b94f82414",
+      "treeSHA256": "b0f4ef840b49288cc01c44b3f13d44283b8e95110cd91d13bc58acf86c17b7db",
+      "licenses": {
+        "LICENSE.txt": "489a8e1108509ed98a37bb983e11e0f7e1d31f0bd8f99a79c8448e7ff37d07ea"
+      },
+      "preparedTreeSHA256": "b0f4ef840b49288cc01c44b3f13d44283b8e95110cd91d13bc58acf86c17b7db"
+    },
+    "placebo": {
+      "version": "7.387.0",
+      "revision": "v7.387.0",
+      "url": "https://codeload.github.com/haasn/libplacebo/tar.gz/v7.387.0",
+      "sha256": "f9e62d3774a9c4cfd198ec3abaa88294aaade2e31c04d5ab02bcf4abc98b1df5",
+      "treeSHA256": "a4b88770fda642ce6dbe68199ba33d0bee7a9fdb6717f7095fff80de5a8372f5",
+      "licenses": {
+        "LICENSE": "b3aa400aca6d2ba1f0bd03bd98d03d1fe7489a3bbb26969d72016360af8a5c9d"
+      },
+      "preparedTreeSHA256": "f87680279e322a0a6b6a1ead15c386c397e188d62e3c208db60f4514e0366add"
+    },
+    "spirv-cross": {
+      "version": "1.4.309.0",
+      "revision": "vulkan-sdk-1.4.309.0",
+      "url": "https://codeload.github.com/KhronosGroup/SPIRV-Cross/tar.gz/vulkan-sdk-1.4.309.0",
+      "sha256": "cf4f12a767d63f63024e61750e372ffdc95567513b99ed9be6f21f474b328ddd",
+      "treeSHA256": "493c1849d5cfb46067eba3186630c84f6f826a53807ccf3cfd82137ca94b40f2",
+      "licenses": {
+        "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      },
+      "preparedTreeSHA256": "493c1849d5cfb46067eba3186630c84f6f826a53807ccf3cfd82137ca94b40f2"
+    },
+    "xml": {
+      "version": "2.14.6",
+      "revision": "v2.14.6",
+      "url": "https://codeload.github.com/GNOME/libxml2/tar.gz/v2.14.6",
+      "sha256": "546ab74561c040df210c88dbd3c652bf509d826954ab2002c8973f1fa8d10130",
+      "treeSHA256": "23821906ab71d81ec272624b91d4add4226b1a6c854b93b0e70931ab76a5f4c5",
+      "licenses": {
+        "Copyright": "5d4873884a890122a4b9b20ad56ac6f7da1d796a5bfcf04a427970ac96217626"
+      },
+      "preparedTreeSHA256": "23821906ab71d81ec272624b91d4add4226b1a6c854b93b0e70931ab76a5f4c5"
+    },
+    "xz": {
+      "version": "5.8.1",
+      "revision": "v5.8.1",
+      "url": "https://codeload.github.com/tukaani-project/xz/tar.gz/v5.8.1",
+      "sha256": "bdbc23fbf9098843357e71e49685724fda2c320c29cb1b25fd90505f14bb0b3d",
+      "treeSHA256": "eb91587375ecb3c70c74f52d861c0d7653db28bfba54c992a0fef9b99e1e8a56",
+      "licenses": {
+        "COPYING": "616a3ad264ce29b8f1cb97e53037b139d406899ca8d1f799651e17bfa09830b8",
+        "COPYING.0BSD": "0b01625d853911cd0e2e088dcfb743261034a091bb379246cb25a14cc4c74bf1",
+        "COPYING.LGPLv2.1": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551",
+        "COPYING.GPLv2": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643",
+        "COPYING.GPLv3": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+      },
+      "preparedTreeSHA256": "eb91587375ecb3c70c74f52d861c0d7653db28bfba54c992a0fef9b99e1e8a56"
+    },
+    "zlib": {
+      "version": "1.3.1",
+      "revision": "v1.3.1",
+      "url": "https://codeload.github.com/madler/zlib/tar.gz/v1.3.1",
+      "sha256": "17e88863f3600672ab49182f217281b6fc4d3c762bde361935e436a95214d05c",
+      "treeSHA256": "1e0c9c5142d16b6d0928b5267cb6d639e092bc1a084217c490e1dd540dbb619f",
+      "licenses": {
+        "LICENSE": "845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243"
+      },
+      "preparedTreeSHA256": "1e0c9c5142d16b6d0928b5267cb6d639e092bc1a084217c490e1dd540dbb619f"
+    }
+  },
+  "inputs": {
+    "apps/windows/native/FilmKernel/ffmpeg-film-avio.patch": "ebc1bbad9bdeaff7e4666a85ddcabaa8176f864360d40d73d5477ecd596ab4fb",
+    "scripts/windows/build-film-kernel-placebo.patch": "6064d6b7a0767157497b950fb215884784061633e392669aff64684a2b5cc873",
+    "apps/windows/native/FilmKernel/ffmpeg-private.h": "39fd1f47e3982b5fab505becdaee6eab35719611ccbb6308aa35eac9ee9255af",
+    "scripts/windows/build-film-kernel-glslang.wrap": "0fab3a524b58661d4e10597680fb28484504f8591f852d5eb0043904e8507e2c",
+    "scripts/windows/build-film-kernel-spirv-cross.wrap": "b1de07e129e5ce1b466e520d0261676894815ec55dc83091a5db1ea4c7734dc0",
+    "apps/windows/native/FilmKernel/ffmpeg-dovi.patch": "428d22ca131a11a49d686b7fcb8c1bc12c1b51c69d3913a3fca2f0de90408527",
+    "apps/windows/native/FilmKernel/ffmpeg-windows-build.patch": "1c22cbe6f1557a00407d2fa6f6562e2bbd0a16c1048a778495ead8856848b5c5"
+  },
+  "patches": [
+    {
+      "source": "ffmpeg",
+      "path": "apps/windows/native/FilmKernel/ffmpeg-film-avio.patch",
+      "files": {
+        "libavformat/hls.c": {
+          "upstream": "401fa5d806cc59888261e6fd08ee5772a4cda153192c1f339c99da5be388cd2c",
+          "patched": "8ebec5cc2d3c27f4366eefdf1f99e4543291a415ad7169210ee39c73278f8043"
+        },
+        "libavformat/dashdec.c": {
+          "upstream": "50f4368e09137d961ba7965ac4e664b48bc3358efcfc1a44df19cb897832ea86",
+          "patched": "4c94bb5d7c17c0513fd257f1aa05402fa87c9732e41bd0336706c8873488ea3d"
+        },
+        "libavformat/mov.c": {
+          "upstream": "7ed52b0e5932026058a55483e72880eb592cdef048b0cec15e9ea7e922ad0347",
+          "patched": "f8d6201d74acc339e341e437a63639c39c4e7383d9c2259b7d7c0d0f61a1061c"
+        },
+        "libavformat/isom.h": {
+          "upstream": "424f1ea8b388da2d1af6ad19b2065ff22b8f80214ff6d19b44b452b3aeb891dc",
+          "patched": "6725c001cd42828b6941d8f1da2ba2299d64f70563edf53da256f33af08f43e5"
+        },
+        "libavutil/aes_ctr.c": {
+          "upstream": "bc85c73e481985b2336eaa2b9eb55094f4e440c5a18611dfe9d0f1e13aa7035e",
+          "patched": "cabafeea70363cbe9fd8d5343165411e3c1320229ceac5b35a7d088f0aafcdc0"
+        },
+        "libavutil/dict.c": {
+          "upstream": "7af36341177b718f04257caed6df73a60dd6b22c9dacddde7cd6d96fdaa32b3a",
+          "patched": "ce417d7f0270e3227963d14db3ed7114c88df9c36673a42c423c7e524ae6adcb"
+        },
+        "libavutil/opt.c": {
+          "upstream": "5457ad7f4c8d384c75136b210c71f26fdc9a2fceb659bbf170b4b021a941a2da",
+          "patched": "d37201d92bbcb59aab015c99146dcbc23852397e9f3a244f6223c0f08ad32dcc"
+        }
+      }
+    },
+    {
+      "source": "placebo",
+      "path": "scripts/windows/build-film-kernel-placebo.patch",
+      "files": {
+        "src/d3d11/meson.build": {
+          "upstream": "804a98f8d33c3822afd63c2895b7b866f9adc06493600d55fc4824f3ba995c67",
+          "patched": "f9f6d6561500354f28a4ce44a50cc585e5b880a94fd86c75552cae8f9022e4ce"
+        },
+        "src/glsl/meson.build": {
+          "upstream": "46d120a90f6e6c45f8b441a68c8f28ce39cd3911d4729ed01cb0a8f6b6edc97b",
+          "patched": "2ce484aa3577a94cb468e208e61dc618222139bfc8eb65947433850bd574912b"
+        },
+        "src/vulkan/meson.build": {
+          "upstream": "a77aa6851c32f9b7ef1e737dd4967e7b3be5a097e889584939f094ea853bce40",
+          "patched": "c5636ec39d4dc6c618ff5f4b7501b12bbb4ed1f543a8f25d7b930fa9ac90d18c"
+        }
+      }
+    },
+    {
+      "source": "ffmpeg",
+      "path": "apps/windows/native/FilmKernel/ffmpeg-dovi.patch",
+      "files": {
+        "libavcodec/packet.h": {
+          "upstream": "96b17565536b27251918cdec0776e5200b0cdf2e42d9276024d9f831bfc30cf6",
+          "patched": "9d37f901c7867adfc0881ec6fcf8fa2a20a0ad2034521eeb00f377e4ecf9814a"
+        },
+        "libavcodec/packet.c": {
+          "upstream": "bcea76b84b6aef6492cd4a315b790a69d8ce34ac9db082134f939f20db4ffa53",
+          "patched": "f8300362a937b9249dd71960a68e1d5257e34ab92bfdc7c0322ea3317f8dd911"
+        },
+        "libavformat/mov.c": {
+          "upstream": "f8d6201d74acc339e341e437a63639c39c4e7383d9c2259b7d7c0d0f61a1061c",
+          "patched": "6d98ffe223eef0c1aedf3a9f0abe724eb4a35f72bd478f9987ad40e479dda453"
+        },
+        "libavcodec/hevc/hevcdec.c": {
+          "upstream": "d6c12610d92a8d8e27bae984172ce1d0f13f8eb16d5998eb58cc25b2fc690974",
+          "patched": "36dbb8923058783887e4dd769452128ade247894f1f3d1110f6c0c0627392aa9"
+        },
+        "libavcodec/dovi_rpudec.c": {
+          "upstream": "e9d5504aa385747b96d3bb752815317f85413acc8cf7115f4851d9659f8df2d4",
+          "patched": "46d77fb16ad1b1911ff7d226ae2502132a2016bf01a6cb596f3e7f99e2f6802a"
+        }
+      }
+    },
+    {
+      "source": "ffmpeg",
+      "path": "apps/windows/native/FilmKernel/ffmpeg-windows-build.patch",
+      "files": {
+        "ffbuild/library.mak": {
+          "upstream": "77d74f382e4f5dae1c4aff7445e7aa04a9b8410f52223803eb9bbef09de41938",
+          "patched": "a7982237313320f073454fc1275bfb1077a08a63aa3a24b25f2e2bd3302928eb"
+        }
+      }
+    }
+  ],
+  "tools": {
+    "meson": "1.9.1",
+    "nasm": "2.16.01"
+  },
+  "wraps": {
+    "glslang": "scripts/windows/build-film-kernel-glslang.wrap",
+    "spirv-cross": "scripts/windows/build-film-kernel-spirv-cross.wrap"
+  }
+}

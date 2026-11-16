@@ -1,0 +1,53 @@
+--- a/src/d3d11/meson.build
++++ b/src/d3d11/meson.build
+@@ -5,7 +5,7 @@
+   cc.check_header('dxgi1_6.h', required: d3d11),
+ ]
+ d3d11_deps = [
+-  dependency('spirv-cross-c-shared', version: '>=0.29.0', required: d3d11),
++  dependency('spirv-cross-c', version: '>=0.29.0', required: d3d11, static: true),
+   cc.find_library('version', required: d3d11),
+ ]
+ 
+--- a/src/glsl/meson.build
++++ b/src/glsl/meson.build
+@@ -29,10 +29,6 @@
+ 
+ elif not glslang_req.disabled()
+ 
+-  glslang_deps = [
+-    cxx.find_library('glslang-default-resource-limits', required: false)
+-  ]
+-
+   # meson doesn't respect generator expressions in INTERFACE_LINK_LIBRARIES
+   # https://github.com/mesonbuild/meson/issues/8232
+   # TODO: Use the following once it's fixed
+@@ -44,6 +40,10 @@
+     vulkan_lib_dirs += [vulkan_sdk / 'lib']
+   endif
+   prefer_static = get_option('prefer_static')
++  glslang_deps = [
++    cxx.find_library('glslang-default-resource-limits', required: false,
++                     static: prefer_static, dirs: vulkan_lib_dirs)
++  ]
+   found_lib = false
+   foreach arg : [[prefer_static, false], [not prefer_static, glslang_req]]
+     static   = arg[0]
+@@ -59,7 +59,7 @@
+ 
+     # Glslang 15.0.0 moved some code around, add also linking to glslang, while
+     # this is not needed for older versions, it will still work.
+-    glslang_deps += cxx.find_library('glslang', required: required, static: static)
++    glslang_deps += cxx.find_library('glslang', required: required, static: static, dirs: vulkan_lib_dirs)
+ 
+     if static
+       glslang_deps += [
+--- a/src/vulkan/meson.build
++++ b/src/vulkan/meson.build
+@@ -52,6 +52,4 @@
+     build_deps += vulkan_loader
+     tests += 'vulkan.c'
+   endif
+-else
+-  sources += 'vulkan/stubs.c'
+ endif

@@ -21,7 +21,7 @@ internal static class Program
             return;
         }
         NativeAudioPlayback? musicPlayback = null;
-        NativePlayback? filmPlayback = null;
+        FilmPlayback? filmPlayback = null;
         AppPlaybackCoordinator? playbackCoordinator = null;
         FilmRuleService? pendingRules = null;
         FilmSourceService? pendingSources = null;
@@ -38,7 +38,7 @@ internal static class Program
                     () => musicPlayback?.StopAsync() ?? Task.CompletedTask,
                     () => filmPlayback?.StopAsync() ?? Task.CompletedTask);
                 musicPlayback = new NativeAudioPlayback(acquireOutput: playbackCoordinator.AcquireMusicAsync);
-                filmPlayback = new NativePlayback(acquireOutput: playbackCoordinator.AcquireFilmAsync);
+                filmPlayback = new FilmPlayback(acquireOutput: playbackCoordinator.AcquireFilmAsync);
                 var cacheRoot = AppDataPaths.Current.Caches;
                 cacheStore = new CacheDocumentStore(() =>
                 {

@@ -1,0 +1,424 @@
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -48,6 +48,8 @@
+ 
+ #include "hls_sample_encryption.h"
+ 
++#include "meowfilm-private.h"
++
+ #define INITIAL_BUFFER_SIZE 32768
+ 
+ #define MAX_FIELD_LEN 64
+@@ -224,8 +226,6 @@
+     AVDictionary *avio_opts;
+     AVDictionary *seg_format_opts;
+     char *allowed_extensions;
+-    char *allowed_segment_extensions;
+-    int extension_picky;
+     int max_reload;
+     int http_persistent;
+     int http_multiple;
+@@ -287,6 +287,7 @@
+             pls->ctx->pb = NULL;
+             avformat_close_input(&pls->ctx);
+         }
++        meowfilm_erase(pls->key, sizeof(pls->key));
+         av_free(pls);
+     }
+     av_freep(&c->playlists);
+@@ -664,14 +665,14 @@
+ 
+     if (av_strstart(url, "crypto", NULL)) {
+         if (url[6] == '+' || url[6] == ':')
+-            proto_name = avio_find_protocol_name(url + 7);
++            proto_name = meowfilm_http_protocol(url + 7);
+     } else if (av_strstart(url, "data", NULL)) {
+         if (url[4] == '+' || url[4] == ':')
+-            proto_name = avio_find_protocol_name(url + 5);
++            proto_name = meowfilm_http_protocol(url + 5);
+     }
+ 
+     if (!proto_name)
+-        proto_name = avio_find_protocol_name(url);
++        proto_name = meowfilm_http_protocol(url);
+ 
+     if (!proto_name)
+         return AVERROR_INVALIDDATA;
+@@ -692,9 +693,9 @@
+     } else
+         return AVERROR_INVALIDDATA;
+ 
+-    if (!strncmp(proto_name, url, strlen(proto_name)) && url[strlen(proto_name)] == ':')
++    if (!av_strncasecmp(proto_name, url, strlen(proto_name)) && url[strlen(proto_name)] == ':')
+         ;
+-    else if (av_strstart(url, "crypto", NULL) && !strncmp(proto_name, url + 7, strlen(proto_name)) && url[7 + strlen(proto_name)] == ':')
++    else if (av_strstart(url, "crypto", NULL) && !av_strncasecmp(proto_name, url + 7, strlen(proto_name)) && url[7 + strlen(proto_name)] == ':')
+         ;
+     else if (av_strstart(url, "data", NULL) && !strncmp(proto_name, url + 5, strlen(proto_name)) && url[5 + strlen(proto_name)] == ':')
+         ;
+@@ -738,53 +739,6 @@
+         *is_http_out = is_http;
+ 
+     return ret;
+-}
+-
+-static int test_segment(AVFormatContext *s, const AVInputFormat *in_fmt, struct playlist *pls, struct segment *seg)
+-{
+-    HLSContext *c = s->priv_data;
+-    int matchA = 3;
+-    int matchF = 0;
+-
+-    if (!c->extension_picky)
+-        return 0;
+-
+-    if (strcmp(c->allowed_segment_extensions, "ALL"))
+-        matchA =      av_match_ext    (seg->url, c->allowed_segment_extensions)
+-                 + 2*(ff_match_url_ext(seg->url, c->allowed_segment_extensions) > 0);
+-
+-    if (!matchA) {
+-        av_log(s, AV_LOG_ERROR, "URL %s is not in allowed_segment_extensions, consider updating hls.c and submitting a patch to ffmpeg-devel, if this should be added\n", seg->url);
+-        return AVERROR_INVALIDDATA;
+-    }
+-
+-    if (in_fmt) {
+-        if (in_fmt->extensions) {
+-            matchF =      av_match_ext(    seg->url, in_fmt->extensions)
+-                     + 2*(ff_match_url_ext(seg->url, in_fmt->extensions) > 0);
+-            // Youtube uses aac files with .ts extension
+-            if(av_match_name("mp4", in_fmt->name) || av_match_name("aac", in_fmt->name)) {
+-                matchF |=      av_match_ext(    seg->url, "ts,m2t,m2ts,mts,mpg,m4s,mpeg,mpegts,cmfv,cmfa")
+-                          + 2*(ff_match_url_ext(seg->url, "ts,m2t,m2ts,mts,mpg,m4s,mpeg,mpegts,cmfv,cmfa") > 0);
+-            }
+-        } else if (!strcmp(in_fmt->name, "mpegts")) {
+-            const char *str = "ts,m2t,m2ts,mts,mpg,m4s,mpeg,mpegts"
+-                              ",html" // https://flash1.bogulus.cfd/
+-                            ;
+-            matchF =      av_match_ext(    seg->url, str)
+-                     + 2*(ff_match_url_ext(seg->url, str) > 0);
+-        } else if (!strcmp(in_fmt->name, "webvtt")) {
+-            matchF =      av_match_ext(    seg->url, "vtt,webvtt")
+-                     + 2*(ff_match_url_ext(seg->url, "vtt,webvtt") > 0);
+-        }
+-
+-        if (!(matchA & matchF)) {
+-            av_log(s, AV_LOG_ERROR, "detected format %s extension %s mismatches allowed extensions in url %s\n", in_fmt->name, in_fmt->extensions ? in_fmt->extensions : "none", seg->url);
+-            return AVERROR_INVALIDDATA;
+-        }
+-    }
+-
+-    return 0;
+ }
+ 
+ static int parse_playlist(HLSContext *c, const char *url,
+@@ -1058,14 +1012,6 @@
+                     goto fail;
+                 }
+ 
+-                ret = test_segment(c->ctx, pls->ctx ? pls->ctx->iformat : NULL, pls, seg);
+-                if (ret < 0) {
+-                    av_free(seg->url);
+-                    av_free(seg->key);
+-                    av_free(seg);
+-                    goto fail;
+-                }
+-
+                 if (duration < 0.001 * AV_TIME_BASE) {
+                     av_log(c->ctx, AV_LOG_WARNING, "Cannot get correct #EXTINF value of segment %s,"
+                                     " set to default value to 1ms.\n", seg->url);
+@@ -1426,6 +1372,7 @@
+ 
+         av_dict_set(&opts, "key", key, 0);
+         av_dict_set(&opts, "iv", iv, 0);
++        meowfilm_erase(key, sizeof(key));
+ 
+         ret = open_url(pls->parent, in, url, &c->avio_opts, opts, &is_http);
+         if (ret < 0) {
+@@ -2132,8 +2079,11 @@
+     free_variant_list(c);
+     free_rendition_list(c);
+ 
+-    if (c->crypto_ctx.aes_ctx)
++    if (c->crypto_ctx.aes_ctx) {
++        meowfilm_erase(c->crypto_ctx.aes_ctx, av_aes_size);
+         av_free(c->crypto_ctx.aes_ctx);
++    }
++    meowfilm_erase(&c->crypto_ctx, sizeof(c->crypto_ctx));
+ 
+     av_dict_free(&c->avio_opts);
+     ff_format_io_close(c->ctx, &c->playlist_pb);
+@@ -2334,10 +2284,6 @@
+             pls->ctx->interrupt_callback = s->interrupt_callback;
+             url = av_strdup(pls->segments[0]->url);
+             ret = av_probe_input_buffer(&pls->pb.pub, &in_fmt, url, NULL, 0, 0);
+-
+-            for (int n = 0; n < pls->n_segments; n++)
+-                if (ret >= 0)
+-                    ret = test_segment(s, in_fmt, pls, pls->segments[n]);
+ 
+             if (ret < 0) {
+                 /* Free the ctx - it isn't initialized properly at this point,
+@@ -2820,17 +2766,6 @@
+             ",fmp4"      // https://github.com/yt-dlp/yt-dlp/issues/12700
+         },
+         INT_MIN, INT_MAX, FLAGS},
+-    {"allowed_segment_extensions", "List of file extensions that hls is allowed to access",
+-        OFFSET(allowed_segment_extensions), AV_OPT_TYPE_STRING,
+-        {.str = "3gp,aac,avi,ac3,eac3,flac,mkv,m3u8,m4a,m4s,m4v,mpg,mov,mp2,mp3,mp4,mpeg,mpegts,ogg,ogv,oga,ts,vob,vtt,wav,webvtt"
+-            ",cmfv,cmfa" // Ticket11526 www.nicovideo.jp
+-            ",ec3"       // part of Ticket11435 (Elisa Viihde (Finnish online recording service))
+-            ",fmp4"      // https://github.com/yt-dlp/yt-dlp/issues/12700
+-            ",html"      // https://flash1.bogulus.cfd/
+-        },
+-        INT_MIN, INT_MAX, FLAGS},
+-    {"extension_picky", "Be picky with all extensions matching",
+-        OFFSET(extension_picky), AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, FLAGS},
+     {"max_reload", "Maximum number of times a insufficient list is attempted to be reloaded",
+         OFFSET(max_reload), AV_OPT_TYPE_INT, {.i64 = 100}, 0, INT_MAX, FLAGS},
+     {"m3u8_hold_counters", "The maximum number of times to load m3u8 when it refreshes without new segments",
+--- a/libavformat/dashdec.c
++++ b/libavformat/dashdec.c
+@@ -32,6 +32,8 @@
+ #include "demux.h"
+ #include "url.h"
+ 
++#include "meowfilm-private.h"
++
+ #define INITIAL_BUFFER_SIZE 32768
+ 
+ struct fragment {
+@@ -167,7 +169,7 @@
+ 
+ static int ishttp(char *url)
+ {
+-    const char *proto_name = avio_find_protocol_name(url);
++    const char *proto_name = meowfilm_http_protocol(url);
+     return proto_name && av_strstart(proto_name, "http", NULL);
+ }
+ 
+@@ -415,11 +417,11 @@
+ 
+     if (av_strstart(url, "crypto", NULL)) {
+         if (url[6] == '+' || url[6] == ':')
+-            proto_name = avio_find_protocol_name(url + 7);
++            proto_name = meowfilm_http_protocol(url + 7);
+     }
+ 
+     if (!proto_name)
+-        proto_name = avio_find_protocol_name(url);
++        proto_name = meowfilm_http_protocol(url);
+ 
+     if (!proto_name)
+         return AVERROR_INVALIDDATA;
+@@ -446,7 +448,7 @@
+     else if (strcmp(proto_name, "file") || !strncmp(url, "file,", 5))
+         return AVERROR_INVALIDDATA;
+ 
+-    av_freep(pb);
++    ff_format_io_close(s, pb);
+     av_dict_copy(&tmp, *opts, 0);
+     av_dict_copy(&tmp, opts2, 0);
+     ret = s->io_open(s, pb, url, AVIO_FLAG_READ, &tmp);
+@@ -1268,7 +1270,7 @@
+ 
+     av_bprint_init(&buf, 0, INT_MAX); // xmlReadMemory uses integer bufsize
+ 
+-    if ((ret = avio_read_to_bprint(in, &buf, SIZE_MAX)) < 0 ||
++    if ((ret = avio_read_to_bprint(in, &buf, 8 * 1024 * 1024)) < 0 ||
+         !avio_feof(in)) {
+         av_log(s, AV_LOG_ERROR, "Unable to read to manifest '%s'\n", url);
+         if (ret == 0)
+@@ -1276,7 +1278,8 @@
+     } else {
+         LIBXML_TEST_VERSION
+ 
+-        doc = xmlReadMemory(buf.str, buf.len, c->base_url, NULL, 0);
++        doc = xmlReadMemory(buf.str, buf.len, c->base_url, NULL, XML_PARSE_NONET | XML_PARSE_NO_XXE | XML_PARSE_NOERROR | XML_PARSE_NOWARNING);
++        if (!doc) { ret = AVERROR_INVALIDDATA; goto cleanup; }
+         root_element = xmlDocGetRootElement(doc);
+         node = root_element;
+ 
+--- a/libavformat/mov.c
++++ b/libavformat/mov.c
+@@ -66,6 +66,7 @@
+ #include "dovi_isom.h"
+ #include "riff.h"
+ #include "isom.h"
++#include "meowfilm-private.h"
+ #include "libavcodec/get_bits.h"
+ #include "id3v1.h"
+ #include "mov_chan.h"
+@@ -8195,10 +8196,12 @@
+         /* initialize the cipher */
+         sc->cenc.aes_ctr = av_aes_ctr_alloc();
+         if (!sc->cenc.aes_ctr) {
++            meowfilm_erase(decryption_key, sizeof(decryption_key));
+             return AVERROR(ENOMEM);
+         }
+ 
+         ret = av_aes_ctr_init(sc->cenc.aes_ctr, decryption_key);
++        meowfilm_erase(decryption_key, sizeof(decryption_key));
+         if (ret < 0) {
+             return ret;
+         }
+@@ -8255,10 +8258,12 @@
+         /* initialize the cipher */
+         sc->cenc.aes_ctx = av_aes_alloc();
+         if (!sc->cenc.aes_ctx) {
++            meowfilm_erase(decryption_key, sizeof(decryption_key));
+             return AVERROR(ENOMEM);
+         }
+ 
+         ret = av_aes_init(sc->cenc.aes_ctx, decryption_key, 16 * 8, 1);
++        meowfilm_erase(decryption_key, sizeof(decryption_key));
+         if (ret < 0) {
+             return ret;
+         }
+@@ -8320,10 +8325,12 @@
+         /* initialize the cipher */
+         sc->cenc.aes_ctr = av_aes_ctr_alloc();
+         if (!sc->cenc.aes_ctr) {
++            meowfilm_erase(decryption_key, sizeof(decryption_key));
+             return AVERROR(ENOMEM);
+         }
+ 
+         ret = av_aes_ctr_init(sc->cenc.aes_ctr, decryption_key);
++        meowfilm_erase(decryption_key, sizeof(decryption_key));
+         if (ret < 0) {
+             return ret;
+         }
+@@ -8392,10 +8399,12 @@
+         /* initialize the cipher */
+         sc->cenc.aes_ctx = av_aes_alloc();
+         if (!sc->cenc.aes_ctx) {
++            meowfilm_erase(decryption_key, sizeof(decryption_key));
+             return AVERROR(ENOMEM);
+         }
+ 
+         ret = av_aes_init(sc->cenc.aes_ctx, decryption_key, 16 * 8, 1);
++        meowfilm_erase(decryption_key, sizeof(decryption_key));
+         if (ret < 0) {
+             return ret;
+         }
+@@ -8450,6 +8459,20 @@
+ 
+ static int cenc_decrypt(MOVContext *c, MOVStreamContext *sc, AVEncryptionInfo *sample, uint8_t *input, int size)
+ {
++    /* Both cipher schedules belong to this KID. A rotation must retire both,
++     * including a schedule retained from a different encryption scheme. */
++    if (!sc->cenc.current_key || sample->key_id_size != 16 ||
++        memcmp(sc->cenc.current_kid, sample->key_id, 16)) {
++        av_aes_ctr_free(sc->cenc.aes_ctr);
++        sc->cenc.aes_ctr = NULL;
++        if (sc->cenc.aes_ctx) {
++            meowfilm_erase(sc->cenc.aes_ctx, av_aes_size);
++            av_freep(&sc->cenc.aes_ctx);
++        }
++        sc->cenc.current_key = sample->key_id_size == 16;
++        if (sc->cenc.current_key)
++            memcpy(sc->cenc.current_kid, sample->key_id, 16);
++    }
+     if (sample->scheme == MKBETAG('c','e','n','c') && !sample->crypt_byte_block && !sample->skip_byte_block) {
+         return cenc_scheme_decrypt(c, sc, sample, input, size);
+     } else if (sample->scheme == MKBETAG('c','b','c','1') && !sample->crypt_byte_block && !sample->skip_byte_block) {
+@@ -10117,6 +10140,11 @@
+     mov_free_encryption_index(&sc->cenc.encryption_index);
+     av_encryption_info_free(sc->cenc.default_encrypted_sample);
+     av_aes_ctr_free(sc->cenc.aes_ctr);
++    if (sc->cenc.aes_ctx) {
++        meowfilm_erase(sc->cenc.aes_ctx, av_aes_size);
++        av_freep(&sc->cenc.aes_ctx);
++    }
++    meowfilm_erase(sc->cenc.current_kid, sizeof(sc->cenc.current_kid));
+ 
+     av_freep(&sc->stereo3d);
+     av_freep(&sc->spherical);
+--- a/libavformat/isom.h
++++ b/libavformat/isom.h
+@@ -277,6 +277,8 @@
+     struct {
+         struct AVAESCTR* aes_ctr;
+         struct AVAES *aes_ctx;
++        uint8_t current_kid[16];
++        int current_key;
+         unsigned int per_sample_iv_size;  // Either 0, 8, or 16.
+         AVEncryptionInfo *default_encrypted_sample;
+         MOVEncryptionIndex *encryption_index;
+--- a/libavutil/aes_ctr.c
++++ b/libavutil/aes_ctr.c
+@@ -28,6 +28,7 @@
+ #include "macros.h"
+ #include "mem.h"
+ #include "random_seed.h"
++#include "meowfilm-private.h"
+ 
+ #define AES_BLOCK_SIZE (16)
+ 
+@@ -83,6 +84,7 @@
+ 
+ void av_aes_ctr_free(struct AVAESCTR *a)
+ {
++    if (a) meowfilm_erase(a, sizeof(*a));
+     av_free(a);
+ }
+ 
+--- a/libavutil/dict.c
++++ b/libavutil/dict.c
+@@ -28,6 +28,7 @@
+ #include "error.h"
+ #include "mem.h"
+ #include "bprint.h"
++#include "meowfilm-private.h"
+ 
+ struct AVDictionary {
+     int count;
+@@ -139,8 +140,10 @@
+             memcpy(newval + oldlen, copy_value, new_part_len + 1);
+             av_freep(&copy_value);
+             copy_value = newval;
+-        } else
++        } else {
++            meowfilm_erase_string(tag->value);
+             av_free(tag->value);
++        }
+         av_free(tag->key);
+         *tag = m->elems[--m->count];
+     } else if (copy_value) {
+@@ -202,6 +205,7 @@
+         ret = AVERROR(EINVAL);
+ 
+     av_freep(&key);
++    meowfilm_erase_string(val);
+     av_freep(&val);
+ 
+     return ret;
+@@ -237,6 +241,7 @@
+     if (m) {
+         while (m->count--) {
+             av_freep(&m->elems[m->count].key);
++            meowfilm_erase_string(m->elems[m->count].value);
+             av_freep(&m->elems[m->count].value);
+         }
+         av_freep(&m->elems);
+--- a/libavutil/opt.c
++++ b/libavutil/opt.c
+@@ -40,6 +40,7 @@
+ #include "samplefmt.h"
+ #include "bprint.h"
+ #include "version.h"
++#include "meowfilm-private.h"
+ 
+ #include <float.h>
+ 
+@@ -1956,6 +1957,12 @@
+     while ((o = av_opt_next(obj, o))) {
+         void *pitem = (uint8_t *)obj + o->offset;
+ 
++        if (!strcmp(o->name, "decryption_key") && o->type == AV_OPT_TYPE_BINARY && *(uint8_t **)pitem)
++            meowfilm_erase(*(uint8_t **)pitem, *(int *)((uint8_t *)pitem + sizeof(uint8_t *)));
++        else if ((!strcmp(o->name, "cenc_decryption_key") || !strcmp(o->name, "cenc_decryption_keys")) &&
++                 o->type == AV_OPT_TYPE_STRING)
++            meowfilm_erase_string(*(char **)pitem);
++
+         if (o->type & AV_OPT_TYPE_FLAG_ARRAY)
+             opt_free_array(o, pitem, opt_array_pcount(pitem));
+         else

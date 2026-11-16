@@ -12,6 +12,7 @@ internal static class Program
         var groups = new Dictionary<string, Func<IEnumerable<TestCase>>>(StringComparer.Ordinal)
         {
             [nameof(FFmpegVideoKernelTests)] = FFmpegVideoKernelTests.Cases,
+            [nameof(FilmKernelIntegrationTests)] = FilmKernelIntegrationTests.Cases,
             [nameof(RuntimeMediaTests)] = RuntimeMediaTests.Cases,
             [nameof(MediaOutputTests)] = MediaOutputTests.Cases
         };

@@ -229,14 +229,16 @@ export function createMediaService() {
       track(stream) {
         socketDrain(stream, streams);
         stream.on('error', () => {}); // Only closed error codes escape the transport.
-        if (controller.signal.aborted) stream.destroy();
+        if (controller.signal.aborted) stream.destroy(controller.signal.reason);
         return stream;
       },
       cancel(code = 'MEDIA_CANCELLED') {
-        if (!controller.signal.aborted) controller.abort(failure(code));
+        const reason = controller.signal.reason ?? failure(code);
         if (response?.socket) task.track(response.socket);
-        for (const stream of streams.keys()) stream.destroy();
-        response?.destroy();
+        // ClientRequest.abort() loses the error; preserve it on buffered EOF readers first.
+        for (const stream of streams.keys()) stream.destroy(reason);
+        response?.destroy(reason);
+        if (!controller.signal.aborted) controller.abort(reason);
       },
       async finish() {
         for (const stream of streams.keys()) if (stream !== response) stream.destroy();
@@ -521,9 +523,10 @@ export function createMediaService() {
         entry.headers[name] && result.incoming.headers[name] && entry.headers[name] !== result.incoming.headers[name]);
       if (result.incoming.statusCode !== 206) {
         if (!response.headersSent && result.incoming.statusCode >= 400) {
+          task.controller.signal.throwIfAborted();
           response.writeHead(result.incoming.statusCode, copyHeaders(result.incoming.headers));
           if (result.errorBody) response.end(result.errorBody);
-          else await pipeline(result.incoming, response);
+          else await pipeline(result.incoming, response, { signal: task.controller.signal });
           return null;
         }
         throw failure(changed ? 'MEDIA_RESOURCE_CHANGED' : 'MEDIA_RANGE_UNSUPPORTED');
@@ -592,9 +595,10 @@ export function createMediaService() {
       sendDocument(request, response, controlHeaders(result.incoming.headers, format), body);
       return;
     }
+    task.controller.signal.throwIfAborted();
     response.writeHead(result.incoming.statusCode, copyHeaders(result.incoming.headers));
     if (result.errorBody) response.end(result.errorBody);
-    else await pipeline(result.incoming, response);
+    else await pipeline(result.incoming, response, { signal: task.controller.signal });
   }
 
   async function prefetchOperation(owner, job, perform) {

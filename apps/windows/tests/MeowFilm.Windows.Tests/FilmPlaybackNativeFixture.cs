@@ -8,16 +8,12 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
 using System.Windows.Threading;
-using LibVLCSharp.Shared;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Media;
 using MeowFilm.Platform.Runtime;
 using Microsoft.Win32.SafeHandles;
-using MediaPlayer = LibVLCSharp.Shared.MediaPlayer;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -34,11 +30,12 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
     internal sealed record PageOwner(FilmPlaybackSession Session, FilmPlaybackPage Page, Guid Id, string TargetId);
 
     internal readonly NodeRuntime Runtime;
-    internal readonly NativePlayback Native;
+    internal readonly FilmPlayback Native;
     internal readonly RuntimeTraffic Traffic;
     internal readonly FilmPlaybackView View = new();
     internal readonly Window Window;
     internal readonly string DataRoot;
+    private readonly MetadataUpstream metadata = new();
     private readonly Process process;
     private readonly SafeProcessHandle processHandle;
     private readonly List<FilmPlaybackSession> owners = [];
@@ -50,7 +47,7 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
     internal int Generation { get; private set; }
     internal int NativeEnded { get; private set; }
 
-    private FilmPlaybackNativeFixture(NodeRuntime runtime, NativePlayback native, string dataRoot)
+    private FilmPlaybackNativeFixture(NodeRuntime runtime, FilmPlayback native, string dataRoot)
     {
         Runtime = runtime; Native = native; Traffic = new(runtime, native); DataRoot = dataRoot;
         client = new(runtime);
@@ -59,7 +56,7 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
         Native.Ended += (_, _) => NativeEnded++;
         Window = new()
         {
-            Content = View, Width = 1120, Height = 820, Left = -10000, Top = -10000,
+            Content = View, Width = 1120, Height = 820, Left = 40, Top = 40,
             ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None
         };
     }
@@ -83,13 +80,17 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
         }
         var runtime = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules,
             Path.Combine(root, "script-runtime"));
-        NativePlayback? native = null;
+        FilmPlayback? native = null;
         FilmPlaybackNativeFixture? fixture = null;
         try
         {
             // The real Cat receipt owns revocation and release; HTTP input has no origin admission.
-            native = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
+            native = new FilmPlayback { Volume = 0 };
             fixture = new(runtime, native, Path.Combine(root, "script-runtime"));
+            Okay(await runtime.CallAsync("tmdb.data.settings.update",
+                new { apiBase = fixture.metadata.BaseUrl }), "tmdb.data.v1");
+            Okay(await runtime.CallAsync("douban.data.settings.update",
+                new { apiBase = fixture.metadata.BaseUrl, searchBase = fixture.metadata.BaseUrl }), "douban.data.v1");
             fixture.connection = await runtime.CaptureConnectionAsync();
             Check(ReferenceEquals(fixture.connection.Client, runtime) &&
                 fixture.connection.Revoked.CanBeCanceled && !fixture.connection.Revoked.IsCancellationRequested,
@@ -119,7 +120,7 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
                 generation = fixture.Generation, sites = sites.Length, headers, reports,
                 asset = longVideo ? "FFmpegVideoFixtures.Progressive/24s" : "VideoKernel/public-ordinary.mp4",
                 sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)),
-                dummyAudio = true, realVideoSurface = true
+                audioOutput = "WASAPI-muted", realVideoSurface = true
             });
             return fixture;
         }
@@ -146,7 +147,7 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
         }, new FilmNativeMedia(Native));
         session.OperationFailed += (_, code) => failures.Add(code);
         owners.Add(session);
-        var target = new FilmPlaybackTarget(targetId, "movie", Title);
+        var target = new FilmPlaybackTarget(targetId, "movie", Title, MetadataProvider: "tmdb", MetadataId: "1");
         var request = new FilmPlaybackRequest(target, sources);
         var page = new FilmPlaybackPage(new(targetId, Title, "", "") { PlaybackContext = request }, request, session, null);
         View.DataContext = page;
@@ -176,8 +177,8 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
     internal async Task<string> OutputAsync(PageOwner owner, bool pauseAfterOutput = true)
     {
         await Until(() => owner.Session.HasOutput &&
-            Native.ObservedVideoOutput is { DisplayedPictures: > 0, OwnerId: "film" } output &&
-            output.Identity == owner.Session.MediaIdentity, "actual matching libVLC video display counter");
+            Native.Output is { SubmittedPictures: > 0, Scope.OwnerId: "film" } output &&
+            output.Scope.Identity == owner.Session.MediaIdentity, "actual matching D3D11 render/Present counter");
         string attempt = owner.Session.MediaIdentity!;
         // Do not race a short ordinary.mp4 to its end while reading history and diagnostics.
         if (pauseAfterOutput) await owner.Session.SetPausedAsync(true);
@@ -185,42 +186,36 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
             Traffic.Commands("media.started").Any(call => call.Attempt == attempt && call.Completed),
             "native-driven Node media.started receipt");
         var evidence = Traffic.Commands("media.started").Single(call => call.Attempt == attempt);
-        Check(evidence.Pictures > 0, "media.started was sent only after this exact candidate actually displayed pictures");
+        Check(evidence.Pictures > 0, "media.started was sent only after this exact candidate actually submitted a rendered picture");
         Observe("video-output", new
         {
-            sessionId = owner.Id, attemptId = attempt, evidence = Native.ObservedVideoOutput!.Evidence,
-            displayedPictures = evidence.Pictures, position = Native.PositionSeconds,
-            paused = Native.PauseRequested, nativeVersion = Native.NativeVersion
+            sessionId = owner.Id, attemptId = attempt, evidence = "d3d11-present-submissions",
+            submittedPictures = evidence.Pictures, position = Native.PositionSeconds,
+            paused = Native.PauseRequested, coreIdentity = FilmKernelBuild.Identity
         });
         return attempt;
     }
 
-    internal MediaPlayer CurrentPlayer() =>
-        (MediaPlayer)AdaptiveMediaTests.Field(AdaptiveMediaTests.Session(Native)!, "Player")!;
+    internal object? CurrentSession => AdaptiveMediaTests.Field(Native, "current");
+    internal NativeAllocation CurrentAllocation() => CaptureNative();
     internal T Element<T>(string name) where T : FrameworkElement => (T)View.FindName(name);
-    internal Button MoreButton() => Visuals(View).OfType<Button>().Single(button => Equals(button.Content, "加载更多"));
 
-    internal sealed class NativeAllocation(object session)
+    internal sealed class NativeAllocation(object session, FilmPlayback native)
     {
-        internal readonly MediaPlayer Player = (MediaPlayer)AdaptiveMediaTests.Field(session, "Player")!;
-        private readonly object demux = AdaptiveMediaTests.Field(session, "FFmpeg") ??
-            throw new InvalidOperationException("The real private demux must own this input.");
-        private readonly object resource = AdaptiveMediaTests.Field(session, "Resource") ??
-            throw new InvalidOperationException("The real controlled resource must own this input.");
-        internal long Pictures => ((LibVLCSharp.Shared.Media)AdaptiveMediaTests.Field(session, "Media")!)
-            .Statistics.DisplayedPictures;
+        internal readonly object Session = session;
+        internal bool Matches(NativeAllocation other) => ReferenceEquals(Session, other.Session);
+        internal bool IsCurrent => ReferenceEquals(Session, AdaptiveMediaTests.Field(native, "current"));
+        internal bool IsAlive => AdaptiveMediaTests.Field(Session, "owner") is IntPtr pointer && pointer != IntPtr.Zero;
+        internal long Pictures => IsCurrent && native.Output is { } output ? (long)output.SubmittedPictures : 0;
         internal bool PhysicallyReleased =>
-            AdaptiveMediaTests.Field(session, "ReleaseTask") is Task<bool> { IsCompletedSuccessfully: true } release &&
-            !release.Result && Player.NativeReference == IntPtr.Zero &&
-            AdaptiveMediaTests.Field(demux, "_release") is Task { IsCompletedSuccessfully: true } &&
-            AdaptiveMediaTests.Field(demux, "_owner") is IntPtr pointer && pointer == IntPtr.Zero &&
-            AdaptiveMediaTests.Field(AdaptiveMediaTests.Field(demux, "_http")!, "_readers")
-                is System.Collections.IDictionary { Count: 0 } &&
-            AdaptiveMediaTests.Field(resource, "release") is Task { IsCompletedSuccessfully: true };
+            AdaptiveMediaTests.Field(Session, "release") is Task { IsCompletedSuccessfully: true } &&
+            AdaptiveMediaTests.Field(Session, "owner") is IntPtr pointer && pointer == IntPtr.Zero &&
+            AdaptiveMediaTests.Field(AdaptiveMediaTests.Field(Session, "transport")!, "_readers")
+                is System.Collections.IDictionary { Count: 0 };
     }
 
-    internal NativeAllocation CaptureNative() => new(AdaptiveMediaTests.Session(Native) ??
-        throw new InvalidOperationException("No actual native allocation to observe."));
+    internal NativeAllocation CaptureNative() => new(CurrentSession ??
+        throw new InvalidOperationException("No actual native allocation to observe."), Native);
     internal string[] FailureCodes => failures.ToArray();
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -320,16 +315,25 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
         throw new InvalidOperationException("Closed Node session is still accessible.");
     }
 
-    internal static async Task ResourceGoneAsync(FilmMediaReceipt receipt)
+    internal async Task ResourceRetiredAsync(FilmMediaReceipt receipt)
     {
-        // A status check AFTER release, never a surrogate for native output.
-        Check(receipt.MediaOrigin is not null && receipt.Address.IsLoopback, "only check the actual controlled test receipt");
+        // Receipt retirement never means deleting a shared source's direct URL.
+        var releases = Traffic.MediaReleases(receipt.AttemptId);
+        Check(releases.Length == 1 && releases[0].Completed && releases[0].Resource == receipt.ResourceId,
+            "the exact real media receipt is released once after native retirement");
+        Check(receipt.Address.IsLoopback, "only check the actual local test receipt");
         using var handler = new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false };
         using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
         using var request = new HttpRequestMessage(HttpMethod.Head, receipt.Address);
         using var reply = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
-        Check(reply.StatusCode == HttpStatusCode.NotFound, "released Node media resource must be 404");
-        Observe("resource-release", new { attemptId = receipt.AttemptId, httpStatus = (int)reply.StatusCode });
+        Check(reply.StatusCode == (receipt.MediaOrigin is null ? HttpStatusCode.OK : HttpStatusCode.NotFound),
+            receipt.MediaOrigin is null ? "retiring a movie receipt preserves the shared Cat direct endpoint"
+                : "released Node media resource must be 404");
+        Observe("resource-release", new
+        {
+            attemptId = receipt.AttemptId, releaseAck = true, controlledStream = receipt.MediaOrigin is not null,
+            httpStatus = (int)reply.StatusCode
+        });
     }
 
     internal void NoBackgroundFailures() =>
@@ -359,38 +363,101 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
             await Task.Delay(20); // Poll actual owners; delay is not the success criterion.
         }
     }
-    private static IEnumerable<DependencyObject> Visuals(DependencyObject root)
-    {
-        yield return root;
-        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
-            foreach (var child in Visuals(VisualTreeHelper.GetChild(root, i))) yield return child;
-    }
-
     public ValueTask DisposeAsync() => new(disposal ??= DisposeCoreAsync());
     private async Task DisposeCoreAsync()
     {
         Exception? failure = null;
-        async Task Drain(Task task)
+        async Task Drain(Task task, string phase)
         {
-            try { await task; } catch (Exception error) { failure ??= error; }
+            try { await task; }
+            catch (Exception error)
+            {
+                failure ??= error;
+                Observe("cleanup-failure", new { phase, error = error.GetType().Name, stack = error.StackTrace });
+            }
         }
         Traffic.ReleaseGates();
-        foreach (var owner in owners.AsEnumerable().Reverse()) await Drain(owner.DisposeAsync().AsTask());
+        foreach (var id in Traffic.OpenedSessions)
+        {
+            try
+            {
+                var snapshot = await SnapshotAsync(id);
+                Observe("final-session", new
+                {
+                    stage = FilmJson.Text(snapshot, "stage"), error = FilmJson.Text(snapshot, "error"),
+                    initializationError = FilmJson.Text(snapshot, "initializationError"),
+                    failures = FailureCodes,
+                    search = FilmJson.Array(snapshot, "search").Select(row => new
+                    {
+                        source = FilmJson.Text(row, "sourceKey"), error = FilmJson.Text(row, "error"),
+                        completed = FilmJson.Bool(row, "completed")
+                    }).ToArray()
+                });
+            }
+            catch (Exception error) { Observe("final-session-unavailable", new { error = error.GetType().Name }); }
+        }
+        foreach (var owner in owners.AsEnumerable().Reverse()) await Drain(owner.DisposeAsync().AsTask(), "film-session");
         Traffic.Dump();
         View.DataContext = null; Window.Content = null; Window.Close();
-        await Drain(Native.DisposeAsync().AsTask());
-        await Drain(Runtime.DisposeAsync().AsTask());
-        await Drain(Runtime.Completion.WaitAsync(TimeSpan.FromSeconds(10)));
-        await Drain(process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)));
+        await Drain(Native.DisposeAsync().AsTask(), "film-kernel");
+        await Drain(Runtime.DisposeAsync().AsTask(), "runtime");
+        await Drain(Runtime.Completion.WaitAsync(TimeSpan.FromSeconds(10)), "runtime-drain");
+        await Drain(process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)), "process-exit");
+        await Drain(metadata.DisposeAsync().AsTask(), "metadata-upstream");
         bool exited = process.HasExited;
         process.Dispose();
         Observe("physical-close", new
         {
             nodeExited = exited, runtimeDrain = Runtime.Completion.IsCompletedSuccessfully,
-            nativeHasMedia = Native.HasMedia, failure = failure is null ? null : failure.GetType().Name
+            nativeHasOutput = Native.HasOutput, failure = failure is null ? null : failure.GetType().Name
         });
         if (failure is not null) throw new InvalidOperationException("Film native integration cleanup failed.", failure);
-        Check(exited && Runtime.Completion.IsCompletedSuccessfully && !Native.HasMedia, "actual native and Node process drains");
+        Check(exited && Runtime.Completion.IsCompletedSuccessfully && !Native.HasOutput, "actual native and Node process drains");
+    }
+
+    // Synthetic public metadata is an HTTP upstream fixture, not a Film RPC
+    // replacement. The real data owner still fetches, validates and caches it.
+    private sealed class MetadataUpstream : IAsyncDisposable
+    {
+        private readonly RuntimeHttpClientTests.Server server = new();
+        private readonly Task serving;
+        private volatile bool closed;
+        internal string BaseUrl => server.BaseUrl;
+        internal MetadataUpstream() => serving = ServeAsync();
+        private async Task ServeAsync()
+        {
+            while (!closed)
+            {
+                RuntimeHttpClientTests.Exchange exchange;
+                try { exchange = await server.AcceptAsync().ConfigureAwait(false); }
+                catch (OperationCanceledException) when (!closed) { continue; }
+                catch (Exception error) when (closed && error is
+                    (SocketException or ObjectDisposedException or InvalidOperationException or OperationCanceledException)) { return; }
+                await using (exchange)
+                {
+                    string path = new Uri(BaseUrl + exchange.Path).AbsolutePath;
+                    if (path == "/3/movie/1")
+                        await exchange.ReplyAsync(JsonSerializer.SerializeToUtf8Bytes(new
+                        {
+                            id = 1, title = Title, original_title = Title, runtime = 1, genres = Array.Empty<object>(),
+                            credits = new { cast = Array.Empty<object>(), crew = Array.Empty<object>() },
+                            similar = new { results = Array.Empty<object>() },
+                            images = new { posters = Array.Empty<object>(), backdrops = Array.Empty<object>() }
+                        })).ConfigureAwait(false);
+                    else if (path == "/movie/subject_search")
+                        await exchange.ReplyAsync(Encoding.UTF8.GetBytes(
+                            "<script>window.__DATA__ = {\"items\":[],\"total\":0,\"start\":0,\"count\":0}; window.__USER__ = {};</script>"),
+                            contentType: "text/html; charset=utf-8").ConfigureAwait(false);
+                    else await exchange.ReplyAsync("{}"u8.ToArray(), 404).ConfigureAwait(false);
+                }
+            }
+        }
+        public async ValueTask DisposeAsync()
+        {
+            closed = true;
+            await server.DisposeAsync();
+            await serving;
+        }
     }
 
     // Embedding public fixture bytes only transports test input to the Worker's
@@ -478,11 +545,11 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
     // A transparent diagnostic decorator, NOT a fake runtime. All envelopes and
     // SSE values come unchanged from this exact NodeRuntime. An optional gate
     // delays a completed real receipt; stopping observation disposes only its HTTP iterator.
-    internal sealed class RuntimeTraffic(NodeRuntime runtime, NativePlayback native) : IRuntimeClient
+    internal sealed class RuntimeTraffic(NodeRuntime runtime, FilmPlayback native) : IRuntimeClient
     {
-        internal sealed class Call(string method, string action, string attempt, Guid session, long pictures)
+        internal sealed class Call(string method, string action, string attempt, string resource, Guid session, long pictures)
         {
-            internal readonly string Method = method, Action = action, Attempt = attempt;
+            internal readonly string Method = method, Action = action, Attempt = attempt, Resource = resource;
             internal readonly Guid Session = session;
             internal readonly long Pictures = pictures;
             internal volatile bool Completed;
@@ -516,8 +583,11 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
             }
         }
         internal Guid Opened(string targetId) { lock (gate) return opened[targetId]; }
+        internal Guid[] OpenedSessions { get { lock (gate) return opened.Values.ToArray(); } }
         internal Call[] Commands(string action)
         { lock (gate) return calls.Where(call => call.Method == "film.session.command" && call.Action == action).ToArray(); }
+        internal Call[] MediaReleases(string attempt)
+        { lock (gate) return calls.Where(call => call.Method == "film.session.media.release" && call.Attempt == attempt).ToArray(); }
         internal int BusinessCalls { get { lock (gate) return calls.Count; } }
         internal FilmMediaReceipt[] Receipts(Guid id)
         { lock (gate) return receipts.Where(row => row.Session == id).Select(row => row.Receipt).ToArray(); }
@@ -538,7 +608,8 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
             var input = parameters is null ? default : FilmJson.Encode(parameters);
             string action = FilmJson.Text(input, "action"), attempt = FilmJson.Text(input, "attemptId");
             _ = Guid.TryParse(FilmJson.Text(input, "sessionId"), out Guid id);
-            var call = new Call(method, action, attempt, id, action == "media.started" ? Pictures(attempt) : 0);
+            var call = new Call(method, action, attempt, FilmJson.Text(input, "resourceId"), id,
+                action == "media.started" ? Pictures(attempt) : 0);
             lock (gate) calls.Add(call);
             var reply = await runtime.CallAsync(method, parameters, cancellationToken);
             ReceiptGate? held = null;
@@ -606,14 +677,16 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
         }
         private long Pictures(string attempt)
         {
-            if (native.ObservedVideoOutput is { } output && output.Identity == attempt) return output.DisplayedPictures;
-            // The commit callback precedes public observation publication. Observe
-            // the exact real prepared/current VLC counter, never Playing or a donor's frame.
-            object? session = native.Identity == attempt ? AdaptiveMediaTests.Session(native) : null;
-            if (session is null && AdaptiveMediaTests.Field(native, "_runtimeHandoffIntent") is RuntimeMediaPlaybackIntent intent &&
-                intent.Identity == attempt) session = AdaptiveMediaTests.Field(native, "_handoffSession");
-            return session is null ? 0 :
-                ((LibVLCSharp.Shared.Media)AdaptiveMediaTests.Field(session, "Media")!).Statistics.DisplayedPictures;
+            // FilmPlayback publishes the exact submitted picture count before its
+            // commit callback. No Playing flag, decoder count or donor is accepted.
+            var output = native.Output;
+            Observe("before-started", new
+            {
+                attemptId = attempt, nativeIdentity = native.Identity, nativeHasOutput = native.HasOutput,
+                outputIdentity = output?.Scope.Identity, submittedPictures = output?.SubmittedPictures ?? 0
+            });
+            return output is not null && output.Scope.Identity == attempt ?
+                (long)output.SubmittedPictures : 0;
         }
         internal void Dump()
         {

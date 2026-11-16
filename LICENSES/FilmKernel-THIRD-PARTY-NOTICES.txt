@@ -1,0 +1,620 @@
+Windows FilmKernel - additional third-party notices
+===================================================
+
+This file preserves dependency copyright notices, distinct license wording
+and exceptions for the sources identified in LICENSES/NOTICE.md. Layout and
+comment delimiters are organized here; full upstream license-file hashes
+are recorded in film-kernel.lock.json. This file is not an upstream LICENSE
+file and its own hash is not an upstream license hash.
+
+The following existing files in this same license bundle supply shared terms:
+- GPL-3.0-only.txt and GPL-2.0-only.txt: GPLv3 and GPLv2, respectively.
+- LGPL-2.1-only.txt and LGPL-3.0-only.txt: LGPLv2.1 and LGPLv3.
+- Apache-2.0.txt: Apache License 2.0.
+- npm-node-compat-ISC.txt: ISC permission and disclaimer.
+- npm-node-compat-BSD-3-Clause.txt: standard BSD-3-Clause permission/disclaimer.
+- libxml2-MIT.txt: standard MIT permission/disclaimer, plus libxml2 exceptions.
+- SkiaSharp-THIRD-PARTY-NOTICES.txt, HarfBuzz section: Old MIT terms.
+- zlib-LICENSE.txt, FFmpeg-LICENSE.md and FFmpeg-IJG-NOTICE.txt: unchanged
+  shared zlib, FFmpeg overview and Independent JPEG Group notices.
+
+References to these shared terms below include the component copyrights here;
+they do not assign the other component's copyright to this code, narrow an
+"or later" grant, or change the upstream alternative-license options.
+
+
+libass 0.17.4 - ISC
+===================
+
+Copyright (C) 2006-2016 libass contributors
+
+ISC permission and disclaimer: npm-node-compat-ISC.txt.
+The locked COPYING uses the same ISC wording; no second ISC body is added.
+
+
+bzip2/libbzip2 1.0.8
+====================
+
+
+--------------------------------------------------------------------------
+
+This program, "bzip2", the associated library "libbzip2", and all
+documentation, are copyright (C) 1996-2019 Julian R Seward.  All
+rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+2. The origin of this software must not be misrepresented; you must
+   not claim that you wrote the original software.  If you use this
+   software in a product, an acknowledgment in the product
+   documentation would be appreciated but is not required.
+
+3. Altered source versions must be plainly marked as such, and must
+   not be misrepresented as being the original software.
+
+4. The name of the author may not be used to endorse or promote
+   products derived from this software without specific prior written
+   permission.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS
+OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Julian Seward, jseward@acm.org
+bzip2/libbzip2 version 1.0.8 of 13 July 2019
+
+--------------------------------------------------------------------------
+
+
+dav1d 1.5.3 - BSD-2-Clause
+==========================
+
+Copyright © 2018-2025, VideoLAN and dav1d authors
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+HarfBuzz 11.5.1 - Old MIT and Microsoft USE
+===========================================
+
+HarfBuzz is licensed under the so-called "Old MIT" license.  Details follow.
+For parts of HarfBuzz that are licensed under different licenses see individual
+files names COPYING in subdirectories where applicable.
+
+Copyright © 2010-2022  Google, Inc.
+Copyright © 2015-2020  Ebrahim Byagowi
+Copyright © 2019,2020  Facebook, Inc.
+Copyright © 2012,2015  Mozilla Foundation
+Copyright © 2011  Codethink Limited
+Copyright © 2008,2010  Nokia Corporation and/or its subsidiary(-ies)
+Copyright © 2009  Keith Stribley
+Copyright © 2011  Martin Hosken and SIL International
+Copyright © 2007  Chris Wilson
+Copyright © 2005,2006,2020,2021,2022,2023  Behdad Esfahbod
+Copyright © 2004,2007,2008,2009,2010,2013,2021,2022,2023  Red Hat, Inc.
+Copyright © 1998-2005  David Turner and Werner Lemberg
+Copyright © 2016  Igalia S.L.
+Copyright © 2022  Matthias Clasen
+Copyright © 2018,2021  Khaled Hosny
+Copyright © 2018,2019,2020  Adobe, Inc
+Copyright © 2013-2015  Alexei Podtelezhnikov
+
+For full copyright notices consult the individual files in the package.
+
+The complete, unchanged Old MIT permission and disclaimer are supplied in
+SkiaSharp-THIRD-PARTY-NOTICES.txt, in its HarfBuzz section. That body applies
+with the locked 11.5.1 copyright notices above, not only its older copyrights.
+
+src/ms-use/COPYING:
+Copyright (c) Microsoft Corporation.
+MIT permission and disclaimer: libxml2-MIT.txt.
+
+
+FreeType 2.14.1 - license selection and contributed files
+=========================================================
+
+Copyright (C) 1996-2025 by David Turner, Robert Wilhelm, and Werner Lemberg.
+
+For this GPLv3 film derivative the GPL-2.0-or-later option offered by the
+locked LICENSE.TXT is selected. The existing GPL-2.0-only.txt and
+GPL-3.0-only.txt supply the license bodies; the filenames do not remove
+FreeType's "any later version" option. The alternative FTL text need not be
+copied again (an earlier copy also exists in SkiaSharp's upstream notices).
+
+The BDF and PCF drivers and fthash retain their separate contributed licenses.
+
+src/bdf/README, driver notice:
+Copyright (C) 2001-2002 by Francesco Zappa Nardelli
+
+src/pcf/README:
+Copyright (C) 2000 by Francesco Zappa Nardelli
+
+These two driver notices use the standard MIT permission and disclaimer
+supplied in libxml2-MIT.txt. The portions of BDF and fthash with the distinct
+Computing Research Lab disclaimer retain the wording below.
+
+src/base/fthash.c and include/freetype/internal/fthash.h additionally credit:
+Copyright 2000 Computing Research Labs, New Mexico State University
+Copyright 2001-2015 Francesco Zappa Nardelli
+
+Copyright 2000 Computing Research Labs, New Mexico State University
+Copyright 2001-2002, 2011 Francesco Zappa Nardelli
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+THE COMPUTING RESEARCH LAB OR NEW MEXICO STATE UNIVERSITY BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT
+OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
+THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+The imported HarfBuzz autofit files retain Old MIT, supplied in the HarfBuzz
+section of SkiaSharp-THIRD-PARTY-NOTICES.txt; their copyrights include:
+Copyright © 2009, 2023 Red Hat, Inc.
+Copyright © 2015 Google, Inc.
+
+The FreeType gzip module uses zlib; this build uses the external locked zlib
+library and its zlib-LICENSE.txt. FreeType's debugging MD5 implementation
+retains the following src/base/md5.c notice:
+
+This software was written by Alexander Peslyak in 2001.  No copyright is
+claimed, and the software is hereby placed in the public domain.
+In case this attempt to disclaim copyright and place the software in the
+public domain is deemed null and void, then the software is
+Copyright (c) 2001 Alexander Peslyak and it is hereby released to the
+general public under the following terms:
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted.
+
+There's ABSOLUTELY NO WARRANTY, express or implied.
+
+(This is a heavily cut-down "BSD license".)
+
+
+FriBidi 1.0.16 - LGPL-2.1-or-later
+==================================
+
+Copyright (C) 2004 Sharif FarsiWeb, Inc
+Copyright (C) 2001,2002 Behdad Esfahbod
+Copyright (C) 1999,2000 Dov Grobgeld
+
+The library source grants LGPL version 2.1 or (at your option) any later
+version. License bodies: LGPL-2.1-only.txt and LGPL-3.0-only.txt.
+Full per-file copyrights remain in the corresponding pinned source.
+
+
+glslang 15.1.0 - upstream mixed licenses and exceptions
+=======================================================
+
+Here, glslang proper means core GLSL parsing, HLSL parsing, and SPIR-V code
+generation. Glslang proper requires use of a number of licenses, one that covers
+preprocessing and others that covers non-preprocessing.
+
+Bison was removed long ago. You can build glslang from the source grammar,
+using tools of your choice, without using bison or any bison files.
+
+Other parts, outside of glslang proper, include:
+
+- gl_types.h, only needed for OpenGL-like reflection, and can be left out of
+  a parse and codegen project.  See it for its license.
+
+- update_glslang_sources.py, which is not part of the project proper and does
+  not need to be used.
+
+- the SPIR-V "remapper", which is optional, but has the same license as
+  glslang proper
+
+- Google tests and SPIR-V tools, and anything in the external subdirectory
+  are external and optional; see them for their respective licenses.
+
+--------------------------------------------------------------------------------
+
+The core of glslang-proper, minus the preprocessor is licenced as follows:
+
+--------------------------------------------------------------------------------
+3-Clause BSD License
+--------------------------------------------------------------------------------
+
+//
+// Copyright (C) 2015-2018 Google, Inc.
+// Copyright (C) <various other dates and companies>
+//
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
+//
+//    Redistributions of source code must retain the above copyright
+//    notice, this list of conditions and the following disclaimer.
+//
+//    Redistributions in binary form must reproduce the above
+//    copyright notice, this list of conditions and the following
+//    disclaimer in the documentation and/or other materials provided
+//    with the distribution.
+//
+//    Neither the name of 3Dlabs Inc. Ltd. nor the names of its
+//    contributors may be used to endorse or promote products derived
+//    from this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+// FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+// COPYRIGHT HOLDERS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+// INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+// BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+// LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+// LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+// ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
+//
+
+
+
+Shared bodies from the following upstream LICENSE.txt sections are supplied
+elsewhere in this bundle rather than duplicated:
+
+2-Clause BSD License:
+Copyright 2020 The Khronos Group Inc
+Permission and disclaimer: the dav1d BSD-2-Clause text above.
+
+The MIT License:
+Copyright 2020 The Khronos Group Inc
+Permission and disclaimer: libxml2-MIT.txt.
+
+APACHE LICENSE, VERSION 2.0: Apache-2.0.txt.
+GPL 3 with special bison exception: GPL-3.0-only.txt, together with the exact
+Bison exception below. Bison itself is not a film runtime dependency; the
+exception is retained as part of this locked upstream licensing overview.
+
+Bison Exception
+
+As a special exception, you may create a larger work that contains part or all
+of the Bison parser skeleton and distribute that work under terms of your
+choice, so long as that work isn't itself a parser generator using the skeleton
+or a modified version thereof as a parser skeleton.  Alternatively, if you
+modify or redistribute the parser skeleton itself, you may (at your option)
+remove this special exception, which will cause the skeleton and the resulting
+Bison output files to be licensed under the GNU General Public License without
+this special exception.
+
+This special exception was added by the Free Software Foundation in version
+2.2 of Bison.
+
+                     END OF TERMS AND CONDITIONS
+
+The preprocessor has the core licenses stated above, plus additional licences:
+
+/****************************************************************************\
+Copyright (c) 2002, NVIDIA Corporation.
+
+NVIDIA Corporation("NVIDIA") supplies this software to you in
+consideration of your agreement to the following terms, and your use,
+installation, modification or redistribution of this NVIDIA software
+constitutes acceptance of these terms.  If you do not agree with these
+terms, please do not use, install, modify or redistribute this NVIDIA
+software.
+
+In consideration of your agreement to abide by the following terms, and
+subject to these terms, NVIDIA grants you a personal, non-exclusive
+license, under NVIDIA's copyrights in this original NVIDIA software (the
+"NVIDIA Software"), to use, reproduce, modify and redistribute the
+NVIDIA Software, with or without modifications, in source and/or binary
+forms; provided that if you redistribute the NVIDIA Software, you must
+retain the copyright notice of NVIDIA, this notice and the following
+text and disclaimers in all such redistributions of the NVIDIA Software.
+Neither the name, trademarks, service marks nor logos of NVIDIA
+Corporation may be used to endorse or promote products derived from the
+NVIDIA Software without specific prior written permission from NVIDIA.
+Except as expressly stated in this notice, no other rights or licenses
+express or implied, are granted by NVIDIA herein, including but not
+limited to any patent rights that may be infringed by your derivative
+works or by other works in which the NVIDIA Software may be
+incorporated. No hardware is licensed hereunder.
+
+THE NVIDIA SOFTWARE IS BEING PROVIDED ON AN "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+INCLUDING WITHOUT LIMITATION, WARRANTIES OR CONDITIONS OF TITLE,
+NON-INFRINGEMENT, MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, OR
+ITS USE AND OPERATION EITHER ALONE OR IN COMBINATION WITH OTHER
+PRODUCTS.
+
+IN NO EVENT SHALL NVIDIA BE LIABLE FOR ANY SPECIAL, INDIRECT,
+INCIDENTAL, EXEMPLARY, CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+TO, LOST PROFITS; PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
+USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) OR ARISING IN ANY WAY
+OUT OF THE USE, REPRODUCTION, MODIFICATION AND/OR DISTRIBUTION OF THE
+NVIDIA SOFTWARE, HOWEVER CAUSED AND WHETHER UNDER THEORY OF CONTRACT,
+TORT (INCLUDING NEGLIGENCE), STRICT LIABILITY OR OTHERWISE, EVEN IF
+NVIDIA HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+\****************************************************************************/
+
+/*
+** Copyright (c) 2014-2016 The Khronos Group Inc.
+**
+** Permission is hereby granted, free of charge, to any person obtaining a copy
+** of this software and/or associated documentation files (the "Materials"),
+** to deal in the Materials without restriction, including without limitation
+** the rights to use, copy, modify, merge, publish, distribute, sublicense,
+** and/or sell copies of the Materials, and to permit persons to whom the
+** Materials are furnished to do so, subject to the following conditions:
+**
+** The above copyright notice and this permission notice shall be included in
+** all copies or substantial portions of the Materials.
+**
+** MODIFICATIONS TO THIS FILE MAY MEAN IT NO LONGER ACCURATELY REFLECTS KHRONOS
+** STANDARDS. THE UNMODIFIED, NORMATIVE VERSIONS OF KHRONOS SPECIFICATIONS AND
+** HEADER INFORMATION ARE LOCATED AT https://www.khronos.org/registry/
+**
+** THE MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+** OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+** FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+** THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+** LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+** FROM,OUT OF OR IN CONNECTION WITH THE MATERIALS OR THE USE OR OTHER DEALINGS
+** IN THE MATERIALS.
+*/
+
+
+glslang/MachineIndependent/gl_types.h:
+Copyright (c) 2013 The Khronos Group Inc.
+This header uses standard MIT terms for the "Materials", without the
+MODIFICATIONS clause above; the standard permission/disclaimer are supplied
+in libxml2-MIT.txt. Full notices remain in the fixed source.
+
+
+SPIRV-Cross vulkan-sdk-1.4.309.0
+================================
+
+Apache-2.0 is the selected alternative for the Apache-2.0 OR MIT library
+source. License body: Apache-2.0.txt. Its source copyright notices include:
+Copyright 2015-2021 Arm Limited
+Copyright 2016-2021 Robert Konrad
+Copyright 2019-2021 Hans-Kristian Arntzen
+
+The generated SPIR-V headers additionally retain:
+Copyright (c) 2014-2024 The Khronos Group Inc.
+Their permission and disclaimer, including the MODIFICATIONS/registry clause,
+are the Khronos "Materials" terms in the glslang preprocessor notice above;
+they are not relicensed as Apache by this notice.
+
+
+fast_float 97b54ca9e75f5303507699d27c6b4f4efe4641a1
+===================================================
+
+Copyright 2021 The fast_float authors
+
+Apache-2.0 is selected from the upstream Apache-2.0 OR MIT OR BSL-1.0 options.
+The complete Apache terms are supplied in Apache-2.0.txt. The upstream notice:
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+
+libplacebo 7.387.0 - LGPL-2.1-or-later
+======================================
+
+libplacebo authors and contributors.
+The locked source grants LGPL version 2.1 or (at your option) any later
+version. License bodies: LGPL-2.1-only.txt and LGPL-3.0-only.txt. The project
+is an independently linked library; this does not link or distribute mpv.
+The local D3D11 build adaptation is identified in film-kernel.lock.json.
+
+
+XZ Utils 5.8.1 - liblzma under 0BSD
+===================================
+
+Copyright (C) The XZ Utils authors and contributors
+This software includes code from XZ Utils <https://tukaani.org/xz/>.
+
+Only liblzma is part of the film runtime closure. Its locked COPYING assigns
+liblzma to 0BSD, whose full permission and disclaimer follow. Optional XZ
+command-line tools, gzip-derived scripts and Autotools GPL/LGPL notices are
+not alternative licenses for this liblzma build; those tools are not shipped.
+
+Permission to use, copy, modify, and/or distribute this
+software for any purpose with or without fee is hereby granted.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL
+WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL
+THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR
+CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+
+Pallets build-only dependencies - BSD-3-Clause
+==============================================
+
+Jinja 15206881c006c79667fe5154fe80c01c65410679:
+Copyright 2007 Pallets
+
+MarkupSafe 297fc8e356e6836a62087949245d09a28e9f1b13:
+Copyright 2010 Pallets
+
+Both locked LICENSE.txt files use the standard BSD-3-Clause wording supplied
+in npm-node-compat-BSD-3-Clause.txt. The copyright notices above apply with
+those terms. These are the build-time Jinja/MarkupSafe sources, not Python
+code shipped or started by the Windows film application.
+
+
+LLVM-MinGW 20261104 - LLVM 23.1.5 runtimes
+==========================================
+
+Fixed upstream LLVM source: llvmorg-23.1.5.
+Original upstream LICENSE.TXT SHA-256 identities (not hashes of this excerpt):
+- root: 8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee
+- compiler-rt: 1a8f1058753f1ba890de984e48f0242a3a5c29a6a8f2ed9fd813f36985387e8d
+- libcxx: 539dd7aed86e8a4f12cbdd0e6c50c189c7d74847e4fecc64ce2c6ee3a01da38b
+- libcxxabi: e2b35be49f7284a45b7baca8fc7b3ab7440e7902392b2528a457816b5bb2a15c
+- libunwind: b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d
+
+The LLVM Project, compiler-rt, libc++, libc++abi and libunwind use Apache-2.0
+WITH LLVM-exception. Apache-2.0.txt supplies the unmodified Apache body; the
+LLVM exception and upstream third-party qualification are retained below.
+Actual linked runtime archives and per-file exceptions still require the
+Windows build receipt/link-map check, not an assumption from the tool name.
+
+---- LLVM Exceptions to the Apache 2.0 License ----
+
+As an exception, if, as a result of your compiling your source code, portions
+of this Software are embedded into an Object form of such source code, you
+may redistribute such embedded portions in such Object form without complying
+with the conditions of Sections 4(a), 4(b) and 4(d) of the License.
+
+In addition, if you combine or link compiled forms of this Software with
+software that is licensed under the GPLv2 ("Combined Software") and if a
+court of competent jurisdiction determines that the patent provision (Section
+3), the indemnity provision (Section 9) or other Section of the License
+conflicts with the conditions of the GPLv2, you may retroactively and
+prospectively choose to deem waived or otherwise exclude such Section(s) of
+the License, but only in their entirety and only with respect to the Combined
+Software.
+
+==============================================================================
+Software from third parties included in the LLVM Project:
+==============================================================================
+The LLVM Project contains third party software which is under different license
+terms. All such code will be identified clearly using at least one of two
+mechanisms:
+1) It will be in a separate directory tree with its own `LICENSE.txt` or
+   `LICENSE` file at the top containing the specific license and restrictions
+   which apply to that software, or
+2) It will contain specific license and restriction terms at the top of every
+   file.
+
+
+Legacy LLVM notice, retained once:
+Copyright (c) 2003-2019 University of Illinois at Urbana-Champaign.
+The compiler-rt, libc++, libc++abi and libunwind legacy licenses offer NCSA
+or MIT. NCSA is selected for any applicable legacy code; its common body
+below retains their upstream 2009-2019 CREDITS.TXT attribution. Per-file
+copyrights remain in the corresponding sources.
+
+University of Illinois/NCSA
+Open Source License
+
+Copyright (c) 2009-2019 by the contributors listed in CREDITS.TXT
+
+All rights reserved.
+
+Developed by:
+
+    LLVM Team
+
+    University of Illinois at Urbana-Champaign
+
+    http://llvm.org
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal with
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+    * Redistributions of source code must retain the above copyright notice,
+      this list of conditions and the following disclaimers.
+
+    * Redistributions in binary form must reproduce the above copyright notice,
+      this list of conditions and the following disclaimers in the
+      documentation and/or other materials provided with the distribution.
+
+    * Neither the names of the LLVM Team, University of Illinois at
+      Urbana-Champaign, nor the names of its contributors may be used to
+      endorse or promote products derived from this Software without specific
+      prior written permission.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+CONTRIBUTORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS WITH THE
+SOFTWARE.
+
+
+LLVM-MinGW 20261104 - MinGW-w64 runtime additions
+=================================================
+
+Fixed MinGW-w64 source: ee9bd87644156c41072a11ad957d1e11831a72df.
+Original upstream identities:
+- COPYING.MinGW-w64-runtime/COPYING.MinGW-w64-runtime.txt SHA-256:
+  1db8da07b436c68833c0673ffee3d9fcb2526047f3820b81661865dfedc79a1f
+- mingw-w64-libraries/winpthreads/COPYING SHA-256:
+  63263614cdd29f2f93cba85e992f041b31f9fc7b4033692f31269489a8a1b177
+- mingw-w64-libraries/winpthreads/src/misc.c SHA-256:
+  e33a99899b9858038fadac0c8f60142e53ff46db9e25df5db45e6352f8e47cb0
+
+The common upstream runtime grants are already supplied in
+MinGW-w64-runtime-NOTICE.txt. The newer runtime overview adds:
+
+Some string, memory and time conversion functions:
+Copyright © 2005-2020 Rich Felker, et al.
+The standard MIT permission/disclaimer is supplied in libxml2-MIT.txt.
+
+The locked release's winpthreads COPYING is already present verbatim in
+winpthreads-LICENSE.txt; src/misc.c now additionally credits:
+Copyright (c) 2011-2016, 2026 mingw-w64 project
+The same MIT permission/disclaimer is supplied in winpthreads-LICENSE.txt.
+
+These notices supplement, and do not change, the older VideoKernel toolchain
+notices. The actual compiler/runtime versions and included source portions
+must be checked against the final Windows build receipt.

@@ -800,7 +800,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     {
         if (current is not { } input) return;
         if (media.Scope is { } scope && scope.Identity == input.Receipt.AttemptId) input.NativeScope = scope;
-        if (args.PropertyName is "OwnerId" or "Identity" or "ObservedVideoOutput" or "HasMedia")
+        if (args.PropertyName is "Scope" or "Identity" or "HasOutput")
         {
             // Native publication changes several properties before its atomic
             // committed callback. Recheck this captured input after that turn,
