@@ -122,8 +122,14 @@ open class PageViewController: UIViewController {
 
     open override func present(_ viewControllerToPresent: UIViewController, animated flag: Bool,
                                completion: (() -> Void)? = nil) {
-        super.present(viewControllerToPresent, animated: flag, completion: completion)
-        if viewControllerToPresent.presentingViewController != nil {
+        super.present(viewControllerToPresent, animated: flag) { [weak self, weak viewControllerToPresent] in
+            if let self, let viewControllerToPresent,
+               viewControllerToPresent.presentingViewController != nil || presentedViewController === viewControllerToPresent {
+                presentedPageModal = viewControllerToPresent
+            }
+            completion?()
+        }
+        if viewControllerToPresent.presentingViewController != nil || presentedViewController === viewControllerToPresent {
             presentedPageModal = viewControllerToPresent
         }
     }
@@ -328,8 +334,16 @@ open class PageViewController: UIViewController {
     /// receipt, including a coordinator UIKit may retain during completion.
     public func dismissPageModal(_ modal: UIViewController, completion: (() -> Void)? = nil) {
         guard presentedViewController === modal || presentedPageModal === modal else { return }
-        if presentedPageModal === modal { presentedPageModal = nil }
         var transition = modal.transitionCoordinator
+        if modal.isBeingDismissed, let transition {
+            _ = transition.animate(alongsideTransition: nil, completion: { [weak self, weak modal, weak transition] context in
+                guard let self, !context.isCancelled else { return }
+                if presentedPageModal === modal { presentedPageModal = nil }
+                finishAppearance(transition: transition, completion: completion)
+            })
+            return
+        }
+        if presentedPageModal === modal { presentedPageModal = nil }
         // UIKit may invoke an alert action after automatic dismissal has already
         // removed every presentation link. Its recorded owner still consumes it.
         if presentedViewController !== modal, modal.presentingViewController == nil,

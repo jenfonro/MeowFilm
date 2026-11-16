@@ -759,6 +759,55 @@ final class PageViewControllerTests: XCTestCase {
         XCTAssertFalse(page.canPresentPageAlert)
     }
 
+    func testAlreadyDismissingModalUsesItsExistingReceiptWithoutAnotherDismissal() async throws {
+        try await performRunnerAction { $0.activate() }
+        for invalidated in [false, true] {
+            let page = PageAlertTestPage(themeProvider: PageLifecycleTestTheme())
+            try mountDismissalPage(page)
+            await waitForErrorAlertState("page ready before automatic dismissal begins") { page.canPresentPageAlert }
+            let modal = PageDismissalTestModal()
+            page.covering = modal
+            modal.dismiss(animated: true)
+            XCTAssertTrue(modal.isBeingDismissed)
+            var completions = 0
+            page.dismissPageModal(modal) { completions += 1 }
+            XCTAssertEqual(modal.dismissalCalls, 1, "An existing dismissal already owns its completion")
+            XCTAssertEqual(completions, 0)
+            page.coordinator = modal.coordinator
+            page.covering = nil
+            if invalidated { PageViewController.invalidatePages(in: page) }
+            modal.completeDismissal()
+            XCTAssertEqual(completions, invalidated ? 0 : 1)
+            XCTAssertEqual(page.canPresentPageAlert, !invalidated)
+            page.dismissPageModal(modal) { completions += 1 }
+            XCTAssertEqual(completions, invalidated ? 0 : 1)
+        }
+    }
+
+    func testCancelledExistingModalDismissalDoesNotConsumeFollowUpAndCanDismissAgain() async throws {
+        try await performRunnerAction { $0.activate() }
+        let page = PageAlertTestPage(themeProvider: PageLifecycleTestTheme())
+        try mountDismissalPage(page)
+        await waitForErrorAlertState("page ready before cancellable dismissal") { page.canPresentPageAlert }
+        let modal = PageDismissalTestModal()
+        page.covering = modal
+        modal.dismiss(animated: true)
+        var completions = 0
+        page.dismissPageModal(modal) { completions += 1 }
+        XCTAssertEqual(modal.dismissalCalls, 1)
+        page.coordinator = modal.coordinator
+        modal.completeDismissal(cancelled: true)
+        XCTAssertEqual(completions, 0)
+        XCTAssertTrue(page.presentedViewController === modal)
+        XCTAssertFalse(page.canPresentPageAlert)
+        page.dismissPageModal(modal) { completions += 1 }
+        XCTAssertEqual(modal.dismissalCalls, 2)
+        page.covering = nil
+        modal.completeDismissal()
+        XCTAssertEqual(completions, 1)
+        XCTAssertTrue(page.canPresentPageAlert)
+    }
+
     func testAutomaticallyDismissedModalRunsFollowUpOnlyForItsRecordedPageOnce() async throws {
         try await performRunnerAction { $0.activate() }
         let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
@@ -957,14 +1006,26 @@ private final class PageAlertTestPage: PageViewController {
 private final class PageDismissalTestModal: UIViewController {
     let coordinator = PageLifecycleTestCoordinator()
     private(set) var dismissalStarted = false
+    private(set) var dismissalCalls = 0
+    private var dismissing = false
     private var completion: (() -> Void)?
+    override var isBeingDismissed: Bool { dismissing }
     override var transitionCoordinator: UIViewControllerTransitionCoordinator? { dismissalStarted ? coordinator : nil }
     override func dismiss(animated flag: Bool, completion: (() -> Void)? = nil) {
+        dismissalCalls += 1
+        guard !dismissalStarted else { return }
         dismissalStarted = true
+        dismissing = true
         self.completion = completion
     }
-    func completeDismissal() {
-        coordinator.complete(cancelled: false)
+    func completeDismissal(cancelled: Bool = false) {
+        dismissing = false
+        coordinator.complete(cancelled: cancelled)
+        if cancelled {
+            dismissalStarted = false
+            completion = nil
+            return
+        }
         let callback = completion
         completion = nil
         callback?()
