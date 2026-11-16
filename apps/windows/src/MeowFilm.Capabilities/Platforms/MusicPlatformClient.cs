@@ -302,8 +302,21 @@ internal sealed class MusicPlatformClient(IRuntimeClient runtime) : IAsyncDispos
             await pair.Value.Publication.WaitAsync().ConfigureAwait(false);
             try
             {
-                Published(await Call("music.platform.session.update",
-                    new { platform = pair.Key, session = (object?)null }, CancellationToken.None).ConfigureAwait(false));
+                if (runtime is IRuntimeLifetime { ShutdownCompletion: { } shutdown })
+                    await shutdown.ConfigureAwait(false);
+                else
+                {
+                    try
+                    {
+                        Published(await Call("music.platform.session.update",
+                            new { platform = pair.Key, session = (object?)null }, CancellationToken.None).ConfigureAwait(false));
+                    }
+                    catch (MusicPlatformException error) when (error.Code == "CLOSED" &&
+                        runtime is IRuntimeLifetime { ShutdownCompletion: not null })
+                    {
+                        await ((IRuntimeLifetime)runtime).ShutdownCompletion!.ConfigureAwait(false);
+                    }
+                }
                 pair.Value.PublicationFailure = null;
             }
             finally { pair.Value.Publication.Release(); }

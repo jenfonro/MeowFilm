@@ -80,4 +80,6 @@ App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能�
 
 `AppUserDataReset` 串行持有一次已确认操作的阶段：记录待清理请求、真实释放旧代、删除两根自有数据、重新装配；失败显式重试只继续未成功的阶段。旧窗口取消导航并锁定交互，媒体设置先封住系统输入，随后使用 `AppShutdown.ForceReleaseAsync` 退役全部所有者，包含实际排空的 `CacheDocumentStore` 与其 backing store。内存缓存随旧代释放；缓存落盘尚未结算、任一根删除失败或释放超时，都不能放行新代启动。删除前两根均取得排他删除句柄，任一仍有存储占用则不开始删另一根。
 
+强制释放先确认共享运行器真实退役；原生消费者通过[运行器关闭回执](app-runtime.md#所有权与关闭)完成本地排空，不向退役宿主再次请求会话重置或图片释放，真实关闭失败仍阻断删除与替代代次。清除失败后的托盘退出与浮层退出复用同一单飞 abort 路径；尚未确认、清除中或退出中不接纳竞争动作，也不改走普通保存关闭。
+
 两根全部清除后才移除 pending，关闭旧 Shell，但不关闭 WPF dispatcher；复用启动/失败重试窗口创建新的 `AppStartup`、store、cache owner、runtime、业务模块、偏好、播放和窗口附件。小说原生写入、规则 RPC 与 Web 交互随旧 owner 取消并排空，搜索页及导航委托一并释放并重新装配，不借用旧 `NovelCapability`。入口装配闭包在资源成功释放后清空，旧 Shell 的 Closed 不会终止替代代次。程序 PID 不变，无需手动重启。中断后的进程启动先继续同一请求，部分删除失败仍不准入业务；完成请求的重试不再删除新代业务或缓存。范围及文件排他边界见[本机数据清除](protected-storage.md#clear-all-local-user-data)。

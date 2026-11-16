@@ -142,7 +142,8 @@ public sealed partial class ShellWindow
     {
         if (_isClosed || _sessionEnding) return;
         RestoreFromTray();
-        BeginShutdown();
+        if (ResetDialog.IsOpen) OnUserDataResetExit();
+        else BeginShutdown();
     }
 
     private void OnTrayUnavailable()
