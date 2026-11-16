@@ -1,6 +1,7 @@
 import { Socket } from 'node:net';
 import { isAbsolute, resolve } from 'node:path';
 import { BridgeError, HTTP_PROTOCOL, decodeJSONValue, validateEndpoint, validateSession } from '@meowfilm/runtime-bridge';
+import { createWindowsNativeSettings } from './native-settings.mjs';
 
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const sessionPattern = new RegExp(`^${uuid}$(?![\\s\\S])`);
@@ -99,7 +100,7 @@ export function connectWindowsNamedPipe(pipeName, {
 export async function startWindowsRuntimeOnPipe(stream, {
   sessionId, createRuntime, timeout = 5000, signal,
 } = {}) {
-  let runtime, startup, closing, stopError, started = false, stopped = false, configured = false;
+  let runtime, startup, closing, stopError, settings, started = false, stopped = false, configured = false;
   let length = 0, chunks = [];
   let acceptConfig, rejectConfig, rejectStopped;
   const config = new Promise((resolve, reject) => { acceptConfig = resolve; rejectConfig = reject; });
@@ -112,6 +113,7 @@ export async function startWindowsRuntimeOnPipe(stream, {
     clearTimeout(timer);
     signal?.removeEventListener('abort', cancelled);
     chunks = [];
+    settings?.close();
     closing = (async () => {
       try {
         // Wait for a racing listen operation before reporting resource cleanup.
@@ -142,7 +144,11 @@ export async function startWindowsRuntimeOnPipe(stream, {
   const cancelled = () => stop('CANCELLED');
   const data = bytes => {
     if (stopped) return;
-    if (configured) { stop('INVALID_REQUEST'); return; }
+    if (configured) {
+      if (!settings) stop('INVALID_REQUEST');
+      else settings.accept(bytes);
+      return;
+    }
     length += bytes.length;
     // The resource bound includes the line terminator, never business bodies.
     if (length > bootstrapBytes) { stop('INVALID_REQUEST'); return; }
@@ -155,12 +161,14 @@ export async function startWindowsRuntimeOnPipe(stream, {
       const value = decodeJSONValue(Buffer.concat(chunks, length).subarray(0, -1));
       chunks = [];
       if (value === null || typeof value !== 'object' || Array.isArray(value) ||
-          Object.keys(value).length !== 2 || value.sessionId !== sessionId ||
+          Object.keys(value).length !== (value.nativeSettings === true ? 3 : 2) || value.sessionId !== sessionId ||
           !Object.hasOwn(value, 'dataRoot')) {
         throw new BridgeError('INVALID_REQUEST');
       }
       validateSession({ sessionId: value.sessionId });
-      acceptConfig({ ...value, dataRoot: windowsScriptDataRoot(value.dataRoot) });
+      if (value.nativeSettings === true) settings = createWindowsNativeSettings(stream, stop);
+      acceptConfig({ sessionId: value.sessionId, dataRoot: windowsScriptDataRoot(value.dataRoot),
+        ...(settings ? { settings } : {}) });
     } catch { stop('INVALID_REQUEST'); }
   };
   const timer = setTimeout(() => stop('TIMEOUT'), timeout);
@@ -174,7 +182,7 @@ export async function startWindowsRuntimeOnPipe(stream, {
     if (stream.destroyed || stream.readableEnded) stop('CLOSED');
     const input = await config;
     if (stopped) throw stopError;
-    runtime = createRuntime(input);
+    runtime = await createRuntime(input);
     startup = Promise.resolve(runtime.start());
     await Promise.race([startup, interrupted]);
     if (stopped) throw stopError;

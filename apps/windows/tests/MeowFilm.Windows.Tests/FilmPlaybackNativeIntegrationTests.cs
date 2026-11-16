@@ -1,4 +1,7 @@
 using System.Text.Json;
+using System.IO;
+using MeowFilm.AppHost;
+using MeowFilm.Platform.Storage;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -441,7 +444,10 @@ public static class FilmPlaybackNativeIntegrationTests
         foreach (var receipt in receipts) await ResourceGoneAsync(receipt);
         Check(allocation.PhysicallyReleased && !f.Native.HasMedia, "actual first-process media and private inputs drain before cold restart");
 
-        var settings = new FilmPlaybackSettings(f.Runtime);
+        string root = Path.GetDirectoryName(f.DataRoot)!;
+        await using var store = new LocalDocumentStore(Path.Combine(root, "documents"), AppIdentity.NativeNamespaces,
+            AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
+        var settings = new FilmPlaybackSettings(f.Runtime, store);
         var preferences = new FilmPreferences(["keyword", "pan", "quality"],
             ["baidu", "uc", "quark", "tianyi", "yidong"], ["原始优先词", "第二关键词"],
             ["本地净化词", "直播"], false);
@@ -449,7 +455,7 @@ public static class FilmPlaybackNativeIntegrationTests
         Check(committed.RuleOrder.SequenceEqual(preferences.RuleOrder) && committed.PanOrder.SequenceEqual(preferences.PanOrder) &&
             committed.Keywords.SequenceEqual(preferences.Keywords) &&
             committed.SiteCleanKeywords.SequenceEqual(preferences.SiteCleanKeywords) && !committed.IosAutoPrepare,
-            "formal settings receipt preserves all nondefault orders and values");
+            "native document receipt preserves all nondefault orders and values without a runtime acknowledgement");
         var siteManual = FilmJson.Encode(new
         {
             id = "native-site-manual", targetId = owner.TargetId, kind = "site", name = "本机站点",
@@ -491,10 +497,17 @@ public static class FilmPlaybackNativeIntegrationTests
             "the durable library never stores this run's media capability, private demux URL or signed media address");
         f.NoBackgroundFailures();
         await f.DisposeAsync(); // Close the actual first Node, not merely another library object.
-        var restored = await f.ReadInSecondProcessAsync();
-        Check(JsonElement.DeepEquals(before, restored.Library) &&
+        await store.DisposeAsync();
+        await using var next = await FilmMetadataRuntimeTests.RuntimeHost.OpenAsync(root);
+        var restored = (Library: await next.FilmAsync("library.get", new { }),
+            Preferences: await next.WaitSettingsAsync("film.preferences"));
+        Check(next.ProcessId != f.Runtime.ProcessId && File.ReadAllText(Path.Combine(f.DataRoot, "film-playback", "library.json")) == stored,
+            "the real cold native-settings runtime has a new process and its read-only business access preserves the durable library bytes");
+        JsonElement Business(JsonElement value) => FilmJson.Encode(value.EnumerateObject()
+            .Where(item => item.Name != "preferences").ToDictionary(item => item.Name, item => item.Value.Clone()));
+        Check(JsonElement.DeepEquals(Business(before), Business(restored.Library)) &&
             JsonElement.DeepEquals(FilmJson.Encode(preferences), restored.Preferences),
-            "a second actual process reads the identical committed preferences, manual, blocks and native history");
+            "a second actual process consumes native preferences and reads identical Node-owned manual blocks and history");
         Observe("durable-library", new
         {
             historyCount = FilmJson.Array(restored.Library, "history").Length,

@@ -1,3 +1,5 @@
+using System.IO;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using MeowFilm.Capabilities;
@@ -16,11 +18,9 @@ public static partial class FilmSourcesTests
         yield return Case("duplicate source identity members isolate every candidate through save sync and restart", AmbiguousSourceIdentityMembers);
         yield return Case("unknown update display state never retires an otherwise valid source generation", UnknownUpdateState);
         yield return Case("unsupported roots and real source CAS conflicts preserve original storage", SourceDocumentBoundaries);
-        yield return Case("management uses the Cat wire and status metadata without owning the runtime", Management);
-        yield return Case("uninstall reports target cleanup failures and reconciles committed error receipts", UninstallFailures);
-        yield return Case("tombstones isolate parents and only successful explicit reimport restores included sites", Tombstones);
-        yield return Case("explicit network reimport enables and restores only its successful current list", NetworkReimport);
-        yield return Case("a new deletion while reimport is running wins over the late receipt", DeleteDuringImport);
+        yield return Case("native source intent is authoritative and only update restart and detection use Cat RPC", Management);
+        yield return Case("tombstones survive updates type changes and duplicate adds for each parent", Tombstones);
+        yield return Case("a deletion while runtime status is pending wins over late metadata", DeleteDuringImport);
         yield return Case("starting failed disabled and missing parents reconcile without empty-list loss", Reconciliation);
         yield return Case("dashboard fixture sends home category detail play search parameters", DetectionContract);
         yield return Case("dashboard fallback matrix distinguishes errors empty data and missing actions", DetectionMatrix);
@@ -32,19 +32,17 @@ public static partial class FilmSourcesTests
         yield return Case("deleted disabled and replaced generations fence noncooperative late detections", LateResults);
         yield return Case("shutdown preparation drains and resume admits new work without disposal", PrepareAndResume);
         yield return Case("final shutdown drains late work and leaves borrowed dependencies alive", Disposal);
-        yield return Case("complete source bytes and large structured values preserve Unicode", SourceAndValues);
-        yield return Case("source receipts match the exact installation and revision before management", SourceReceipts);
-        yield return Case("cancelled uploads and structured replies cannot publish results", CancelledDelivery);
+        yield return Case("selected source hashes and large structured values preserve Unicode", SourceAndValues);
         yield return Case("failed local saves do not publish and lost commit receipts reconcile", StorageFailures);
-        yield return Case("post-management local write failures retire old generations and preserve committed user state", ManagementStorageFailures);
+        yield return Case("post-network-update cache failures retire old generations and preserve user state", ManagementStorageFailures);
         yield return Case("shutdown drains storage-failure observation while preserving the original storage error", StorageFailureShutdown);
         yield return Case("startup failure is observable and local initialization never contacts Node", StartupFailure);
         yield return Case("explicit refresh recovers a failed host epoch without replaying management", ExplicitRuntimeRecovery);
         yield return Case("cancelled management retires cached generations and waits for rollback without replay", CancelledManagement);
-        yield return Case("cancelled committed changes reconcile without restoring deleted videos", CancelledCommits);
+        yield return Case("cancelled or timed-out committed online changes reconcile without replay or restoring tombstones", LostOnlineReceipts);
+        yield return Case("cancelled structured detection replies preserve the completed result", CancelledDetectionReply);
         yield return Case("failed or shutdown cancellation reconciliation never authorizes a retired generation", CancelledReconciliationFailure);
         yield return Case("timed out management observes delayed rollback independently of the page and preserves its error", TimedOutManagement);
-        yield return Case("timed out committed changes reconcile without restoring deleted videos or replaying management", TimedOutCommits);
         yield return Case("failed or shutdown timeout reconciliation preserves the original error and drains observation", TimedOutReconciliationFailure);
     }
 
@@ -52,11 +50,11 @@ public static partial class FilmSourcesTests
     {
         var runtime = new Runtime();
         runtime.Add("a"); runtime.Add("b");
-        var store = new Store();
+        var store = new Store(runtime);
         await using (var service = new FilmSourceService(runtime, store))
         {
             await service.InitializeAsync();
-            Check(runtime.Calls.Count == 0 && store.Reads == 1, "initialization only reads the local document");
+            Check(runtime.Calls.Count == 0 && store.Reads == 2, "initialization only reads the local document");
             await service.RefreshAsync();
             var a = Key("a");
             var b = Key("b");
@@ -92,107 +90,60 @@ public static partial class FilmSourcesTests
     private static async Task Management()
     {
         var runtime = new Runtime();
-        var store = new Store();
+        var store = new Store(runtime);
         await using var service = new FilmSourceService(runtime, store);
-        var local = await service.ImportLocalAsync("本地猫", FixtureScript, "local");
-        Check(local.Enabled && local.SourceType == "local" && local.ImportedAt == 100 && local.ModifiedAt == 100,
-            "local install defaults enabled and uses Node timestamps");
-        var uploaded = runtime.Uploads.Single();
-        Check(uploaded.InstallationId == "local" && uploaded.SourceRevision is > 0 and <= BridgeCodec.MaximumSafeInteger &&
-            uploaded.Source.SequenceEqual(Encoding.UTF8.GetBytes(FixtureScript)) && runtime.UploadedSource == FixtureScript,
-            "local source is uploaded as complete bytes under an explicit candidate identity");
-        var install = runtime.Calls.Single(call => call.Method == "install").Input;
-        Fields(install, "installationId", "sourceRevision", "name", "sourceType", "sourceUrl", "enabled");
-        Check(install.GetProperty("sourceRevision").GetInt64() == uploaded.SourceRevision,
-            "install consumes the exact uploaded candidate");
-        Check(install.GetProperty("sourceType").GetString() == "local", "local install metadata");
-        Check(install.GetProperty("sourceUrl").ValueKind == JsonValueKind.Null, "local reimport explicitly clears a previous network URL");
+        using var file = new SourceFile(FixtureScript);
+        var local = await service.ImportLocalAsync("本地猫", file.Path, "local");
+        Check(local.Enabled && local.SourceType == "local" && local.LocalPath == file.Path &&
+            local.InputRevision == 1 && !local.CanDetect && local.ImportedAt is null,
+            "local save exposes committed intent, not an invented runtime receipt");
         var network = await service.ImportNetworkAsync("网络猫", "https://fixture.invalid/cat.js", "net");
-        Check(network.SourceType == "network" && network.SourceUrl == "https://fixture.invalid/cat.js", "URL stays in public Node metadata");
-        Check(runtime.Uploads.Count == 1, "network import leaves source retrieval to the runtime");
+        Check(network.SourceType == "network" && network.SourceUrl == "https://fixture.invalid/cat.js" &&
+            network.LocalPath is null && runtime.Calls.Count == 0 && runtime.Uploads.Count == 0,
+            "adding only saves intent; source retrieval belongs to the runtime");
         await service.EditCatAsync("net", "新名称", "https://fixture.invalid/changed.js");
-        Check(service.Cats.Single(cat => cat.InstallationId == "net").Name == "新名称", "edit synchronizes authoritative metadata");
         await service.EditCatAsync("local", "本地改名");
-        Fields(runtime.Calls.Last(call => call.Method == "edit").Input, "installationId", "name");
-        await service.UpdateCatAsync("local", FixtureScript + "\n// changed");
-        var update = runtime.Calls.Last(call => call.Method == "update").Input;
-        Fields(update, "installationId", "sourceRevision");
-        var replacement = runtime.Uploads.Last();
-        Check(replacement.InstallationId == "local" && replacement.SourceRevision > uploaded.SourceRevision &&
-            update.GetProperty("sourceRevision").GetInt64() == replacement.SourceRevision &&
-            replacement.Source.SequenceEqual(Encoding.UTF8.GetBytes(FixtureScript + "\n// changed")),
-            "local update uploads and consumes a new exact candidate");
+        Check(service.Cats.Single(cat => cat.InstallationId == "local").InputRevision == 1 &&
+            service.Cats.Single(cat => cat.InstallationId == "net").InputRevision == 2,
+            "only source changes advance input revision, not name edits");
+        using var changed = new SourceFile(FixtureScript + "\n// changed");
+        await service.UpdateCatAsync("local", changed.Path);
+        Check(service.Cats.Single(cat => cat.InstallationId == "local").InputRevision == 2 &&
+            runtime.Calls.Count == 0 && runtime.Uploads.Count == 0, "local update is another native file selection");
+        runtime.Apply(store);
+        await service.RefreshAsync();
         long? modified = service.Cats.Single(cat => cat.InstallationId == "local").ModifiedAt;
         await service.RestartCatAsync("local");
-        Check(service.Cats.Single(cat => cat.InstallationId == "local").ModifiedAt == modified, "restart does not synthesize an update time");
+        Check(service.Cats.Single(cat => cat.InstallationId == "local").ModifiedAt == modified,
+            "restart does not synthesize an update time");
         await service.UpdateCatAsync("net");
         Fields(runtime.Calls.Last(call => call.Method == "update").Input, "installationId");
-        Check(runtime.Uploads.Count == 2, "network update uses the runtime-owned URL without a client upload");
-        Check(service.Cats.Single(cat => cat.InstallationId == "net").UpdatedAt == 200, "successful network update uses its reported time");
+        Check(service.Cats.Single(cat => cat.InstallationId == "net").UpdatedAt == 200,
+            "successful network update uses its actual reported timestamp");
         runtime.NextUpdateState = "unchanged";
         await service.UpdateCatAsync("net");
-        Check(service.Cats.Single(cat => cat.InstallationId == "net").ModifiedAt == 200, "unchanged content retains modification time");
+        Check(service.Cats.Single(cat => cat.InstallationId == "net").ModifiedAt == 200,
+            "unchanged content retains modification time");
         runtime.FailNext = "update";
         await Code(() => service.UpdateCatAsync("net"), "SCRIPT_EXCEPTION");
         var failed = service.Cats.Single(cat => cat.InstallationId == "net");
         Check(failed.UpdateState == "failed" && failed.UpdateError == "SCRIPT_EXCEPTION" && failed.CanDetect &&
-            failed.ModifiedAt == 200 && service.Videos.Count == 2, "failed update resynchronizes metadata and keeps old descriptors");
-        await service.EnableCatAsync("net", false);
+            failed.ModifiedAt == 200 && service.Videos.Count == 2, "failed online update preserves actual working facts");
         int count = runtime.Calls.Count;
+        await service.EnableCatAsync("net", false);
         await Code(() => service.RestartCatAsync("net"), "DISABLED");
         await Code(() => service.DetectAsync(Key("net")), "DISABLED");
-        Check(!runtime.Calls.Skip(count).Any(call => call.Method is "restart" or "invoke") && service.Videos.Count == 2,
-            "disabled cats retain the list and cannot execute restart or detection");
         await service.DeleteCatAsync("local");
-        Check(service.Cats.Single().InstallationId == "net" && service.Videos.Single().Key == Key("net"),
-            "uninstall removes only that parent's children");
-        Check(runtime.Calls.Where(call => call.Method is "install" or "import" or "edit" or "update" or "restart" or "enable" or "uninstall")
-            .All(call => runtime.Calls.Skip(runtime.Calls.IndexOf(call) + 1).Any(next => next.Method == "status")),
-            "management receipts are followed by authoritative status");
-    }
-
-    private static async Task UninstallFailures()
-    {
-        foreach (string scenario in new[] { "cleanup", "error-receipt", "other-installation" })
-        {
-            var runtime = new Runtime();
-            runtime.Add("a", "video", "deleted"); runtime.Add("b", "video", "deleted");
-            await using var service = new FilmSourceService(runtime, new Store());
-            await service.RefreshAsync();
-            await service.DeleteVideoAsync(new("a", "deleted"));
-            await service.DeleteVideoAsync(new("b", "deleted"));
-            runtime.Uninstall = id =>
-            {
-                Check(id == "a", "uninstall targets one installation");
-                runtime.Nodes.Remove(id);
-                if (scenario == "error-receipt")
-                    return Element(new { ok = false, contract = "cat.script.v2", code = "COMMIT_UNKNOWN" });
-                var failures = scenario == "cleanup"
-                    ? new[] { new { installationId = "b", code = "SERVICE_ERROR" }, new { installationId = "a", code = "STORAGE_ERROR" } }
-                    : new[] { new { installationId = "b", code = "SERVICE_ERROR" } };
-                return runtime.Reply(new { applied = false, failures });
-            };
-            int before = runtime.Calls.Count;
-            if (scenario == "other-installation") await service.DeleteCatAsync("a");
-            else await Code(() => service.DeleteCatAsync("a"), scenario == "cleanup" ? "STORAGE_ERROR" : "COMMIT_UNKNOWN");
-            Check(runtime.Calls.Skip(before).Select(call => call.Method).SequenceEqual(["uninstall", "status"]),
-                "both payload cleanup failures and error receipts coordinate with authoritative status");
-            Check(service.Cats.Single().InstallationId == "b" && service.Videos.Single().Key == Key("b"),
-                "committed uninstall stays removed locally even when its cleanup or receipt reports failure");
-            runtime.Add("a", "video", "deleted");
-            await service.RefreshAsync();
-            Check(service.Videos.Where(video => video.Key.InstallationId == "a").Select(video => video.Key.SiteKey)
-                    .ToHashSet().SetEquals(["video", "deleted"]) &&
-                service.Videos.Where(video => video.Key.InstallationId == "b").Select(video => video.Key.SiteKey)
-                    .SequenceEqual(["video"]),
-                "committed uninstall clears only the removed parent's tombstones");
-        }
+        Check(runtime.Calls.Count == count && service.Cats.Single().InstallationId == "net" &&
+            service.Videos.Single().Key == Key("net"), "native disable/delete never RPC and affect only their parent");
+        Check(runtime.Calls.All(call => call.Method is "status" or "restart" or "update"),
+            "native management never sends legacy install/import/edit/enable/uninstall or source upload");
     }
 
     private static async Task CancelledManagement()
     {
         var runtime = new Runtime(); runtime.Add("a", "video", "deleted");
-        await using var service = new FilmSourceService(runtime, new Store());
+        await using var service = new FilmSourceService(runtime, new Store(runtime));
         await service.RefreshAsync();
         await service.DeleteVideoAsync(new("a", "deleted"));
         var options = new FilmVideoOptions(false, false, false, true);
@@ -227,7 +178,7 @@ public static partial class FilmSourcesTests
             cat.Generation = 3; cat.State = "ready"; cat.UpdateState = "failed"; cat.UpdateError = "CANCELLED";
             return runtime.Reply(new { instances = runtime.Nodes.Values.Select(node => node.Wire()).ToArray() });
         }
-        var update = service.UpdateCatAsync("a", FixtureScript, cancel.Token);
+        var update = service.UpdateCatAsync("a", null, cancel.Token);
         try
         {
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -243,40 +194,11 @@ public static partial class FilmSourcesTests
                 runtime.Invocations.All(call => call.Generation == 3), "next detection works without manual refresh");
             Check(service.Videos.Count == 1 && service.Videos.Single().Options == options,
                 "rollback synchronization preserves options and the deleted video");
-            Check(runtime.Uploads.Count == 1 && runtime.Calls.Count(call => call.Method == "update") == 1 &&
+            Check(runtime.Uploads.Count == 0 && runtime.Calls.Count(call => call.Method == "update") == 1 &&
                 !runtime.Calls.Any(call => call.Method is "install" or "import" or "restart" or "refresh"),
                 "cancellation reads status only; no management replay");
         }
         finally { release.TrySetResult(); cancel.Cancel(); }
-    }
-
-    private static async Task CancelledCommits()
-    {
-        foreach (string operation in new[] { "install", "uninstall" })
-        {
-            var runtime = new Runtime(); runtime.Add("a", "video", "deleted"); runtime.Add("b");
-            await using var service = new FilmSourceService(runtime, new Store());
-            await service.RefreshAsync();
-            await service.DeleteVideoAsync(new("a", "deleted"));
-            using var cancel = new CancellationTokenSource();
-            runtime.OnCall = (method, _, _) =>
-            {
-                if (method != operation) return null;
-                if (method == "uninstall") runtime.Nodes.Remove("a");
-                else { runtime.Nodes["a"].Generation++; runtime.Nodes["a"].SourceHash = "accepted"; }
-                cancel.Cancel();
-                return Task.FromException<JsonElement>(new OperationCanceledException(cancel.Token));
-            };
-            await Cancelled(operation == "uninstall" ? service.DeleteCatAsync("a", cancel.Token) :
-                service.ImportLocalAsync("再次导入", FixtureScript, "a", cancel.Token));
-            Check(service.Cats.Any(cat => cat.InstallationId == "a") == (operation != "uninstall"),
-                "actual committed uninstall is reflected despite the cancelled receipt");
-            Check(service.Videos.Select(video => video.Key).ToHashSet().SetEquals(operation == "uninstall"
-                ? [Key("b")] : [Key("a"), Key("b")]),
-                "cancelled reimport cannot clear a tombstone; uninstall clears only its own children");
-            Check(runtime.Uploads.Count == (operation == "install" ? 1 : 0) &&
-                runtime.Calls.Count(call => call.Method == operation) == 1, "cancelled commit is not replayed");
-        }
     }
 
     private static async Task CancelledReconciliationFailure()
@@ -284,7 +206,7 @@ public static partial class FilmSourcesTests
         foreach (bool shutdown in new[] { false, true })
         {
             var runtime = new Runtime(); runtime.Add("a");
-            await using var service = new FilmSourceService(runtime, new Store());
+            await using var service = new FilmSourceService(runtime, new Store(runtime));
             await service.RefreshAsync();
             var entered = Signal(); var reconciling = Signal();
             using var cancel = new CancellationTokenSource();
@@ -306,7 +228,7 @@ public static partial class FilmSourcesTests
                 if (shutdown) await Task.Delay(Timeout.Infinite, token);
                 throw new BridgeException("CLOSED");
             }
-            var update = service.UpdateCatAsync("a", FixtureScript, cancel.Token);
+            var update = service.UpdateCatAsync("a", null, cancel.Token);
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             cancel.Cancel();
             await reconciling.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -322,12 +244,75 @@ public static partial class FilmSourcesTests
         }
     }
 
+    private static async Task LostOnlineReceipts()
+    {
+        foreach (string operation in new[] { "update", "restart" })
+        foreach (bool cancelled in new[] { false, true })
+        {
+            var runtime = new Runtime();
+            runtime.Add("a", "video", "deleted"); runtime.Add("b", "video", "deleted");
+            var store = new Store(runtime);
+            await using var service = new FilmSourceService(runtime, store);
+            await service.RefreshAsync();
+            await service.DeleteVideoAsync(new("a", "deleted"));
+            await service.DeleteVideoAsync(new("b", "deleted"));
+            var options = new FilmVideoOptions(false, false, false, true);
+            await service.SaveVideoOptionsAsync(Key("a"), options, order: 17);
+            using var page = new CancellationTokenSource();
+            var timeout = new BridgeException("TIMEOUT");
+            runtime.OnCall = (method, _, _) =>
+            {
+                if (method != operation) return null;
+                runtime.Nodes["a"].Generation++;
+                if (operation == "update") runtime.Nodes["a"].SourceHash = "committed";
+                if (!cancelled) return Task.FromException<JsonElement>(timeout);
+                page.Cancel();
+                return Task.FromException<JsonElement>(new OperationCanceledException(page.Token));
+            };
+            int before = runtime.Calls.Count;
+            Task change = operation == "update" ? service.UpdateCatAsync("a", cancellationToken: page.Token) :
+                service.RestartCatAsync("a", page.Token);
+            if (cancelled) await Cancelled(change); else await SameError(change, timeout);
+            var current = service.Cats.Single(cat => cat.InstallationId == "a");
+            Check(current is { CanDetect: true, Generation: 2 } &&
+                current.SourceHash == (operation == "update" ? "committed" : "hash") &&
+                service.Videos.Select(video => video.Key).ToHashSet().SetEquals([Key("a"), Key("b")]) &&
+                service.Videos.Single(video => video.Key == Key("a")) is { Order: 17 } video && video.Options == options,
+                "lost online receipts publish only actual runtime facts and preserve committed options and tombstones");
+            Check(runtime.Calls.Skip(before).Select(call => call.Method).SequenceEqual([operation, "status"]) &&
+                runtime.Uploads.Count == 0, "uncertain online operations are observed once, never replayed");
+            Check((await service.DetectAsync(Key("a"))).Result == "valid" &&
+                runtime.Invocations.All(call => call.Generation == 2), "the next probe never uses the retired generation");
+            await using var reopened = new FilmSourceService(runtime, store);
+            await reopened.InitializeAsync();
+            Check(reopened.Videos.Select(video => video.Key).ToHashSet().SetEquals([Key("a"), Key("b")]),
+                "reconciled facts and suppressed video rows survive a new native owner");
+        }
+    }
+
+    private static async Task CancelledDetectionReply()
+    {
+        var runtime = new Runtime(); runtime.Add("a");
+        var store = new Store(runtime);
+        await using var service = new FilmSourceService(runtime, store);
+        await service.RefreshAsync();
+        var baseline = await service.DetectAsync(Key("a"));
+        byte[] before = store.Bytes!.ToArray();
+        using var page = new CancellationTokenSource();
+        runtime.AfterReply = page.Cancel;
+        try { await Cancelled(service.DetectAsync(Key("a"), page.Token)); }
+        finally { runtime.AfterReply = null; }
+        Check(JsonElement.DeepEquals(Element(service.Videos.Single().Detection!), Element(baseline)) &&
+            store.Bytes!.SequenceEqual(before),
+            "page cancellation after a structured response cannot publish a partial detection or clear the previous result");
+    }
+
     private static async Task TimedOutManagement()
     {
         foreach (bool bridgeFailure in new[] { true, false })
         {
             var runtime = new Runtime(); runtime.Add("a", "video", "deleted");
-            await using var service = new FilmSourceService(runtime, new Store());
+            await using var service = new FilmSourceService(runtime, new Store(runtime));
             await service.RefreshAsync();
             var original = service.Cats.Single();
             await service.DeleteVideoAsync(new("a", "deleted"));
@@ -365,7 +350,7 @@ public static partial class FilmSourcesTests
                 cat.Generation = 3; cat.State = "ready"; cat.UpdateState = "failed"; cat.UpdateError = "CANCELLED";
                 return runtime.Reply(new { instances = runtime.Nodes.Values.Select(node => node.Wire()).ToArray() });
             }
-            var update = service.UpdateCatAsync("a", FixtureScript, page.Token);
+            var update = service.UpdateCatAsync("a", null, page.Token);
             try
             {
                 await reconciling.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -384,7 +369,7 @@ public static partial class FilmSourcesTests
                     runtime.Invocations.All(call => call.Generation == 3), "next detection needs no refresh");
                 Check(service.Videos.Count == 1 && service.Videos.Single().Options == options,
                     "owner observation preserves the tombstone and all four switches");
-                Check(runtime.Uploads.Count == 1 && runtime.Calls.Count(call => call.Method == "update") == 1 &&
+                Check(runtime.Uploads.Count == 0 && runtime.Calls.Count(call => call.Method == "update") == 1 &&
                     runtime.Calls.SkipWhile(call => call.Method != "update").Skip(1)
                         .All(call => call.Method is "status" or "invoke"),
                     "timeout only observes status; it never replays management");
@@ -393,73 +378,13 @@ public static partial class FilmSourcesTests
         }
     }
 
-    private static async Task TimedOutCommits()
-    {
-        foreach (string operation in new[] { "install", "import", "enable", "uninstall" })
-        {
-            var runtime = new Runtime();
-            runtime.Add("a", "video", "deleted"); runtime.Add("b", "video", "deleted");
-            var store = new Store();
-            await using var service = new FilmSourceService(runtime, store);
-            await service.RefreshAsync();
-            await service.DeleteVideoAsync(new("a", "deleted"));
-            await service.DeleteVideoAsync(new("b", "deleted"));
-            var options = new FilmVideoOptions(false, false, false, true);
-            await service.SaveVideoOptionsAsync(Key("b"), options);
-            var timeout = new BridgeException("TIMEOUT");
-            runtime.OnCall = (method, _, _) =>
-            {
-                if (method != operation) return null;
-                if (method == "uninstall") runtime.Nodes.Remove("a");
-                else
-                {
-                    var cat = runtime.Nodes["a"];
-                    cat.Generation++;
-                    if (method == "enable") { cat.Enabled = false; cat.State = "disabled"; }
-                    else cat.SourceHash = "accepted";
-                }
-                return Task.FromException<JsonElement>(timeout);
-            };
-            int before = runtime.Calls.Count;
-            Task management = operation switch
-            {
-                "install" => service.ImportLocalAsync("再次导入", FixtureScript, "a"),
-                "import" => service.ImportNetworkAsync("再次导入", "https://fixture.invalid/cat.js", "a"),
-                "enable" => service.EnableCatAsync("a", false),
-                _ => service.DeleteCatAsync("a")
-            };
-            await SameError(management, timeout);
-            FilmSourceKey[] expected = operation == "uninstall" ? [Key("b")] : [Key("a"), Key("b")];
-            Check(service.Videos.Select(video => video.Key).ToHashSet().SetEquals(expected) &&
-                service.Videos.Single(video => video.Key == Key("b")).Options == options,
-                "lost reimport receipts never restore tombstones and uninstall affects only its parent");
-            Check(service.Cats.Any(cat => cat.InstallationId == "a") == (operation != "uninstall"),
-                "committed uninstall is reflected despite TIMEOUT");
-            if (operation != "uninstall")
-            {
-                var cat = service.Cats.Single(cat => cat.InstallationId == "a");
-                Check(cat.Generation == 2 && cat.CanDetect == (operation != "enable") &&
-                    cat.Enabled == (operation != "enable"), "committed enable or reimport is read from actual status");
-            }
-            Check(runtime.Uploads.Count == (operation == "install" ? 1 : 0) &&
-                runtime.Calls.Skip(before).Count(call => call.Method == operation) == 1 &&
-                runtime.Calls.SkipWhile(call => call.Method != operation).Skip(1)
-                    .All(call => call.Method == "status"),
-                "timeout only observes status without repeating committed management");
-            await using var reopened = new FilmSourceService(runtime, store);
-            await reopened.InitializeAsync();
-            Check(reopened.Videos.Select(video => video.Key).ToHashSet().SetEquals(expected),
-                "reconciled parent removal and suppressed videos survive reopening");
-        }
-    }
-
     private static async Task TimedOutReconciliationFailure()
     {
-        foreach (string operation in new[] { "update", "uninstall" })
+        foreach (string operation in new[] { "update", "restart" })
         foreach (string outcome in new[] { "failure", "prepare", "dispose" })
         {
             var runtime = new Runtime(); runtime.Add("a", "video", "deleted");
-            var store = new Store();
+            var store = new Store(runtime);
             await using var service = new FilmSourceService(runtime, store);
             await service.RefreshAsync();
             await service.DeleteVideoAsync(new("a", "deleted"));
@@ -490,7 +415,7 @@ public static partial class FilmSourcesTests
                 }
                 finally { settled.TrySetResult(); }
             }
-            Task management = operation == "update" ? service.UpdateCatAsync("a", FixtureScript) : service.DeleteCatAsync("a");
+            Task management = operation == "update" ? service.UpdateCatAsync("a") : service.RestartCatAsync("a");
             try
             {
                 await reconciling.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -526,7 +451,7 @@ public static partial class FilmSourcesTests
     {
         var runtime = new Runtime();
         runtime.Add("a", "shared", "other"); runtime.Add("b", "shared");
-        var store = new Store();
+        var store = new Store(runtime);
         await using (var service = new FilmSourceService(runtime, store))
         {
             await service.RefreshAsync();
@@ -535,39 +460,32 @@ public static partial class FilmSourcesTests
             await service.DeleteVideoAsync(new("b", "shared"));
             await service.RefreshAsync();
             await service.RestartCatAsync("a");
-            await service.UpdateCatAsync("a", FixtureScript);
-            Check(service.Videos.Count == 0, "refresh restart and ordinary update do not revive deleted videos");
+            await service.UpdateCatAsync("a");
+            using var local = new SourceFile(FixtureScript);
+            await service.EditCatAsync("a", "本地替换", "local", null, local.Path);
+            runtime.Apply(store);
+            await service.RefreshAsync();
+            await Code(() => service.ImportLocalAsync("重复本地", local.Path, "a"), "STORAGE_CONFLICT");
+            await Code(() => service.ImportNetworkAsync("重复网络", "https://fixture.invalid/new.js", "a"), "STORAGE_CONFLICT");
+            Check(service.Videos.Count == 0, "update restart type changes and rejected duplicates never restore deletions");
         }
         await using var restored = new FilmSourceService(runtime, store);
         await restored.InitializeAsync();
         await restored.StartAsync();
-        Check(restored.Videos.Count == 0, "application restart and startup keep tombstones");
-        runtime.FailNext = "install";
-        await Code(() => restored.ImportLocalAsync("failed", FixtureScript, "a"), "SCRIPT_EXCEPTION");
-        Check(restored.Videos.Count == 0, "failed explicit import restores nothing");
-        runtime.ImportState = "failed";
-        await Code(() => restored.ImportLocalAsync("not-ready", FixtureScript, "a"), "IMPORT_FAILED");
-        Check(restored.Videos.Count == 0, "successful transport with failed instance is not successful import");
-        runtime.ImportState = "ready";
-        runtime.NextSites = ["shared"];
-        await restored.ImportLocalAsync("reimport", FixtureScript, "a");
-        Check(restored.Videos.Count == 1 && restored.Videos[0].Key == new FilmSourceKey("a", "shared"),
-            "successful reimport only restores the included keys for that parent");
-        runtime.Nodes["a"].Sites.Add(Site("other"));
-        await restored.RefreshAsync();
-        Check(restored.Videos.Count == 1, "a deleted site absent from reimport remains suppressed when it later reappears");
+        Check(restored.Videos.Count == 0 && restored.Cats.Count == 2,
+            "cold initialization and runtime startup retain tombstones and configured identities");
         await restored.DeleteCatAsync("a");
-        runtime.NextSites = ["shared", "other"];
-        await restored.ImportLocalAsync("fresh", FixtureScript, "a");
-        Check(restored.Videos.Count == 2 && restored.Videos.All(video => video.Key.InstallationId == "a"),
-            "parent removal clears its tombstones, preserving the other parent's tombstones");
+        runtime.Apply(store);
+        await restored.RefreshAsync();
+        Check(restored.Cats.Single().InstallationId == "b" && restored.Videos.Count == 0,
+            "native deletion prunes only the selected parent and leaves the other tombstone");
     }
 
     private static async Task Reconciliation()
     {
         var runtime = new Runtime();
         runtime.Add("a"); runtime.Add("b");
-        await using var service = new FilmSourceService(runtime, new Store());
+        await using var service = new FilmSourceService(runtime, new Store(runtime));
         await service.RefreshAsync();
         var site = runtime.Nodes["a"].Sites.Single();
         runtime.Nodes["a"].State = "starting"; runtime.Nodes["a"].Sites.Clear();
@@ -589,53 +507,36 @@ public static partial class FilmSourcesTests
         Check(service.Videos.Single().Key == Key("b"), "ready empty list reconciles only its own parent");
         runtime.Nodes.Remove("b");
         await service.RefreshAsync();
-        Check(service.Videos.Count == 0 && service.Cats.Single().InstallationId == "a", "missing parent is authoritatively removed");
-    }
-
-    private static async Task NetworkReimport()
-    {
-        var runtime = new Runtime(); runtime.Add("a", "old", "other", "later");
-        runtime.Nodes["a"].SourceType = "network"; runtime.Nodes["a"].SourceUrl = "https://fixture.invalid/source.js";
-        var store = new Store();
-        await using (var service = new FilmSourceService(runtime, store))
-        {
-            await service.RefreshAsync();
-            await service.DeleteVideoAsync(new("a", "old"));
-            await service.DeleteVideoAsync(new("a", "other"));
-            await service.EnableCatAsync("a", false);
-            runtime.NextSites = ["old", "later"];
-            var imported = await service.ImportNetworkAsync("replacement", "https://fixture.invalid/new.js", "a");
-            Check(imported.Enabled && imported.State == "ready" && service.Videos.Select(video => video.Key.SiteKey)
-                .ToHashSet().SetEquals(["old", "later"]), "explicit reimport enables and discovers the actual replacement list");
-            Check(runtime.Calls.Last(call => call.Method == "import").Input.GetProperty("enabled").GetBoolean(),
-                "network import explicitly enables just like local import");
-            await service.DeleteVideoAsync(new("a", "later"));
-        }
-        await using var reopened = new FilmSourceService(runtime, store);
-        await reopened.InitializeAsync();
-        await reopened.StartAsync();
-        Check(reopened.Videos.Count == 1 && reopened.Videos.Single().Key.SiteKey == "old",
-            "later deletion remains effective across app restart");
-        runtime.Nodes["a"].Sites.Add(Site("other"));
-        await reopened.RefreshAsync();
-        Check(reopened.Videos.Count == 1, "a deleted site absent from the successful reimport stays suppressed on later sync");
+        Check(service.Videos.Single().Key == Key("b") && service.Cats.Count == 2 &&
+            !service.Cats.Single(cat => cat.InstallationId == "b").CanDetect,
+            "missing runtime parent never deletes configured native intent or its cached video");
     }
 
     private static async Task DeleteDuringImport()
     {
         var runtime = new Runtime(); runtime.Add("a", "previous", "later");
         var entered = Signal(); var release = Signal();
-        await using var service = new FilmSourceService(runtime, new Store());
+        await using var service = new FilmSourceService(runtime, new Store(runtime));
         await service.RefreshAsync();
         await service.DeleteVideoAsync(new("a", "previous"));
-        runtime.BeforeInstall = async () => { entered.TrySetResult(); await release.Task; };
-        var importing = service.ImportLocalAsync("replacement", FixtureScript, "a");
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await service.DeleteVideoAsync(new("a", "later"));
-        release.SetResult();
-        await importing;
-        Check(service.Videos.Single().Key.SiteKey == "previous",
-            "explicit import restores prior tombstones while respecting later user deletion");
+        runtime.OnCall = (method, _, _) => method == "status" ? Status() : null;
+        async Task<JsonElement> Status()
+        {
+            var reply = runtime.Reply(new { instances = runtime.Nodes.Values.Select(node => node.Wire()).ToArray() });
+            entered.TrySetResult();
+            await release.Task;
+            return reply;
+        }
+        var refreshing = service.RefreshAsync();
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await service.DeleteVideoAsync(new("a", "later"));
+            release.TrySetResult();
+            await refreshing;
+            Check(service.Videos.Count == 0, "late authoritative site discovery never revives old or newly deleted rows");
+        }
+        finally { release.TrySetResult(); }
     }
 
     private static async Task DetectionContract()
@@ -674,7 +575,7 @@ public static partial class FilmSourcesTests
                 default: throw new InvalidOperationException("Unexpected fixture operation");
             }
         };
-        var store = new Store();
+        var store = new Store(runtime);
         await using (var service = new FilmSourceService(runtime, store))
         {
             await service.RefreshAsync();
@@ -726,7 +627,7 @@ public static partial class FilmSourcesTests
                 },
                 _ => throw new InvalidOperationException("Unexpected operation")
             };
-            await using var service = new FilmSourceService(runtime, new Store());
+            await using var service = new FilmSourceService(runtime, new Store(runtime));
             await service.RefreshAsync();
             var result = await service.DetectAsync(Key("a"));
             string expected = scenario switch
@@ -768,7 +669,7 @@ public static partial class FilmSourcesTests
                 "play" => Result(new { url = "https://media.invalid/video.mp4" }),
                 _ => throw new InvalidOperationException("Unexpected fallback operation")
             };
-            var store = new Store();
+            var store = new Store(runtime);
             FilmSourceDetection detection;
             var options = new FilmVideoOptions(false, false, false, true);
             await using (var service = new FilmSourceService(runtime, store))
@@ -820,7 +721,7 @@ public static partial class FilmSourcesTests
                 "play" => Result(new { url = "https://media.invalid/must-not-play.mp4" }),
                 _ => throw new InvalidOperationException("Unexpected failed detail operation")
             };
-            await using var service = new FilmSourceService(runtime, new Store());
+            await using var service = new FilmSourceService(runtime, new Store(runtime));
             await service.RefreshAsync();
             var result = await service.DetectAsync(Key("a"));
             Check(result.Result == "invalid" && !result.PlaybackResolved &&
@@ -854,7 +755,7 @@ public static partial class FilmSourcesTests
                 "search" => Result(new { list = Array.Empty<object>() }),
                 _ => throw new InvalidOperationException("Unexpected root navigation operation")
             };
-            var store = new Store();
+            var store = new Store(runtime);
             FilmSourceDetection detection;
             var options = new FilmVideoOptions(false, false, false, true);
             await using (var service = new FilmSourceService(runtime, store))
@@ -885,7 +786,7 @@ public static partial class FilmSourcesTests
     private static async Task DetectionFailureOwnership()
     {
         var runtime = new Runtime(); runtime.Add("a");
-        var store = new Store();
+        var store = new Store(runtime);
         await using var service = new FilmSourceService(runtime, store);
         await service.RefreshAsync();
         var baseline = await service.DetectAsync(Key("a"));
@@ -923,7 +824,7 @@ public static partial class FilmSourcesTests
             "search" => Result(new { list = Array.Empty<object>() }),
             _ => throw new InvalidOperationException("Unexpected operation")
         };
-        await using var service = new FilmSourceService(runtime, new Store());
+        await using var service = new FilmSourceService(runtime, new Store(runtime));
         await service.RefreshAsync();
         var result = await service.DetectAsync(Key("a"));
         Check(result.Result == "valid" && runtime.Invocations.Count(call => call.Operation == "folder") == 2,
@@ -964,7 +865,7 @@ public static partial class FilmSourcesTests
                 if (call.Operation == "home") { entered.TrySetResult(); return await release.Task; }
                 return await DefaultInvoke(call);
             };
-            await using var service = new FilmSourceService(runtime, new Store());
+            await using var service = new FilmSourceService(runtime, new Store(runtime));
             await service.RefreshAsync();
             var detection = service.DetectAsync(Key("a"));
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -990,7 +891,7 @@ public static partial class FilmSourcesTests
     private static async Task PrepareAndResume()
     {
         var runtime = new Runtime(); runtime.Add("a");
-        var store = new Store();
+        var store = new Store(runtime);
         await using var service = new FilmSourceService(runtime, store);
         await service.RefreshAsync();
         var entered = Signal(); var release = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1017,7 +918,7 @@ public static partial class FilmSourcesTests
     private static async Task Disposal()
     {
         var runtime = new Runtime(); runtime.Add("a");
-        var store = new Store();
+        var store = new Store(runtime);
         var service = new FilmSourceService(runtime, store);
         await service.RefreshAsync();
         var entered = Signal(); var release = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1037,19 +938,26 @@ public static partial class FilmSourcesTests
     private static async Task SourceAndValues()
     {
         var runtime = new Runtime();
-        var store = new Store();
+        var store = new Store(runtime);
         await using var service = new FilmSourceService(runtime, store);
         string source = FixtureScript + "\n//" + new string('中', 70000);
         string name = "猫🎬" + new string('文', 70000);
-        await service.ImportLocalAsync(name, source, "large");
-        Check(runtime.UploadedSource == source && service.Cats.Single().Name == name &&
-            runtime.Uploads.Single().Source.SequenceEqual(Encoding.UTF8.GetBytes(source)),
-            "one complete source upload and large structured status preserve Unicode");
+        using var file = new SourceFile(source);
+        await service.ImportLocalAsync(name, file.Path, "large");
+        using (var configured = JsonDocument.Parse(store.CatBytes!))
+        {
+            var input = configured.RootElement.GetProperty("scripts")[0];
+            Check(input.GetProperty("localHash").GetString() == Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(file.Path))) &&
+                input.GetProperty("name").GetString() == name && !Encoding.UTF8.GetString(store.CatBytes!).Contains(source, StringComparison.Ordinal),
+                "the complete selected file is hashed; native intent stores path and Unicode name but never script text");
+        }
+        runtime.Apply(store);
+        await service.RefreshAsync();
         using (var cached = JsonDocument.Parse(store.Bytes!))
         {
             Fields(cached.RootElement, "version", "cats", "videos", "deleted");
             Fields(cached.RootElement.GetProperty("cats")[0], "installationId", "name", "sourceType", "sourceUrl",
-                "enabled", "importedAt", "updatedAt", "updateState", "updateError", "sourceHash", "sites");
+                "enabled", "inputRevision", "importedAt", "updatedAt", "updateState", "updateError", "sourceHash", "sites");
         }
         runtime.OnCall = (operation, _, _) => operation == "status"
             ? Task.FromResult(runtime.Reply(new { instances = "invalid" })) : null;
@@ -1072,7 +980,7 @@ public static partial class FilmSourcesTests
         var detected = await service.DetectAsync(Key("large"));
         Check(detected.PlaybackResolved && runtime.Calls.Any(call => call.Method == "invoke" &&
             call.Input.GetProperty("operation").GetString() == "folder" &&
-            call.Input.GetProperty("payload").GetProperty("id").GetString() == opaque) && runtime.Uploads.Count == 1,
+            call.Input.GetProperty("payload").GetProperty("id").GetString() == opaque) && runtime.Uploads.Count == 0,
             "large arbitrary navigation payload remains a structured object throughout invocation");
         Task<JsonElement> LargeNavigation(JsonElement payload)
         {
@@ -1081,35 +989,10 @@ public static partial class FilmSourcesTests
         }
     }
 
-    private static async Task SourceReceipts()
-    {
-        foreach (string scenario in new[] { "installation", "revision", "failure", "cancelled" })
-        {
-            var runtime = new Runtime();
-            await using var service = new FilmSourceService(runtime, new Store());
-            runtime.UploadReceipt = (id, revision) => scenario switch
-            {
-                "failure" => Element(new { ok = false, contract = "cat.script.v2", code = "SCRIPT_PROTOCOL_ERROR" }),
-                "cancelled" => Element(new { ok = false, contract = "cat.script.v2", code = "CANCELLED" }),
-                _ => runtime.Reply(new
-                {
-                    installationId = scenario == "installation" ? "other" : id,
-                    sourceRevision = scenario == "revision" ? revision + 1 : revision
-                })
-            };
-            var install = service.ImportLocalAsync("上传回执", FixtureScript, "candidate");
-            if (scenario == "cancelled") await Cancelled(install);
-            else await Code(() => install, scenario == "failure" ? "SCRIPT_PROTOCOL_ERROR" : "INVALID_RESPONSE");
-            Check(runtime.Uploads.Count == 1 && runtime.Calls.All(call => call.Method == "status") &&
-                service.Cats.Count == 0 && service.Videos.Count == 0,
-                "failed or mismatched upload cannot install a candidate or publish a client row");
-        }
-    }
-
     private static async Task StorageFailures()
     {
         var runtime = new Runtime(); runtime.Add("a");
-        var store = new Store();
+        var store = new Store(runtime);
         await using var service = new FilmSourceService(runtime, store);
         await service.RefreshAsync();
         var before = service.Videos.Single().Options;
@@ -1131,11 +1014,11 @@ public static partial class FilmSourcesTests
     private static async Task ManagementStorageFailures()
     {
         foreach (bool persistent in new[] { false, true })
-        foreach (string operation in new[] { "update", "enable", "uninstall", "install" })
         {
+            const string operation = "update";
             var runtime = new Runtime();
             runtime.Add("a", "video", "deleted"); runtime.Add("b", "video", "deleted");
-            var store = new Store();
+            var store = new Store(runtime);
             await using var service = new FilmSourceService(runtime, store);
             await service.RefreshAsync();
             await service.DeleteVideoAsync(new("a", "deleted"));
@@ -1158,15 +1041,9 @@ public static partial class FilmSourcesTests
                 }
                 return null;
             };
-            Task change = operation switch
-            {
-                "update" => service.UpdateCatAsync("a", FixtureScript),
-                "enable" => service.EnableCatAsync("a", false),
-                "uninstall" => service.DeleteCatAsync("a"),
-                _ => service.ImportLocalAsync("再次导入", FixtureScript, "a")
-            };
+            Task change = service.UpdateCatAsync("a");
             await SameError(change, failure);
-            Check(observations > 0 && runtime.Uploads.Count == (operation is "update" or "install" ? 1 : 0) &&
+            Check(observations > 0 && runtime.Uploads.Count == 0 &&
                 runtime.Calls.Skip(calls).Count(call => call.Method == operation) == 1 &&
                 runtime.Calls.SkipWhile(call => call.Method != operation).Skip(1)
                     .All(call => call.Method == "status"),
@@ -1178,26 +1055,20 @@ public static partial class FilmSourcesTests
                     "persistent write failure publishes no new document and never authorizes a retired generation");
                 await Code(() => service.DetectAsync(Key("a")), "NOT_READY");
             }
-            else if (operation == "uninstall")
-            {
-                Check(service.Cats.Single().InstallationId == "b" &&
-                    service.Videos.Single().Key == Key("b"), "confirmed deletion removes only its parent's mapping");
-            }
             else
             {
                 var cat = service.Cats.Single(cat => cat.InstallationId == "a");
                 Check(cat.Generation == runtime.Nodes["a"].Generation &&
                     cat.SourceHash == runtime.Nodes["a"].SourceHash &&
-                    cat.CanDetect == (operation != "enable") && service.RuntimeError is null,
+                    cat.CanDetect && service.RuntimeError is null,
                     "a settled local write publishes only the actual runtime generation");
-                if (operation == "enable") await Code(() => service.DetectAsync(Key("a")), "DISABLED");
-                else Check((await service.DetectAsync(Key("a"))).Result == "valid" &&
+                Check((await service.DetectAsync(Key("a"))).Result == "valid" &&
                     runtime.Invocations.All(call => call.Generation == cat.Generation),
                     "the next probe uses the new generation, never the retired one");
             }
-            FilmSourceKey[] expected = !persistent && operation == "uninstall" ? [Key("b")] : [Key("a"), Key("b")];
+            FilmSourceKey[] expected = [Key("a"), Key("b")];
             Check(service.Videos.Select(video => video.Key).ToHashSet().SetEquals(expected),
-                "failed reimport cannot clear either parent's video tombstones");
+                "failed online management cannot clear either parent's video tombstones");
             if (expected.Contains(Key("a")))
                 Check(service.Videos.Single(video => video.Key == Key("a")) is { Order: 500 } video &&
                     video.Options == options, "all persisted user switches and sort order survive the failure");
@@ -1213,7 +1084,7 @@ public static partial class FilmSourcesTests
         foreach (bool dispose in new[] { false, true })
         {
             var runtime = new Runtime(); runtime.Add("a", "video", "deleted");
-            var store = new Store();
+            var store = new Store(runtime);
             await using var service = new FilmSourceService(runtime, store);
             await service.RefreshAsync();
             await service.DeleteVideoAsync(new("a", "deleted"));
@@ -1232,7 +1103,7 @@ public static partial class FilmSourcesTests
                 catch (OperationCanceledException) { interrupted.TrySetResult(); await release.Task; throw; }
                 throw new InvalidOperationException("Expected owner cancellation");
             }
-            var change = service.UpdateCatAsync("a", FixtureScript);
+            var change = service.UpdateCatAsync("a");
             try
             {
                 await observing.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -1258,64 +1129,10 @@ public static partial class FilmSourcesTests
         }
     }
 
-    private static async Task CancelledDelivery()
-    {
-        var runtime = new Runtime(); runtime.Add("a");
-        await using var service = new FilmSourceService(runtime, new Store());
-        await service.RefreshAsync();
-        using (var cancel = new CancellationTokenSource())
-        {
-            runtime.AfterUpload = cancel.Cancel;
-            await Cancelled(service.ImportLocalAsync("cancelled", FixtureScript, "cancelled", cancel.Token));
-            Check(runtime.Uploads.Single().InstallationId == "cancelled" && runtime.Calls.All(call => call.Method != "install") &&
-                service.Cats.Single().InstallationId == "a",
-                "a complete upload received at cancellation cannot dispatch install or publish its row");
-            runtime.AfterUpload = null;
-        }
-        using (var cancel = new CancellationTokenSource())
-        {
-            runtime.AfterReply = cancel.Cancel;
-            await Cancelled(service.DetectAsync(Key("a"), cancel.Token));
-            Check(runtime.Invocations.Count == 1 && service.Videos.Single().Detection is null,
-                "a structured reply received at cancellation cannot dispatch more steps or publish detection");
-            runtime.AfterReply = null;
-        }
-        using (var cancel = new CancellationTokenSource())
-        {
-            var entered = Signal(); var cancelled = Signal(); var release = Signal();
-            byte[] expected = Encoding.UTF8.GetBytes(FixtureScript);
-            ReadOnlyMemory<byte> borrowed = default;
-            runtime.BeforeUpload = async (bytes, token) =>
-            {
-                borrowed = bytes;
-                using var registration = token.Register(() => cancelled.TrySetResult());
-                entered.TrySetResult();
-                await release.Task; // A sender may still be using the bytes after cancellation.
-                Check(bytes.Span.SequenceEqual(expected), "source bytes stay intact until the real sender settles");
-                token.ThrowIfCancellationRequested();
-            };
-            var install = service.ImportLocalAsync("borrowed", FixtureScript, "borrowed", cancel.Token);
-            try
-            {
-                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                cancel.Cancel();
-                await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                Check(!install.IsCompleted && borrowed.Span.SequenceEqual(expected),
-                    "cancelling the caller waits for its outstanding source upload");
-                release.TrySetResult();
-                await Cancelled(install);
-                Check(borrowed.Span.IndexOfAnyExcept((byte)0) == -1 &&
-                    runtime.Calls.All(call => call.Method != "install") && runtime.Uploads.Count == 1,
-                    "settled cancellation clears the borrowed bytes without installing or sending them again");
-            }
-            finally { release.TrySetResult(); runtime.BeforeUpload = null; }
-        }
-    }
-
     private static async Task StartupFailure()
     {
         var runtime = new Runtime(); runtime.Add("a");
-        var store = new Store();
+        var store = new Store(runtime);
         await using (var first = new FilmSourceService(runtime, store)) await first.RefreshAsync();
         runtime.FailNext = "start";
         await using var service = new FilmSourceService(runtime, store);
@@ -1334,23 +1151,28 @@ public static partial class FilmSourcesTests
     private static async Task ExplicitRuntimeRecovery()
     {
         var session = new Runtime { StartingStatuses = 1 }; session.Add("restored");
+        var store = new Store(session);
         int factories = 0;
-        await using var runtime = new AppRuntimeClient(_ => ++factories == 1
-            ? Task.FromException<IRuntimeSession>(new BridgeException("INTERNAL"))
-            : Task.FromResult<IRuntimeSession>(session));
-        await using var service = new FilmSourceService(runtime, new Store());
+        await using var runtime = new AppRuntimeClient(_ =>
+        {
+            if (++factories == 1) return Task.FromException<IRuntimeSession>(new BridgeException("INTERNAL"));
+            session.Apply(store); // A new runtime epoch reads the final native input, not a queued operation list.
+            return Task.FromResult<IRuntimeSession>(session);
+        });
+        await using var service = new FilmSourceService(runtime, store);
         await service.InitializeAsync();
         Check(factories == 0, "local initialization never enters the runtime factory");
         runtime.Start();
         try { await service.StartAsync(); throw new InvalidOperationException("Expected factory failure"); }
         catch (BridgeException error) { Check(error.Code == "INTERNAL", "failed factory is observable"); }
         Check(service.RuntimeError is not null && runtime.CanRetry && factories == 1, "first failed epoch is retained");
-        try { await service.ImportLocalAsync("uncertain", FixtureScript, "new"); throw new InvalidOperationException("Expected failed epoch"); }
-        catch (BridgeException) { }
-        Check(factories == 1 && session.Calls.Count == 0, "management never automatically retries the host");
+        await service.ImportNetworkAsync("离线保存", "https://fixture.invalid/new.js", "new");
+        Check(factories == 1 && session.Calls.Count == 0 && service.Cats.Any(cat => cat.InstallationId == "new"),
+            "ordinary saving remains available in a failed host epoch without retrying it");
         await service.RefreshAsync();
         Check(factories == 2 && !runtime.CanRetry && service.RuntimeError is null &&
-            service.Cats.Single().InstallationId == "restored" && service.Cats.Single().CanDetect,
+            service.Cats.Single(cat => cat.InstallationId == "restored").CanDetect &&
+            service.Cats.Any(cat => cat.InstallationId == "new"),
             "explicit refresh creates a fresh epoch then synchronizes status");
         Check(session.Calls.All(call => call.Method == "status"), "recovery does not replay install/update/start business calls");
         await service.RefreshAsync();
@@ -1421,19 +1243,18 @@ public static partial class FilmSourcesTests
         new(key, "视频 " + key, "/spider/fixture", actions ?? ["home", "category", "detail", "play", "search"]);
     private sealed class CatFixture(string id)
     {
-        internal string Name = "猫 " + id, SourceType = "local", State = "ready", UpdateState = "idle", SourceHash = "hash";
-        internal string? SourceUrl, UpdateError;
+        internal string Name = "猫 " + id, SourceType = "network", State = "ready", UpdateState = "idle", SourceHash = "hash";
+        internal string? SourceUrl = "https://fixture.invalid/cat.js", UpdateError;
+        internal long InputRevision = 1;
         internal long Generation = 1, ImportedAt = 100;
         internal long? UpdatedAt;
         internal bool Enabled = true;
         internal List<SiteFixture> Sites = [Site("video")];
         internal object Wire() => new { installationId = id, name = Name, sourceType = SourceType, sourceUrl = SourceUrl,
             enabled = Enabled, importedAt = ImportedAt, updatedAt = UpdatedAt, updateState = UpdateState, updateError = UpdateError,
-            generation = Generation, state = State, sourceHash = SourceHash, error = State == "failed" ? "SCRIPT_EXCEPTION" : null,
+            inputRevision = InputRevision, generation = Generation, state = State, sourceHash = SourceHash, error = State == "failed" ? "SCRIPT_EXCEPTION" : null,
             sites = Sites.Select(site => site.Wire()).ToArray() };
     }
-    private sealed record Upload(string InstallationId, long SourceRevision, byte[] Source);
-
     private sealed class Runtime : IRuntimeSession
     {
         public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
@@ -1444,17 +1265,12 @@ public static partial class FilmSourcesTests
         internal readonly Dictionary<string, CatFixture> Nodes = new(StringComparer.Ordinal);
         internal readonly List<RpcCall> Calls = [];
         internal readonly List<Invocation> Invocations = [];
-        internal readonly List<Upload> Uploads = [];
+        internal readonly List<string> Uploads = [];
         internal Func<Invocation, CancellationToken, Task<JsonElement>> Invoke = (call, _) => DefaultInvoke(call);
-        internal string? FailNext, UploadedSource;
-        internal string NextUpdateState = "updated", ImportState = "ready";
-        internal string[]? NextSites;
-        internal Func<Task>? BeforeInstall;
+        internal string? FailNext;
+        internal string NextUpdateState = "updated";
+        internal Action? AfterReply;
         internal Func<string, JsonElement, CancellationToken, Task<JsonElement>?>? OnCall;
-        internal Func<string, JsonElement>? Uninstall;
-        internal Func<ReadOnlyMemory<byte>, CancellationToken, Task>? BeforeUpload;
-        internal Func<string, long, JsonElement>? UploadReceipt;
-        internal Action? AfterUpload, AfterReply;
         internal int StartingStatuses;
         internal bool Disposed;
         internal void Add(string id, params string[] keys)
@@ -1462,17 +1278,29 @@ public static partial class FilmSourcesTests
             Nodes[id] = new(id);
             if (keys.Length > 0) Nodes[id].Sites = keys.Select(key => Site(key)).ToList();
         }
-        public async Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
+        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
             ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            Check(module == "cat" && basename is null && sourceRevision is > 0 and <= BridgeCodec.MaximumSafeInteger,
-                "Cat source upload has an explicit safe candidate revision and no basename");
-            if (BeforeUpload is not null) await BeforeUpload(source, cancellationToken);
-            Uploads.Add(new(installationId, sourceRevision, source.ToArray()));
-            AfterUpload?.Invoke();
-            return UploadReceipt?.Invoke(installationId, sourceRevision) ??
-                Reply(new { installationId, sourceRevision, sourceBytes = source.Length });
+            Uploads.Add(installationId);
+            throw new InvalidOperationException("Native Cat settings never upload script bytes.");
+        }
+        internal void Apply(Store store)
+        {
+            var inputs = JsonSerializer.Deserialize<JsonElement>(store.CatBytes!).GetProperty("scripts");
+            var ids = inputs.EnumerateArray().Select(input => input.GetProperty("installationId").GetString()!).ToHashSet();
+            foreach (string id in Nodes.Keys.Where(id => !ids.Contains(id)).ToArray()) Nodes.Remove(id);
+            foreach (var input in inputs.EnumerateArray())
+            {
+                string id = input.GetProperty("installationId").GetString()!;
+                if (!Nodes.ContainsKey(id)) Add(id);
+                var node = Nodes[id];
+                node.Name = input.GetProperty("name").GetString()!;
+                node.SourceType = input.GetProperty("sourceType").GetString()!;
+                node.SourceUrl = input.GetProperty("sourceUrl").GetString();
+                node.InputRevision = input.GetProperty("inputRevision").GetInt64();
+                node.Enabled = input.GetProperty("enabled").GetBoolean();
+                node.State = node.Enabled ? "ready" : "disabled";
+            }
         }
         public async Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
@@ -1518,63 +1346,19 @@ public static partial class FilmSourcesTests
                 Invocations.Add(call);
                 return Reply(await Invoke(call, cancellationToken)); // May deliberately ignore cancellation to test fencing.
             }
-            if (operation is "install" or "import")
-            {
-                if (BeforeInstall is not null) await BeforeInstall();
-                if (operation == "install")
-                {
-                    Fields(input, "installationId", "sourceRevision", "name", "sourceType", "sourceUrl", "enabled");
-                    UploadedSource = Take(id, input.GetProperty("sourceRevision").GetInt64());
-                }
-                else Fields(input, "installationId", "name", "sourceUrl", "enabled");
-                if (!Nodes.ContainsKey(id)) Add(id);
-                var imported = Nodes[id];
-                imported.Name = input.GetProperty("name").GetString()!;
-                imported.SourceType = operation == "install" ? "local" : "network";
-                imported.SourceUrl = operation == "import" ? input.GetProperty("sourceUrl").GetString() : null;
-                imported.Enabled = input.GetProperty("enabled").GetBoolean();
-                imported.Generation++; imported.State = imported.Enabled ? ImportState : "disabled";
-                imported.SourceHash = "imported"; imported.UpdateState = "idle"; imported.UpdateError = null;
-                if (NextSites is { } sites) { imported.Sites = sites.Select(key => Site(key)).ToList(); NextSites = null; }
-                return Reply(imported.Wire());
-            }
             var cat = Nodes[id];
             switch (operation)
             {
-                case "edit":
-                    cat.Name = input.GetProperty("name").GetString()!;
-                    if (input.TryGetProperty("sourceUrl", out var url)) cat.SourceUrl = url.GetString();
-                    break;
                 case "update":
-                    if (cat.SourceType == "local")
-                    {
-                        Fields(input, "installationId", "sourceRevision");
-                        UploadedSource = Take(id, input.GetProperty("sourceRevision").GetInt64());
-                    }
-                    else Fields(input, "installationId");
+                    Fields(input, "installationId");
+                    Check(cat.SourceType == "network", "local updates do not call the runtime");
                     cat.UpdateState = NextUpdateState; cat.UpdateError = null;
                     if (NextUpdateState == "updated") { cat.UpdatedAt = 200; cat.Generation++; cat.SourceHash = "updated"; }
                     break;
                 case "restart": Fields(input, "installationId"); cat.Generation++; break;
-                case "enable":
-                    Fields(input, "installationId", "enabled");
-                    cat.Enabled = input.GetProperty("enabled").GetBoolean();
-                    cat.State = cat.Enabled ? "ready" : "disabled"; cat.Generation++;
-                    break;
-                case "uninstall":
-                    Fields(input, "installationId");
-                    if (Uninstall is not null) return Uninstall(id);
-                    Nodes.Remove(id);
-                    return Reply(new { removed = true });
                 default: throw new InvalidOperationException("Unexpected RPC " + operation);
             }
             return Reply(cat.Wire());
-        }
-        private string Take(string installationId, long sourceRevision)
-        {
-            var upload = Uploads.Single(candidate => candidate.InstallationId == installationId &&
-                candidate.SourceRevision == sourceRevision);
-            return Encoding.UTF8.GetString(upload.Source);
         }
         internal JsonElement Reply(object value)
         {
@@ -1586,34 +1370,64 @@ public static partial class FilmSourcesTests
         public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
     }
 
+    private sealed class SourceFile : IDisposable
+    {
+        internal string Path { get; } = TestWorkspace.DataPath("film-source-files", Guid.NewGuid().ToString("N") + ".js");
+        internal SourceFile(string source)
+        {
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path)!);
+            File.WriteAllText(Path, source, new UTF8Encoding(false));
+        }
+        public void Dispose() => File.Delete(Path);
+    }
+
     private sealed class Store : IDocumentStore
     {
-        internal byte[]? Bytes;
+        internal const string CatNamespace = "film.cat-sources.v1";
+        internal byte[]? Bytes, CatBytes;
+        internal Store(Runtime? runtime = null)
+        {
+            if (runtime is not null) CatBytes = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                version = 1, port = 0, providers = new { }, mappings = Array.Empty<object>(),
+                scripts = runtime.Nodes.Select(pair => new
+                {
+                    installationId = pair.Key, name = pair.Value.Name, sourceType = pair.Value.SourceType,
+                    sourceUrl = pair.Value.SourceUrl, localPath = (string?)null,
+                    localHash = pair.Value.SourceType == "local" ? new string('0', 64) : null,
+                    enabled = pair.Value.Enabled, inputRevision = pair.Value.InputRevision
+                }).ToArray()
+            });
+        }
         internal int Reads, Writes, WriteFailures;
         internal bool FailBefore, FailAfter, FailAlways, Disposed;
         internal DocumentStoreException? WriteError;
         public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
         {
-            Check(documentNamespace == FilmSourceService.DocumentNamespace, "local document namespace");
+            Check(documentNamespace is FilmSourceService.DocumentNamespace or CatNamespace, "known native document namespace");
             cancellationToken.ThrowIfCancellationRequested(); Reads++;
-            return Task.FromResult(new DocumentSnapshot(Bytes?.ToArray(),
-                Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes)));
+            var bytes = documentNamespace == CatNamespace ? CatBytes : Bytes;
+            return Task.FromResult(new DocumentSnapshot(bytes?.ToArray(),
+                bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
         }
         public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
             DocumentFingerprint expected, CancellationToken cancellationToken = default)
         {
-            Check(documentNamespace == FilmSourceService.DocumentNamespace, "local document namespace");
+            Check(documentNamespace is FilmSourceService.DocumentNamespace or CatNamespace, "known native document namespace");
             cancellationToken.ThrowIfCancellationRequested();
             if (FailBefore || FailAlways)
             {
                 FailBefore = false; WriteFailures++;
                 throw WriteError ?? new DocumentStoreException(DocumentStoreError.Storage);
             }
-            var previous = Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes);
+            var bytes = documentNamespace == CatNamespace ? CatBytes : Bytes;
+            var previous = bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes);
             if (previous != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-            Bytes = data.ToArray(); Writes++;
+            bytes = data.ToArray();
+            if (documentNamespace == CatNamespace) CatBytes = bytes; else Bytes = bytes;
+            Writes++;
             if (FailAfter) { FailAfter = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
-            return Task.FromResult(DocumentFingerprint.FromBytes(Bytes));
+            return Task.FromResult(DocumentFingerprint.FromBytes(bytes));
         }
         public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
     }

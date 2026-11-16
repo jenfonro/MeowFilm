@@ -5,7 +5,9 @@
 `packages/film-playback` 是 App 本地的影视业务 owner。它借用已经装配的
 CatNode／source／pan／TMDB／豆瓣模块，负责规则、搜索聚合、匹配、候选排序、会话、数据缓存、
 历史、人工匹配、错误片源屏蔽和偏好。业务不连接 meowfilm-server 的登录、
-数据库或播放 API。收藏仍由现有客户端 owner 保存；规则在 Node 保存，客户端仅持编辑草稿与展示快照。
+数据库或播放 API。收藏仍由现有客户端 owner 保存；默认装配在 Node 保存规则与偏好，客户端仅持编辑草稿与展示快照。
+
+Windows 正式 App 注入 `nativeSettings`，规则与偏好由原生唯一保存，Node 只捕获／消费配置，仍独占搜索、播放会话、业务缓存、历史、人工匹配、屏蔽和预览选择。此装配下 `settings.set` 与规则保存／恢复／清除方法返回 `PERMISSION_DENIED`，业务资料库文件不再持久 `preferences`；不改变 iOS 或未注入适配的通用行为。具体文档、通知、迁移及原生保存入口见 [Windows 原生设置](../windows/native-settings.md)与[影视设置](../windows/film-settings.md)。
 
 本地资料库与规则文档分别位于 `<dataRoot>/film-playback/library.json` 和
 `<dataRoot>/film-rules/rules.json`。App 提供 `dataRoot`，owner 按正常文件系统路径语义访问，
@@ -72,13 +74,13 @@ Windows 只使用内置原生输出，不提供外部播放器入口或子进程
 
 ### 规则与搜索
 
-规则文档由 `createFilmRulesService` 唯一读写；默认初始化、保存、恢复及清除均通过同一 owner。
+默认装配的规则文档由 `createFilmRulesService` 唯一读写；默认初始化、保存、恢复及清除均通过同一 owner。Windows 注入适配后，该服务仅持有执行快照，设置变更重读原生值；没有文档时计算默认快照但不落盘。
 分组接口的 `group` 为 `episodeClean`／`episode`／`movie`／`search`，分别对应
 `episodeCleanRegexRules`／`episodeRules`／`movieRules`／`aggregateRegexRules`。
 净化组 `rules` 是字符串数组，匹配组是 `{pattern,replace,flags}` 数组。空数组表示清空该组。
 组预览的 `request.section` 须与组一致（`episodeClean` 对应 `episode`）；关联的另一剧集组
 只取 Node 已保存配置，客户端其他组草稿不参与。分组保存仅归一化本组，其他组原样保留；
-写入失败不发布新快照。`rules.set`／`rules.restore` 保留 Windows 使用的整份提交语义。
+写入失败不发布新快照。`rules.set`／`rules.restore` 在默认装配中保留整份提交语义；Windows 页面整份草稿改由原生服务提交，不调用这两个运行器写入方法。
 保存仅投影当前定义的规则字段；预览和识别直接消费实际使用的规则组，不在调用前或
 每次复用不可变快照时重新校验整棵规则树。未使用的组、查询及普通扩展不阻断本次计算；
 实际正则错误、文本表示边界、取消和预算仍按执行结果处理。
@@ -86,7 +88,7 @@ iOS 页面新增、编辑、删除和恢复默认只修改本组草稿，唯一�
 保存一旦交给稳定草稿 owner，其 Task 会等待实际落盘回执并更新本组草稿；离页或取消页面
 等待者不取消该写入，也不丢弃归一化结果。页内测试随页面隐藏或失活取消，旧结果不再发布；
 服务保留取消任务直到调用结束，Node 原生程序先停止并排空实际计算再结束取消。
-`revision` 包含共享 QuickJS-NG 0.18.0／Unicode 身份与实际规则内容。搜索和播放持不可变快照，
+Node 执行快照的 `revision` 包含共享 QuickJS-NG 0.18.0／Unicode 身份与实际规则内容，不等同于 Windows 原生文档 CAS 指纹或页面保存 revision。搜索和播放持不可变快照，
 保存新规则不改变旧任务、不清原始数据缓存，也不打断媒体。设置预览与播放识别使用独立于第三方
 脚本的 Runtime/Context；纯计算可中断并排空，失败后下次调用重建同一内核，不回退到 Node vm。
 

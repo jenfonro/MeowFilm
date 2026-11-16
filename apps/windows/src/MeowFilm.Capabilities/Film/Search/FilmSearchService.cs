@@ -328,6 +328,7 @@ public sealed class FilmSearchService : IAsyncDisposable
         {
             session.Changed -= SessionChanged;
             session.Observation?.Dispose();
+            session.Observation = null;
             sessions.Remove(session);
         }
     }

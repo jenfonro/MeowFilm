@@ -170,7 +170,7 @@ public static partial class MusicUiTests
             var sources = Visuals(f.Module.SettingsView).OfType<MusicSourcesSettingsView>().Single();
             var sourceLabels = Visuals(sources).OfType<Button>()
                 .Select(button => button.Content as string).Where(value => value is not null).ToArray();
-            True(sourceLabels.Contains("导入音源"), "source import action is available");
+            True(sourceLabels.Contains("添加本地文件"), "source import action is available");
             await f.Module.PlaySelectionAsync(); var opens = f.Playback.Opens.Count;
             await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
             Equal(opens, f.Playback.Opens.Count);
@@ -1302,9 +1302,12 @@ public static partial class MusicUiTests
         public int DisposeCalls { get; private set; }
         public int Count(string method) => Log.Count(call => call.Method == method);
         public JsonElement Last(string method) => Log.Last(call => call.Method == method).Parameters;
-        public HeldReply HoldNext(string method, Func<JsonElement, bool>? match = null)
+        public HeldReply HoldNext(string method, Func<JsonElement, bool>? match = null, string? failure = null)
         {
-            var hold = new HeldReply(); holds.Add(hold); rules.Add(new(method, match ?? (_ => true), hold.Hold, false)); return hold;
+            var hold = new HeldReply(); holds.Add(hold);
+            rules.Add(new(method, match ?? (_ => true), failure is null ? hold.Hold :
+                _ => hold.Hold(BridgeCodec.Value(new { ok = false, code = failure })), failure is not null));
+            return hold;
         }
         public void FailNext(string method, string code) => rules.Add(new(method, _ => true,
             _ => Task.FromResult(BridgeCodec.Value(new { ok = false, code })), true));

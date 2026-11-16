@@ -3,9 +3,9 @@ import { createMetadataSettings, metadataFailure, object } from './metadata/sett
 import { createMetadataRequest, createMetadataImageTransport } from './metadata/network.mjs';
 import { requestTMDB, tmdbImageTarget } from './metadata/tmdb.mjs';
 
-function createMetadataModule(id, { dataRoot, request = createMetadataRequest() } = {}) {
+function createMetadataModule(id, { dataRoot, request = createMetadataRequest(), nativeSettings } = {}) {
   if (typeof request !== 'function') throw metadataFailure('INVALID_REQUEST');
-  const spec = contracts[id], store = createMetadataSettings(dataRoot, id);
+  const spec = contracts[id], store = createMetadataSettings(dataRoot, id, nativeSettings);
   const lifetime = new AbortController(), active = new Set(), streams = new Set();
   const images = createMetadataImageTransport();
   let closed = false, closing, cleanupFailure;
@@ -48,6 +48,7 @@ function createMetadataModule(id, { dataRoot, request = createMetadataRequest() 
   });
   return Object.freeze({
     id, version: spec.version, contract: spec.contract, methods,
+    settingsChanged() { store.invalidate(); },
     image(path, context) {
       return track((async () => {
         try {

@@ -8,11 +8,14 @@ import { discoverWorkspaces } from '../verify-dependency-lock.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const runtimeTrees = new Map([
-  ['apps/windows/runtime', { files: ['bootstrap.mjs', 'entries/aggregate.mjs'], directories: ['entries'] }],
+  ['apps/windows/runtime', { files: ['bootstrap.mjs', 'native-settings.mjs', 'entries/aggregate.mjs'], directories: ['entries'] }],
 ]);
-// The bootstrap may use only these platform capabilities; workspace subpaths
-// are checked against their package exports above, not this set.
-const windowsImports = new Set(['node:net', 'node:path', '@meowfilm/runtime-bridge']);
+// Each platform file may use only its declared capabilities; workspace subpaths
+// are checked against their package exports above, not these sets.
+const windowsImports = new Map([
+  ['apps/windows/runtime/bootstrap.mjs', new Set(['node:net', 'node:path', '@meowfilm/runtime-bridge'])],
+  ['apps/windows/runtime/native-settings.mjs', new Set(['@meowfilm/runtime-bridge'])],
+]);
 function fail(message) { throw new Error('Windows App structure: ' + message); }
 function samePath(a, b) {
   return process.platform === 'win32'
@@ -118,7 +121,7 @@ export function verifyAppStructure(directory = root) {
             !SHARED_RUNTIME_BUILTINS.has(specifier) && !publicPackageImport(directory, packages, specifier, { kind }))
           fail('shared runtime platform import: ' + file + ' -> ' + specifier);
         if (file.startsWith('apps/windows/runtime/') &&
-            (file !== 'apps/windows/runtime/bootstrap.mjs' || !windowsImports.has(specifier)))
+            !windowsImports.get(file)?.has(specifier))
           fail('Windows runtime bypasses shared module: ' + file + ' -> ' + specifier);
       }
     }

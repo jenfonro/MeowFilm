@@ -24,6 +24,7 @@ public static class FilmMetadataRuntimeTests
     private const string OriginalPoster = "/v1/tmdb/images/original/poster.png";
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Case("offline native TMDB Douban and preferences save without launching Node and cold start consumes them", NativeOffline);
         yield return Case("native settings preserve replace clear failed drafts and restore after restart", Settings);
         yield return Case("ordinary metadata cancellation leaves a late complete response in the Node cache", Cancellation);
         yield return Case("concurrent complete details share the Node producer and exact request keys remain isolated", MetadataKeys);
@@ -107,6 +108,7 @@ public static class FilmMetadataRuntimeTests
         await using var first = await RuntimeHost.OpenAsync(data);
         await first.Metadata.SaveSettingsAsync(new Dictionary<string, object?>
         { ["apiBase"] = api.BaseUrl + "/api/3", ["imageBase"] = api.BaseUrl + "/img" });
+        await first.WaitSettingsAsync("tmdb");
         await using var search = new FilmSearchService(first.Client.CaptureConnectionAsync, new SearchSources(), first.Metadata.ResolveImage);
         var session = search.Start("原查询2");
         await using (var exchange = await api.AcceptAsync())
@@ -136,16 +138,21 @@ public static class FilmMetadataRuntimeTests
             context.MetadataSearchPayload!.Value.GetProperty("raw").GetProperty("unknown").GetProperty("nullable").ValueKind == JsonValueKind.Null,
             "search keeps w500 image references and complete unknown raw fields independently of full detail");
         CompleteDetail(handoff.Metadata!.Value, "真实详情回执");
-        Check(item.GetProperty("poster").GetString() == OriginalPoster && first.Metadata.ResolveImage(searchPoster) == searchPoster,
-            "the enhanced card uses original detail while stable search image references stay unchanged");
+        string displayKey = FilmJson.Text(item, "displayKey");
+        var currentItem = session.Items.FirstOrDefault(value => FilmJson.Text(value, "displayKey") == displayKey);
+        Check(item.GetProperty("poster").GetString() == searchPoster &&
+            currentItem.ValueKind == JsonValueKind.Object && currentItem.GetProperty("poster").GetString() == searchPoster &&
+            first.Metadata.ResolveImage(searchPoster) == searchPoster,
+            "captured and current cards keep the stable w500 search poster independently of the complete original-size handoff detail");
         await search.LoadMoreAsync();
         Check(!api.HasConnection && ReferenceEquals(search.Start(session.Query), session), "more and same-word reuse do not request metadata again");
         await first.Metadata.SaveSettingsAsync(new Dictionary<string, object?>
         { ["apiKey"] = "synthetic-image-isolation-key", ["accessToken"] = "synthetic-image-isolation-token" });
+        await first.WaitSettingsAsync("tmdb");
 
         IRuntimeImageClient current = first.Client;
         await using var artwork = new ArtworkService(readTrusted: (reference, budget, token) => current.ReadImageAsync(reference, budget, token));
-        // Exercise the retained list's w500 reference, not the detail-enriched card's original poster.
+        // Exercise the retained card's w500 search reference, not the handoff detail's original poster.
         var pixels = artwork.AcquireAsync(searchPoster);
         await using (var exchange = await api.AcceptAsync())
         {
@@ -165,6 +172,7 @@ public static class FilmMetadataRuntimeTests
             Capture(root, "tmdb-artwork.png");
         }
         await first.Metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["imageBase"] = images.BaseUrl + "/pictures" });
+        await first.WaitSettingsAsync("tmdb");
         using (var cached = await artwork.AcquireAsync(searchPoster))
             Check(ReferenceEquals(cached.Image, lease.Image) && !api.HasConnection && !images.HasConnection,
                 "changing the proxy base does not rename or bypass a cached relative resource");
@@ -179,7 +187,7 @@ public static class FilmMetadataRuntimeTests
         await first.DisposeAsync();
         await using var second = await RuntimeHost.OpenAsync(data);
         current = second.Client;
-        Check(second.Metadata.Settings!.ImageBase == images.BaseUrl + "/pictures", "a new real Node process restores the runtime-owned settings");
+        Check(second.Metadata.Settings!.ImageBase == images.BaseUrl + "/pictures", "a new real Node process restores the native settings consumed at cold start");
         using (var cached = await artwork.AcquireAsync(searchPoster))
             Check(ReferenceEquals(cached.Image, lease.Image), "a new session endpoint cannot alter the stable cache identity");
         var restarted = artwork.AcquireAsync("/v1/tmdb/images/w500/restarted.png");
@@ -198,6 +206,7 @@ public static class FilmMetadataRuntimeTests
         await using var host = await RuntimeHost.OpenAsync(NewData());
         await host.Metadata.SaveSettingsAsync(new Dictionary<string, object?>
         { ["apiBase"] = upstream.BaseUrl, ["imageBase"] = upstream.BaseUrl + "/img" });
+        await host.WaitSettingsAsync("tmdb");
         await using var search = new FilmSearchService(host.Client.CaptureConnectionAsync, new SearchSources(), host.Metadata.ResolveImage);
         var failed = search.Start("失败2");
         await using (var exchange = await upstream.AcceptAsync())
@@ -255,6 +264,40 @@ public static class FilmMetadataRuntimeTests
             "the exact stable reference succeeds on explicit retry and only the complete pixels enter cache");
     }
 
+    private static async Task NativeOffline()
+    {
+        string root = NewData();
+        int starts = 0;
+        await using (var store = new LocalDocumentStore(Path.Combine(root, "documents"), AppIdentity.NativeNamespaces,
+            AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces))
+        await using (var runtime = new AppRuntimeConnectionHost(_ =>
+        {
+            starts++;
+            throw new InvalidOperationException("Offline settings must not start Node.");
+        }))
+        await using (var metadata = new FilmMetadataService(runtime, store))
+        {
+            await metadata.GetSettingsAsync(); await metadata.GetDoubanSettingsAsync();
+            await metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["language"] = "ja-JP" });
+            await metadata.SaveDoubanSettingsAsync(new Dictionary<string, object?> { ["searchBase"] = "https://douban.fixture.invalid" });
+            var preferences = new FilmPlaybackSettings(runtime, store);
+            await preferences.SavePreferencesAsync(FilmPreferences.Defaults with { Keywords = ["离线原生词"] });
+            Check(starts == 0 && (await metadata.GetSettingsAsync()).Language == "ja-JP" &&
+                (await metadata.GetDoubanSettingsAsync()).SearchBase == "https://douban.fixture.invalid",
+                "real native protected documents remain readable and writable with no runtime session");
+            await BridgeTests.Expect("CLOSED", () => metadata.SearchAsync("离线", default));
+            Check(starts == 0, "actual metadata requests fail offline without recovering Node or rolling back settings");
+        }
+        await using var cold = await RuntimeHost.OpenAsync(root);
+        Check((await cold.WaitSettingsAsync("tmdb")).GetProperty("language").GetString() == "ja-JP" &&
+            (await cold.WaitSettingsAsync("douban")).GetProperty("searchBase").GetString() == "https://douban.fixture.invalid" &&
+            (await cold.WaitSettingsAsync("film.preferences")).GetProperty("keywords")[0].GetString() == "离线原生词",
+            "the real cold runtime consumes the latest offline documents from its private settings capability");
+        var denied = await cold.Client.CallAsync("tmdb.data.settings.update", new { language = "en-US" });
+        Check(!denied.GetProperty("ok").GetBoolean() && denied.GetProperty("code").GetString() == "PERMISSION_DENIED" &&
+            (await cold.Metadata.GetSettingsAsync()).Language == "ja-JP",
+            "the real runtime cannot write or replace the unique native metadata document");
+    }
     private static async Task Settings()
     {
         await using var upstream = new RuntimeHttpClientTests.Server();
@@ -265,13 +308,10 @@ public static class FilmMetadataRuntimeTests
             ["apiBase"] = upstream.BaseUrl, ["imageBase"] = upstream.BaseUrl + "/img",
             ["apiKey"] = "synthetic-api-key", ["accessToken"] = "synthetic.access.token"
         });
-        string documents = Path.Combine(data, "documents");
-        Directory.CreateDirectory(documents);
-        await using (var store = new LocalDocumentStore(documents,
-            [FilmSourceService.DocumentNamespace]))
+        await host.WaitSettingsAsync("tmdb");
         {
-            var rules = new FilmRuleService(host.Client);
-            var sources = new FilmSourceService(host.Client, store);
+            var rules = new FilmRuleService(host.Client, host.Store);
+            var sources = new FilmSourceService(host.Client, host.Store);
             await using var film = new FilmCapability(rules, sources, host.Client, host.Metadata);
             var view = (FilmSettingsView)film.SettingsView;
             view.Width = 900; view.Height = 650;
@@ -289,30 +329,37 @@ public static class FilmMetadataRuntimeTests
                 token.ActualWidth < 420, "native fields retain usable widths inside the narrow settings viewport");
             Capture(view, "tmdb-settings-narrow.png");
             await SaveView(view);
+            await host.WaitSettingsAsync("tmdb");
             await Credentials(host.Metadata, upstream, "初始保留", expectedToken: "synthetic.access.token");
             await SaveView(view);
+            await host.WaitSettingsAsync("tmdb");
             Check(host.Metadata.Settings is { ApiKey: "synthetic.access.token", AccessToken: "" } &&
                 token.Text == "synthetic.access.token", "an unedited plain token survives another save");
             await Credentials(host.Metadata, upstream, "未修改", expectedToken: "synthetic.access.token");
             token.Text = "synthetic.replacement.token";
             await SaveView(view);
+            await host.WaitSettingsAsync("tmdb");
             Check(token.Text == "synthetic.replacement.token", "successful replacement remains visible and editable");
             await Credentials(host.Metadata, upstream, "替换", expectedToken: "synthetic.replacement.token");
             token.Text = "synthetic-replacement-key"; await SaveView(view);
+            await host.WaitSettingsAsync("tmdb");
             Check(host.Metadata.Settings is { ApiKey: "synthetic-replacement-key", AccessToken: "" },
                 "the same input replaces v4 authentication with a v3 key");
             await Credentials(host.Metadata, upstream, "改用key", expectedKey: "synthetic-replacement-key");
             token.Text = "   "; await SaveView(view);
+            await host.WaitSettingsAsync("tmdb");
             Check(host.Metadata.Settings is { ApiKey: "", AccessToken: "" } && token.Text == "",
                 "an empty save clears credentials without a separate clear action");
             await Credentials(host.Metadata, upstream, "清空");
             string savedBase = host.Metadata.Settings!.ApiBase;
             apiBase.Text = "https://invalid.example/?query=not-a-base"; token.Text = "synthetic-retry-key";
             await SaveView(view);
+            await host.WaitSettingsAsync("tmdb");
             Check(apiBase.Text.Contains("?query=", StringComparison.Ordinal) && token.Text == "synthetic-retry-key" &&
                 host.Metadata.Settings!.ApiBase == savedBase && host.Metadata.Settings!.ApiToken == "",
                 "failed validation retains drafts and cannot publish unsaved settings");
             apiBase.Text = savedBase; await SaveView(view);
+            await host.WaitSettingsAsync("tmdb");
             Check(host.Metadata.Settings!.ApiKey == "synthetic-retry-key" && token.Text == "synthetic-retry-key",
                 "the unchanged failure draft can be retried explicitly");
             surface.RootVisual = null;
@@ -320,7 +367,7 @@ public static class FilmMetadataRuntimeTests
         await host.DisposeAsync();
         await using var restored = await RuntimeHost.OpenAsync(data);
         Check(restored.Metadata.Settings is { ApiKey: "synthetic-retry-key", AccessToken: "" },
-            "runtime-owned plain and cleared credentials restore in a new process");
+            "native plain and cleared credentials restore in a new process");
         await Credentials(restored.Metadata, upstream, "重启恢复", expectedKey: "synthetic-retry-key");
     }
 
@@ -356,6 +403,7 @@ public static class FilmMetadataRuntimeTests
         await using var host = await RuntimeHost.OpenAsync(NewData());
         await host.Metadata.SaveSettingsAsync(new Dictionary<string, object?>
         { ["apiBase"] = upstream.BaseUrl, ["imageBase"] = upstream.BaseUrl + "/img" });
+        await host.WaitSettingsAsync("tmdb");
         using var cancel = new CancellationTokenSource();
         var query = host.Metadata.SearchAsync("挂起", cancel.Token);
         await using var pending = await upstream.AcceptAsync();
@@ -385,6 +433,7 @@ public static class FilmMetadataRuntimeTests
         await using var upstream = new RuntimeHttpClientTests.Server();
         await using var host = await RuntimeHost.OpenAsync(NewData());
         await host.Metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["apiBase"] = upstream.BaseUrl });
+        await host.WaitSettingsAsync("tmdb");
         var first = host.Metadata.DetailAsync("tv", 7, default);
         await using (var pending = await upstream.AcceptAsync())
         {
@@ -447,6 +496,7 @@ public static class FilmMetadataRuntimeTests
         await using var after = new RuntimeHttpClientTests.Server();
         await using var host = await RuntimeHost.OpenAsync(NewData());
         await host.Metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["apiBase"] = before.BaseUrl });
+        await host.WaitSettingsAsync("tmdb");
         string oldRevision = await host.SettingsRevisionAsync();
         var ready = host.Metadata.DetailAsync("tv", 7, default);
         await using (var exchange = await before.AcceptAsync())
@@ -462,8 +512,10 @@ public static class FilmMetadataRuntimeTests
         await using var pending = await before.AcceptAsync();
         Request(pending, "/3/search/multi");
         var save = host.Metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["apiBase"] = after.BaseUrl });
-        await pending.AssertDisconnectedAsync();
         await save.WaitAsync(TimeSpan.FromSeconds(10));
+        Check((await host.Metadata.GetSettingsAsync()).ApiBase == after.BaseUrl, "native save succeeds independently of application drain");
+        await host.WaitSettingsAsync("tmdb");
+        await pending.AssertDisconnectedAsync();
         await Cancelled(query);
         Check(await host.SettingsRevisionAsync() != oldRevision &&
             (await host.FilmAsync("data.cache.entry", SearchIdentity("撤权"))).ValueKind == JsonValueKind.Null &&
@@ -490,6 +542,7 @@ public static class FilmMetadataRuntimeTests
         await using var upstream = new RuntimeHttpClientTests.Server();
         await using var host = await RuntimeHost.OpenAsync(NewData());
         await host.Metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["apiBase"] = upstream.BaseUrl });
+        await host.WaitSettingsAsync("tmdb");
         var query = host.Metadata.SearchAsync("关闭", default);
         await using var pending = await upstream.AcceptAsync();
         Request(pending, "/3/search/multi");
@@ -509,6 +562,7 @@ public static class FilmMetadataRuntimeTests
         await using var host = await RuntimeHost.OpenAsync(NewData());
         await host.Metadata.SaveSettingsAsync(new Dictionary<string, object?>
         { ["apiBase"] = upstream.BaseUrl, ["imageBase"] = upstream.BaseUrl + "/img" });
+        await host.WaitSettingsAsync("tmdb");
         await using var artwork = new ArtworkService(readTrusted: host.Client.ReadImageAsync);
         var lease = artwork.AcquireAsync(Poster);
         await using var image = await upstream.AcceptAsync();
@@ -545,19 +599,31 @@ public static class FilmMetadataRuntimeTests
     {
         internal readonly AppRuntimeConnectionHost Client;
         internal readonly FilmMetadataService Metadata;
+        internal readonly LocalDocumentStore Store;
         private NodeRuntime? session;
+        private Process? child;
         internal int ProcessId => session!.ProcessId;
         private Task? disposal;
         private RuntimeHost(string root, RuntimeBundle bundle)
         {
-            Client = new(async token => session = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle,
-                AppIdentity.ScriptModules, Path.Combine(root, "script-runtime"), token, ownerRevoked: token));
-            Metadata = new(Client); Client.Start();
+            Directory.CreateDirectory(Path.Combine(root, "documents"));
+            Store = new(Path.Combine(root, "documents"), AppIdentity.NativeNamespaces,
+                AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
+            Client = new(async token =>
+            {
+                session = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle,
+                    AppIdentity.ScriptModules, Path.Combine(root, "script-runtime"), token, ownerRevoked: token,
+                    settingsStore: Store, settingsNamespaces: AppIdentity.RuntimeSettingsNamespaces);
+                child = Process.GetProcessById(session.ProcessId);
+                _ = child.SafeHandle;
+                return session;
+            });
+            Metadata = new(Client, Store); Client.Start();
         }
         internal static async Task<RuntimeHost> OpenAsync(string root)
         {
             string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
-                ?? throw new InvalidOperationException("A real eight-module Windows runtime bundle is required.");
+                ?? throw new InvalidOperationException("A real aggregate Windows runtime bundle is required.");
             var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), AppIdentity.RuntimeId, AppIdentity.ScriptModules);
             var host = new RuntimeHost(root, bundle);
             try
@@ -577,6 +643,35 @@ public static class FilmMetadataRuntimeTests
             using var wait = CancellationTokenSource.CreateLinkedTokenSource(token, owner.Revoked);
             return await new FilmPlaybackClient(owner.Client).CallAsync(operation, input, wait.Token);
         }
+        internal async Task<JsonElement> WaitSettingsAsync(string block)
+        {
+            string space = AppIdentity.RuntimeSettingsNamespaces[block];
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var document = await new SettingsDocument(Store, space).ReadAsync(deadline.Token)
+                ?? throw new InvalidOperationException("Expected a committed native settings document.");
+            string field = block == "film.rules" ? "rules" : block == "film.preferences" ? "preferences" : "settings";
+            var expected = document.GetProperty(field);
+            var timer = Stopwatch.StartNew();
+            do
+            {
+                JsonElement actual;
+                if (block.StartsWith("film.", StringComparison.Ordinal))
+                    actual = await FilmAsync(block == "film.rules" ? "rules.get" : "settings.get", new { }, deadline.Token);
+                else
+                {
+                    var reply = await Client.CallAsync(block + ".data.settings.get", new { }, deadline.Token);
+                    Check(reply.GetProperty("ok").GetBoolean(), "read-only runtime configuration check succeeds");
+                    actual = reply.GetProperty("value").Clone();
+                }
+                bool applied = block == "film.rules"
+                    ? JsonSerializer.Serialize(actual.GetProperty("rules").Deserialize<FilmRuleSet>(FilmRuleService.Json), FilmRuleService.Json) ==
+                        JsonSerializer.Serialize(expected.Deserialize<FilmRuleSet>(FilmRuleService.Json), FilmRuleService.Json)
+                    : expected.EnumerateObject().All(item => actual.TryGetProperty(item.Name, out var value) && JsonElement.DeepEquals(item.Value, value));
+                if (applied) return actual;
+                await Task.Delay(10, deadline.Token);
+            } while (timer.Elapsed < TimeSpan.FromSeconds(10));
+            throw new InvalidOperationException("Committed native block was not applied by the real runtime: " + block);
+        }
         internal async Task<string> SettingsRevisionAsync()
         {
             var envelope = await Client.CallAsync("tmdb.data.settings.get", new { });
@@ -589,22 +684,35 @@ public static class FilmMetadataRuntimeTests
         public ValueTask DisposeAsync() => new(disposal ??= CloseAsync());
         private async Task CloseAsync()
         {
-            await Metadata.DisposeAsync();
-            using var child = session is { } active ? Process.GetProcessById(active.ProcessId) : null;
-            if (child is not null) _ = child.SafeHandle;
-            await Client.DisposeAsync();
-            if (session is not null) await session.Completion.WaitAsync(TimeSpan.FromSeconds(10));
-            if (child is not null)
+            try
             {
-                await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
-                Check(child.HasExited, "the owned real Node process exits after drain");
+                await Metadata.DisposeAsync();
+            }
+            finally
+            {
+                try { await Client.DisposeAsync(); }
+                finally
+                {
+                    try { if (session is not null) await session.DisposeAsync(); }
+                    finally
+                    {
+                        if (session is not null) await session.Completion.WaitAsync(TimeSpan.FromSeconds(10));
+                        if (child is not null)
+                        {
+                            await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+                            Check(child.HasExited, "the owned real Node process exits after drain");
+                            child.Dispose();
+                        }
+                        await Store.DisposeAsync();
+                    }
+                }
             }
         }
     }
     private static string NewData()
     {
         string root = TestWorkspace.DataPath("tmdb", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(root); return root;
+        Directory.CreateDirectory(Path.Combine(root, "documents")); return root;
     }
     private static IEnumerable<DependencyObject> Visuals(DependencyObject value)
     {

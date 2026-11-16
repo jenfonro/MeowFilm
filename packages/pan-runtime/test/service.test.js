@@ -399,7 +399,7 @@ for (const provider of ['baidu', 'quark', 'uc']) {
       });
       const controller = new AbortController();
       const pending = assert.rejects(service.invoke('login.start', { provider }, { signal: controller.signal }),
-        { code: action === 'cancel' || provider === 'baidu' ? 'CANCELLED' : 'STALE_ACCOUNT' });
+        { code: action === 'cancel' ? 'CANCELLED' : 'STALE_ACCOUNT' });
       await entered.promise;
       if (action === 'cancel') controller.abort();
       else await service.invoke('settings.set', { provider, credentials: { cookie: 'session=synthetic-new' } });

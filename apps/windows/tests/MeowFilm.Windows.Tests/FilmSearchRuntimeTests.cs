@@ -2,7 +2,6 @@ using System.IO;
 using System.Text.Json;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Film.Rules;
-using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -26,15 +25,19 @@ public static class FilmSearchRuntimeTests
         await using var metadata = new RuntimeHttpClientTests.Server();
         await using var host = await FilmMetadataRuntimeTests.RuntimeHost.OpenAsync(root);
         await host.Metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["apiBase"] = metadata.BaseUrl });
-        await using var documents = new LocalDocumentStore(Path.Combine(root, "documents"), [FilmSourceService.DocumentNamespace]);
-        await using var sources = new FilmSourceService(host.Client, documents);
+        await host.WaitSettingsAsync("tmdb");
+        await using var sources = new FilmSourceService(host.Client, host.Store);
         await sources.StartAsync();
-        await sources.ImportLocalAsync("搜索测试猫", Script, "search-runtime");
+        string scriptPath = Path.Combine(root, "search-runtime.js");
+        await File.WriteAllTextAsync(scriptPath, Script);
+        await sources.ImportLocalAsync("搜索测试猫", scriptPath, "search-runtime");
+        await SearchFixture.Until(() => sources.Cats.Single().CanDetect && sources.Videos.Count == 2);
         await sources.SaveVideoOptionsAsync(new("search-runtime", "a"), new(true, false, true, false), order: 2);
         await sources.SaveVideoOptionsAsync(new("search-runtime", "b"), new(true, false, true, true), order: 17);
-        await using var rules = new FilmRuleService(host.Client);
+        await using var rules = new FilmRuleService(host.Client, host.Store);
         await rules.SaveAsync(new FilmRuleSet { AggregateRegexRules = ["\\[标记\\]"] });
-        string rulesRevision = rules.Revision;
+        var appliedRules = await host.WaitSettingsAsync("film.rules");
+        string rulesRevision = appliedRules.GetProperty("revision").GetString()!;
         await using var search = new FilmSearchService(host.Client.CaptureConnectionAsync, sources, host.Metadata.ResolveImage);
         var metadataRequests = new List<string>();
         var session = search.Start("银河");
@@ -67,9 +70,20 @@ public static class FilmSearchRuntimeTests
             request.Query == "银河" && request.DataOwner is not null,
             "the native handoff consumes the actual Node target reference and full members without local rules or seed synthesis");
         var rawRequest = await new FilmSearchContext(session, raw).HandoffAsync(default);
-        Check(rawRequest.Target.Kind == "source" && rawRequest.Sources!.Count == 1 &&
-            rawRequest.Target.Source!.Value.GetProperty("detailId").ValueKind == JsonValueKind.Number && rawRequest.Metadata is null,
-            "the actual raw handoff stays the original single source");
+        Check(rawRequest.Target.Kind == "source" && rawRequest.Target.Members is null &&
+            rawRequest.Target.Source!.Value.GetProperty("key").GetString() == FilmJson.Text(raw, "siteKey") &&
+            rawRequest.Target.Source!.Value.GetProperty("detailId").ValueKind == JsonValueKind.Number &&
+            rawRequest.Target.Source!.Value.GetProperty("detailId").GetInt32() == 0 && rawRequest.Metadata is null,
+            "the raw handoff stays exactly the selected A numeric-zero source without aggregate members or metadata");
+        Check(rawRequest.Sources!.Count == 2 &&
+            JsonElement.DeepEquals(FilmJson.Encode(rawRequest.Sources!), FilmJson.Encode(session.SourceSnapshot)),
+            "the raw handoff keeps the complete original A and B search authorization independently of its single-source target");
+        Check(rawRequest.Results is { ValueKind: JsonValueKind.Array } results && results.GetArrayLength() == 1 &&
+            FilmJson.Text(results[0], "sourceKey") == FilmJson.Text(raw, "siteKey") &&
+            results[0].GetProperty("items").GetArrayLength() == 1 &&
+            JsonElement.DeepEquals(results[0].GetProperty("items")[0], raw.GetProperty("raw")) &&
+            rawRequest.ResultHints is { ValueKind: JsonValueKind.Array } hints && hints.GetArrayLength() == 0,
+            "only the selected original A row becomes a playback result with no other search rows or hints");
         string[] order = session.Items.Select(card => FilmJson.Text(card, "displayKey")).ToArray();
         Check(!metadata.HasConnection, "aggregate and raw handoffs do not implicitly retry the failed TMDB search");
         await search.LoadMoreAsync();

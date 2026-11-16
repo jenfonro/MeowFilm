@@ -32,7 +32,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     private Window? editor;
     private string section = "preferences";
     private long generation;
-    private bool readBusy, mutating, stopping;
+    private bool readBusy, libraryBusy, mutating, stopping;
     private readonly ObservableCollection<OrderItem> ruleItems = [], panItems = [];
     private IReadOnlyList<FilmSettingRow> rows = [];
 
@@ -45,6 +45,10 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     }
     public bool Idle => !stopping && !readBusy && !mutating;
     public bool ReadFailed { get; private set; }
+    public bool LibraryFailed { get; private set; }
+    public bool CanRetryRead => Idle && !libraryBusy;
+    public bool HasReadFailure => ReadFailed || LibraryFailed;
+    public bool CanEditLibrary => Idle && !libraryBusy && !LibraryFailed;
     public string Work { get; private set; } = "";
     public IReadOnlyList<FilmSettingRow> Rows => rows;
     public IReadOnlyList<FilmSettingGroup> ManualGroups { get; private set; } = [];
@@ -74,7 +78,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         generation++;
         read?.Cancel();
         editor?.Close(); editor = null;
-        readBusy = false; ReadFailed = false; preferences = null; rows = []; ManualGroups = []; BlockGroups = []; Work = ""; Changed();
+        readBusy = libraryBusy = false; ReadFailed = LibraryFailed = false; preferences = null; rows = []; ManualGroups = []; BlockGroups = []; Work = ""; Changed();
     }
     internal async Task PrepareShutdownAsync()
     {
@@ -90,7 +94,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     }
     private async void View_Loaded(object sender, RoutedEventArgs e) { if (preferences is null) await LoadAsync(); }
     private void View_Unloaded(object sender, RoutedEventArgs e) => Deactivate();
-    private async void Retry_Click(object sender, RoutedEventArgs e) { if (ReadFailed) await LoadAsync(); }
+    private async void Retry_Click(object sender, RoutedEventArgs e) { if (HasReadFailure && CanRetryRead) await LoadAsync(); }
     private Task LoadAsync()
     {
         if (stopping || !IsLoaded || !IsVisible) return Task.CompletedTask;
@@ -113,27 +117,38 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         string requestedSection = section;
         string? selectedManual = (ManualTargets.SelectedItem as FilmSettingGroup)?.Id;
         string? selectedBlock = (BlockTargets.SelectedItem as FilmSettingGroup)?.Id;
-        readBusy = true; ReadFailed = false; Work = "读取中…"; rows = []; ManualGroups = []; BlockGroups = []; Changed();
+        readBusy = preferences is null; ReadFailed = LibraryFailed = false; Work = ""; rows = []; ManualGroups = []; BlockGroups = []; Changed();
         try
         {
-            var loaded = await service.ReadPreferencesAsync(token);
-            JsonElement? library = requestedSection == "preferences" ? await service.ReadLibraryAsync(token) : null;
+            var loaded = preferences ?? await service.ReadPreferencesAsync(token);
             if (ticket != generation || token.IsCancellationRequested) return;
-            preferences = loaded; PopulatePreferences();
-            if (library is { } value)
+            if (preferences is null) { preferences = loaded; PopulatePreferences(); }
+            readBusy = false;
+            libraryBusy = requestedSection == "preferences";
+            Changed();
+            if (libraryBusy)
             {
-                var manual = ReadRows(value, "manual"); var blocks = ReadRows(value, "blocks");
-                rows = manual.Concat(blocks).ToArray();
-                ManualGroups = Group(manual); BlockGroups = Group(blocks);
-                Changed();
-                ManualTargets.SelectedItem = ManualGroups.FirstOrDefault(group => group.Id == selectedManual) ?? ManualGroups.FirstOrDefault();
-                BlockTargets.SelectedItem = BlockGroups.FirstOrDefault(group => group.Id == selectedBlock) ?? BlockGroups.FirstOrDefault();
+                try
+                {
+                    var value = await service.ReadLibraryAsync(token);
+                    if (ticket != generation || token.IsCancellationRequested) return;
+                    var manual = ReadRows(value, "manual"); var blocks = ReadRows(value, "blocks");
+                    rows = manual.Concat(blocks).ToArray();
+                    ManualGroups = Group(manual); BlockGroups = Group(blocks);
+                    Changed();
+                    ManualTargets.SelectedItem = ManualGroups.FirstOrDefault(group => group.Id == selectedManual) ?? ManualGroups.FirstOrDefault();
+                    BlockTargets.SelectedItem = BlockGroups.FirstOrDefault(group => group.Id == selectedBlock) ?? BlockGroups.FirstOrDefault();
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+                catch (Exception)
+                {
+                    if (ticket == generation) { LibraryFailed = true; Notify("匹配记录读取失败"); }
+                }
             }
-            Work = "";
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception) { if (ticket == generation) { ReadFailed = true; Work = "读取失败"; Notify("影视设置读取失败"); } }
-        finally { if (ticket == generation) { readBusy = false; Changed(); } }
+        finally { if (ticket == generation) { readBusy = libraryBusy = false; Changed(); } }
     }
     private static FilmSettingRow[] ReadRows(JsonElement library, string field)
     {
@@ -246,7 +261,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     }
     private async void Remove_Click(object sender, RoutedEventArgs e)
     {
-        if (!Idle || sender is not Button { Tag: FilmSettingRow row } || !Rows.Contains(row)) return;
+        if (!CanEditLibrary || sender is not Button { Tag: FilmSettingRow row } || !Rows.Contains(row)) return;
         long ticket = generation;
         if (!Confirm("删除记录", row.Title)) return;
         if (ticket != generation) return;
@@ -260,7 +275,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     }
     private async void ClearRecords_Click(object sender, RoutedEventArgs e)
     {
-        if (!Idle || section != "preferences") return;
+        if (!CanEditLibrary || section != "preferences") return;
         long ticket = generation;
         if (!Confirm("清空匹配禁用记录", "清空全部匹配禁用记录？") || ticket != generation) return;
         await MutateAsync(() => service.RemoveBlockAsync(null), null, "匹配禁用记录已清空");
@@ -274,7 +289,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
 
     private void OpenEditor(JsonElement? stored)
     {
-        if (!Idle || section != "preferences" || editor is not null) return;
+        if (!CanEditLibrary || section != "preferences" || editor is not null) return;
         long ticket = generation;
         var value = stored ?? default;
         var content = new StackPanel { Margin = new(20) };

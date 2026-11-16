@@ -1,10 +1,11 @@
 using System.Text.Json;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
-internal sealed class PanAccountFixture : IRuntimeClient
+internal sealed class PanAccountFixture : IRuntimeClient, IDocumentStore, IRuntimeSettingsNotifications
 {
     internal static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     internal static readonly (string Id, string[] Fields)[] Providers =
@@ -23,9 +24,73 @@ internal sealed class PanAccountFixture : IRuntimeClient
     internal string Challenge = "https://drive.fixture.invalid/登录?ticket=synthetic#qr";
     internal string LastSession = "";
     internal int Starts;
+    internal readonly List<string> Notifications = [];
+    internal readonly List<JsonElement> Writes = [];
+    internal Func<CancellationToken, Task<DocumentSnapshot>>? ReadOverride;
+    internal Func<ReadOnlyMemory<byte>, DocumentFingerprint, CancellationToken, Task<DocumentFingerprint>>? WriteOverride;
+    internal bool Offline, NotificationFails;
+    private byte[]? document;
 
-    internal void Account(string provider, long revision, string status, params string[] fields) =>
+    internal void Account(string provider, long revision, string status, params string[] fields)
+    {
         Accounts[provider] = new(provider, revision, fields.Length > 0, status, fields);
+        var root = Saved.GetProperty("accounts").EnumerateObject().ToDictionary(item => item.Name, item => item.Value.Clone());
+        root[provider] = JsonSerializer.SerializeToElement(new
+        {
+            revision, credentials = fields.ToDictionary(field => field, field =>
+                field is "refreshedAt" or "expiresAt" ? (object)1730000000000L : "synthetic-" + field)
+        }, Json);
+        document = JsonSerializer.SerializeToUtf8Bytes(new { version = 1, accounts = root }, Json);
+    }
+    internal JsonElement Saved
+    {
+        get
+        {
+            if (document is null) return JsonSerializer.SerializeToElement(new { version = 1, accounts = new { } }, Json);
+            using var json = JsonDocument.Parse(document);
+            return json.RootElement.Clone();
+        }
+    }
+    internal void SetDocument(string json) => document = System.Text.Encoding.UTF8.GetBytes(json);
+    internal DocumentSnapshot Snapshot() => new(document?.ToArray(),
+        document is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(document));
+    public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
+    {
+        Check(documentNamespace == "pan.accounts.v1", "only the protected pan namespace is used");
+        if (ReadOverride is { } read) return read(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(Snapshot());
+    }
+    public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
+        DocumentFingerprint expected, CancellationToken cancellationToken = default)
+    {
+        Check(documentNamespace == "pan.accounts.v1", "only the protected pan namespace is used");
+        if (WriteOverride is { } write) return write(data, expected, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(Commit(data, expected));
+    }
+    internal DocumentFingerprint Commit(ReadOnlyMemory<byte> data, DocumentFingerprint expected)
+    {
+        if (Snapshot().Fingerprint != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
+        document = data.ToArray();
+        var root = Saved;
+        Writes.Add(root);
+        foreach (var account in root.GetProperty("accounts").EnumerateObject())
+        {
+            var fields = account.Value.GetProperty("credentials").EnumerateObject().Where(field =>
+                field.Value.ValueKind == JsonValueKind.Number ? field.Value.GetInt64() != 0 :
+                field.Value.GetString()!.Length != 0).Select(field => field.Name).ToArray();
+            Accounts[account.Name] = new(account.Name, account.Value.GetProperty("revision").GetInt64(),
+                fields.Length > 0, fields.Length > 0 ? "signedIn" : "signedOut", fields);
+        }
+        return Snapshot().Fingerprint;
+    }
+    public void SettingsChanged(string block)
+    {
+        if (NotificationFails) throw new BridgeException("CLOSED");
+        if (!Offline) Notifications.Add(block);
+    }
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     internal static JsonElement Ok(object value) =>
         JsonSerializer.SerializeToElement(new { ok = true, contract = "pan.runtime.v1", value }, Json);
     internal static JsonElement Failure(string code) =>
@@ -46,6 +111,7 @@ internal sealed class PanAccountFixture : IRuntimeClient
     private Task<JsonElement> Call(string method, object? parameters, TimeSpan? timeout, CancellationToken token)
     {
         Calls.Add((method, timeout));
+        if (Offline) throw new BridgeException("CLOSED");
         var value = JsonSerializer.SerializeToElement(parameters ?? new { }, Json);
         if (Overrides.TryGetValue(method, out var execute)) return execute(value, token);
         token.ThrowIfCancellationRequested();
@@ -96,29 +162,6 @@ internal sealed class PanAccountFixture : IRuntimeClient
     internal static void Check(bool condition, string message)
     {
         if (!condition) throw new InvalidOperationException(message);
-    }
-    internal sealed class DelayedClear
-    {
-        internal readonly TaskCompletionSource<bool> Entered = Gate<bool>(), Release = Gate<bool>();
-        internal Task Receipt = Task.CompletedTask;
-        internal DelayedClear(PanAccountFixture runtime)
-        {
-            runtime.Overrides["pan.settings.clear"] = (parameters, token) =>
-            {
-                runtime.Overrides.Remove("pan.settings.clear");
-                var receipt = Commit(parameters.GetProperty("provider").GetString()!);
-                Receipt = receipt;
-                // Only HTTP observation can be cancelled; the admitted storage side effect remains.
-                return receipt.WaitAsync(token);
-            };
-            async Task<JsonElement> Commit(string provider)
-            {
-                Entered.TrySetResult(true);
-                await Release.Task;
-                runtime.Account(provider, runtime.Accounts[provider].Revision + 1, "signedOut");
-                return Ok(runtime.Accounts[provider]);
-            }
-        }
     }
     internal static TaskCompletionSource<T> Gate<T>() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 }
