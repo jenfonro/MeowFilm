@@ -410,7 +410,7 @@ public static class FilmCacheConsumerTests
                 JsonElement.DeepEquals(rig.Page.RawBrowsing, browsing) && rig.Page.ActiveTarget == target &&
                 rig.Page.CanBrowseRaw && !directory.IsCurrent(rig.Page) && rig.Page.ListStatus == "请求超时，请重试",
                 "browsing.error preserves the exact successful source and files while fencing the failed execution's directory action");
-            rig.Runtime.Change(root => root["browsing"]!["error"] = null);
+            rig.Runtime.Change(root => root["browsing"]!.AsObject().Remove("error"));
             await Until(() => directory.IsCurrent(rig.Page));
             Check(ReferenceEquals(rig.Page.Episodes.Single(), episode) &&
                 ReferenceEquals(rig.Page.Candidates.Single(), candidate) && JsonElement.DeepEquals(rig.Page.RawBrowsing, browsing),
