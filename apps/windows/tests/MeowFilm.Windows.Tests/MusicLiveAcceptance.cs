@@ -21,22 +21,30 @@ namespace MeowFilm.Windows.Tests;
 // Deliberately neither a *Tests class nor a Cases provider. Never runs in the normal inventory.
 internal static class MusicLiveAcceptance
 {
-    internal static async Task<int> RunAsync(bool kugouHomeOnly = false)
+    internal static async Task<int> RunAsync(bool kugouHomeOnly = false, bool catalogOnly = false)
     {
         using var report = new Report();
         try
         {
             Require(OperatingSystem.IsWindows(), "UNSUPPORTED");
-            using var process = Process.GetCurrentProcess();
-            using var identity = WindowsIdentity.GetCurrent();
-            report.WriteIdentity(process.Id, identity.Name, process.SessionId, Environment.UserInteractive);
-            Require(identity.Name.Split('\\')[^1] == "79917" &&
-                process.SessionId == 1 && Environment.UserInteractive, "PERMISSION_DENIED");
+            if (catalogOnly)
+            {
+                Require(Program.CheckDesktopContext(requireTarget: true), "PERMISSION_DENIED");
+                report.Record("desktop.identity", "PASS", count: 1);
+            }
+            else
+            {
+                using var process = Process.GetCurrentProcess();
+                using var identity = WindowsIdentity.GetCurrent();
+                report.WriteIdentity(process.Id, identity.Name, process.SessionId, Environment.UserInteractive);
+                Require(identity.Name.Split('\\')[^1] == "79917" &&
+                    process.SessionId == 1 && Environment.UserInteractive, "PERMISSION_DENIED");
+            }
             TestWorkspace.Initialize();
             string root = TestWorkspace.DataPath("live-music-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
             report.Open(Path.Combine(root, "result.log"));
-            await OnDesktopAsync(() => RunOwnedAsync(root, report, kugouHomeOnly), report);
+            await OnDesktopAsync(() => RunOwnedAsync(root, report, kugouHomeOnly, catalogOnly), report);
         }
         catch (Exception error) { report.Record("live.bootstrap", "FAIL", ErrorCode(error)); }
         report.Record("live.complete", report.Success ? "PASS" : "FAIL",
@@ -68,7 +76,7 @@ internal static class MusicLiveAcceptance
         await stopped.Task;
     }
 
-    private static async Task RunOwnedAsync(string root, Report report, bool kugouHomeOnly)
+    private static async Task RunOwnedAsync(string root, Report report, bool kugouHomeOnly, bool catalogOnly)
     {
         string data = TestWorkspace.ValidatePath(root, Path.Combine(root, "data"));
         Directory.CreateDirectory(data);
@@ -119,6 +127,12 @@ internal static class MusicLiveAcceptance
             Require(window.IsVisible && PresentationSource.FromVisual(module.View) is not null &&
                 module.View.ActualWidth > 0 && module.View.ActualHeight > 0, "NOT_COVERED");
             report.Record("desktop.window.programmatic-no-input", "PASS", count: 1);
+            if (catalogOnly)
+            {
+                await module.PrepareStartupAsync(CancellationToken.None);
+                await CatalogAsync(application, module, player, observed, report, window);
+                return;
+            }
             await module.InitializeAsync(CancellationToken.None);
             await module.ActivateQualitySettingsAsync();
             await module.SetPlaybackQualityRequestAsync("128k");
@@ -226,6 +240,46 @@ internal static class MusicLiveAcceptance
             });
             else report.Record("close.owned-data", "NOT_COVERED", "NOT_COVERED");
         }
+    }
+
+    private static async Task CatalogAsync(MusicNativeApplication application, MusicCapability module, NativeAudioPlayback player,
+        ObservedRuntime runtime, Report report, Window window)
+    {
+        Require((await AccountStatesAsync(application)).Values.All(state => state == "none"), "STORAGE_CONFLICT");
+        foreach (string platform in new[] { "wy", "kg" })
+        {
+            await report.StepAsync("guest." + platform + ".home.ui", () => HomeAsync(module, runtime, report, window, platform, refresh: true));
+            if (platform != "wy") continue;
+            int directoryReads = runtime.Successes("wy", "channels"), channelReads = runtime.Successes("wy", "channel");
+            int errors = report.Failures;
+            MusicCatalogCard? channel = null;
+            bool directory = await report.StepAsync("guest.wy.channels.ui", async () =>
+            {
+                await module.NavigateAsync("catalog-channels", CancellationToken.None);
+                await RenderAsync(window);
+                Require(runtime.Successes("wy", "channels") > directoryReads, "NOT_COVERED");
+                channel = module.VisibleChannelTabs.Concat(module.MoreChannelTabs).FirstOrDefault(card => card.CanOpen);
+                Require(channel is not null, report.Failures > errors ? report.LastError : "NOT_COVERED");
+                return module.ChannelTabs.Count;
+            });
+            if (directory)
+            {
+                var selected = channel!;
+                await report.StepAsync("guest.wy.channel.ui", async () =>
+                {
+                    await RenderAsync(window);
+                    Require(runtime.Successes("wy", "channel") > channelReads &&
+                        module.CaptureNavigationLocation() == "catalog-channel/wy/" + Uri.EscapeDataString(selected.ActionId) &&
+                        Cards(module).Any() && module.Status.Length == 0,
+                        report.Failures > errors ? report.LastError : "UNCLASSIFIED_CODE");
+                    return Cards(module).Count();
+                });
+            }
+            else report.Record("guest.wy.channel.ui", "NOT_COVERED", "NOT_COVERED");
+        }
+        Require(!player.HasMedia && !player.IsPlaying &&
+            runtime.AuthenticatedPublications("wy") == 0 && runtime.AuthenticatedPublications("kg") == 0, "PERMISSION_DENIED");
+        report.Record("guest.catalog.no-account-or-media", "PASS", count: 1);
     }
 
     private static async Task CheckSafetyAsync(MusicNativeApplication application)

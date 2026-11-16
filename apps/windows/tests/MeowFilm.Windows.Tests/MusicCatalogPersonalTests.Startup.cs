@@ -52,13 +52,16 @@ public static partial class MusicCatalogPersonalTests
         await using var f = await Fixture.Create(initialize: false);
         await f.Module.PrepareStartupAsync().WaitAsync(HomeGuard);
         var held = f.App.HoldNext("music.library.list", before: false);
-        var shell = new ShellWindow([f.Module], [], () => f.Module.DisposeAsync().AsTask(), f.Module.AbortAsync);
+        var shell = new ShellWindow([f.Module], [], () => f.Module.DisposeAsync().AsTask(), f.Module.AbortAsync)
+        { ShowActivated = false, ShowInTaskbar = false };
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        shell.Closed += (_, _) => closed.TrySetResult();
         var status = (TextBlock)shell.FindName("StatusText");
         var panel = (Border)shell.FindName("StatusPanel");
-        var navigation = (ListBox)shell.FindName("NavigationList");
+        var navigation = (ListBox)shell.FindName("ModuleNavigationList");
         try
         {
-            shell.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent));
+            shell.Show();
             await held.Arrived.Task.WaitAsync(HomeGuard);
             await Task.WhenAll(Enumerable.Range(0, 3).Select(_ => f.Module.ActivateCatalogLandingAsync()))
                 .WaitAsync(HomeGuard);
@@ -66,12 +69,15 @@ public static partial class MusicCatalogPersonalTests
             AssertStartupReadHeld(f, held);
             status.GetBindingExpression(TextBlock.TextProperty)?.UpdateTarget();
             Equal("正在加载…", status.Text);
-            Check(!shell.IsVisible && new WindowInteropHelper(shell).Handle == IntPtr.Zero,
-                "synthetic Loaded exercises the real shell without showing or creating a window handle");
+            Check(shell.IsVisible && new WindowInteropHelper(shell).Handle != IntPtr.Zero &&
+                PresentationSource.FromVisual(f.Module.View) is not null &&
+                ReferenceEquals(PresentationSource.FromVisual(f.Module.View), PresentationSource.FromVisual(shell)),
+                "normal Loaded exercises the module on a real non-activating shell surface");
 
             held.Release();
             await held.Delivered.Task.WaitAsync(HomeGuard);
-            await Until(() => navigation.SelectedItem is ShellNavigationEntry { Route: "catalog-home" } &&
+            await Until(() => navigation.SelectedItem is ModuleSession { Current: { Value: "catalog-home" } } session &&
+                ReferenceEquals(session.Module, f.Module) &&
                 f.Module.HomeSections.Count > 0 && !f.Module.Busy && status.Text.Length == 0).WaitAsync(HomeGuard);
             await f.Module.HomeRefresh.WaitAsync(HomeGuard);
             await f.Module.HomeInitialization.WaitAsync(HomeGuard);
@@ -83,16 +89,21 @@ public static partial class MusicCatalogPersonalTests
             AssertStartupHomeChain(f);
             Equal("", status.Text);
             Equal(Visibility.Collapsed, panel.Visibility);
-            Check(navigation.SelectedItem is ShellNavigationEntry { Route: "catalog-home" },
+            Check(navigation.SelectedItem is ModuleSession { Current: { Value: "catalog-home" } } selected &&
+                ReferenceEquals(selected.Module, f.Module),
                 "the shell commits its normal first destination after full initialization");
-            Check(!shell.IsVisible && new WindowInteropHelper(shell).Handle == IntPtr.Zero,
-                "successful startup remains an offscreen component operation");
+            Check(shell.IsVisible && new WindowInteropHelper(shell).Handle != IntPtr.Zero &&
+                PresentationSource.FromVisual(f.Module.View) is not null &&
+                ReferenceEquals(PresentationSource.FromVisual(f.Module.View), PresentationSource.FromVisual(shell)),
+                "successful startup keeps the module on the real shell surface");
             AssertNoHomeCommit(f);
         }
         finally
         {
             held.Release();
             await shell.AbortAsync().WaitAsync(HomeGuard);
+            await closed.Task.WaitAsync(HomeGuard);
+            await Drain();
         }
     }
 

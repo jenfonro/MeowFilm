@@ -70,6 +70,25 @@ export function verifyAppStructure(directory = root) {
       fail('unexpected runtime source: ' + source);
   }
 
+  const protocolPath = 'apps/windows/src/MeowFilm.Core/Runtime/RuntimeHttpProtocol.cs';
+  if (files.includes(protocolPath)) {
+    const methods = text => [...text.matchAll(/["']([^"']+)["']/g)].map(([, method]) => method).sort();
+    const native = new Map([...readFileSync(join(directory, protocolPath), 'utf8').matchAll(
+      /\["([^"]+)"\]\s*=\s*new\("([^"]+)",\s*"([^"]+)",\s*"([^"]+)",\s*\[([^\]]*)\]/g,
+    )].map(([, id, version, contract, prefix, operations]) =>
+      [id, { version, contract, prefix, methods: methods(operations) }]));
+    const shared = new Map([...readFileSync(join(directory, 'apps/runtime/contracts.mjs'), 'utf8').matchAll(
+      /(?:'([^']+)'|([a-z][a-z-]*)):\s*\{\s*contract:\s*'([^']+)',\s*version:\s*'([^']+)',\s*prefix:\s*'([^']+)',\s*(?:upload:\s*true,\s*)?operations:\s*\[([^\]]*)\]/g,
+    )].map(([, quotedId, id, contract, version, prefix, operations]) =>
+      [quotedId ?? id, { version, contract, prefix, methods: methods(operations) }]));
+    if (!native.size || native.size !== shared.size ||
+        [...native.keys()].sort().join() !== [...shared.keys()].sort().join())
+      fail('runtime contract modules differ');
+    for (const [id, contract] of shared)
+      if (JSON.stringify(native.get(id)) !== JSON.stringify(contract))
+        fail('runtime contract mismatch: ' + id);
+  }
+
   let imports = 0, resources = 0;
   const embeddedResources = [];
   function sourceTarget(owner, specifier) {

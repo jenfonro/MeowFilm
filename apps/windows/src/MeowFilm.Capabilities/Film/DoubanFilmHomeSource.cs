@@ -86,13 +86,17 @@ internal sealed class DoubanFilmHomeSource(IRuntimeClient runtime) : IFilmHomeSo
             if (item.ValueKind != JsonValueKind.Object) continue;
             string title = Text(item, "title");
             if (title.Length == 0) continue;
-            string id = FilmJson.RequiredText(item, "businessId");
-            var target = FilmJson.Target(item.GetProperty("playbackTarget"));
-            target.Validate();
-            result.Add(new(id, title, Poster(item), Score(item))
+            try
             {
-                PlaybackContext = new(target, Metadata: item.Clone(), EntrySurface: "home")
-            });
+                string id = FilmJson.RequiredText(item, "businessId");
+                var target = FilmJson.Target(FilmJson.Member(item, "playbackTarget"));
+                target.Validate();
+                result.Add(new(id, title, Poster(item), Score(item))
+                {
+                    PlaybackContext = new(target, Metadata: item.Clone(), EntrySurface: "home")
+                });
+            }
+            catch (FilmPlaybackException error) when (error.Code is "INVALID_RESPONSE" or "INVALID_REQUEST") { }
         }
         if (items.GetArrayLength() > 0 && result.Count == 0) throw new FilmHomeException("INVALID_RESPONSE");
         return result;

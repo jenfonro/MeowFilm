@@ -57,6 +57,13 @@ public static class RuntimeTests
                 BridgeTests.Equal(true, sourceStatus.GetProperty("ok").GetBoolean());
                 BridgeTests.Equal("source.runtime.v2", sourceStatus.GetProperty("contract").GetString());
                 BridgeTests.Equal(0, sourceStatus.GetProperty("value").GetProperty("instances").GetArrayLength());
+                var target = await runtime.CallAsync("film.data.target", new
+                {
+                    target = new { kind = "movie", title = "运行器契约测试", metadataProvider = "douban", metadataId = "100" }
+                });
+                BridgeTests.Equal(true, target.GetProperty("ok").GetBoolean());
+                BridgeTests.Equal("film.playback.v1", target.GetProperty("contract").GetString());
+                BridgeTests.Equal("douban:movie:100", target.GetProperty("value").GetProperty("id").GetString());
                 BridgeTests.Equal(true, runtime.IsConnected);
                 foreach (var method in new[] { "music.library.list", "music.queue.get", "music.accounts.list",
                     "music.catalog.search", "film.script.status", "film.sources.list", "reader.rules.reset",

@@ -12,6 +12,8 @@ public static class FilmHomeTests
             () => MusicQualityConsumerTests.Sta(SkeletonStates));
         yield return new("film-home: runtime entry reads preserve request range cache state and original image identity",
             RequestContract);
+        yield return new("film-home: real Douban runtime entries isolate unidentifiable rows without losing healthy sections",
+            () => MusicQualityConsumerTests.Sta(RuntimeRows));
         yield return new("film-home: independent section failure preserves snapshots and retries only that section",
             () => MusicQualityConsumerTests.Sta(IndependentSections));
         yield return new("film-home: explicit refresh retains successful home and category snapshots on stale errors",
@@ -52,7 +54,7 @@ public static class FilmHomeTests
     private static async Task RequestContract()
     {
         await using var runtime = new FilmRuntimeProbe();
-        JsonElement raw = JsonSerializer.Deserialize<JsonElement>(HomePayload);
+        JsonElement raw = JsonSerializer.Deserialize<JsonElement>(HomePayload("movie"));
         JsonElement Entry(string status = "fresh", string? code = null) => FilmJson.Encode(new
         {
             value = raw, completeness = "partial", fetchedAt = 1000, expiresAt = 2000,
@@ -67,6 +69,8 @@ public static class FilmHomeTests
                 FilmJson.Member(wire, "query").ValueKind == JsonValueKind.Object &&
                 refresh.ValueKind is JsonValueKind.Undefined or JsonValueKind.False or JsonValueKind.True,
                 "the encoded runtime request has the metadata entry shape and never sends refresh:null");
+            raw = JsonSerializer.Deserialize<JsonElement>(HomePayload(
+                FilmJson.Text(wire, "path").EndsWith("/tv", StringComparison.Ordinal) ? "tv" : "movie"));
             return Task.FromResult(FilmRuntimeProbe.Ok(Entry()));
         };
         using var source = new DoubanFilmHomeSource(runtime);
@@ -83,21 +87,17 @@ public static class FilmHomeTests
             FilmJson.Member(request.Parameters, "refresh").ValueKind == JsonValueKind.Undefined,
             "ordinary ranged reads let the runtime check freshness");
 
-        Check(items.Count == 3, "blank titles are filtered");
-        Check(items[0].Id == "100" && items[0].Title == "第一部" &&
+        Check(items.Count == 2, "blank titles and unidentifiable rows are isolated");
+        Check(items[0].Id == "douban:movie:100" && items[0].Title == "第一部" &&
             items[0].Poster == "/v1/douban/images/view/photo/s_ratio_poster/public/p100.jpg" &&
             items[0].Score == "8.6" && items[0].PlaybackContext?.Target is
                 { Id: "douban:movie:100", Kind: "movie", MetadataProvider: "douban", MetadataId: "100" },
             "runtime image reference, numeric score and independent Douban identity");
         Check(items[1].Poster.EndsWith("/large.jpg", StringComparison.Ordinal) &&
             items[1].Score.Length == 0, "large fallback and zero score");
-        Check(items[2].Id.StartsWith("movie:27:", StringComparison.Ordinal) &&
-            items[2].Poster.EndsWith("/cover.jpg", StringComparison.Ordinal) &&
-            items[2].Score == "9" && items[2].PlaybackContext is null,
-            "a ranged display fallback is not fabricated into a playable metadata identity");
         var complete = await source.LoadAsync(section, 10024, 1, default);
-        Check(complete.Count == 3 && complete[2].Id.StartsWith("movie:10027:", StringComparison.Ordinal),
-            "runtime results are not truncated and loaded ranges have no additional client offset ceiling");
+        Check(complete.Count == 2 && complete[1].Id == "douban:movie:200",
+            "runtime results are not truncated, identities do not depend on offsets and loaded ranges have no additional client offset ceiling");
 
         foreach (var definition in FilmSectionDefinition.Home)
         {
@@ -125,7 +125,7 @@ public static class FilmHomeTests
 
         runtime.Intercept = (_, _, _) => Task.FromResult(FilmRuntimeProbe.Ok(Entry("stale", "UPSTREAM_ERROR")));
         var stale = (FilmHomePage)await source.LoadAsync(filtered, 0, 24, default);
-        Check(stale.Count == 3 && stale.Cache is { Status: "stale", ErrorCode: "UPSTREAM_ERROR" } cache &&
+        Check(stale.Count == 2 && stale.Cache is { Status: "stale", ErrorCode: "UPSTREAM_ERROR" } cache &&
             cache.Components.GetProperty("baseData").GetProperty("status").GetString() == "ready",
             "a failed refresh returns old success together with its actual cache error and component state");
         foreach (string auxiliary in new[] { "null", "17", """{"status":"future-state","components":[],"error":{"code":"UPSTREAM_ERROR"}}""" })
@@ -135,7 +135,7 @@ public static class FilmHomeTests
                 """);
             runtime.Intercept = (_, _, _) => Task.FromResult(FilmRuntimeProbe.Ok(entry));
             var page = (FilmHomePage)await source.LoadAsync(section, 0, 12, default);
-            Check(page.Count == 3 && page.Cache?.Status != "fresh",
+            Check(page.Count == 2 && page.Cache?.Status != "fresh",
                 "unconsumed auxiliary fields do not gate the actual list or turn an unknown cache state into fresh");
             if (page.Cache is { } unknown)
                 Check(unknown.Status == "future-state" && unknown.ErrorCode == "UPSTREAM_ERROR",
@@ -151,12 +151,105 @@ public static class FilmHomeTests
         runtime.Intercept = (_, _, _) => Task.FromResult(FilmRuntimeProbe.Ok(
             JsonSerializer.Deserialize<JsonElement>("""{"value":{"items":[null,{"title":[]}]},"cache":null}""")));
         await Failure(() => source.LoadAsync(section, 0, 12, default), "INVALID_RESPONSE");
+        foreach (string invalid in new[]
+        {
+            """{"title":"缺少身份"}""",
+            """{"title":"缺少目标","businessId":"douban:movie:300"}""",
+            """{"title":"非法目标","businessId":"douban:movie:300","playbackTarget":{"id":"douban:movie:300","kind":"invalid","title":"非法目标"}}"""
+        })
+        {
+            var healthy = raw.GetProperty("items")[0];
+            runtime.Intercept = (_, _, _) => Task.FromResult(FilmRuntimeProbe.Ok(
+                JsonSerializer.Deserialize<JsonElement>($$$"""{"value":{"items":[{{{invalid}}},{{{healthy.GetRawText()}}}]}}""")));
+            var isolated = await source.LoadAsync(section, 0, 12, default);
+            Check(isolated.Count == 1 && isolated[0].Id == "douban:movie:100",
+                "bad business identity or playback target is isolated without fabricating a fallback");
+            runtime.Intercept = (_, _, _) => Task.FromResult(FilmRuntimeProbe.Ok(
+                JsonSerializer.Deserialize<JsonElement>($$$"""{"value":{"items":[{{{invalid}}}]}}""")));
+            await Failure(() => source.LoadAsync(section, 0, 12, default), "INVALID_RESPONSE");
+        }
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
         int before = runtime.Calls.Count;
         try { await source.LoadAsync(section, 0, 12, cancelled.Token); throw new InvalidOperationException("Expected cancellation"); }
         catch (OperationCanceledException) { }
         Check(runtime.Calls.Count == before, "cancelled consumers do not admit another runtime read");
+    }
+
+    private static async Task RuntimeRows()
+    {
+        await using var upstream = new RuntimeHttpClientTests.Server();
+        await using var host = await FilmMetadataRuntimeTests.RuntimeHost.OpenAsync(
+            TestWorkspace.DataPath("film-home", Guid.NewGuid().ToString("N")));
+        await host.Metadata.SaveDoubanSettingsAsync(new Dictionary<string, object?> { ["apiBase"] = upstream.BaseUrl });
+        await host.WaitSettingsAsync("douban");
+        await using var module = new FilmCapability(new DoubanFilmHomeSource(host.Client));
+        var errors = new List<string>();
+        module.OperationFailed += (_, message) => errors.Add(message);
+        var navigation = module.NavigateAsync(FilmCapability.HomeRoute, default);
+        for (int index = 0; index < FilmSectionDefinition.Home.Count; index++)
+        {
+            await using var exchange = await upstream.AcceptAsync();
+            var address = new Uri("http://fixture.invalid" + exchange.Path);
+            var query = address.Query.TrimStart('?').Split('&').Select(part => part.Split('=', 2))
+                .ToDictionary(pair => Uri.UnescapeDataString(pair[0]),
+                    pair => Uri.UnescapeDataString(pair[1].Replace("+", " ", StringComparison.Ordinal)));
+            var definition = FilmSectionDefinition.Home.Single(section =>
+                address.AbsolutePath == "/rexxar/api/v2/subject/recent_hot/" + section.Kind &&
+                query["category"] == section.Category && query["type"] == section.Type);
+            Check(exchange.Method == "GET" && query.Count == 4 && query["start"] == "0" && query["limit"] == "12",
+                "all four home sections use the actual Douban recent_hot contract");
+            await exchange.ReplyAsync(JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                items = new object[]
+                {
+                    new { title = "缺少作品身份" },
+                    new { id = 100, type = definition.Kind, title = "第一部", marker = "来源原字段",
+                        pic = new { normal = "https://img3.doubanio.com/view/photo/s_ratio_poster/public/p100.jpg" },
+                        rating = new { value = 8.6 } },
+                    new { id = "not-a-metadata-id", type = definition.Kind, title = "非法作品身份" },
+                    new { id = "200", type = definition.Kind, title = "第二部", rating = new { value = "9.0" } }
+                }
+            }));
+        }
+        await navigation;
+        foreach (var section in module.Sections)
+        {
+            string kind = section.Definition.Kind;
+            var entry = await host.FilmAsync("data.metadata.entry", new
+            {
+                provider = "douban", path = "/rexxar/api/v2/subject/recent_hot/" + kind,
+                query = new { start = 0, limit = 12, category = section.Definition.Category, type = section.Definition.Type }
+            });
+            var rows = entry.GetProperty("value").GetProperty("items");
+            Check(rows.GetArrayLength() == 4 && !rows[0].TryGetProperty("businessId", out _) &&
+                !rows[2].TryGetProperty("playbackTarget", out _) &&
+                rows[1].GetProperty("id").ValueKind == JsonValueKind.Number &&
+                rows[3].GetProperty("id").ValueKind == JsonValueKind.String,
+                "the real Node owner keeps original unidentifiable rows and projects numeric and string metadata identities");
+            Check(section.State == FilmHomeSectionState.Ready && section.Items.Count == 2 &&
+                section.Items[0].Id == $"douban:{kind}:100" && section.Items[1].Id == $"douban:{kind}:200" &&
+                section.Items[0].PlaybackContext?.Target is { MetadataProvider: "douban", MetadataId: "100" } target &&
+                target.Kind == kind && section.Items[0].PlaybackContext!.Metadata!.Value.GetProperty("marker").GetString() == "来源原字段" &&
+                section.Items[0].Poster == "/v1/douban/images/view/photo/s_ratio_poster/public/p100.jpg" &&
+                section.Items[0].Score == "8.6" && section.Items[1].Score == "9",
+                "native home sections retain only real targets, original metadata, rewritten images and both score formats");
+        }
+        Check(errors.Count == 0 && !upstream.HasConnection, "healthy sections finish without errors and repeated reads use the Node cache");
+        var movie = module.Sections[0];
+        var retained = movie.Items[0];
+        var refresh = module.RefreshSectionAsync(movie);
+        await using (var exchange = await upstream.AcceptAsync())
+            await exchange.ReplyAsync(JsonSerializer.SerializeToUtf8Bytes(new { items = new[] { new { title = "缺少作品身份" } } }));
+        await refresh;
+        Check(movie.CanRetry && ReferenceEquals(retained, movie.Items[0]) && errors.SequenceEqual(["栏目加载失败"]),
+            "a nonempty all-invalid runtime list still fails and preserves the successful snapshot");
+        var retry = module.RetrySectionAsync(movie);
+        await using (var exchange = await upstream.AcceptAsync())
+            await exchange.ReplyAsync(JsonSerializer.SerializeToUtf8Bytes(new { items = Array.Empty<object>() }));
+        await retry;
+        Check(movie.State == FilmHomeSectionState.Ready && movie.Items.Count == 0 && !movie.CanRetry && errors.Count == 1,
+            "a real empty list is distinct from a malformed nonempty list");
     }
 
     private static async Task IndependentSections()
@@ -256,10 +349,15 @@ public static class FilmHomeTests
             var query = input.GetProperty("query");
             int start = FilmJson.Integer(query, "start")!.Value;
             int limit = FilmJson.Integer(query, "limit")!.Value;
+            string kind = FilmJson.Text(input, "path").EndsWith("/tv", StringComparison.Ordinal) ? "tv" : "movie";
             return Task.FromResult(FilmRuntimeProbe.Ok(FilmJson.Encode(new
             {
                 value = new { items = Enumerable.Range(start + 1, empty ? 0 : limit).Select(id => new
-                { id, title = "影片 " + id, pic = new { normal = "/v1/douban/images/" + id + ".jpg" } }) },
+                {
+                    id, title = "影片 " + id, pic = new { normal = "/v1/douban/images/" + id + ".jpg" },
+                    businessId = $"douban:{kind}:{id}", playbackTarget = new
+                    { id = $"douban:{kind}:{id}", kind, title = "影片 " + id, metadataProvider = "douban", metadataId = id.ToString() }
+                }) },
                 completeness = "partial", fetchedAt = 1000, expiresAt = 2000,
                 cache = new { status = stale ? "stale" : "fresh", error = stale && start == 0 ? new { code = "UPSTREAM_ERROR" } : null,
                     components = new { } }
@@ -592,11 +690,16 @@ public static class FilmHomeTests
         if (!value) throw new InvalidOperationException(message);
     }
 
-    private const string HomePayload = """
+    private static string HomePayload(string kind) => $$"""
                 {
                   "items": [
                     {
                       "id": 100,
+                      "businessId": "douban:{{kind}}:100",
+                      "playbackTarget": {
+                        "id": "douban:{{kind}}:100", "kind": "{{kind}}", "title": "第一部",
+                        "metadataProvider": "douban", "metadataId": "100"
+                      },
                       "title": "第一部",
                       "pic": {
                         "normal": "/v1/douban/images/view/photo/s_ratio_poster/public/p100.jpg",
@@ -607,6 +710,11 @@ public static class FilmHomeTests
                     { "id": "skip", "title": "   ", "pic": { "normal": "https://img1.doubanio.com/skip.jpg" } },
                     {
                       "id": "200",
+                      "businessId": "douban:{{kind}}:200",
+                      "playbackTarget": {
+                        "id": "douban:{{kind}}:200", "kind": "{{kind}}", "title": "第二部",
+                        "metadataProvider": "douban", "metadataId": "200"
+                      },
                       "title": "第二部",
                       "pic": { "large": "https://img2.doubanio.com/large.jpg" },
                       "rating": { "value": 0 }
