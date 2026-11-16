@@ -26,7 +26,7 @@ Node 统一处理结果的传输表示：正常文本保持 JSON 字符串，含
 
 ## 猫源与公共宿主
 
-契约见 [cat.script.v2 原生来源意图](../runtime/cat-script-runtime.md#原生来源意图注入)。只有本地／网络，无内置猫源和版本副标题。`FilmSourceService(transport:storeFactory:settingsDocument:runtimeSourceRoot:observeConnection:)` 读取原生来源意图，runtimeSourceRoot 指向同一运行器的 `cat` 根，App 的 observeConnection 注入 `RuntimeSession.connectionIfStarted()`。本地通过系统文件选择及既有 `ImportedFileReader` 读取严格 UTF-8 安全快照（32 MiB 文件读取资源边界，实际字节计数与修改检测），按 SHA-256 排他原子交接至 `cat/sources/<hash>.js`；意图只写 `localHash`，不保存 picker URL、内联源码或另一安装索引。运行器源码上限仍为 16 MiB；网络输入由 Node 下载。
+契约见 [cat.script.v2 原生来源意图](../runtime/cat-script-runtime.md#原生来源意图注入)。只有本地／网络，无内置猫源和版本副标题。`FilmSourceService(transport:storeFactory:settingsDocument:runtimeSourceRoot:observeConnection:)` 读取原生来源意图，runtimeSourceRoot 指向同一运行器的 `cat` 根，App 的 observeConnection 注入 `RuntimeSession.connectionIfStarted()`。本地通过系统文件选择及既有 `ImportedFileReader` 读取严格 UTF-8 安全快照（16 MiB 文件读取资源边界，实际字节计数与修改检测），按 SHA-256 排他原子交接至 `cat/sources/<hash>.js`；意图只写 `localHash`，不保存 picker URL、内联源码或另一安装索引。运行器源码上限仍为 16 MiB；网络输入由 Node 下载。
 
 页头右侧的导入菜单提供本地／网络导入，列表工具行仅保留搜索。导入受页面可见性及忙碌状态约束；本地导入进入编辑页，网络导入浮层保留原列表，取消不提交。现有选择目标的界面保留：选择已有项时保存同一 ID 的来源替换，不另建安装。列表显示名称、启停、运行及更新状态，并提供直接编辑；低频动作收进单一更多菜单。未知 `updateState` 按原文字展示，不作为整批 status 失败。类型和修改时间放在详情，详情保留启用开关、编辑、更新和单实例重启；删除通过选择模式勾选后批量确认。本地更新重新选文件，网络更新重新下载。首次来源保存默认启用；停用保留本地清单但禁止重启／检测；父源删除清除关联本地视频、配置与删除记录。时间取实际更新时间，否则导入时间；失败、无变化、重启不改时间，失败更新不冒充新版本就绪。
 
@@ -58,7 +58,7 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 
 `FilmPlaybackLibrary` 只投影当前 Manual 或屏蔽页面所需的列表；偏好走独立设置入口。Manual 选影片只读取历史的 targetId/title，不校验位置、时长或时间；无法读取这两个字段的辅助历史不进入选项。当前列表可分离坏项不阻断健康兄弟，真实空列表有效，坏根／列表形状错误及非空但全部不可用仍报错。读取投影不回写资料，删除仍提交原始 typed block 身份，保存失败不发布。
 
-播放快照和设置只投影可识别的排序维度／网盘偏好，不执行未知值或替它补默认排序。辅助 cache／supplement 不阻断主资料和会话：返回的缓存说明无法识别时保守按 non-fresh 处理，不解锁 stale 限制；现有组件完成证据独立保留。无法消费的补充资料不参与展示，不代替主身份。session、sequence、attempt／resource 及真实执行材料继续按原契约消费。
+偏好通过 `FilmPlaybackSettingsModel.loadPreferences/savePreferences` 独立读取和提交原生文档，成功 CAS 才发布保存值，不经 HTTP `settings.get`／`settings.set` 写回。读取只投影可识别的排序维度／网盘偏好，不执行未知值或替它补默认排序。未编辑某组排序时，保存其他字段保留该组原始数组；显式重排或恢复该组才替换，重排规则维度须完整，编辑网盘顺序时补齐其余已知平台。原生播放快照不复制或解码 `preferences`，媒体准入仍读取真实 `attempt.prepareOnly`。辅助 cache／supplement 不阻断主资料和会话：返回的缓存说明无法识别时保守按 non-fresh 处理，不解锁 stale 限制；现有组件完成证据独立保留。无法消费的补充资料不参与展示，不代替主身份。session、sequence、attempt／resource 及真实执行材料继续按原契约消费。
 
 通用设置的缓存管理提供豆瓣、TMDB、两者三个动作，由 `FilmPlaybackSettingsModel` 调用运行器 `data.invalidate`，不直接清文件、不重启或清用户资料；两项都结算后才解除 busy，部分失败仍报告失败。它不触发配置保存或自动搜索。
 

@@ -301,6 +301,7 @@ final class MusicPlaybackControlsView: UIView {
         durationLabel.frame = CGRect(x: width - 96, y: seekTop + 28, width: 80, height: 18)
         let metrics = miniLayout
         let frame = metrics.compactControlFrame(width: Double(width))
+            .offsetBy(dx: 0, dy: height - CGFloat(metrics.compactHeight))
         compactPlay.frame = CGRect(x: frame.minX, y: frame.minY, width: 44, height: 44)
         compactQueue.frame = CGRect(x: frame.minX + 44, y: frame.minY, width: 44, height: 44)
         // Transport follows the same moving top edge as metadata and progress.

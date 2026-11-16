@@ -27,6 +27,7 @@ public static class FilmTrayPlaybackTests
         yield return Test("typed native clock and commands survive tray and exit joins output then receipt", NativeExit);
         yield return Test("failed exit preparation remains visible and cancellation keeps the typed Film owner", FailedExit);
         yield return Test("real system media settings fence disabled Film startup and queued requests across restart", SystemMediaSettings);
+        yield return Test("initial system media update failure releases the backend once and detaches the App projection", SystemMediaStartupFailure);
         yield return Test("system media re-enable publishes the current typed native Film clock", NativeSystemMediaClock);
         yield return Test("system pause and resume never start a page selection without accepted media", SystemTransport);
         yield return Test("independent audio system route ignores paused video clock changes", IndependentAudioRoute);
@@ -37,6 +38,48 @@ public static class FilmTrayPlaybackTests
     private static TaskCompletionSource Gate() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static async Task Pump() => await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
     private static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+
+    private static async Task SystemMediaStartupFailure()
+    {
+        await using var film = new FilmCapability(new HomeSource());
+        var music = new MusicPort(); var video = new MusicPort();
+        var backend = new Backend();
+        var window = new Window();
+        static Delegate[] Subscriptions(object source) =>
+            (NativeMediaFixtures.Field(source, nameof(INotifyPropertyChanged.PropertyChanged)) as Delegate)?.GetInvocationList() ?? [];
+        var musicSubscriptions = Subscriptions(music);
+        var videoSubscriptions = Subscriptions(video);
+        var filmSubscriptions = Subscriptions(film);
+        var failure = new InvalidOperationException("SYSTEM_MEDIA_INITIAL_UPDATE_FAILED");
+        backend.Updating = () =>
+        {
+            Check(Subscriptions(music).Length == musicSubscriptions.Length + 1 &&
+                Subscriptions(video).Length == videoSubscriptions.Length + 1 &&
+                Subscriptions(film).Length == filmSubscriptions.Length + 1 && backend.Subscribers == 1,
+                "the initial Update fails only after the actual App projection and session have attached");
+            throw failure;
+        };
+        bool rejected = false;
+        try
+        {
+            await using var attachment = new AppSystemMediaAttachment(window, music, video, film, () => "music", backend,
+                [new("music"), new("film", Kind: SystemPlaybackKind.Video)]);
+        }
+        catch (InvalidOperationException error) when (ReferenceEquals(error, failure)) { rejected = true; }
+        finally { window.Close(); }
+        Check(rejected && backend.Updates == 1 && backend.Disposals == 1 && backend.Subscribers == 0,
+            "construction preserves the initial failure and the window session owns exactly one backend disposal");
+        Check(Subscriptions(music).SequenceEqual(musicSubscriptions) &&
+            Subscriptions(video).SequenceEqual(videoSubscriptions) && Subscriptions(film).SequenceEqual(filmSubscriptions),
+            "failed App construction removes all three projection subscriptions without removing existing listeners");
+        backend.Updating = null;
+        music.Publish(); video.Publish();
+        backend.Request(SystemPlaybackCommand.Play);
+        await Pump();
+        Check(backend.Updates == 1 && backend.Disposals == 1 &&
+            music.FallbackCalls.Count == 0 && video.FallbackCalls.Count == 0,
+            "later source changes and system requests cannot revive the failed attachment");
+    }
 
     private static async Task SystemTransport()
     {
@@ -600,6 +643,7 @@ public static class FilmTrayPlaybackTests
     {
         private EventHandler<SystemPlaybackRequest>? requested;
         internal SystemPlaybackState? Last;
+        internal Action? Updating;
         internal int Updates, Disabled, Disposals;
         internal int Subscribers => requested?.GetInvocationList().Length ?? 0;
         public event EventHandler<SystemPlaybackRequest>? Requested { add => requested += value; remove => requested -= value; }
@@ -614,6 +658,7 @@ public static class FilmTrayPlaybackTests
             Check(Disposals == 0, "a retired backend must not be updated");
             Updates++;
             Last = state;
+            Updating?.Invoke();
         }
         public void Disable() => Disabled++;
         public void Dispose() => Disposals++;

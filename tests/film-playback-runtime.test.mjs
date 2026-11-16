@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { connectFilmPlayback, createAppRuntime, createRuntimeClient,
   createCatScriptModule, createNeteaseTokenModule } from '../apps/runtime/entry.mjs';
+import { identity, sourceIdentity } from '../packages/film-playback/src/identity.js';
 
 const root = fileURLToPath(new URL('../tmp/test-results/film-playback/http/', import.meta.url));
 const deferred = () => {
@@ -27,7 +28,11 @@ async function until(work) {
 const okay = reply => { assert.equal(reply.ok, true, JSON.stringify(reply)); return reply.value; };
 const source = { key: 'film-source', engine: 'cat', installationId: 'script', siteId: 'fixture',
   generation: 1, name: 'Fixture source' };
-const movie = { id: 'film:fixture', kind: 'movie', title: 'Fixture Film' };
+const movie = { id: 'tmdb:movie:17', kind: 'movie', title: 'Fixture Film',
+  metadataProvider: 'tmdb', metadataId: 17 };
+const rawTarget = detailId => ({ id: `source:${identity(sourceIdentity(source), detailId)}`,
+  kind: 'source', title: movie.title, source: { key: source.key, engine: source.engine,
+    installationId: source.installationId, siteId: source.siteId, detailId } });
 async function setup(t, { invoke, tokenProvider, metadata } = {}) {
   mkdirSync(root, { recursive: true });
   const directory = mkdtempSync(join(root, 'case-'));
@@ -87,7 +92,7 @@ async function setup(t, { invoke, tokenProvider, metadata } = {}) {
   const snapshot = async id => okay(await rpc('session.snapshot', { sessionId: id }));
   const command = async (id, action, input = {}) => okay(await rpc('session.command', { sessionId: id, action, ...input }));
   const open = async (input = {}) => {
-    const value = okay(await rpc('session.open', { platform: 'test', target: movie, sources: [source], ...input }));
+    const value = okay(await rpc('session.open', { platform: 'test', target: rawTarget(0), sources: [source], ...input }));
     await until(async () => (await snapshot(value.sessionId)).stage !== 'loading');
     return value.sessionId;
   };
@@ -136,7 +141,7 @@ test('film HTTP snapshots omit absent entrySurface and preserve supplied entry p
   for (const entrySurface of [undefined, 'home', 'search']) {
     const id = await f.open(entrySurface === undefined ? {} : { entrySurface });
     const value = await f.snapshot(id);
-    assert.deepEqual(value.entryTarget, movie);
+    assert.deepEqual(value.entryTarget, rawTarget(0));
     assert.equal(value.entryResolution, null);
     assert.equal(Object.hasOwn(value, 'entrySurface'), entrySurface !== undefined);
     if (entrySurface !== undefined) assert.equal(value.entrySurface, entrySurface);
@@ -153,7 +158,7 @@ test('film HTTP rejects a supplied empty entry group even with an exact resume t
     { ...empty, members: [{ sourceKey: source.key, detailId: 0 }] }]) {
     const reply = await f.rpc('session.open', { platform: 'test', target: empty, resumeTarget, sources: [source] });
     assert.equal(reply.ok, false);
-    assert.equal(reply.code, 'SOURCE_NOT_FOUND');
+    assert.equal(reply.code, 'INVALID_REQUEST');
   }
   assert.deepEqual(f.calls, []);
   assert.deepEqual(f.reads, []);
@@ -238,13 +243,14 @@ test('film HTTP no-match seed reentry restores exact group and hints without rep
   const episode = (await f.snapshot(first)).browsing.episodes[0];
   await f.command(first, 'select.candidate', { candidateId: episode.candidateId });
   const attempt = await f.pending(first), saved = await f.snapshot(first);
+  const resumeTarget = okay(await f.rpc('data.target', { target: saved.target, sources: [source] }));
   okay(await f.rpc('session.release', { sessionId: first }));
   const before = f.calls.length;
-  const second = await f.open({ platform: 'ios', target: seed, metadata: seedMetadata, resumeTarget: saved.target,
+  const second = await f.open({ platform: 'ios', target: seed, metadata: seedMetadata, resumeTarget,
     resultHints: [{ sourceKey: source.key, items: [{ id: row.source.detailId, title: row.title }] }] });
   const restored = await f.snapshot(second);
   assert.deepEqual(restored.entryTarget, seed);
-  assert.deepEqual(restored.target, saved.target);
+  assert.deepEqual(restored.target, resumeTarget);
   assert.equal(restored.entryResolution, 'unmatched');
   assert.deepEqual(restored.metadata, seedMetadata);
   assert.deepEqual(restored.sources.map(value => value.source), [row.source]);
@@ -295,7 +301,7 @@ test('film HTTP source discovery, exact list selection, private first-read routi
 });
 
 test('SSE disconnect and reconnect without credentials observe one live session without stopping playback or leaking receipts', async t => {
-  const f = await setup(t), id = await f.open();
+  const f = await setup(t), id = await f.open({ target: rawTarget(0) });
   const external = { ...f, headers: () => ({
     Host: 'external.example.invalid', Origin: 'https://browser.example.invalid',
   }) };
@@ -321,7 +327,7 @@ test('SSE disconnect and reconnect without credentials observe one live session 
 });
 
 test('source display changes preserve live media, but actual generation changes revoke it even if the mutation receipt fails', async t => {
-  const f = await setup(t), id = await f.open({ platform: 'windows' });
+  const f = await setup(t), id = await f.open({ platform: 'windows', target: rawTarget(0) });
   const attempt = await f.pending(id);
   await f.command(id, 'media.started', { attemptId: attempt.id });
   const receipt = okay(await f.rpc('session.attempt', { sessionId: id, attemptId: attempt.id }));
@@ -409,7 +415,7 @@ test('film SSE and requests coexist with token success, cancellation, SDK failur
         return { list: [{ vod_id: 'parallel', vod_name: 'Parallel Film' }], pagecount: 1 };
       },
     });
-    const id = await f.open({ platform: 'windows' }), attempt = await f.pending(id);
+    const id = await f.open({ platform: 'windows', target: rawTarget(0) }), attempt = await f.pending(id);
     await f.command(id, 'media.started', { attemptId: attempt.id });
     events = await observation(f, id);
     let previous = await events.next();
@@ -529,7 +535,7 @@ test('real Cat Worker local media uses its mapped listener, stays cold during pr
       installationId: 'script', generation: state.generation, siteId: 'fixture', operation: 'home',
     }));
     const rpc = (operation, params) => client.call(`film.${operation}`, params);
-    const opened = okay(await rpc('session.open', { platform: 'test', target: movie, sources: [actualSource] }));
+    const opened = okay(await rpc('session.open', { platform: 'test', target: rawTarget('fixture'), sources: [actualSource] }));
     const id = opened.sessionId;
     events = await observation({ app, headers: () => ({
       'x-meow-request-id': randomUUID(),
@@ -657,7 +663,7 @@ test('real Cat Worker manifest media preserves DASH BaseURL and xml:base through
       installationId: 'script', generation: state.generation, siteId: 'fixture', operation: 'home',
     }));
     const before = await readState(), rpc = (operation, params) => client.call(`film.${operation}`, params);
-    const id = okay(await rpc('session.open', { platform: 'test', target: movie,
+    const id = okay(await rpc('session.open', { platform: 'test', target: rawTarget('fixture'),
       sources: [{ ...source, generation: state.generation }] })).sessionId;
     events = await observation({ app, headers: () => ({
       'x-meow-request-id': randomUUID(),
@@ -804,7 +810,7 @@ test('real Cat Worker manifest media keeps HLS free titles verbatim and never re
       installationId: 'script', generation: state.generation, siteId: 'fixture', operation: 'home',
     }));
     const before = await readState(), rpc = (operation, params) => client.call(`film.${operation}`, params);
-    const id = okay(await rpc('session.open', { platform: 'test', target: movie,
+    const id = okay(await rpc('session.open', { platform: 'test', target: rawTarget('fixture'),
       sources: [{ ...source, generation: state.generation }] })).sessionId;
     events = await observation({ app, headers: () => ({
       'x-meow-request-id': randomUUID(),
@@ -953,7 +959,8 @@ async function catManifestFixture(t, { document, format, contentType, encoding, 
     installationId: 'script', generation: state.generation, siteId: 'fixture', operation: 'home',
   }));
   const before = await readState(), rpc = (operation, params) => client.call(`film.${operation}`, params);
-  const target = platform === 'ios' ? { ...movie, id: 'tmdb:movie:42', metadataProvider: 'tmdb', metadataId: 42 } : movie;
+  const target = platform === 'ios' ? { ...movie, id: 'tmdb:movie:42', metadataProvider: 'tmdb', metadataId: 42 }
+    : rawTarget('fixture');
   const id = okay(await rpc('session.open', { platform, target,
     sources: [{ ...source, generation: state.generation }] })).sessionId;
   events = await observation({ app, headers: () => ({

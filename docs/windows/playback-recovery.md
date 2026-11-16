@@ -4,7 +4,7 @@
 
 共同切换及故障意图见[歌曲资料与智能播放](../common/music/smart-playback.md#准备提交与故障)。
 
-- 音乐 `NativeAudioPlayback` 是独立音乐播放 owner；视频仍由 `NativePlayback` 管理。两端复用中性 occurrence／continuation／read lease 契约，不复用解码器或输出。手动换源可临时准备第二个不输出的音乐 PCM 实例。播放内核只拥有原生输入、播放状态、作用域、重开及交接能力，不选择歌曲、平台、录音、质量或脚本实例。
+- 音乐 `NativeAudioPlayback` 是独立音乐播放 owner；电影由 `FilmPlayback` 管理，经 App 输出协调器互斥准入。本文的 continuation／read lease 和音乐恢复不作为电影业务接口，两内核不复用解码器或输出。手动换源可临时准备第二个不输出的音乐 PCM 实例。播放内核只拥有原生输入、播放状态、作用域、重开及交接能力，不选择歌曲、平台、录音、质量或脚本实例。
 - 音乐能力拥有账号、质量策略、兼容录音、内置与网络源候选及恢复预算。恢复决定必须在能力层完成，再把已经核验的 HTTP(S) 输入或授权 read lease 交给音乐播放 owner。
 - System Media 只转发当前 owner 的播放命令，不创建第二播放器，也不持有恢复策略。
 

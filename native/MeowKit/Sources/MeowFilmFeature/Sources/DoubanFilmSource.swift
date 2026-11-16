@@ -109,11 +109,12 @@ public struct DoubanFilmSource: FilmCategorySource {
             guard let row = row as? [String: Any] else { continue }
             let title = text(row["title"])
             let id = scalar(row["id"])
-            guard !title.isEmpty, !id.isEmpty, identities.insert(id).inserted else { continue }
-            let seed = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])
-            let fields = try RuntimeJSON.decode(seed).filmRequiredObject()
-            let businessID = try fields.filmString("businessId")
-            let target = try FilmPlaybackTarget(fields.filmValue("playbackTarget"))
+            guard !title.isEmpty, !id.isEmpty else { continue }
+            guard let seed = try? JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]),
+                  let fields = try? RuntimeJSON.decode(seed).filmRequiredObject(),
+                  let businessID = try? fields.filmString("businessId"),
+                  let target = try? FilmPlaybackTarget(fields.filmValue("playbackTarget")),
+                  identities.insert(id).inserted else { continue }
             let pic = row["pic"] as? [String: Any]
             let cover = row["cover"] as? [String: Any]
             let address = [pic?["normal"], pic?["large"], cover?["url"],
@@ -126,6 +127,7 @@ public struct DoubanFilmSource: FilmCategorySource {
                                   score: score(row["rating"]), subtitle: text(row["card_subtitle"]),
                                   metadataSeed: seed, businessID: businessID, playbackTarget: target))
         }
+        guard rows.isEmpty || !items.isEmpty else { throw FilmHomeError.invalidResponse }
         return items
     }
 

@@ -6,8 +6,12 @@
 | --- | --- |
 | `NOTICE.md` | 按上游项目列出来源、固定提交、版权方、许可及改编部分 |
 | `Apache-2.0.txt` | iWebPlus / iWebPlayer、LX Music Desktop |
+| `GPL-2.0-only.txt` | Windows 电影内核 FreeType 的 GPL-2.0-or-later 选项，文件名不限制其 “or later” 授权 |
 | `GPL-3.0-only.txt` | 本应用、MeowMusic、QQMusicApi、固定源码 KSPlayer 核心、FFmpegKit 源码桥与启用 GPL 滤镜的 iOS FFmpeg |
 | `LGPL-2.1-only.txt`、`LGPL-3.0-only.txt`、`FFmpeg-LICENSE.md`、`FFmpeg-IJG-NOTICE.txt` | FFmpeg 上游许可正文与来源声明，实际构建许可见 NOTICE |
+| `NAudio-MIT.txt`、`FFmpeg.AutoGen-MIT.txt`、`FFmpeg-audio-NOTICES.txt` | Windows 音频托管包及两端独立 FFmpeg 9.0.1 音频闭包的附加声明 |
+| `GCC-Runtime-Library-Exception-3.1.txt`、`MinGW-w64-runtime-NOTICE.txt`、`winpthreads-LICENSE.txt` | Windows 音频 GCC 支持库与音频／影片 MinGW、winpthreads 工具链运行库条款，GCC 的 GPL3 正文复用既有文件 |
+| `FilmKernel-THIRD-PARTY-NOTICES.txt`、`libxml2-MIT.txt` | Windows 电影静态依赖、LLVM-MinGW 和 libxml2 的现行声明，复用共享 GNU／Apache 正文 |
 | `api-enhanced-MIT.txt` | NeteaseCloudMusicApiEnhanced/api-enhanced |
 | `KuGouMusicApi-MIT.txt` | MakcRe/KuGouMusicApi |
 | `iwebplus-NOTICE.txt`、`meowmusic-NOTICE.txt` | 上游 NOTICE 原文 |
@@ -34,7 +38,7 @@ runtime-bridge／script-host 及其运行依赖的原始声明由公共打包器
 
 公共来源运行时的 npm 依赖 `acorn@8.19.0`、`fontoxpath@3.34.0`、`linkedom@0.18.14`、`iconv-lite@0.6.3` 及其锁定的传递依赖随 runtime 闭包打包；打包器保留每个包的 `package.json` 与原始许可文件。完整包名、版本和许可类型见 `NOTICE.md`，实际发布闭包以 `runtime-manifest.json` 为准。
 
-libVLC、.NET 及其他传递组件的发行义务需单独核对。清单中的 `redistributionPermissionVerified` 始终为 false，文件哈希或许可清单不等于分发授权。
+.NET、音频与影片静态／共享依赖及其他传递组件的发行义务需单独核对。清单中的 `redistributionPermissionVerified` 始终为 false，文件哈希或许可清单不等于分发授权。
 
 新增或删除 Windows 使用的许可文件时，同步修改 `package-licenses.mjs` 的清单与 `tests/windows-licenses.test.mjs`；仅 iOS 使用的许可同步工程资源与 iOS 构建输入策略。
 

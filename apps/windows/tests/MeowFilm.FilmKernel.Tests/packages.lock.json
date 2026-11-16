@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0-windows7.0": {
+      "meowfilm.core": {
+        "type": "Project"
+      },
+      "meowfilm.media": {
+        "type": "Project",
+        "dependencies": {
+          "MeowFilm.Core": "[1.0.0, )"
+        }
+      }
+    },
+    "net10.0-windows7.0/win-x64": {}
+  }
+}

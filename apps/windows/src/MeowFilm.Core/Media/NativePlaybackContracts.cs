@@ -27,7 +27,6 @@ public sealed class NativePlaybackContinuation
     public NativePlaybackScope Scope { get; }
     public double PositionSeconds { get; }
     public CancellationToken Revoked { get; }
-    public NativePlaybackScope? ReopenedScope { get; internal set; }
     internal bool Used;
 }
 

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createSourceRuntimeModule } from '../apps/runtime/modules/source-runtime.mjs';
 import { moduleHttp } from './runtime-http-fixture.mjs';
+import { deferred } from '../packages/runtime-bridge/test/http-fixture.js';
 
 const base = {
   bookSourceName: 'Reader compatibility', bookSourceUrl: 'https://books.invalid/',
@@ -132,6 +133,94 @@ test('concurrent books import and write back their own variables without mixing 
   assert.equal(b.content, 'B:B');
   assert.equal(JSON.parse(a.chapter.variable).seen, 'A:https://books.invalid/A');
   assert.equal(JSON.parse(b.chapter.variable).seen, 'B:https://books.invalid/B');
+});
+
+test('failed content variable import performs no HTTP and does not affect a concurrent book or recovery', async t => {
+  const entered = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  const { rpc, item, call, requests } = await fixture(t, base, async input => {
+    if (new URL(input.url).pathname === '/held') {
+      entered.resolve();
+      await release.promise;
+    }
+    return '<article>Body</article>';
+  });
+  const payload = {
+    book: { bookUrl: 'https://books.invalid/book', variable: '{"owner":"active"}' },
+    chapter: { chapterUrl: 'https://books.invalid/held', variable: '{"row":"active"}' },
+  };
+  const active = call('content', payload);
+  await entered.promise;
+  for (const field of ['book', 'chapter']) {
+    assert.deepEqual(await rpc('library.invoke', {
+      installationId: item.installationId, revision: item.revision, action: 'content',
+      payload: { chapterUrl: 'https://books.invalid/invalid', [field]: { variable: '[1]' } },
+    }), { ok: false, contract: 'source.runtime.v2', code: 'SOURCE_FAILURE' });
+    assert.deepEqual(requests, ['/held']);
+  }
+  release.resolve();
+  const result = await active;
+  assert.deepEqual(JSON.parse(result.chapter.variable), { owner: 'active', row: 'active' });
+  const recovered = await call('content', {
+    chapterUrl: 'https://books.invalid/recovered', book: { variable: '{"owner":"recovered"}' },
+  });
+  assert.deepEqual(JSON.parse(recovered.chapter.variable), { owner: 'recovered' });
+  assert.deepEqual(requests, ['/held', '/recovered']);
+});
+
+test('Cookie-only login RPC ignores Reader variables while a script read still imports them', async t => {
+  const { call, requests } = await fixture(t, base, {});
+  assert.deepEqual(await call('loginStatus', {
+    book: { variable: '[1]' }, chapter: { variable: [null] },
+  }), { loggedIn: false, cookiePresent: false });
+  assert.deepEqual(requests, []);
+  const checked = await fixture(t, { ...base, loginCheckJs: '@js:java.get("loggedIn")' }, { '/': 'status' });
+  assert.deepEqual(await checked.call('loginStatus', { book: { variable: '{"loggedIn":true}' } }),
+    { loggedIn: true, value: true });
+  assert.deepEqual(await checked.rpc('library.invoke', {
+    installationId: checked.item.installationId, revision: checked.item.revision,
+    action: 'loginStatus', payload: { chapter: { variable: '[1]' } },
+  }), { ok: false, contract: 'source.runtime.v2', code: 'SOURCE_FAILURE' });
+});
+
+test('Legado classification RPC retains healthy siblings and reports nonempty all-bad categories', async t => {
+  const healthy = { name: 'One', url: '/one', style: { width: 1 } };
+  const mixed = await fixture(t, { ...base, exploreUrl: [null, healthy, { title: {} }] }, {});
+  assert.deepEqual(await mixed.call('exploreKinds', {}), {
+    kinds: [{ title: 'One', url: '/one', style: { width: 1 } }],
+  });
+  const broken = await fixture(t, { ...base, exploreUrl: [null, { url: [] }] }, {});
+  assert.deepEqual(await broken.rpc('library.invoke', {
+    installationId: broken.item.installationId, revision: broken.item.revision, action: 'exploreKinds',
+    payload: {},
+  }), { ok: false, contract: 'source.runtime.v2', code: 'SOURCE_FAILURE' });
+  const empty = await fixture(t, { ...base, exploreUrl: [] }, {});
+  assert.deepEqual(await empty.call('exploreKinds', {}), { kinds: [] });
+});
+
+test('Legado raw list RPC distinguishes bad JSON roots, real empty lists and explicit no-match selectors', async t => {
+  let body;
+  const { rpc, item, call } = await fixture(t, { ...base,
+    exploreUrl: 'https://books.invalid/list', ruleSearch: {}, ruleExplore: {},
+    ruleToc: { chapterName: '$.name', chapterUrl: '$.chapterUrl' },
+  }, () => body);
+  for (const [action, payload, key] of [
+    ['search', { keyword: 'fixture' }, 'books'],
+    ['explore', { url: 'https://books.invalid/list' }, 'books'],
+    ['toc', { tocUrl: 'https://books.invalid/list' }, 'chapters'],
+  ]) {
+    for (body of ['[{"name":', '{}', 'not JSON']) {
+      assert.deepEqual(await rpc('library.invoke', {
+        installationId: item.installationId, revision: item.revision, action, payload,
+      }), { ok: false, contract: 'source.runtime.v2', code: 'SOURCE_FAILURE' });
+    }
+    body = '[]';
+    assert.deepEqual((await call(action, payload))[key], []);
+    body = '[{"name":"One","bookUrl":"/book","chapterUrl":"/chapter"}]';
+    assert.equal((await call(action, payload))[key][0].name, 'One');
+  }
+  const selected = await fixture(t, base, { '/search': '<article>No matching books</article>' });
+  assert.deepEqual((await selected.call('search', { keyword: 'fixture' })).books, []);
 });
 
 test('java.get falls back to source values only when an invocation has no variable', async t => {

@@ -8,7 +8,7 @@ final class PlaybackListeningFactTests: XCTestCase {
         var state = PlaybackStateMachine()
         let token = state.begin(resource: try .init(id: "listening",
             url: URL(string: "https://media.invalid/not-requested")!, title: "Synthetic"), owner: "music")
-        state.ready(generation: token, duration: 180, ranges: [])
+        state.ready(generation: token, duration: 180)
         _ = state.takeEvents()
         return (state, token)
     }
@@ -113,7 +113,7 @@ final class PlaybackListeningFactTests: XCTestCase {
         state.rateChanged(generation: token, rate: 3, position: 8)
         state.transport(generation: token, state: .playing, rate: 3)
         XCTAssertTrue(state.takeEvents().isEmpty)
-        state.ready(generation: video, duration: 10, ranges: [])
+        state.ready(generation: video, duration: 10)
         _ = state.takeEvents()
         XCTAssertTrue(state.resume())
         state.transport(generation: video, state: .playing, rate: 1.5)
@@ -124,20 +124,25 @@ final class PlaybackListeningFactTests: XCTestCase {
         XCTAssertTrue(played.wantsPlayback)
         XCTAssertEqual(exit.rate, 2, "The new owner's actual rate cannot rewrite the donor's final sample")
     }
-    func testRateAndSmallExternalSeekAreDiscontinuitiesNotNewStarts() throws {
+    func testRateAndSmallSeekAreDiscontinuitiesNotNewStarts() throws {
         var (state, token) = try ready()
         state.transport(generation: token, state: .playing)
         state.progress(generation: token, position: 4)
         _ = state.takeEvents()
         state.rateChanged(generation: token, rate: 2, position: 4)
-        state.timeJumped(generation: token, position: 4.1)
-        let boundaries = state.takeEvents()
+        let rateEvents = state.takeEvents()
+        XCTAssertTrue(state.requestSeek(to: 4.1))
+        let requested = state.takeEvents()
+        XCTAssertEqual(requested.map(\.kind), [.progress])
+        XCTAssertTrue(try XCTUnwrap(requested.first).discontinuity)
+        let seek = try XCTUnwrap(state.takeSeekIfPossible())
+        XCTAssertEqual(state.snapshot.position, 4)
+        state.completeSeek(seek, finished: true, actualPosition: 4.1)
+        let boundaries = rateEvents + state.takeEvents()
         XCTAssertEqual(boundaries.map(\.kind), [.progress, .progress])
         XCTAssertTrue(boundaries.allSatisfy(\.discontinuity))
         XCTAssertTrue(boundaries.allSatisfy { $0.rate == 2 })
         XCTAssertEqual(boundaries.last?.snapshot.position, 4.1)
-        XCTAssertTrue(state.requestSeek(to: 4.2))
-        XCTAssertTrue(try XCTUnwrap(state.takeEvents().first).discontinuity)
     }
     func testNaturalEndEventKeepsActualPositionWhileUISnapshotSettlesAtDuration() throws {
         var (state, token) = try ready()

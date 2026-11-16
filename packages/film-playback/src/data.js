@@ -484,15 +484,16 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       const hint = await recognition.metadata(seed, target.kind, { signal: ownedSignal });
       const response = rawMetadata(await getMetadata(metadataRequest('tmdb', '/3/search/multi',
         { query: hint.query, page: 1 }, 'w500'), { signal: ownedSignal, checkSchedule, refresh }));
-      const candidates = response.results.filter(record => record?.media_type === target.kind);
+      const sameKind = response.results.filter(record => record?.media_type === target.kind);
+      const candidates = sameKind.filter(record =>
+        Number.isSafeInteger(record.id) && record.id > 0 && text(record.title ?? record.name));
+      requireValue(!sameKind.length || candidates.length, 'UPSTREAM_FORMAT');
       const dateField = target.kind === 'movie' ? 'release_date' : 'first_air_date';
       const candidateYear = record => typeof record[dateField] === 'string' && /^\d{4}/.test(record[dateField])
         ? Number(record[dateField].slice(0, 4)) : null;
       const selected = candidates.find(record => hint.year === null || candidateYear(record) === null ||
         candidateYear(record) === hint.year) ?? candidates[0];
       if (!selected) return null;
-      requireValue(Number.isSafeInteger(selected.id) && selected.id > 0 && text(selected.title ?? selected.name),
-        'UPSTREAM_FORMAT');
       const resolved = { id: `tmdb:${target.kind}:${selected.id}`, kind: target.kind,
         title: selected.title ?? selected.name, metadataProvider: 'tmdb', metadataId: selected.id,
         ...(candidateYear(selected) === null && hint.year === null ? {} : { year: candidateYear(selected) ?? hint.year }) };
@@ -500,10 +501,9 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       return { target: resolved, entry };
     });
   }
-  async function metadataSourcesValue(target, supplied, rules, signal, checkSchedule) {
+  async function metadataSourcesValue(target, rules, signal, checkSchedule) {
     if (!target.metadataProvider) return [];
     const primaryRequest = targetRequest(target);
-    if (supplied !== undefined) metadataValue(target.metadataProvider, primaryRequest.path, supplied, 'complete');
     const primary = rawMetadata(await getMetadata(primaryRequest, { signal, checkSchedule }));
     metadataValue(target.metadataProvider, primaryRequest.path, primary, 'complete');
     const recognition = createRecognitionRules(rules);
@@ -634,9 +634,9 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
         other.season_number === row.season && other.episode_count === row.episodeCount));
     return result.filter(row => row.provider !== 'douban' || row === douban && !redundant);
   }
-  async function metadataSources(target, { metadata: supplied, rules, signal, canSchedule } = {}) {
+  async function metadataSources(target, { rules, signal, canSchedule } = {}) {
     return execute([{ domain: 'tmdb' }, { domain: 'douban' }], { signal, canSchedule },
-      (ownedSignal, checkSchedule) => metadataSourcesValue(target, supplied, rules, ownedSignal, checkSchedule));
+      (ownedSignal, checkSchedule) => metadataSourcesValue(target, rules, ownedSignal, checkSchedule));
   }
   async function seasonMetadataEntry(target, season, { signal, canSchedule, rules, refresh = false, requestedEpisode } = {}) {
     if (['source', 'group'].includes(target.kind)) { open(signal); return null; }
@@ -652,7 +652,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       const row = await doubanSeason(primary, target.metadataId, createRecognitionRules(rules), ownedSignal);
       if (row?.season === season) return { ...entry, value: { ...primary, season, episodeCount: row.episodeCount } };
       rawMetadata(entry);
-      const sources = await metadataSourcesValue(target, primary, rules, ownedSignal, checkSchedule);
+      const sources = await metadataSourcesValue(target, rules, ownedSignal, checkSchedule);
       const rows = sources.find(row => row.provider === 'douban')?.seasons ?? [];
       const selected = rows.find(row => row.season === season);
       requireValue(selected, 'NOT_FOUND');
@@ -840,25 +840,32 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
   function inputDependencies(input) {
     return input.kind === 'metadata' ? [{ domain: input.provider }] : sourceDependencies(checkSource(input.source));
   }
-  async function seedValue(input, signal, checkSchedule) {
+  async function seedValue(input, signal, checkSchedule, optionalContent = false) {
     requireValue(['partial', 'complete'].includes(input.completeness) && Number.isFinite(input.fetchedAt) &&
       input.fetchedAt >= 0 && input.fetchedAt <= time() && (input.expiresAt === undefined || Number.isFinite(input.expiresAt)));
     let prepared;
     try { prepared = await handoffRequest(input, signal, checkSchedule); }
     catch (error) { if (error.code === 'STALE_SOURCE') return undefined; throw error; }
     const { request, dependencies } = prepared;
+    if (input.kind === 'metadata' &&
+        (!text(input.settings?.revision) || input.settings.revision !== request.settings.revision)) return undefined;
     let ttl;
-    if (input.kind === 'metadata') {
-      if (!text(input.settings?.revision) || input.settings.revision !== request.settings.revision) return undefined;
-      metadataValue(input.provider, input.path, input.value, input.completeness);
-      ttl = metadataTTL(input.provider, input.path, input.value, input.fetchedAt, input.completeness);
-      dependencies[0] = { kind: 'metadata', domain: input.provider, revision: request.settings.revision };
-    } else {
-      requireValue(object(input.value), 'UPSTREAM_FORMAT');
-      if (input.kind === 'search') searchPage(input.value, input.page);
-      else if (input.completeness === 'complete') detailValue(input.value, request.source, input.detailId);
-      ttl = HOUR;
+    try {
+      if (input.kind === 'metadata') {
+        metadataValue(input.provider, input.path, input.value, input.completeness);
+        ttl = metadataTTL(input.provider, input.path, input.value, input.fetchedAt, input.completeness);
+      } else {
+        requireValue(object(input.value), 'UPSTREAM_FORMAT');
+        if (input.kind === 'search') searchPage(input.value, input.page);
+        else if (input.completeness === 'complete') detailValue(input.value, request.source, input.detailId);
+        ttl = HOUR;
+      }
+    } catch (error) {
+      if (optionalContent && error.code === 'UPSTREAM_FORMAT') return undefined;
+      throw error;
     }
+    if (input.kind === 'metadata')
+      dependencies[0] = { kind: 'metadata', domain: input.provider, revision: request.settings.revision };
     const expiresAt = Math.min(input.fetchedAt + ttl, input.expiresAt ?? input.fetchedAt + ttl);
     if (expiresAt <= time()) return undefined;
     open(signal);
@@ -884,7 +891,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       let accepted = 0, ignored = 0;
       for (const entry of entries) {
         checkSchedule();
-        if (await seedValue(entry, ownedSignal, checkSchedule) === undefined) ignored++; else accepted++;
+        if (await seedValue(entry, ownedSignal, checkSchedule, true) === undefined) ignored++; else accepted++;
       }
       return { accepted, ignored };
     });

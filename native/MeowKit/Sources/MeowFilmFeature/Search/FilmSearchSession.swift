@@ -304,7 +304,7 @@ public final class FilmSearchSession: ObservableObject {
             // A late open may have allocated an identity without ever publishing.
             // Stop acknowledges only control state, never its newly settled data.
             var state = value.retainingDisplay(snapshot)
-            state.sequence = value.sequence; state.revision = value.revision; state.round = value.round
+            state.sequence = value.sequence; state.revision = value.revision
             state.siteState = value.siteState; state.metadataState = value.metadataState
             state.loading = value.loading; state.hasMore = value.hasMore; state.noSources = value.noSources
             snapshot = state

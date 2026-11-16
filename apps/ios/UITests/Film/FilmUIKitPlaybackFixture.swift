@@ -107,7 +107,7 @@ enum FilmUIKitPlaybackFixture {
                 return .object(row)
             }),
             "candidates": .array(candidates), "current": .null, "attempt": .null,
-            "searchComplete": .bool(false), "preferences": FilmPlaybackPreferences.defaults.value,
+            "searchComplete": .bool(false),
             "shortVideo": .bool(shortVideo), "previewEpisodes": .bool(false), "reportError": .null,
         ]
         if let attemptID {

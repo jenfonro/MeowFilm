@@ -277,8 +277,8 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
         controls.layer.cornerRadius = layer.cornerRadius
         layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: layer.cornerRadius).cgPath
         let metrics = controls.miniLayout
-        // Fixed-size covers follow the same moving top edge as the card content.
-        cover.frame = CGRect(x: 8, y: CGFloat(metrics.compactArtworkTop),
+        // The capsule cover stays at the bottom while card content follows the top.
+        cover.frame = CGRect(x: 8, y: bounds.height - CGFloat(metrics.compactHeight - metrics.compactArtworkTop),
                              width: 42, height: 42)
         cover.layer.cornerRadius = 21
         cardCover.frame = CGRect(x: 16, y: 16,

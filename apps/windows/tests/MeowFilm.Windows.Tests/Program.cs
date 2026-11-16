@@ -5,8 +5,6 @@ using System.Security.Principal;
 
 namespace MeowFilm.Windows.Tests;
 
-public sealed record TestCase(string Name, Func<Task> Run);
-
 internal static class Program
 {
     private static async Task<int> Main(string[] args)

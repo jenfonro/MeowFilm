@@ -172,8 +172,8 @@
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
    <StackPanel Style="{DynamicResource MeowFilm.ManagementTitleRow}">
     <TextBlock Text="猫源管理" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" Margin="0,0,12,0"/>
-    <Button Content="添加本地文件" Style="{DynamicResource MeowFilm.ManagementRowButton}" IsEnabled="{Binding CanEditSources}" Click="ImportLocal_Click" AutomationProperties.Name="添加本地文件"/>
-    <Button Content="添加网络源" Style="{DynamicResource MeowFilm.ManagementRowButton}" IsEnabled="{Binding CanEditSources}" Click="ImportNetwork_Click" AutomationProperties.Name="添加网络猫源"/>
+    <Button Content="添加本地文件" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{Binding CanEditSources}" Click="ImportLocal_Click" AutomationProperties.Name="添加本地文件"/>
+    <Button Content="添加网络源" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{Binding CanEditSources}" Click="ImportNetwork_Click" AutomationProperties.Name="添加网络猫源"/>
     <Button Content="删除所选" Style="{DynamicResource MeowFilm.ManagementDeleteSelected}" IsEnabled="{Binding CanDeleteCats}" Click="DeleteSelectedCats_Click" AutomationProperties.Name="删除选中猫源"/>
    </StackPanel>
    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8" Visibility="{Binding HasSourceWork,Converter={StaticResource MeowFilm.BoolToVisibility}}">
@@ -187,7 +187,7 @@
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
    <StackPanel Style="{DynamicResource MeowFilm.ManagementTitleRow}">
     <TextBlock Text="视频源管理" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" Margin="0,0,12,0"/>
-    <Button Content="检测所选" Style="{DynamicResource MeowFilm.ManagementRowButton}" IsEnabled="{Binding CanDetectVideos}" Click="DetectSelectedVideos_Click" AutomationProperties.Name="检测选中视频源"/>
+    <Button Content="检测所选" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{Binding CanDetectVideos}" Click="DetectSelectedVideos_Click" AutomationProperties.Name="检测选中视频源"/>
     <Button Content="删除所选" Style="{DynamicResource MeowFilm.ManagementDeleteSelected}" IsEnabled="{Binding CanDeleteVideos}" Click="DeleteSelectedVideos_Click" AutomationProperties.Name="删除选中视频源"/>
    </StackPanel>
    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8" Visibility="{Binding HasSourceWork,Converter={StaticResource MeowFilm.BoolToVisibility}}">

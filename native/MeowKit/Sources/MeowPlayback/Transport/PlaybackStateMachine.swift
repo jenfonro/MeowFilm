@@ -43,17 +43,6 @@ struct PlaybackStateMachine {
         let position: TimeInterval
     }
 
-    struct TimeRange: Equatable {
-        let start: TimeInterval
-        let end: TimeInterval
-
-        init?(start: TimeInterval, end: TimeInterval) {
-            guard start.isFinite, end.isFinite, start >= 0, end > start else { return nil }
-            self.start = start
-            self.end = end
-        }
-    }
-
     private(set) var snapshot = PlaybackSnapshot()
     private(set) var title = ""
     private(set) var error: Error?
@@ -65,7 +54,6 @@ struct PlaybackStateMachine {
     private(set) var requestsAudioAdmission = false
     private(set) var pendingSeek: Seek?
     private(set) var activeSeek: Seek?
-    private(set) var seekableRanges: [TimeRange] = []
     private var interruptedGeneration: UUID?
     private var events: [PlaybackEvent] = []
     private var seekResults: [PlaybackSeekResult] = []
@@ -103,7 +91,7 @@ struct PlaybackStateMachine {
     }
 
     var outstandingSeek: Seek? { pendingSeek ?? activeSeek }
-    var canSeek: Bool { isPlayable && isReady && supportsSeeking && (snapshot.duration != nil || !seekableRanges.isEmpty) }
+    var canSeek: Bool { isPlayable && isReady && supportsSeeking && snapshot.duration != nil }
 
     @discardableResult
     mutating func begin(resource: PlaybackResource, owner: String, autoplay: Bool = true,
@@ -148,7 +136,6 @@ struct PlaybackStateMachine {
         acceptedRate = 1
         lastReportedTransport = nil
         lastProgress = nil
-        seekableRanges = []
         pendingSeek = nil
         activeSeek = nil
         requestsAudioAdmission = false
@@ -166,22 +153,21 @@ struct PlaybackStateMachine {
 
     func accepts(_ token: UUID) -> Bool { generation == token && isPlayable }
 
-    mutating func ready(generation token: UUID, duration: TimeInterval?, ranges: [TimeRange], seekable: Bool = true) {
+    mutating func ready(generation token: UUID, duration: TimeInterval?, seekable: Bool = true) {
         guard accepts(token) else { return }
         let wasReady = isReady
         isReady = true
         supportsSeeking = seekable
-        updateTimeline(generation: token, duration: duration, ranges: ranges)
+        updateTimeline(generation: token, duration: duration)
         if !wasReady {
             updatePendingPhase()
             record(.prepared)
         }
     }
 
-    mutating func updateTimeline(generation token: UUID, duration: TimeInterval?, ranges: [TimeRange]) {
+    mutating func updateTimeline(generation token: UUID, duration: TimeInterval?) {
         guard accepts(token) else { return }
         snapshot.duration = Self.validDuration(duration)
-        seekableRanges = ranges.sorted { $0.start < $1.start }
         if let duration = snapshot.duration {
             snapshot.position = min(snapshot.position, duration)
         }
@@ -265,19 +251,14 @@ struct PlaybackStateMachine {
     }
 
     mutating func takeSeekIfPossible() -> Seek? {
+        // Ready-to-play alone does not prove that the timeline is seekable.
         guard isPlayable, isReady, let pending = pendingSeek else { return nil }
-        let position: TimeInterval
-        if let duration = snapshot.duration {
-            position = min(pending.position, duration)
-        } else if !seekableRanges.isEmpty {
-            // A DVR/live timeline may start after zero and may contain gaps.
-            position = seekableRanges.map { min(max(pending.position, $0.start), $0.end) }
-                .min { abs($0 - pending.position) < abs($1 - pending.position) }!
-        } else {
-            // Ready-to-play alone does not prove that the timeline is seekable.
+        guard supportsSeeking else {
+            fail(NativePlaybackError.seekFailed, generation: pending.generation)
             return nil
         }
-        let seek = Seek(generation: pending.generation, id: pending.id, position: position)
+        guard let duration = snapshot.duration else { return nil }
+        let seek = Seek(generation: pending.generation, id: pending.id, position: min(pending.position, duration))
         pendingSeek = nil
         activeSeek = seek
         // The adapter pauses while seeking. That implementation pause is not
@@ -313,22 +294,14 @@ struct PlaybackStateMachine {
     }
 
     mutating func progress(generation token: UUID, position: TimeInterval) {
-        guard accepts(token), isReady, position.isFinite, position >= 0,
+        guard accepts(token), isReady, snapshot.phase != .ended, position.isFinite, position >= 0,
               outstandingSeek == nil else { return }
-        if snapshot.phase == .ended {
-            // AVKit can scrub an ended item without calling our seek method.
-            guard let duration = snapshot.duration, position < duration - 0.001 else { return }
-            snapshot.phase = .paused
-            lastReportedTransport = .paused
-            snapshot.position = boundedPosition(position)
-            record(.paused)
-        }
         snapshot.position = boundedPosition(position)
         recordProgress()
     }
 
-    /// Also observes transport operations made by AVKit's own controls. Adapter
-    /// pauses during preparation/seek/interruption do not overwrite user intent.
+    /// Observes native output state forwarded by PlaybackController.
+    /// Preparation/seek/interruption pauses do not overwrite user intent.
     mutating func transport(generation token: UUID, state: Transport, rate: Double = 1) {
         guard accepts(token), isReady, outstandingSeek == nil,
               !isInterrupted, snapshot.phase != .ended else { return }
@@ -363,20 +336,13 @@ struct PlaybackStateMachine {
         recordProgress(force: true)
     }
 
-    /// Rate and timeline jumps are observations, never permission to start.
+    /// Rate changes are observations, never permission to start.
     mutating func rateChanged(generation token: UUID, rate: Double, position: TimeInterval) {
         guard accepts(token), isReady, outstandingSeek == nil,
               rate.isFinite, rate > 0, rate != acceptedRate,
               position.isFinite, position >= 0 else { return }
         snapshot.position = boundedPosition(position)
         acceptedRate = rate
-        recordProgress(discontinuity: true)
-    }
-
-    mutating func timeJumped(generation token: UUID, position: TimeInterval) {
-        guard accepts(token), isReady, outstandingSeek == nil,
-              position.isFinite, position >= 0 else { return }
-        snapshot.position = boundedPosition(position)
         recordProgress(discontinuity: true)
     }
 
@@ -466,7 +432,6 @@ struct PlaybackStateMachine {
         isReady = false
         pendingSeek = nil
         activeSeek = nil
-        seekableRanges = []
         interruptedGeneration = nil
         isInterrupted = false
         lastReportedTransport = nil

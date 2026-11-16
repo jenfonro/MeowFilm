@@ -10,6 +10,95 @@ namespace MeowFilm.Windows.Tests;
 
 public static partial class NovelTests
 {
+    private static async Task ChapterBlockMaterials()
+    {
+        await using var store = new MemoryStore(); var library = new NovelLibrary(store); await library.InitializeAsync();
+        var runtime = new Runtime(); var sources = NovelTestSources.Create(runtime);
+        await using var engine = new RuleProbe(); await using var rules = new NovelRuleProgram(engine);
+        var session = new NovelBookSession(sources, library, rules, new("block-materials", "key", Book()));
+        try
+        {
+            await session.ContinueAsync(); await session.SaveProgressAsync(new("chapter-1", "第一章", 0, 0, 2, .4));
+            var blocks = session.Blocks; var entry = session.Entry; var chapter = session.Chapter;
+            string title = session.ContentTitle, style = session.ImageStyle; int writes = store.Writes;
+            var valid = JsonSerializer.Deserialize<JsonElement>("""
+                {"title":"候选标题","blocks":[{"type":"text","text":"候选正文","src":{}},
+                  {"type":"image","src":"https://a.invalid/full.png","text":[],"alt":"插图"}],
+                 "chapter":{"name":"候选章节"},"imageStyle":"candidate"}
+                """);
+            JsonElement response = valid;
+            runtime.Read = (_, action, _, _) => action == "content" ? Task.FromResult(response) :
+                throw new InvalidOperationException("Unexpected block material action: " + action);
+            foreach (bool transformed in new[] { false, true })
+            {
+                foreach (string invalid in new[]
+                {
+                    "null", "false", "17", "[]",
+                    """{"type":"text"}""", """{"type":"text","text":null}""",
+                    """{"type":"text","text":[]}""", """{"type":"text","text":7}""",
+                    """{"type":"image"}""", """{"type":"image","src":null}""",
+                    """{"type":"image","src":{}}""", """{"type":"image","src":false}""",
+                    """{"type":"image","src":""}""", """{"type":"image","src":"  "}""",
+                    """{"type":"unknown","text":"正文","src":"https://a.invalid/image"}"""
+                })
+                {
+                    var candidate = JsonSerializer.Deserialize<JsonElement>(
+                        """{"title":"不能提交","blocks":[{"type":"text","text":"不能局部提交"},""" + invalid +
+                        """],"chapter":{"name":"不能提交"},"imageStyle":"invalid"}""");
+                    response = transformed ? valid : candidate;
+                    engine.ProjectTransform = transformed
+                        ? _ => Json(new { ok = true, contract = "source.runtime.v2", value = candidate }) : null;
+                    try { await session.ReadAsync(1); throw new InvalidOperationException("Missing block material became a successful chapter."); }
+                    catch (JsonException) { }
+                    Unchanged();
+                }
+                foreach (var (validBlocks, expected) in new (string, NovelBlock[])[]
+                {
+                    ("""[{"type":"text","text":"新正文","src":{}},{"type":"image","src":"https://a.invalid/full.png","text":[],"alt":"插图"}]""",
+                        [new("text", "新正文"), new("image", Src: "https://a.invalid/full.png", Alt: "插图")]),
+                    ("""[{"type":"text","text":"","src":false}]""", [new("text", "")]),
+                    ("[]", [])
+                })
+                {
+                    var candidate = JsonSerializer.Deserialize<JsonElement>("""{"title":"合法正文","blocks":""" + validBlocks + "}");
+                    response = transformed ? valid : candidate;
+                    engine.ProjectTransform = transformed
+                        ? _ => Json(new { ok = true, contract = "source.runtime.v2", value = candidate }) : null;
+                    await session.ReadAsync(1);
+                    Check(session.HasContent && session.Blocks.SequenceEqual(expected) && session.ContentTitle == "合法正文" &&
+                        session.Entry.BookId == entry.BookId && session.Chapter?.ChapterUrl == "chapter-2" && store.Writes == writes);
+                }
+                engine.ProjectTransform = null; runtime.Read = null;
+                await session.ReadAsync(0); await session.SaveProgressAsync(entry.Anchor!);
+                blocks = session.Blocks; entry = session.Entry; chapter = session.Chapter;
+                title = session.ContentTitle; style = session.ImageStyle; writes = store.Writes;
+                runtime.Read = (_, _, _, _) => Task.FromResult(response);
+            }
+            response = valid;
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            engine.AfterTransform = async () => { entered.TrySetResult(); await release.Task; };
+            using var cancellation = new CancellationTokenSource();
+            var pending = session.ReadAsync(1, token: cancellation.Token);
+            try
+            {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancellation.Cancel();
+                Check(!pending.IsCompleted, "Cancellation acknowledged an undrained transform.");
+                Unchanged();
+            }
+            finally { release.TrySetResult(); }
+            try { await pending; throw new InvalidOperationException("Cancelled block conversion committed."); }
+            catch (OperationCanceledException) { }
+            Unchanged();
+            void Unchanged() => Check(ReferenceEquals(session.Blocks, blocks) && session.Entry == entry &&
+                ReferenceEquals(session.Chapter, chapter) && session.ContentTitle == title && session.ImageStyle == style &&
+                store.Writes == writes && library.Entries.Single().Anchor == entry.Anchor &&
+                library.Entries.Single().ContentSignature == entry.ContentSignature,
+                "A failed or cancelled chapter changed blocks, title, chapter, anchor, signature or persisted state.");
+        }
+        finally { await session.PrepareShutdownAsync(); await sources.PrepareShutdownAsync(); }
+    }
+
     private static async Task ChapterContext()
     {
         await using var store = new MemoryStore(); var library = new NovelLibrary(store); await library.InitializeAsync();

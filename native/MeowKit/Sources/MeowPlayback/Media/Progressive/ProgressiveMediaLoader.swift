@@ -6,7 +6,7 @@ import FoundationNetworking
 /// The audio byte adapter and deterministic test sinks implement this small
 /// byte boundary. Every method is called on the loader's serial queue.
 protocol ProgressiveMediaSink: AnyObject {
-    var range: ProgressiveReadRange? { get } // nil = content-information only
+    var range: ProgressiveReadRange { get }
     func receive(_ information: ProgressiveContentInformation)
     func receive(_ data: Data)
     func finish(_ error: PlaybackNetworkError?)
@@ -41,7 +41,7 @@ final class ProgressiveMediaLoader: NSObject, URLSessionDataDelegate, @unchecked
         var waitID: UUID?
         init(_ sink: ProgressiveMediaSink) {
             self.sink = sink
-            position = sink.range?.start ?? 0
+            position = sink.range.start
         }
     }
 
@@ -100,7 +100,7 @@ final class ProgressiveMediaLoader: NSObject, URLSessionDataDelegate, @unchecked
         }
     }
 
-    /// AVFoundation already cancelled this request: no finishLoading callback.
+    /// The byte owner cancelled this request; it settles its own waiter.
     func cancel(_ sink: ProgressiveMediaSink) {
         performSynchronized { remove(ObjectIdentifier(sink), finish: false, error: nil) }
     }
@@ -158,18 +158,18 @@ final class ProgressiveMediaLoader: NSObject, URLSessionDataDelegate, @unchecked
             if let information {
                 load.sink.receive(information)
                 guard !invalidated, !reportedFailure, loads[id] === load, load.taskID == nil else { continue }
-                if load.sink.range == nil || load.position >= information.length {
+                if load.position >= information.length {
                     remove(id, finish: true, error: nil)
                     continue
                 }
             }
-            if let end = load.sink.range?.endExclusive, load.position >= end {
+            if let end = load.sink.range.endExclusive, load.position >= end {
                 remove(id, finish: true, error: nil)
                 continue
             }
-            let requestedEnd = load.sink.range?.endExclusive
+            let requestedEnd = load.sink.range.endExclusive
             let remaining = requestedEnd.map { $0 - load.position } ?? Int64(budget.limits.windowBytes)
-            let bytes = load.sink.range == nil ? 2 : Int(min(Int64(budget.limits.windowBytes), remaining))
+            let bytes = Int(min(Int64(budget.limits.windowBytes), remaining))
             guard bytes > 0, load.position <= Int64.max - Int64(bytes) else {
                 failAsset(.invalidResponse); return
             }
@@ -252,7 +252,7 @@ final class ProgressiveMediaLoader: NSObject, URLSessionDataDelegate, @unchecked
             guard !invalidated, !reportedFailure, loads[transfer.sinkID] === load else {
                 completionHandler(.cancel); return
             }
-            if load.sink.range == nil || parsed.bodyBytes == 0 {
+            if parsed.bodyBytes == 0 {
                 remove(transfer.sinkID, finish: true, error: nil)
                 completionHandler(.cancel)
             } else {
@@ -378,6 +378,6 @@ final class ProgressiveMediaLoader: NSObject, URLSessionDataDelegate, @unchecked
     deinit {
         if let observation { budget.unobserve(observation) }
         // A created URLSession retains its delegate until invalidated, so owners
-        // must call invalidate(); the AV adapter/controller do so synchronously.
+        // must call invalidate(); the audio byte owner does so synchronously.
     }
 }

@@ -129,10 +129,20 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertFalse(try hasDirectory(page))
 
         let files = [FilmUIKitPlaybackFixture.file("one", name: "第一季", path: "/剧集/第一季/1.mp4")]
-        let associated = FilmUIKitPlaybackFixture.metadataSources([.tmdb, .douban])
+        var associated = FilmUIKitPlaybackFixture.metadataSources([.tmdb, .douban])
+        var other = try associated[1].filmRequiredObject()
+        other["seasons"] = .object(["unused": .bool(true)])
+        associated[1] = .object(other)
+        associated.insert(.object(["id": .string("bad-unselected"), "provider": .string("future"),
+            "metadataId": .number(0), "kind": .string("tv"), "title": .string("不可选资料")]), at: 1)
         try await server.publish(FilmUIKitPlaybackFixture.snapshot(10, metadataSources: associated,
                                                                  metadataError: "UPSTREAM_HTTP"))
         await settle()
+        XCTAssertEqual(source.menu?.children.compactMap { ($0 as? UIAction)?.title }, [
+            "TMDB · 星海航线", "豆瓣 · 星海航线", "测试站 · 星海航线", "测试站 · 失败站点", "加载更多来源",
+        ])
+        XCTAssertEqual(model.snapshot?.metadataSources.map(\.id), ["confirmed-tmdb", "confirmed-douban"])
+        XCTAssertNil(model.actionError); XCTAssertNil(model.observationError)
         XCTAssertNil(view("film.detail.metadata-state", page.view), "Metadata errors belong in a floating alert")
         XCTAssertTrue(try button("film.detail.play", page.view).isEnabled,
                       "Association failure must not block the primary playback chain")
@@ -171,9 +181,12 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await visible(page)
         await model.waitForPendingWork()
         XCTAssertNotNil(view("film.file.file-first", page.view))
+        var failedBrowsing = try FilmUIKitPlaybackFixture.browsing(sourceID: "result-b",
+            error: "UPSTREAM_HTTP").filmRequiredObject()
+        failedBrowsing["episodes"] = .object(["unused": .bool(true)])
+        failedBrowsing["originalEpisodes"] = .array([file, .null])
         await server.reply(to: "browse", with: FilmUIKitPlaybackFixture.snapshot(provider: .douban,
-            browsing: FilmUIKitPlaybackFixture.browsing(sourceID: "result-b", files: [file],
-                                                        original: [file], error: "UPSTREAM_HTTP")))
+            browsing: .object(failedBrowsing)))
         invoke(try menuAction("测试站 · 失败站点", button("film.detail.source", page.view).menu))
         await model.waitForPendingWork()
         await settle()
@@ -1121,8 +1134,6 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             if var attempt = fields["attempt"]?.filmObject {
                 attempt["prepareOnly"] = .bool(true); fields["attempt"] = .object(attempt)
             }
-            var preferences = FilmPlaybackPreferences.defaults
-            preferences.iosAutoPrepare = autoPrepare; fields["preferences"] = preferences.value
             try await server.publish(.object(fields))
             NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
             try await visible(page)
@@ -1130,16 +1141,14 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             await settle()
             XCTAssertTrue(window.rootViewController?.presentedViewController === page, "The modal and its controls are not reconstructed")
             XCTAssertEqual(model.snapshot?.stage, autoPrepare ? "prepared" : "idle")
-            XCTAssertEqual(model.snapshot?.preferences.iosAutoPrepare, autoPrepare)
+            XCTAssertEqual(model.snapshot?.attempt?.prepareOnly, autoPrepare ? true : nil)
             XCTAssertNil(model.mediaState.attemptID)
             XCTAssertEqual(media.inputs.map(\.attemptID), ["before-background"])
             let play = try button("film.player.play-pause", page.view)
             XCTAssertTrue(play.isEnabled); XCTAssertEqual(play.accessibilityLabel, "播放")
             var calls = await server.calls()
             XCTAssertFalse(calls.contains { $0.action == "play" })
-            var formal = try FilmUIKitPlaybackFixture.snapshot(101, attemptID: "after-background").filmRequiredObject()
-            formal["preferences"] = preferences.value
-            await server.reply(to: "play", with: .object(formal))
+            await server.reply(to: "play", with: FilmUIKitPlaybackFixture.snapshot(101, attemptID: "after-background"))
             play.sendActions(for: .touchUpInside)
             await model.waitForPendingWork()
             await settle()

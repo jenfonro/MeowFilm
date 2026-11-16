@@ -166,9 +166,9 @@
   "corePackage": {
     "path": "native/KSPlayer",
     "manifest": "native/KSPlayer/Provenance/source-manifest.json",
-    "manifestSHA256": "5160cb6b69660c3367605080ab6422f68bb7b4d5adbf1138c8f419d3d4a7e393",
+    "manifestSHA256": "f19a5ba656f4c375815f437e8db6ce88a9f59821fd4a63f1fc272688f21cff91",
     "patch": "native/KSPlayer/patches/core-only.patch",
-    "patchSHA256": "3bdd6bb1c830d76c626e924e96b44dbb68b52b32fd8b1e715f0a6dec08d6c570"
+    "patchSHA256": "5666561e48055ade6dda625ccb0699c05a0fb0b058a378fe9ca2b47eadf77210"
   },
   "requiredFilterSymbols": [
     "ff_asrc_abuffer",

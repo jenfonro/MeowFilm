@@ -129,12 +129,14 @@ public static partial class DesktopTests
             Click(f.Button("搜索")); await DrainAsync();
             Equal(before, module.Calls.Count, "settings-owned public page cannot target the search owner");
             Click(f.Back); await DrainAsync();
-            Equal(module.Title, AutomationProperties.GetName(f.Element<Grid>("ContentDeck")),
-                "returns to the same shell-owned accessible title");
+            Equal("设置", AutomationProperties.GetName(f.Element<Grid>("ContentDeck")),
+                "returning from a settings page retains the settings title");
             Equal(1, actions.Items.Count, "settings action restored");
             Equal(Visibility.Collapsed, f.Element<Border>("PlayerFrame").Visibility,
                 "returning from a settings page remains in settings");
             Click(f.Back); await DrainAsync();
+            Equal(module.Title, AutomationProperties.GetName(f.Element<Grid>("ContentDeck")),
+                "leaving settings restores the retained domain title");
             Equal(Visibility.Visible, f.Element<Border>("PlayerFrame").Visibility,
                 "leaving settings restores the retained player");
             Equal(Visibility.Visible, f.Element<Grid>("SearchInput").Visibility,
