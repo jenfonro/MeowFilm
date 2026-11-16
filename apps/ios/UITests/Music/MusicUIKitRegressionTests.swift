@@ -5409,9 +5409,15 @@ final class MusicPlayerContentModelTests: XCTestCase {
         await content.favorites.flush()
         XCTAssertTrue(content.favorites.loaded, "Hit testing requires authoritative favorites eligibility")
         XCTAssertNil(content.favorites.error)
-        let host = UIView(frame: CGRect(x: 0, y: 0, width: 430, height: 800))
+        let root = UIViewController()
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let window = scene.map { UIWindow(windowScene: $0) }
+            ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 430, height: 800))
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
         let controls = MusicPlaybackControlsView(content: content, layout: .compact)
-        host.addSubview(controls)
+        root.view.addSubview(controls)
         let compact = try ["play", "queue"].map { try dockButton($0, in: controls) }
         let card = try ["favorite", "previous", "card.play", "next", "card.queue"].map {
             try dockButton($0, in: controls)
@@ -5429,15 +5435,28 @@ final class MusicPlayerContentModelTests: XCTestCase {
                     controls.layoutIfNeeded()
                 }
                 layout(.compact)
-                let slots = (compact + card).map { $0.convert($0.bounds, to: host) }
+                let compactSlots = compact.map { $0.convert($0.bounds, to: window) }
+                let cardSlots = card.map(\.frame)
                 XCTAssertTrue(compact.allSatisfy { $0.alpha == 1 && $0.isUserInteractionEnabled && $0.isEnabled })
                 XCTAssertTrue(card.allSatisfy { $0.alpha == 0 && !$0.isUserInteractionEnabled &&
                     $0.accessibilityElementsHidden })
                 for button in compact { XCTAssertTrue(controls.hitTest(button.center, with: nil) === button) }
                 for style in [MusicPlaybackControlsView.Layout.card, .compact, .card] {
                     layout(style)
-                    for (button, slot) in zip(compact + card, slots) {
-                        XCTAssertEqual(button.convert(button.bounds, to: host), slot)
+                    for (button, slot) in zip(compact, compactSlots) {
+                        let frame = button.convert(button.bounds, to: window)
+                        XCTAssertEqual(frame.minX, slot.minX, accuracy: 0.5)
+                        XCTAssertEqual(frame.minY, slot.minY, accuracy: 0.5,
+                                       "Compact controls stay at their visible capsule window slots")
+                        XCTAssertEqual(frame.size, slot.size)
+                    }
+                    for (button, slot) in zip(card, cardSlots) {
+                        var expected = slot
+                        expected.origin.y = CGFloat(controls.miniLayout.controlsTop)
+                        XCTAssertEqual(button.frame, expected)
+                        XCTAssertEqual(button.convert(button.bounds, to: window).minY -
+                                       controls.convert(controls.bounds, to: window).minY,
+                                       expected.minY, accuracy: 0.5)
                     }
                     let visible = style == .card ? card : compact
                     let hidden = style == .card ? compact : card
@@ -5469,13 +5488,21 @@ final class MusicPlayerContentModelTests: XCTestCase {
         for width in [CGFloat(292), CGFloat(408)] {
             surface.frame.size.width = width
             surface.setNeedsLayout(); surface.layoutIfNeeded()
-            let frames = covers.map { $0.convert($0.bounds, to: root.view) }
+            let frames = covers.map { $0.convert($0.bounds, to: surface) }
+            let compactSlot = covers[0].convert(covers[0].bounds, to: window)
+            let bottom = surface.frame.maxY
             XCTAssertEqual(frames.map(\.size), [CGSize(width: 42, height: 42), CGSize(width: 84, height: 84)])
             for expanded in [true, false, true, false] {
                 if expanded { await expandDock(content) }
                 else { content.collapseDock(); await deliverUpdates() }
                 surface.layoutIfNeeded()
-                XCTAssertEqual(covers.map { $0.convert($0.bounds, to: root.view) }, frames)
+                XCTAssertEqual(covers[0].convert(covers[0].bounds, to: window), compactSlot,
+                               "Compact artwork stays at its visible capsule window slot")
+                XCTAssertEqual(covers[1].convert(covers[1].bounds, to: surface), frames[1])
+                XCTAssertEqual(surface.frame.maxY, bottom, accuracy: 0.5)
+                XCTAssertEqual(covers[1].convert(covers[1].bounds, to: window).minY -
+                               surface.convert(surface.bounds, to: window).minY,
+                               frames[1].minY, accuracy: 0.5)
                 let visible = covers[expanded ? 1 : 0], hidden = covers[expanded ? 0 : 1]
                 XCTAssertEqual(visible.alpha, 1)
                 XCTAssertTrue(visible.isUserInteractionEnabled)
@@ -5493,18 +5520,7 @@ final class MusicPlayerContentModelTests: XCTestCase {
     }
 
     func testArtworkArrivingDuringDockMorphKeepsBothCoverImagesAtTheirOwnSize() async throws {
-        let runnerIdentifier = try XCTUnwrap(Bundle.main.bundleIdentifier)
-        await withCheckedContinuation { continuation in
-            RunLoop.main.perform {
-                MainActor.assumeIsolated { XCUIApplication(bundleIdentifier: runnerIdentifier).activate() }
-                continuation.resume()
-            }
-        }
-        let active = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
-            UIApplication.shared.applicationState == .active &&
-                UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive }
-        } }, evaluatedWith: nil)
-        await fulfillment(of: [active], timeout: 4)
+        try await activateDockRunner()
         XCTAssertTrue(UIView.areAnimationsEnabled)
         let images = MusicArtworkImages()
         let urls = try ["first", "replacement"].map {
@@ -5521,19 +5537,42 @@ final class MusicPlayerContentModelTests: XCTestCase {
         let window = mountDock(surface, in: PageViewController(themeProvider: content.appearance))
         defer { window.isHidden = true; window.rootViewController = nil }
         let covers = try ["open", "card.open"].map { try dockButton($0, in: surface) }
-        let observer = MusicDockArtworkFrameObserver(covers: covers, window: window)
-        let displayLink = CADisplayLink(target: observer, selector: #selector(MusicDockArtworkFrameObserver.sample(_:)))
+        let (observer, compact, card) = try await makeDockMorphObserver(content, surface: surface, window: window)
+        let displayLink = CADisplayLink(target: observer, selector: #selector(MusicDockMorphFrameObserver.sample(_:)))
         displayLink.add(to: .main, forMode: .common)
-        defer { displayLink.invalidate() }
+        defer { observer.onIntermediateFrame = nil; displayLink.invalidate() }
         let rendered = expectation(for: NSPredicate { _, _ in
             MainActor.assumeIsolated { !observer.samples.isEmpty }
         }, evaluatedWith: nil)
         await fulfillment(of: [rendered], timeout: 3)
-        let frames = covers.map { $0.convert($0.bounds, to: window) }
-        await expandDock(content)
+        try assertDockMorphFrames(observer.samples, from: card, to: compact, compactAnchor: compact)
+        let expansionStart = observer.samples.count
+        var collapseStart = 0
         for (index, url) in urls.enumerated() {
-            content.model.metadataState.occurrenceID = "dock"
-            content.model.metadataState.artworkURL = url
+            var transitionImage: UIImage?
+            let requestArtwork = {
+                content.model.metadataState.occurrenceID = "dock"
+                content.model.metadataState.artworkURL = url
+            }
+            let incoming = UIAccessibility.isReduceMotionEnabled ? nil
+                : expectation(description: "artwork requested at a rendered middle frame")
+            if let incoming {
+                observer.onIntermediateFrame = { _ in
+                    observer.onIntermediateFrame = nil
+                    requestArtwork()
+                    transitionImage = UIGraphicsImageRenderer(size: window.bounds.size).image { _ in
+                        window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+                    }
+                    incoming.fulfill()
+                }
+            }
+            if index == 0 { await expandDock(content) }
+            else {
+                collapseStart = observer.samples.count
+                content.collapseDock(); await deliverUpdates()
+            }
+            if let incoming { await fulfillment(of: [incoming], timeout: 3) }
+            else { requestArtwork() }
             await deliverUpdates(); await content.flushArtwork(); await deliverUpdates()
             let image = try XCTUnwrap(images.cached(url))
             for cover in covers {
@@ -5543,35 +5582,108 @@ final class MusicPlayerContentModelTests: XCTestCase {
                 XCTAssertNil(imageView.layer.animationKeys(),
                              "Late artwork must not add an image resize or contents transition")
             }
-            let settled = expectation(for: NSPredicate { _, _ in
-                MainActor.assumeIsolated { surface.layer.animationKeys()?.isEmpty != false }
-            }, evaluatedWith: surface)
-            await fulfillment(of: [settled], timeout: 3)
+            await waitForDockMorph(observer, at: index == 0 ? card : compact)
             attachDock(surface, name: index == 0 ? "card-artwork-settled" : "capsule-artwork-settled")
-            if index == 0 { content.collapseDock(); await deliverUpdates() }
-        }
-        displayLink.invalidate()
-        if !UIAccessibility.isReduceMotionEnabled {
-            XCTAssertTrue(observer.samples.contains { $0.cardOpacity > 0.1 && $0.cardOpacity < 0.9 },
-                          "Observe actual intermediate frames of the dock morph")
-        }
-        for sample in observer.samples {
-            for (actual, expected) in zip(sample.frames, frames) {
-                XCTAssertEqual(actual.minX, expected.minX, accuracy: 0.5)
-                XCTAssertEqual(actual.minY, expected.minY, accuracy: 0.5)
-                XCTAssertEqual(actual.width, expected.width, accuracy: 0.5)
-                XCTAssertEqual(actual.height, expected.height, accuracy: 0.5)
+            if let image = transitionImage {
+                let attachment = XCTAttachment(image: image)
+                attachment.name = index == 0 ? "dock-artwork-expansion-middle" : "dock-artwork-collapse-middle"
+                attachment.lifetime = .keepAlways
+                add(attachment)
             }
         }
-        if let image = observer.transitionImage {
-            let attachment = XCTAttachment(image: image)
-            attachment.name = "dock-artwork-morph"
-            attachment.lifetime = .keepAlways
-            add(attachment)
+        displayLink.invalidate()
+        let expansion = Array(observer.samples[expansionStart..<collapseStart])
+        let collapse = Array(observer.samples.dropFirst(collapseStart))
+        if !UIAccessibility.isReduceMotionEnabled {
+            XCTAssertTrue(expansion.contains { $0.cardOpacity > 0.1 && $0.cardOpacity < 0.9 },
+                          "Observe actual intermediate frames while expanding")
+            XCTAssertTrue(collapse.contains { $0.cardOpacity > 0.1 && $0.cardOpacity < 0.9 },
+                          "Observe actual intermediate frames while collapsing")
         }
+        try assertDockMorphFrames(expansion, from: compact, to: card, compactAnchor: compact)
+        try assertDockMorphFrames(collapse, from: card, to: compact, compactAnchor: compact)
         await expandDock(content)
         surface.interruptDockMorph()
         XCTAssertTrue(covers.allSatisfy { $0.image(for: .normal) === content.artwork })
+    }
+
+    func testDockMorphReversesFromActualIntermediateFramesWithoutSeparatingContents() async throws {
+        try await activateDockRunner()
+        XCTAssertTrue(UIView.areAnimationsEnabled)
+        guard !UIAccessibility.isReduceMotionEnabled else {
+            throw XCTSkip("Reduce Motion has no intermediate morph frames")
+        }
+        let (content, surface) = try makeDock()
+        addTeardownBlock { await content.model.close() }
+        let window = mountDock(surface, in: PageViewController(themeProvider: content.appearance))
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let (observer, compact, card) = try await makeDockMorphObserver(content, surface: surface, window: window)
+        let displayLink = CADisplayLink(target: observer, selector: #selector(MusicDockMorphFrameObserver.sample(_:)))
+        displayLink.add(to: .main, forMode: .common)
+        defer { observer.onIntermediateFrame = nil; displayLink.invalidate() }
+        await waitForDockMorph(observer, at: compact)
+        try assertDockMorphFrames(observer.samples, from: card, to: compact, compactAnchor: compact)
+        func beginExpansion() {
+            let intent = content.presentation.beginHomePlayback()
+            XCTAssertTrue(content.presentation.finishHomePlayback(intent, playback: .init(
+                occurrenceID: content.model.current!.id, nativeAttemptID: content.model.activeNativeAttemptID!,
+                accessGeneration: content.model.accountAccessGeneration)))
+        }
+        for initiallyExpanded in [false, true] {
+            if initiallyExpanded {
+                await expandDock(content)
+                await waitForDockMorph(observer, at: card)
+            }
+            let start = initiallyExpanded ? card : compact
+            let target = initiallyExpanded ? compact : card
+            let sampleStart = observer.samples.count
+            var interruption: MusicDockMorphFrameObserver.Frame?
+            var interruptionIndex: Int?
+            var awaitingReversal = false
+            let reversed = expectation(description: initiallyExpanded
+                ? "collapse reverses at a rendered middle frame" : "expansion reverses at a rendered middle frame")
+            let retargeting = content.dockChanges.sink {
+                guard awaitingReversal, content.dockExpanded == initiallyExpanded else { return }
+                awaitingReversal = false
+                interruption = observer.presentationFrame
+                interruptionIndex = observer.samples.count
+                reversed.fulfill()
+            }
+            defer { retargeting.cancel() }
+            observer.onIntermediateFrame = { _ in
+                observer.onIntermediateFrame = nil
+                awaitingReversal = true
+                if initiallyExpanded { beginExpansion() }
+                else { content.collapseDock() }
+            }
+            if initiallyExpanded { content.collapseDock() }
+            else { beginExpansion() }
+            await fulfillment(of: [reversed], timeout: 3)
+            await waitForDockMorph(observer, at: start)
+            XCTAssertEqual(content.dockExpanded, initiallyExpanded)
+            let interrupted = try XCTUnwrap(interruption)
+            let split = try XCTUnwrap(interruptionIndex)
+            try assertDockMorphFrames(Array(observer.samples[sampleStart..<split]) + [interrupted],
+                                      from: start, to: target, compactAnchor: compact)
+            let returning = Array(observer.samples.dropFirst(split))
+            XCTAssertTrue(returning.contains {
+                let fraction = ($0.surface.height - interrupted.surface.height) /
+                    (start.surface.height - interrupted.surface.height)
+                return fraction > 0.1 && fraction < 0.9
+            }, "The reversed morph must render its own intermediate frames")
+            try assertDockMorphFrames(returning, from: interrupted, to: start, compactAnchor: compact)
+            let visible = try dockButton(initiallyExpanded ? "card.open" : "open", in: surface)
+            let hidden = try dockButton(initiallyExpanded ? "open" : "card.open", in: surface)
+            XCTAssertEqual(visible.alpha, 1)
+            XCTAssertTrue(visible.isUserInteractionEnabled)
+            XCTAssertFalse(visible.accessibilityElementsHidden)
+            XCTAssertEqual(hidden.alpha, 0)
+            XCTAssertFalse(hidden.isUserInteractionEnabled)
+            XCTAssertTrue(hidden.accessibilityElementsHidden)
+            let point = visible.convert(CGPoint(x: visible.bounds.midX, y: visible.bounds.midY), to: surface)
+            XCTAssertTrue(surface.hitTest(point, with: nil) === visible)
+            if !initiallyExpanded { try assertCapsuleTitleRestored("Goodbye - Ramsey", in: surface) }
+        }
     }
 
     func testIndependentDockButtonsSharePlaybackStateAndKeepQueueActionSeparate() async throws {
@@ -6194,6 +6306,105 @@ final class MusicPlayerContentModelTests: XCTestCase {
         XCTAssertEqual(slider.value, held)
     }
 
+    private func activateDockRunner() async throws {
+        let runnerIdentifier = try XCTUnwrap(Bundle.main.bundleIdentifier)
+        await withCheckedContinuation { continuation in
+            RunLoop.main.perform {
+                MainActor.assumeIsolated { XCUIApplication(bundleIdentifier: runnerIdentifier).activate() }
+                continuation.resume()
+            }
+        }
+        let active = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
+            UIApplication.shared.applicationState == .active &&
+                UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive }
+        } }, evaluatedWith: nil)
+        await fulfillment(of: [active], timeout: 4)
+    }
+
+    private func makeDockMorphObserver(_ content: MusicPlayerContentModel, surface: MusicPlayerSurface,
+                                       window: UIWindow) async throws
+        -> (MusicDockMorphFrameObserver, MusicDockMorphFrameObserver.Frame, MusicDockMorphFrameObserver.Frame) {
+        let animationsEnabled = UIView.areAnimationsEnabled
+        UIView.setAnimationsEnabled(false)
+        defer { UIView.setAnimationsEnabled(animationsEnabled) }
+        surface.traitOverrides.preferredContentSizeCategory = .large
+        await deliverUpdates()
+        await expandDock(content)
+        surface.layoutIfNeeded()
+        let labels = dockViews(surface).compactMap { $0 as? UILabel }
+        var views: [String: UIView] = [
+            "title": try capsuleTitleView("", in: surface),
+            "artist": try XCTUnwrap(labels.first { $0.text == "Ramsey" }),
+            "progress": try XCTUnwrap(dockViews(surface).first {
+                $0.accessibilityIdentifier == "music.miniPlayer.progress"
+            }),
+            "elapsed": try XCTUnwrap(labels.first { $0.text == MusicMiniPlayerText.time(content.clock.position) }),
+            "duration": try XCTUnwrap(labels.first {
+                $0.text == MusicMiniPlayerText.time(content.clock.duration)
+            })
+        ]
+        for name in ["open", "card.open", "play", "queue", "favorite", "previous", "card.play", "next", "card.queue"] {
+            views[name] = try dockButton(name, in: surface)
+        }
+        let observer = MusicDockMorphFrameObserver(surface: surface, views: views, window: window)
+        let card = observer.modelFrame
+        content.collapseDock(); await deliverUpdates()
+        surface.layoutIfNeeded()
+        return (observer, observer.modelFrame, card)
+    }
+
+    private func waitForDockMorph(_ observer: MusicDockMorphFrameObserver,
+                                  at target: MusicDockMorphFrameObserver.Frame) async {
+        let settled = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
+            guard let frame = observer.samples.last else { return false }
+            return abs(frame.surface.height - target.surface.height) < 0.5 &&
+                abs(frame.surface.minY - target.surface.minY) < 0.5 &&
+                abs(frame.cardOpacity - target.cardOpacity) < 0.01 &&
+                observer.surface.layer.animationKeys()?.isEmpty != false
+        } }, evaluatedWith: nil)
+        await fulfillment(of: [settled], timeout: 3)
+    }
+
+    private func assertDockMorphFrames(_ samples: [MusicDockMorphFrameObserver.Frame],
+                                       from start: MusicDockMorphFrameObserver.Frame,
+                                       to target: MusicDockMorphFrameObserver.Frame,
+                                       compactAnchor: MusicDockMorphFrameObserver.Frame,
+                                       file: StaticString = #filePath, line: UInt = #line) throws {
+        XCTAssertFalse(samples.isEmpty, file: file, line: line)
+        XCTAssertEqual(compactAnchor.cardOpacity, 0, file: file, line: line)
+        let heightChange = target.surface.height - start.surface.height
+        XCTAssertNotEqual(heightChange, 0, file: file, line: line)
+        for sample in samples {
+            let fraction = (sample.surface.height - start.surface.height) / heightChange
+            XCTAssertEqual(sample.surface.maxY, start.surface.maxY, accuracy: 0.5, file: file, line: line)
+            let opacity = CGFloat(start.cardOpacity) + CGFloat(target.cardOpacity - start.cardOpacity) * fraction
+            XCTAssertEqual(sample.cardOpacity, Float(min(1, max(0, opacity))), accuracy: 0.03,
+                           file: file, line: line)
+            for (name, initial) in start.frames {
+                let actual = try XCTUnwrap(sample.frames[name], name, file: file, line: line)
+                let final = try XCTUnwrap(target.frames[name], name, file: file, line: line)
+                let fixedCompact = ["open", "play", "queue"].contains(name)
+                let expected: CGRect
+                if fixedCompact {
+                    expected = try XCTUnwrap(compactAnchor.frames[name], name, file: file, line: line)
+                } else {
+                    expected = CGRect(x: initial.minX + (final.minX - initial.minX) * fraction,
+                                      y: initial.minY + (final.minY - initial.minY) * fraction,
+                                      width: initial.width + (final.width - initial.width) * fraction,
+                                      height: initial.height + (final.height - initial.height) * fraction)
+                }
+                XCTAssertEqual(actual.minX, expected.minX, accuracy: 0.5, name, file: file, line: line)
+                XCTAssertEqual(actual.minY, expected.minY, accuracy: 0.5, name, file: file, line: line)
+                XCTAssertEqual(actual.width, expected.width, accuracy: 0.5, name, file: file, line: line)
+                XCTAssertEqual(actual.height, expected.height, accuracy: 0.5, name, file: file, line: line)
+                if !fixedCompact, name != "title", name != "artist" {
+                    XCTAssertEqual(actual.minY - sample.surface.minY, final.minY - target.surface.minY,
+                                   accuracy: 0.5, name + " follows the dock top", file: file, line: line)
+                }
+            }
+        }
+    }
+
     private func makeDock(service: MusicUIKitRegressionService = MusicUIKitRegressionService(),
                           artworkImages: MusicArtworkImages = .shared)
         throws -> (MusicPlayerContentModel, MusicPlayerSurface) {
@@ -6297,31 +6508,45 @@ final class MusicPlayerContentModelTests: XCTestCase {
 }
 
 @MainActor
-private final class MusicDockArtworkFrameObserver: NSObject {
-    let covers: [UIButton]
+private final class MusicDockMorphFrameObserver: NSObject {
+    struct Frame {
+        let surface: CGRect
+        let frames: [String: CGRect]
+        let cardOpacity: Float
+    }
+    let surface: MusicPlayerSurface
+    let views: [String: UIView]
     let window: UIWindow
-    private(set) var samples: [(frames: [CGRect], cardOpacity: Float)] = []
-    private(set) var transitionImage: UIImage?
+    private(set) var samples: [Frame] = []
+    var onIntermediateFrame: (@MainActor (Frame) -> Void)?
 
-    init(covers: [UIButton], window: UIWindow) {
-        self.covers = covers; self.window = window
+    init(surface: MusicPlayerSurface, views: [String: UIView], window: UIWindow) {
+        self.surface = surface; self.views = views; self.window = window
         super.init()
     }
 
-    @objc func sample(_ displayLink: CADisplayLink) {
+    var modelFrame: Frame {
+        Frame(surface: surface.convert(surface.bounds, to: window),
+              frames: views.mapValues { $0.convert($0.bounds, to: window) },
+              cardOpacity: surface.form == .card ? 1 : 0)
+    }
+
+    var presentationFrame: Frame? {
         guard let host = window.layer.presentation(),
-              let card = covers.last?.layer.presentation() else { return }
-        let frames = covers.compactMap { button -> CGRect? in
-            guard let layer = button.layer.presentation() else { return nil }
-            return layer.convert(layer.bounds, to: host)
+              let dock = surface.layer.presentation(),
+              let card = views["card.open"]?.layer.presentation() else { return nil }
+        var frames: [String: CGRect] = [:]
+        for (name, view) in views {
+            guard let layer = view.layer.presentation() else { return nil }
+            frames[name] = layer.convert(layer.bounds, to: host)
         }
-        guard frames.count == covers.count else { return }
-        samples.append((frames, card.opacity))
-        if transitionImage == nil, card.opacity > 0.25, card.opacity < 0.75 {
-            transitionImage = UIGraphicsImageRenderer(size: window.bounds.size).image { _ in
-                window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
-            }
-        }
+        return Frame(surface: dock.convert(dock.bounds, to: host), frames: frames, cardOpacity: card.opacity)
+    }
+
+    @objc func sample(_ displayLink: CADisplayLink) {
+        guard let frame = presentationFrame else { return }
+        samples.append(frame)
+        if frame.cardOpacity > 0.25, frame.cardOpacity < 0.75 { onIntermediateFrame?(frame) }
     }
 }
 

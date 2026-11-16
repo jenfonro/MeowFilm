@@ -28,7 +28,8 @@ final class FilmPlaybackRuntimeLifetimeTests: XCTestCase {
         XCTAssertEqual(model.sessionReleaseError?.code, "CLOSED")
         XCTAssertFalse(model.isReleased)
         XCTAssertTrue(model.canLeave, "The confirmed dead owner has no local media to drain")
-        XCTAssertNil(model.open())
+        XCTAssertNil(model.executionStage)
+        XCTAssertNotNil(model.presentation)
         await client.close()
     }
 
@@ -112,13 +113,23 @@ final class FilmPlaybackRuntimeLifetimeTests: XCTestCase {
         await client.close()
         await fulfillment(of: [stopped], timeout: 2)
         await model.waitForPendingWork()
+        let callsBeforePlay = await server.calls()
+        let play = model.send("play")
+        XCTAssertNotNil(play)
+        await play?.value
+        await model.waitForPendingWork()
         XCTAssertFalse(media.systemOwner)
         XCTAssertFalse(model.hasSystemOwner)
         XCTAssertFalse(model.navigateFromSystem(forward: true))
-        XCTAssertNil(model.send("play"))
+        XCTAssertEqual(media.prepared.map(\.attemptID), ["pip"])
+        XCTAssertFalse(media.isCurrent(sessionID: FilmPlaybackFixture.sessionID, attemptID: "pip"))
         XCTAssertFalse(model.isReleased)
         XCTAssertTrue(model.canLeave)
         XCTAssertEqual(model.sessionReleaseError?.code, "CLOSED")
+        let calls = await server.calls()
+        XCTAssertEqual(calls.filter { $0.0 == "session.open" }.count,
+                       callsBeforePlay.filter { $0.0 == "session.open" }.count)
+        XCTAssertFalse(calls.dropFirst(callsBeforePlay.count).contains { $0.1.filmObject?["action"] == .string("play") })
     }
 
     func testRevocationDuringRetainedCloseFencesSystemCommandsBeforeTheOldCloseDrains() async throws {
@@ -147,7 +158,8 @@ final class FilmPlaybackRuntimeLifetimeTests: XCTestCase {
         await fulfillment(of: [revoked], timeout: 2)
         subscription.cancel()
         XCTAssertFalse(model.navigateFromSystem(forward: true))
-        XCTAssertNil(model.open())
+        XCTAssertNil(model.executionStage)
+        XCTAssertNotNil(model.presentation)
         XCTAssertTrue(media.stopped.isEmpty, "The old admitted close is still being drained")
         let stopped = expectation(description: "non-retaining close follows the admitted close")
         media.onStop = { stopped.fulfill() }
@@ -174,17 +186,24 @@ final class FilmPlaybackRuntimeLifetimeTests: XCTestCase {
         subscription.cancel()
         XCTAssertTrue(media.stopped.isEmpty, "Close must wait for the real admitted candidate drain")
         XCTAssertFalse(model.canLeave, "A confirmed runtime close cannot skip an admitted native drain")
-        XCTAssertNil(model.send("play"))
+        let callsBeforePlay = await server.calls()
+        let play = model.send("play")
+        XCTAssertNotNil(play)
         await candidate.release()
+        await play?.value
         await model.waitForPendingWork()
         media.emit(.started(attemptID: "candidate"), attemptID: "candidate")
         XCTAssertTrue(media.committed.isEmpty)
         XCTAssertEqual(media.cancelled, ["candidate"])
+        XCTAssertEqual(media.prepared.map(\.attemptID), ["candidate"])
         XCTAssertNil(model.mediaState.attemptID)
         XCTAssertEqual(media.stopped, [FilmPlaybackFixture.sessionID])
         XCTAssertFalse(model.isReleased)
         XCTAssertTrue(model.canLeave)
         let calls = await server.calls()
+        XCTAssertEqual(calls.filter { $0.0 == "session.open" }.count,
+                       callsBeforePlay.filter { $0.0 == "session.open" }.count)
+        XCTAssertFalse(calls.dropFirst(callsBeforePlay.count).contains { $0.1.filmObject?["action"] == .string("play") })
         XCTAssertFalse(calls.contains { $0.1.filmObject?["action"] == .string("media.started") })
     }
 
@@ -298,7 +317,8 @@ final class FilmPlaybackRuntimeLifetimeTests: XCTestCase {
         await model.waitForPendingWork()
         XCTAssertFalse(media.isCurrent(sessionID: FilmPlaybackFixture.sessionID, attemptID: "undrained"))
         XCTAssertEqual(model.observationError?.code, "CLOSED")
-        XCTAssertNil(model.open())
+        XCTAssertNil(model.executionStage)
+        XCTAssertNotNil(model.presentation)
     }
 
     func testMissingSessionReleaseReceiptRemainsFailureAfterPhysicalStop() async throws {

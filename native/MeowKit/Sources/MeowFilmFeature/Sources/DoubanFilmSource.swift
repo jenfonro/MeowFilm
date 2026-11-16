@@ -21,8 +21,7 @@ public struct DoubanFilmSource: FilmCategorySource {
                         "category": .string(section.category), "type": .string(section.type)
                     ], refresh: refresh)
                     try Task.checkCancellation()
-                    let items = try Self.parse(bytes, sourceID: descriptor.id,
-                                               kind: FilmItemKind(rawValue: section.kind))
+                    let items = try Self.parse(bytes, sourceID: descriptor.id)
                     return (index, FilmHomeSection(id: section.id, title: section.title,
                                                   items: Array(items.prefix(12)), cache: cache))
                 }
@@ -43,7 +42,7 @@ public struct DoubanFilmSource: FilmCategorySource {
                                           refresh: refresh)
         try Task.checkCancellation()
         let rows = try Self.rows(bytes)
-        let items = try Self.parseRows(rows, sourceID: descriptor.id, kind: FilmItemKind(rawValue: kind))
+        let items = try Self.parseRows(rows, sourceID: descriptor.id)
         let count = rows.count
         return FilmCategoryPage(items: items, nextOffset: count < 24 ? nil : offset + count, cache: cache)
     }
@@ -86,8 +85,8 @@ public struct DoubanFilmSource: FilmCategorySource {
                 "category": .string(requestCategory), "type": .string(type)]
     }
 
-    static func parse(_ bytes: Data, sourceID: String = "douban", kind: FilmItemKind? = nil) throws -> [FilmItem] {
-        try parseRows(rows(bytes), sourceID: sourceID, kind: kind)
+    static func parse(_ bytes: Data, sourceID: String = "douban") throws -> [FilmItem] {
+        try parseRows(rows(bytes), sourceID: sourceID)
     }
 
     private static func rows(_ bytes: Data) throws -> [Any] {
@@ -103,14 +102,19 @@ public struct DoubanFilmSource: FilmCategorySource {
         return rows
     }
 
-    private static func parseRows(_ rows: [Any], sourceID: String, kind: FilmItemKind?) throws -> [FilmItem] {
+    private static func parseRows(_ rows: [Any], sourceID: String) throws -> [FilmItem] {
         var items: [FilmItem] = []
         var identities = Set<String>()
         for row in rows {
             guard let row = row as? [String: Any] else { continue }
             let title = text(row["title"])
             let id = scalar(row["id"])
-            guard !title.isEmpty, !id.isEmpty, identities.insert(id).inserted else { continue }
+            guard !title.isEmpty, !id.isEmpty else { continue }
+            guard let seed = try? JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]),
+                  let fields = try? RuntimeJSON.decode(seed).filmRequiredObject(),
+                  let businessID = try? fields.filmString("businessId"),
+                  let target = try? FilmPlaybackTarget(fields.filmValue("playbackTarget")),
+                  identities.insert(id).inserted else { continue }
             let pic = row["pic"] as? [String: Any]
             let cover = row["cover"] as? [String: Any]
             let address = [pic?["normal"], pic?["large"], cover?["url"],
@@ -118,11 +122,12 @@ public struct DoubanFilmSource: FilmCategorySource {
                 .map(text).first { !$0.isEmpty } ?? ""
             let posterURL = FilmPosterAddress.normalize(address)
             let largeURL = FilmPosterAddress.normalize(text(pic?["large"]))
-            items.append(FilmItem(sourceID: sourceID, id: id, title: title, kind: kind, posterURL: posterURL,
+            items.append(FilmItem(sourceID: sourceID, id: id, title: title, kind: FilmItemKind(rawValue: target.kind.rawValue), posterURL: posterURL,
                                   largePosterURL: largeURL == posterURL ? nil : largeURL,
                                   score: score(row["rating"]), subtitle: text(row["card_subtitle"]),
-                                  metadataSeed: try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])))
+                                  metadataSeed: seed, businessID: businessID, playbackTarget: target))
         }
+        guard rows.isEmpty || !items.isEmpty else { throw FilmHomeError.invalidResponse }
         return items
     }
 

@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text.Json;
 using MeowFilm.Core.Runtime;
 
@@ -29,13 +30,35 @@ public sealed class NovelRuleProgram(IRuntimeClient runtime) : IAsyncDisposable
     public async Task<string> IdentityAsync(NovelBook book, CancellationToken token = default) =>
         NovelJson.Text(await InvokeAsync(new { operation = "identity", book = book.Json() }, token), "key");
     public Task<JsonElement> TransformAsync(string title, IReadOnlyList<NovelBlock> blocks, NovelBook book,
-        NovelSource source, IReadOnlyList<NovelRule> rules, string conversion, CancellationToken token = default) =>
+        NovelSource source, JsonElement rules, string conversion, CancellationToken token = default) =>
         InvokeAsync(new
         {
             operation = "transform", title, blocks, book = book.Json(),
             source = new { installationId = source.InstallationId, sourceUrl = source.SourceUrl,
-                bookSourceUrl = source.SourceUrl, name = source.Name }, rules, conversion
+                bookSourceUrl = source.SourceUrl, name = source.Name }, rules = ExecutionRules(rules), conversion
         }, token);
+    private static JsonElement ExecutionRules(JsonElement rules)
+    {
+        if (rules.ValueKind != JsonValueKind.Array) return rules;
+        using var buffer = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartArray();
+            foreach (var rule in rules.EnumerateArray())
+            {
+                if (rule.ValueKind != JsonValueKind.Object) { rule.WriteTo(writer); continue; }
+                writer.WriteStartObject();
+                foreach (var property in rule.EnumerateObject())
+                    if (property.Name is "pattern" or "replacement" or "isRegex" or "isEnabled" or "scopeTitle" or
+                        "scopeContent" or "scope" or "excludeScope" or "order" or "timeoutMillisecond")
+                        property.WriteTo(writer);
+                writer.WriteEndObject();
+            }
+            writer.WriteEndArray();
+        }
+        using var document = JsonDocument.Parse(buffer.ToArray());
+        return document.RootElement.Clone();
+    }
     public async Task<bool> MatchUrlAsync(string pattern, string url, CancellationToken token = default) =>
         (await InvokeAsync(new { operation = "matchUrl", pattern, url }, token)).GetBoolean();
     public Task PrepareShutdownAsync()

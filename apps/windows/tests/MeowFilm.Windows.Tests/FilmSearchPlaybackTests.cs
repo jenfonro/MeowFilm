@@ -10,15 +10,16 @@ public static class FilmSearchPlaybackTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("Node handoff keeps typed members original query raw rows confirmed cursors and cache provenance", TypedHandoff);
+        yield return Case("released search and a missing live selection still open the original Node business target", StableCardOpen);
         yield return Case("raw selection remains its exact single source and cannot inherit TMDB metadata", RawHandoff);
         yield return Case("source execution and reentry retain full search authorization without adding unrelated card results", SourceSelectionScope);
         yield return Case("late navigation updates carry only the original search reference and preserve active target on reopen", LiveUpdate);
         yield return Case("first open follows handoff while same-owner page reentry sends the exact resume target even after search retirement", Reentry);
         yield return Case("stale and failed update receipts cannot overwrite a replacement page", UpdateFailure);
-        yield return Case("metadata uses one captured producer and original cache identity receipts", MetadataReceipt);
-        yield return Case("invalid cache receipts and owner failures are never successful content", ReceiptFailures);
-        yield return Case("revocation fences late content and late cache receipt", RevokedReceipt);
-        yield return Case("ordinary waiter cancellation never revokes the runtime owner", CancelledWaiter);
+        yield return Case("metadata handoff keeps the search producer original revision times and complete raw data", MetadataHandoff);
+        yield return Case("handoff rejects wrong contracts selections references and returns the original locator after live failure", HandoffFailures);
+        yield return Case("runtime revocation fences late handoff authority and keeps the original locator", RevokedHandoff);
+        yield return Case("ordinary handoff cancellation fences its waiter and keeps the runtime usable", CancelledHandoff);
         yield return Case("group open and reconnect retain only admitted original members with their typed identity", GroupScope);
         yield return Case("an accepted group file cannot fall back to another member after its source is removed", SelectedGroupSourceRevocation);
         yield return Case("Douban seed loading unmatched and error entries retain their seed across reentry with or without entry provenance", HomeEntryRecovery);
@@ -42,6 +43,45 @@ public static class FilmSearchPlaybackTests
     private static JsonElement[] Updates(FilmSearchConsumerRuntime runtime) => runtime.Calls
         .Where(call => call.Method == "film.session.command" && FilmJson.Text(call.Input, "action") == "search.update")
         .Select(call => call.Input).ToArray();
+    private static void CheckLocator(FilmPlaybackRequest request, FilmPlaybackRequest original) =>
+        Check(JsonElement.DeepEquals(Encode(request.Target.Wire()), Encode(original.Target.Wire())) &&
+            JsonElement.DeepEquals(Encode(request.Sources!), Encode(original.Sources!)) &&
+            request.Query == original.Query && request.EntrySurface == original.EntrySurface &&
+            request.DataOwner is null && request.SearchReference is null && request.CacheEntries is null &&
+            request.Metadata is null && request.Results is null && request.ResultHints is null &&
+            request.Search is null && request.ResumeTarget is null,
+            "a lost live handoff keeps only the original stable target, query and source authorization, never expired producer facts");
+
+    private static async Task StableCardOpen()
+    {
+        await using var fixture = new SearchFixture();
+        var session = fixture.Service.Start("固定身份"); await SearchFixture.Settle(session);
+        var card = session.CardItems.Single().ToCard();
+        var context = card.SearchContext!;
+        var original = card.PlaybackContext!;
+        fixture.Runtime.Respond = (method, input, _) => Task.FromResult(method == "film.search.handoff"
+            ? FilmSearchConsumerRuntime.Failure("NOT_FOUND") : fixture.Runtime.Handle(method, input));
+        var withoutReference = await context.HandoffAsync(default);
+        Check(JsonElement.DeepEquals(Encode(original.Target.Wire()), Encode(withoutReference.Target.Wire())) &&
+            withoutReference.SearchReference is null, "a lost live selection is optional, not the card's business identity");
+        fixture.Runtime.Respond = null;
+        fixture.Service.InvalidateMetadata();
+        if (session.Releasing is { } release) await release;
+        int handoffs = fixture.Runtime.Calls.Count(call => call.Method == "film.search.handoff");
+        var released = await context.HandoffAsync(default);
+        await using var native = new FilmPlaybackSession(fixture.Runtime.CaptureConnectionAsync, new FilmNativeProbe());
+        var page = new FilmPlaybackPage(card, released, native, null);
+        try
+        {
+            await native.OpenAsync(page, Open(released), default);
+            var opened = fixture.Runtime.Calls.Last(call => call.Method == "film.session.open").Input;
+            Check(fixture.Runtime.Calls.Count(call => call.Method == "film.search.handoff") == handoffs &&
+                JsonElement.DeepEquals(opened.GetProperty("target"), Encode(original.Target.Wire())) &&
+                !opened.TryGetProperty("searchReference", out _),
+                "a card opens after the old search is actually released without another search or handoff");
+        }
+        finally { page.Release(); }
+    }
 
     private static async Task TypedHandoff()
     {
@@ -75,14 +115,14 @@ public static class FilmSearchPlaybackTests
         var handoff = runtime.Calls.Single(call => call.Method == "film.search.handoff").Input;
         Check(handoff.EnumerateObject().Select(field => field.Name).Order().SequenceEqual(new[] { "selectionId", "sessionId", "sources" }), "no local rules results or cache seeds are uploaded to handoff");
         await using var native = new FilmPlaybackSession(runtime.CaptureConnectionAsync, new FilmNativeProbe());
-        var page = FilmPlaybackPage.FromSearch(new("card", "显示", "", "") { SearchContext = context }, request, native, null);
+        var page = new FilmPlaybackPage(new("card", "显示", "", "") { SearchContext = context }, request, native, null);
         try
         {
             await native.OpenAsync(page, Open(page.CaptureRequest), default);
             var opened = runtime.Calls.Single(call => call.Method == "film.session.open").Input;
             Check(JsonElement.DeepEquals(opened.GetProperty("searchReference"), request.SearchReference!.Value) && !opened.TryGetProperty("rules", out _), "playback receives Node reference without client rules");
         }
-        finally { page.ReleaseSearch(); }
+        finally { page.Release(); }
     }
     private static async Task RawHandoff()
     {
@@ -131,7 +171,7 @@ public static class FilmSearchPlaybackTests
             };
             var request = await context.HandoffAsync(default);
             await using var native = new FilmPlaybackSession(runtime.CaptureConnectionAsync, new FilmNativeProbe());
-            var page = FilmPlaybackPage.FromSearch(new("card", entry.Title, "", "") { SearchContext = context }, request, native, null);
+            var page = new FilmPlaybackPage(new("card", entry.Title, "", "") { SearchContext = context }, request, native, null);
             bool FullScope(JsonElement input) => FilmJson.Array(input, "sources").Select(row => FilmJson.Text(row, "key"))
                 .SequenceEqual(new[] { a.Key, b.Key });
             JsonElement Execution(JsonElement input) => FilmJson.Member(input, metadataEntry ? "resumeTarget" : "target");
@@ -166,7 +206,7 @@ public static class FilmSearchPlaybackTests
                         !otherOwner.TryGetProperty("resumeTarget", out _)),
                     "a replacement owner keeps the exact selection and only genuine card hints without stale producer authority");
             }
-            finally { page.ReleaseSearch(); }
+            finally { page.Release(); }
         }
     }
 
@@ -178,7 +218,7 @@ public static class FilmSearchPlaybackTests
         var context = new FilmSearchContext(search, search.Items[0]);
         var request = await context.HandoffAsync(default);
         await using var native = new FilmPlaybackSession(runtime.CaptureConnectionAsync, new FilmNativeProbe());
-        var page = FilmPlaybackPage.FromSearch(new("card", "显示", "", "") { SearchContext = context }, request, native, null);
+        var page = new FilmPlaybackPage(new("card", "显示", "", "") { SearchContext = context }, request, native, null);
         try
         {
             await native.OpenAsync(page, Open(page.CaptureRequest), default);
@@ -206,7 +246,7 @@ public static class FilmSearchPlaybackTests
             runtime.PublishSearch(SearchFixture.Snapshot(Guid.Parse(search.Id), search.Query, [], [], revision: 6)); await Task.Yield();
             Check(Updates(runtime).Length == count, "closed playback cannot dispatch a late update");
         }
-        finally { page.ReleaseSearch(); }
+        finally { page.Release(); }
     }
     private static async Task UpdateFailure()
     {
@@ -216,7 +256,7 @@ public static class FilmSearchPlaybackTests
         var context = new FilmSearchContext(search, search.Items[0]);
         var request = await context.HandoffAsync(default);
         await using var native = new FilmPlaybackSession(runtime.CaptureConnectionAsync, new FilmNativeProbe());
-        var first = FilmPlaybackPage.FromSearch(new("card", "显示", "", "") { SearchContext = context }, request, native, null);
+        var first = new FilmPlaybackPage(new("card", "显示", "", "") { SearchContext = context }, request, native, null);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var receipt = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
@@ -240,7 +280,7 @@ public static class FilmSearchPlaybackTests
             runtime.PublishSearch(SearchFixture.Snapshot(Guid.Parse(search.Id), search.Query, [], [], revision: 5)); await Task.Yield();
             Check(replacement.ActiveTarget.Id == "tmdb:movie:8", "old-page search cannot publish into a replacement owner");
         }
-        finally { receipt.TrySetResult(FilmSearchConsumerRuntime.Failure("CLOSED")); first.ReleaseSearch(); }
+        finally { receipt.TrySetResult(FilmSearchConsumerRuntime.Failure("CLOSED")); first.Release(); }
     }
     private static async Task Reentry()
     {
@@ -251,7 +291,7 @@ public static class FilmSearchPlaybackTests
             var context = new FilmSearchContext(search, search.Items[0]);
             var request = await context.HandoffAsync(default);
             await using var native = new FilmPlaybackSession(f.Runtime.CaptureConnectionAsync, new FilmNativeProbe());
-            var page = FilmPlaybackPage.FromSearch(new("card", "显示标题不是身份", "", "") { SearchContext = context }, request, native, null);
+            var page = new FilmPlaybackPage(new("card", "显示标题不是身份", "", "") { SearchContext = context }, request, native, null);
             using var replacement = new FilmSearchConsumerRuntime();
             try
             {
@@ -291,125 +331,127 @@ public static class FilmSearchPlaybackTests
                 Check(JsonElement.DeepEquals(sent.GetProperty("resumeTarget"), reopened.GetProperty("resumeTarget")),
                     "the real page reopen forwards the marker and exact coordinates rather than only constructing an unused DTO");
             }
-            finally { page.ReleaseSearch(); }
+            finally { page.Release(); }
         }
     }
 
-    private static async Task MetadataReceipt()
+    private static async Task MetadataHandoff()
     {
         using var producer = new FilmSearchConsumerRuntime();
         using var replacement = new FilmSearchConsumerRuntime();
-        var facade = new CapturingFacade(producer);
-        JsonElement entry = default;
-        producer.Respond = (method, input, _) =>
-        {
-            if (method == "film.data.metadata")
-            {
-                Check(FilmJson.Text(input, "provider") == "tmdb", "metadata provider remains explicit");
-                string path = FilmJson.Text(input, "path");
-                var query = input.GetProperty("query");
-                Check(!query.TryGetProperty("language", out var language),
-                    "the client metadata key leaves language to Node's configured request identity");
-                if (path == "/3/search/multi")
-                    Check(FilmJson.Text(input, "imageSize") == "w500" && query.GetProperty("page").GetInt32() == 1 &&
-                        FilmJson.Text(query, "query") == " 原查询 ", "list request preserves exact query and w500 identity");
-                else Check(path == "/3/tv/7" && FilmJson.Text(input, "imageSize") == "original" &&
-                    FilmJson.Text(query, "append_to_response") == "credits,similar,images", "detail uses the unique targetMetadata identity");
-                var value = path == "/3/search/multi" ? SearchFixture.Tmdb("tv", 7, "目标", "简介") :
-                    Encode(new { id = 7, name = "目标", seasons = Array.Empty<object>(), raw = new { notDisplay = " kept " } });
-                facade.Current = replacement;
-                entry = Encode(new { kind = "metadata", provider = "tmdb", path, query,
-                    imageSize = FilmJson.Text(input, "imageSize"), settings = new { revision = "opaque-original" },
-                    completeness = "complete", fetchedAt = 42L, expiresAt = 84L, value });
-                return Task.FromResult(FilmSearchConsumerRuntime.Success(value));
-            }
-            Check(method == "film.data.cache.entry" &&
-                FilmJson.Text(input, "path") == FilmJson.Text(entry, "path") &&
-                JsonElement.DeepEquals(input.GetProperty("query"), entry.GetProperty("query")) &&
-                FilmJson.Text(input, "imageSize") == FilmJson.Text(entry, "imageSize"),
-                "the same fixed producer exports the exact content key");
-            return Task.FromResult(FilmSearchConsumerRuntime.Success(entry));
-        };
-        replacement.Respond = producer.Respond;
-        await using var store = new FilmNativeSettingsFixture();
-        await using var service = new FilmMetadataService(facade, store);
-        IFilmSearchMetadata consumer = service;
-        var search = await consumer.SearchAsync(" 原查询 ", default);
-        var detail = await consumer.DetailAsync("tv", 7, default);
-        Check(facade.Captures == 2 && facade.Calls == 0 &&
-            ReferenceEquals(search.Owner!.Client, producer) && ReferenceEquals(detail.Owner!.Client, replacement) &&
-            producer.Calls.Count == 2 && replacement.Calls.Count == 2 &&
-            detail.CacheEntry!.Value.GetProperty("fetchedAt").GetInt64() == 42 &&
-            detail.CacheEntry.Value.GetProperty("settings").GetProperty("revision").GetString() == "opaque-original" &&
-            detail.Value.GetProperty("raw").GetProperty("notDisplay").GetString() == " kept ",
-            "even after the facade switches epochs, each content and receipt pair stays on its exact producer");
-        Console.WriteLine($"OBSERVED film-search-wire metadata captures={facade.Captures} facadeCalls={facade.Calls} producerCalls={producer.Calls.Count},{replacement.Calls.Count} fetchedAt=42 expiresAt=84 revision=opaque-original fullAppend=true imageSize=original");
+        var current = producer;
+        int captures = 0;
+        producer.SearchOpen = (id, input) => SearchFixture.Snapshot(id, FilmJson.Text(input, "query"),
+            [SearchFixture.Card("tmdb:tv:7", "tmdb", "目标", [])], []);
+        var metadata = SearchFixture.Json(new { id = 7, name = "目标", seasons = Array.Empty<object>(),
+            poster_path = "/v1/tmdb/images/original/poster.png", raw = new { notDisplay = " kept ", unknown = (object?)null } });
+        var entries = Encode(new[] { new { kind = "metadata", provider = "tmdb", path = "/3/tv/7",
+            query = new { append_to_response = "credits,similar,images" }, imageSize = "original",
+            settings = new { revision = "opaque-original" }, completeness = "complete",
+            fetchedAt = 42L, expiresAt = 84L, value = metadata } });
+        producer.SearchHandoff = input => SearchFixture.Handoff(Guid.Parse(FilmJson.Text(input, "sessionId")),
+            FilmJson.Text(input, "selectionId"), "原查询", new("tmdb:tv:7", "tv", "目标", "tmdb", "7"),
+            [], metadata: metadata, cacheEntries: entries);
+        await using var service = new FilmSearchService(token =>
+        { captures++; return current.CaptureConnectionAsync(token); }, new SearchSources());
+        var search = service.Start("原查询"); await SearchFixture.Settle(search);
+        current = replacement;
+        var request = await new FilmSearchContext(search, search.Items.Single()).HandoffAsync(default);
+        Check(captures == 1 && replacement.Calls.Count == 0 &&
+            ReferenceEquals(request.DataOwner, search.Connection) && ReferenceEquals(request.DataOwner!.Client, producer) &&
+            request.DataOwner.Revoked == producer.Revoked.Token &&
+            JsonElement.DeepEquals(request.Metadata!.Value, metadata) &&
+            JsonElement.DeepEquals(request.CacheEntries!.Value, entries),
+            "handoff keeps the original search owner and exact Node revision, times, image reference and raw metadata after the App capture target changes");
+        Check(producer.Calls.All(call => call.Method.StartsWith("film.search.", StringComparison.Ordinal)),
+            "native handoff consumes the Node receipt without fetching content or creating another cache receipt");
     }
 
-    private static async Task ReceiptFailures()
+    private static async Task HandoffFailures()
     {
-        foreach (string failure in new[] { "shape", "contract", "STALE_SESSION", "CLOSED" })
+        foreach (string failure in new[] { "contract", "selection", "reference", "STALE_SESSION", "CLOSED" })
         {
-            using var runtime = new FilmSearchConsumerRuntime();
-            runtime.Respond = (method, _, _) => Task.FromResult(method == "film.data.metadata"
-                ? FilmSearchConsumerRuntime.Success(SearchFixture.Tmdb("tv", 7, "目标", "原始简介"))
-                : failure == "shape" ? FilmSearchConsumerRuntime.Success(new[] { 1 })
-                : failure == "contract" ? Encode(new { ok = true, contract = "tmdb.data.v1", value = (object?)null })
-                : FilmSearchConsumerRuntime.Failure(failure));
-            await using var store = new FilmNativeSettingsFixture();
-            await using var service = new FilmMetadataService(runtime, store);
-            await FilmPlaybackFixture.Error(failure is "shape" or "contract" ? "INVALID_RESPONSE" : failure,
-                () => service.SearchAsync("目标", default));
-        }
-        using var valid = new FilmSearchConsumerRuntime();
-        valid.Respond = (method, _, _) => Task.FromResult(FilmSearchConsumerRuntime.Success(
-            method == "film.data.metadata" ? (object)SearchFixture.Tmdb("tv", 7, "目标", "简介") : null));
-        await using var validStore = new FilmNativeSettingsFixture();
-        await using var metadata = new FilmMetadataService(valid, validStore);
-        var response = await ((IFilmSearchMetadata)metadata).SearchAsync("目标", default);
-        Check(response.CacheEntry is null && response.Value.GetProperty("results").GetArrayLength() == 1,
-            "only successful null means content exists without a retained cache entry");
-    }
-
-    private static async Task RevokedReceipt()
-    {
-        foreach (bool atReceipt in new[] { false, true })
-        {
-            using var runtime = new FilmSearchConsumerRuntime();
-            var release = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            runtime.Respond = async (method, _, _) =>
+            await using var fixture = new SearchFixture();
+            var search = fixture.Service.Start("目标"); await SearchFixture.Settle(search);
+            fixture.Runtime.Respond = (method, input, _) =>
             {
-                if ((method == "film.data.cache.entry") == atReceipt) { entered.TrySetResult(); return await release.Task; }
-                return FilmSearchConsumerRuntime.Success(SearchFixture.Tmdb("tv", 7, "目标", "简介"));
+                if (method != "film.search.handoff") return Task.FromResult(fixture.Runtime.Handle(method, input));
+                if (failure is "STALE_SESSION" or "CLOSED") return Task.FromResult(FilmSearchConsumerRuntime.Failure(failure));
+                var reply = JsonNode.Parse(fixture.Runtime.Handle(method, input).GetRawText())!.AsObject();
+                if (failure == "contract") reply["contract"] = "tmdb.data.v1";
+                else if (failure == "selection") reply["value"]!["selectionId"] = "another-selection";
+                else reply["value"]!["searchReference"]!["sessionId"] = Guid.NewGuid().ToString();
+                return Task.FromResult(JsonSerializer.SerializeToElement(reply));
             };
-            await using var store = new FilmNativeSettingsFixture();
-            await using var service = new FilmMetadataService(runtime, store);
-            var read = service.SearchAsync("目标", default);
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            runtime.Revoked.Cancel();
-            release.TrySetResult(FilmSearchConsumerRuntime.Success(atReceipt ? null : (object)SearchFixture.Tmdb("tv", 7, "目标", "晚到")));
-            try { await read; throw new InvalidOperationException("Revoked content was published"); }
-            catch (OperationCanceledException) { }
-            Check(atReceipt || runtime.Calls.Count == 1, "late content cannot even request a new cache receipt after revocation");
+            var context = new FilmSearchContext(search, search.Items.Single());
+            if (failure is "STALE_SESSION" or "CLOSED")
+            {
+                CheckLocator(await context.HandoffAsync(default), context.PlaybackRequest);
+                Check(fixture.Runtime.SearchOpens == 1 &&
+                    fixture.Runtime.Calls.Count(call => call.Method == "film.search.handoff") == 1 &&
+                    !fixture.Runtime.Calls.Any(call => call.Method.StartsWith("film.session.", StringComparison.Ordinal) ||
+                        call.Method.StartsWith("film.data.", StringComparison.Ordinal)),
+                    "live failure does not open another search or playback session or manufacture a cache receipt");
+            }
+            else
+                await FilmPlaybackFixture.Error("INVALID_RESPONSE", () => context.HandoffAsync(default));
         }
     }
 
-    private static async Task CancelledWaiter()
+    private static async Task RevokedHandoff()
     {
-        using var runtime = new FilmSearchConsumerRuntime();
+        await using var fixture = new SearchFixture();
+        var search = fixture.Service.Start("目标"); await SearchFixture.Settle(search);
+        var context = new FilmSearchContext(search, search.Items.Single());
+        var release = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Runtime.Respond = (method, input, _) =>
+        {
+            if (method == "film.search.handoff") { entered.TrySetResult(); return release.Task; }
+            return Task.FromResult(fixture.Runtime.Handle(method, input));
+        };
+        try
+        {
+            var read = context.HandoffAsync(default);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            fixture.Runtime.Revoked.Cancel();
+            var call = fixture.Runtime.Calls.Single(call => call.Method == "film.search.handoff");
+            release.SetResult(fixture.Runtime.Handle(call.Method, call.Input));
+            CheckLocator(await read, context.PlaybackRequest);
+            Check(fixture.Runtime.SearchOpens == 1 &&
+                fixture.Runtime.Calls.Count(call => call.Method == "film.search.handoff") == 1 &&
+                !fixture.Runtime.Calls.Any(call => call.Method.StartsWith("film.session.", StringComparison.Ordinal) ||
+                    call.Method.StartsWith("film.data.", StringComparison.Ordinal)),
+                "a revoked late handoff cannot allocate a playback session or replay on another owner");
+        }
+        finally { release.TrySetResult(FilmSearchConsumerRuntime.Failure("CLOSED")); }
+    }
+
+    private static async Task CancelledHandoff()
+    {
+        await using var fixture = new SearchFixture();
+        var search = fixture.Service.Start("原查询"); await SearchFixture.Settle(search);
+        var context = new FilmSearchContext(search, search.Items.Single());
         using var waiter = new CancellationTokenSource();
         var receipt = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        runtime.Respond = (_, _, _) => receipt.Task;
-        await using var store = new FilmNativeSettingsFixture();
-        await using var metadata = new FilmMetadataService(runtime, store);
-        var read = metadata.SearchAsync("原查询", waiter.Token);
-        waiter.Cancel();
-        receipt.SetResult(FilmSearchConsumerRuntime.Success(SearchFixture.Tmdb("tv", 7, "目标", "有限晚到")));
-        try { await read; throw new InvalidOperationException("Cancelled waiter published"); }
-        catch (OperationCanceledException) { }
-        Check(!runtime.Revoked.IsCancellationRequested && runtime.Calls.Count == 1,
-            "ordinary query cancellation fences publication, not the App epoch or a new cache receipt");
+        fixture.Runtime.Respond = (method, input, _) => method == "film.search.handoff"
+            ? receipt.Task : Task.FromResult(fixture.Runtime.Handle(method, input));
+        try
+        {
+            var read = context.HandoffAsync(waiter.Token);
+            waiter.Cancel();
+            var call = fixture.Runtime.Calls.Single(call => call.Method == "film.search.handoff");
+            receipt.SetResult(fixture.Runtime.Handle(call.Method, call.Input));
+            try { await read; throw new InvalidOperationException("Cancelled handoff was published"); }
+            catch (OperationCanceledException) { }
+            fixture.Runtime.Respond = null;
+            var next = await context.HandoffAsync(default);
+            Check(!fixture.Runtime.Revoked.IsCancellationRequested && !search.Retired &&
+                ReferenceEquals(next.DataOwner, search.Connection) &&
+                fixture.Runtime.Calls.Count(call => call.Method == "film.search.handoff") == 2,
+                "only the cancelled waiter loses publication; a later explicit handoff still uses the original live owner");
+        }
+        finally { receipt.TrySetResult(FilmSearchConsumerRuntime.Failure("CLOSED")); }
     }
 
     private static async Task GroupScope()
@@ -807,7 +849,7 @@ public static class FilmSearchPlaybackTests
             Check(Updates(fixture.Runtime).Length == before && !page.RequiresSourceSearch,
                 "an ordinary empty revocation remains terminal and is never inferred to be an unmatched home entry");
         }
-        finally { page.ReleaseSearch(); }
+        finally { page.Release(); }
     }
 
     private static async Task HomeSelectionRecovery()
@@ -989,18 +1031,5 @@ public static class FilmSearchPlaybackTests
                 call.Method.StartsWith("film.data.", StringComparison.Ordinal) ||
                 call.Method == "film.session.command" && FilmJson.Text(call.Input, "action") == "search.more"),
             "every external empty group still fails SOURCE_NOT_FOUND without a replacement lookup or search");
-    }
-
-    private sealed class CapturingFacade(FilmSearchConsumerRuntime producer) : IRuntimeClient, IRuntimeConnectionSource
-    {
-        internal int Captures, Calls;
-        internal FilmSearchConsumerRuntime Current = producer;
-        public Task<RuntimeConnection> CaptureConnectionAsync(CancellationToken cancellationToken = default)
-        { Captures++; return Current.CaptureConnectionAsync(cancellationToken); }
-        public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
-        { Calls++; throw new InvalidOperationException("Content must use the fixed producer, not the facade."); }
-        public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
-            ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default) =>
-            throw new InvalidOperationException("No uploads.");
     }
 }

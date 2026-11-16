@@ -29,7 +29,7 @@ private actor RuntimeSessionLauncher: RuntimeLaunching {
     var calls = 0
     var closes = 0
     var client: RuntimeHTTPClient?
-    private let configuredClient: RuntimeHTTPClient?
+    private var configuredClient: RuntimeHTTPClient?
     init(failure: RuntimeLaunchError? = nil, holdExit: Bool = false, client: RuntimeHTTPClient? = nil) {
         self.failure = failure
         configuredClient = client
@@ -50,6 +50,7 @@ private actor RuntimeSessionLauncher: RuntimeLaunching {
         await exit.wait()
     }
     func waitForExit() async { await exit.wait() }
+    func use(_ client: RuntimeHTTPClient) { configuredClient = client }
 }
 
 final class RuntimeSessionTests: XCTestCase {
@@ -131,6 +132,44 @@ final class RuntimeSessionTests: XCTestCase {
         XCTAssertEqual(calls, 1)
         await session.close()
         XCTAssertTrue(a.isClosed)
+    }
+
+    func testSettingsFromARetiredStartupNeverReachItsReplacementConnection() async throws {
+        let seen = SettingsNotificationRequests(), notified = expectation(description: "current connection notification")
+        SettingsNotificationURLProtocol.install { request, peer in
+            XCTAssertEqual(request.url?.port, 43211)
+            guard case .object(let fields) = try? RuntimeJSON.decode(peer.body()),
+                  case .string(let block)? = fields["block"] else {
+                XCTFail("notification block"); return
+            }
+            seen.append(block); peer.respond(); notified.fulfill()
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SettingsNotificationURLProtocol.self]
+        let retired = try RuntimeHTTPClient(baseURL: URL(string: "http://127.0.0.1:43210")!,
+                                            timeout: 3, configuration: configuration)
+        let replacement = try RuntimeHTTPClient(baseURL: URL(string: "http://127.0.0.1:43211")!,
+                                                timeout: 3, configuration: configuration)
+        let launcher = RuntimeSessionLauncher(client: retired), session = RuntimeSession(launcher: launcher)
+        var available = await session.connections().makeAsyncIterator()
+        let startup = Task { try await session.connection() }
+        await launcher.gate.started()
+        session.settingsChanged("retired-startup")
+        await retired.close(); await launcher.gate.release()
+        do { _ = try await startup.value; XCTFail("closed startup connection") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .closed) }
+        session.settingsChanged("offline-between-connections")
+        await launcher.use(replacement)
+        let current = try await session.connection(), published = await available.next()
+        XCTAssertTrue(current === replacement); XCTAssertTrue(published === replacement)
+        session.settingsChanged("tmdb")
+        await fulfillment(of: [notified], timeout: 5)
+        await session.close()
+        XCTAssertEqual(seen.values, ["tmdb"])
+        let ended = await available.next()
+        XCTAssertNil(ended)
+        let calls = await launcher.calls
+        XCTAssertEqual(calls, 2)
     }
 
     func testCancellingABorrowerFinishesWhileSharedStartupIsStillHeld() async throws {
@@ -218,17 +257,26 @@ final class RuntimeSessionTests: XCTestCase {
         catch { XCTAssertEqual(error as? RuntimeHTTPError, .closed) }
     }
 
-    func testExecutorFailureMakesTheBorrowedClientTerminalWithoutRestart() async throws {
+    func testActualReplacementConnectionIsPublishedAndClosedClientsAreNotBorrowed() async throws {
         let launcher = RuntimeSessionLauncher(), session = RuntimeSession(launcher: launcher)
+        var available = await session.connections().makeAsyncIterator()
         let pending = Task { try await session.connection() }
         await launcher.gate.started(); await launcher.gate.release()
-        let client = try await pending.value
-        await client.close()
-        do { _ = try await session.connection(); XCTFail("closed client") }
-        catch { XCTAssertEqual(error as? RuntimeHTTPError, .closed) }
+        let original = try await pending.value
+        let initialSignal = await available.next()
+        XCTAssertTrue(initialSignal === original)
+        await original.close()
+        let replacementSignal = await available.next()
+        let replacement = try XCTUnwrap(replacementSignal)
+        XCTAssertFalse(replacement === original)
+        XCTAssertFalse(replacement.isClosed)
+        let borrowed = try await session.connection()
+        XCTAssertTrue(borrowed === replacement)
         let calls = await launcher.calls
-        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(calls, 2, "Connection replacement is admitted once by the stable runtime owner")
         await session.close()
+        let ended = await available.next()
+        XCTAssertNil(ended)
     }
 }
 

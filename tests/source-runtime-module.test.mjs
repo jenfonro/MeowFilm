@@ -578,13 +578,33 @@ test('QYSG HTTP list actions reject malformed and non-list results while preserv
       title: '', chapter: {}, content: value, blocks: [{ type: 'text', text: value }], imageStyle: '',
     });
   }
+  const chapters = [
+    { name: 'Volume', chapterUrl: '', isVolume: true, index: 90 },
+    { name: 'One', chapterUrl: '/one', index: 90 },
+    { name: 'Two', chapterUrl: './two', index: -1 },
+  ];
+  for (let index = 0; index <= chapters.length; index++) {
+    await select(chapters.toSpliced(index, 0, null));
+    denied(await invoke('toc'), 'SOURCE_FAILURE');
+  }
+  for (const value of [[null, {}], { chapters: [null] }, '{"list":[false]}']) {
+    await select(value);
+    denied(await invoke('toc'), 'SOURCE_FAILURE');
+  }
+  await select({ chapters });
+  assert.deepEqual(okay(await invoke('toc')).chapters.map(chapter =>
+    [chapter.name, chapter.index, chapter.chapterUrl]), [
+    ['Volume', 0, ''], ['One', 1, 'https://books.invalid/one'], ['Two', 2, 'https://books.invalid/two'],
+  ]);
   const cat = await load(rpc, { installationId: 'plain-cat', protocol: 'cat',
     source: 'export default { searchContent(keyword) { return keyword; } };' });
   for (const keyword of ['ordinary CatVod text', '[{"name":']) {
-    assert.equal(okay(await rpc('invoke', {
-      installationId: cat.installationId, revision: cat.revision, generation: cat.generation,
-      action: 'search', payload: { keyword },
-    })), keyword);
+    for (const extra of [{}, { book: { variable: '[1]' }, chapter: { variable: [null] } }]) {
+      assert.equal(okay(await rpc('invoke', {
+        installationId: cat.installationId, revision: cat.revision, generation: cat.generation,
+        action: 'search', payload: { keyword, ...extra },
+      })), keyword);
+    }
   }
 });
 

@@ -331,6 +331,8 @@ test('real iOS native metadata notification revokes the film cache and cancels a
     const request = { provider: 'tmdb', path: '/3/movie/42', query: { language: 'zh-CN' } };
     const initial = okay(await client.call('film.data.metadata', request), 'film.playback.v1');
     assert.equal(initial.title, 'a');
+    assert.equal(initial.businessId, 'tmdb:movie:42');
+    assert.equal(initial.playbackTarget.id, initial.businessId);
     assert.deepEqual(okay(await client.call('film.data.metadata', request), 'film.playback.v1'), initial);
     assert.deepEqual(counts, { a: 1, b: 0 });
     const pending = client.call('film.data.metadata', { ...request, path: '/3/movie/43' });
@@ -339,7 +341,9 @@ test('real iOS native metadata notification revokes the film cache and cancels a
     assert.equal((await notify(runtime, 'tmdb')).ok, true);
     assert.deepEqual(await pending, { ok: false, contract: 'film.playback.v1', code: 'CANCELLED' });
     release.resolve();
-    assert.equal(okay(await client.call('film.data.metadata', request), 'film.playback.v1').title, 'b');
+    const refreshed = okay(await client.call('film.data.metadata', request), 'film.playback.v1');
+    assert.equal(refreshed.title, 'b');
+    assert.equal(refreshed.businessId, initial.businessId);
     assert.equal(okay(await client.call('film.data.metadata', { ...request, path: '/3/movie/43' }), 'film.playback.v1').title, 'b');
     assert.deepEqual(counts, { a: 2, b: 2 });
     await stop(runtime, client);

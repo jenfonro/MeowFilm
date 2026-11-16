@@ -5,20 +5,27 @@
 业务规则、分页和数据交接的唯一契约见[共同影视搜索契约](../common/film/search.md)，Node 整合程序见[共享搜索程序](../../packages/film-search/README.md)。本端没有 Swift 清洗、季集识别、评分或聚合算法，也不装载客户端 JS 引擎。
 
 - `MeowfilmAssembly.filmSearch` 装配 `FilmSearchService`，借用既有 `FilmSourceService` 与 App runtime；`FilmSearchTransport` 固定同一个 runtime epoch。`film.search.open` 只传原查询和当前准入来源，包含 `order`／`options.aggregateImages` 的布尔值。来源管理仍由原生来源 owner 负责；稳定源键编码安装／站点，代次单独校验。来源换代、禁用及配置变化撤销旧会话的 UI 发布资格，不擅自重搜。
-- `FilmSearchSession` 只持有 Node 身份、完整 `FilmSearchSnapshot`、订阅及消费者生命周期。分页游标、成功页、TMDB 回退、规则快照、两模式顺序和成员关系全由 Node 管理。`snapshot.sequence` 与 `revision` 相同，沿 `/v1/film/events/{sessionId}` 接收完整 `cards`／`rawCards`；不从原始页重算卡片。`search.command more` 分页，切换模式不请求。成功空、通道失败、不可用和取消分别展示；SSE 断开保留已得卡片并显示错误，显式重试用同 session 的 `search.snapshot` 和新订阅，不重发 `open`。
-- `cancel()` 同步撤销旧 SSE／在途回执的 UI 发布资格、结束本地 loading，再串行发送 `stop`；不取消 Node 已接纳的内容 producer。stop 回执只接纳序列／轮次、通道、loading、hasMore 等控制状态，保留已有卡片、原始条目及 metadata 展示；即使 open 或 SSE 晚到后 stop 返回了新卡，也要等明确 resume 才重新发布。保留真实 session ID 供停止、恢复和释放。同词按精确 UTF-8 查询复用当前或调用方持有的会话，只发 `resume`，不重取已成功页。新词停止旧会话；Service 弱跟踪仍由导航持有的会话，消费者释放时排空已接纳 open 并向其真实 ID 发送 `release`。搜索关闭不关闭共享 runtime。
+- `FilmSearchSession` 只持有 Node 身份、`FilmSearchSnapshot` 展示与控制状态、订阅及消费者生命周期。分页游标、成功页、TMDB 回退、规则快照、两模式顺序和成员关系全由 Node 管理；原生不复制或解析未消费的 `round`。`snapshot.sequence` 与 `revision` 相同，沿 `/v1/film/events/{sessionId}` 接收完整 `cards`／`rawCards`；不从原始页重算卡片。`search.command more` 分页，切换模式不请求。成功空、通道失败、不可用和取消分别展示；SSE 断开保留已得卡片并显示错误，显式重试用同 session 的 `search.snapshot` 和新订阅，不重发 `open`。
+- `cancel()` 同步撤销旧 SSE／在途回执的 UI 发布资格、结束本地 loading，再串行发送 `stop`；不取消 Node 已接纳的内容 producer。stop 回执只接纳 sequence／revision、通道、loading、hasMore 等控制状态，保留已有卡片、原始条目及 metadata 展示；即使 open 或 SSE 晚到后 stop 返回了新卡，也要等明确 resume 才重新发布。保留真实 session ID 供停止、恢复和释放。同词按精确 UTF-8 查询复用当前或调用方持有的会话，只发 `resume`，不重取已成功页。新词停止旧会话；Service 弱跟踪仍由导航持有的会话，消费者释放时排空已接纳 open 并向其真实 ID 发送 `release`。搜索关闭不关闭共享 runtime。
 - 原始 metadata 搜索响应、有效查询及详情只是当前 snapshot 的展示数据。`FilmSearchContext.metadataDetail` 缺少详情时按明确 TMDB 类型＋数值 ID 读取 snapshot 中的原 search 行；不根据标题猜关联，不把 partial 升级为 full。`FilmTMDBService` 保留既有独立元数据消费者接口，但不再被原生搜索会话逐项调度。缓存、原时间、revision 和完整度由 Node 保管，客户端不生成缓存 seed 或新鲜度。独立接口在主元数据请求成功后导出附属 `data.cache.entry`；明确的缓存存储／读取错误允许返回无 `cacheEntry` 的主结果，取消、关闭、协议及授权错误仍向上传递。
 - `MeowfilmSearchComposition` 在应用层协调两个业务，将影视 `FilmSearchResultsContent` 注入既有 `MusicSearchViewController`／结果分页容器。`MeowUI.SearchTargetOption`、`SearchResultCategory`、`SearchResultContent` 只定义中性输入和内容生命周期；音乐算法不导入影视。页头、历史和四分类沿用既有搜索页。影视结果只是无页头的内容控制器，复用 `FilmPosterCell`，搜索补文本角标和来源／聚合／类型标签；首页默认配置和评分语义不变。
-- 实际 `MeowfilmCoordinator.showFilmSearchResult` 将 `FilmSearchContext` 交给真实 `FilmPlaybackModel` 和 `FilmDetailViewController`，正式播放进入 `FilmPlayerViewController`，不旁路到裸 URL 播放器。`selectedCard` 保留原 opaque 选择身份；准确 target、可靠 TMDB 关联、当前卡片真实成员、原始单源及 typed `detailId` 均由 `search.handoff` 返回，不从显示标题重建。原生原样保留 handoff 的完整已授权 `sources` 与 `searchReference:{sessionId,selectionId}`，`results` 只承载当前卡片成员，不把原搜索其他结果补回来源菜单。`FilmPlaybackModel.searchScope` 保存完整授权而非当前执行来源，晚到 `search.update` 继续传该 scope／reference／revision，`session.open` 通过 reference 重读同一 Node owner 的事实和规则快照。跨 runtime 的交接明确失败，不给旧事实补证明。仅明确重进的 `retargeted` 请求附 `resumeTarget`，完整保留运行器已确认的 metadata、season／episode／globalEpisode、source／line／candidate（包括数字 0）；准确候选改为 `source` 后也不缩减搜索授权。普通初进不携带该字段，以跟随 Node 最新 handoff。正在播放时迟到资料不能重启或换集。触发与媒体生命周期见[影视会话](../runtime/film-playback.md)。
+- 实际 `MeowfilmCoordinator.showFilmSearchResult` 将 `FilmSearchContext` 交给真实 `FilmPlaybackModel` 和 `FilmDetailViewController`，正式播放进入 `FilmPlayerViewController`，不旁路到裸 URL 播放器。`FilmSearchCard` 保留 Node 的 `businessID/playbackTarget`；`FilmSearchContext` 捕获选择时的卡片、原查询和 snapshot `sources`，`playbackRequest` 直接使用该目标，不再先等待原生 `search.handoff`。可提供当前来源并按 engine／installation／site 与原授权相交；不为旧数据补新 producer 证明。`session.reference(for:)` 仅在原执行仍可用且选择存在时提供 opaque reference。晚到 `playbackUpdate()` 只转发 reference／revision／原授权 sources，Node 负责读取事实；原生不生成成员、游标或缓存 seed。重进 `retargeted` 附 `resumeTarget`，保留真实元数据、season／episode／globalEpisode 和 source／line／candidate（包括数字 0）；准确候选不缩减原授权。初进不附该字段，可跟随 Node 活跃交接。触发与读取恢复的现行边界见[影视会话](../runtime/film-playback.md#读取恢复)。
 
 原始列表为工具行右侧开关，TMDB 加载／失败／不可用状态在其左边；手机沿现有窄屏工具行布局，不把所有音乐分页标签挤到一行。切换只改同一 session 的展示模式和独立滚动位置；TMDB 失败可用“重试”继续原会话。
 
-`FilmSearchResultsPresentation` 将会话 UUID 与 `displayKey` 的精确 UTF-8 作为 UICollectionView
+`FilmSearchResultsPresentation` 将 `businessID` 的精确 UTF-8 作为 UICollectionView
 身份，不以代表项或规范等价字符串合并作品。展示字段不变不提交 diff，
 身份顺序不变时仅 reconfigure 实际变化项；选择引用仍更新到当前完整卡片。
 完整卡片未变的状态快照不重新映射展示内容，内容变化时复用未变项的投影。
 错误通知只更新状态，成功快照不会重复发布已为空的错误。
 UICollectionView 继续管理 cell 回收，海报保留现有 URL 幂等与资源生命周期。
+
+`FilmSearchSession` 保留已取得快照，`retainingDisplay`／`retainingLoadingDisplay`
+使停止及恢复加载／失败状态不清空已有卡片。App runtime 就绪后，
+当前可见内容通过 `runtimeDidBecomeAvailable` 排空旧订阅并重新绑定读取；同一存活会话的
+SSE 重连仍走 snapshot／观察，旧会话失效才新建搜索执行。新执行不改变未变卡片业务身份，
+旧 reference 不跨 epoch 复活；展示／执行共同边界见[页面契约](../common/pages/data-requests.md#展示与执行生命周期)。
+Q19 本轮仅核对源码并同步文档，以下测试入口不是本轮通过证据。
 
 分类高亮沿用分页滑动插值，使用文字下方独立居中的 20×3 短横线，不改变按钮和文字布局。搜索卡片直接显示 Node 的 `textBadge`／`siteLabel`：海报右上角为橙色白字圆角角标，内缩 8、最大海报宽度 70%；标题下的来源／聚合／电影／剧集为居中浅底描边标签，深色模式沿服务器配色调整。两者长值单行省略、空值隐藏，标题仍保留 iOS 两行及原按压效果，搜索不显示评分；首页三张加第四张边缘及仅标题展示不变。
 
@@ -34,7 +41,7 @@ HTTP／设置／图片的唯一协议见[元数据运行器](../runtime/metadata
 
 以下是可执行测试入口，不能代替具体测试运行结果：
 
-- Swift：`bash scripts/test-native.sh test --filter 'FilmSearchSessionTests|FilmSearchHandoffTests|FilmSearchAuthorizationScopeTests|FilmSearchStableIdentityTests|FilmPlaybackSearchContextTests|FilmTMDBServiceTests'`，验证完整 Node 卡片、两模式顺序、错误／空／不可用、SSE、停止即撤发布、同 session 恢复、来源准入、准确 handoff 和关闭排空；播放 context 测试验证晚到 reference 更新和重进坐标。stop 迟到数据回归为 `FilmSearchSessionTests/testStopReceiptKeepsEveryDisplayedFieldAfterRejectedSSEUntilSameSessionResume`、`testCancelledAcceptedOpenBindsIdentityWithoutPublishingStopCardsAndResumesThenReleases`；保留既有 SSE／accepted more 取消断言。搜索算法、逐源游标和缓存行为由 Node 搜索测试覆盖，不再用 Swift 替身实现另一套算法。
+- Swift：`bash scripts/test-native.sh test --filter 'FilmSearchSessionTests|FilmSearchSelectionTests|FilmSearchAuthorizationScopeTests|FilmSearchStableIdentityTests|FilmPlaybackSearchContextTests|FilmPlaybackPresentationLifetimeTests|FilmTMDBServiceTests'`，验证完整 Node 卡片、两模式顺序、错误／空／不可用、SSE、停止即撤发布、同 session 恢复、来源准入、固定目标与活跃 reference、展示保留及关闭排空；播放 context 测试验证晚到 reference 更新和重进坐标。stop 迟到数据回归为 `FilmSearchSessionTests/testStopReceiptKeepsEveryDisplayedFieldAfterRejectedSSEUntilSameSessionResume`、`testCancelledAcceptedOpenBindsIdentityWithoutPublishingStopCardsAndResumesThenReleases`；保留既有 SSE／accepted more 取消断言。搜索算法、逐源游标和缓存行为由 Node 搜索测试覆盖，不再用 Swift 替身实现另一套算法。
 - 跨查询详情回归分别验证原生旧 UI 发布被撤销、真实 Node producer 优雅完成、同键缓存复用及配置失效后的物理取消；不能再以原生成功详情字典的调用次数证明统一缓存正确。可控 continuation gate 覆盖晚到旧读者；真实宿主补充 Node 缓存及网络证据。
 - scheme `MeowfilmAcceptance` 的 UIKit 精确方法：`MeowfilmAcceptanceUITests/FilmSearchUIKitTests/testExistingPosterAddsSearchBadgeAndSourceLabelAtNarrowAndWideWidths`、`testSearchContentUsesExistingPostersKeepsBothModesAndDeliversLiveContext`、`testRawTypedZeroCardsKeepSeparateNavigationAndRealFavoritesAcrossReload`（后两项使用同一 target/class 前缀）。使用真实 `FilmPosterCell` 断言长标题、窄宽、普通／聚合／电影／剧集文本、服务器角标和来源标签、深浅色及按压/复用，并保存附件 `film-search-server-posters-<width>-<light|dark>`；固定 Node wire 回执覆盖模式切换和 live context，不冒充引擎执行。
 - 同类的 `testSearchPresentation*` 方法覆盖无变化、前插／移动／删除、单字段更新、选择事实更新、精确不透明 key 及原始／聚合／TMDB 身份转换。`FilmSearchSessionTests` 另覆盖成功 SSE／更多／refresh 的错误通知去重和断流后一次清除；这些行为回归不替代真实页面性能采样。

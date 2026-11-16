@@ -5,17 +5,19 @@ import { compareCandidates, defaultPreferences, isCandidateAllowed, isSmartSiteA
 import { contentResults, matchesResult, mediaVariants, normalizeDetail, recognizeCandidates, recognizeVariantCandidates } from './recognition.js';
 import { buildEpisodeMap, matchEpisodeMaps, resolveEpisode, sameSeasonPartition } from './episodes.js';
 import { providerFamily, qualityKey } from './rules.js';
+import { createFilmCatalog } from './catalog.js';
 import { checkSource, checkTarget, clone, codeOf, fail, identity, isIdentifier, object, requireValue,
   nativeMediaErrorCodes, playbackFeedbackFailure, resultDetailId, sourceRevision, text, variantParentId } from './identity.js';
 
 const publicSource = source => fields(source, ['key', 'engine', 'installationId', 'siteId', 'revision',
   'generation', 'name', 'detailId']);
-const publicCandidate = candidate => ({ ...fields(candidate, ['id', 'lineId', 'lineLabel', 'provider',
+const publicCandidate = (candidate, target, catalog) => ({ ...fields(candidate, ['id', 'lineId', 'lineLabel', 'provider',
   'name', 'path', 'season', 'episode', 'globalEpisode', 'quality', 'resolution', 'fps', 'codec']),
-  source: publicSource(candidate.source) });
+  source: publicSource(candidate.source), ...catalog.candidate(target, candidate) });
 const publicTarget = target => ({ ...fields(target, ['id', 'kind', 'title', 'year', 'metadataProvider',
   'metadataId', 'season', 'episode', 'globalEpisode', 'members']),
-  ...(target.source ? { source: fields(target.source, ['key', 'detailId', 'lineId', 'candidateId']) } : {}) });
+  ...(target.source ? { source: fields(target.source, ['key', 'engine', 'installationId', 'siteId',
+    'detailId', 'lineId', 'candidateId']) } : {}) });
 const sameEpisode = (a, b) => {
   if (a?.id !== b?.id || a?.kind !== b?.kind) return false;
   if (a?.source?.candidateId !== undefined || b?.source?.candidateId !== undefined)
@@ -53,7 +55,7 @@ function episodeTarget(target, episode) {
 }
 
 /** A page schedules finite business work. Cache producers and native media leases outlive observation. */
-export function createPlaybackService({ data, library, media, rules, now = Date.now }) {
+export function createPlaybackService({ data, library, media, rules, catalog = createFilmCatalog({ library }), now = Date.now }) {
   const sessions = new Map(), jobs = new Set(), calculations = new Set();
   const episodeMaps = new WeakMap(), browsingProjections = new WeakMap();
   let closed = false, closing;
@@ -196,25 +198,60 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
       browsingProjections.set(session.browsing, projected);
     }
     const browsing = clone(projected.value);
+    if (session.restoring) browsing.loading = true;
+    const result = session.results.find(row => row.id === browsing.sourceId);
+    if (result) {
+      const parent = catalog.source(session.target, result.source);
+      browsing.lines = browsing.lines.map(row => ({ ...row, ...catalog.line(parent, row) }));
+    }
+    const projectFile = row => {
+      const candidate = session.candidates.get(row.candidateId);
+      if (candidate) return { ...row, ...catalog.candidate(session.target, candidate) };
+      const file = result?.detail?.lines.find(line => line.id === browsing.lineId)?.episodes.find(item => item.index === row.index);
+      return file ? { ...row, ...catalog.file(session.target, result.source, browsing.lineId, file) } : row;
+    };
+    browsing.episodes = browsing.episodes.map(projectFile);
+    if (browsing.originalEpisodes) browsing.originalEpisodes = browsing.originalEpisodes.map(projectFile);
+    const selected = session.metadataSources.find(row => row.id === session.metadataSourceId);
+    const metadataProvider = selected?.provider ?? session.target.metadataProvider;
+    const metadataKind = selected?.kind ?? session.target.kind;
+    const metadataId = selected?.metadataId ?? session.target.metadataId;
+    const metadataPath = `${metadataProvider === 'douban' ? '/rexxar/api/v2' : '/3'}/${metadataKind}/${metadataId}`;
+    const metadata = session.metadata && metadataProvider
+      ? catalog.metadata(metadataProvider, metadataPath, session.metadata, session.target) : clone(session.metadata);
+    const episodes = visibleEpisodes(session).map(row => {
+      const entry = catalog.metadata(metadataProvider, `${metadataPath}/season/${row.season}`,
+        { name: session.target.title, season_number: row.season, episodes: [row] });
+      return entry.episodes?.[0] ?? row;
+    });
     return {
       sessionId: session.id, sequence: session.sequence, rulesRevision: session.rules.revision, target: publicTarget(session.target),
       entryTarget: publicTarget(session.entryTarget), entryResolution: session.entryResolution,
       ...(session.entrySurface === undefined ? {} : { entrySurface: session.entrySurface }),
       stage: session.stage, error: session.error,
       errorStage: session.error && session.error === session.feedbackFailure?.code ? session.feedbackFailure.stage : null,
-      reportError: session.reportError, metadata: clone(session.metadata),
-      metadataSources: session.metadataSources.map(row => fields(row, ['id', 'provider', 'metadataId', 'kind', 'title', 'seasons'])),
+      reportError: session.reportError, metadata,
+      metadataSources: session.metadataSources.map(row => {
+        const value = catalog.metadata(row.provider,
+          `${row.provider === 'douban' ? '/rexxar/api/v2' : '/3'}/${row.kind}/${row.metadataId}`,
+          { title: row.title, ...(row.seasons === undefined ? {} :
+            row.provider === 'douban' ? { doubanSeasons: row.seasons } : { seasons: row.seasons }) });
+        const seasons = value.doubanSeasons ?? value.seasons;
+        return { ...fields(row, ['id', 'provider', 'metadataId', 'kind', 'title']),
+          ...fields(value, ['businessId', 'playbackTarget']), ...(seasons === undefined ? {} : { seasons }) };
+      }),
       metadataSourceId: session.metadataSourceId, metadataError: session.metadataError,
       metadataCache: metadataCacheState(session),
       metadataSupplement: metadataSupplement(session),
       sources: session.results.map(item => ({ id: item.id, title: item.title,
-        source: publicSource(item.source), state: item.state, error: item.error })),
+        source: publicSource(item.source), state: item.state, error: item.error,
+        ...catalog.source(session.target, item.source, item.title || session.target.title) })),
       search: [...session.search.values()].map(state => fields(state, ['sourceKey', 'page', 'completed', 'loading', 'error'])),
-      browsing, episodes: clone(visibleEpisodes(session)), candidates: candidates.map(publicCandidate),
-      attempt: session.pending && !session.pending.resourceReleased ? { id: session.pending.id, candidate: publicCandidate(session.pending.candidate),
+      browsing, episodes, candidates: candidates.map(candidate => publicCandidate(candidate, session.target, catalog)),
+      attempt: session.pending && !session.pending.resourceReleased ? { id: session.pending.id, candidate: publicCandidate(session.pending.candidate, session.target, catalog),
         prepareOnly: session.pending.prepareOnly, position: session.pending.position, paused: session.pending.paused } : null,
       current: session.current && !session.current.resourceReleased ? { attemptId: session.current.id,
-        candidate: publicCandidate(session.current.candidate), position: session.position,
+        candidate: publicCandidate(session.current.candidate, session.target, catalog), position: session.position,
         duration: session.duration, paused: session.paused } : null,
       constraint: clone(session.constraint), searchComplete: searchComplete(session),
       preferences: clone(preferences()), shortVideo: session.shortVideo, previewEpisodes: session.previewEpisodes,
@@ -926,7 +963,8 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
   }
   function metadataSupplement(session) {
     const selected = associatedTMDB(session, session.metadataSources.find(row => row.id === session.metadataSourceId));
-    return selected ? fields(selected, ['provider', 'metadataId', 'kind', 'metadata']) : null;
+    return selected ? { ...fields(selected, ['provider', 'metadataId', 'kind']),
+      metadata: catalog.metadata(selected.provider, `/3/${selected.kind}/${selected.metadataId}`, selected.metadata) } : null;
   }
   async function seasonDisplay(session, target, metadata, season, options) {
     const subject = target.metadataProvider === 'douban'
@@ -989,7 +1027,7 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
       epoch === session.metadataEpoch && browsing === session.browseGeneration;
     try {
       const rows = await data.metadataSources(session.target, {
-        metadata: session.metadata, rules: session.rules, canSchedule: admitted });
+        rules: session.rules, canSchedule: admitted });
       if (!admitted()) return;
       const sources = rows.map(row => ({ ...clone(row), id: metadataIdentity(row) }));
       // A successful discovery is the current proof set. Retaining an omitted
@@ -1011,7 +1049,8 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
           acceptMetadataCache(session, value.entry, season, value.error);
         } else session.metadata = display;
       }
-      if (session.target.kind === 'tv' && session.target.episode === undefined && session.generation === 0) {
+      if (!session.restoreOnly && session.target.kind === 'tv' &&
+          session.target.episode === undefined && session.generation === 0) {
         const previous = session.platform === 'windows'
           ? library.read().history.find(row => row.targetId === session.target.id) : null;
         initializeEpisode(session, previous);
@@ -1112,6 +1151,34 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
     }
     publish(session);
   }
+  async function restoreReads(session) {
+    const selected = session.restoreBrowsing;
+    const active = () => !session.released && !session.stopped && !closed;
+    try {
+      if (session.metadataDiscovery) await session.metadataDiscovery;
+      if (!active() || session.generation !== 0) return;
+      if (selected?.season !== undefined)
+        session.browsing = { ...session.browsing, season: selected.season };
+      if (selected?.metadataSourceId) {
+        const generation = session.browseGeneration;
+        await browseMetadata(session, selected.metadataSourceId, true);
+        if (!active() || session.browseGeneration !== generation + 1) return;
+      } else if (selected?.season !== undefined && session.target.metadataProvider) {
+        await refreshMetadataDisplay(session, { season: selected.season });
+        if (!active()) return;
+      }
+      const sourceId = selected && Object.hasOwn(selected, 'sourceId')
+        ? selected.sourceId : session.browsing.sourceId;
+      await browse(session, sourceId, selected?.lineId ?? session.browsing.lineId ?? undefined);
+      if (session.browsing.error) throw fail(session.browsing.error);
+    } catch (error) {
+      if (active()) { session.stage = 'error'; session.error = codeOf(error); }
+    } finally {
+      session.restoring = false;
+      delete session.restoreBrowsing;
+      if (active()) publish(session);
+    }
+  }
   async function initialize(session, cacheEntries, { refresh = false } = {}) {
     const epoch = session.metadataEpoch;
     const admitted = () => !session.released && !session.stopped && !closed && session.metadataEpoch === epoch &&
@@ -1122,6 +1189,7 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
       // Existing metadata may render immediately, but only the data owner can
       // decide that a complete, correctly scoped and still-fresh entry exists.
       let entry, displayTarget = session.target, displayError;
+      if (!displayTarget.metadataProvider) displayTarget = catalog.content(displayTarget) ?? displayTarget;
       if (session.entryTarget.metadataProvider === 'douban' && session.entryResolution === 'loading') {
         const resolved = await data.tmdbTargetEntry(session.entryTarget,
           { metadata: session.entryMetadata, rules: session.rules, canSchedule: admitted, refresh });
@@ -1131,7 +1199,7 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
           session.metadataSources = []; session.metadataSourceId = null;
           session.metadata = session.entryMetadata;
           if (session.target.kind === 'group' && !session.target.members.length) {
-            session.stage = 'idle'; publish(session); return;
+            session.restoring = false; session.stage = 'idle'; publish(session); return;
           }
         } else {
           session.entryResolution = 'matched';
@@ -1164,9 +1232,13 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
         session.metadata = metadataDisplay(session, row);
         // Association lookup must not delay the primary source's automatic
         // preparation. Failure only affects the optional metadata selector.
-        if (session.target.metadataProvider) detached(session, discoverMetadata(session));
+        if (session.target.metadataProvider) {
+          session.metadataDiscovery = discoverMetadata(session);
+          detached(session, session.metadataDiscovery);
+        }
       }
-      const previous = session.platform === 'windows' ? library.read().history.find(row => row.targetId === session.target.id) : null;
+      const previous = !session.restoreOnly && session.platform === 'windows'
+        ? library.read().history.find(row => row.targetId === session.target.id) : null;
       if (session.target.kind === 'tv') {
         initializeEpisode(session, session.generation === 0 ? previous : null);
         if (session.target.metadataProvider === 'tmdb' && session.target.season !== undefined) {
@@ -1200,6 +1272,10 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
         session.stage = 'idle'; publish(session);
       }
       if (session.generation !== 0) return;
+      if (session.restoreOnly) {
+        await restoreReads(session);
+        return;
+      }
       if (session.target.metadataProvider && metadataCacheState(session)?.status === 'stale' ||
           session.target.kind === 'group' && !session.target.members.length) return;
       const autoPrepare = session.platform === 'ios' && !!session.target.metadataProvider && preferences().iosAutoPrepare;
@@ -1214,11 +1290,17 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
       }
     } catch (error) {
       if (admitted()) {
+        session.restoring = false;
         session.initializationError = codeOf(error);
         if (session.entryResolution === 'loading') session.entryResolution = 'error';
         if (session.generation === 0 || session.stage === 'loading') {
           session.stage = 'error'; session.error = codeOf(error); publish(session);
         }
+      }
+    } finally {
+      if (session.restoring) {
+        session.restoring = false;
+        publish(session);
       }
     }
   }
@@ -1238,6 +1320,17 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
   async function open(input, { ruleSnapshot, searchHandoff } = {}) {
     requireValue(!closed, 'CLOSED');
     requireValue(object(input) && ['ios', 'windows', 'test'].includes(input.platform));
+    requireValue(input.restoreOnly === undefined || typeof input.restoreOnly === 'boolean');
+    if (input.browsing != null) {
+      requireValue(input.restoreOnly === true && object(input.browsing));
+      for (const name of ['sourceId', 'metadataSourceId'])
+        requireValue(input.browsing[name] == null || text(input.browsing[name]));
+      requireValue(input.browsing.lineId == null || isIdentifier(input.browsing.lineId));
+      requireValue(input.browsing.source === undefined || object(input.browsing.source) &&
+        text(input.browsing.source.key) && isIdentifier(input.browsing.source.detailId));
+      requireValue(input.browsing.season === undefined ||
+        Number.isSafeInteger(input.browsing.season) && input.browsing.season >= 0);
+    }
     const entryTarget = checkTarget(input.target);
     if (entryTarget.kind === 'group') requireValue(entryTarget.members.length > 0, 'SOURCE_NOT_FOUND');
     const providedResumeTarget = input.resumeTarget === undefined ? null : checkTarget(input.resumeTarget);
@@ -1264,7 +1357,9 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
       entryTarget: clone(entryTarget), entrySurface: input.entrySurface,
       entryResolution: doubanSeed ? (resumeTarget ? (resumeTarget.metadataProvider === 'tmdb' ? 'matched' : 'unmatched')
         : 'loading') : null, entryMetadata: clone(input.metadata ?? null),
-      platform: input.platform, query: doubanSeed ? target.title : text(input.query) || target.title,
+      platform: input.platform, restoreOnly: input.restoreOnly === true,
+      restoring: input.restoreOnly === true, restoreBrowsing: clone(input.browsing),
+      query: doubanSeed ? target.title : text(input.query) || target.title,
       selectionId: entryTarget.id, selectionKind: doubanSeed ? resumeTarget?.kind ?? entryTarget.kind : entryTarget.kind,
       selectionSource: entryTarget.kind === 'source' ? clone(entryTarget.source)
         : target.kind === 'source' ? clone(target.source) : null,
@@ -1305,13 +1400,22 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
         state.page = value.page; state.completed = value.completed;
       }
     }
-    if (target.kind === 'source') {
+    if (target.kind === 'source' && target.source.engine === 'pan') {
+      const row = library.read().manual.find(value => value.id === target.source.detailId &&
+        value.targetId === target.id && value.share && value.enabled !== false);
+      requireValue(row && target.source.key === `manual:${row.id}`, 'SOURCE_NOT_FOUND');
+      const source = { key: target.source.key, engine: 'pan', name: row.name || '人工匹配', detailId: row.id };
+      await addResults(session, source, [{ id: row.id, title: row.title || target.title }], 'linked');
+      Object.assign(session.results.find(value => value.source.key === source.key),
+        { manualId: row.id, manualIdentity: manualIdentity(row), linkedTargetId: target.id });
+    } else if (target.kind === 'source') {
       const source = sources.find(value => value.key === target.source.key);
       requireValue(source, 'SOURCE_NOT_FOUND');
       await addResults(session, source, [{ id: target.source.detailId, title: target.title }], 'linked');
-    } else if (target.kind === 'group') {
+    } else if (target.members?.length) {
       for (const member of target.members) {
         const source = sources.find(value => value.key === member.sourceKey);
+        requireValue(source, 'SOURCE_NOT_FOUND');
         await addResults(session, source, [{ detailId: member.detailId }], 'linked');
       }
     }
@@ -1320,6 +1424,16 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
         row.source.detailId === target.source.detailId) : session.results[0];
       if (selected) session.browsing = { ...session.browsing, sourceId: selected.id,
         lineId: target.source?.lineId ?? null };
+    }
+    if (input.browsing?.source) {
+      const pointer = input.browsing.source;
+      const source = pointer.engine === 'pan' ? session.results.find(row =>
+        row.source.engine === 'pan' && row.source.key === pointer.key && row.source.detailId === pointer.detailId)?.source
+        : sources.find(value => value.key === pointer.key && (pointer.installationId === undefined ||
+          value.engine === pointer.engine && value.installationId === pointer.installationId && value.siteId === pointer.siteId));
+      requireValue(source, 'SOURCE_NOT_FOUND');
+      await addResults(session, source, [{ id: pointer.detailId, title: target.title }], 'linked');
+      session.restoreBrowsing.sourceId = identity(source.key, pointer.detailId);
     }
     requireValue(input.cacheEntries === undefined || Array.isArray(input.cacheEntries));
     requireValue(!closed, 'CLOSED');
@@ -1417,7 +1531,8 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
         row.id = metadataIdentity(row);
         session.metadataSources = [...session.metadataSources.filter(item => item.id !== row.id), row];
         const display = metadataDisplay(session, row);
-        if (session.target.kind !== 'group' || session.pending || session.current || session.userSelected) {
+        if (session.restoreOnly || session.target.kind !== 'group' ||
+            session.pending || session.current || session.userSelected) {
           // A proven late association supplies display data, not authority to
           // reinterpret the playing raw file as a particular metadata episode.
           if (['source', 'group'].includes(session.target.kind) &&
@@ -1669,6 +1784,7 @@ export function createPlaybackService({ data, library, media, rules, now = Date.
     const candidate = selected.candidate;
     library.update(document => {
       const value = { targetId: selected.target.id, title: selected.target.title,
+        playbackTarget: catalog.candidate(selected.target, candidate).playbackTarget,
         sourceKey: candidate.source.key, detailId: candidate.source.detailId,
         lineId: candidate.lineId, candidateId: candidate.id,
         episode: fields(selected.target, ['season', 'episode', 'globalEpisode']),

@@ -46,7 +46,8 @@ const settle = async works => {
 };
 
 /** Owns search scheduling and projections, borrowing the film data/cache owner. */
-export function createFilmSearchService({ data, rules, program, now = Date.now }) {
+export function createFilmSearchService({ data, rules, catalog, program, now = Date.now }) {
+  requireValue(catalog && typeof catalog.search === 'function');
   const processor = program ?? new NativeJsonProgram(readFileSync(require.resolve('@meowfilm/film-search'), 'utf8'));
   const sessions = new Map(), jobs = new Set();
   let closed = false, closing;
@@ -78,6 +79,7 @@ export function createFilmSearchService({ data, rules, program, now = Date.now }
       hasMore: !session.loading && !session.stopped && !session.invalidated &&
         canLoadMore(session),
       noSources: session.cursors.length === 0, invalidated: session.invalidated,
+      sources: clone(session.cursors.map(cursor => cursor.source)),
       siteItems: wireValue(session.siteItems), tmdbItems: wireValue(session.tmdbItems),
       metadataSearch: clone(session.metadataSearch), metadataQuery: session.metadataQuery,
       metadataDetails: clone(Object.fromEntries(session.details)),
@@ -127,7 +129,9 @@ export function createFilmSearchService({ data, rules, program, now = Date.now }
         // Facts can advance while this one projection is running. Do not queue
         // their obsolete intermediate versions or publish an out-of-date pair.
         if (revision !== session.displayRevision) continue;
-        session.cards = value.cards; session.rawCards = value.rawCards;
+        const cards = catalog.search([...value.cards, ...value.rawCards],
+          session.cursors.map(cursor => cursor.source), session.ruleSnapshot.revision);
+        session.cards = cards.slice(0, value.cards.length); session.rawCards = cards.slice(value.cards.length);
         session.projectedRevision = revision;
         for (const card of [...session.cards, ...session.rawCards]) {
           // Processor results are immutable owner facts. Retain the first
@@ -407,19 +411,10 @@ export function createFilmSearchService({ data, rules, program, now = Date.now }
     });
     const selectedMembers = members(card).filter(item => sources.some(source => source.key === item.siteKey));
     const selectionMembers = selectedMembers.map(item => ({ sourceKey: item.siteKey, detailId: item.detailId }));
-    let target;
-    if (!isRaw && card.sourceKind === 'tmdb') {
-      target = { id: input.selectionId, kind: card.tmdbType, title: card.title,
-        metadataProvider: 'tmdb', metadataId: String(card.tmdbId) };
-    } else if (isRaw) {
-      requireValue(selectedMembers.length > 0, 'SOURCE_NOT_FOUND');
-      target = { id: input.selectionId, kind: 'source', title: selected.title,
-        source: { key: selected.siteKey, detailId: selected.detailId } };
-    } else {
-      requireValue(selectedMembers.length > 0, 'SOURCE_NOT_FOUND');
-      target = { id: input.selectionId, kind: 'group', title: card.title,
-        members: selectionMembers };
-    }
+    if (card.sourceKind !== 'tmdb') requireValue(selectedMembers.length > 0, 'SOURCE_NOT_FOUND');
+    const target = { ...clone(card.playbackTarget), id: selected.playbackTarget.id };
+    if (isRaw) Object.assign(target, clone(selected.playbackTarget));
+    if (target.kind === 'group') target.members = selectionMembers;
     const results = [], resultHints = [], search = [], cacheEntries = [];
     for (const source of sources) {
       const cursor = session.cursors.find(row => row.source.key === source.key);
@@ -443,9 +438,18 @@ export function createFilmSearchService({ data, rules, program, now = Date.now }
       cacheEntries.push(...[...session.metadataReads.values()].flatMap(read => read.entry ? [read.entry] : []));
     }
     return clone({ target, selectionMembers, sources, query: session.query, results, resultHints, search, metadata, cacheEntries,
-      selectionId: input.selectionId, revision: session.sequence,
+      selectionId: target.id, revision: session.sequence,
       ...(target.metadataProvider ? { metadataTarget: target } : {}),
       searchReference: { sessionId: session.id, selectionId: input.selectionId } });
+  }
+  function findHandoff(input) {
+    requireValue(object(input) && text(input.sessionId) && text(input.selectionId));
+    if (!sessions.has(input.sessionId)) return undefined;
+    try { return handoff(input); }
+    catch (error) {
+      if (error.code === 'NOT_FOUND') return undefined;
+      throw error;
+    }
   }
   function events(id, after = -1) {
     const session = get(id);
@@ -482,7 +486,7 @@ export function createFilmSearchService({ data, rules, program, now = Date.now }
     await Promise.allSettled(affected.map(session => session.work));
   }
   return {
-    open, command, handoff, release, events, invalidate,
+    open, command, handoff, findHandoff, release, events, invalidate,
     has: id => sessions.has(id),
     snapshot: input => snapshot(get(input.sessionId)),
     ruleSnapshot: input => get(input.sessionId).ruleSnapshot,

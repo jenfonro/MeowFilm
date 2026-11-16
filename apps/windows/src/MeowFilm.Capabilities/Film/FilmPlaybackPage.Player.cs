@@ -10,7 +10,7 @@ public sealed partial class FilmPlaybackPage
     private static readonly string[] PlayerQualities = ["4k_hdr", "4k_fps", "4k", "1080p", "720p"];
     private bool IsMetadataPlayback => ActiveTarget.Kind is "movie" or "tv" &&
         ActiveTarget.MetadataProvider is "tmdb" or "douban";
-    private string PlayerStage => FilmJson.Text(snapshot?.Raw ?? default, "stage");
+    private string PlayerStage => HasExecution ? FilmJson.Text(session?.SnapshotFor(this)?.Raw ?? default, "stage") : "idle";
     private JsonElement PlayerCandidate => FilmJson.Member(snapshot?.Current ?? default, "candidate") is
         { ValueKind: JsonValueKind.Object } current ? current : FilmJson.Member(snapshot?.Attempt ?? default, "candidate");
     private string PlayerPanValue => PlayerProviderFamily(FilmJson.Text(PlayerCandidate, "provider"));
@@ -44,7 +44,7 @@ public sealed partial class FilmPlaybackPage
     }
     public bool ShowPlayerSwitchActions => IsMetadataPlayback && HasCurrent;
     public FilmPlayerOption? SelectedPanOption => PlayerPanOptions.FirstOrDefault(option => option.IsSelected);
-    public bool PlayerBusy => !ConnectionFailed && (snapshot is null ||
+    public bool PlayerBusy => HasExecution && !ConnectionFailed && (snapshot is null ||
         PlayerStage is "loading" or "searching" or "history" or "manual" or "cached" or "resolving" or "pending");
     public bool PlayerBuffering => HasOutput && IsPlaying && session?.IsBuffering == true;
     public string MetadataAssociationErrorMessage => MetadataAssociationFailed ? "关联资料加载失败" : "";
@@ -56,7 +56,7 @@ public sealed partial class FilmPlaybackPage
             "searching" or "history" or "manual" or "cached" => "正在搜索片源...",
             "resolving" => "正在获取播放地址...",
             "pending" => "正在准备媒体...",
-            "unavailable" => FilmPlaybackError.Message(FilmJson.Text(snapshot?.Raw ?? default, "error"), "暂无可用片源"),
+            "unavailable" => FilmPlaybackError.Message(FilmJson.Text(session?.SnapshotFor(this)?.Raw ?? snapshot?.Raw ?? default, "error"), "暂无可用片源"),
             "idle" => "待播放",
             _ => snapshot is null ? "加载中..." : StatusText
         };

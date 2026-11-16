@@ -54,7 +54,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             guard let self else { return }
             self.root.setRootVisible(page === self.main, animated: false)
             self.root.setSettingsVisible(self.isSettingsBranchVisible)
-            if !(page is FilmDetailViewController), self.filmPlayer == nil {
+            if !self.isSettingsBranchVisible, !(page is FilmDetailViewController), self.filmPlayer == nil {
                 self.activateFilmPage(page)
             }
             self.root.setReadingVisible(self.navigation.viewControllers.contains { $0 is NovelReaderViewController })
@@ -269,7 +269,8 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         let item = FilmItem(sourceID: item.sourceID, id: item.id, title: item.title,
                             kind: FilmItemKind(rawValue: kind.rawValue) ?? item.kind,
                             posterURL: item.posterURL, largePosterURL: item.largePosterURL,
-                            score: item.score, subtitle: item.subtitle, metadataSeed: item.metadataSeed)
+                            score: item.score, subtitle: item.subtitle, metadataSeed: item.metadataSeed,
+                            businessID: item.businessID, playbackTarget: item.playbackTarget)
         let model: FilmPlaybackModel
         do { model = try assembly.makeFilmPlayback(item: item, kind: kind, entrySurface: entrySurface) }
         catch {

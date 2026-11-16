@@ -1,8 +1,27 @@
 import Foundation
 import XCTest
+import MeowRuntime
 @testable import MeowFilmFeature
 
 final class FilmCatalogIdentityTests: XCTestCase {
+    func testNodeIdentityAndCompleteTypedTargetSurviveSerializationWithoutRebuilding() throws {
+        let target = FilmPlaybackTarget(id: "opaque-content", kind: .source, title: "影片",
+            position: .init(season: 0, episode: 0),
+            source: ["key": .string("source"), "detailId": .number(0), "lineId": .number(0),
+                     "candidateId": .string("opaque-file")])
+        let item = FilmItem(sourceID: "site", id: "display-id", title: "影片",
+                            businessID: "opaque-business-row", playbackTarget: target)
+        let restored = try JSONDecoder().decode(FilmItem.self, from: JSONEncoder().encode(item))
+        XCTAssertEqual(restored.businessID, item.businessID)
+        XCTAssertEqual(restored.playbackTarget, target)
+        let identity = try JSONDecoder().decode(FilmItemIdentity.self, from: JSONEncoder().encode(item.identity))
+        XCTAssertEqual(identity.playbackTarget, target)
+        XCTAssertEqual(identity.businessID, item.businessID)
+        XCTAssertEqual(identity, FilmItemIdentity(sourceID: "another-display-source", itemID: "another-display-id",
+                                                businessID: item.businessID))
+        XCTAssertNotEqual(identity, FilmItemIdentity(sourceID: item.sourceID, itemID: item.id))
+    }
+
     func testTMDBKindIsPartOfIdentityWithoutChangingDoubanOrSourceNamespaces() {
         let movie = FilmItemIdentity(sourceID: "tmdb", itemID: "19", kind: .movie)
         let tv = FilmItemIdentity(sourceID: "tmdb", itemID: "19", kind: .tv)

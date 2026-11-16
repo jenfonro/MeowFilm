@@ -745,6 +745,100 @@ final class MusicSettingsPlatformTests: XCTestCase {
         wait(for: [closed], timeout: 3)
     }
 
+    func testAccountImportAlreadyDismissedSystemPickerStartsImportAndReleasesBusyState() throws {
+        let service = makeService(importConflicts: [])
+        try withMountedAccountImportPicker(service) { page, picker, input, runner in
+            let dismissed = expectation(description: "system picker automatic dismissal completed")
+            performAccountPageAction {
+                picker.dismiss(animated: true) { dismissed.fulfill() }
+            }
+            wait(for: [dismissed], timeout: 5)
+            waitForSettingsComponent("system picker presentation links removed before delegate delivery") {
+                page.presentedViewController == nil && picker.presentingViewController == nil &&
+                    picker.viewIfLoaded?.window == nil && !picker.isBeingDismissed && page.canPresentPageAlert
+            }
+            XCTAssertTrue(page.transfer.busy)
+            performAccountPageAction {
+                page.documentPicker(picker, didPickDocumentsAt: [input])
+                XCTAssertNotNil(page.transfer.pendingOperation, "A settled picker must hand its file to the import owner")
+            }
+            waitForSettingsComponent("already dismissed picker started and finished account import") {
+                page.transfer.summary != nil && !page.transfer.busy
+            }
+            let summary = try XCTUnwrap(page.transfer.summary)
+            XCTAssertEqual(summary.imported, [.netease, .qq])
+            XCTAssertTrue(summary.skipped.isEmpty)
+            try acknowledgeAccountImportSummary(page, runner: runner, summary: summary)
+            assertAccountTransferCounts(service, prepares: 1, commits: 1)
+        }
+    }
+
+    func testAccountImportDismissingSystemPickerStartsImportAndPresentsConflictAfterDismissal() throws {
+        let service = makeService()
+        try withMountedAccountImportPicker(service) { page, picker, input, runner in
+            let dismissed = expectation(description: "in-flight system picker automatic dismissal completed")
+            var dismissalFinished = false
+            performAccountPageAction {
+                picker.dismiss(animated: true) { dismissalFinished = true; dismissed.fulfill() }
+                XCTAssertTrue(picker.isBeingDismissed)
+                XCTAssertNotNil(picker.transitionCoordinator)
+                XCTAssertFalse(dismissalFinished, "Deliver didPick during the real UIKit dismissal, not after it")
+                page.documentPicker(picker, didPickDocumentsAt: [input])
+            }
+            wait(for: [dismissed], timeout: 5)
+            waitForSettingsComponent("account conflict presented after system picker dismissal") {
+                guard let alert = page.presentedViewController as? UIAlertController else { return false }
+                return picker.viewIfLoaded?.window == nil && !picker.isBeingDismissed &&
+                    alert.title == "已有平台账号" && alert.viewIfLoaded?.window != nil && !alert.isBeingPresented
+            }
+            let plan = try XCTUnwrap(page.transfer.plan)
+            XCTAssertEqual(plan.conflicts, [.netease, .qq])
+            XCTAssertTrue(page.transfer.busy); XCTAssertNil(page.transfer.summary)
+            let skip = runner.alerts["已有平台账号"].buttons["跳过"]
+            XCTAssertTrue(skip.waitForExistence(timeout: 3)); XCTAssertTrue(skip.isHittable)
+            performAccountPageAction { skip.tap() }
+            waitForSettingsComponent("conflict decision finished account import and released busy state") {
+                page.transfer.summary != nil && !page.transfer.busy
+            }
+            let summary = try XCTUnwrap(page.transfer.summary)
+            XCTAssertEqual(summary.skipped, [.netease, .qq])
+            XCTAssertTrue(summary.imported.isEmpty)
+            try acknowledgeAccountImportSummary(page, runner: runner, summary: summary)
+            assertAccountTransferCounts(service, prepares: 1, commits: 1)
+        }
+    }
+
+    func testAccountImportDismissingSystemPickerDoesNotConsumeReplacementSelection() throws {
+        let service = makeService(importConflicts: [])
+        try withMountedAccountImportPicker(service) { page, picker, input, _ in
+            let dismissed = expectation(description: "obsolete picker dismissal completed")
+            let originalSelection = page.transfer.selectionID
+            performAccountPageAction {
+                picker.dismiss(animated: true) { dismissed.fulfill() }
+                XCTAssertTrue(picker.isBeingDismissed); XCTAssertNotNil(picker.transitionCoordinator)
+                page.documentPicker(picker, didPickDocumentsAt: [input])
+                // Replace the transfer selection before the original UIKit receipt, not via another Files pick.
+                page.transfer.selectionCancelled()
+                XCTAssertTrue(page.transfer.beginSelection())
+            }
+            let replacementSelection = page.transfer.selectionID
+            XCTAssertNotEqual(replacementSelection, originalSelection)
+            wait(for: [dismissed], timeout: 5)
+            waitForSettingsComponent("obsolete picker dismissal settled") {
+                picker.viewIfLoaded?.window == nil && !picker.isBeingDismissed && page.canPresentPageAlert
+            }
+            performAccountPageAction {
+                XCTAssertEqual(page.transfer.selectionID, replacementSelection)
+                XCTAssertTrue(page.transfer.busy, "The replacement selection is still waiting for its own file")
+                XCTAssertNil(page.transfer.pendingOperation); XCTAssertNil(page.transfer.plan)
+                XCTAssertNil(page.transfer.summary); XCTAssertNil(page.presentedViewController)
+            }
+            assertAccountTransferCounts(service, prepares: 0, commits: 0)
+            page.transfer.selectionCancelled()
+            XCTAssertFalse(page.transfer.busy)
+        }
+    }
+
     func testAccountFileStatePresentsConflictOncePerBatchAndPublishesSingleFinalSummary() async throws {
         let service = makeService()
         // Explicit transfer-capable account fixture; no platform network or Keychain.
@@ -857,6 +951,75 @@ final class MusicSettingsPlatformTests: XCTestCase {
         await model.close()
     }
 
+    // A real foreground system picker dismissal stands in for Files' automatic dismissal.
+    // Direct delegate delivery models only the UIKit-to-import handoff, not a Files selection.
+    private func withMountedAccountImportPicker(
+        _ service: MusicSettingsServiceFixture,
+        body: (MusicAccountsViewController, UIDocumentPickerViewController, URL, XCUIApplication) throws -> Void
+    ) throws {
+        let owner = makeOwner(service: service, accounts: service)
+        defer {
+            let closed = expectation(description: "picker handoff owner closed")
+            Task { await owner.close(); closed.fulfill() }
+            wait(for: [closed], timeout: 3)
+        }
+        let input = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+        try Data("synthetic file boundary".utf8).write(to: input)
+        defer { try? FileManager.default.removeItem(at: input) }
+        let loaded = expectation(description: "picker handoff account service available")
+        Task { await owner.load(); loaded.fulfill() }
+        wait(for: [loaded], timeout: 3)
+        let page = MusicAccountsViewController(model: owner,
+            appearance: MusicAppearancePreferencesStore(defaults: .standard), router: MusicSettingsRouterFixture())
+        try withMountedAccountPage(page) { runner in
+            let button = runner.buttons["music.accounts.import"]
+            XCTAssertTrue(button.waitForExistence(timeout: 3)); XCTAssertTrue(button.isHittable)
+            performAccountPageAction { button.tap() }
+            let shown = expectation(for: NSPredicate { _, _ in
+                MainActor.assumeIsolated {
+                    guard let picker = page.presentedViewController as? UIDocumentPickerViewController else { return false }
+                    return picker.viewIfLoaded?.window != nil && !picker.isBeingPresented
+                }
+            }, evaluatedWith: nil)
+            wait(for: [shown], timeout: 10)
+            let picker = try XCTUnwrap(page.presentedViewController as? UIDocumentPickerViewController)
+            XCTAssertTrue(picker.delegate === page); XCTAssertEqual(picker.documentPickerMode, .open)
+            XCTAssertTrue(page.transfer.busy); XCTAssertNil(page.transfer.pendingOperation)
+            try body(page, picker, input, runner)
+        }
+    }
+
+    private func acknowledgeAccountImportSummary(
+        _ page: MusicAccountsViewController, runner: XCUIApplication, summary: MusicAccountImportSummary
+    ) throws {
+        waitForSettingsComponent("final account import summary presented in the foreground window") {
+            guard let alert = page.presentedViewController as? UIAlertController else { return false }
+            return alert.title == "账号导入导出" && alert.message == summary.message &&
+                alert.viewIfLoaded?.window != nil && !alert.isBeingPresented
+        }
+        let alert = try XCTUnwrap(page.presentedViewController as? UIAlertController)
+        XCTAssertEqual(alert.actions.map(\.title), ["确定"])
+        XCTAssertFalse(page.transfer.busy); XCTAssertNil(page.transfer.plan)
+        XCTAssertTrue(summary.failed.isEmpty); XCTAssertTrue(summary.cancelled.isEmpty)
+        let confirm = runner.alerts["账号导入导出"].buttons["确定"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 3)); XCTAssertTrue(confirm.isHittable)
+        performAccountPageAction { confirm.tap() }
+        waitForSettingsComponent("summary acknowledged without leaving a busy page or another alert") {
+            page.presentedViewController == nil && page.canPresentPageAlert && !page.transfer.busy
+        }
+        XCTAssertEqual(page.transfer.summary, summary)
+    }
+
+    private func assertAccountTransferCounts(_ service: MusicSettingsServiceFixture, prepares: Int, commits: Int) {
+        let counted = expectation(description: "account import transfer calls counted")
+        Task {
+            let counts = await service.transferCounts()
+            XCTAssertEqual(counts.prepares, prepares); XCTAssertEqual(counts.commits, commits)
+            counted.fulfill()
+        }
+        wait(for: [counted], timeout: 3)
+    }
+
     private func withMountedAccountPage(
         _ page: MusicAccountsViewController, body: (XCUIApplication) throws -> Void
     ) throws {
@@ -910,12 +1073,12 @@ final class MusicSettingsPlatformTests: XCTestCase {
         wait(for: [performed], timeout: 5)
     }
 
-    private func makeService() -> MusicSettingsServiceFixture {
+    private func makeService(importConflicts: [MusicAccountPlatform] = [.netease, .qq]) -> MusicSettingsServiceFixture {
         let image = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).pngData { context in
             UIColor.black.setFill()
             context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
         }
-        return MusicSettingsServiceFixture(image: image)
+        return MusicSettingsServiceFixture(image: image, importConflicts: importConflicts)
     }
 
     private func makeOwner(
@@ -1024,18 +1187,19 @@ final class MusicSettingsPlatformTests: XCTestCase {
 
 private actor MusicSettingsServiceFixture: MusicServing, MusicAccountsServing, MusicAccountTransferring {
     private var transferPrepares = 0, transferCommits = 0
+    private let importConflicts: [MusicAccountPlatform]
     private var transferGate: MusicSettingsTransferGate?
     func holdTransfer(_ gate: MusicSettingsTransferGate) { transferGate = gate }
     func transferCounts() -> (prepares: Int, commits: Int) { (transferPrepares, transferCommits) }
     func exportAccountFile() throws -> MusicAccountFilePayload { try .init(fileData: Data("synthetic-export".utf8)) }
     func prepareAccountImport(_ payload: MusicAccountFilePayload) -> MusicAccountImportPlan {
-        transferPrepares += 1; return MusicAccountImportPlan(conflicts: [.netease, .qq], cancel: { _ in })
+        transferPrepares += 1; return MusicAccountImportPlan(conflicts: importConflicts, cancel: { _ in })
     }
     func importAccounts(_ plan: MusicAccountImportPlan, policy: MusicAccountImportPolicy) async -> MusicAccountImportSummary {
         transferCommits += 1
         if let transferGate { await transferGate.wait() }
         var report = MusicAccountImportSummary()
-        if policy == .skip { report.skipped = plan.conflicts } else { report.imported = plan.conflicts }
+        if policy == .skip { report.skipped = plan.conflicts } else { report.imported = [.netease, .qq] }
         return report
     }
     func discardAccountImport(_ plan: MusicAccountImportPlan) { plan.cancel() }
@@ -1051,7 +1215,9 @@ private actor MusicSettingsServiceFixture: MusicServing, MusicAccountsServing, M
     private var official = MusicAccountPlatform.allCases
     private var collectionItems: [MusicCollection] = []
 
-    init(image: Data) { self.image = image }
+    init(image: Data, importConflicts: [MusicAccountPlatform]) {
+        self.image = image; self.importConflicts = importConflicts
+    }
     func completeQR(as phase: MusicAccountStatus.Phase) { qrCompletion = phase }
     func holdQRCheck(_ gate: MusicSettingsQRCheckGate) { qrGate = gate }
     func setCollections(_ value: [MusicCollection]) { collectionItems = value }

@@ -3,27 +3,19 @@ import MeowRuntime
 @testable import MeowFilmFeature
 
 final class FilmPlaybackWireTests: XCTestCase {
-    func testUnknownPreferenceEntriesAreNotExecutedOrAllowedToRejectTheSnapshot() throws {
-        var preferences = try FilmPlaybackPreferences.defaults.value.filmRequiredObject()
-        preferences["ruleOrder"] = .array([.string("keyword"), .string("future-rule"),
-                                           .object(["extra": .bool(true)]), .string("quality")])
-        preferences["panOrder"] = .array([.string("quark"), .string("future-provider"), .number(1), .string("baidu")])
-        preferences["extra"] = .object(["ruleOrder": .string("unused")])
-        var fields = try FilmPlaybackFixture.snapshot().filmRequiredObject()
-        fields["preferences"] = .object(preferences)
-        let snapshot = try FilmPlaybackSnapshot(value: .object(fields))
-        XCTAssertEqual(snapshot.preferences.ruleOrder, [.keyword, .quality])
-        XCTAssertEqual(snapshot.preferences.panOrder, [.quark, .baidu])
-        XCTAssertEqual(snapshot.preferences.iosAutoPrepare, true)
-        XCTAssertEqual(snapshot.preferences.value.filmObject?["ruleOrder"], preferences["ruleOrder"])
-        XCTAssertEqual(snapshot.preferences.value.filmObject?["panOrder"], preferences["panOrder"])
-        var edited = snapshot.preferences
-        edited.keywords = ["新关键词"]
-        XCTAssertEqual(edited.value.filmObject?["ruleOrder"], preferences["ruleOrder"])
-        XCTAssertEqual(edited.value.filmObject?["panOrder"], preferences["panOrder"])
-        edited.ruleOrder = [.quality, .keyword]
-        XCTAssertEqual(edited.value.filmObject?["ruleOrder"], .array([.string("quality"), .string("keyword")]))
-        XCTAssertEqual(edited.value.filmObject?["panOrder"], preferences["panOrder"])
+    func testUnconsumedPreferencesDoNotRejectAPreparationAttempt() throws {
+        let value = FilmPlaybackFixture.snapshot(stage: "prepared",
+            attempt: FilmPlaybackFixture.attempt("prepared", prepareOnly: true))
+        let expected = try FilmPlaybackSnapshot(value: value)
+        for preferences in [RuntimeValue?.none, .null, .bool(false), .string("unused"),
+                            .object(["iosAutoPrepare": .array([])])] {
+            var fields = try value.filmRequiredObject()
+            fields["preferences"] = preferences
+            XCTAssertEqual(try FilmPlaybackSnapshot(value: .object(fields)), expected)
+        }
+        XCTAssertEqual(expected.attempt?.id, "prepared")
+        XCTAssertEqual(expected.attempt?.prepareOnly, true)
+        XCTAssertNil(expected.current)
     }
 
     func testUnusableSupplementDoesNotRejectPrimaryMetadataOrAnActiveAttempt() throws {
@@ -89,6 +81,8 @@ final class FilmPlaybackWireTests: XCTestCase {
         XCTAssertEqual(snapshot.browsing.files.first?.candidateID, "opaque-candidate")
         XCTAssertNil(snapshot.episodes.first?.position.globalEpisode)
         XCTAssertEqual(snapshot.episodes.first?.position.value, ["season": .number(0), "episode": .number(0)])
+        XCTAssertEqual(snapshot.episodes.first?.businessID, "fixture-season-0-episode-0")
+        XCTAssertEqual(snapshot.episodes.first?.playbackTarget.position, .init(season: 0, episode: 0))
     }
     func testPresentationMetadataDoesNotManufactureCacheEntries() {
         let metadata: RuntimeValue = .object(["title": .string("partial")])
@@ -175,14 +169,75 @@ final class FilmPlaybackWireTests: XCTestCase {
         XCTAssertEqual(request.value.filmObject?["cacheEntries"], .array(entries))
     }
     func testFailedCurrentBrowsingCannotDisplayOldPlayableRows() throws {
-        let browsing: RuntimeValue = .object([
-            "sourceId": .string("result-b"), "lineId": .null, "loading": .bool(false), "error": .string("UPSTREAM_HTTP"),
-            "lines": .array([]), "episodes": .array([.object(["id": .string("old"), "name": .string("old"),
-                                                             "candidateId": .string("old-candidate")])]),
-        ])
-        let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(browsing: browsing))
-        XCTAssertTrue(snapshot.browsing.files.isEmpty)
-        XCTAssertEqual(snapshot.browsing.sourceID, "result-b")
+        for unused in [RuntimeValue?.none, .null, .bool(false), .object(["unused": .number(1)]),
+                       .array([.null, .object(["id": .string("missing-name")])]),
+                       .array([.object(["id": .string("old"), "name": .string("old"),
+                                       "candidateId": .string("old-candidate")])])] {
+            var browsing: RuntimeObject = [
+                "sourceId": .string("result-b"), "lineId": .number(0), "loading": .bool(false),
+                "refreshing": .bool(true), "error": .string("UPSTREAM_HTTP"),
+                "lines": .array([.object(["id": .number(0), "label": .string("真实线路")])]),
+            ]
+            browsing["episodes"] = unused; browsing["originalEpisodes"] = unused
+            let value = FilmPlaybackFixture.snapshot(
+                current: FilmPlaybackFixture.current("playing"), browsing: .object(browsing))
+            XCTAssertEqual(value.filmObject?["browsing"]?.filmObject?["episodes"], unused)
+            XCTAssertEqual(value.filmObject?["browsing"]?.filmObject?["originalEpisodes"], unused)
+            let snapshot = try FilmPlaybackSnapshot(value: value)
+            XCTAssertEqual(snapshot.browsing.error, "UPSTREAM_HTTP")
+            XCTAssertTrue(snapshot.browsing.files.isEmpty); XCTAssertTrue(snapshot.browsing.originalFiles.isEmpty)
+            XCTAssertEqual(snapshot.browsing.sourceID, "result-b")
+            XCTAssertEqual(snapshot.browsing.lineID, .number(0))
+            XCTAssertEqual(snapshot.browsing.lines.map(\.label), ["真实线路"])
+            XCTAssertTrue(snapshot.browsing.refreshing)
+            XCTAssertEqual(snapshot.current?.attemptID, "playing")
+            XCTAssertEqual(snapshot.current?.candidate.lineID, .string("opaque-line"))
+        }
+    }
+
+    func testBrowsingFailureStillConsumesLinesRefreshingAndIndependentCurrent() throws {
+        let browsing: RuntimeObject = [
+            "sourceId": .null, "lineId": .null,
+            "loading": .bool(false), "error": .string("UPSTREAM_HTTP"), "lines": .array([]),
+        ]
+        let healthy = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(browsing: .object(browsing)))
+        XCTAssertEqual(healthy.browsing.error, "UPSTREAM_HTTP")
+        XCTAssertTrue(healthy.browsing.lines.isEmpty)
+        for (key, value) in [("lines", RuntimeValue.bool(false)),
+                             ("lines", .array([.object(["businessId": .string("fixture-line-0"),
+                                 "playbackTarget": FilmPlaybackFixture.sourceTarget(lineID: .number(0)),
+                                 "label": .string("缺少身份")])])),
+                             ("refreshing", .string("true"))] {
+            var invalid = browsing; invalid[key] = value
+            XCTAssertThrowsError(try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(browsing: .object(invalid)))) {
+                XCTAssertEqual($0 as? FilmPlaybackError, .invalidResponse)
+            }
+        }
+        XCTAssertThrowsError(try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
+            current: .object(["attemptId": .string("missing-candidate")]), browsing: .object(browsing)))) {
+            XCTAssertEqual($0 as? FilmPlaybackError, .invalidResponse)
+        }
+    }
+
+    func testSuccessfulBrowsingRequiresUsableFileListsAndIdentities() throws {
+        let browsing: RuntimeObject = [
+            "sourceId": .null, "lineId": .null, "loading": .bool(false), "error": .null,
+            "lines": .array([]), "episodes": .array([]),
+        ]
+        let healthy = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(browsing: .object(browsing)))
+        XCTAssertTrue(healthy.browsing.files.isEmpty); XCTAssertTrue(healthy.browsing.originalFiles.isEmpty)
+        for key in ["episodes", "originalEpisodes"] {
+            for invalid in [RuntimeValue.object([:]), .array([.null]),
+                            .array([.object(["businessId": .string("file"), "playbackTarget": FilmPlaybackFixture.sourceTarget(),
+                                             "id": .string("missing-name")])]),
+                            .array([.object(["businessId": .string("file"), "playbackTarget": FilmPlaybackFixture.sourceTarget(),
+                                             "id": .number(0), "name": .string("错误身份")])])] {
+                var invalidBrowsing = browsing; invalidBrowsing[key] = invalid
+                XCTAssertThrowsError(try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(browsing: .object(invalidBrowsing)))) {
+                    XCTAssertEqual($0 as? FilmPlaybackError, .invalidResponse)
+                }
+            }
+        }
     }
     func testRefreshingBrowseKeepsSuccessfulFilesAndDefaultsToFalseWhenAbsent() throws {
         let file: RuntimeValue = .object(["id": .string("old"), "name": .string("旧成功文件"),
@@ -228,7 +283,9 @@ final class FilmPlaybackWireTests: XCTestCase {
     }
 
     func testDirectoryRetainsAbsoluteRootUnicodeAndAccurateCandidateIdentity() throws {
-        let file = try FilmPlaybackFile(.object(["id": .string("opaque"), "candidateId": .string("candidate"),
+        let file = try FilmPlaybackFile(.object(["businessId": .string("opaque"),
+                                                "playbackTarget": FilmPlaybackFixture.sourceTarget(candidateID: "candidate"),
+                                                "id": .string("opaque"), "candidateId": .string("candidate"),
                                                 "name": .string("片.mp4"), "path": .string("/目录/片.mp4")]))
         let directory = FilmPlaybackDirectory(files: [file])
         XCTAssertEqual(directory.children(at: []), [.folder("")])
@@ -272,6 +329,115 @@ final class FilmPlaybackWireTests: XCTestCase {
         XCTAssertEqual(snapshot.metadataError, "UPSTREAM_HTTP")
         let missing = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot())
         XCTAssertTrue(missing.metadataSources.isEmpty, "A module or title does not prove a provider association")
+    }
+
+    func testMetadataMenuKeepsHealthySiblingsAndPrimarySeasonsDespiteUnusableAuxiliaryRows() throws {
+        let selectedTarget = FilmPlaybackTarget(id: "tmdb:tv:19", kind: .tv, title: "主资料",
+            metadataProvider: .tmdb, metadataID: "19")
+        let selected: RuntimeObject = [
+            "id": .string("tmdb:tv:19"), "provider": .string("tmdb"), "metadataId": .number(19),
+            "kind": .string("tv"), "title": .string("主资料"),
+            "businessId": .string("tmdb:tv:19"), "playbackTarget": .object(selectedTarget.value),
+        ]
+        let other: RuntimeObject = [
+            "id": .string("douban:tv:0"), "provider": .string("douban"), "metadataId": .number(0),
+            "kind": .string("tv"), "title": .string("健康后项"),
+        ]
+        let specialTarget = FilmPlaybackTarget(id: "tmdb:tv:19", kind: .tv, title: "主资料",
+            metadataProvider: .tmdb, metadataID: "19", position: .init(season: 0))
+        let metadata: RuntimeValue = .object([
+            "name": .string("主资料"), "seasons": .array([
+                .object(["id": .string("special"), "season_number": .number(0), "name": .string("主特别篇"),
+                         "businessId": .string("tmdb:tv:19:season:0"), "playbackTarget": .object(specialTarget.value)]),
+            ]),
+        ])
+        let original = FilmDetail(item: .init(sourceID: "tmdb", id: "19", title: "原资料", kind: .tv))
+        for seasons in [RuntimeValue?.none, .null, .bool(false), .string("unused"),
+                        .object(["unused": .array([])]), .array([.null])] {
+            var row = selected; row["seasons"] = seasons
+            var last = other; last["seasons"] = seasons
+            var badProvider = selected; badProvider["id"] = .string("bad-provider")
+            badProvider["provider"] = .string("future")
+            var badKind = selected; badKind["id"] = .string("bad-kind"); badKind["kind"] = .string("future")
+            var badID = selected; badID["id"] = .string("bad-id"); badID["metadataId"] = .object([:])
+            var badBusinessID = selected; badBusinessID["id"] = .string("bad-business-id"); badBusinessID["businessId"] = .null
+            var badTarget = selected; badTarget["id"] = .string("bad-target"); badTarget["playbackTarget"] = .object([:])
+            let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(stage: "pending",
+                attempt: FilmPlaybackFixture.attempt("pending"), metadata: metadata,
+                episodes: [.object(["season": .number(0), "episode": .number(0), "name": .string("特别集")])],
+                metadataSources: [.object(row), .null, .object(badProvider), .object(badKind), .object(badID),
+                                  .object(badBusinessID), .object(badTarget), .object(last)],
+                metadataSourceID: "tmdb:tv:19"))
+            XCTAssertEqual(snapshot.metadataSources.map(\.id), ["tmdb:tv:19", "douban:tv:0"])
+            XCTAssertEqual(snapshot.metadataSources.map(\.provider), [.tmdb, .douban])
+            XCTAssertEqual(snapshot.metadataSources.map(\.metadataID), [.number(19), .number(0)])
+            XCTAssertEqual(snapshot.metadataSourceID, "tmdb:tv:19")
+            XCTAssertEqual(snapshot.attempt?.id, "pending")
+            let detail = FilmPlaybackPresentation.detail(snapshot, original: original)
+            XCTAssertEqual(detail.item.identity, original.item.identity)
+            XCTAssertEqual(detail.seasons.map(\.number), [0])
+            XCTAssertEqual(detail.seasons.map(\.title), ["主特别篇"])
+            XCTAssertEqual(detail.seasons.first?.episodes.map(\.number), [0])
+            XCTAssertEqual(detail.seasons.first?.businessID, "tmdb:tv:19:season:0")
+            XCTAssertEqual(detail.seasons.first?.playbackTarget, specialTarget)
+            XCTAssertEqual(detail.seasons.first?.episodes.first?.businessID, "fixture-season-0-episode-0")
+            XCTAssertEqual(detail.seasons.first?.episodes.first?.playbackTarget?.position, .init(season: 0, episode: 0))
+        }
+    }
+
+    func testSelectedMetadataReferenceRequiresAnExactStringOrNoSelection() throws {
+        let selected: RuntimeValue = .object([
+            "id": .string("0"), "provider": .string("tmdb"), "metadataId": .number(0),
+            "kind": .string("tv"), "title": .string("特别篇"),
+        ])
+        let value = FilmPlaybackFixture.snapshot(metadataSources: [selected], metadataSourceID: "0")
+        let snapshot = try FilmPlaybackSnapshot(value: value)
+        XCTAssertEqual(snapshot.metadataSourceID, "0")
+        XCTAssertEqual(snapshot.metadataSources.first?.metadataID, .number(0))
+        for invalid in [RuntimeValue.number(0), .object(["id": .string("0")]),
+                        .bool(false), .array([.string("0")]), .string("")] {
+            var fields = try value.filmRequiredObject(); fields["metadataSourceId"] = invalid
+            XCTAssertThrowsError(try FilmPlaybackSnapshot(value: .object(fields))) {
+                XCTAssertEqual($0 as? FilmPlaybackError, .invalidResponse)
+            }
+        }
+        for absent in [RuntimeValue?.none, .null] {
+            var fields = try value.filmRequiredObject(); fields["metadataSourceId"] = absent
+            let unselected = try FilmPlaybackSnapshot(value: .object(fields))
+            XCTAssertNil(unselected.metadataSourceID)
+            XCTAssertEqual(unselected.metadataSources.map(\.id), ["0"])
+        }
+    }
+
+    func testSelectedMetadataStillRequiresConfirmedProviderKindAndTypedIdentity() throws {
+        let selectedTarget = FilmPlaybackTarget(id: "0", kind: .tv, title: "特别篇",
+            metadataProvider: .tmdb, metadataID: "0")
+        let selected: RuntimeObject = [
+            "id": .string("0"), "provider": .string("tmdb"), "metadataId": .number(0),
+            "kind": .string("tv"), "title": .string("特别篇"),
+            "businessId": .string("0"), "playbackTarget": .object(selectedTarget.value),
+        ]
+        var other = selected; other["id"] = .string("healthy"); other["metadataId"] = .string("0")
+        other["businessId"] = .string("healthy")
+        other["playbackTarget"] = .object(FilmPlaybackTarget(id: "healthy", kind: .tv, title: "特别篇",
+            metadataProvider: .tmdb, metadataID: "0").value)
+        for (key, invalid) in [
+            ("id", RuntimeValue.object([:])), ("id", .number(0)), ("provider", .string("future")),
+            ("kind", .string("future")), ("metadataId", .object([:])), ("metadataId", .bool(false)),
+            ("businessId", .null), ("businessId", .number(0)),
+            ("playbackTarget", .null), ("playbackTarget", .object([:])),
+        ] {
+            var row = selected; row[key] = invalid
+            let value = FilmPlaybackFixture.snapshot(metadataSources: [.object(row), .object(other)], metadataSourceID: "0")
+            XCTAssertEqual(value.filmObject?["metadataSources"]?.filmArray?.first?.filmObject?[key], invalid)
+            XCTAssertThrowsError(try FilmPlaybackSnapshot(value: value)) {
+                XCTAssertEqual($0 as? FilmPlaybackError, .invalidResponse)
+            }
+        }
+        XCTAssertThrowsError(try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
+            metadataSources: [.object(selected), .object(other)], metadataSourceID: "missing"))) {
+            XCTAssertEqual($0 as? FilmPlaybackError, .invalidResponse)
+        }
     }
 
     func testMediaReceiptAcceptsHTTPURLsWithoutHostPortOrResourcePathAdmission() throws {
@@ -347,9 +513,13 @@ final class FilmPlaybackWireTests: XCTestCase {
         XCTAssertEqual(updated.item.posterURL, original.item.posterURL)
         var target = try FilmPlaybackFixture.target.filmRequiredObject()
         target["metadataProvider"] = .string("douban"); target["metadataId"] = .number(0)
+        let specialTarget = FilmPlaybackTarget(id: "douban:tv:0", kind: .tv, title: "可靠关联",
+            metadataProvider: .douban, metadataID: "0", position: .init(season: 0))
         let linked: RuntimeValue = .object(["id": .string("douban:tv:0"), "provider": .string("douban"),
             "metadataId": .number(0), "kind": .string("tv"), "title": .string("可靠关联"),
-            "seasons": .array([.object(["id": .number(0), "season_number": .number(0), "name": .string("特别季")])])])
+            "seasons": .array([.object(["id": .number(0), "season_number": .number(0), "name": .string("特别季"),
+                                       "businessId": .string("douban:tv:0:season:0"),
+                                       "playbackTarget": .object(specialTarget.value)])])])
         let changed = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(target: .object(target),
             metadataSources: [linked], metadataSourceID: "douban:tv:0"))
         let result = FilmPlaybackPresentation.detail(changed, original: original)
@@ -366,10 +536,14 @@ final class FilmPlaybackWireTests: XCTestCase {
             let target = FilmPlaybackTarget(id: "tmdb:\(kind.rawValue):19",
                 kind: kind == .movie ? .movie : .tv, title: "影片",
                 metadataProvider: .tmdb, metadataID: "19")
+            let similarTarget = FilmPlaybackTarget(id: "tmdb:\(kind.rawValue):20",
+                kind: kind == .movie ? .movie : .tv, title: "相似条目",
+                metadataProvider: .tmdb, metadataID: "20")
             let metadata: RuntimeValue = .object([
                 "title": .string("真实标题"),
                 "similar": .object(["results": .array([
-                    .object(["id": .number(20), "title": .string("相似条目")]),
+                    .object(["id": .number(20), "title": .string("相似条目"),
+                             "businessId": .string(similarTarget.id), "playbackTarget": .object(similarTarget.value)]),
                 ])]),
             ])
             let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
@@ -380,8 +554,11 @@ final class FilmPlaybackWireTests: XCTestCase {
             XCTAssertEqual(detail.item.identity, FilmItemIdentity(sourceID: "tmdb", itemID: "19", kind: kind))
             XCTAssertEqual(detail.similarItems.count, 1)
             XCTAssertEqual(detail.similarItems.first?.kind, kind)
+            XCTAssertEqual(detail.similarItems.first?.id, "20")
+            XCTAssertEqual(detail.similarItems.first?.playbackTarget, similarTarget)
             XCTAssertEqual(detail.similarItems.first?.identity,
-                           FilmItemIdentity(sourceID: "tmdb", itemID: "20", kind: kind))
+                           FilmItemIdentity(sourceID: "tmdb", itemID: "20", kind: kind,
+                                            businessID: similarTarget.id, playbackTarget: similarTarget))
         }
     }
 
@@ -460,10 +637,13 @@ final class FilmPlaybackWireTests: XCTestCase {
                 position: kind == .tv ? .init(season: 0, episode: 0) : .init(),
                 source: ["key": .string("source-key"), "detailId": .number(0),
                          "lineId": .string("0"), "candidateId": .string("opaque-selected")])
+            let specialTarget = FilmPlaybackTarget(id: "tmdb:\(kind.rawValue):19", kind: kind, title: "可靠作品",
+                metadataProvider: .tmdb, metadataID: "19", position: .init(season: 0))
             let confirmed: RuntimeValue = .object([
                 "id": .string("confirmed-tmdb"), "provider": .string("tmdb"), "metadataId": .number(19),
                 "kind": .string(kind.rawValue), "title": .string("可靠作品"),
-                "seasons": .array(kind == .tv ? [.object(["season_number": .number(0), "name": .string("特别季")])] : []),
+                "seasons": .array(kind == .tv ? [.object(["season_number": .number(0), "name": .string("特别季"),
+                    "businessId": .string("tmdb:tv:19:season:0"), "playbackTarget": .object(specialTarget.value)])] : []),
             ])
             let episode: RuntimeValue = .object(["season": .number(0), "episode": .number(0), "name": .string("真实特别集")])
             let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(

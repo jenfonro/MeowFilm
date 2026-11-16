@@ -118,7 +118,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 - 页面跳转由路由显式调用，不通过业务状态标志触发。
 - 上层呈现通过视图层级阻挡下层触摸。
 - 资源活跃、页面可见及浮层呈现时机分别管理；待处理的错误在页面稳定出现或导航／呈现转场完成后处理，不因此重新加载业务。
-- `PageViewController.showError` 保留单“确定”及确认回调；需要显式恢复的页面使用 `showRetryableError`，在同一错误浮层内提供“重试”。页面记录实际接受呈现的浮层身份；`dismissPageModal` 以实际退出回执结算该次转场后调用业务动作，UIKit 已自动退出才触发的 action 仍可消费一次，已失效页面不再重试；影视设置的成功反馈在暂不可呈现时保留，待页面出现或原浮层退出后显示，不重新提交保存。
+- `PageViewController.showError` 保留单“确定”及确认回调；需要显式恢复的页面使用 `showRetryableError`，在同一错误浮层内提供“重试”。页面根据实际呈现关系和呈现完成回执记录已接受的浮层身份，不只检查同步的 `presentingViewController`；`dismissPageModal` 以实际退出回执结算该次转场后调用业务动作，系统文件选择器等浮层正在自动退出时复用已有转场，不再次发起退出；已有转场被取消时保留浮层及 picker 身份，继续接收选择／取消，不执行业务动作；UIKit 已自动退出才触发的 action 仍可消费一次，已失效页面不再重试；影视设置的成功反馈在暂不可呈现时保留，待页面出现或原浮层退出后显示，不重新提交保存。
 
 ## 页面加载与刷新
 
@@ -189,6 +189,6 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `music.presentation-resources.v1`、`music.home.display.v1`、`music.source-checks.v1` | 共享图片／歌词资源、首页展示快照和来源发现观察 |
 | `music.ui.appearance.v1`、`music.ui.songColors.v1`、`music.ui.lastChannel` | 音乐外观偏好、歌曲取色缓存和频道恢复 |
 | `playback.volume`、播放所有者 `music`／`film` | 共享播放音量与当前播放业务所有者 |
-| `meowfilm.film.library.v1` | 影视收藏的来源 ID 与影片 ID |
+| `meowfilm.film.library.v1` | 影视收藏身份，保留原来源／影片字段及可选 Node `businessID/playbackTarget`，见[影视收藏](film.md#详情和收藏) |
 
 歌曲／录音、来源、队列 occurrence、播放 attempt、账号访问代次和文件版本是相互独立的身份，不能用标题、短期 URL 或队列位置替代。

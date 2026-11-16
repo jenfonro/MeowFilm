@@ -16,12 +16,14 @@ public static partial class NovelTests
         private readonly NovelRuleRuntimeFixture runtime = new();
         internal int Transforms;
         internal Func<Task>? AfterTransform;
+        internal Func<JsonElement, JsonElement>? ProjectTransform;
         public async Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken token = default)
         {
             bool transform = NovelJson.Value(parameters!).GetProperty("request").GetProperty("operation").GetString() == "transform";
             if (transform) Transforms++;
             var result = await runtime.CallAsync(method, parameters, token);
             if (transform && AfterTransform is { } after) await after();
+            if (transform && ProjectTransform is { } project) result = project(result);
             return result;
         }
         public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,

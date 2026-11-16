@@ -149,12 +149,18 @@ internal static class NovelJson
 
 internal sealed class NovelBlockConverter : JsonConverter<NovelBlock>
 {
+    public override bool HandleNull => true;
     public override NovelBlock Read(ref Utf8JsonReader reader, Type type, JsonSerializerOptions options)
     {
         using var document = JsonDocument.ParseValue(ref reader); var value = document.RootElement;
         string kind = NovelJson.Text(value, "type");
         if (kind is not ("text" or "image")) throw new JsonException();
-        return new(kind, NovelJson.Text(value, "text"), NovelJson.Text(value, "src"), NovelJson.Text(value, "alt"));
+        string member = kind == "text" ? "text" : "src";
+        if (!value.TryGetProperty(member, out var material) || material.ValueKind != JsonValueKind.String)
+            throw new JsonException();
+        string content = material.GetString()!;
+        if (kind == "image" && string.IsNullOrWhiteSpace(content)) throw new JsonException();
+        return kind == "text" ? new(kind, Text: content) : new(kind, Src: content, Alt: NovelJson.Text(value, "alt"));
     }
     public override void Write(Utf8JsonWriter writer, NovelBlock value, JsonSerializerOptions options)
     {

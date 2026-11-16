@@ -14,6 +14,8 @@ public actor RuntimeSession {
     private var waiters: [UUID: CheckedContinuation<RuntimeHTTPClient, Error>] = [:]
     private var stopping: Task<Void, Never>?
     private var closed = false
+    private var connectionLifetime: Task<Void, Never>?
+    private var availability: [UUID: AsyncStream<RuntimeHTTPClient>.Continuation] = [:]
     private nonisolated let notificationLifetime = RuntimeSettingsNotificationLifetime()
     private var notifications: [UUID: Task<Void, Never>] = [:]
 
@@ -25,8 +27,9 @@ public actor RuntimeSession {
         guard !closed else { throw RuntimeHTTPError.closed }
         if let outcome {
             let client = try outcome.get()
-            guard !client.isClosed else { throw RuntimeHTTPError.closed }
-            return client
+            if !client.isClosed { return client }
+            notificationLifetime.end()
+            self.outcome = nil; launch = nil
         }
         let id = UUID()
         let client = try await withTaskCancellationHandler {
@@ -51,6 +54,31 @@ public actor RuntimeSession {
         guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         guard !closed, !client.isClosed else { throw RuntimeHTTPError.closed }
         return client
+    }
+
+    /// Emits only a published, live connection. Subscribers do not own startup
+    /// or executor lifetime, and receive the currently available connection once.
+    public func connections() -> AsyncStream<RuntimeHTTPClient> {
+        let id = UUID()
+        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            guard !closed else { continuation.finish(); return }
+            availability[id] = continuation
+            if case .success(let client)? = outcome, !client.isClosed { continuation.yield(client) }
+            continuation.onTermination = { @Sendable _ in
+                Task { await self.removeAvailability(id) }
+            }
+        }
+    }
+
+    private func removeAvailability(_ id: UUID) { availability[id] = nil }
+
+    private func connectionEnded(_ client: RuntimeHTTPClient) async {
+        guard !closed, case .success(let current)? = outcome, current === client else { return }
+        notificationLifetime.end()
+        outcome = nil; launch = nil; connectionLifetime = nil
+        // A launcher may reconnect to its existing executor. Embedded Node never
+        // reserves a second start; physical exit remains terminal for this App.
+        _ = try? await connection()
     }
 
     /// Synchronous admission drops offline changes immediately. It neither
@@ -91,6 +119,9 @@ public actor RuntimeSession {
     public func close() async {
         if let stopping { await stopping.value; return }
         closed = true
+        connectionLifetime?.cancel(); connectionLifetime = nil
+        for continuation in availability.values { continuation.finish() }
+        availability.removeAll()
         notificationLifetime.end()
         let notifications = Array(notifications.values)
         self.notifications.removeAll()
@@ -116,11 +147,19 @@ public actor RuntimeSession {
 
     private func finish(_ result: Result<RuntimeHTTPClient, Error>) async {
         outcome = result
-        if case .failure = result { notificationLifetime.end() }
         if closed {
             if case .success(let client) = result { await client.close() }
             return
         }
+        if case .success(let client) = result, !client.isClosed {
+            for continuation in availability.values { continuation.yield(client) }
+            connectionLifetime?.cancel()
+            connectionLifetime = Task { [weak self] in
+                do { try await client.waitUntilClosed(); try Task.checkCancellation() }
+                catch { return }
+                await self?.connectionEnded(client)
+            }
+        } else { notificationLifetime.end() }
         let pending = waiters
         waiters.removeAll()
         for waiter in pending.values {

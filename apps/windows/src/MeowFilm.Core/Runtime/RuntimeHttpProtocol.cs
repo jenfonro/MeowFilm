@@ -89,7 +89,7 @@ public static partial class RuntimeHttpProtocol
             ["session.open", "session.command", "session.snapshot", "session.release",
                 "session.attempt", "session.media.release", "settings.get", "settings.set",
                 "library.get", "library.remove", "manual.update", "data.search", "data.detail",
-                "data.catalog", "data.metadata", "data.metadata.entry", "data.cache.entry", "data.invalidate",
+                "data.target", "data.catalog", "data.metadata", "data.metadata.entry", "data.cache.entry", "data.invalidate",
                 "rules.get", "rules.set", "rules.group.set", "rules.group.defaults", "rules.group.preview",
                 "rules.restore", "rules.preview", "rules.normalize", "rules.clear",
                 "search.open", "search.snapshot", "search.command", "search.release", "search.handoff"],

@@ -111,14 +111,16 @@ final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAc
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard controller === filePicker else { return }
-        filePicker = nil
         if exportingFile {
+            filePicker = nil
             // Destination belongs to the user. Cleanup touches only our private staging directory.
             transfer.exportFinished(); return
         }
         let selection = transfer.selectionID
         dismissPageModal(controller) { [weak self] in
-            guard let self, transfer.selectionID == selection else { return }
+            guard let self, controller === filePicker else { return }
+            filePicker = nil
+            guard transfer.selectionID == selection else { return }
             guard isPageActive, transfer.available, let file = urls.first else {
                 transfer.selectionCancelled(); return
             }

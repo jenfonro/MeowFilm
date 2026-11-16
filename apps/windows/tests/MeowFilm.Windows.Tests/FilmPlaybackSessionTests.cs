@@ -32,6 +32,88 @@ public static class FilmPlaybackSessionTests
 
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Test("closed execution reconnects read-only without replacing the displayed directory or browsing position", async () =>
+        {
+            await using var rig = new FilmPlaybackRig();
+            await rig.OpenAsync();
+            var page = rig.Page;
+            var directory = page.EpisodeDirectory!;
+            var episodes = page.Episodes;
+            var recommendations = page.Recommendations;
+            directory.HorizontalOffset = 137; directory.VerticalOffset = 251;
+            page.PageOffset = 311; page.MetadataOffset = 179; page.RecommendationOffset = 83;
+            page.SetListLayout(true);
+            await rig.Session.CloseSessionAsync();
+            Check(ReferenceEquals(page.EpisodeDirectory, directory) && ReferenceEquals(page.Episodes, episodes) &&
+                !page.CanPlay && !page.PlayerBusy, "ending execution retains display but retires live actions and progress");
+            await page.ReconnectAsync();
+            var restored = rig.Runtime.Calls.Last(call => call.Method == "film.session.open").Parameters;
+            var browsing = restored.GetProperty("browsing");
+            Check(FilmJson.Bool(restored, "restoreOnly") && browsing.GetProperty("sourceId").ValueKind == JsonValueKind.Null &&
+                FilmJson.Integer(browsing, "season") == page.Season && !browsing.TryGetProperty("lineId", out _),
+                "a metadata directory sends explicit null source and omits an unselected typed line");
+            Check(ReferenceEquals(page.EpisodeDirectory, directory) && ReferenceEquals(page.Episodes, episodes) &&
+                ReferenceEquals(page.Recommendations, recommendations) && page.IsListLayout &&
+                directory.HorizontalOffset == 137 && directory.VerticalOffset == 251 &&
+                page.PageOffset == 311 && page.MetadataOffset == 179 && page.RecommendationOffset == 83 &&
+                rig.Native.Intents.Count == 0 && !Called(rig, "play") && !Called(rig, "browse.refresh"),
+                "identical recovered data retains models and positions without replaying playback or refreshing the directory");
+        });
+        yield return Test("replacement loading and failed reads preserve successful display until real directory changes", () =>
+        {
+            var card = Card();
+            var page = new FilmPlaybackPage(card, card.PlaybackContext!, null, null);
+            var request = card.PlaybackContext!;
+            var target = request.Target;
+            var metadata = request.Metadata!.Value;
+            page.Apply(new(Snapshot(Guid.NewGuid(), 1, target, metadata)));
+            var directory = page.EpisodeDirectory;
+            var episodes = page.Episodes;
+            var seasons = page.Seasons;
+            var recommendations = page.Recommendations;
+            var id = Guid.NewGuid();
+            var reading = JsonNode.Parse(Snapshot(id, 1, target, FilmJson.Encode((object)null!)).GetRawText())!.AsObject();
+            reading["stage"] = "loading"; reading["browsing"]!["loading"] = true;
+            page.Apply(new(FilmJson.Encode(reading)));
+            reading["sequence"] = 2; reading["stage"] = "error"; reading["error"] = "TIMEOUT";
+            reading["browsing"]!["loading"] = false; reading["browsing"]!["error"] = "TIMEOUT";
+            page.Apply(new(FilmJson.Encode(reading)));
+            Check(ReferenceEquals(page.EpisodeDirectory, directory) && ReferenceEquals(page.Episodes, episodes) &&
+                ReferenceEquals(page.Seasons, seasons) && ReferenceEquals(page.Recommendations, recommendations),
+                "loading and failed replacement sessions cannot erase successful page display");
+            page.Apply(new(Snapshot(id, 3, target, metadata)));
+            Check(ReferenceEquals(page.EpisodeDirectory, directory) && ReferenceEquals(page.Episodes, episodes),
+                "a new session with identical directory content reuses the original models");
+            var empty = JsonNode.Parse(metadata.GetRawText())!.AsObject();
+            empty["seasons"] = new JsonArray();
+            page.Apply(new(Snapshot(id, 4, target, FilmJson.Encode(empty))));
+            Check(ReferenceEquals(page.EpisodeDirectory, directory) && page.Episodes.Count == 0,
+                "a genuine successful empty directory still updates the same presentation owner");
+            return Task.CompletedTask;
+        });
+        yield return Test("captured source browsing retains typed selectors without source generation or private fields", async () =>
+        {
+            await using var rig = new FilmPlaybackRig();
+            await rig.OpenAsync();
+            var source = Candidate("one").GetProperty("source");
+            rig.Runtime.Change(root =>
+            {
+                root["sources"] = JsonNode.Parse(FilmJson.Encode(new[] { new { id = "selected-source", title = "目录", source } }).GetRawText());
+                root["browsing"] = JsonNode.Parse(FilmJson.Encode(new
+                {
+                    sourceId = "selected-source", lineId = "0", season = 2,
+                    loading = false, lines = Array.Empty<object>(), episodes = Array.Empty<object>()
+                }).GetRawText());
+            });
+            await Until(() => rig.Page.SourceId == "selected-source");
+            var browsing = rig.Page.CaptureRequest.Browsing!.Value;
+            Check(browsing.GetProperty("lineId").ValueKind == JsonValueKind.String &&
+                browsing.GetProperty("lineId").GetString() == "0" && FilmJson.Integer(browsing, "season") == 2 &&
+                browsing.GetProperty("source").EnumerateObject().Select(field => field.Name).Order().SequenceEqual(
+                    new[] { "detailId", "engine", "installationId", "key", "siteId" }) &&
+                browsing.GetProperty("source").GetProperty("detailId").ValueKind == JsonValueKind.Number,
+                "restoration keeps the original typed source/detail/line identities and only the public browsing pointer");
+        });
         yield return Test("headerless direct receipt consumes exact format scope native controls and release without a local lease", async () =>
         {
             await using var rig = new FilmPlaybackRig();
@@ -943,7 +1025,7 @@ public static class FilmPlaybackSessionTests
         await using var rig = new FilmPlaybackRig();
         await rig.OpenAsync();
         var oldPage = rig.Page; var oldTarget = oldPage.ActiveTarget;
-        string oldStatus = oldPage.StatusText; string? oldSource = oldPage.SourceId;
+        string? oldSource = oldPage.SourceId;
         int notifications = 0;
         rig.Session.OperationFailed += (_, _) => notifications++;
         var entered = Gate(); var finish = Gate(); var releasing = Gate(); var released = Gate();
@@ -977,7 +1059,7 @@ public static class FilmPlaybackSessionTests
                 "retirement revokes UI immediately but cannot release before the admitted command returns");
             finish.TrySetResult(); await command;
             await releasing.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Check(!close.IsCompleted && oldPage.ActiveTarget == oldTarget && oldPage.StatusText == oldStatus &&
+            Check(!close.IsCompleted && oldPage.ActiveTarget == oldTarget && !oldPage.PlayerBusy && !oldPage.CanPlay &&
                 oldPage.SourceId == oldSource && notifications == 0 && rig.Native.Intents.Count == 0 &&
                 !Called(rig, "media.started") && !Called(rig, "media.failed"),
                 "neither a late authoritative snapshot nor its business error can publish into the retired page");
@@ -986,7 +1068,7 @@ public static class FilmPlaybackSessionTests
                 "close joins the actual session release once");
             await rig.OpenAsync(Card(number: 201));
             Check(rig.Page.ActiveTarget.Id == "tmdb:tv:201" && rig.Native.Intents.Count == 0 &&
-                oldPage.ActiveTarget == oldTarget && oldPage.StatusText == oldStatus && notifications == 0,
+                oldPage.ActiveTarget == oldTarget && !oldPage.PlayerBusy && !oldPage.CanPlay && notifications == 0,
                 "reopening cannot consume the old command's response or old attempt");
         }
         finally { finish.TrySetResult(); released.TrySetResult(); }

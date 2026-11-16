@@ -35,14 +35,18 @@ public struct FilmDetail: Equatable, Sendable {
 }
 
 public struct FilmSeason: Equatable, Sendable {
+    public let businessID: String?
+    public let playbackTarget: FilmPlaybackTarget?
     public let id: String
     public let title: String
     public let number: Int?
     public let posterURL: URL?
     public let episodes: [FilmEpisode]
 
-    public init(id: String, title: String, number: Int? = nil, posterURL: URL? = nil, episodes: [FilmEpisode] = []) {
+    public init(id: String, title: String, number: Int? = nil, posterURL: URL? = nil, episodes: [FilmEpisode] = [],
+                businessID: String? = nil, playbackTarget: FilmPlaybackTarget? = nil) {
         self.id = id
+        self.businessID = businessID; self.playbackTarget = playbackTarget
         self.title = title
         self.number = number
         self.posterURL = posterURL
@@ -51,6 +55,8 @@ public struct FilmSeason: Equatable, Sendable {
 }
 
 public struct FilmEpisode: Equatable, Sendable {
+    public let businessID: String?
+    public let playbackTarget: FilmPlaybackTarget?
     public let id: String
     public let title: String
     public let number: Int?
@@ -60,8 +66,10 @@ public struct FilmEpisode: Equatable, Sendable {
     public let releaseDate: String?
 
     public init(id: String, title: String, number: Int? = nil, summary: String = "",
-                artworkURL: URL? = nil, playbackURL: URL? = nil, releaseDate: String? = nil) {
+                artworkURL: URL? = nil, playbackURL: URL? = nil, releaseDate: String? = nil,
+                businessID: String? = nil, playbackTarget: FilmPlaybackTarget? = nil) {
         self.id = id
+        self.businessID = businessID; self.playbackTarget = playbackTarget
         self.title = title
         self.number = number
         self.summary = summary

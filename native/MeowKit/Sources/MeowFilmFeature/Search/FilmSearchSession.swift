@@ -9,13 +9,15 @@ import MeowRuntime
 public final class FilmSearchSession: ObservableObject {
     @Published public private(set) var snapshot: FilmSearchSnapshot
     @Published public private(set) var error: FilmPlaybackError?
-    private let transport: FilmSearchTransport
+    private var transport: FilmSearchTransport
     private let readSites: FilmSearchService.Sites
     private let metadataRevision: UUID
     private weak var service: FilmSearchService?
     private var sources: [FilmPlaybackSource]?
     private var allocatedID: UUID?
     private var started = false, stopped = false, released = false
+    private var runtimeClosed = false
+    private var presentationVisible = false
     private(set) var invalidated = false
     private var work: Task<Void, Never>?
     private var admission: Task<[FilmPlaybackSource], Error>?
@@ -23,12 +25,12 @@ public final class FilmSearchSession: ObservableObject {
     private var observationID = UUID()
     private var publicationID = UUID()
     private var releaseTask: Task<Void, Never>?
-    private var scopeWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var settleWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
-    init(query: String, service: FilmSearchService) {
-        snapshot = .init(sessionID: UUID(), query: query)
-        transport = service.transport; readSites = service.sites
+    init(query: String, service: FilmSearchService, presentation: FilmSearchSnapshot? = nil) {
+        let initial = FilmSearchSnapshot(sessionID: UUID(), query: query)
+        snapshot = presentation.map { initial.retainingDisplay($0) } ?? initial
+        transport = service.transport.renewed(); readSites = service.sites
         metadataRevision = service.metadataRevision
         self.service = service
     }
@@ -43,6 +45,12 @@ public final class FilmSearchSession: ObservableObject {
 
     func startIfNeeded() {
         guard service?.ownsWork(for: self) == true, !invalidated, !released, !snapshot.query.isEmpty else { return }
+        if runtimeClosed {
+            publicationID = UUID(); observationID = UUID()
+            observation?.cancel(); observation = nil
+            transport = transport.renewed()
+            allocatedID = nil; runtimeClosed = false; started = false
+        }
         if !started || allocatedID == nil && error != nil {
             started = true; stopped = false; snapshot.loading = true; clearError()
             let token = publicationID
@@ -70,6 +78,23 @@ public final class FilmSearchSession: ObservableObject {
         }
     }
 
+    func setPresentationVisible(_ visible: Bool) {
+        presentationVisible = visible
+        if visible { startIfNeeded() }
+    }
+
+    func runtimeDidBecomeAvailable() {
+        guard presentationVisible, !released, !invalidated else { return }
+        let publication = publicationID
+        Task { [weak self] in
+            guard let self, (try? await self.transport.producer())?.isClosed == true,
+                  self.presentationVisible, !self.released, !self.invalidated,
+                  self.publicationID == publication else { return }
+            self.runtimeClosed = true
+            self.startIfNeeded()
+        }
+    }
+
     public func loadMore() {
         guard service?.ownsWork(for: self) == true, !invalidated, !released,
               !snapshot.loading, snapshot.hasMore, allocatedID != nil else { return }
@@ -94,7 +119,6 @@ public final class FilmSearchSession: ObservableObject {
         if [.idle, .loading].contains(snapshot.siteState) { snapshot.siteState = .cancelled }
         if [.idle, .loading].contains(snapshot.metadataState) { snapshot.metadataState = .cancelled }
         finishSettlement()
-        finishScope(.failure(CancellationError()))
         enqueue { session in
             await observer?.value
             if session.allocatedID != nil { await session.command("stop", publication: token) }
@@ -123,22 +147,6 @@ public final class FilmSearchSession: ObservableObject {
         }
     }
 
-    func waitForSourceScope() async throws {
-        if allocatedID != nil { return }
-        guard !invalidated, !released, !stopped, error == nil else { throw FilmSearchError.unavailable }
-        let id = UUID()
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                if Task.isCancelled { continuation.resume(throwing: CancellationError()) }
-                else { scopeWaiters[id] = continuation }
-            }
-        } onCancel: {
-            Task { @MainActor [weak self] in
-                self?.scopeWaiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
-            }
-        }
-    }
-
     public func refresh() async throws {
         guard let id = allocatedID, !released, !invalidated else { throw FilmSearchError.closed }
         let token = publicationID, previous = observation
@@ -162,20 +170,13 @@ public final class FilmSearchSession: ObservableObject {
         FilmSearchContext(session: self, card: card)
     }
 
-    func handoff(selectionID: String, sources: [FilmPlaybackSource],
-                 owner: RuntimeHTTPClient?) async throws -> FilmSearchHandoff {
-        try await waitForSourceScope()
-        guard let id = allocatedID, !released else { throw FilmSearchError.closed }
-        let producer = try await transport.producer()
-        guard producer === owner else { throw FilmSearchError.unavailable }
-        var input = fields(id)
-        input["selectionId"] = .string(selectionID)
-        input["sources"] = .array(sources.map { .object($0.value) })
-        let handoff = try FilmSearchHandoff(await transport.call("search.handoff", input))
-        guard handoff.reference.filmObject?["sessionId"]?.filmText.flatMap(UUID.init(uuidString:)) == id else {
-            throw FilmSearchError.invalidResponse
-        }
-        return handoff
+    func reference(for selectionID: String) -> RuntimeValue? {
+        guard let id = allocatedID, !runtimeClosed, !released, !invalidated,
+              snapshot.sessionID == id,
+              (snapshot.cards + snapshot.rawCards).contains(where: {
+                  $0.displayKey.utf8.elementsEqual(selectionID.utf8)
+              }) else { return nil }
+        return .object(["sessionId": .string(id.uuidString.lowercased()), "selectionId": .string(selectionID)])
     }
 
     /// Establishes the terminal state before another queued operation can run.
@@ -201,7 +202,6 @@ public final class FilmSearchSession: ObservableObject {
         if [.idle, .loading].contains(snapshot.siteState) { snapshot.siteState = .cancelled }
         if [.idle, .loading].contains(snapshot.metadataState) { snapshot.metadataState = .cancelled }
         finishSettlement()
-        finishScope(.failure(FilmSearchError.closed))
         return task
     }
 
@@ -224,14 +224,18 @@ public final class FilmSearchSession: ObservableObject {
             allocatedID = value.sessionID
             guard publicationID == token, !stopped, !released, !invalidated else { return }
             try accept(value)
-            finishScope(.success(Void()))
             observe()
         } catch {
             admission = nil
             guard publicationID == token, !released, !invalidated else { return }
             snapshot.loading = false
-            if !Self.cancelled(error) { self.error = Self.failure(error) }
-            finishScope(.failure(error)); finishSettlement()
+            if !Self.cancelled(error) {
+                self.error = Self.failure(error)
+                let disconnected = (try? await transport.producer())?.isClosed == true
+                guard publicationID == token, !released, !invalidated else { return }
+                self.runtimeClosed = disconnected
+            }
+            finishSettlement()
         }
     }
 
@@ -245,11 +249,16 @@ public final class FilmSearchSession: ObservableObject {
             guard publicationID == token, !released, !invalidated,
                   action == "stop" || !stopped else { return }
             try accept(value, stopping: action == "stop"); clearError()
-            if action == "resume" { finishScope(.success(Void())); observe() }
+            if action == "resume" { observe() }
         } catch {
             guard publicationID == token, !released, !invalidated else { return }
             snapshot.loading = false
-            if !Self.cancelled(error) { self.error = Self.failure(error) }
+            if !Self.cancelled(error) {
+                self.error = Self.failure(error)
+                let disconnected = (try? await transport.producer())?.isClosed == true
+                guard publicationID == token, !released, !invalidated else { return }
+                self.runtimeClosed = disconnected
+            }
             finishSettlement()
         }
     }
@@ -267,6 +276,9 @@ public final class FilmSearchSession: ObservableObject {
                 guard let self, self.observationID == token, !Task.isCancelled, !self.released else { return }
                 self.error = Self.failure(error)
                 self.snapshot.loading = false
+                let disconnected = (try? await transport.producer())?.isClosed == true
+                guard self.observationID == token, !Task.isCancelled, !self.released else { return }
+                self.runtimeClosed = disconnected
                 self.finishSettlement()
             }
             guard let self, self.observationID == token else { return }
@@ -284,19 +296,20 @@ public final class FilmSearchSession: ObservableObject {
         guard value.sessionID == allocatedID, value.query.utf8.elementsEqual(snapshot.query.utf8) else {
             throw FilmSearchError.invalidResponse
         }
-        guard value.sequence > snapshot.sequence else { return }
-        guard value.revision >= snapshot.revision else { throw FilmSearchError.invalidResponse }
+        if value.sessionID == snapshot.sessionID {
+            guard value.sequence > snapshot.sequence else { return }
+            guard value.revision >= snapshot.revision else { throw FilmSearchError.invalidResponse }
+        }
         if stopping {
             // A late open may have allocated an identity without ever publishing.
             // Stop acknowledges only control state, never its newly settled data.
-            var state = snapshot.sessionID == value.sessionID ? snapshot :
-                FilmSearchSnapshot(sessionID: value.sessionID, query: snapshot.query)
-            state.sequence = value.sequence; state.revision = value.revision; state.round = value.round
+            var state = value.retainingDisplay(snapshot)
+            state.sequence = value.sequence; state.revision = value.revision
             state.siteState = value.siteState; state.metadataState = value.metadataState
             state.loading = value.loading; state.hasMore = value.hasMore; state.noSources = value.noSources
             snapshot = state
         } else {
-            snapshot = value
+            snapshot = value.retainingLoadingDisplay(snapshot)
         }
         if !value.loading { finishSettlement() }
     }
@@ -313,10 +326,7 @@ public final class FilmSearchSession: ObservableObject {
     private func clearError() {
         if error != nil { error = nil }
     }
-    private func finishScope(_ result: Result<Void, Error>) {
-        let pending = Array(scopeWaiters.values); scopeWaiters.removeAll()
-        for waiter in pending { waiter.resume(with: result) }
-    }
+
     private func finishSettlement() {
         let pending = Array(settleWaiters.values); settleWaiters.removeAll()
         for waiter in pending { waiter.resume() }

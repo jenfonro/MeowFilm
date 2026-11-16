@@ -69,6 +69,36 @@ test('checks relative imports and resources in the declared source tree', t => {
   assert.equal(result.resourceReferences, 1);
 });
 
+test('Windows runtime descriptors match shared contracts without loosening method validation', async t => {
+  const f = fixture(t);
+  f.write('apps/runtime/contracts.mjs', `
+    export const contracts = {
+      film: { contract: 'film.playback.v1', version: '0.1.0', prefix: 'film.',
+        operations: ['data.catalog', 'data.target'] },
+      'music-platform': { contract: 'music.platform.v1', version: '0.1.0', prefix: 'music.platform.',
+        operations: ['request'] }
+    };
+  `);
+  const native = `
+    ["film"] = new("0.1.0", "film.playback.v1", "film.", ["data.target", "data.catalog"]),
+    ["music-platform"] = new("0.1.0", "music.platform.v1", "music.platform.", ["request"])
+  `;
+  for (const [name, source, mismatch] of [
+    ['matching methods in a different order', native, false],
+    ['missing current target operation', native.replace('"data.target", ', ''), true],
+    ['unknown operation', native.replace('"data.target"', '"data.unknown"'), true],
+    ['wrong prefix', native.replace('"film."', '"film.other."'), true],
+    ['wrong contract', native.replace('"film.playback.v1"', '"film.playback.v2"'), true],
+    ['wrong version', native.replace('"0.1.0"', '"0.2.0"'), true],
+  ]) {
+    await t.test(name, () => {
+      f.write('apps/windows/src/MeowFilm.Core/Runtime/RuntimeHttpProtocol.cs', source);
+      if (mismatch) assert.throws(() => verifyAppStructure(f.source), /runtime contract mismatch: film/);
+      else assert.doesNotThrow(() => verifyAppStructure(f.source));
+    });
+  }
+});
+
 test('shared metadata sources and neutral HTTP imports fit the exact runtime inventory', t => {
   const f = fixture(t);
   f.write('apps/runtime/modules/metadata-data.mjs', `

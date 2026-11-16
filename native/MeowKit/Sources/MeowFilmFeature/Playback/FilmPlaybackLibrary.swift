@@ -5,6 +5,10 @@ public struct FilmPlaybackHistory: Equatable, Sendable {
     public let value: RuntimeObject
     public let targetID: String
     public let title: String
+    public var businessID: String? { value["businessId"]?.filmText }
+    public var playbackTarget: FilmPlaybackTarget? {
+        value["playbackTarget"].flatMap { try? FilmPlaybackTarget($0) }
+    }
     init(_ raw: RuntimeValue) throws {
         value = try raw.filmRequiredObject()
         targetID = try value.filmString("targetId"); title = try value.filmString("title")

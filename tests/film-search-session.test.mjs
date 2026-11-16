@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { NativeJsonProgram } from '@meowfilm/script-host/native-json';
 import { createFilmSearchService } from '../packages/film-playback/src/search.js';
+import { createFilmCatalog } from '../packages/film-playback/src/catalog.js';
+import { createPlaybackLibrary } from '../packages/film-playback/src/library.js';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const deferred = () => {
@@ -52,10 +54,14 @@ function setup(t, { search, metadata, getRules, cachedEntry, invoke } = {}) {
     invoke: (input, options) => invoke(input, options, () => nativeProgram.invoke(input, options)),
     close: () => nativeProgram.close(),
   } : nativeProgram;
-  const service = createFilmSearchService({ data, program,
+  const area = new URL('../tmp/test-results/film-search-session/', import.meta.url);
+  mkdirSync(area, { recursive: true });
+  const directory = mkdtempSync(new URL('catalog-', area));
+  const library = createPlaybackLibrary({ dataRoot: directory });
+  const service = createFilmSearchService({ data, program, catalog: createFilmCatalog({ library }),
     rules: { snapshot: async () => getRules ? getRules() : { rules: { aggregateRegexRules: [] }, revision: 'one' } },
     now: () => Date.UTC(2026, 10, 10) });
-  t.after(() => service.close());
+  t.after(async () => { await service.close(); library.close(); rmSync(directory, { recursive: true }); });
   const snapshot = id => service.snapshot({ sessionId: id });
   const complete = id => until(() => {
     const value = snapshot(id);
@@ -111,7 +117,7 @@ test('in-flight changes coalesce into one latest projection and settlement waits
   assert.equal(calls.filter(call => call[0] === 'search').length, sources.length);
   assert.ok(calls.filter(call => call[0] === 'search').every(call => call[3] === 1));
   const handoff = service.handoff({ sessionId, selectionId: final.rawCards[0].displayKey, sources });
-  assert.deepEqual(handoff.target.source, { key: final.rawCards[0].siteKey, detailId: final.rawCards[0].detailId });
+  assert.deepEqual(handoff.target, final.rawCards[0].playbackTarget);
   assert.equal(handoff.results.length, 1);
 });
 
@@ -172,14 +178,14 @@ test('one source page is complete; raw and aggregate views keep typed identities
   assert.deepEqual(group.aggregateItems.map(item => item.detailId), [0, '0']);
   for (const raw of value.rawCards.filter(card => card.title === '星河')) {
     const handoff = service.handoff({ sessionId: opened.sessionId, selectionId: raw.displayKey, sources: [source] });
-    assert.equal(handoff.target.id, raw.displayKey);
+    assert.equal(handoff.target.id, raw.businessId);
     assert.equal(handoff.target.source.detailId, raw.detailId);
     assert.deepEqual(handoff.selectionMembers, [{ sourceKey: 'a', detailId: raw.detailId }]);
     assert.deepEqual(handoff.results, [{ sourceKey: 'a', items: [rows.find(row => row.id === raw.detailId)] }]);
     assert.equal(handoff.metadata, null);
   }
   const handoff = service.handoff({ sessionId: opened.sessionId, selectionId: group.displayKey, sources: [source] });
-  assert.equal(handoff.target.id, group.displayKey);
+  assert.equal(handoff.target.id, group.businessId);
   assert.deepEqual(handoff.target.members.map(member => member.detailId), [0, '0']);
   assert.deepEqual(handoff.selectionMembers, handoff.target.members);
   assert.deepEqual(handoff.results, [{ sourceKey: 'a', items: rows.slice(0, 2) }]);
@@ -316,7 +322,7 @@ test('late metadata changes the selected group carrier but never changes a raw s
   await complete(sessionId);
   const after = service.handoff({ sessionId, selectionId: group.displayKey, sources: [source] });
   assert.equal(after.target.kind, 'tv');
-  assert.equal(after.target.id, group.displayKey);
+  assert.equal(after.target.id, group.businessId);
   assert.equal(after.target.metadataId, '12');
   assert.equal(after.metadata.id, 12);
   assert.deepEqual(after.selectionMembers, before.selectionMembers);
@@ -357,7 +363,7 @@ for (const kind of ['movie', 'tv']) {
     const next = await complete(sessionId);
     const handoff = service.handoff({ sessionId, selectionId, sources: [source] });
     assert.equal(handoff.target.kind, kind);
-    assert.equal(handoff.target.id, selectionId);
+    assert.equal(handoff.target.id, before.target.id);
     assert.equal(handoff.target.metadataId, '12');
     assert.deepEqual(handoff.selectionMembers,
       [{ sourceKey: 'a', detailId: 0 }, { sourceKey: 'a', detailId: '0' }]);

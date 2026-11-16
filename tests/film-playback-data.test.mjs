@@ -890,6 +890,45 @@ test('E49 original complete search/detail/metadata handoff avoids upstream conte
   assert.equal((await f.data.cachedEntry(requestFor(movieTarget))).fetchedAt, fetchedAt);
 });
 
+test('E49 optional handoff ignores malformed content, retains healthy entries and reloads missing facts', async t => {
+  const f = fixture(t), fetchedAt = f.now() - 1000;
+  const search = { kind: 'search', source, query: 'bad-page', page: 1, value: { list: null },
+    completeness: 'complete', fetchedAt };
+  const detail = { kind: 'detail', source, detailId: 'bad-detail', value: { list: [null] },
+    completeness: 'complete', fetchedAt };
+  const metadata = { ...requestFor(movieTarget), value: { id: 42, title: 'Incomplete' },
+    settings: { revision: f.revisions.tmdb }, completeness: 'complete', fetchedAt };
+  const healthy = { kind: 'detail', source, detailId: 'healthy', value: detailValue('healthy'),
+    completeness: 'complete', fetchedAt };
+  assert.deepEqual(await f.data.handoff([search, healthy, detail, metadata]), { accepted: 1, ignored: 3 });
+  assert.equal((await f.data.detail(source, 'healthy')).detailId, 'healthy');
+  assert.equal(f.calls('cat', 'invoke').length, 0);
+  assert.equal((await f.data.cachedEntry(healthy)).fetchedAt, fetchedAt);
+  for (const input of [search, detail, metadata]) {
+    assert.equal(await f.data.cachedEntry(input), undefined);
+    await assert.rejects(f.data.seed(input), { code: 'UPSTREAM_FORMAT' });
+  }
+  await f.data.search(source, 'bad-page');
+  f.handlers.cat.invoke = () => success(detailValue('bad-detail'));
+  assert.equal((await f.data.detail(source, 'bad-detail')).detailId, 'bad-detail');
+  assert.equal((await f.data.targetMetadata(movieTarget)).runtime, 120);
+  assert.equal(f.calls('cat', 'invoke').length, 2);
+  assert.equal(f.calls('tmdb', 'request').length, 1);
+});
+
+test('E49 optional handoff still fails invalid request evidence and settings acquisition', async t => {
+  const f = fixture(t);
+  const entry = { ...requestFor(movieTarget), value: movieValue(), completeness: 'complete',
+    settings: { revision: f.revisions.tmdb }, fetchedAt: f.now() };
+  await assert.rejects(f.data.handoff([{ ...entry, fetchedAt: f.now() + 1 }]), { code: 'INVALID_REQUEST' });
+  await assert.rejects(f.data.handoff([{ kind: 'search', source, query: '', page: 1,
+    value: { list: [] }, completeness: 'complete', fetchedAt: f.now() }]), { code: 'INVALID_REQUEST' });
+  f.handlers.tmdb['settings.get'] = () => success({});
+  await assert.rejects(f.data.handoff([entry]), { code: 'UPSTREAM_FORMAT' });
+  f.handlers.tmdb['settings.get'] = () => failure('AUTH_REQUIRED');
+  await assert.rejects(f.data.handoff([entry]), { code: 'AUTH_REQUIRED' });
+});
+
 test('E49 expired/old generation/old metadata revision handoff is ignored; caller cannot extend original business TTL', async t => {
   const f = fixture(t);
   const original = { kind: 'search', source, query: '真实电影', page: 1, value: { list: [], pagecount: 1 }, completeness: 'complete' };
@@ -941,6 +980,19 @@ test('E03 metadata association accepts only unambiguous actual title/year eviden
   assert.equal(f.calls('douban', 'request').length, 1);
 });
 
+test('metadata association reads the actual primary and ignores unused supplied metadata', async t => {
+  const f = fixture(t);
+  f.handlers.douban.search = () => success({ subjects: { items: [] } });
+  const expected = await f.data.metadataSources(movieTarget);
+  for (const metadata of [null, { id: 'wrong', title: [] }, ['unused'], 1]) {
+    assert.deepEqual(await f.data.metadataSources(movieTarget, { metadata }), expected);
+  }
+  assert.equal(f.calls('tmdb', 'request').length, 1);
+  await f.data.invalidate('tmdb');
+  f.handlers.tmdb.request = () => success({ id: 42, title: 'Incomplete' });
+  await assert.rejects(f.data.metadataSources(movieTarget), { code: 'UPSTREAM_FORMAT' });
+});
+
 test('E03 no year or ambiguous same-name counterparts never fabricate an associated provider', async t => {
   const f = fixture(t);
   f.handlers.douban.search = () => success({ subjects: { items: [
@@ -977,9 +1029,9 @@ test('CR-01 E04/D2 complete Douban primary maps and resolves first episode witho
   assert.deepEqual([season.season, season.episodeCount], [1, 2]);
   assert.equal(f.calls('douban', 'search').length, 0);
   assert.equal(f.calls('tmdb', 'request').length, 0);
-  await assert.rejects(f.data.metadataSources(target, { metadata: primary }), { code: 'UPSTREAM_HTTP' });
+  await assert.rejects(f.data.metadataSources(target), { code: 'UPSTREAM_HTTP' });
   f.handlers.douban.search = () => success({ subjects: { items: [] } });
-  await assert.rejects(f.data.metadataSources(target, { metadata: primary }), { code: 'NOT_CONFIGURED' });
+  await assert.rejects(f.data.metadataSources(target), { code: 'NOT_CONFIGURED' });
   assert.deepEqual(resolveEpisode(buildEpisodeMap(await f.data.targetMetadata(target)), { globalEpisode: 1 }), first);
   assert.equal(f.calls('douban', 'request').length, 1);
 });
@@ -1254,19 +1306,33 @@ test('Douban seed explicit refresh replaces a cached no-match with one new multi
     ['/3/search/multi', '/3/search/multi', '/3/movie/42']);
 });
 
-test('Douban seed ignores unused multi-search rows and validates only the selected same-kind identity', async t => {
+test('Douban seed isolates unusable same-kind candidates without consuming unrelated multi-search rows', async t => {
   const f = fixture(t);
   const target = { id: 'douban:movie:51', kind: 'movie', title: '真实电影' };
   f.handlers.tmdb.request = ({ path }) => success(path === '/3/search/multi' ? { results: [
     { media_type: 'person', name: '未消费的人物' },
     { title: '缺少类型的未消费行' },
     { media_type: 'tv' },
+    { id: 0, media_type: 'movie', title: '坏身份' },
     { id: 42, media_type: 'movie', title: '真实电影' },
     { media_type: 'movie' },
   ] } : movieValue(42));
   const resolved = await f.data.tmdbTargetEntry(target, { rules: recognitionRules });
   assert.equal(resolved.target.metadataId, 42);
   assert.deepEqual(f.calls('tmdb', 'request').map(row => row.params.path), ['/3/search/multi', '/3/movie/42']);
+  for (const rows of [
+    [{ media_type: 'movie' }, { id: 42, media_type: 'movie', title: '真实电影', release_date: '2024-01-01' }],
+    [{ id: 43, media_type: 'movie', title: '其他年份', release_date: '2023-01-01' },
+      { media_type: 'movie', release_date: '2024-01-01' },
+      { id: 42, media_type: 'movie', title: '真实电影', release_date: '2024-01-01' }],
+    [{ id: 42, media_type: 'movie', title: '真实电影', release_date: '2024-01-01' }, { media_type: 'movie' }],
+  ]) {
+    await f.data.invalidate('tmdb');
+    f.handlers.tmdb.request = ({ path }) =>
+      success(path === '/3/search/multi' ? { results: rows } : movieValue(42));
+    assert.equal((await f.data.tmdbTargetEntry({ ...target, year: 2024 },
+      { rules: recognitionRules })).target.metadataId, 42);
+  }
   await f.data.invalidate('tmdb');
   f.handlers.tmdb.request = () => success({ results: [{ id: 42, title: '真实电影' }] });
   assert.equal(await f.data.tmdbTargetEntry(target, { rules: recognitionRules }), null);
@@ -1503,12 +1569,12 @@ test('DT-01 E22 stopping an association search prevents detail but preserves the
     return success({ subjects: { items: [{ target_id: '51', target_type: 'movie', target: doubanValue() }] } });
   };
   const rejected = assert.rejects(f.data.metadataSources(movieTarget,
-    { metadata: movieValue(), canSchedule: () => active }), { code: 'CANCELLED' });
+    { canSchedule: () => active }), { code: 'CANCELLED' });
   const signal = await entered.promise;
   active = false; gate.resolve(); await rejected;
   assert.equal(signal.aborted, false);
   assert.equal(f.calls('douban', 'request').length, 0);
-  const sources = await f.data.metadataSources(movieTarget, { metadata: movieValue() });
+  const sources = await f.data.metadataSources(movieTarget);
   assert.deepEqual(sources.map(row => [row.provider, row.metadataId]), [['tmdb', 42], ['douban', '51']]);
   assert.equal(f.calls('douban', 'search').length, 1);
   assert.equal(f.calls('douban', 'request').length, 1);
@@ -1526,7 +1592,7 @@ test('DT-01 E22 stopping cross-provider pagination prevents the next page or ass
       return success({ page: query.page, total_pages: 2, results: [movieValue()] });
     };
     const rejected = assert.rejects(f.data.metadataSources(target,
-      { metadata: doubanValue(), canSchedule: () => active }), { code: 'CANCELLED' });
+      { canSchedule: () => active }), { code: 'CANCELLED' });
     const signal = await entered.promise;
     active = false; gate.resolve(); await rejected;
     assert.equal(signal.aborted, false);

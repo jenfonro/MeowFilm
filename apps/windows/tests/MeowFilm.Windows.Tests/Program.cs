@@ -11,6 +11,7 @@ internal static class Program
     {
         if (args is ["--live-music"]) return await MusicLiveAcceptance.RunAsync();
         if (args is ["--live-music-kg-home"]) return await MusicLiveAcceptance.RunAsync(kugouHomeOnly: true);
+        if (args is ["--live-music-catalog"]) return await MusicLiveAcceptance.RunAsync(catalogOnly: true);
         if (!CheckDesktopContext()) return 1;
         TestWorkspace.Initialize();
         if (args is ["--novel-restore", var path]) return await NovelTests.RestoreChild(path);
@@ -65,11 +66,11 @@ internal static class Program
         return failed == 0 ? 0 : 1;
     }
 
-    private static bool CheckDesktopContext()
+    internal static bool CheckDesktopContext(bool requireTarget = false)
     {
         string? expectedUser = Environment.GetEnvironmentVariable("MEOWFILM_TEST_DESKTOP_EXPECTED_USER");
         string? expectedSessionId = Environment.GetEnvironmentVariable("MEOWFILM_TEST_DESKTOP_EXPECTED_SESSION_ID");
-        if (expectedUser is null && expectedSessionId is null) return true;
+        if (!requireTarget && expectedUser is null && expectedSessionId is null) return true;
         if (!OperatingSystem.IsWindows())
         {
             Console.WriteLine("TEST_DESKTOP_CHECK FAIL UNSUPPORTED");

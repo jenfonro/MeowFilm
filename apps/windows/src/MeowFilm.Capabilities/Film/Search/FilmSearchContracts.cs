@@ -1,5 +1,4 @@
 using System.Text.Json;
-using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities;
 
@@ -18,22 +17,11 @@ public sealed record FilmSearchSource(FilmCatSource Cat, FilmVideoSource Site)
     });
 }
 
-/// <summary>The successful response and its actual producer; cache receipts keep their original provenance.</summary>
-public sealed record FilmSearchData(JsonElement Value, RuntimeConnection? Owner = null, JsonElement? CacheEntry = null);
-
 public interface IFilmSearchSources
 {
     event EventHandler? Changed;
     IReadOnlyList<FilmSearchSource> CurrentSearchSources { get; }
     Task<IReadOnlyList<FilmSearchSource>> ReadSearchSourcesAsync(CancellationToken token);
-}
-
-/// <summary>The adapter returns original TMDB JSON; image resolution belongs to data access.</summary>
-public interface IFilmSearchMetadata
-{
-    Task<FilmSearchData> SearchAsync(string query, CancellationToken token);
-    Task<FilmSearchData> DetailAsync(string type, long id, CancellationToken token);
-    string ResolveImage(string path);
 }
 
 public sealed class FilmSearchContext
@@ -53,11 +41,15 @@ public sealed class FilmSearchContext
     public long Revision => Session.ReferenceRevision;
     public string MetadataQuery => Session.MetadataQuery;
     public JsonElement? MetadataSearchPayload => Session.MetadataSearchPayload;
-    public string DisplayKey { get; }
+    public string DisplayKey { get; private set; }
     public JsonElement Item { get; private set; }
-    internal void UpdateItem(JsonElement item) => Item = item;
-    internal bool SameSelection(FilmSearchContext other) =>
-        ReferenceEquals(Session, other.Session) && DisplayKey == other.DisplayKey;
+    internal void UpdateItem(JsonElement item)
+    {
+        Item = item;
+        if (FilmSearchJson.Text(item, "displayKey") is { Length: > 0 } key) DisplayKey = key;
+    }
+    internal FilmPlaybackRequest PlaybackRequest => new(FilmJson.Target(Item.GetProperty("playbackTarget")),
+        Sources: Session.SourceSnapshot, Query: Query, EntrySurface: "search");
     internal object Reference => new { sessionId = SessionId, selectionId = DisplayKey };
     internal Task<FilmPlaybackRequest> HandoffAsync(CancellationToken token) => Session.Service.HandoffAsync(this, token);
 }

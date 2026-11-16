@@ -633,6 +633,7 @@ public static class FilmPlaybackRecoveryTests
     private sealed class Rig : IAsyncDisposable
     {
         private readonly ConcurrentQueue<Epoch> epochs = new();
+        private readonly FilmNativeSettingsFixture storage = new(CatSourceSettings.DocumentNamespace, FilmSourceService.DocumentNamespace);
         internal readonly AppRuntimeConnectionHost Host;
         internal readonly FilmSourceService Sources;
         internal readonly FilmNativeProbe Native = new();
@@ -648,6 +649,15 @@ public static class FilmPlaybackRecoveryTests
         internal Rig(params string[] installations)
         {
             if (installations.Length == 0) installations = ["a", "b"];
+            storage.Seed(CatSourceSettings.DocumentNamespace, FilmJson.Encode(new
+            {
+                version = 1, port = 0, providers = new Dictionary<string, bool>(), mappings = Array.Empty<object>(),
+                scripts = installations.Select(id => new
+                {
+                    installationId = id, name = "猫 " + id, sourceType = "local", sourceUrl = (string?)null,
+                    localPath = (string?)null, localHash = new string('a', 64), enabled = true, inputRevision = 1L
+                }).ToArray()
+            }));
             Host = new(owner =>
             {
                 var epoch = new Epoch(owner, installations);
@@ -655,7 +665,7 @@ public static class FilmPlaybackRecoveryTests
                 epochs.Enqueue(epoch);
                 return Task.FromResult<IRuntimeSession>(epoch);
             });
-            Sources = new(Host, new FilmMemoryStore());
+            Sources = new(Host, storage);
             Session = new(CaptureAsync, Native, prepareOpen: async (page, parameters, reconnect, token) =>
             {
                 var result = await FilmCapability.PreparePlaybackOpenAsync(Sources, CaptureAsync, page, parameters, reconnect, token);
@@ -713,7 +723,11 @@ public static class FilmPlaybackRecoveryTests
             finally
             {
                 try { await Sources.DisposeAsync(); }
-                finally { await Host.DisposeAsync(); }
+                finally
+                {
+                    try { await Host.DisposeAsync(); }
+                    finally { await storage.DisposeAsync(); }
+                }
             }
         }
     }
@@ -770,7 +784,7 @@ public static class FilmPlaybackRecoveryTests
                 {
                     installationId = pair.Key, name = "猫 " + pair.Key, sourceType = "local", sourceUrl = (string?)null,
                     enabled = true, importedAt = 100L, updatedAt = (long?)null, updateState = "idle", updateError = (string?)null,
-                    generation = pair.Value, state = starting ? "starting" : "ready", sourceHash = "synthetic-" + pair.Key,
+                    generation = pair.Value, state = starting ? "starting" : "ready", sourceHash = "synthetic-" + pair.Key, inputRevision = 1L,
                     error = (string?)null, sites = SiteIds.Select(site => new
                     {
                         key = site, name = "来源 " + pair.Key + " " + site, api = "/spider/synthetic",

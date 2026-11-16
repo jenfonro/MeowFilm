@@ -8,7 +8,7 @@
 
 侧边栏来源菜单与首页共用同一 `FilmHomeModel`；视频列表观察 App 持有的 `FilmSettingsModel` 快照，使用 `FilmSourceSnapshot.homeVideos` 保留目录顺序及 `FilmSourceKey` 精确身份，仅筛选启用且首页可见的项，不按检测结果过滤。源行是只读展示，不发起源内容请求、自动检测或管理详情导航。
 
-`FilmSourceDescriptor.id` 标识来源；`FilmItemIdentity` 使用来源 ID 与上游影片 ID 的组合。来源自行返回栏目与影片，页面不按豆瓣分类解释其他来源。豆瓣读取与 Windows 一致的四个栏目：热门电影、热门剧集、新番放送、热门综艺，每栏请求 12 个摘要，不预取详情或播放地址。图片地址沿用豆瓣图片代理归一化。
+`FilmSourceDescriptor.id` 标识来源；`FilmItem`／`FilmItemIdentity` 原样保留 Node 返回的 `businessID` 和 `playbackTarget`，相等／散列优先使用业务身份，旧记录未补全时才使用原来源／影片／类型组合。共同身份语义见[稳定业务身份](../common/film/search.md#稳定业务身份)。来源自行返回栏目与影片，页面不按豆瓣分类解释其他来源。豆瓣读取与 Windows 一致的四个栏目：热门电影、热门剧集、新番放送、热门综艺，每栏请求 12 个摘要，不预取详情或播放地址。`DoubanFilmSource` 按实际影片 id／title 及必需的业务身份／播放目标隔离不可消费行，保留健康兄弟，从返回目标读取类型，不按栏目造业务目标；真实空数组成功，非空但全部不可消费的栏目失败，刷新失败保留已完成内容。图片地址沿用豆瓣图片代理归一化。
 
 `FilmHomeModel` 持有所选来源、请求及本页面内按来源区分的快照。重复进入不重复读取；切源立即撤销旧请求发布权、取消读取，恢复对应快照或发起首次读取。旧成功或错误不能覆盖新来源。失败在统一错误浮层中提供“重试”，浮层退出后显式重新读取；“确定”仅关闭通知，不发起请求，之后仍可下拉刷新。页面正文只保留加载、失败或空集合状态，不放重试控件。页面从导航生命周期释放时关闭请求。覆盖详情或切换主页面保留首页及滚动位置。
 
@@ -20,17 +20,40 @@
 
 来源按钮按 `browsing.sourceId` 或 `metadataSourceId` 显示真实选中项的来源与条目标题；初始、无 snapshot 或尚无真实选中项时禁用并显示“加载中...”，不以入口 provider 充当选中来源。菜单保留同名不同详情项，不按名称去重。普通来源的详情播放按钮只在当前显示文件中保留准确候选或取首个可播放候选，不从其他季度的完整原始目录找回旧文件；原始目录的显式文件选择仍发送原候选 ID。
 
+元数据菜单隔离无法消费的未选行，保留健康项的顺序和 typed metadataId；选中项仍须对应可识别的 provider、kind 和准确身份。`metadataSourceId` 缺省或 null 表示无选择，非空字符串须精确命中健康行；非法类型、空串或失效引用报格式错误，不将数字转成同值字符串或静默置空。菜单行的辅助 seasons 仅作可选分季投影，不阻断主元数据已有的完整分季，合法季 0 保留。浏览列表已有 error 时，不解码或展示该列表的 episodes／originalEpisodes；真实 lines、refreshing 状态及独立 current 媒体继续消费，成功列表仍要求可用文件身份与名称。
+
 元数据视图的季集、资料投影及电影／剧集控件读取 `metadataSourceId` 对应的确认项，不因准确播放目标变成 `source` 就丢失已有资料。元数据集数发送 `select.episode` 坐标，详情总播放发送 `play` 交由 Node 使用当前浏览目标；播放器有有效输出时 `pauseOrResume()` 只控制当前原生媒体，不因浏览新来源切流，无有效输出才通过既有 `play` 正式发起播放。媒体准备捕获该 attempt 的内容类型，保留同一电影换源时的播放位置，未知剧集仍要求准确集号或同一候选身份。
 
-无 `searchReference` 的元数据入口重入保留原始 `target`、metadata seed 和入口信息，以既有 `resumeTarget` 携带当前准确 `source`／坐标；不限豆瓣入口。Node 根据原入口恢复确认资料，当前 source 仍只用于准确执行，不因此重新授予自动准备。搜索重入继续由 reference 的 owner 重读入口；原本没有元数据的 source／group 不补造元数据 provenance。
+`MeowfilmAssembly.makeFilmPlayback` 优先使用条目携带的 `playbackTarget`；旧条目缺少目标时，
+按已有真实 provider／ID 调用 `film.data.target` 补全，不在 Swift 拼业务 ID。
+无 `searchReference` 的元数据重入保留原始 `target`、metadata seed 和入口信息，
+以 `resumeTarget` 携带当前准确 `source`／坐标；不限豆瓣入口。搜索入口已可用卡片固定目标，
+reference 只复用活跃事实；原本没有元数据的 source／group 不补造元数据 provenance。
 
-`FilmPlaybackModel`／`MeowfilmFilmMedia` 的媒体接缝把真实 attempt 交给共享 MeowPlayback 的两阶段 prepare／commit；播放状态来自实际内核输出，不用本地计时模拟。MeowVideoKernel 适配固定源码 KSMEPlayer 的真实解码／原生输出，保留完整渲染视图及实际首帧确认；核心关闭等待真实输入、解码、轨道、音频与渲染工作退出后才释放媒体 receipt。直连输入的 HTTP headers／Cookie 通过每实例 KSOptions 注入，运行器 receipt 保持空原生上下文。Node 仍拥有业务会话及媒体资源授权，见[共同原生播放契约](../common/film/playback.md)。影片收藏继续由稳定 `FilmLibrary` 持有，用 `meowfilm.film.library.v1` 保存来源与影片复合身份；不复制进 Node 新增的历史／人工匹配／屏蔽／偏好库，也不写音乐曲库。
+`FilmPlaybackModel`／`MeowfilmFilmMedia` 的媒体接缝把真实 attempt 交给共享 MeowPlayback 的两阶段 prepare／commit；播放状态来自实际内核输出，不用本地计时模拟。MeowVideoKernel 适配固定源码 KSMEPlayer 的真实解码／原生输出，保留完整渲染视图及实际首帧确认；核心关闭等待真实输入、解码、轨道、音频与渲染工作退出后才释放媒体 receipt。直连输入的 HTTP headers／Cookie 通过每实例 KSOptions 注入，运行器 receipt 保持空原生上下文。Node 仍拥有业务会话及媒体资源授权，见[共同原生播放契约](../common/film/playback.md)。影片收藏继续由稳定 `FilmLibrary` 持有，用原 namespace `meowfilm.film.library.v1` 保存身份记录，新增可选 `businessID/playbackTarget`；`contains`／`toggle` 仍识别原来源／影片／类型记录，不清空旧收藏。它不复制进 Node v2 历史／人工匹配／屏蔽／偏好／聚合注册库，也不写音乐曲库。
 
 视频定位能力由 `VideoSession → PlaybackVideoDecoding → PlaybackController` 透传：准备后的有限 HLS／DASH 时间线使用实际探测到的 demuxer 时间定位能力，不要求主清单支持 HTTP Range；普通 progressive 输入使用核心的字节定位能力。未准备、失败或已撤销的 session 不接受 seek，已知时长不等于可定位。不按 URL 后缀或调用方 format hint 推断能力，也不新增 live／DVR 时间线支持。
 
 媒体准备或真实播放失败的 `media.failed` 回执携带已有原生适配器的有限 `code`，不发送异常正文、URL 或凭据。运行器区分取回执、准备和播放阶段，保留真实原生失败原因；候选续选的过程错误不重复弹出最终错误。客户端沿用准确 attempt、取消、资源释放与系统 owner 边界，不因错误码扩展改变手动准确播放或自动准备策略。
 
-iOS 请求继续携带 `platform: ios`，“进入播放页自动准备”由运行器的 `iosAutoPrepare` 设置与既有入口范围控制。Swift 不为普通站点／聚合新增自动目录或准备命令，保留既有页面恢复刷新；收到 `prepareOnly` 也不启动原生媒体或写入观看事实，进入详情不自动实播或呈现全屏播放器。
+iOS 请求继续携带 `platform: ios`，正常新进入的自动准备由运行器 `iosAutoPrepare` 与既有入口范围控制。
+已有展示的重开由 `FilmPlaybackRequest.restoreOnly` 和 `restoreBrowsing` 传递原 snapshot 的
+来源结果、typed 线路、元数据来源、季度及真实来源指针，协议见[读取恢复](../runtime/film-playback.md#读取恢复)。
+仍有同一执行 snapshot 时 `open()` 只恢复观察，不再额外提交恢复刷新。
+收到 `prepareOnly` 也不启动原生媒体或写入观看事实，进入详情不自动实播或呈现全屏播放器。
+
+`FilmPlaybackModel.snapshot` 持有实时执行数据，`presentation` 独立保留已加载展示；
+`FilmDetailViewController`／原始目录读取后者，忙碌提示读取 `executionStage`。
+`close/resetSession` 不清展示，恢复完成前保留旧成功内容；`retainingLoadedPresentation`
+按真实浏览选择保留加载／失败中的目录。详情轨道按相同业务身份和条目内容复用视图，
+不以新 session 或来源 generation 清空选集。页面可见性通过 `presentationOwners` 登记，
+隐藏不直接关闭；真正 inactive 仍收口执行／媒体，不把保留展示当作媒体保活。
+共同保留和导航边界见[页面生命周期](../common/pages/data-requests.md#展示与执行生命周期)。
+
+App 的 RuntimeSession 就绪回调由 `MeowfilmAssembly` 转给影视搜索及当前播放模型；
+`runtimeDidBecomeAvailable()` 只为可见展示在旧 executor／原生媒体排空后
+`renew` transport 并用 `restoreOnly` 重开。Transport 在释放／关闭回执结算前仍固定旧 client，
+不把旧回执发给新 epoch；隐藏页再次激活才按需绑定。
 
 iOS 影视只使用共享原生媒体 owner，不提供外部播放器入口、URL 模板或应用启动注入。进入后台或离开播放器时，仅真实 PiP／系统 owner 可通过 `keepMedia` 保留当前媒体；普通关闭等待原生输出和准确资源回执排空。页面重开沿用既有会话恢复与显式播放流程，媒体回执由实际原生资源的释放完成确认。
 
@@ -38,7 +61,9 @@ iOS 影视只使用共享原生媒体 owner，不提供外部播放器入口、U
 
 运行器不可逆退出时，业务释放回执可能无法取得，`isReleased` 与释放错误如实保留。`canLeave` 另外要求本次关闭流程完成、该会话的解码／输出／I/O 已实际排空，才允许退出失效页面；普通 RPC 或 SSE 断连不能绕过这一门槛。
 
-搜索交接规则只见[共同契约](../common/film/search.md)；本端装配与测试边界见[影视搜索](film-search.md)。原生导航／搜索已接入正式会话，尚无覆盖八模块与 VideoKernel 最终输入的 iOS 编译／真实播放通过结论；不能把接线完成视为整端验收。
+搜索交接规则只见[共同契约](../common/film/search.md)；本端装配与测试边界见[影视搜索](film-search.md)。
+上述是 Q19 当前源码事实，本次文档同步未执行编译、测试或真实 App 验收；
+恢复晚到更新的公共限制见[读取恢复](../runtime/film-playback.md#读取恢复)，不能把接线完成视为整端验收。
 
 ## 布局和交互
 
@@ -54,7 +79,7 @@ iOS 影视只使用共享原生媒体 owner，不提供外部播放器入口、U
 
 电影组合“分类＋地区”；剧集在“剧集”分类下支持地区，选择动漫或纪录片时隐藏地区（上游的 `type` 无法同时表达这两种类型与地区）。切回剧集保留先前地区选择。综艺支持国内／国外；动漫固定为现有豆瓣动漫来源，不展示无效筛选。
 
-分类每次请求 24 条，按响应原始条数推进偏移，短页结束；显示条目按来源与影片 ID 去重，不受首页 12 条预览裁剪影响。下滑接近底部或点击“加载更多”读取下一页；筛选变化清空旧列表并从首屏重载，取消和请求身份共同阻止过期结果写入。分页失败保留已加载影片，通过统一错误浮层中的“重试”显式重读同一偏移，失败期间底部分页禁用且滚动不自动重试；“确定”关闭浮层不发请求，仍可下拉刷新首屏。离开页面生命周期时取消请求，详情返回保留当前筛选与滚动位置。
+分类每次请求 24 条，成功页按响应原始条数推进偏移，短页结束；混合页的坏行及重复项仍占用原始偏移。非空全坏页失败，不推进或结束分页；真实空页成功结束，首屏刷新成功为空时清空旧内容。显示条目按来源与影片 ID 去重，不受首页 12 条预览裁剪影响。下滑接近底部或点击“加载更多”读取下一页；筛选变化清空旧列表并从首屏重载，取消和请求身份共同阻止过期结果写入。分页失败保留已加载影片，通过统一错误浮层中的“重试”显式重读同一偏移，失败期间底部分页禁用且滚动不自动重试；“确定”关闭浮层不发请求，仍可下拉刷新首屏。离开页面生命周期时取消请求，详情返回保留当前筛选与滚动位置。
 
 ## 影视播放器
 
