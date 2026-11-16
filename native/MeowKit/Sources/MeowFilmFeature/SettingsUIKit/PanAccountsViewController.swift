@@ -7,7 +7,6 @@ import MeowUI
 public final class PanAccountsViewController: PageViewController, UITableViewDataSource {
     let model: PanAccountsModel
     let table = SettingsTableView()
-    private let loading = UIActivityIndicatorView(style: .medium)
     private weak var loginCard: PanLoginViewController?
     private var displayedNotice: UUID?
 
@@ -21,7 +20,6 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
         table.dataSource = self
         table.rowHeight = UITableView.automaticDimension; table.estimatedRowHeight = 110
         table.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(table)
-        loading.hidesWhenStopped = true; table.backgroundView = loading
         NSLayoutConstraint.activate([
             table.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
             table.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
@@ -40,7 +38,6 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
     public override func pageDidFinishAppearing() { showNotice() }
     public override func applyTheme() { super.applyTheme(); if isViewLoaded { table.reloadData() } }
     private func render() {
-        if model.loading && model.rows.isEmpty { loading.startAnimating() } else { loading.stopAnimating() }
         table.reloadData(); showNotice()
     }
     private func showNotice() {
@@ -80,12 +77,12 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
         }.margins(.all, 0).makeContentView()
         platform.accessibilityIdentifier = "pan.accounts.platform"
         columns.columns[0].addArrangedSubview(platform)
-        if row.busy || row.account == nil {
+        if row.busy {
             let spinner = UIActivityIndicatorView(style: .medium)
-            spinner.accessibilityLabel = "读取账号"; spinner.startAnimating()
+            spinner.accessibilityLabel = "正在操作账号"; spinner.startAnimating()
             columns.columns[1].addArrangedSubview(spinner)
         } else {
-            let label = UILabel(); label.text = row.account?.status.title
+            let label = UILabel(); label.text = row.account?.status.title ?? "不可用"
             label.accessibilityIdentifier = "pan.accounts.status"
             label.font = .preferredFont(forTextStyle: .subheadline); label.numberOfLines = 0
             label.adjustsFontForContentSizeCategory = true

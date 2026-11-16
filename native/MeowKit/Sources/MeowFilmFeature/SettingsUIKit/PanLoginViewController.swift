@@ -24,11 +24,11 @@ final class PanLoginViewController: HostingPageViewController<PanLoginContent> {
         observe(model) { [weak self] in
             guard let self else { return }
             if model.challenge == nil { qrImage.value = nil }
-            if model.confirmed, isPageVisible { close() } else { showNotice() }
+            if model.completed, isPageVisible { close() } else { showNotice() }
         }
     }
     override func pageDidBecomeVisible() {
-        if model.confirmed { close() } else { model.setVisible(true); showNotice() }
+        if model.completed { close() } else { model.setVisible(true); showNotice() }
     }
     override func pageDidBecomeHidden() { model.setVisible(false); qrImage.value = nil }
     override func pageDidBecomeInactive() { model.close(); qrImage.value = nil }
@@ -99,9 +99,8 @@ struct PanLoginContent: View {
                     input(field).padding(.horizontal, 18).frame(minHeight: 48)
                 }
             }
-            Button("登录") { model.save() }.buttonStyle(AccountPrimaryButtonStyle(theme: theme))
+            Button("保存") { model.save() }.buttonStyle(AccountPrimaryButtonStyle(theme: theme))
                 .disabled(model.busy).accessibilityIdentifier("pan.login.save")
-            if model.busy { ProgressView().frame(maxWidth: .infinity).accessibilityLabel("验证账号") }
         }
         .disabled(model.busy)
     }

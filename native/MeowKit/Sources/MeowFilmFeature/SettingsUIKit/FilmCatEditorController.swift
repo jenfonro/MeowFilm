@@ -43,6 +43,8 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
     }
     override func pageDidBecomeActive() {
         runPageTask { [weak self, service] in
+            do { try await service.initialize() }
+            catch { self?.failure(error); return }
             let snapshot = await service.snapshot
             guard let self, !Task.isCancelled else { return }
             targets = snapshot.cats; render()
@@ -154,8 +156,17 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
             do {
                 switch mode {
                 case .importSource(let local):
-                    if local, let source { _ = try await service.importLocal(name: name, source: source, installationId: target) }
-                    else { _ = try await service.importNetwork(name: name, sourceURL: url, installationId: target) }
+                    if let target {
+                        if local, let source {
+                            _ = try await service.editCat(target, name: name, sourceType: "local", source: source)
+                        } else {
+                            _ = try await service.editCat(target, name: name, sourceType: "network", sourceURL: url)
+                        }
+                    } else if local, let source {
+                        _ = try await service.importLocal(name: name, source: source)
+                    } else {
+                        _ = try await service.importNetwork(name: name, sourceURL: url)
+                    }
                 case .edit(let cat): _ = try await service.editCat(cat.installationId, name: name, sourceURL: local ? nil : url)
                 case .updateLocal(let cat): _ = try await service.updateCat(cat.installationId, source: source)
                 }

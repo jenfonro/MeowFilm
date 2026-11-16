@@ -179,7 +179,7 @@ function freeze(value) {
  * read/update return immutable internal snapshots (including sensitive shares).
  * update mutates a detached draft synchronously; only rename commits/publishes.
  */
-export function createPlaybackLibrary({ dataRoot } = {}) {
+export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
   requireValue(typeof dataRoot === 'string' && isAbsolute(dataRoot) &&
     !dataRoot.includes('\0') && !dataRoot.split(/[\\/]/).includes('..'));
   const root = join(resolve(dataRoot), 'film-playback');
@@ -196,7 +196,8 @@ export function createPlaybackLibrary({ dataRoot } = {}) {
       fs.fchmodSync(fd, 0o600);
       try {
         requireValue(isUtf8(bytes));
-        return validate(JSON.parse(bytes.toString('utf8')));
+        const value = JSON.parse(bytes.toString('utf8'));
+        return validate(nativePreferences ? { ...value, preferences: defaultPreferences() } : value);
       }
       catch { throw failure('CORRUPT_STORAGE'); }
     } catch (error) {
@@ -209,11 +210,13 @@ export function createPlaybackLibrary({ dataRoot } = {}) {
     }
   }
 
+  const serialized = value => JSON.stringify(nativePreferences ? Object.fromEntries(Object.entries(value)
+    .filter(([key]) => key !== 'preferences')) : value);
   const initial = readDisk();
   let committed = freeze(initial ?? {
     version: 1, preferences: defaultPreferences(), history: [], manual: [], blocks: [], previewTargets: [],
   });
-  let diskState = initial === null ? null : JSON.stringify(initial);
+  let diskState = initial === null ? null : serialized(initial);
 
   function open() {
     if (closed) throw failure('CLOSED');
@@ -221,7 +224,7 @@ export function createPlaybackLibrary({ dataRoot } = {}) {
 
   function unchanged() {
     const current = readDisk();
-    if ((current === null ? null : JSON.stringify(current)) !== diskState) {
+    if ((current === null ? null : serialized(current)) !== diskState) {
       throw failure('STORAGE_CHANGED');
     }
   }
@@ -261,7 +264,7 @@ export function createPlaybackLibrary({ dataRoot } = {}) {
 
   function read() {
     open();
-    return committed;
+    return nativePreferences ? freeze({ ...committed, preferences: normalizePreferences(nativePreferences()) }) : committed;
   }
 
   function update(mutator) {
@@ -282,8 +285,9 @@ export function createPlaybackLibrary({ dataRoot } = {}) {
       // the trusted mutator might retain. A held draft cannot mutate the owner.
       const bytes = JSON.stringify(validate(draft));
       const next = freeze(validate(JSON.parse(bytes)));
-      write(bytes);
-      diskState = bytes;
+      const persisted = serialized(next);
+      write(persisted);
+      diskState = persisted;
       committed = next;
       return committed;
     } catch (error) { throw failure(error.code); }
@@ -292,5 +296,5 @@ export function createPlaybackLibrary({ dataRoot } = {}) {
 
   function close() { closed = true; }
 
-  return { read, update, close };
+  return { read, update, close, configurationOwner: nativePreferences ? 'native' : 'runtime' };
 }

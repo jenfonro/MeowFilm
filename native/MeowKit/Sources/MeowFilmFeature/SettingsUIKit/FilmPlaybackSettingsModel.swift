@@ -2,22 +2,27 @@ import Foundation
 import Combine
 import MeowRuntime
 
-/// A draft and read-only presentation of the Node-owned local business library.
-/// No UserDefaults, documents, TTL or client-side matching facts live here.
+/// Native preference drafts and a read-only presentation of the Node-owned
+/// business library. Matching facts and business history remain in Node.
 @MainActor
 public final class FilmPlaybackSettingsModel: ObservableObject {
     @Published public private(set) var preferences: FilmPlaybackPreferences?
     @Published public private(set) var draft: FilmPlaybackPreferences?
     @Published public private(set) var library: FilmPlaybackLibrary?
     @Published public private(set) var busy = false
+    @Published public private(set) var preferencesBusy = false
     private let transport: FilmPlaybackTransport
+    private let settingsDocument: FilmSettingsDocument
     public var playbackSnapshot: (@MainActor () -> FilmPlaybackSnapshot?)?
 
-    public init(transport: FilmPlaybackTransport) { self.transport = transport }
+    public init(transport: FilmPlaybackTransport, settingsDocument: FilmSettingsDocument) {
+        self.transport = transport; self.settingsDocument = settingsDocument
+    }
 
     public func loadPreferences() async throws {
-        try begin(); defer { busy = false }
-        let value = try FilmPlaybackPreferences(await transport.call("settings.get"))
+        try beginPreferences(); defer { preferencesBusy = false }
+        let value = try FilmPlaybackPreferences(Self.preferences(in: settingsDocument.read()))
+        try Task.checkCancellation()
         preferences = value
         if draft == nil { draft = value }
     }
@@ -28,7 +33,7 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
     }
 
     public func edit(_ transform: (inout FilmPlaybackPreferences) -> Void) {
-        guard !busy, var draft else { return }
+        guard !preferencesBusy, var draft else { return }
         transform(&draft); self.draft = draft
     }
 
@@ -47,10 +52,54 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
 
     public func savePreferences() async throws {
         guard let draft else { throw FilmPlaybackError(code: "INVALID_REQUEST") }
-        try begin(); defer { busy = false }
-        let saved = try FilmPlaybackPreferences(await transport.call("settings.set", parameters: draft.value))
-        // The server's successful persistence receipt is the publication boundary.
+        try beginPreferences(); defer { preferencesBusy = false }
+        let patch = try Self.normalize(draft.editedValues)
+        let document = try settingsDocument.update { current in
+            var values = try Self.preferences(in: current).filmRequiredObject()
+            for (key, value) in patch { values[key] = value }
+            var envelope = current?.filmObject ?? ["version": .number(1)]
+            envelope["preferences"] = .object(values)
+            return .object(envelope)
+        }
+        let saved = try FilmPlaybackPreferences(Self.preferences(in: document))
+        // The native CAS is the publication boundary, not a runtime receipt.
         preferences = saved; self.draft = saved
+    }
+
+    private static func preferences(in document: RuntimeValue?) throws -> RuntimeValue {
+        guard let document else { return FilmPlaybackPreferences.defaults.value }
+        guard let fields = document.filmObject, fields["version"] == .number(1),
+              case .object? = fields["preferences"] else { throw FilmSettingsStorageError.invalidDocument }
+        return fields["preferences"]!
+    }
+
+    private static let inputWhitespace = CharacterSet(charactersIn:
+        "\u{0009}\u{000a}\u{000b}\u{000c}\u{000d}\u{0020}\u{00a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}")
+    static func trimInput(_ value: String) -> String { value.trimmingCharacters(in: inputWhitespace) }
+
+    private static func normalize(_ patch: RuntimeObject) throws -> RuntimeObject {
+        var result = RuntimeObject()
+        for (key, value) in patch {
+            if key == "iosAutoPrepare" { result[key] = value; continue }
+            guard let rows = value.filmArray, rows.allSatisfy({ $0.filmText != nil }) else {
+                throw FilmPlaybackError(code: "INVALID_PREFERENCES")
+            }
+            var items = rows.map { trimInput($0.filmText!) }
+            guard !items.contains(where: \.isEmpty),
+                  Set(items.map { Data($0.lowercased().utf8) }).count == items.count else {
+                throw FilmPlaybackError(code: "INVALID_PREFERENCES")
+            }
+            let allowed = key == "ruleOrder" ? FilmPlaybackPreferences.defaults.ruleOrder.map(\.rawValue) :
+                key == "panOrder" ? FilmPanProvider.allCases.map(\.rawValue) : nil
+            if let allowed {
+                guard items.allSatisfy(allowed.contains), key != "ruleOrder" || items.count == allowed.count else {
+                    throw FilmPlaybackError(code: "INVALID_PREFERENCES")
+                }
+                if key == "panOrder" { items += allowed.filter { !items.contains($0) } }
+            }
+            result[key] = .array(items.map(RuntimeValue.string))
+        }
+        return result
     }
 
     public func saveManual(_ item: FilmManualMatch) async throws {
@@ -105,7 +154,14 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
 
     private func begin() throws {
         guard !busy else { throw FilmPlaybackError(code: "BUSY") }
+        try Task.checkCancellation()
         busy = true
+    }
+
+    private func beginPreferences() throws {
+        guard !preferencesBusy else { throw FilmPlaybackError(code: "BUSY") }
+        try Task.checkCancellation()
+        preferencesBusy = true
     }
 }
 

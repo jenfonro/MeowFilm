@@ -205,7 +205,8 @@ final class MeowfilmLaunchResetTests: XCTestCase {
 /// network stores, standard preferences or the App's production reset factory.
 private final class ResetFixture: @unchecked Sendable {
     static let expectedServices = [
-        "dev.meowfilm.aggregate.music.platform.accounts.v1"
+        "dev.meowfilm.aggregate.music.platform.accounts.v1",
+        "dev.meowfilm.aggregate.film.settings.keys.v1"
     ]
     let root: URL, support: URL, caches: URL, temporary: URL, external: URL, unrelated: URL
     let payloads: [URL]

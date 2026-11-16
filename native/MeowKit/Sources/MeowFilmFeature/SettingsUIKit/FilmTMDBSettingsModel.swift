@@ -17,7 +17,9 @@ public final class FilmTMDBSettingsModel: ObservableObject {
     public func load() async throws {
         guard saved == nil, !busy else { return }
         busy = true; defer { busy = false }
-        apply(try await service.settings())
+        let value = try await service.settings()
+        try Task.checkCancellation()
+        apply(value)
     }
     public func save() async throws {
         guard !busy, saved != nil else { return }

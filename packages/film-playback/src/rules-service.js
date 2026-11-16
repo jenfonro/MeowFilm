@@ -56,7 +56,7 @@ function previewRequest({ section, text, query }) {
 }
 
 /** The sole rules document owner. Every accepted write publishes only after rename. */
-export function createFilmRulesService({ dataRoot } = {}) {
+export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
   if (typeof dataRoot !== 'string' || !isAbsolute(dataRoot) || dataRoot.includes('\0') ||
       dataRoot.split(/[\\/]/).includes('..')) throw fault('INVALID_REQUEST');
   const root = join(resolve(dataRoot), 'film-rules');
@@ -76,6 +76,10 @@ export function createFilmRulesService({ dataRoot } = {}) {
   function readDisk() {
     let descriptor;
     try {
+      if (nativeSettings) {
+        const value = nativeSettings.read('film.rules');
+        return value === null ? null : { rules: copyRules(value.rules), fingerprint: digest(JSON.stringify(value)) };
+      }
       descriptor = fs.openSync(path, fs.constants.O_RDONLY);
       const bytes = fs.readFileSync(descriptor);
       let document;
@@ -98,6 +102,7 @@ export function createFilmRulesService({ dataRoot } = {}) {
     if ((readDisk()?.fingerprint ?? null) !== fingerprint) throw fault('STORAGE_CHANGED');
   }
   function write(rules) {
+    if (nativeSettings) throw fault('PERMISSION_DENIED');
     let temporary = join(root, `.rules-${randomUUID()}.tmp`), descriptor, failure;
     try {
       fs.mkdirSync(root, { recursive: true, mode: 0o700 });
@@ -143,7 +148,7 @@ export function createFilmRulesService({ dataRoot } = {}) {
       } else {
         const { rules } = await invokeNative({ operation: 'defaults' });
         open();
-        write(rules);
+        if (!nativeSettings) write(rules);
         committed = snapshotOf(rules);
       }
     })().catch(error => {
@@ -160,6 +165,7 @@ export function createFilmRulesService({ dataRoot } = {}) {
   }
   function mutate(operation, { signal } = {}) {
     open(signal);
+    if (nativeSettings) return Promise.reject(fault('PERMISSION_DENIED'));
     const work = writes.then(async () => {
       open(signal);
       await initialize();
@@ -171,6 +177,18 @@ export function createFilmRulesService({ dataRoot } = {}) {
   }
   return {
     get: snapshot, snapshot,
+    async settingsChanged() {
+      if (!nativeSettings) return;
+      await writes;
+      await initialize();
+      const disk = readDisk();
+      const rules = disk ? disk.rules :
+        (await invokeNative({ operation: 'defaults' })).rules;
+      open();
+      if ((readDisk()?.fingerprint ?? null) !== (disk?.fingerprint ?? null)) return;
+      fingerprint = disk?.fingerprint ?? null;
+      committed = snapshotOf(rules);
+    },
     set({ rules }, options) {
       const draft = copyRules(rules);
       return mutate(async signal => {
@@ -239,6 +257,7 @@ export function createFilmRulesService({ dataRoot } = {}) {
         ...(kind === 'match' ? { replace } : {}) }, options);
     },
     clear(_input = {}, options) {
+      if (nativeSettings) throw fault('PERMISSION_DENIED');
       return mutate(async signal => {
         const { rules } = await invokeNative({ operation: 'defaults' }, { signal });
         open(signal);

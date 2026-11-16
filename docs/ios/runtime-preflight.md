@@ -30,7 +30,7 @@ App 嵌入两个 framework：
 - 官方 `NodeMobile.framework` 提供 Node 主控和 Cat Worker。
 - `MeowScriptHost.framework` 提供同一套原生 Node-API 8 执行核心；QuickJS-NG 0.18.0、锁定派生补丁、OpenSSL libcrypto 和 zlib 静态进入该 framework，并限制导出。LX／source／影视纯 JSON 程序各自使用独立 Runtime／Context／线程，不是每脚本复制 framework 或新建 Node 进程。
 
-影视规则、搜索及匹配统一由 Node 加载共享程序并通过该原生载体执行；客户端只调用 `film.rules.*`／`film.search.*`／播放会话接口，不再静态链接另一套引擎。规则和脚本状态隔离，取消／截止保持真实资源排空与恢复；共享核心和 Unicode 表许可随 App 分发。
+影视规则执行、搜索及匹配统一由 Node 加载共享程序并通过该原生载体执行；客户端通过 `film.rules.*` 做预览，搜索／播放继续调用原接口，不再静态链接另一套引擎。规则配置的原生读写见[影视设置](film-settings.md)。规则和脚本状态隔离，取消／截止保持真实资源排空与恢复；共享核心和 Unicode 表许可随 App 分发。
 
 NodeMobile 18 的内置 `Request` 等 getter 会加载依赖 WASM 的 Undici 网络实现。iOS 因此只在构建期从锁定的 Undici 6.29.1 打包 `Request`／`Response`／`Headers`／`FormData` 纯值闭包为 `cat-web-values.cjs`，不发布完整 npm 包、fetch／dispatcher／llhttp 或 WASM；网络仍经现有 managed `node:http`，Buffer／Blob／WebStream 仍用 Node 原生值。该产物、实际输入和许可纳入 receipt 与编译身份。其他平台仍用原生 Web 值构造器。缺失的 `CustomEvent` 仅在 Cat realm 内以原生 `Event` 子类提供，不改宿主全局或启动开关。
 
@@ -38,11 +38,30 @@ NodeMobile 18 的内置 `Request` 等 getter 会加载依赖 WASM 的 Undici 网
 
 构建期校验固定来源、补丁、工具、目标、源码／SDK／依赖清单、许可与签名前产物。安装后的原生 framework 由 App 签名链保护，并核对编译内置身份、ABI 和目标；JS／SDK 的文件身份继续校验。IPA 移除签名和侧载重签会改变 Mach-O，不能把签名前全文件 hash 当作安装后恒定值，也不能借此关闭桌面 `.node` 校验。
 
-原生宿主使用最小私有启动通道交接生命周期 session、数据目录，并接收本机访问 URL；通道只负责启动与生命期，不承载业务请求。公共 HTTP 监听全部可用接口，外部和浏览器请求无需密钥或 session，Host／Origin 不作为访问门禁。所有业务经标准 HTTP；App 最终关闭运行器并等待 `node_start` 返回，不能用 HTTP close 回执或固定延时假定已退出。
+原生宿主使用私有 socketpair 交接生命周期 session、数据目录，并接收本机访问 URL；同一通道可显式提供原生设置能力，见下节，不承载脚本调用或其他业务 RPC。公共 HTTP 监听全部可用接口，外部和浏览器请求无需密钥或 session，Host／Origin 不作为访问门禁。业务请求仍经标准 HTTP；App 最终关闭运行器并等待 `node_start` 返回，不能用 HTTP close 回执或固定延时假定已退出。
 
 每个 App 进程只启动一次 Node；不可恢复失败后脚本不可用，不自动重启，也不通过 `process.exit` 杀掉整个 App。它不是恶意原生代码安全沙箱，取消和独立执行不等于整个进程崩溃／OOM 隔离。
 
 启动失败仅向 stderr 输出 `IOS_RUNTIME_START_FAILED stage=<静态阶段> category=<白名单错误类别>`，并设置退出码 1。阶段区分 `arguments`、`native-binding`、`bootstrap-channel`、`configuration`、`assembly`、九模块各自初始化、`listen` 和 `endpoint`；模块阶段使用固定模块 ID。类别仅保留明确列入白名单的协议、存储、原生载体、通道和系统 I/O 错误码，其余固定为 `UNKNOWN`，非法阶段固定为 `unknown`。不输出异常 message、stack、路径、配置或凭据；该记录只定位失败阶段和类别，不能还原未记录的原始异常。成功握手仍仅交接 `baseUrl`，运行期逃逸异常仍使用 `IOS_RUNTIME_FAILED`。
+
+### 原生设置私密通道
+
+`RuntimeEmbeddedLauncher(..., settings: RuntimeSettingsAccess?)` 在注入时向一次启动配置加入 `nativeSettings:true`；未注入仍为 `{sessionId,dataRoot}`，不创建设置能力。`MeowfilmNativeSettings.access` 允许读取共同契约中的六块，唯一可写块为 `pan.accounts`。Node 在 `configuration` 阶段读齐快照后才装配业务模块；端点帧仍只有 `{baseUrl}`，没有凭据。
+
+通道使用 LF 分隔 JSON，单帧正文最多 8 MiB（不含 LF）：
+
+| 方向 | 帧 |
+| --- | --- |
+| Node → Swift 读 | `{kind:"settings.read",id,block}` |
+| Node → Swift 写 | `{kind:"settings.write",id,block,document,expected}`，仅 `pan.accounts` |
+| Swift → Node 成功 | `{kind:"settings.result",id,ok:true,document,fingerprint}` |
+| Swift → Node 失败 | `{kind:"settings.result",id,ok:false,code}` |
+
+`id` 为本连接递增正安全整数；不存在的文档用 `null` 表示。`fingerprint`／写入 `expected` 为 `{exists,length,sha256}`，绑定**原生明文字节**的存在性、长度及 SHA-256；缺失为 `false/0/null`。CAS 在原生 owner 内重读并核对内容身份，敏感块仅在同一 owner 内解密／加密，Node 不读取 Keychain 或密文文件。冲突返回 `STORAGE_CONFLICT`，存储错误返回 `STORAGE_ERROR`，不回传路径或异常正文。
+
+Node 设置交换的等待为 5 秒；超时、非法帧及断连终止本次通道并清理所有 pending，运行器按既有关闭路径排空。Swift 保留唯一 reader 到 EOF，关闭后不接纳设置请求，不在阻塞读取期间另关／复用 descriptor。它是受信能力通道，不是公开反向脚本存储 RPC。
+
+`FilmSettingsDocument` 本地提交通过 `RuntimeSession.settingsChanged(_:)` 异步通知。同步准入只认当前 Starting／活跃代次，不调用 `connection()` 启动运行器；已接纳启动中的通知仅等待同一次启动，关闭／失败后丢弃并排空通知任务。通知 HTTP 的具体接口见 [Runtime HTTP](../runtime/runtime-bridge.md#原生设置注入)，本地保存不等待其回执。
 
 ## 验证内容与成功判据
 

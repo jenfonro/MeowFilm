@@ -126,6 +126,16 @@ public final class EncryptedDocumentStore: @unchecked Sendable {
         try writeUnlocked(data, key: key)
     }
 
+    /// Content CAS uses decrypted bytes, never a randomized ciphertext fingerprint.
+    public func compareAndSwap(key: String, expected: Data?, replacement: Data) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard try readUnlocked(key: key) == expected else {
+            throw EncryptedDocumentStoreError.revisionConflict
+        }
+        try writeUnlocked(replacement, key: key)
+    }
+
     /// No suspension between read, transform and commit. Throwing transforms are
     /// sanitized and leave the file/key unchanged; caller errors may contain secrets.
     public func update<Result>(key: String, defaultValue: Data,

@@ -82,12 +82,13 @@ public struct MusicAutomaticLibrarySyncPreferences: Equatable, Sendable {
 }
 
 /// A confirmed local preference write and the following network round are
-/// separate facts. A remote unknown must not relabel the settings commit.
+/// separate facts. The service owns the network task, including its drain;
+/// awaiting a settings receipt never waits for that task's result.
 public struct MusicAutomaticLibrarySyncSaveResult: Sendable {
     public let preferences: MusicAutomaticLibrarySyncPreferences
-    public let synchronization: Result<MusicLibrarySyncState, MusicServiceError>
+    public let synchronization: Task<Result<MusicLibrarySyncState, MusicServiceError>, Never>
     public init(preferences: MusicAutomaticLibrarySyncPreferences,
-                synchronization: Result<MusicLibrarySyncState, MusicServiceError>) {
+                synchronization: Task<Result<MusicLibrarySyncState, MusicServiceError>, Never>) {
         self.preferences = preferences; self.synchronization = synchronization
     }
 }
@@ -115,6 +116,8 @@ public struct MusicAutomaticLibrarySyncRequest: Sendable {
 /// Native synchronization settings. Saving an empty selection is valid.
 /// Saving is local first, followed by ONE fresh sync; a failed remote round
 /// never rolls back the saved switch or blindly resends an uncertain write.
+/// After a successful save, the service retains and retires the action's
+/// authorization with its synchronization task, independently of the page.
 public protocol MusicAutomaticLibrarySyncing: MusicLibrarySyncing {
     func automaticLibrarySyncPreferences() async throws -> MusicAutomaticLibrarySyncPreferences
     func saveAutomaticLibrarySync(_ preferences: MusicAutomaticLibrarySyncPreferences, requestID: UUID,

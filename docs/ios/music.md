@@ -176,7 +176,15 @@ Node 保管匿名设备及 prepare；Swift 账号 owner 保留 Keychain、安全
 
 ## 设置保存回执
 
-`MusicSettingsReceiptOwner` 由稳定原生存储范围持有，公开 `begin/settle/submit/flush`，`unknown` 由 Coordinator 接到现有全局错误呈现。quality、official、metadata、home、feedback、自动同步和脚本设置使用各自字段 key；FM 交回真实设置范围。Appearance 的同步 UserDefaults 没有 unknown 回执。共同结算及因果规则见[设置回执](../common/music/settings-receipts.md)，相关关闭页／重开竞态未运行验证。
+通用外观及音乐搜索偏好直接使用 UserDefaults；音质、官方源、metadata、首页来源、播放反馈和自动同步选择由 `NativeMusicService` 的 `music.library.v3` 原生文档 CAS 保存，账号凭据由原生 Keychain owner 保存，具体保护见[本地存储](storage.md)。这些存储入口不通过运行器，本地设置保存回执不等待歌词读取、账号绑定或后续同步。账号资料补全和真实同步仍是各自 owner 的在线业务；音乐脚本的安装、来源及执行仍归运行器，不迁入这份原生设置。配置与执行的共同边界见[设置存储契约](../common/settings-storage.md)。
+
+`MusicSettingsReceiptOwner` 由稳定原生存储范围持有，公开 `begin/settle/submit/flush`，`unknown` 由 Coordinator 接到现有全局错误呈现。quality、official、metadata、home、feedback、自动同步和脚本设置使用各自字段 key；FM 交回真实设置范围。Appearance 的同步 UserDefaults 没有 unknown 回执。共同结算及因果规则见[设置回执](../common/music/settings-receipts.md)。
+
+`MusicViewModel.updateSettings` 保留真实提交后的权威状态回读及失败回执；活跃歌曲的歌词刷新经 `beginPlaybackMetadata(refreshSources: true)` 交给既有 `playbackMetadata`，不等待其 `flush`。禁用歌词使旧结果失效；歌词读取、缓存及关闭时的取消／实际排空仍由原 metadata owner 管理，不因保存提前结算而省略。
+
+`saveAutomaticLibrarySync` 在原生 CAS 后返回 `MusicAutomaticLibrarySyncSaveResult`：已提交的 `preferences` 与独立的 `synchronization: Task<Result<MusicLibrarySyncState, MusicServiceError>, Never>`。`MusicLibrarySyncViewModel` 的设置回执与 `busy` 只随本地提交结算，另行观察同步句柄；仅当前页面代次与偏好 revision 仍匹配时发布业务状态／错误并调用原 `onLibraryChanged`。页面离开只停止该观察，不取消已接受的同步，也不向失效页面发布迟到错误。
+
+`NativeMusicService` 持有已接受动作的授权，仍立即调度账号绑定和一轮真实同步；同步失败不撤销已保存偏好。新保存撤销旧工作，其业务阶段等待旧工作实际排空后再按当前授权及 revision 执行，不执行被替代的旧意图，也不新增离线重试队列。访问撤销、`setAccess`、`close` 及显式取消同步句柄立即撤销业务授权；服务负责实际排空，包括尚在账号绑定、尚未建立同步 engine run 的工作，完成后才清理授权与任务登记。
 
 ## 缓存
 

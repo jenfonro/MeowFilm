@@ -657,30 +657,30 @@ private final class SidebarFilmFixture {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let store = try DocumentStore(baseURL: directory, namespace: FilmSourceService.documentNamespace)
+        let settings = try FilmRuntimeTestSettings(root: directory)
+        try settings.seedCats(Self.cats(for: videos))
         let document = FilmSourceDocument(cats: Self.cats(for: videos).map(StoredFilmCat.init), videos: videos)
         try store.write(JSONEncoder().encode(document), key: FilmSourceService.documentKey)
         let transport = SidebarSourceTransport()
         self.transport = transport
         sources = FilmSourceService(transport: .init(
-            request: { method, _ in try await transport.call(method) },
-            upload: { _, _, _ in try await transport.call("upload") }), storeFactory: { store })
-        rules = FilmRuleService(connection: {
+            request: { method, _ in try await transport.call(method) }), storeFactory: { store },
+            settingsDocument: settings[.catSources], runtimeSourceRoot: directory.appendingPathComponent("cat"))
+        rules = FilmRuleService(settingsDocument: settings[.rules], connection: {
             let resources = try await MainActor.run {
                 let app = try XCTUnwrap(UIApplication.shared.delegate as? MeowfilmAppDelegate)
                 return try XCTUnwrap(app.readyAssembly()?.resources)
             }
             return try await resources.scriptSession.connection()
         })
-        let tmdb = FilmTMDBSettingsModel(service: FilmTMDBService(connection: {
+        let tmdb = FilmTMDBSettingsModel(service: FilmTMDBService(settingsDocument: settings[.tmdb], connection: {
             XCTFail("Rendering the saved sidebar must not request TMDB")
             throw FilmSearchError.unavailable
         }), didSave: {})
-        let douban = FilmDoubanSettingsModel(service: FilmDoubanSettingsService(connection: {
-            XCTFail("Rendering the saved sidebar must not request Douban")
-            throw FilmSearchError.unavailable
-        }), didSave: {})
+        let douban = FilmDoubanSettingsModel(service: FilmDoubanSettingsService(settingsDocument: settings[.douban]), didSave: {})
         model = FilmSettingsModel(rules: rules, sources: sources, tmdb: tmdb, douban: douban,
-            pan: PanAccountsModel(service: .init(request: { _, _, _ in throw RuntimeHTTPError.closed })))
+            pan: PanAccountsModel(service: .init(document: settings[.panAccounts],
+                request: { _, _, _ in throw RuntimeHTTPError.closed })))
     }
 
     static func cats(for videos: [FilmVideoSource]) -> [FilmCatSource] {
@@ -689,7 +689,7 @@ private final class SidebarFilmFixture {
                           generation: 1, state: "ready", sourceHash: "sidebar-fixture",
                           sites: videos.filter { $0.key.installationId == installation }.map {
                               .init(key: $0.key.siteKey, name: $0.name, api: $0.api, actions: $0.actions, methods: $0.methods)
-                          })
+                          }, inputRevision: 1)
         }
     }
 

@@ -8,7 +8,7 @@ import MeowMusicFeature
         let saved = try await service.automaticLibrarySyncPreferences()
         let result = try await service.saveAutomaticLibrarySync(.init(revision: saved.revision,
             selections: platforms.map { .init(platform: $0, playlists: true) }), requestID: UUID(), authorization: .init())
-        return try result.synchronization.get()
+        return try await result.synchronization.value.get()
     }
     private func run(_ service: NativeMusicService, reason: MusicAutomaticLibrarySyncRequest.Reason = .localMutation) async throws -> MusicLibrarySyncState {
         try await service.synchronizeAutomaticLibrary(.init(reason: reason, authorization: .init()))
@@ -83,7 +83,7 @@ import MeowMusicFeature
         _ = try await enable(service)
         let values = try await references(service), saved = try XCTUnwrap(values.first)
         let preferences = try await service.automaticLibrarySyncPreferences()
-        _ = try await service.saveAutomaticLibrarySync(.init(revision: preferences.revision), requestID: UUID(), authorization: .init())
+        _ = try await (service.saveAutomaticLibrarySync(.init(revision: preferences.revision), requestID: UUID(), authorization: .init())).synchronization.value.get()
         let before = await peer.counts()
         try await service.removeNetworkPlaylist(saved, intent: .init())
         _ = try await run(service, reason: .foreground)
@@ -271,8 +271,8 @@ import MeowMusicFeature
         let favorite = NativeSyncFixture.collection("301", name: "Favorites", kind: .favorites)
         let peer = NativeSyncPeer(rows: [favorite]), service = try await NativeMusicFixture.service(accounts: peer)
         let preferences = try await service.automaticLibrarySyncPreferences()
-        _ = try await service.saveAutomaticLibrarySync(.init(revision: preferences.revision,
-            selections: [.init(platform: .netease, favorites: true)]), requestID: UUID(), authorization: .init())
+        _ = try await (service.saveAutomaticLibrarySync(.init(revision: preferences.revision,
+            selections: [.init(platform: .netease, favorites: true)]), requestID: UUID(), authorization: .init())).synchronization.value.get()
         let before = await peer.counts()
         let saved = try await service.saveNetworkPlaylist(.init(platform: .netease, nativeID: "501", title: "Local"), intent: .init())
         _ = try await run(service)

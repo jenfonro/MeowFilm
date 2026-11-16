@@ -18,7 +18,7 @@ export const simulatedIOS = `
 `;
 
 export function spawnRuntime(t, { preload = simulatedIOS, argv, entry, fixture, cwd = root,
-  configuration: changes = {}, sendConfiguration = true } = {}) {
+  configuration: changes = {}, sendConfiguration = true, onSettings } = {}) {
   mkdirSync(temporaryRoot, { recursive: true });
   const area = mkdtempSync(join(temporaryRoot, 'ios-runtime-'));
   t.after(() => rmSync(assertOwnedPath(temporaryRoot, area), { recursive: true, force: true }));
@@ -48,18 +48,29 @@ export function spawnRuntime(t, { preload = simulatedIOS, argv, entry, fixture, 
     channel.on('error', () => { if (!ready) reject(new Error('BOOTSTRAP_CLOSED')); });
     channel.once('close', () => { if (!ready) reject(new Error('BOOTSTRAP_CLOSED')); });
     channel.on('data', bytes => {
-      if (ready) { channel.destroy(new Error('UNEXPECTED_BOOTSTRAP_DATA')); return; }
       pending = Buffer.concat([pending, bytes]);
-      const newline = pending.indexOf(10);
-      if (newline === -1) return;
-      try {
-        assert.equal(newline, pending.length - 1);
-        const value = decodeJSONValue(pending.subarray(0, newline));
-        assert.deepEqual(Object.keys(value), ['baseUrl']);
-        validateEndpoint(value.baseUrl);
-        ready = true;
-        resolve(value.baseUrl);
-      } catch (error) { ready = true; reject(error); channel.destroy(); }
+      for (;;) {
+        const newline = pending.indexOf(10);
+        if (newline === -1) return;
+        const frame = pending.subarray(0, newline);
+        pending = pending.subarray(newline + 1);
+        try {
+          const value = decodeJSONValue(frame);
+          if (value?.kind?.startsWith('settings.')) {
+            assert.equal(configuration.nativeSettings, true);
+            assert.equal(typeof onSettings, 'function');
+            Promise.resolve(onSettings(value)).then(reply => {
+              if (reply !== undefined && !channel.destroyed) channel.write(`${JSON.stringify(reply)}\n`);
+            }).catch(error => { reject(error); channel.destroy(); });
+            continue;
+          }
+          assert.equal(ready, false, 'UNEXPECTED_BOOTSTRAP_DATA');
+          assert.deepEqual(Object.keys(value), ['baseUrl']);
+          validateEndpoint(value.baseUrl);
+          ready = true;
+          resolve(value.baseUrl);
+        } catch (error) { ready = true; reject(error); channel.destroy(); return; }
+      }
     });
   });
   endpoint.catch(() => {});

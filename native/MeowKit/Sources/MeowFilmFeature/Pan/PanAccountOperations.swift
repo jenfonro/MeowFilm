@@ -1,6 +1,6 @@
 import Foundation
 
-/// The App-owned account model retains real write/start/cancel receipts across
+/// The App-owned account model retains real online start/cancel receipts across
 /// page lifetimes. Admission is synchronous; presentation tasks never cancel it.
 @MainActor
 final class PanAccountOperations {
