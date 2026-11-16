@@ -64,12 +64,13 @@ public static class RuntimeHttpClientTests
                 await exchange.ReplyAsync(Success(Description(), RuntimeHttpProtocol.Name));
             }
             var declared = RuntimeHttpProtocol.ValidateDescription((await describe).GetProperty("value"), "aggregate", Modules);
-            BridgeTests.Equal(102, declared.Count);
+            BridgeTests.Equal(103, declared.Count);
             BridgeTests.Equal(true, declared.Contains("music.platform.request"));
             BridgeTests.Equal(true, declared.Contains("music.platform.session.update"));
             BridgeTests.Equal(true, declared.Contains("music.platform.cache.clear"));
             BridgeTests.Equal(true, declared.Contains("music.platform.describe"));
             BridgeTests.Equal(true, declared.Contains("netease.token.get"));
+            BridgeTests.Equal(true, declared.Contains("film.data.target"));
             BridgeTests.Equal(true, declared.Contains("film.rules.group.set"));
             BridgeTests.Equal(true, declared.Contains("film.rules.group.defaults"));
             BridgeTests.Equal(true, declared.Contains("film.rules.group.preview"));
@@ -314,6 +315,7 @@ public static class RuntimeHttpClientTests
             }),
             ("new module version", root => root["modules"]![6]!["version"] = "0.2.0"),
             ("missing film media release", root => root["modules"]![6]!["methods"]!.AsArray().RemoveAt(5)),
+            ("missing film target resolution", root => root["modules"]![6]!["methods"]!.AsArray().RemoveAt(11)),
             ("duplicate film method", root => root["modules"]![6]!["methods"]!.AsArray().Add("film.library.get")),
             ("unknown film method", root => root["modules"]![6]!["methods"]!.AsArray().Add("film.session.unknown")),
             ("unknown metadata method", root => root["modules"]![4]!["methods"]!.AsArray().Add("tmdb.data.unknown")),
@@ -674,7 +676,7 @@ public static class RuntimeHttpClientTests
                 "film.session.open", "film.session.command", "film.session.snapshot", "film.session.release",
                 "film.session.attempt", "film.session.media.release", "film.settings.get", "film.settings.set",
                 "film.library.get", "film.library.remove", "film.manual.update",
-                "film.data.catalog", "film.data.search", "film.data.detail", "film.data.metadata",
+                "film.data.target", "film.data.catalog", "film.data.search", "film.data.detail", "film.data.metadata",
                 "film.data.metadata.entry", "film.data.cache.entry", "film.data.invalidate",
                 "film.rules.get", "film.rules.set", "film.rules.group.set", "film.rules.group.defaults", "film.rules.group.preview",
                 "film.rules.restore", "film.rules.preview", "film.rules.normalize", "film.rules.clear",

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -310,59 +311,65 @@ public static class FilmMetadataRuntimeTests
         });
         await host.WaitSettingsAsync("tmdb");
         {
-            var rules = new FilmRuleService(host.Client, host.Store);
-            var sources = new FilmSourceService(host.Client, host.Store);
-            await using var film = new FilmCapability(rules, sources, host.Client, host.Metadata);
-            var view = (FilmSettingsView)film.SettingsView;
+            await using var rules = new FilmRuleService(host.Client, host.Store);
+            await using var sources = new FilmSourceService(host.Client, host.Store);
+            var view = new FilmSettingsView(rules, sources, host.Metadata);
             view.Width = 900; view.Height = 650;
             using var surface = Mount(view);
-            var navigation = (StackPanel)view.FindName("SettingsNavigation");
-            navigation.Children.OfType<RadioButton>().Single(button => Equals(button.Tag, "metadata")).IsChecked = true;
-            await SearchFixture.Until(() => view.MetadataLoaded && !view.MetadataBusy);
-            var token = (TextBox)view.FindName("MetadataApiToken");
-            var apiBase = (TextBox)view.FindName("MetadataApiBase");
-            Check(token.Text == "synthetic.access.token" && AutomationProperties.GetName(token) == "TMDB API TOKEN",
-                "the actual settings form exposes one editable plain token");
-            Capture(view, "tmdb-settings-wide.png");
-            view.Width = 420; Layout(view);
-            Check(apiBase.ActualWidth > 100 && apiBase.ActualWidth < 420 && token.ActualWidth > 80 &&
-                token.ActualWidth < 420, "native fields retain usable widths inside the narrow settings viewport");
-            Capture(view, "tmdb-settings-narrow.png");
-            await SaveView(view);
-            await host.WaitSettingsAsync("tmdb");
-            await Credentials(host.Metadata, upstream, "初始保留", expectedToken: "synthetic.access.token");
-            await SaveView(view);
-            await host.WaitSettingsAsync("tmdb");
-            Check(host.Metadata.Settings is { ApiKey: "synthetic.access.token", AccessToken: "" } &&
-                token.Text == "synthetic.access.token", "an unedited plain token survives another save");
-            await Credentials(host.Metadata, upstream, "未修改", expectedToken: "synthetic.access.token");
-            token.Text = "synthetic.replacement.token";
-            await SaveView(view);
-            await host.WaitSettingsAsync("tmdb");
-            Check(token.Text == "synthetic.replacement.token", "successful replacement remains visible and editable");
-            await Credentials(host.Metadata, upstream, "替换", expectedToken: "synthetic.replacement.token");
-            token.Text = "synthetic-replacement-key"; await SaveView(view);
-            await host.WaitSettingsAsync("tmdb");
-            Check(host.Metadata.Settings is { ApiKey: "synthetic-replacement-key", AccessToken: "" },
-                "the same input replaces v4 authentication with a v3 key");
-            await Credentials(host.Metadata, upstream, "改用key", expectedKey: "synthetic-replacement-key");
-            token.Text = "   "; await SaveView(view);
-            await host.WaitSettingsAsync("tmdb");
-            Check(host.Metadata.Settings is { ApiKey: "", AccessToken: "" } && token.Text == "",
-                "an empty save clears credentials without a separate clear action");
-            await Credentials(host.Metadata, upstream, "清空");
-            string savedBase = host.Metadata.Settings!.ApiBase;
-            apiBase.Text = "https://invalid.example/?query=not-a-base"; token.Text = "synthetic-retry-key";
-            await SaveView(view);
-            await host.WaitSettingsAsync("tmdb");
-            Check(apiBase.Text.Contains("?query=", StringComparison.Ordinal) && token.Text == "synthetic-retry-key" &&
-                host.Metadata.Settings!.ApiBase == savedBase && host.Metadata.Settings!.ApiToken == "",
-                "failed validation retains drafts and cannot publish unsaved settings");
-            apiBase.Text = savedBase; await SaveView(view);
-            await host.WaitSettingsAsync("tmdb");
-            Check(host.Metadata.Settings!.ApiKey == "synthetic-retry-key" && token.Text == "synthetic-retry-key",
-                "the unchanged failure draft can be retried explicitly");
-            surface.RootVisual = null;
+            try
+            {
+                var navigation = (StackPanel)view.FindName("SettingsNavigation");
+                navigation.Children.OfType<RadioButton>().Single(button => Equals(button.Tag, "metadata")).IsChecked = true;
+                await SearchFixture.Until(() => view.MetadataLoaded && !view.MetadataBusy);
+                var token = (TextBox)view.FindName("MetadataApiToken");
+                var apiBase = (TextBox)view.FindName("MetadataApiBase");
+                Check(token.Text == "synthetic.access.token" && AutomationProperties.GetName(token) == "TMDB API TOKEN",
+                    "the actual settings form exposes one editable plain token");
+                Capture(view, "tmdb-settings-wide.png");
+                view.Width = 420; Layout(view);
+                Check(apiBase.ActualWidth > 100 && apiBase.ActualWidth < 420 && token.ActualWidth > 80 &&
+                    token.ActualWidth < 420, "native fields retain usable widths inside the narrow settings viewport");
+                Capture(view, "tmdb-settings-narrow.png");
+                await SaveView(view);
+                await host.WaitSettingsAsync("tmdb");
+                await Credentials(host.Metadata, upstream, "初始保留", expectedToken: "synthetic.access.token");
+                await SaveView(view);
+                await host.WaitSettingsAsync("tmdb");
+                Check(host.Metadata.Settings is { ApiKey: "synthetic.access.token", AccessToken: "" } &&
+                    token.Text == "synthetic.access.token", "an unedited plain token survives another save");
+                await Credentials(host.Metadata, upstream, "未修改", expectedToken: "synthetic.access.token");
+                token.Text = "synthetic.replacement.token";
+                await SaveView(view);
+                await host.WaitSettingsAsync("tmdb");
+                Check(token.Text == "synthetic.replacement.token", "successful replacement remains visible and editable");
+                await Credentials(host.Metadata, upstream, "替换", expectedToken: "synthetic.replacement.token");
+                token.Text = "synthetic-replacement-key"; await SaveView(view);
+                await host.WaitSettingsAsync("tmdb");
+                Check(host.Metadata.Settings is { ApiKey: "synthetic-replacement-key", AccessToken: "" },
+                    "the same input replaces v4 authentication with a v3 key");
+                await Credentials(host.Metadata, upstream, "改用key", expectedKey: "synthetic-replacement-key");
+                token.Text = "   "; await SaveView(view);
+                await host.WaitSettingsAsync("tmdb");
+                Check(host.Metadata.Settings is { ApiKey: "", AccessToken: "" } && token.Text == "",
+                    "an empty save clears credentials without a separate clear action");
+                await Credentials(host.Metadata, upstream, "清空");
+                string savedBase = host.Metadata.Settings!.ApiBase;
+                apiBase.Text = "https://invalid.example/?query=not-a-base"; token.Text = "synthetic-retry-key";
+                await SaveView(view);
+                await host.WaitSettingsAsync("tmdb");
+                Check(apiBase.Text.Contains("?query=", StringComparison.Ordinal) && token.Text == "synthetic-retry-key" &&
+                    host.Metadata.Settings!.ApiBase == savedBase && host.Metadata.Settings!.ApiToken == "",
+                    "failed validation retains drafts and cannot publish unsaved settings");
+                apiBase.Text = savedBase; await SaveView(view);
+                await host.WaitSettingsAsync("tmdb");
+                Check(host.Metadata.Settings!.ApiKey == "synthetic-retry-key" && token.Text == "synthetic-retry-key",
+                    "the unchanged failure draft can be retried explicitly");
+            }
+            finally
+            {
+                surface.RootVisual = null;
+                await view.PreparePlaybackSettingsShutdownAsync();
+            }
         }
         await host.DisposeAsync();
         await using var restored = await RuntimeHost.OpenAsync(data);
@@ -422,7 +429,14 @@ public static class FilmMetadataRuntimeTests
             "only the real Node producer supplies complete content and original configuration/freshness evidence after UI cancellation");
         var repeated = await host.Metadata.SearchAsync("挂起", default).WaitAsync(TimeSpan.FromSeconds(5));
         var retained = await host.FilmAsync("data.cache.entry", SearchIdentity("挂起"));
-        Check(JsonElement.DeepEquals(repeated, receipt.GetProperty("value")) &&
+        var expected = JsonNode.Parse(receipt.GetProperty("value").GetRawText())!;
+        var row = expected["results"]![0]!;
+        row["businessId"] = "tmdb:tv:7";
+        row["playbackTarget"] = JsonSerializer.SerializeToNode(new
+        {
+            id = "tmdb:tv:7", kind = "tv", title = "目标", metadataProvider = "tmdb", metadataId = "7"
+        });
+        Check(JsonElement.DeepEquals(repeated, BridgeCodec.Value(expected)) &&
             retained.GetProperty("fetchedAt").GetInt64() == receipt.GetProperty("fetchedAt").GetInt64() && !upstream.HasConnection,
             "a later same-key read returns the late original body without a second download or a new native freshness clock");
         Console.WriteLine("TMDB_RUNTIME ordinaryCancel=waiterOnly; lateCache=complete; sameKeyUpstreamReads=1; publicNetwork=false");
@@ -449,7 +463,23 @@ public static class FilmMetadataRuntimeTests
         }
         var receipt = await CachedAsync(host, DetailIdentity());
         var repeat = await host.Metadata.DetailAsync("tv", 7, default).WaitAsync(TimeSpan.FromSeconds(5));
-        Check(JsonElement.DeepEquals(repeat, receipt.GetProperty("value")) && !upstream.HasConnection,
+        var expected = JsonNode.Parse(receipt.GetProperty("value").GetRawText())!;
+        expected["businessId"] = "tmdb:tv:7";
+        expected["playbackTarget"] = JsonSerializer.SerializeToNode(new
+        {
+            id = "tmdb:tv:7", kind = "tv", title = "目标", metadataProvider = "tmdb", metadataId = "7"
+        });
+        var season = expected["seasons"]![0]!;
+        season["businessId"] = "tmdb:tv:7:season:1";
+        season["playbackTarget"] = expected["playbackTarget"]!.DeepClone();
+        season["playbackTarget"]!["season"] = 1;
+        var related = expected["similar"]!["results"]![0]!;
+        related["businessId"] = "tmdb:tv:8";
+        related["playbackTarget"] = JsonSerializer.SerializeToNode(new
+        {
+            id = "tmdb:tv:8", kind = "tv", title = "相关作品", metadataProvider = "tmdb", metadataId = "8"
+        });
+        Check(JsonElement.DeepEquals(repeat, BridgeCodec.Value(expected)) && !upstream.HasConnection,
             "a new native detail call uses the unique Node complete-detail cache");
         Check((await host.FilmAsync("data.cache.entry", DetailIdentity(size: "w500"))).ValueKind == JsonValueKind.Null,
             "the original detail is not a freshness receipt for a different image size");
