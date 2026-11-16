@@ -316,9 +316,9 @@ public sealed partial class ShellWindow : DesktopWindow
             immersive ? Visibility.Collapsed : Visibility.Visible;
         if (immersive) PlayerFrame.Visibility = Visibility.Collapsed;
         _state.CanGoBack = _queueOpen || _playerDetailOpen || _currentPage is not null ||
-            current.IsSettingsOpen || _returnPage is not null || _history.Count > 1;
-        _state.CanGoForward = !_queueOpen && !_playerDetailOpen && _currentPage is null &&
-            !current.IsSettingsOpen && _returnPage is null && _future.Count > 0;
+            current.IsSettingsOpen || _history.Count > 1;
+        _state.CanGoForward = !_queueOpen && !_playerDetailOpen &&
+            !current.IsSettingsOpen && _future.Count > 0;
         ApplySearchPresentation();
         foreach (var page in _pages) page.Host.Visibility = ReferenceEquals(page, _currentPage) ? Visibility.Visible : Visibility.Collapsed;
         AutomationProperties.SetName(SettingsButton, "设置");
@@ -339,8 +339,6 @@ public sealed partial class ShellWindow : DesktopWindow
                 if (ReferenceEquals(entry.Session, session)) Retain(entry.Destination);
             if (_currentPage is null && ReferenceEquals(_current, session)) Retain(session.Current);
             if (ReferenceEquals(_settingsReturn, session)) Retain(session.Current);
-            RetainOrigin(_currentPage);
-            RetainOrigin(_returnPage);
             foreach (var request in _requests)
                 if ((request.Plan.IsBack || request.Plan.IsForward) && ReferenceEquals(request.Plan.Session, session)) Retain(request.Plan.Destination);
             if (_retryPlan is { } retry && (retry.IsBack || retry.IsForward) && ReferenceEquals(retry.Session, session)) Retain(retry.Destination);
@@ -349,10 +347,6 @@ public sealed partial class ShellWindow : DesktopWindow
             void Retain(Destination? destination)
             {
                 if (destination?.Location is { } location) locations.Add(location);
-            }
-            void RetainOrigin(PageSession? page)
-            {
-                if (page?.Origin is { } origin && ReferenceEquals(origin.Session, session)) Retain(origin.Destination);
             }
         }
     }
@@ -477,7 +471,7 @@ public sealed partial class ShellWindow : DesktopWindow
         {
             // A queued request from an old presentation must not navigate after switching away/back.
             if (!MayNavigate(session, args.FromPlayer) || generation != Interlocked.Read(ref _presentationGeneration)) return;
-            RunUiAction(() => NavigateFromUiAsync(session, route, fromContent: !args.FromPlayer));
+            RunUiAction(() => NavigateFromUiAsync(session, route));
         });
     }
 
@@ -492,10 +486,8 @@ public sealed partial class ShellWindow : DesktopWindow
                 : Volatile.Read(ref _currentPage) is null && ReferenceEquals(current, session);
     }
 
-    private Task NavigateFromUiAsync(ModuleSession session, string route, bool fromContent = false)
+    private Task NavigateFromUiAsync(ModuleSession session, string route)
     {
-        if (fromContent && _currentPage?.Page is IDesktopSearchPage) _returnPage = _currentPage;
-        else if (!fromContent) _returnPage = null;
         if (_isClosing) return Task.CompletedTask;
         _settingsReturn = null;
         if (_current is { } previous) previous.IsSettingsOpen = false;
@@ -565,7 +557,6 @@ public sealed partial class ShellWindow : DesktopWindow
 
     private void OnSettingsClick(object sender, RoutedEventArgs e) => RunUiAction(async () =>
     {
-        if (_currentPage?.Page is IDesktopSearchPage) await GoBackAsync();
         if (_current is not { } current) return;
         if (_playerDetailOpen) await ClosePlayerDetailAsync();
         if (current.IsSettingsOpen && _currentPage is null) { ApplyPresentation(); return; }
@@ -595,8 +586,20 @@ public sealed partial class ShellWindow : DesktopWindow
     {
         if (!_state.CanGoForward) return;
         var next = _future[^1];
-        PreparePresentation(next.Session);
-        await RunRequestAsync(new(next.Session, next.Destination, IsForward: true));
+        await RestoreHistoryAsync(new(next.Session, next.Destination, IsForward: true));
+    }
+
+    private async Task RestoreHistoryAsync(RequestPlan plan)
+    {
+        if (plan.Destination?.PageId is { } pageId)
+        {
+            var page = _pages.Single(item => item.Page.Id == pageId);
+            PreparePresentation(plan.Session);
+            await ActivatePageAsync(page, navigation: plan);
+            return;
+        }
+        PreparePresentation(plan.Session);
+        await RunRequestAsync(plan);
     }
 
     private async Task GoBackAsync()
@@ -604,17 +607,17 @@ public sealed partial class ShellWindow : DesktopWindow
         if (_queueOpen) { await CloseQueueAsync(); return; }
         if (_playerDetailOpen) { await ClosePlayerDetailAsync(); return; }
         if (_current is not { } current) return;
-        if (_currentPage is { } page)
+        if (_currentPage is not null && _history.Count <= 1)
         {
             LeavePublicPage();
-            if (page.Origin is { } origin)
-            {
-                page.Origin = null;
-                PreparePresentation(origin.Session);
-                await RunRequestAsync(new(origin.Session, origin.Destination, IsBack: true));
-            }
             SetStatus();
             ApplyPresentation();
+            return;
+        }
+        if (_currentPage is not null)
+        {
+            var previous = _history[^2];
+            await RestoreHistoryAsync(new(previous.Session, previous.Destination, IsBack: true));
             return;
         }
         if (current.IsSettingsOpen)
@@ -629,6 +632,11 @@ public sealed partial class ShellWindow : DesktopWindow
             _retryPlan = null;
             SetStatus();
             ApplyPresentation();
+            if (_history.LastOrDefault().Destination?.PageId is { } pageId)
+            {
+                await ActivatePageAsync(_pages.Single(page => page.Page.Id == pageId), recordNavigation: false);
+                return;
+            }
             QueueUi(() =>
             {
                 if (!ReferenceEquals(_current, restore) || restore.IsSettingsOpen) return;
@@ -640,19 +648,10 @@ public sealed partial class ShellWindow : DesktopWindow
             if (!restore.Initialized) await RunRequestAsync(new(restore));
             return;
         }
-        if (_returnPage is { } returnPage)
-        {
-            _returnPage = null;
-            if (returnPage.Origin is { } origin && _history.Count > origin.HistoryDepth)
-                _history.RemoveRange(origin.HistoryDepth, _history.Count - origin.HistoryDepth);
-            await ActivatePageAsync(returnPage);
-            return;
-        }
         if (_history.Count > 1)
         {
             var previous = _history[^2];
-            PreparePresentation(previous.Session);
-            await RunRequestAsync(new(previous.Session, previous.Destination, IsBack: true));
+            await RestoreHistoryAsync(new(previous.Session, previous.Destination, IsBack: true));
         }
     }
 
@@ -689,9 +688,6 @@ public sealed partial class ShellWindow : DesktopWindow
             string query = SearchBox.Text.Trim();
             var page = _pages.Single(item => ReferenceEquals(item.Page, searchPage));
             page.SearchDraft = SearchBox.Text;
-            if (!ReferenceEquals(_currentPage, page) && _current?.Current is { } destination)
-                page.Origin = (_current, destination, _history.Count);
-            _returnPage = null;
             return ActivatePageAsync(page, token => searchPage.SubmitAsync(query, target, token));
         }
         if (_current is not { } current || current.IsSettingsOpen ||
@@ -920,7 +916,7 @@ public sealed partial class ShellWindow : DesktopWindow
                 if (_history.Count > HistoryLimit) _history.RemoveAt(0);
             }
         }
-        plan.Session.Current = destination;
+        if (destination.PageId is null) plan.Session.Current = destination;
     }
 
     private async Task ReapRequestAsync(ShellRequest request, Task work)

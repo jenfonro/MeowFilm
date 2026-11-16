@@ -24,6 +24,12 @@ struct FilmHeroGeometry {
 
 @MainActor
 public final class FilmDetailViewController: PageViewController, UIScrollViewDelegate, FilmPlaybackPage {
+    private struct EpisodeDirectoryKey: Hashable {
+        let source: String?
+        let line: FilmPlaybackIdentifier?
+        let metadata: String?
+        let season: Int?
+    }
     public var onPresentPlayback: (() -> Void)?
     public var onSelectItem: ((FilmItem) -> Void)?
     public private(set) var detail: FilmDetail
@@ -55,6 +61,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     private let sourceRow = UIStackView(), episodeList = UIStackView()
     private var displayedSnapshot: FilmPlaybackSnapshot?
     private var playbackActivationRequested = false
+    private let presentationOwner = UUID()
     private var summaryExpanded = false
     private var episodeListVisible = false
     private var episodeListContainer = UIView()
@@ -63,6 +70,10 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     private var selectedSeasonID: String?
     private var heroSpaceHeight: NSLayoutConstraint!
     private var episodeViews: [FilmEpisodeButton] = []
+    private var episodeButtons: [String: FilmEpisodeButton] = [:]
+    private var episodeDirectory: EpisodeDirectoryKey?
+    private var episodeOffsets: [EpisodeDirectoryKey: CGPoint] = [:]
+    private var shownEpisodeList = false
     private var castViews: [FilmCastView] = []
     private var similarViews: [FilmRelatedButton] = []
     private var sectionTitles: [UILabel] = []
@@ -102,7 +113,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     }
 
     private func receiveSearchUpdate() {
-        guard let searchContext, model?.snapshot == nil else { return }
+        guard let searchContext, model?.presentation == nil else { return }
         detail = searchContext.detail
         pageTitle = detail.title
         guard isViewLoaded else { return }
@@ -177,6 +188,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     }
 
     public override func pageDidBecomeVisible() {
+        model?.setPresentationVisible(true, owner: presentationOwner)
         activatePlaybackIfVisible()
         presentLibraryError()
         presentPlaybackError()
@@ -186,10 +198,12 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         guard model != nil, !playbackActivationRequested, canPresentPageAlert else { return }
         playbackActivationRequested = true
         if let onActivatePlayback { onActivatePlayback() } else { model?.open() }
-        if model?.snapshot != nil { model?.reconnect() }
     }
 
-    public override func pageDidBecomeHidden() { playbackActivationRequested = false }
+    public override func pageDidBecomeHidden() {
+        model?.setPresentationVisible(false, owner: presentationOwner)
+        playbackActivationRequested = false
+    }
 
     public override func pageDidBecomeInactive() {
         guard let model else { return }
@@ -391,7 +405,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     }
 
     private func renderSeason() {
-        if model != nil { renderRuntimeEpisodes(); renderEpisodeMenu(); return }
+        if model != nil { renderRuntimeEpisodes(); updateEpisodeAvailability(); renderEpisodeMenu(); return }
         let season = detail.seasons.first { $0.id == selectedSeasonID } ?? detail.seasons.first
         selectedSeasonID = season?.id
         let selectable = detail.seasons.count > 1
@@ -422,7 +436,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     }
 
     private func playSelection() {
-        guard let model, let snapshot = model.snapshot, canPlay(snapshot) else { return }
+        guard let model, let snapshot = model.presentation, canPlay(snapshot) else { return }
         if snapshot.browsing.sourceID != nil {
             guard let id = playbackCandidateID(snapshot) else { return }
             model.selectCandidate(id)
@@ -442,7 +456,10 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     }
 
     private func canPlay(_ snapshot: FilmPlaybackSnapshot) -> Bool {
-        guard !(snapshot.browsing.loading && !snapshot.browsing.refreshing), snapshot.browsing.error == nil else { return false }
+        guard model?.executionStage != nil, let execution = model?.snapshot,
+              execution.entryResolution != "loading", execution.entryResolution != "error",
+              !(execution.browsing.loading && !execution.browsing.refreshing), execution.browsing.error == nil,
+              !(snapshot.browsing.loading && !snapshot.browsing.refreshing) else { return false }
         if snapshot.browsing.sourceID != nil {
             return playbackCandidateID(snapshot) != nil
         }
@@ -472,7 +489,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     }
 
     private func showDirectory() {
-        guard let model, let browsing = model.snapshot?.browsing, browsing.error == nil,
+        guard let model, let browsing = model.presentation?.browsing, browsing.error == nil,
               let sourceID = browsing.sourceID, !browsing.originalFiles.isEmpty else { return }
         let page = FilmDirectoryViewController(model: model, sourceID: sourceID, lineID: browsing.lineID,
                                                themeProvider: themeProvider)
@@ -482,7 +499,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
 
     private func renderPlayback() {
         guard isViewLoaded, let model else { return }
-        guard let snapshot = model.snapshot else {
+        guard let snapshot = model.presentation else {
             renderSourceMenus(nil)
             play.isEnabled = false
             play.configuration?.title = model.opening ? "准备中" : "播放"
@@ -494,9 +511,9 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         play.isEnabled = canPlay(snapshot)
         play.configuration?.title = play.isEnabled ? "播放" : "暂无片源"
         play.accessibilityLabel = play.isEnabled ? "播放" : "播放，暂无可用片源"
-        let busy = ["loading", "searching", "resolving", "pending"].contains(snapshot.stage)
+        let busy = model.opening || ["loading", "searching", "resolving", "pending"].contains(model.executionStage ?? "")
         if busy { loadingIndicator.startAnimating() } else { loadingIndicator.stopAnimating() }
-        switch snapshot.stage {
+        switch model.executionStage {
         case "prepared": playbackState.text = "地址已准备"
         case "playing": playbackState.text = "播放中"
         case "searching": playbackState.text = "匹配片源"
@@ -513,9 +530,10 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
             displayedSnapshot?.metadataSourceID != snapshot.metadataSourceID ||
             displayedSnapshot?.metadataSources != snapshot.metadataSources
         if metadataChanged {
-            detail = FilmPlaybackPresentation.detail(snapshot, original: originalDetail)
-            renderMetadata()
-            renderRelated()
+            let next = FilmPlaybackPresentation.detail(snapshot, original: originalDetail)
+            let relatedChanged = detail.cast != next.cast || detail.similarItems != next.similarItems
+            if detail != next { detail = next; renderMetadata() }
+            if relatedChanged { renderRelated() }
         }
         if displayedSnapshot?.sources != snapshot.sources || displayedSnapshot?.browsing != snapshot.browsing ||
             displayedSnapshot?.searchComplete != snapshot.searchComplete ||
@@ -528,10 +546,11 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
             displayedSnapshot?.candidates != snapshot.candidates || metadataChanged {
             renderRuntimeEpisodes()
         }
+        updateEpisodeAvailability()
         more.menu = UIMenu(children: [
             UIAction(title: "点映", identifier: .init("film.detail.preview"),
                      state: snapshot.previewEpisodes ? .on : .off) { [weak model] _ in
-                guard let model, let current = model.snapshot else { return }
+                guard let model, let current = model.presentation else { return }
                 model.setPreview(!current.previewEpisodes)
             }
         ])
@@ -539,6 +558,18 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         displayedSnapshot = snapshot
         presentPlaybackError()
         applyTheme()
+    }
+
+    private func updateEpisodeAvailability() {
+        guard let execution = model?.snapshot else {
+            for button in episodeViews { button.isEnabled = false }
+            return
+        }
+        let available = model?.executionStage != nil &&
+            execution.entryResolution != "loading" && execution.entryResolution != "error" &&
+            !(execution.browsing.loading && !execution.browsing.refreshing) && execution.browsing.error == nil &&
+            (execution.browsing.sourceID != nil || execution.metadataCache?.status != .stale)
+        for button in episodeViews { button.isEnabled = available && button.onSelect != nil }
     }
 
     private func renderMetadata() {
@@ -644,8 +675,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     }
 
     private func renderRuntimeEpisodes() {
-        guard let snapshot = model?.snapshot else { return }
-        resetEpisodeViews()
+        guard let snapshot = model?.presentation else { return }
         let browsing = snapshot.browsing
         let metadataKind = snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }?.kind
         let seasons = detail.seasons
@@ -678,43 +708,47 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         if snapshot.entryResolution == "error" { showEpisodeState(nil); return }
         if browsing.loading && !browsing.refreshing { showEpisodeState("加载中"); return }
         if browsing.error != nil { showEpisodeState(nil); return }
+        var next: [FilmEpisodeButton] = []
         if browsing.sourceID != nil {
             for file in browsing.files {
-                let button = FilmEpisodeButton(episode: displayedEpisode(position: file.position,
-                    id: file.id, name: file.name), images: images, list: episodeListVisible)
+                let button = runtimeEpisodeButton(displayedEpisode(position: file.position,
+                    id: file.businessID, name: file.name, target: file.playbackTarget))
                 button.accessibilityIdentifier = "film.file.\(file.id)"
-                button.isEnabled = file.candidateID != nil
-                button.addAction(UIAction { [weak self] _ in
-                    guard let self, let id = file.candidateID else { return }
-                    model?.selectCandidate(id); onPresentPlayback?()
-                }, for: .touchUpInside)
-                appendEpisode(button)
+                button.onSelect = file.candidateID.map { id in { [weak self] in
+                    self?.model?.selectCandidate(id); self?.onPresentPlayback?()
+                } }
+                next.append(button)
             }
         } else if metadataKind == .movie {
             for candidate in snapshot.candidates {
-                let episode = FilmEpisode(id: candidate.id, title: candidate.name,
+                let episode = FilmEpisode(id: candidate.businessID, title: candidate.name,
                     summary: [candidate.quality, candidate.source.name, candidate.lineLabel]
                         .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),
-                    artworkURL: detail.item.posterURL ?? detail.item.largePosterURL)
-                let button = FilmEpisodeButton(episode: episode, images: images, list: episodeListVisible)
+                    artworkURL: detail.item.posterURL ?? detail.item.largePosterURL,
+                    businessID: candidate.businessID, playbackTarget: candidate.playbackTarget)
+                let button = runtimeEpisodeButton(episode)
                 button.accessibilityIdentifier = "film.candidate.\(candidate.id)"
-                button.addAction(UIAction { [weak self] _ in
+                button.onSelect = { [weak self] in
                     self?.model?.selectCandidate(candidate.id); self?.onPresentPlayback?()
-                }, for: .touchUpInside)
-                appendEpisode(button)
+                }
+                next.append(button)
             }
         } else if metadataKind == .tv {
             for episode in snapshot.episodes {
-                let button = FilmEpisodeButton(episode: FilmPlaybackPresentation.episode(episode,
-                    fallbackArtworkURL: episodeArtwork(season: episode.position.season)),
-                    images: images, list: episodeListVisible)
-                button.isEnabled = snapshot.metadataCache?.status != .stale
-                button.addAction(UIAction { [weak self] _ in
+                let button = runtimeEpisodeButton(FilmPlaybackPresentation.episode(episode,
+                    fallbackArtworkURL: episodeArtwork(season: episode.position.season)))
+                button.onSelect = { [weak self] in
                     self?.model?.selectEpisode(episode.position); self?.onPresentPlayback?()
-                }, for: .touchUpInside)
-                appendEpisode(button)
+                }
+                next.append(button)
             }
         }
+        let key = EpisodeDirectoryKey(
+            source: snapshot.sources.first { $0.id == browsing.sourceID }?.businessID ?? browsing.sourceID,
+            line: browsing.lineID,
+            metadata: snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }?.businessID ?? snapshot.metadataSourceID,
+            season: number)
+        applyEpisodeViews(next, directory: key)
         if episodeViews.isEmpty {
             let manualSearch = snapshot.entryResolution == "unmatched" && snapshot.error != "SOURCE_NOT_FOUND" &&
                 browsing.sourceID == nil && snapshot.sources.isEmpty
@@ -723,22 +757,74 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
             searchButton.isHidden = !manualSearch
             if manualSearch { episodeStateContainer.isHidden = false }
         }
-        episodeRail.resetOffset()
+    }
+
+    private func runtimeEpisodeButton(_ episode: FilmEpisode) -> FilmEpisodeButton {
+        let button: FilmEpisodeButton
+        if let existing = episodeButtons[episode.id] {
+            button = existing
+            button.update(episode: episode, list: episodeListVisible)
+        } else {
+            button = FilmEpisodeButton(episode: episode, images: images, list: episodeListVisible)
+            episodeButtons[episode.id] = button
+        }
+        return button
+    }
+
+    private func applyEpisodeViews(_ next: [FilmEpisodeButton], directory: EpisodeDirectoryKey) {
+        let changed = episodeDirectory != directory
+        let layoutChanged = shownEpisodeList != episodeListVisible
+        if !shownEpisodeList, let previous = episodeDirectory, changed || layoutChanged {
+            episodeOffsets[previous] = episodeRail.contentOffset
+        }
+        episodeRail.isHidden = episodeListVisible
+        episodeListContainer.isHidden = !episodeListVisible
+        episodeStateContainer.isHidden = true
+        episodeState.isHidden = true
+        searchButton.isHidden = true
+        if episodeListVisible {
+            episodeRail.setViews([], width: 176)
+            for child in episodeList.arrangedSubviews where !next.contains(where: { $0 === child }) {
+                episodeList.removeArrangedSubview(child); child.removeFromSuperview()
+            }
+            for (index, button) in next.enumerated() {
+                if index >= episodeList.arrangedSubviews.count || episodeList.arrangedSubviews[index] !== button {
+                    episodeList.removeArrangedSubview(button)
+                    episodeList.insertArrangedSubview(button, at: index)
+                }
+            }
+        } else {
+            for child in episodeList.arrangedSubviews {
+                episodeList.removeArrangedSubview(child); child.removeFromSuperview()
+            }
+            episodeRail.setViews(next, width: 176)
+            if changed || layoutChanged {
+                episodeRail.layoutIfNeeded()
+                episodeRail.setContentOffset(episodeOffsets[directory] ?? .zero, animated: false)
+            }
+        }
+        episodeViews = next
+        episodeDirectory = directory
+        shownEpisodeList = episodeListVisible
     }
 
     private func episodeArtwork(season: Int?) -> URL? {
         detail.seasons.first { $0.number == season }?.posterURL ?? detail.item.posterURL ?? detail.item.largePosterURL
     }
 
-    private func displayedEpisode(position: FilmEpisodePosition, id: String, name: String) -> FilmEpisode {
-        if let episode = model?.snapshot?.episodes.first(where: {
+    private func displayedEpisode(position: FilmEpisodePosition, id: String, name: String,
+                                  target: FilmPlaybackTarget?) -> FilmEpisode {
+        if let episode = model?.presentation?.episodes.first(where: {
             $0.position.season == position.season && $0.position.episode == position.episode
         }) {
-            return FilmPlaybackPresentation.episode(episode, fallbackArtworkURL: episodeArtwork(season: position.season))
+            let display = FilmPlaybackPresentation.episode(episode, fallbackArtworkURL: episodeArtwork(season: position.season))
+            return .init(id: id, title: display.title, number: display.number, summary: display.summary,
+                         artworkURL: display.artworkURL, releaseDate: display.releaseDate,
+                         businessID: id, playbackTarget: target)
         }
         let number = position.episode ?? position.globalEpisode
         return FilmEpisode(id: id, title: number == nil ? name : "", number: number,
-                           artworkURL: episodeArtwork(season: position.season))
+                           artworkURL: episodeArtwork(season: position.season), businessID: id, playbackTarget: target)
     }
 
     private func resetEpisodeViews() {
@@ -771,7 +857,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
             },
         ]
         var actions = viewActions
-        if let browsing = model?.snapshot?.browsing, browsing.sourceID != nil,
+        if let browsing = model?.presentation?.browsing, browsing.sourceID != nil,
            browsing.error == nil, !browsing.originalFiles.isEmpty {
             actions.append(UIAction(title: "查看原始列表", identifier: .init("film.detail.directory")) { [weak self] _ in
                 self?.showDirectory()
@@ -799,10 +885,11 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
 
     private var displayedPlaybackError: FilmPlaybackError?
     private func presentPlaybackError() {
-        let reported = model?.snapshot?.reportError.map { FilmPlaybackError(code: $0) }
-        let metadata = model?.snapshot?.metadataError.map { FilmPlaybackError(code: $0) }
-        let browsing = model?.snapshot?.browsing.error.map { FilmPlaybackError(code: $0) }
-        let session = model?.snapshot?.error.map { FilmPlaybackError(code: $0) }
+        let active = model?.executionStage == nil ? nil : model?.snapshot
+        let reported = active?.reportError.map { FilmPlaybackError(code: $0) }
+        let metadata = active?.metadataError.map { FilmPlaybackError(code: $0) }
+        let browsing = active?.browsing.error.map { FilmPlaybackError(code: $0) }
+        let session = active?.error.map { FilmPlaybackError(code: $0) }
         if model?.actionError == nil, model?.observationError == nil, reported == nil,
            metadata == nil, browsing == nil, session == nil {
             displayedPlaybackError = nil
@@ -812,10 +899,12 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         let presented: Bool
         if model.actionError == nil, model.observationError != nil {
             presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.reconnect() })
-        } else if model.snapshot == nil {
+        } else if model.presentation == nil {
             presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.open() })
+        } else if model.restoringRead {
+            presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.refreshBrowsing() })
         } else if model.actionError == nil, model.observationError == nil, reported == nil,
-                  browsing != nil || metadata != nil || model.snapshot?.entryResolution == "error" {
+                  browsing != nil || metadata != nil || model.presentation?.entryResolution == "error" {
             presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.refreshBrowsing() })
         } else {
             presented = showError(error.localizedDescription, acknowledged: { [weak model] in model?.acknowledgeError() })

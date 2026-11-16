@@ -61,7 +61,7 @@ internal sealed class DoubanFilmHomeSource(IRuntimeClient runtime) : IFilmHomeSo
             }, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             var cache = FilmMetadataCache.Read(FilmJson.Member(entry, "cache"));
-            return new FilmHomePage(Parse(FilmJson.Member(entry, "value"), section, start), cache);
+            return new FilmHomePage(Parse(FilmJson.Member(entry, "value")), cache);
         }
         catch (FilmPlaybackException error)
         {
@@ -73,10 +73,7 @@ internal sealed class DoubanFilmHomeSource(IRuntimeClient runtime) : IFilmHomeSo
         }
     }
 
-    private static IReadOnlyList<FilmCardItem> Parse(
-        JsonElement root,
-        FilmSectionDefinition section,
-        int start)
+    private static IReadOnlyList<FilmCardItem> Parse(JsonElement root)
     {
         if (root.ValueKind != JsonValueKind.Object ||
             !root.TryGetProperty("items", out var items) ||
@@ -84,22 +81,17 @@ internal sealed class DoubanFilmHomeSource(IRuntimeClient runtime) : IFilmHomeSo
             throw new FilmHomeException("INVALID_RESPONSE");
 
         var result = new List<FilmCardItem>();
-        var index = 0;
         foreach (var item in items.EnumerateArray())
         {
-            int itemIndex = checked(start + index++);
             if (item.ValueKind != JsonValueKind.Object) continue;
             string title = Text(item, "title");
             if (title.Length == 0) continue;
-            string id = Scalar(item, "id");
-            string metadataId = id;
-            if (id.Length == 0)
-                id = $"{section.Key}:{itemIndex.ToString(CultureInfo.InvariantCulture)}:{title}";
+            string id = FilmJson.RequiredText(item, "businessId");
+            var target = FilmJson.Target(item.GetProperty("playbackTarget"));
+            target.Validate();
             result.Add(new(id, title, Poster(item), Score(item))
             {
-                PlaybackContext = metadataId.Length == 0 || section.Kind is not ("movie" or "tv") ? null : new(new(
-                    $"douban:{section.Kind}:{metadataId}", section.Kind,
-                    title, "douban", metadataId), Metadata: item.Clone(), EntrySurface: "home")
+                PlaybackContext = new(target, Metadata: item.Clone(), EntrySurface: "home")
             });
         }
         if (items.GetArrayLength() > 0 && result.Count == 0) throw new FilmHomeException("INVALID_RESPONSE");
@@ -148,17 +140,6 @@ internal sealed class DoubanFilmHomeSource(IRuntimeClient runtime) : IFilmHomeSo
         item.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()?.Trim() ?? ""
             : "";
-
-    private static string Scalar(JsonElement item, string property)
-    {
-        if (!item.TryGetProperty(property, out var value)) return "";
-        return value.ValueKind switch
-        {
-            JsonValueKind.String => value.GetString()?.Trim() ?? "",
-            JsonValueKind.Number => value.GetRawText(),
-            _ => ""
-        };
-    }
 
     public void Dispose()
     {

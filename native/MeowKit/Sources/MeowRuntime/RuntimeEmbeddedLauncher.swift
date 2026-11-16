@@ -52,6 +52,7 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
     private var running = false
     private var channel: RuntimeBootstrapChannel?
     private var client: RuntimeHTTPClient?
+    private var endpoint: URL?
     private var exitWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(payload: @escaping @Sendable () throws -> RuntimePayload, dataDirectory: URL,
@@ -61,7 +62,14 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
     }
 
     public func connect() async throws -> RuntimeHTTPClient {
-        try reserveLaunch()
+        if let existing = try reserveLaunch() {
+            let replacement = try RuntimeHTTPClient(baseURL: existing)
+            do {
+                try await replacement.validateAppModules()
+                guard publish(replacement) else { throw RuntimeHTTPError.closed }
+                return replacement
+            } catch { await replacement.close(); throw error }
+        }
         let payload: RuntimePayload
         do { payload = try self.payload() } catch { throw RuntimeLaunchError.payloadUnavailable }
         var descriptors: [Int32] = [-1, -1]
@@ -97,7 +105,7 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
         do {
             let baseURL = try await channel.endpoint(configuration: configuration)
             let client = try RuntimeHTTPClient(baseURL: baseURL)
-            guard publish(client) else { await client.close(); throw RuntimeHTTPError.closed }
+            guard publish(client, endpoint: baseURL) else { await client.close(); throw RuntimeHTTPError.closed }
             return client
         } catch {
             await close()
@@ -124,11 +132,15 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
         }
     }
 
-    private func reserveLaunch() throws {
+    private func reserveLaunch() throws -> URL? {
         lock.lock(); defer { lock.unlock() }
         guard !closed else { throw RuntimeHTTPError.closed }
-        guard !started else { throw RuntimeLaunchError.alreadyStarted }
+        if started {
+            guard running, client?.isClosed == true, let endpoint else { throw RuntimeLaunchError.alreadyStarted }
+            return endpoint
+        }
         started = true
+        return nil
     }
 
     private func admit(_ channel: RuntimeBootstrapChannel) -> Bool {
@@ -139,10 +151,11 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
         return true
     }
 
-    private func publish(_ client: RuntimeHTTPClient) -> Bool {
+    private func publish(_ client: RuntimeHTTPClient, endpoint: URL? = nil) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard !closed, running else { return false }
         self.client = client
+        if let endpoint { self.endpoint = endpoint }
         return true
     }
 

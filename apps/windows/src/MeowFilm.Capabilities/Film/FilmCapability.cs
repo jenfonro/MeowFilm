@@ -13,7 +13,8 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, IDesktopNavigationRetention, IDesktopGeneralSettingsSource
+public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, IDesktopNavigationRetention, IDesktopGeneralSettingsSource,
+    IRuntimeRecoveryScope
 {
     internal const string HomeRoute = "film-home";
     internal const string DataRoute = "film-data";
@@ -42,6 +43,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     private Task? preparation;
     private Task? disposal;
     private Task? abortion;
+    private Task? restoringPresentation;
     private CancellationTokenSource? dataRequest;
     private FilmDataSection? dataRequestSection;
     private string route = HomeRoute;
@@ -55,6 +57,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
                 .CaptureConnectionAsync, sources, metadata is null ? null : metadata.ResolveImage),
             metadata)
     {
+        (runtime as IRuntimeRecovery)?.RegisterRecoveryScope(this);
     }
 
     internal FilmCapability(IFilmHomeSource source) : this(source, rules: null, sources: null) { }
@@ -74,7 +77,10 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
             metadata, new FilmPlaybackSession(capture, new FilmNativeMedia(playback),
                 prepareOpen: (page, parameters, reconnect, token) =>
                     PreparePlaybackOpenAsync(sources, capture, page, parameters, reconnect, token)),
-            new FilmLibrary(storage), new FilmPlaybackSettings(runtime)) { }
+            new FilmLibrary(storage), new FilmPlaybackSettings(runtime))
+    {
+        (runtime as IRuntimeRecovery)?.RegisterRecoveryScope(this);
+    }
 
     internal FilmCapability(IFilmHomeSource source, FilmPlaybackSession playback, FilmLibrary library)
         : this(source, null, null, playback: playback, library: library) { }
@@ -126,7 +132,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     public IReadOnlyList<FilmDataSection> DataSections { get; }
     public FilmDataSection ActiveData { get; private set; }
     public FilmPlaybackPage? Playback { get; private set; }
-    internal int RetainedSearchPlaybackPages => playbackPages.Values.Count(page => page.SearchContext is not null);
+    internal int RetainedPlaybackPages => playbackPages.Count;
     public FilmSearchService Search => search ?? throw new InvalidOperationException("Film search is not composed.");
     private void MetadataSaved(object? sender, EventArgs e) => search?.InvalidateMetadata();
     public bool HasPlayback => Playback is not null;
@@ -147,6 +153,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     public event PropertyChangedEventHandler? PropertyChanged;
     public event EventHandler<DesktopNavigationRequestEventArgs>? NavigationRequested;
     public event EventHandler<string>? OperationFailed;
+    internal event EventHandler? RuntimeRestored;
 
     public Task InitializeAsync(CancellationToken cancellationToken)
     {
@@ -171,7 +178,10 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         }
     }
 
-    public async Task NavigateAsync(string route, CancellationToken cancellationToken)
+    public Task NavigateAsync(string route, CancellationToken cancellationToken) =>
+        NavigateCoreAsync(route, cancellationToken, restoreOnly: false);
+
+    private async Task NavigateCoreAsync(string route, CancellationToken cancellationToken, bool restoreOnly)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (stopping) return;
@@ -189,7 +199,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         if (route == PlaybackRoute)
         {
             if (Playback is not null && filmPlayback is not null && (!filmPlayback.HasSession || !filmPlayback.IsCurrentPage(Playback)))
-                await OpenPageSessionAsync(Playback, cancellationToken);
+                await OpenPageSessionAsync(Playback, cancellationToken, restoreOnly);
             else if (filmPlayback is not null) await filmPlayback.ResumePresentationAsync();
             return;
         }
@@ -214,8 +224,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
 
     public string CaptureNavigationLocation() =>
         IsPlayback && Playback is { } page
-            ? page.SearchContext is not null ? $"{PlaybackRoute}:{page.NavigationIdentity}"
-                : $"{PlaybackRoute}:{JsonSerializer.Serialize(page.Item with { PlaybackContext = page.CaptureRequest }, FilmJson.Options)}"
+            ? $"{PlaybackRoute}:{page.NavigationIdentity}"
             : route;
 
     public async Task RestoreNavigationAsync(string location, CancellationToken token)
@@ -226,21 +235,12 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         if (location.StartsWith(PlaybackRoute + ":", StringComparison.Ordinal))
         {
             string identity = location[(PlaybackRoute.Length + 1)..];
-            if (identity.StartsWith("search:", StringComparison.Ordinal))
-            {
-                if (!playbackPages.TryGetValue(identity, out var page))
-                    throw new ArgumentException("Unknown film playback location.", nameof(location));
-                Playback = page;
-                ReleaseUnreachableSearchPages();
-                Changed(nameof(Playback)); Changed(nameof(HasPlayback));
-                await NavigateAsync(PlaybackRoute, token);
-                return;
-            }
-            FilmCardItem item;
-            try { item = JsonSerializer.Deserialize<FilmCardItem>(identity, FilmJson.Options)!; }
-            catch (JsonException) { throw new ArgumentException("Unknown film playback location.", nameof(location)); }
-            if (!await SelectPlaybackAsync(item, token)) return;
-            await NavigateAsync(PlaybackRoute, token);
+            if (!playbackPages.TryGetValue(identity, out var page))
+                throw new ArgumentException("Unknown film playback location.", nameof(location));
+            Playback = page;
+            ReleaseUnreachablePages();
+            Changed(nameof(Playback)); Changed(nameof(HasPlayback));
+            await NavigateCoreAsync(PlaybackRoute, token, restoreOnly: true);
             return;
         }
         await NavigateAsync(location, token);
@@ -253,6 +253,56 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         // A tray hide is not a page exit. Only an already live output owns playback here.
         if (hiddenToTray && filmPlayback?.HasOutput == true) return;
         if (filmPlayback is not null) ObservePresentationLeave(filmPlayback.LeaveAsync(filmPlayback.CanRetainMedia));
+    }
+
+    internal void ResumePresentation()
+    {
+        if (stopping || disposed || !view.IsVisible || !IsPlayback || Playback is null || filmPlayback is null) return;
+        if (filmPlayback.IsOpeningPage(Playback)) return;
+        if (restoringPresentation is { IsCompleted: false }) return;
+        restoringPresentation = dispatcher.InvokeAsync(async () =>
+        {
+            if (stopping || disposed || !view.IsVisible || !IsPlayback || Playback is null) return;
+            if (filmPlayback.IsOpeningPage(Playback)) return;
+            if (filmPlayback.HasSession && filmPlayback.IsCurrentPage(Playback))
+                await filmPlayback.ResumePresentationAsync();
+            else await OpenPageSessionAsync(Playback, lifetime.Token, restoreOnly: true);
+        }, System.Windows.Threading.DispatcherPriority.Loaded).Task.Unwrap();
+        ObservePresentationLeave(restoringPresentation, "播放资料恢复失败");
+    }
+
+    public Task PrepareRuntimeRecoveryAsync(CancellationToken cancellationToken) =>
+        dispatcher.InvokeAsync(async () =>
+        {
+            if (stopping || disposed) return;
+            navigationGeneration++;
+            RetireRequests();
+            await Task.WhenAll(search?.SuspendRuntimeAsync() ?? Task.CompletedTask,
+                filmPlayback?.CloseSessionAsync() ?? Task.CompletedTask);
+        }, System.Windows.Threading.DispatcherPriority.Normal, cancellationToken).Task.Unwrap();
+
+    public void ResumeAfterRuntimeRecovery()
+    {
+        if (dispatcher.HasShutdownStarted) return;
+        _ = dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (stopping || disposed) return;
+            ObservePresentationLeave(RestoreVisibleAsync(), "影片资料恢复失败");
+        }));
+    }
+
+    private async Task RestoreVisibleAsync()
+    {
+        if (sources is not null) await sources.StartAsync(lifetime.Token);
+        if (stopping || disposed) return;
+        RuntimeRestored?.Invoke(this, EventArgs.Empty);
+        if (!view.IsVisible) return;
+        if (IsPlayback) ResumePresentation();
+        else if (IsHome)
+            await Task.WhenAll(Sections.Where(section => section.State is not FilmHomeSectionState.Ready)
+                .Select(section => StartSectionLoad(section, navigationGeneration, lifetime.Token)));
+        else if (IsData && ActiveData.State is not FilmDataSectionState.Ready)
+            await StartDataLoad(ActiveData, navigationGeneration, NextDataLimit(ActiveData), lifetime.Token);
     }
 
     public Task SearchAsync(string query, CancellationToken cancellationToken)
@@ -298,41 +348,38 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     {
         ArgumentNullException.ThrowIfNull(item);
         if (stopping || disposed) throw new InvalidOperationException("CLOSED");
-        var context = item.SearchContext ?? throw new ArgumentException("Missing search context.", nameof(item));
-        if (!ReferenceEquals(search?.Current, context.Session))
-            throw new ArgumentException("Retired search session.", nameof(item));
+        var request = item.PlaybackContext ?? throw new ArgumentException("Missing film business identity.", nameof(item));
+        var context = item.SearchContext;
         long ticket = ++navigationGeneration;
-        var page = playbackPages.Values.FirstOrDefault(candidate =>
-            candidate.SearchContext is { } selected && selected.SameSelection(context));
+        var page = context is null ? null : playbackPages.Values.FirstOrDefault(candidate =>
+            ReferenceEquals(candidate.SearchContext, context));
+        if (context is not null) request = await context.HandoffAsync(token);
+        token.ThrowIfCancellationRequested();
+        if (ticket != navigationGeneration) throw new OperationCanceledException(token);
+        if (stopping || disposed) throw new FilmPlaybackException("CLOSED");
         if (page is null)
         {
-            var request = await context.HandoffAsync(token);
-            token.ThrowIfCancellationRequested();
-            if (ticket != navigationGeneration) throw new OperationCanceledException(token);
-            if (stopping || disposed || !ReferenceEquals(search?.Current, context.Session))
-                throw new FilmPlaybackException("STALE_SESSION");
-            page = FilmPlaybackPage.FromSearch(item, request, filmPlayback, library);
+            page = new FilmPlaybackPage(item with { PlaybackContext = request }, request.Own(), filmPlayback, library);
             playbackPages.Add(page.NavigationIdentity, page);
         }
-        else page.UpdateItem(item);
+        else page.UpdateItem(item with { PlaybackContext = request });
         Playback = page;
-        ReleaseUnreachableSearchPages();
+        ReleaseUnreachablePages();
         Changed(nameof(Playback)); Changed(nameof(HasPlayback));
     }
 
     public void RetainNavigationLocations(IReadOnlySet<string> locations)
     {
         retainedNavigationLocations = locations;
-        ReleaseUnreachableSearchPages();
+        ReleaseUnreachablePages();
     }
 
-    private void ReleaseUnreachableSearchPages()
+    private void ReleaseUnreachablePages()
     {
-        foreach (var entry in playbackPages.Where(entry => entry.Value.SearchContext is not null &&
-            !ReferenceEquals(entry.Value, Playback) &&
+        foreach (var entry in playbackPages.Where(entry => !ReferenceEquals(entry.Value, Playback) &&
             !retainedNavigationLocations.Contains($"{PlaybackRoute}:{entry.Key}")).ToArray())
         {
-            entry.Value.ReleaseSearch();
+            entry.Value.Release();
             playbackPages.Remove(entry.Key);
         }
     }
@@ -367,14 +414,15 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         long ticket = ++navigationGeneration;
         request = (request with { EntrySurface = entrySurface ?? request.EntrySurface ?? "search" }).Own();
         var selected = new FilmPlaybackPage(item with { PlaybackContext = request }, request, filmPlayback, library);
+        playbackPages.Add(selected.NavigationIdentity, selected);
         Playback = selected;
-        ReleaseUnreachableSearchPages();
+        ReleaseUnreachablePages();
         Changed(nameof(Playback)); Changed(nameof(HasPlayback));
         await OpenPageSessionAsync(selected, token);
         return ticket == navigationGeneration && ReferenceEquals(Playback, selected) && !stopping && !disposed;
     }
 
-    private async Task OpenPageSessionAsync(FilmPlaybackPage page, CancellationToken token)
+    private async Task OpenPageSessionAsync(FilmPlaybackPage page, CancellationToken token, bool restoreOnly = false)
     {
         if (filmPlayback is null) throw new FilmPlaybackException("CAPABILITY_UNAVAILABLE");
         long ticket = navigationGeneration;
@@ -382,10 +430,11 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         var request = page.CaptureRequest;
         await filmPlayback.OpenAsync(page, new
         {
-            platform = "windows", entrySurface = request.EntrySurface,
+            platform = "windows", entrySurface = request.EntrySurface, restoreOnly = restoreOnly || page.HasPlaybackSnapshot,
             target = request.Target.Wire(), resumeTarget = request.ResumeTarget?.Wire(), sources = request.Sources,
             query = request.Query, results = request.Results, search = request.Search, metadata = request.Metadata,
-            cacheEntries = request.CacheEntries, resultHints = request.ResultHints, searchReference = request.SearchReference
+            cacheEntries = request.CacheEntries, resultHints = request.ResultHints, searchReference = request.SearchReference,
+            browsing = request.Browsing
         }, token);
         if (ticket == navigationGeneration && ReferenceEquals(Playback, page) && !stopping && !disposed)
             await page.LoadFavoriteAsync();
@@ -828,7 +877,8 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     private void Release()
     {
         if (disposed) return;
-        foreach (var page in playbackPages.Values) page.ReleaseSearch();
+        foreach (var page in playbackPages.Values) page.Release();
+        playbackPages.Clear();
         if (sources is not null) sources.Changed -= PlaybackSourcesChanged;
         if (filmPlayback is not null)
         {

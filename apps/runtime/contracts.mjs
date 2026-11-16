@@ -13,7 +13,7 @@ export const contracts = Object.freeze({
   film: { contract: 'film.playback.v1', version: '0.1.0', prefix: 'film.',
     operations: ['session.open', 'session.command', 'session.snapshot', 'session.release',
       'session.attempt', 'session.media.release', 'settings.get', 'settings.set', 'library.get', 'library.remove', 'manual.update',
-      'data.catalog', 'data.search', 'data.detail', 'data.metadata', 'data.metadata.entry', 'data.cache.entry', 'data.invalidate',
+      'data.target', 'data.catalog', 'data.search', 'data.detail', 'data.metadata', 'data.metadata.entry', 'data.cache.entry', 'data.invalidate',
       'rules.get', 'rules.set', 'rules.group.set', 'rules.group.defaults', 'rules.group.preview',
       'rules.restore', 'rules.preview', 'rules.normalize', 'rules.clear',
       'search.open', 'search.snapshot', 'search.command', 'search.release', 'search.handoff'],

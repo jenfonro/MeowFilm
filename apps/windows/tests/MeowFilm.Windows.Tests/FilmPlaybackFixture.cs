@@ -31,13 +31,20 @@ internal static class FilmPlaybackFixture
     }
     internal static JsonElement Metadata(FilmPlaybackTarget target, string poster)
     {
+        string metadataKind = target.Kind == "movie" ? "movie" : "tv";
         var episodes = Enumerable.Range(1, 12).Select(index => new
         {
+            businessId = $"{target.Id}:season:1:episode:{index}",
+            playbackTarget = (target with { Season = 1, Episode = index, GlobalEpisode = index }).Wire(),
             season = 1, episode = index, globalEpisode = index, name = $"契约单集 {index}",
             overview = string.Concat(Enumerable.Repeat($"第{index}集的独立简介，保留完整显示内容。", 12)),
             still_path = Assets + $"episode-{index:00}.jpg", runtime = 45, air_date = "2023-01-01"
         }).ToArray();
-        object[] seasons = target.Kind == "movie" ? [] : [new { season_number = 1, name = "第一季", episodes }];
+        object[] seasons = target.Kind == "movie" ? [] : [new
+        {
+            businessId = target.Id + ":season:1", playbackTarget = (target with { Season = 1, Episode = null }).Wire(),
+            season_number = 1, name = "第一季", episodes
+        }];
         return FilmJson.Encode(new
         {
             title = target.Title, name = target.Title, poster_path = poster, year = "2023",
@@ -46,7 +53,9 @@ internal static class FilmPlaybackFixture
             overview = string.Concat(Enumerable.Repeat("这是一份明确注入的离线资料契约，不是产品默认影片。", 90)),
             seasons,
             similar = new { results = Enumerable.Range(201, 6).Select((id, index) =>
-                new { id, name = $"关联样例 {id}", title = $"关联样例 {id}", poster_path = Assets + Posters[index], vote_average = 8.1 }).ToArray() }
+                new { id, businessId = $"tmdb:{metadataKind}:{id}",
+                    playbackTarget = new FilmPlaybackTarget($"tmdb:{metadataKind}:{id}", metadataKind, $"关联样例 {id}", "tmdb", id.ToString()).Wire(),
+                    name = $"关联样例 {id}", title = $"关联样例 {id}", poster_path = Assets + Posters[index], vote_average = 8.1 }).ToArray() }
         });
     }
     internal static JsonElement Snapshot(Guid id, long sequence, FilmPlaybackTarget target, JsonElement metadata,
@@ -71,7 +80,11 @@ internal static class FilmPlaybackFixture
         });
     }
     internal static JsonElement Candidate(string id, int? episode = 1, object? detail = null, object? line = null, string quality = "1080p") =>
-        FilmJson.Encode(new { id, name = $"资源 {id}", path = $"/season/第{episode}集.mp4", quality, provider = "quark",
+        FilmJson.Encode(new { id, businessId = "fixture:file:" + id,
+            playbackTarget = new FilmPlaybackTarget("fixture:source", "source", $"资源 {id}", Source: FilmJson.Encode(new
+            { key = "cat:fixture:site:1", engine = "cat", installationId = "fixture", siteId = "site",
+                detailId = detail ?? 0, lineId = line ?? 0, candidateId = id })).Wire(),
+            name = $"资源 {id}", path = $"/season/第{episode}集.mp4", quality, provider = "quark",
             lineId = line ?? 0, season = episode is null ? (int?)null : 1, episode, globalEpisode = episode,
             source = new { key = "cat:fixture:site:1", engine = "cat", installationId = "fixture", siteId = "site",
                 generation = 1, name = "契约来源", detailId = detail ?? 0 } });

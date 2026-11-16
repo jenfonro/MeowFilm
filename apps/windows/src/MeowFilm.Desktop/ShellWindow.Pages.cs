@@ -10,7 +10,6 @@ public sealed partial class ShellWindow
         public IDesktopPage Page { get; } = page;
         public ContentControl Host { get; } = new() { Visibility = Visibility.Collapsed };
         public SemaphoreSlim Gate { get; } = new(1, 1);
-        public (ModuleSession Session, Destination Destination, int HistoryDepth)? Origin { get; set; }
         public string? SearchDraft { get; set; }
     }
     private sealed class PageRequest
@@ -26,7 +25,7 @@ public sealed partial class ShellWindow
         }
     }
     private readonly PageSession[] _pages;
-    private PageSession? _currentPage, _retryPage, _returnPage;
+    private PageSession? _currentPage, _retryPage;
     private PageRequest? _pageRequest;
 
     private void OnPublicPageSelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -35,7 +34,8 @@ public sealed partial class ShellWindow
         if (PublicNavigationList.SelectedItem is IDesktopPage page)
             RunUiAction(() => ActivatePageAsync(_pages.Single(item => ReferenceEquals(item.Page, page))));
     }
-    private async Task ActivatePageAsync(PageSession session, Func<CancellationToken, Task>? operation = null)
+    private async Task ActivatePageAsync(PageSession session, Func<CancellationToken, Task>? operation = null,
+        RequestPlan? navigation = null, bool recordNavigation = true)
     {
         if (_isClosing) return;
         CancelActive();
@@ -47,6 +47,8 @@ public sealed partial class ShellWindow
         _retryPlan = null; _retryPage = null;
         Volatile.Write(ref _currentPage, session);
         var generation = Interlocked.Increment(ref _presentationGeneration);
+        var navigationOwner = navigation?.Session ?? _current ?? _sessions[0];
+        var destination = navigation?.Destination ?? new Destination(session.Page.Id, Location: session.Page.Id, PageId: session.Page.Id);
         ApplyPresentation(); // Hide the capability surface even if a supplied page getter fails.
         if (session.Page is IDesktopSearchPage searchPage)
         {
@@ -74,7 +76,12 @@ public sealed partial class ShellWindow
         try
         {
             await work.WaitAsync(OperationTimeout, _timeProvider, token);
-            if (Current()) SetStatus();
+            if (Current())
+            {
+                if (recordNavigation) CommitDestination(navigation ?? new(navigationOwner, destination), destination);
+                SetStatus();
+                ApplyPresentation();
+            }
         }
         catch (OperationCanceledException)
         {

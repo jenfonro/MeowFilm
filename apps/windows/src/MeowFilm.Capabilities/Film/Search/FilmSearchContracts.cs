@@ -53,11 +53,15 @@ public sealed class FilmSearchContext
     public long Revision => Session.ReferenceRevision;
     public string MetadataQuery => Session.MetadataQuery;
     public JsonElement? MetadataSearchPayload => Session.MetadataSearchPayload;
-    public string DisplayKey { get; }
+    public string DisplayKey { get; private set; }
     public JsonElement Item { get; private set; }
-    internal void UpdateItem(JsonElement item) => Item = item;
-    internal bool SameSelection(FilmSearchContext other) =>
-        ReferenceEquals(Session, other.Session) && DisplayKey == other.DisplayKey;
+    internal void UpdateItem(JsonElement item)
+    {
+        Item = item;
+        if (FilmSearchJson.Text(item, "displayKey") is { Length: > 0 } key) DisplayKey = key;
+    }
+    internal FilmPlaybackRequest PlaybackRequest => new(FilmJson.Target(Item.GetProperty("playbackTarget")),
+        Sources: Session.SourceSnapshot, Query: Query, EntrySurface: "search");
     internal object Reference => new { sessionId = SessionId, selectionId = DisplayKey };
     internal Task<FilmPlaybackRequest> HandoffAsync(CancellationToken token) => Session.Service.HandoffAsync(this, token);
 }

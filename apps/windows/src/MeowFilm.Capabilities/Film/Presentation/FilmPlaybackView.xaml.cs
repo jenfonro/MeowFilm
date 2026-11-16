@@ -18,7 +18,7 @@ public partial class FilmPlaybackView : UserControl
     private (bool Top, bool Bottom, double Height) metadataFade;
     private FilmPlaybackPage? boundPage, seekingPage;
     private FilmEpisodeDirectory? shownDirectory;
-    private bool restoringDirectory, shownList;
+    private bool restoringDirectory, restoringPage, shownList;
     private FilmDirectoryDialog? directory;
     private Window? playerWindow;
     private bool pip, selectingControl;
@@ -41,6 +41,7 @@ public partial class FilmPlaybackView : UserControl
         PlayerOverlay.SetBinding(DataContextProperty, new Binding(nameof(DataContext)) { Source = this });
         DataContextChanged += (_, _) =>
         {
+            RememberPagePosition();
             CancelPlayerInput();
             if (boundPage is not null) boundPage.PropertyChanged -= PageChanged;
             directory?.Close(); directory = null;
@@ -53,16 +54,15 @@ public partial class FilmPlaybackView : UserControl
             rateGeneration++; aspectGeneration++;
             controlsIdentity = null;
             UpdateControlSelections();
-            PageScroll.ScrollToTop();
-            MetadataScroll.ScrollToTop();
+            RestorePagePosition();
             RestoreDirectory();
-            RelatedScroll.ScrollToLeftEnd();
             UpdateMedia();
             ShowPlayerControls();
         };
         Loaded += (_, _) => { UpdateLayoutMode(); UpdateMedia(); AttachKeyboard(); };
         Unloaded += (_, _) =>
         {
+            RememberPagePosition();
             DetachKeyboard();
             if (!pip) { CancelPlayerInput(); DetachOverlay(); VideoHost.Content = null; }
         };
@@ -70,6 +70,7 @@ public partial class FilmPlaybackView : UserControl
         {
             if (!IsVisible)
             {
+                RememberPagePosition();
                 directory?.Close();
                 if (!pip)
                 {
@@ -79,8 +80,45 @@ public partial class FilmPlaybackView : UserControl
                     VideoHost.Content = null;
                 }
             }
-            else UpdateMedia();
+            else { RestorePagePosition(); UpdateMedia(); }
         };
+        PageScroll.ScrollChanged += (_, e) =>
+        {
+            if (!restoringPage && IsVisible && boundPage is { } page && ReferenceEquals(e.OriginalSource, PageScroll))
+                page.PageOffset = PageScroll.VerticalOffset;
+        };
+        MetadataScroll.ScrollChanged += (_, e) =>
+        {
+            if (!restoringPage && IsVisible && boundPage is { } page && ReferenceEquals(e.OriginalSource, MetadataScroll))
+                page.MetadataOffset = MetadataScroll.VerticalOffset;
+        };
+        RelatedScroll.ScrollChanged += (_, e) =>
+        {
+            if (!restoringPage && IsVisible && boundPage is { } page && ReferenceEquals(e.OriginalSource, RelatedScroll))
+                page.RecommendationOffset = RelatedScroll.HorizontalOffset;
+        };
+    }
+
+    private void RememberPagePosition()
+    {
+        if (restoringPage || boundPage is not { } page) return;
+        page.PageOffset = PageScroll.VerticalOffset;
+        page.MetadataOffset = MetadataScroll.VerticalOffset;
+        page.RecommendationOffset = RelatedScroll.HorizontalOffset;
+    }
+
+    private void RestorePagePosition()
+    {
+        restoringPage = true;
+        var page = boundPage;
+        _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+        {
+            if (!ReferenceEquals(page, boundPage)) return;
+            PageScroll.ScrollToVerticalOffset(page?.PageOffset ?? 0);
+            MetadataScroll.ScrollToVerticalOffset(page?.MetadataOffset ?? 0);
+            RelatedScroll.ScrollToHorizontalOffset(page?.RecommendationOffset ?? 0);
+            restoringPage = false;
+        }));
     }
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e) => UpdateLayoutMode();

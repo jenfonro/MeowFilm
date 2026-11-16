@@ -254,7 +254,7 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         XCTAssertEqual(session.snapshot.rawCards.first?.value.catField("raw")?.catField("vod_name"), .string("作品🎬高清2外传"))
         let group = try XCTUnwrap(session.snapshot.cards.first)
         XCTAssertEqual(group.members.count, 2)
-        let request = try await session.context(for: group).playbackRequest(sources: sites.map(\.playbackSource), owner: client)
+        let request = try session.context(for: group).playbackRequest(sources: sites.map(\.playbackSource))
         XCTAssertEqual(request.query, "作品2外传"); XCTAssertEqual(request.target.kind, .group)
         XCTAssertEqual(request.target.value["members"]?.filmArray?.count, 2)
         XCTAssertNil(request.value.filmObject?["rules"])
@@ -275,8 +275,8 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         }
         let numberedGroup = try XCTUnwrap(numbered.snapshot.cards.first)
         XCTAssertEqual(numberedGroup.members.count, 2)
-        let numberedRequest = try await numbered.context(for: numberedGroup).playbackRequest(
-            sources: sites.map(\.playbackSource), owner: client)
+        let numberedRequest = try numbered.context(for: numberedGroup).playbackRequest(
+            sources: sites.map(\.playbackSource))
         XCTAssertEqual(numberedRequest.query, "作品2"); XCTAssertEqual(numberedRequest.target.kind, .group)
         XCTAssertEqual(numberedRequest.target.value["members"]?.filmArray?.count, 2)
         XCTAssertNil(numberedRequest.value.filmObject?["rules"])
@@ -308,7 +308,7 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         XCTAssertEqual(group.members.count, 2)
         XCTAssertTrue(group.members.allSatisfy { $0.catField("raw")?.catField("vod_name") == .string("𠀀星河") })
         let context = session.context(for: group)
-        let request = try await context.playbackRequest(sources: sites.map(\.playbackSource), owner: client)
+        let request = try context.playbackRequest(sources: sites.map(\.playbackSource))
         XCTAssertEqual(request.target.title, "𠀀星河")
         XCTAssertEqual(request.target.value["members"]?.filmArray?.map { $0.filmObject?["detailId"] }, [.number(0), .string("0")])
     }

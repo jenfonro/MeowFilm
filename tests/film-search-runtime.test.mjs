@@ -121,6 +121,128 @@ test('HTTP search returns both views, preserves original provider fields and nav
   await f.rpc('session.release', { sessionId: single.sessionId });
 });
 
+test('stable cards reopen after their original search session is released without another search or playback', async t => {
+  const f = await setup(t);
+  const opened = await f.rpc('search.open', { query: '星河', sources: [source] });
+  const value = await f.complete(opened.sessionId), card = value.rawCards[0];
+  assert.equal(card.businessId, card.playbackTarget.id);
+  await f.rpc('search.release', { sessionId: opened.sessionId });
+  const reopened = await f.rpc('session.open', { platform: 'windows', restoreOnly: true,
+    target: card.playbackTarget, sources: value.sources,
+    searchReference: { sessionId: opened.sessionId, selectionId: card.displayKey } });
+  const ready = await until(async () => {
+    const current = await f.rpc('session.snapshot', { sessionId: reopened.sessionId });
+    return current.stage !== 'loading' && !current.browsing.loading && current;
+  });
+  assert.equal(ready.target.id, card.businessId);
+  assert.equal(ready.browsing.episodes.length, 2);
+  assert.equal(ready.sources.length, 1);
+  assert.equal(ready.browsing.episodes[0].businessId, ready.browsing.episodes[0].candidateId);
+  assert.equal(ready.browsing.episodes[0].playbackTarget.source.detailId, 0);
+  assert.deepEqual(f.calls.map(row => row.operation), ['search', 'detail']);
+  assert.deepEqual((await f.rpc('library.get')).history, []);
+});
+
+test('restore-only reading restores the selected source line without starting an intelligent match or exact address', async t => {
+  const f = await setup(t, { invoke: async input => input.operation === 'detail' ? { list: [{
+    vod_id: input.payload.id, vod_name: '星河', vod_play_from: '主线$$$副线',
+    vod_play_url: '第1集$one$$$第2集$two#第3集$three',
+  }] } : undefined });
+  const opened = await f.rpc('search.open', { query: '星河', sources: [source] });
+  const value = await f.complete(opened.sessionId), card = value.rawCards[0];
+  const request = { platform: 'windows', restoreOnly: true, target: card.playbackTarget, sources: value.sources };
+  const first = await f.rpc('session.open', request);
+  const ready = await until(async () => {
+    const state = await f.rpc('session.snapshot', { sessionId: first.sessionId });
+    return !state.browsing.loading && state.browsing.lines.length && state;
+  });
+  const selection = { sourceId: ready.browsing.sourceId, lineId: ready.browsing.lines[1].id };
+  await f.rpc('session.release', { sessionId: first.sessionId });
+  const reopened = await f.rpc('session.open', { ...request, browsing: selection });
+  const restored = await until(async () => {
+    const state = await f.rpc('session.snapshot', { sessionId: reopened.sessionId });
+    return state.stage !== 'loading' && !state.browsing.loading && state;
+  });
+  assert.equal(restored.browsing.sourceId, selection.sourceId);
+  assert.equal(restored.browsing.lineId, selection.lineId);
+  assert.equal(restored.browsing.episodes.length, 2);
+  assert.deepEqual(f.calls.map(row => row.operation), ['search', 'detail']);
+});
+
+test('restore-only metadata reading restores the selected season and never schedules source search or media', async t => {
+  const f = await setup(t, { metadata: async input => {
+    if (input.path === '/3/tv/42') return { id: 42, name: '星河', genres: [],
+      seasons: [1, 2].map(season_number => ({ season_number, episode_count: 2 })) };
+    const season = Number(input.path.match(/\/season\/(\d+)$/)?.[1]);
+    assert.ok(season === 1 || season === 2, input.path);
+    return { id: season, name: `第${season}季`, season_number: season,
+      episodes: [1, 2].map(episode_number => ({ name: `第${episode_number}集`,
+        season_number: season, episode_number })) };
+  } });
+  const request = { platform: 'windows', restoreOnly: true, sources: [source],
+    target: { id: 'tmdb:tv:42', kind: 'tv', title: '星河', metadataProvider: 'tmdb', metadataId: '42' } };
+  const first = await f.rpc('session.open', request);
+  const ready = await until(async () => {
+    const state = await f.rpc('session.snapshot', { sessionId: first.sessionId });
+    return state.stage !== 'loading' && !state.browsing.loading && state;
+  });
+  await f.rpc('session.release', { sessionId: first.sessionId });
+  const reopened = await f.rpc('session.open', { ...request, browsing: {
+    metadataSourceId: ready.metadataSourceId, sourceId: null, season: 2,
+  } });
+  const restored = await until(async () => {
+    const state = await f.rpc('session.snapshot', { sessionId: reopened.sessionId });
+    return state.stage !== 'loading' && !state.browsing.loading && state;
+  });
+  assert.equal(restored.metadataSourceId, ready.metadataSourceId);
+  assert.equal(restored.browsing.season, 2);
+  assert.deepEqual(restored.episodes.map(row => row.businessId),
+    ['tmdb:tv:42:season:2:episode:1', 'tmdb:tv:42:season:2:episode:2']);
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual((await f.rpc('library.get')).history, []);
+});
+
+for (const platform of ['windows', 'ios']) {
+  test(`restore-only ${platform} late metadata keeps the loaded source directory and never auto-plays`, async t => {
+    const gate = deferred();
+    t.after(() => gate.resolve({ results: [] }));
+    const f = await setup(t, { metadata: ({ path }) => {
+      if (path === '/3/search/multi') return gate.promise;
+      assert.equal(path, '/3/movie/12');
+      return { id: 12, title: '星河', release_date: '2020-01-01', genres: [],
+        credits: { cast: [], crew: [] }, similar: { results: [] }, images: { posters: [], backdrops: [] } };
+    } });
+    const search = await f.rpc('search.open', { query: '星河', sources: [source] });
+    const early = await until(async () => {
+      const state = await f.snapshot(search.sessionId);
+      return state.cards.length && state;
+    });
+    const reference = { sessionId: search.sessionId, selectionId: early.cards[0].displayKey };
+    const opened = await f.rpc('session.open', { platform, restoreOnly: true,
+      target: early.cards[0].playbackTarget, sources: early.sources, searchReference: reference });
+    const loaded = await until(async () => {
+      const state = await f.rpc('session.snapshot', { sessionId: opened.sessionId });
+      return !state.browsing.loading && state.stage === 'idle' && state;
+    });
+    gate.resolve({ results: [{ id: 12, media_type: 'movie', title: '星河' }] });
+    await f.complete(search.sessionId);
+    await f.rpc('session.command', { sessionId: opened.sessionId, action: 'search.update',
+      searchReference: reference, sources: early.sources });
+    const updated = await until(async () => {
+      const state = await f.rpc('session.snapshot', { sessionId: opened.sessionId });
+      return state.metadata?.id === 12 && state;
+    });
+    assert.equal(updated.target.id, loaded.target.id);
+    assert.equal(updated.target.kind, 'group');
+    assert.deepEqual(updated.browsing, loaded.browsing);
+    assert.equal(updated.stage, 'idle');
+    assert.equal(updated.attempt, null);
+    assert.equal(updated.current, null);
+    assert.deepEqual(f.calls.map(row => row.operation), ['search', 'detail']);
+    await f.rpc('session.release', { sessionId: opened.sessionId });
+  });
+}
+
 test('HTTP default and raw single-card handoffs open and update only the selected typed detail, not the search page', async t => {
   const selected = { id: 0, name: '星河' }, other = { id: '0', name: '别片' };
   const f = await setup(t, { invoke: input => input.operation === 'search'
@@ -132,7 +254,7 @@ test('HTTP default and raw single-card handoffs open and update only the selecte
     const card = cards.find(row => row.detailId === 0);
     const handoff = await f.rpc('search.handoff', { sessionId: opened.sessionId,
       selectionId: card.displayKey, sources: [source] });
-    assert.equal(handoff.target.id, card.displayKey);
+    assert.equal(handoff.target.id, card.businessId);
     assert.equal(handoff.target.metadataProvider, undefined);
     assert.deepEqual(handoff.selectionMembers, [{ sourceKey: 'a', detailId: 0 }]);
     assert.deepEqual(handoff.results, [{ sourceKey: 'a', items: [selected] }]);
@@ -143,7 +265,7 @@ test('HTTP default and raw single-card handoffs open and update only the selecte
       const state = await f.rpc('session.snapshot', { sessionId: playback.sessionId });
       return state.stage === 'idle' && state;
     });
-    assert.equal(ready.target.id, card.displayKey);
+    assert.equal(ready.target.id, card.businessId);
     assert.deepEqual(ready.sources.map(row => row.source.detailId), [0]);
     await f.rpc('session.command', { sessionId: playback.sessionId, action: 'browse', sourceId: ready.sources[0].id });
     const browsing = await until(async () => {
@@ -379,7 +501,7 @@ for (const output of ['pending', 'current']) {
     const next = await f.complete(opened.sessionId);
     assert.deepEqual(next.cards.find(card => card.tmdbId === 12).aggregateItems.map(row => row.detailId), [0, '0']);
     const latest = await f.rpc('search.handoff', { sessionId: opened.sessionId,
-      selectionId: handoff.selectionId, sources: [source] });
+      selectionId: handoff.searchReference.selectionId, sources: [source] });
     const members = [{ sourceKey: 'a', detailId: 0 }, { sourceKey: 'a', detailId: '0' }];
     assert.equal(latest.target.kind, 'tv');
     assert.deepEqual(latest.selectionMembers, members);

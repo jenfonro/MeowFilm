@@ -121,7 +121,7 @@ internal sealed record FilmPlaybackOpen(RuntimeConnection Connection, JsonElemen
             FilmJson.Text(value, "installationId") == FilmJson.Text(old, "installationId") &&
             FilmJson.Text(value, "siteId") == FilmJson.Text(old, "siteId"))))
             .Where(pair => pair.Current.ValueKind == JsonValueKind.Object).ToArray();
-        if (selected.Kind == "source" && !admitted.Any(pair =>
+        if (selected.Kind == "source" && FilmJson.Text(selected.Source!.Value, "engine") != "pan" && !admitted.Any(pair =>
             FilmJson.Text(pair.Old, "key") == FilmJson.Text(selected.Source!.Value, "key")))
             throw new FilmPlaybackException("SOURCE_NOT_FOUND");
         // A Douban resume must reach Node intact: an empty revoked group is not

@@ -55,11 +55,38 @@ final class FilmDetailRail: FilmTouchScrollView {
     }
 
     func removeAll() {
+        NSLayoutConstraint.deactivate(Array(widths.values))
         for child in stack.arrangedSubviews {
             stack.removeArrangedSubview(child)
             child.removeFromSuperview()
         }
         widths.removeAll()
+        invalidateIntrinsicContentSize()
+    }
+
+    func setViews(_ views: [UIView], width: CGFloat) {
+        if stack.arrangedSubviews.elementsEqual(views, by: { $0 === $1 }) {
+            for child in views { setWidth(width, for: child) }
+            return
+        }
+        let wanted = Set(views.map(ObjectIdentifier.init))
+        for child in stack.arrangedSubviews where !wanted.contains(ObjectIdentifier(child)) {
+            widths.removeValue(forKey: ObjectIdentifier(child))?.isActive = false
+            stack.removeArrangedSubview(child)
+            child.removeFromSuperview()
+        }
+        for (index, child) in views.enumerated() {
+            if index >= stack.arrangedSubviews.count || stack.arrangedSubviews[index] !== child {
+                stack.removeArrangedSubview(child)
+                stack.insertArrangedSubview(child, at: index)
+            }
+            if widths[ObjectIdentifier(child)] == nil {
+                child.translatesAutoresizingMaskIntoConstraints = false
+                let constraint = child.widthAnchor.constraint(equalToConstant: width)
+                constraint.isActive = true
+                widths[ObjectIdentifier(child)] = constraint
+            } else { setWidth(width, for: child) }
+        }
         invalidateIntrinsicContentSize()
     }
 
@@ -77,44 +104,61 @@ class FilmPressButton: UIButton {
 
 @MainActor
 final class FilmEpisodeButton: FilmPressButton {
+    var onSelect: (() -> Void)?
     private let artwork: ArtworkView
     private let heading = UILabel(), summary = UILabel()
+    private let stack = UIStackView()
+    private var listConstraints: [NSLayoutConstraint] = []
+    private var displayedEpisode: FilmEpisode?
+    private var isList = false
 
     init(episode: FilmEpisode, images: ArtworkImages, list: Bool = false) {
         artwork = ArtworkView(size: 0, images: images)
         super.init(frame: .zero)
         artwork.layer.cornerRadius = 9
-        artwork.load(episode.artworkURL)
-        heading.text = episode.number.map {
-            episode.title.isEmpty ? "第 \($0) 集" : "\($0). \(episode.title)"
-        } ?? episode.title
         heading.font = .systemFont(ofSize: 14)
         heading.numberOfLines = 2
-        heading.textAlignment = episode.title.isEmpty ? .center : .natural
-        summary.text = episode.summary
         summary.font = .systemFont(ofSize: 12)
         summary.numberOfLines = 3
-        summary.isHidden = episode.summary.isEmpty
         let text = UIStackView(arrangedSubviews: [heading, summary])
         text.axis = .vertical; text.spacing = 6
-        let stack = UIStackView(arrangedSubviews: [artwork, text])
-        stack.axis = list ? .horizontal : .vertical
-        stack.alignment = list ? .center : .fill
-        stack.spacing = list ? 12 : 6
+        stack.addArrangedSubview(artwork); stack.addArrangedSubview(text)
+        stack.axis = .vertical; stack.alignment = .fill; stack.spacing = 6
         stack.isUserInteractionEnabled = false
         addSubview(stack)
         stack.pinEdges(to: self)
-        if list {
-            artwork.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.36).isActive = true
-            heightAnchor.constraint(greaterThanOrEqualTo: artwork.heightAnchor).isActive = true
-        }
+        listConstraints = [
+            artwork.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.36),
+            heightAnchor.constraint(greaterThanOrEqualTo: artwork.heightAnchor),
+        ]
         artwork.heightAnchor.constraint(equalTo: artwork.widthAnchor, multiplier: 9.0 / 16.0).isActive = true
-        accessibilityLabel = [heading.text, episode.summary].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "，")
-        accessibilityIdentifier = "film.episode.\(episode.id)"
+        addAction(UIAction { [weak self] _ in self?.onSelect?() }, for: .touchUpInside)
+        update(episode: episode, list: list)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func update(episode: FilmEpisode, list: Bool) {
+        if isList != list {
+            isList = list
+            stack.axis = list ? .horizontal : .vertical
+            stack.alignment = list ? .center : .fill
+            stack.spacing = list ? 12 : 6
+            for constraint in listConstraints { constraint.isActive = list }
+        }
+        guard displayedEpisode != episode else { return }
+        if displayedEpisode?.artworkURL != episode.artworkURL { artwork.load(episode.artworkURL) }
+        displayedEpisode = episode
+        heading.text = episode.number.map {
+            episode.title.isEmpty ? "第 \($0) 集" : "\($0). \(episode.title)"
+        } ?? episode.title
+        heading.textAlignment = episode.title.isEmpty ? .center : .natural
+        summary.text = episode.summary
+        summary.isHidden = episode.summary.isEmpty
+        accessibilityLabel = [heading.text, episode.summary].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "，")
+        accessibilityIdentifier = "film.episode.\(episode.id)"
+    }
 
     func applyTheme(_ theme: PageTheme) {
         artwork.backgroundColor = UIColor(theme.chip)

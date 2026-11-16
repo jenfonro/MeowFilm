@@ -41,7 +41,9 @@ public sealed class FilmSearchService : IAsyncDisposable
             {
                 retained.Resuming = true;
                 retained.Commanding = true;
-                retained.Work = ResumeAsync(retained, retained.Work, ++retained.Publication);
+                retained.Work = retained.Connection?.Revoked.IsCancellationRequested != false
+                    ? RebindAsync(retained, retained.Work, ++retained.Publication)
+                    : ResumeAsync(retained, retained.Work, ++retained.Publication);
             }
             return retained;
         }
@@ -55,16 +57,52 @@ public sealed class FilmSearchService : IAsyncDisposable
         return session;
     }
 
+    internal Task SuspendRuntimeAsync()
+    {
+        dispatcher.VerifyAccess();
+        if (Current is not { } session) return Task.CompletedTask;
+        session.Publication++; session.Resuming = false;
+        session.Fail(new FilmPlaybackException("CLOSED"));
+        session.Execution.Cancel();
+        session.Observation?.Cancel();
+        return DrainAsync();
+
+        async Task DrainAsync()
+        {
+            await session.Work;
+            await Task.WhenAll(session.Handoffs.ToArray().Select(work => SettleHandoffAsync(session, work)));
+            await session.Observing;
+            session.ResetBinding();
+        }
+    }
+
+    private async Task RebindAsync(FilmSearchSession session, Task prior, long publication)
+    {
+        await Task.Yield();
+        await prior;
+        if (closed || stopping || session.Retired || session.Publication != publication) return;
+        session.Observation?.Cancel();
+        await session.Observing;
+        if (closed || stopping || session.Retired || session.Publication != publication) return;
+        session.ResetBinding();
+        session.Stopped = false;
+        await OpenAsync(session);
+        if (session.Publication == publication)
+        {
+            session.Resuming = false; session.Commanding = false; session.Notify();
+        }
+    }
+
     private async Task OpenAsync(FilmSearchSession session)
     {
         await Task.Yield();
         try
         {
             if (!CanPublish(session)) return;
-            var available = await sources.ReadSearchSourcesAsync(default);
+            var available = await sources.ReadSearchSourcesAsync(session.Execution.Token);
             if (!CanPublish(session)) return;
             session.SourceSnapshot = available.Select(source => source.Wire).ToArray();
-            var connection = session.Connection = await capture(default);
+            var connection = session.Connection = await capture(session.Execution.Token);
             if (!CanPublish(session)) return;
             connection.Revoked.ThrowIfCancellationRequested();
             if (!SameSources(session)) { Invalidate(session); return; }
@@ -253,10 +291,22 @@ public sealed class FilmSearchService : IAsyncDisposable
     internal Task<FilmPlaybackRequest> HandoffAsync(FilmSearchContext context, CancellationToken token)
     {
         dispatcher.VerifyAccess();
-        var work = HandoffCoreAsync(context, token);
+        var work = HandoffOrLocatorAsync(context, token);
         context.Session.Handoffs.Add(work);
         _ = SettleHandoffAsync(context.Session, work);
         return work;
+    }
+    private async Task<FilmPlaybackRequest> HandoffOrLocatorAsync(FilmSearchContext context, CancellationToken token)
+    {
+        try { return await HandoffCoreAsync(context, token); }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested && !closed && !stopping)
+        { return context.PlaybackRequest; }
+        catch (FilmPlaybackException error) when (!closed && !stopping &&
+            error.Code is "STALE_SESSION" or "STALE_SOURCE" or "NOT_FOUND" or "CLOSED" or "DISCONNECTED")
+        { return context.PlaybackRequest; }
+        catch (BridgeException error) when (!closed && !stopping &&
+            error.Code is "STALE_SESSION" or "CLOSED" or "DISCONNECTED")
+        { return context.PlaybackRequest; }
     }
     private static async Task SettleHandoffAsync(FilmSearchSession session, Task work)
     {
@@ -267,10 +317,14 @@ public sealed class FilmSearchService : IAsyncDisposable
     private async Task<FilmPlaybackRequest> HandoffCoreAsync(FilmSearchContext context, CancellationToken token)
     {
         var session = context.Session;
-        if (session.Retired || closed || stopping) throw new FilmPlaybackException("STALE_SESSION");
+        if (closed || stopping) throw new FilmPlaybackException("CLOSED");
+        if (session.Retired || session.Connection?.Revoked.IsCancellationRequested != false)
+            return context.PlaybackRequest;
         await session.Work.WaitAsync(token);
         var available = sources.CurrentSearchSources;
-        if (session.Retired || closed || stopping || !SameSources(session)) throw new FilmPlaybackException("STALE_SOURCE");
+        if (closed || stopping) throw new FilmPlaybackException("CLOSED");
+        if (session.Retired || session.Connection?.Revoked.IsCancellationRequested != false || !SameSources(session))
+            return context.PlaybackRequest;
         using var wait = CancellationTokenSource.CreateLinkedTokenSource(token, session.Connection!.Revoked);
         var value = await session.Client!.CallAsync("search.handoff", new
         {
@@ -278,16 +332,11 @@ public sealed class FilmSearchService : IAsyncDisposable
         }, wait.Token);
         wait.Token.ThrowIfCancellationRequested();
         if (session.Retired || closed || stopping) throw new FilmPlaybackException("STALE_SESSION");
-        if (FilmJson.Text(value, "selectionId") != context.DisplayKey ||
+        if (FilmJson.Text(value, "selectionId") != context.PlaybackRequest.Target.Id ||
             FilmJson.Text(value.GetProperty("searchReference"), "sessionId") != session.Id ||
             FilmJson.Text(value.GetProperty("searchReference"), "selectionId") != context.DisplayKey)
             throw new FilmPlaybackException("INVALID_RESPONSE");
         return FilmSearchPlayback.Read(value, session.Connection);
-    }
-    internal void Retain(FilmSearchSession session) => session.Retainers++;
-    internal void Release(FilmSearchSession session)
-    {
-        if (--session.Retainers == 0 && session.Retired) _ = ReleaseAsync(session);
     }
     public void InvalidateQuery(string query)
     {
@@ -304,11 +353,12 @@ public sealed class FilmSearchService : IAsyncDisposable
         if (session.Retired) return;
         session.Publication++; session.Resuming = false;
         session.Retired = true; session.Stopped = true;
+        session.Execution.Cancel();
         session.Changed -= SessionChanged;
         session.Observation?.Cancel();
         QueueStop(session);
         if (ReferenceEquals(Current, session)) Current = null;
-        if (session.Retainers == 0) _ = ReleaseAsync(session);
+        _ = ReleaseAsync(session);
         Changed?.Invoke(this, EventArgs.Empty);
     }
     private Task ReleaseAsync(FilmSearchSession session) => session.Releasing ??= ReleaseCoreAsync(session);
@@ -328,12 +378,16 @@ public sealed class FilmSearchService : IAsyncDisposable
         {
             session.Changed -= SessionChanged;
             session.Observation?.Dispose();
+            session.Execution.Dispose();
             sessions.Remove(session);
         }
     }
-    private bool SameSources(FilmSearchSession session) =>
-        session.SourceSnapshot.Select(value => value.GetRawText())
-            .SequenceEqual(sources.CurrentSearchSources.Select(source => source.Wire.GetRawText()), StringComparer.Ordinal);
+    private bool SameSources(FilmSearchSession session)
+    {
+        var available = sources.CurrentSearchSources;
+        return session.SourceSnapshot.Count == available.Count &&
+            session.SourceSnapshot.Zip(available).All(pair => FilmJson.Equal(pair.First, pair.Second.Wire));
+    }
     private void SourcesChanged(object? sender, EventArgs e)
     {
         if (dispatcher.HasShutdownStarted) return;

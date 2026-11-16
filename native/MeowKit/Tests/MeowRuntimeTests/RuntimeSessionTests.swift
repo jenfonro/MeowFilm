@@ -150,16 +150,25 @@ final class RuntimeSessionTests: XCTestCase {
         catch { XCTAssertEqual(error as? RuntimeHTTPError, .closed) }
     }
 
-    func testExecutorFailureMakesTheBorrowedClientTerminalWithoutRestart() async throws {
+    func testActualReplacementConnectionIsPublishedAndClosedClientsAreNotBorrowed() async throws {
         let launcher = RuntimeSessionLauncher(), session = RuntimeSession(launcher: launcher)
+        var available = await session.connections().makeAsyncIterator()
         let pending = Task { try await session.connection() }
         await launcher.gate.started(); await launcher.gate.release()
-        let client = try await pending.value
-        await client.close()
-        do { _ = try await session.connection(); XCTFail("closed client") }
-        catch { XCTAssertEqual(error as? RuntimeHTTPError, .closed) }
+        let original = try await pending.value
+        let initialSignal = await available.next()
+        XCTAssertTrue(initialSignal === original)
+        await original.close()
+        let replacementSignal = await available.next()
+        let replacement = try XCTUnwrap(replacementSignal)
+        XCTAssertFalse(replacement === original)
+        XCTAssertFalse(replacement.isClosed)
+        let borrowed = try await session.connection()
+        XCTAssertTrue(borrowed === replacement)
         let calls = await launcher.calls
-        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(calls, 2, "Connection replacement is admitted once by the stable runtime owner")
         await session.close()
+        let ended = await available.next()
+        XCTAssertNil(ended)
     }
 }

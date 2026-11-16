@@ -84,9 +84,8 @@ final class FilmPlaybackCacheTests: XCTestCase {
         XCTAssertEqual(media.pendingCancellations, cancellations)
         let calls = await server.calls()
         let checks = calls.filter { $0.1.filmObject?["action"] == .string("browse.refresh") }
-        XCTAssertEqual(checks.count, 2)
-        XCTAssertEqual(checks[0].1.filmObject?["refresh"], .bool(false))
-        XCTAssertNil(checks[1].1.filmObject?["refresh"])
+        XCTAssertEqual(checks.count, 1)
+        XCTAssertNil(checks[0].1.filmObject?["refresh"])
         XCTAssertFalse(calls.contains { $0.1.filmObject?["action"] == .string("play") })
         await model.close()
     }

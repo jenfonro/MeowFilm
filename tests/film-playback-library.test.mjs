@@ -36,7 +36,19 @@ const block = (extra = {}) => ({
   detailId: 'detail:one', lineId: 'raw-flag', ...extra,
 });
 const empty = () => ({
-  version: 1, preferences: defaultPreferences(), history: [], manual: [], blocks: [], previewTargets: [],
+  version: 2, preferences: defaultPreferences(), history: [], manual: [], blocks: [], previewTargets: [], groups: [],
+});
+
+test('v1 playback documents migrate once without losing existing watching and source preferences', t => {
+  const dataRoot = area(t), directory = join(dataRoot, 'film-playback');
+  fs.mkdirSync(directory);
+  const previous = { version: 1, preferences: defaultPreferences(), history: [history()],
+    manual: [manual()], blocks: [block()], previewTargets: ['tmdb:tv:42'] };
+  fs.writeFileSync(join(directory, 'library.json'), JSON.stringify(previous));
+  const { owner } = library(t, dataRoot);
+  assert.deepEqual(owner.read(), { ...previous, version: 2, groups: [] });
+  owner.update(draft => { draft.preferences.iosAutoPrepare = false; });
+  assert.equal(JSON.parse(fs.readFileSync(join(directory, 'library.json'))).version, 2);
 });
 
 test('E31/E36: initial document takes defaults only from policy and exposes an immutable snapshot', t => {
@@ -259,7 +271,7 @@ test('E37: asynchronous and reentrant transactions cannot publish a partial draf
 
 test('E37: invalid schemas, duplicate identities and unsafe history never replace the committed document', async t => {
   const cases = [
-    ['version', draft => { draft.version = 2; }],
+    ['version', draft => { draft.version = 3; }],
     ['foreign favorites owner', draft => { draft.favorites = []; }],
     ['foreign native rules owner', draft => { draft.rules = []; }],
     ['missing section', draft => { delete draft.manual; }],
@@ -311,7 +323,7 @@ test('E37: malformed JSON, unsupported versions, invalid rows and invalid UTF-8 
   delete unpublishedDraft.previewTargets;
   const cases = [
     ['JSON', Buffer.from('{')],
-    ['version', Buffer.from(JSON.stringify({ ...empty(), version: 2 }))],
+    ['version', Buffer.from(JSON.stringify({ ...empty(), version: 3 }))],
     ['missing rows', Buffer.from(JSON.stringify({ version: 1, preferences: defaultPreferences() }))],
     ['row schema', Buffer.from(JSON.stringify({ ...empty(), blocks: [{ targetId: 'x' }] }))],
     ['foreign owner', Buffer.from(JSON.stringify({ ...empty(), favorites: [] }))],

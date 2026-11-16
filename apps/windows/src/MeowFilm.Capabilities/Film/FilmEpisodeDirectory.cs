@@ -61,7 +61,7 @@ public sealed class FilmEpisodeDirectory
         var previous = Episodes.ToDictionary(item => item.Identity, StringComparer.Ordinal);
         var next = FilmJson.Array(rows).Select(row =>
         {
-            string identity = FilmEpisodeItem.IdentityOf(row, raw);
+            string identity = FilmEpisodeItem.IdentityOf(row);
             if (!previous.TryGetValue(identity, out var item)) item = new(raw, identity);
             int? season = FilmJson.Integer(row, "season") ?? FilmJson.Integer(row, "season_number");
             int? episode = FilmJson.Integer(row, "episode") ?? FilmJson.Integer(row, "episode_number");
@@ -110,13 +110,13 @@ public sealed class FilmEpisodeItem : INotifyPropertyChanged
     private string quality = "", provider = "";
     internal FilmEpisodeItem(bool raw, string identity) { this.raw = raw; Identity = identity; }
     internal string Identity { get; }
-    internal static string IdentityOf(JsonElement row, bool raw) => raw
-        ? "file:" + (FilmJson.Text(row, "id") is { Length: > 0 } id ? id : FilmJson.RequiredText(row, "candidateId"))
-        : $"episode:{FilmJson.Integer(row, "season") ?? FilmJson.Integer(row, "season_number")}:" +
-            $"{FilmJson.Integer(row, "episode") ?? FilmJson.Integer(row, "episode_number")}";
+    public FilmPlaybackTarget? PlaybackTarget { get; private set; }
+    internal static string IdentityOf(JsonElement row) => FilmJson.RequiredText(row, "businessId");
 
     internal void Apply(JsonElement row, JsonElement detail, string seasonPoster, string poster, string overview)
     {
+        PlaybackTarget = FilmJson.Target(row.GetProperty("playbackTarget"));
+        PlaybackTarget.Validate();
         int? season = FilmJson.Integer(row, "season") ?? FilmJson.Integer(row, "season_number");
         int? episode = FilmJson.Integer(row, "episode") ?? FilmJson.Integer(row, "episode_number");
         int? global = FilmJson.Integer(row, "globalEpisode");

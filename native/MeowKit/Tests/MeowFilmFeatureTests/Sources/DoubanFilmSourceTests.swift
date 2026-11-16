@@ -53,15 +53,15 @@ final class DoubanFilmSourceTests: XCTestCase {
         }
     }
 
-    func testParsingUsesUpstreamIdentityPosterFallbacksAndNormalizedScores() throws {
+    func testParsingKeepsRuntimeBusinessIdentityPosterFallbacksAndNormalizedScores() throws {
         let payload = Data(#"""
         {"items":[
-          {"id":100,"title":" 第一部 ","pic":{"normal":"http://img1.doubanio.com/a.jpg",
+          {"businessId":"fixture-100","playbackTarget":{"id":"fixture-100","kind":"movie","title":"第一部","metadataProvider":"douban","metadataId":"100"},"id":100,"title":" 第一部 ","pic":{"normal":"http://img1.doubanio.com/a.jpg",
             "large":"https://img2.doubanio.com/a-large.jpg"},"rating":{"value":8.6},"card_subtitle":"真实副标题"},
           {"id":"blank","title":"   "},
-          {"id":"300","title":"第二部","pic":{"large":"https://img2.doubanio.com/large.jpg"},"rating":{"value":0}},
-          {"id":400,"title":"第三部","cover":{"url":"//img3.doubanio.com/cover.jpg"},"rating":{"value":"9.0"}},
-          {"id":"500","title":"第四部","cover_url":"https://user@artwork.invalid/private.jpg","rating":{"value":"NaN"}},
+          {"businessId":"fixture-300","playbackTarget":{"id":"fixture-300","kind":"movie","title":"第二部","metadataProvider":"douban","metadataId":"300"},"id":"300","title":"第二部","pic":{"large":"https://img2.doubanio.com/large.jpg"},"rating":{"value":0}},
+          {"businessId":"fixture-400","playbackTarget":{"id":"fixture-400","kind":"movie","title":"第三部","metadataProvider":"douban","metadataId":"400"},"id":400,"title":"第三部","cover":{"url":"//img3.doubanio.com/cover.jpg"},"rating":{"value":"9.0"}},
+          {"businessId":"fixture-500","playbackTarget":{"id":"fixture-500","kind":"movie","title":"第四部","metadataProvider":"douban","metadataId":"500"},"id":"500","title":"第四部","cover_url":"https://user@artwork.invalid/private.jpg","rating":{"value":"NaN"}},
           {"id":true,"title":"布尔值不是影片 ID"},
           {"title":"缺少稳定身份"},
           {"id":100,"title":"重复影片"},
@@ -72,6 +72,8 @@ final class DoubanFilmSourceTests: XCTestCase {
         XCTAssertEqual(items.map(\.id), ["100", "300", "400", "500"])
         XCTAssertEqual(items.map(\.sourceID), ["douban", "douban", "douban", "douban"])
         XCTAssertEqual(items[0].title, "第一部")
+        XCTAssertEqual(items[0].businessID, "fixture-100")
+        XCTAssertEqual(items[0].playbackTarget?.id, "fixture-100")
         XCTAssertEqual(items[0].posterURL?.absoluteString, "https://img.doubanio.cmliussss.net/a.jpg")
         XCTAssertEqual(items[0].largePosterURL?.absoluteString, "https://img.doubanio.cmliussss.net/a-large.jpg",
                        "Cards keep pic.normal while details receive the normalized pic.large")
@@ -235,6 +237,14 @@ final class DoubanFilmSourceTests: XCTestCase {
     }
 
     private static func entry(items: [RuntimeValue], status: String = "fresh", error: String? = nil) -> RuntimeValue {
+        let items = items.map { value -> RuntimeValue in
+            var row = value.filmObject!
+            let id = row["id"]!.filmScalar!
+            let target: RuntimeObject = ["id": .string("fixture-" + id), "kind": .string("movie"),
+                "title": row["title"]!, "metadataProvider": .string("douban"), "metadataId": .string(id)]
+            row["businessId"] = target["id"]; row["playbackTarget"] = .object(target)
+            return .object(row)
+        }
         var cache: RuntimeObject = ["status": .string(status),
             "components": .object(["items": .object(["state": .string("ready")])])]
         cache["error"] = error.map { .object(["code": .string($0)]) }
