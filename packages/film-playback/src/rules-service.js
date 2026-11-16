@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import { isUtf8 } from 'node:buffer';
+import { cloneJSONValue, parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { NativeJsonProgram } from '@meowfilm/script-host/native-json';
 import { bindRuleSnapshot, filmRuleFailure, filmRuleKernelRevision, filmRuleSource, validRuleText } from './rules.js';
 
@@ -78,14 +79,14 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
     try {
       if (nativeSettings) {
         const value = nativeSettings.read('film.rules');
-        return value === null ? null : { rules: copyRules(value.rules), fingerprint: digest(JSON.stringify(value)) };
+        return value === null ? null : { rules: copyRules(value.rules), fingerprint: digest(stringifyJSONValue(value)) };
       }
       descriptor = fs.openSync(path, fs.constants.O_RDONLY);
       const bytes = fs.readFileSync(descriptor);
       let document;
       try {
         if (!isUtf8(bytes)) throw fault('CORRUPT_STORAGE');
-        document = JSON.parse(bytes.toString('utf8'));
+        document = parseJSONText(bytes.toString('utf8'));
         document.rules = copyRules(document.rules);
       } catch { throw fault('CORRUPT_STORAGE'); }
       return { rules: document.rules, fingerprint: digest(bytes) };
@@ -108,7 +109,7 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
       fs.mkdirSync(root, { recursive: true, mode: 0o700 });
       fs.chmodSync(root, 0o700);
       unchanged();
-      const bytes = JSON.stringify({ rules });
+      const bytes = stringifyJSONValue({ rules });
       const next = digest(bytes);
       descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
       fs.writeFileSync(descriptor, bytes);
@@ -132,7 +133,7 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
     if (failure) throw fault(['STORAGE_CHANGED', 'CORRUPT_STORAGE'].includes(failure.code) ? failure.code : 'STORAGE_ERROR');
   }
   function snapshotOf(rules) {
-    const snapshot = freeze({ rules, revision: digest(JSON.stringify([filmRuleKernelRevision, rules])) });
+    const snapshot = freeze({ rules, revision: digest(stringifyJSONValue([filmRuleKernelRevision, rules])) });
     return bindRuleSnapshot(snapshot, (request, options) => invokeNative(request, options));
   }
   function invokeNative(request, { signal } = {}) {
@@ -215,7 +216,7 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
     },
     async previewGroup({ group, rules, request }, { signal } = {}) {
       const [key, section] = groupInfo(group);
-      const draft = structuredClone(rules);
+      const draft = cloneJSONValue(rules);
       request = previewRequest(request);
       if (request.section !== section) throw fault('INVALID_REQUEST');
       open(signal);
@@ -228,7 +229,7 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
     },
     restore({ section, rules }, options) {
       if (!['episode', 'movie', 'search'].includes(section)) throw fault('INVALID_REQUEST');
-      const draft = rules === undefined ? undefined : structuredClone(rules);
+      const draft = rules === undefined ? undefined : cloneJSONValue(rules);
       return mutate(async signal => {
         const normalized = await invokeNative({ operation: 'restore', section, rules: draft ?? committed.rules }, { signal });
         open(signal);

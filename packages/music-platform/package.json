@@ -7,5 +7,6 @@
   "engines": { "node": "^24.0.0" },
   "exports": { ".": "./src/index.mjs" },
   "files": ["src"],
+  "dependencies": { "@meowfilm/runtime-bridge": "0.2.0" },
   "scripts": { "test": "node --test test/*.test.mjs" }
 }

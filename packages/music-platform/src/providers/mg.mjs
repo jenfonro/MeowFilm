@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Fixed LX / meowmusic public metadata/lyrics recipes; see LICENSES/NOTICE.md.
-import { durationSeconds, first, image, input, number, optionalNumber, page, pageNumber, required, rows, scalar, song, text } from '../model.mjs';
+import { durationSeconds, first, image, input, number, optionalNumber, page, pageNumber, required, rows, scalar, song, text, utf8 } from '../model.mjs';
 import { form, md5 } from '../protocols.mjs';
-import { miguLyrics } from '../lyrics.mjs';
+import { lyricTracks, miguLyrics } from '../lyrics.mjs';
 import { fail } from '../errors.mjs';
 
 const device = '963B7AA0D21511ED807EE5846EC87D20';
@@ -14,7 +14,7 @@ function artwork(value) {
 }
 export function mgSong(raw) {
   const names = Array.isArray(first(raw.singerList, raw.artists))
-    ? first(raw.singerList, raw.artists).map(artist => text(artist.name)) : undefined;
+    ? first(raw.singerList, raw.artists).map(artist => text(artist?.name)).filter(Boolean) : undefined;
   let duration = durationSeconds(raw.duration);
   if (raw.duration == null) {
     const parts = text(raw.length).split(':').map(optionalNumber);
@@ -25,7 +25,8 @@ export function mgSong(raw) {
   for (const key of ['contentId', 'hash', 'md5'])
     if (typeof raw[key] === 'string' || typeof raw[key] === 'number') native[key] = raw[key];
   // Audio/lyric consumers need these protocol fields, not the rest of the response.
-  for (const name of ['audioFormats', 'newRateFormats']) if (Array.isArray(raw[name])) native[name] = raw[name].map(row =>
+  for (const name of ['audioFormats', 'newRateFormats']) if (Array.isArray(raw[name])) native[name] = raw[name]
+    .filter(row => row && typeof row === 'object' && !Array.isArray(row)).map(row =>
     Object.fromEntries(['formatType', 'resourceType', 'size', 'androidSize', 'iosSize', 'asize', 'isize', 'format',
       'androidFormat', 'iosFormat', 'aformat', 'iformat', 'bitrate', 'sampleRate', 'bitDepth', 'fileType',
       'androidFileType', 'iosFileType', 'iosAccuracyLevel', 'androidAccuracyLevel', 'hash', 'md5', 'androidMd5', 'fileId', 'contentId']
@@ -45,7 +46,7 @@ export function mgSong(raw) {
 }
 function mgCollection(raw) {
   return { id: required(first(raw.musicListId, raw.id)), name: text(first(raw.title, raw.name)),
-    cover: image(artwork(first(raw.imgItem?.img, raw.musicListPicUrl))), count: number(raw.musicNum, null),
+    cover: image(artwork(first(raw.imgItem?.img, raw.musicListPicUrl))), count: optionalNumber(raw.musicNum),
     creator: text(first(raw.ownerName, raw.userName)), description: text(raw.summary), source: 'mg', engine: 'Migu' };
 }
 function request(url, query = {}, playlist = false, body) {
@@ -140,7 +141,7 @@ export const mgProvider = {
     const resource = rows(data.resource)[0], main = first(resource.mrcUrl, resource.mrcurl, resource.lrcUrl);
     if (!main) return { text: '', translation: '', romanization: '' };
     const file = async address => {
-      const url = new URL(input(address));
+      const url = new URL(required(address));
       // Dynamic files come only from this response; no credentials follow them.
       if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) fail('INVALID_RESPONSE');
       url.protocol = 'https:';
@@ -148,9 +149,7 @@ export const mgProvider = {
         headers: { Referer: 'https://app.c.nf.migu.cn/', channel: '0146921', 'User-Agent': mobileAgent } });
     };
     const bytes = await file(main), text = resource.mrcUrl || resource.mrcurl ? await miguLyrics(bytes, c.signal) :
-      new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    const translated = resource.trcUrl ? await file(resource.trcUrl) : null;
-    return { text,
-      translation: translated ? new TextDecoder('utf-8', { fatal: true }).decode(translated) : '', romanization: '' };
+      utf8(bytes);
+    return lyricTracks(text, { translation: async () => resource.trcUrl ? utf8(await file(resource.trcUrl)) : '' }, c.signal);
   },
 };

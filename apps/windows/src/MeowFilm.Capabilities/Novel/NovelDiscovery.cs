@@ -34,7 +34,8 @@ public sealed partial class NovelCapability
     {
         if (ExploreSource is not { } selected) { discoveryNeedsReload = true; return; }
         var current = Sources.Sources.FirstOrDefault(s => s.InstallationId == selected.InstallationId);
-        if (current is not null && CanExplore(current) && current.Revision == selected.Revision)
+        if (current is not null && current.Revision == selected.Revision &&
+            (CanExplore(current) || !CanExplore(selected)))
         { ExploreSource = current; return; }
         discovery?.Cancel();
         // Keep the selected identity, including a removed source, until the user chooses another.
@@ -67,17 +68,17 @@ public sealed partial class NovelCapability
             var requestedKind = kind ?? (changedSource ? null : ExploreKind);
             try
             {
-                if (changedSource)
-                { ExploreSource = source; ExploreKind = null; Kinds = []; }
                 if (changedSource || changedKind)
                 {
                     DiscoverBooks.Clear(); MoreDiscovery = false; explorePage = 0; discoveryNeedsReload = true;
                     if (!changedSource && kind is not null) ExploreKind = kind;
                 }
                 DiscoveryState = NovelDiscoveryState.Loading; DiscoveryError = ""; Publish();
-                await Sources.EnsureReadyAsync(cancellation);
+                await Sources.EnsureExecutionReadyAsync(cancellation);
                 cancellation.ThrowIfCancellationRequested();
                 if (generation != discoveryGeneration) return false;
+                if (changedSource)
+                { ExploreSource = source; ExploreKind = null; Kinds = []; }
                 source ??= Sources.Sources.FirstOrDefault(CanExplore);
                 var current = Sources.Sources.FirstOrDefault(s => s.InstallationId == source?.InstallationId);
                 bool firstSelection = ExploreSource is null && current is not null;

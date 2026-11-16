@@ -157,7 +157,7 @@ test('LX retirement reports physical storage I/O debt after native thread exit a
 for (const ending of ['timeout', 'cancellation']) {
   test(`LX ${ending} fences asynchronous storage at native revocation without dropping physical work`,
     { timeout: 15000 }, async t => {
-      const entered = deferred(), release = deferred(), resumed = deferred(), finished = deferred();
+      const entered = deferred(), release = deferred(), resumed = deferred(), finished = deferred(), drained = deferred();
       const revoked = deferred(), controller = new AbortController();
       let operation, writes = 0, invocationSettled = false;
       const { host, sessions } = capturingHost({ storage: { async set(input) {
@@ -204,6 +204,12 @@ for (const ending of ['timeout', 'cancellation']) {
         }
         return result;
       };
+      const call = engine.call;
+      engine.call = function (method, ...args) {
+        const result = call.call(this, method, ...args);
+        if (method === 'dispatch') result.then(drained.resolve, drained.resolve);
+        return result;
+      };
       const code = ending === 'timeout' ? 'TIMEOUT' : 'CANCELLED';
       const pending = assert.rejects(host.invoke(target('a', 'kw', { hold: true }), {
         signal: controller.signal, ...(ending === 'timeout' ? { timeoutMs: 100 } : {}),
@@ -226,6 +232,7 @@ for (const ending of ['timeout', 'cancellation']) {
       finished.resolve();
       await session.whenAdaptersIdle();
       assert.equal(host.stats().pendingAdapterTasks, 0);
+      await drained.promise;
       assert.deepEqual(await host.invoke(target('a')), { calls: 1, tailSteps: 128 });
       assert.equal(host.get('a').generation, a.generation);
       assert.equal(host.get('a').state, 'ready');

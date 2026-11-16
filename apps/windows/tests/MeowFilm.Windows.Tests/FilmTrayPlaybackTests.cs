@@ -110,7 +110,7 @@ public static class FilmTrayPlaybackTests
         int controls = scene.Rig.Native.Controls.Count;
         scene.Backend.Request(SystemPlaybackCommand.Pause);
         scene.PublishMusic();
-        await scene.Rig.Native.TakeMusicAsync();
+        await scene.Rig.Native.RetireScopeAsync();
         await Pump();
         Check(scene.Rig.Native.Controls.Count == controls && scene.Music.FallbackCalls.Count == 0 &&
             scene.Port.FallbackCalls.Count == 0,

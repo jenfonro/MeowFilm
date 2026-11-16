@@ -49,11 +49,6 @@ internal sealed record FilmPreferences(string[] RuleOrder, string[] PanOrder, st
         var items = value.EnumerateArray().Select(item => item.GetString()!.Trim(InputWhitespace)).ToArray();
         if (items.Any(item => item.Length == 0) || items.Distinct(StringComparer.OrdinalIgnoreCase).Count() != items.Length)
             throw new FilmPlaybackException("INVALID_PREFERENCES");
-        string[]? allowed = field == "ruleOrder" ? Defaults.RuleOrder : field == "panOrder" ? Defaults.PanOrder : null;
-        if (allowed is not null && (items.Any(item => !allowed.Contains(item)) ||
-            field == "ruleOrder" && items.Length != allowed.Length))
-            throw new FilmPlaybackException("INVALID_PREFERENCES");
-        if (field == "panOrder") items = items.Concat(allowed!.Where(item => !items.Contains(item))).ToArray();
         return FilmJson.Encode(items);
     }
 }
@@ -70,7 +65,7 @@ internal sealed class FilmPlaybackSettings(IRuntimeClient runtime, IDocumentStor
         {
             var before = current?.GetProperty("preferences") ?? FilmPreferences.Defaults.Wire(null);
             var next = field is null ? preferences.Wire(null) : FilmDocument.Set(before, field, FilmJson.Member(preferences.Wire(field), field));
-            return FilmJson.Encode(new { version = 1, preferences = next });
+            return FilmDocument.Set(current ?? FilmJson.Encode(new { version = 1 }), "preferences", next);
         });
         (runtime as IRuntimeSettingsNotifications)?.SettingsChanged("film.preferences");
         return FilmPreferences.Read(saved.GetProperty("preferences"));

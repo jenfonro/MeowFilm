@@ -47,14 +47,14 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | 模块 | 职责 | 依赖 |
 | --- | --- | --- |
 | `MeowContracts` | 通用请求、生命周期和错误契约 | 无 |
-| `MeowJSON` | Codable DTO 值、外部字典 JSON 解析与数字原文转发 | 无 |
+| `MeowJSON` | Codable DTO 值、JSON 语法解析、UTF-8 成员与数字原文转发 | 无 |
 | `MeowStorage` | 普通及加密文档存储 | Contracts |
 | `MeowAccounts` | 凭据与账号状态基础设施 | Contracts |
 | `MeowAudio` | 独立音频解码、有界 PCM、原生保音高变速与 AVAudioEngine 输出 | CMeowAudioKernel |
 | `MeowPlayback` | 受控媒体输入、音乐播放、唯一系统媒体会话与播放所有权 | Contracts、MeowAudio |
 | `MeowPlaybackVideo` | 显式注入共享协调器的视频解码／原生视图输出适配 | Playback、MeowVideoKernel |
 | `MeowUI` | 中性主题、窗口渐变、页面生命周期、自绘页头、导航栈与转场、搜索页与呈现机制 | 无 |
-| `MeowRuntime` | runtime.http.v1 客户端、严格 JSON、事件观察／取消／关闭与单次内嵌启动机制；fd 仅交接受信启动及生命期 | 无 |
+| `MeowRuntime` | runtime.http.v1 客户端、精确 JSON 值、事件观察／取消／关闭与单次内嵌启动机制；fd 仅交接受信启动及生命期 | JSON |
 | `MeowMusicFeature` | 音乐界面、交互、公开业务契约与音乐外观策略 | Contracts、Storage、Playback、UI |
 | `MeowMusicPlatform` | 网易、QQ、酷狗协议、账号、加密、HTTP 与文件缓存 | Feature、Audio、Contracts、JSON、Accounts、Storage |
 | `MeowMusicNativeService` | 曲库、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | Contracts、JSON、Feature、Runtime、Storage |
@@ -74,7 +74,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 
 原生源码检查仅覆盖 `apps/ios` 和 `native/MeowKit`，不遍历 Windows 专属源码。Node 根测试可用 `node scripts/test-root.mjs --platform ios` 选择 iOS 与共享契约测试；共享 packager 用例不读取 Windows 入口源码，iOS 入口及生成载荷由本端 wrapper 用例验证。
 
-平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器使用 `MeowRuntime.RuntimeValue`／`RuntimeObject`／`RuntimeJSON`：对象键按原始 UTF-8 区分，保留 Unicode 规范等价但标量不同的成员；严格 UTF-8、Unicode 标量、安全整数、重复键和业务深度遵循[公共 HTTP 契约](../runtime/runtime-bridge.md)。该边界不增加普通 JSON 总字节配额，也不改变平台／账号 DTO 的 JSON 语义。
+平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器使用 `MeowRuntime.RuntimeValue`／`RuntimeObject`／`RuntimeJSON`：对象键按原始 UTF-8 区分，保留 Unicode 规范等价但标量不同的成员；语法解析复用 `JSONObject.decodeValue`／`Fields`，同一 UTF-8 键重复时采用末值。`Fields` 按首次插入顺序迭代，同键更新不重排，删除后重插追加到末尾；`JSONObject.encode` 仍按键排序输出。无法无损表示的数字由 `JSONNumber`／`RuntimeValue.exactNumber` 保留原文，不因未消费数字拒绝整棵树。普通数字、身份与资源由实际消费者检查；解码深度 64 和私密帧字节预算保留。HTTP 只解析一次 envelope，核对 request-id、contract、ok 与 value/code，不再次全树校验。共同语义见[公共 HTTP 契约](../runtime/runtime-bridge.md)。`JSONObject.decode` 是供既有 DTO 使用的 Foundation 字典投影，不用于原始文档保留；持久原文使用 `decodeValue` 或 `RuntimeJSON`。该边界不增加普通 JSON 总字节配额。
 
 ## UI 技术选型
 

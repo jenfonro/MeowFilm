@@ -176,6 +176,50 @@ test('WY home continuation follows real cursor and carries only actual protocol 
   await assert.rejects(stalled.request('wy', 'home'), { code: 'INVALID_RESPONSE' }); await stalled.close();
 });
 
+test('WY malformed optional URI actions leave actual resource locators and healthy sibling actions usable', async t => {
+  const f = fixture(() => response({ code: 200, data: { blocks: [
+    { positionCode: 'resources', dslData: { title: 'Current', action: 'orpheus://playlist/%ZZ', resources: [
+      { resourceType: 'playlist', resourceId: '1', action: 'orpheus://playlist/%ZZ' },
+      { resourceType: 'playlist', resourceId: '2', action: 'orpheus://playlist/actual%20id' },
+      { resourceType: 'playlist', action: 'orpheus://playlist/%ZZ' },
+      { resourceType: 'song', resourceExtInfo: { songData: wySong('3', { ar: [null, { name: 'Singer' }] }) },
+        playBtnData: { detailUrl: 'orpheus://playlist/%ZZ' } },
+    ] } },
+  ], hasMore: false } }));
+  t.after(() => f.close());
+  const result = await f.request('wy', 'home');
+  assert.deepEqual(result.sections[0].items.map(row => row.action), [
+    { type: 'playlist', id: '1' }, { type: 'playlist', id: 'actual id' },
+  ]);
+  assert.equal(result.sections[0].action, null);
+  assert.equal(idOf(result.sections[1].items[0]), '3');
+  assert.equal(result.sections[1].items[0].artist, 'Singer');
+  for (const data of [{ blocks: 'broken' }, { blocks: [{ creatives: [{ resources: [
+    { resourceType: 'song', resourceExtInfo: { songData: {} } },
+  ] }] }] }, { blocks: [{ creatives: [{ resources: [
+    { resourceType: 'playlist', action: 'orpheus://playlist/%ZZ' },
+  ] }] }] }]) {
+    const invalid = fixture(() => response({ code: 200, data })); t.after(() => invalid.close());
+    await assert.rejects(invalid.request('wy', 'home'), { code: 'INVALID_RESPONSE' });
+  }
+});
+
+test('WY cube optional actions isolate unusable cards without hiding an entirely unlocatable response', async t => {
+  for (const healthy of [true, false]) {
+    const f = fixture(() => response({ code: 200, data: { pageProtocol: { pages: [
+      { componentName: 'Grid', children: [
+        { componentName: 'Playlist', props: { action: 'orpheus://playlist/%ZZ' } },
+        ...(healthy ? [{ componentName: 'Playlist', props: { id: '1', name: 'Current', action: 'orpheus://playlist/%ZZ' } }] : []),
+      ] },
+    ] } } }));
+    t.after(() => f.close());
+    const work = f.request('wy', 'channel', { id: 'custom', pageCode: 'PAGE' });
+    if (healthy) assert.deepEqual((await work).sections[0].items.map(row => row.action), [{ type: 'playlist', id: '1' }]);
+    else await assert.rejects(work, { code: 'INVALID_RESPONSE' });
+    assert.equal(f.requests.length, 1);
+  }
+});
+
 test('WY directory and cube channel dispatch real pageCode without a directory verification reread', async t => {
   fixedEntropy(t);
   const f = fixture(request => {

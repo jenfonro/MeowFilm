@@ -57,8 +57,7 @@ public static class MusicDesktopLyricSettingsTests
                 ("geometry", new { monitor = @"\\.\DISPLAY1", x = 0d, y = 0d, width = 0d, height = 144d }),
                 ("geometry", new { monitor = @"\\.\DISPLAY1", x = "12", y = 0d, width = 760d, height = 144d }),
                 ("geometry", null),
-                ("ifRevision", -1), ("ifRevision", "0"), ("ifRevision", .5),
-                ("showTranslation", false), ("offset", .5), ("locked", true), ("left", 20) })
+                ("ifRevision", -1), ("ifRevision", "0"), ("ifRevision", .5) })
             {
                 var draft = Draft(layout: "double"); draft[field] = JsonSerializer.SerializeToNode(value);
                 await f.Error(Save, draft, "INVALID_REQUEST");
@@ -68,10 +67,12 @@ public static class MusicDesktopLyricSettingsTests
                 var draft = Draft(layout: "double"); draft.Remove(field);
                 await f.Error(Save, draft, "INVALID_REQUEST");
             }
-            await f.Error(Get, new { layout = "single" }, "INVALID_REQUEST");
+            await f.Ok(Get, new { layout = "single" });
             await f.Error("music.lyrics.desktop.settings.reconcile", null, "CAPABILITY_UNAVAILABLE");
             Check(f.Store.Writes == 0);
-            await f.Ok(Save, Draft(layout: "double"));
+            var extended = Draft(layout: "double");
+            extended["showTranslation"] = false; extended["offset"] = .5; extended["locked"] = true; extended["left"] = 20;
+            await f.Ok(Save, extended);
             await f.Error(Save, Draft(), "REVISION_CONFLICT");
             using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
             Code(await f.App.ExecuteAsync(Save, Draft(1), cancelled.Token), "CANCELLED");
@@ -96,7 +97,7 @@ public static class MusicDesktopLyricSettingsTests
             var reopenedSettings = (await reopened.ExecuteAsync(Get)).GetProperty("settings");
             Check(JsonNode.DeepEquals(JsonNode.Parse(reopenedSettings.GetProperty("geometry").GetRawText()), geometry));
         });
-        yield return Case("persisted desktop fields and independent current appearance fields remain strict", async () =>
+        yield return Case("selected desktop fields stay validated while unrelated extensions survive", async () =>
         {
             await using var f = new QualityFixture();
             await f.Ok(Save, Draft(layout: "double"));
@@ -110,8 +111,7 @@ public static class MusicDesktopLyricSettingsTests
                     ("normalColor", "#123"), ("highlightColor", "#FFAABBCC"),
                     ("geometry", new JsonObject { ["monitor"] = "DISPLAY1", ["x"] = "20",
                         ["y"] = 0, ["width"] = 760, ["height"] = 144 }),
-                    ("geometry", null),
-                    ("showTranslation", true), ("offset", 0), ("locked", false) })
+                    ("geometry", null) })
                 {
                     var doc = (JsonObject)original.DeepClone();
                     StoredSettings(doc)[field] = JsonSerializer.SerializeToNode(value);
@@ -121,9 +121,15 @@ public static class MusicDesktopLyricSettingsTests
                 }
                 var damaged = (JsonObject)original.DeepClone();
                 Entry(damaged, "native-appearance")["value"]!["desktopLyrics"] = new JsonObject();
+                StoredSettings(damaged)["showTranslation"] = true;
+                StoredSettings(damaged)["offset"] = 0;
+                StoredSettings(damaged)["locked"] = false;
                 f.Store.Data[MusicLibraryOwner.DocumentNamespace] = LJ.Bytes(damaged);
-                await using var strict = new MusicLibraryOwner(f.Store);
-                Code(await strict.ExecuteAsync(Get), "CORRUPT_STORAGE");
+                await using var selected = new MusicLibraryOwner(f.Store);
+                Check((await selected.ExecuteAsync(Get)).GetProperty("ok").GetBoolean());
+                Check((await selected.ExecuteAsync(Save, Draft(1, layout: "single"))).GetProperty("ok").GetBoolean());
+                Check(StoredSettings(Document(f.Store))["showTranslation"]!.GetValue<bool>());
+                Check(JsonNode.DeepEquals(Entry(damaged, "native-appearance"), Entry(Document(f.Store), "native-appearance")));
             }
             finally { f.Store.Data[MusicLibraryOwner.DocumentNamespace] = LJ.Bytes(original); }
         });

@@ -2,7 +2,6 @@ import XCTest
 import Foundation
 import MeowAccounts
 import MeowMusicFeature
-import MeowJSON
 import MeowMusicTestSupport
 import MeowRuntime
 @testable import MeowMusicPlatform
@@ -251,7 +250,7 @@ import MeowRuntime
 
     func testCanonicalRecommendationBatchesAreNotRebudgetedPerItemOrAsMergedHTTPResponses() async throws {
         func paddedSong(_ count: Int) throws -> Data {
-            try JSONEncoder().encode(JSONValue.object([
+            try RuntimeJSON.encode(RuntimeValue.object([
                 "songmid": .string("101"), "name": .string("合成歌曲"),
                 "padding": .string(String(repeating: "x", count: count))
             ]))
@@ -331,8 +330,8 @@ private actor MusicSimilarModeGateProvider: MusicAccountProvider, MusicAccountSi
     func cancelQR(_ id: UUID) {}
     func revoke() {}
     func recommendations(kind: String, page: Int) -> MusicAccountRecommendation { .init(rows: [], nextPage: nil) }
-    func collectionRows() -> [JSONValue] { [] }
-    func tracks(collectionID: String) -> [JSONValue] { [] }
+    func collectionRows() -> [RuntimeValue] { [] }
+    func tracks(collectionID: String) -> [RuntimeValue] { [] }
     func capabilities(mid: String) -> [String] { [] }
-    func resolve(mid: String, quality: String) -> JSONValue { .null }
+    func resolve(mid: String, quality: String) -> RuntimeValue { .null }
 }

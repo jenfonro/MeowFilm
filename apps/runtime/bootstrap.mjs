@@ -59,7 +59,7 @@ export function createAppRuntime({ sessionId,
       return { contract: HTTP_PROTOCOL, codes: publicCodes, contentType: 'application/json',
         validate(input) {
           if (input === null || typeof input !== 'object' || Array.isArray(input) ||
-              Object.keys(input).length !== 1 || typeof input.block !== 'string' ||
+              typeof input.block !== 'string' ||
               !/^[a-z][a-z0-9.]{0,63}$(?![\s\S])/.test(input.block)) invalid();
         },
         handler: async input => {
@@ -76,7 +76,7 @@ export function createAppRuntime({ sessionId,
     if (method === 'POST' && url.pathname === '/v1/close' && !url.search) {
       return { contract: HTTP_PROTOCOL, codes: publicCodes, contentType: 'application/json',
         validate(input) {
-          if (input === null || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) invalid();
+          if (input === null || typeof input !== 'object' || Array.isArray(input)) invalid();
         }, handler: async (_input, context) => {
         await (shutdown ??= (async () => {
           const drained = server.abortActive(context.requestId);

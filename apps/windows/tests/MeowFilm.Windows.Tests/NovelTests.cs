@@ -395,9 +395,9 @@ public static partial class NovelTests
             {
                 case "library.apply":
                     var definitions = payload.GetProperty("sources").Deserialize<NovelSourceDefinition[]>(NovelJson.Options)!;
-                    records = definitions.Select(item => item.Source() with
+                    records = definitions.Select(item => item.SourceFromDefinition() with
                     {
-                        Actions = Records.FirstOrDefault(s => s.InstallationId == item.InstallationId)?.Actions ?? item.Source().Actions
+                        Actions = Records.FirstOrDefault(s => s.InstallationId == item.InstallationId)?.Actions ?? item.SourceFromDefinition().Actions
                     }).ToArray();
                     if (records.Any(s => !s.Enabled)) PendingWeb = [];
                     result = Json(new { revision = payload.GetProperty("revision").GetInt64(), sources = records }); break;

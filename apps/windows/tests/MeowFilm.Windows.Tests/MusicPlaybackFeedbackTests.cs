@@ -200,15 +200,10 @@ public static partial class MusicPlaybackFeedbackTests
             "null",
             "{}",
             "{\"version\":1,\"revision\":0,\"enabled\":[],\"enabled\":[]}",
-            "{\"version\":1,\"revision\":0,\"enabled\":[],\"extra\":true}",
             "{\"version\":1,\"enabled\":[]}",
-            "{\"version\":1.0,\"revision\":0,\"enabled\":[]}",
             "{\"version\":01,\"revision\":0,\"enabled\":[]}",
-            "{\"version\":1,\"revision\":0.0,\"enabled\":[]}",
-            "{\"version\":1,\"revision\":1e0,\"enabled\":[]}",
             "{\"version\":1,\"revision\":00,\"enabled\":[]}",
             "{\"version\":1,\"revision\":0,\"enabled\":[\"wy\",\"wy\"]}",
-            "{\"version\":1,\"revision\":0,\"enabled\":[\"wy\",\"kg\"]}",
             "{\"version\":1,\"revision\":0,\"enabled\":[1]}",
             "{\"version\":1,\"revision\":0,\"enabled\":[\"unknown\"]}"
         })
@@ -223,6 +218,29 @@ public static partial class MusicPlaybackFeedbackTests
                     Check(!settings.IsEnabled("wy") && store.Writes == 0 &&
                         store.Data.SequenceEqual(original));
                 });
+        yield return Case("settings-consume-equivalent-numbers-and-preserve-unedited-extensions", async () =>
+        {
+            foreach (string value in new[] {
+                "{\"version\":1.0,\"revision\":0,\"enabled\":[]}",
+                "{\"version\":1,\"revision\":0.0,\"enabled\":[]}",
+                "{\"version\":1,\"revision\":1e0,\"enabled\":[]}",
+                "{\"version\":1,\"revision\":0,\"enabled\":[\"wy\",\"kg\"]}" })
+            {
+                var root = JsonNode.Parse(value)!.AsObject();
+                root["extra"] = JsonNode.Parse("{\"large\":900719925474099312345,\"decimal\":0.12345678901234567890123456789}");
+                var store = new MemoryStore { Data = JsonSerializer.SerializeToUtf8Bytes(root) };
+                await using var settings = new MusicFeedbackSettingsOwner(store);
+                var before = await settings.ReadAsync();
+                Check(store.Writes == 0 && before.Enabled.Count == root["enabled"]!.AsArray().Count);
+                var saved = await settings.SaveAsync(before.Revision, ["wy"]);
+                Check(saved.Enabled.SequenceEqual(["wy"]) && saved.Revision == before.Revision + 1);
+                string bytes = Encoding.UTF8.GetString(store.Data!);
+                Check(bytes.Contains("900719925474099312345", StringComparison.Ordinal) &&
+                    bytes.Contains("0.12345678901234567890123456789", StringComparison.Ordinal));
+                await using var cold = new MusicFeedbackSettingsOwner(store);
+                Check((await cold.ReadAsync()).Enabled.SequenceEqual(["wy"]));
+            }
+        });
         yield return Case("settings-reject-unknown-write-receipt-without-retry-or-success", async () =>
         {
             var store = new MemoryStore

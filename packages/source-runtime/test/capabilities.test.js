@@ -6,7 +6,8 @@ import {
   createCapabilityClient,
   hostApiVersion,
 } from '../src/index.js';
-import { SourceHttpClient } from '../src/http.js';
+import { SourceHttpClient, trustedCapabilityContext } from '../src/http.js';
+import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 
 const encoded = value => new TextEncoder().encode(value);
 
@@ -44,9 +45,8 @@ test('capability JSON business values accept 64 levels while control fields do n
   const count = values.length;
   for (const value of [
     nested(65), nested(65, true), { ok: true, value: nested(64) }, cycle,
-    '\ud800', '\udc00', 'a\ud800b', '\udc00\ud800', { ['\ud800']: 1 }, { ['\udc00']: 1 },
-    Infinity, Number.MAX_SAFE_INTEGER + 1, 1n,
-    undefined, new Uint8Array([1]), new ArrayBuffer(1),
+    Infinity, NaN, 1n, undefined, new Uint8Array([1]), new ArrayBuffer(1),
+    new Date(0), new Map(), [, 1], { get value() { assert.fail('accessor must not run'); } },
   ]) {
     await assert.rejects(client.call('storage.set', { ...input, value }), { code: 'INVALID_ARGUMENT' });
     assert.equal(values.length, count, 'invalid input must not reach the owner');
@@ -55,6 +55,35 @@ test('capability JSON business values accept 64 levels while control fields do n
   }
   returned = nested(64);
   assert.deepEqual(await client.call('storage.get', input), returned);
+});
+
+test('capability JSON values preserve exact numbers and UTF-16 strings through shared cloning', async () => {
+  const exact = '{"integer":9007199254740993,"decimal":1.234567890123456789,"large":1e400,' +
+    '"zero":-0,"\\ud800":"\\udc00","é":1,"é":2}';
+  const values = [parseJSONText(exact), Number.MAX_SAFE_INTEGER + 1,
+    '\ud800', '\udc00', 'a\ud800b', '\udc00\ud800', { ['\ud800']: 1 }, { ['\udc00']: 1 }];
+  const input = { version: hostApiVersion, profile: 'exact:storage', key: 'key' };
+  let saved;
+  const client = createCapabilityClient({ invoke(name, input) {
+    if (name === 'storage.set') { saved = input.value; return true; }
+    return saved;
+  } });
+  for (const value of values) {
+    await client.call('storage.set', { ...input, value });
+    assert.equal(stringifyJSONValue(saved), stringifyJSONValue(value));
+    const read = await client.call('storage.get', input);
+    assert.equal(stringifyJSONValue(read), stringifyJSONValue(value));
+    if (typeof value === 'object') {
+      assert.notEqual(saved, value);
+      assert.notEqual(read, saved);
+    }
+  }
+  await client.call('storage.set', { ...input, value: values[0] });
+  values[0].integer = 0;
+  const read = await client.call('storage.get', input);
+  assert.equal(stringifyJSONValue(read), exact);
+  read.decimal = 0;
+  assert.equal(stringifyJSONValue(await client.call('storage.get', input)), exact);
 });
 
 test('Base64 codec preserves arbitrary bytes and rejects non-canonical input', () => {
@@ -78,6 +107,7 @@ test('capability ABI normalizes HTTP envelopes and validates returned bytes', as
         headers: { 'Content-Type': ['text/plain'] },
         url: 'https://fixture.invalid/final',
         body: encoded('response'),
+        future: { unused: true },
       };
     },
   });
@@ -111,11 +141,18 @@ test('capability ABI normalizes HTTP envelopes and validates returned bytes', as
     url: 'https://fixture.invalid/final',
     body: encoded('response'),
   });
-  await assert.rejects(client.call('http.request', {
+  await client.call('http.request', {
     version: hostApiVersion,
     url: 'https://fixture.invalid/start',
     unexpected: true,
-  }), { code: 'INVALID_ARGUMENT' });
+  });
+  assert.equal(Object.hasOwn(calls.at(-1).input, 'unexpected'), false);
+  assert.deepEqual(trustedCapabilityContext({
+    installationId: 'source', generation: 1, protocol: 'legado', siteId: 'source',
+    future: true, requestId: 99,
+  }, { invocationId: 2, scope: { installationId: 'other' } }).scope, {
+    installationId: 'source', generation: 1, protocol: 'legado', siteId: 'source', requestId: 2,
+  });
   await assert.rejects(client.call('http.request', {
     version: hostApiVersion,
     url: 'https://fixture.invalid/start',

@@ -3,6 +3,7 @@ import { URL, URLSearchParams } from 'whatwg-url';
 import { createCapabilityClient, SourceSession, sourceFault, sourceSafeError } from '@meowfilm/source-runtime';
 import { PortableSandbox } from './portable-sandbox.js';
 import { sourceUtility } from './source-native-codec.js';
+import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 
 globalThis.URL = URL;
 globalThis.URLSearchParams = URLSearchParams;
@@ -46,10 +47,13 @@ export const runtime = Object.freeze({
           if (name.startsWith('encoding.') || name.startsWith('crypto.')) {
             return localCapability(name, value);
           }
-          const keys = Object.keys(value);
-          return host('source.capability', [
-            name, context.scope, keys, ...keys.map(key => value[key]),
+          const input = name === 'storage.set'
+            ? { ...value, value: stringifyJSONValue(value.value) } : value;
+          const keys = Object.keys(input);
+          const result = host('source.capability', [
+            name, context.scope, keys, ...keys.map(key => input[key]),
           ]);
+          return name === 'storage.get' ? result.then(parseJSONText) : result;
         },
       }),
       onDiagnostic: value => emit('source.diagnostic', value),

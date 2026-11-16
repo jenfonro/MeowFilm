@@ -3,6 +3,7 @@ import { lstat, readFile } from 'node:fs/promises';
 import { fault, requireValue } from './errors.js';
 import { NativeEngine } from './native-engine.js';
 import { portableRealmSource } from './portable-realm.js';
+import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 
 let sdkSource;
 export function sourceSDKPath(platform, arch, manifest) {
@@ -130,16 +131,18 @@ export class PortableSourceSession {
       scope?.generation === this.generation && scope?.siteId === 'source',
     'PERMISSION_DENIED');
     const input = Object.fromEntries(keys.map((key, index) => [key, values[index]]));
+    if (name === 'storage.set') input.value = parseJSONText(input.value);
     const controller = new AbortController();
     const abort = () => controller.abort(hostError(signal.reason));
     if (signal.aborted) abort();
     else signal.addEventListener('abort', abort, { once: true });
     this.adapters.add(controller);
-    const task = Promise.resolve().then(() => {
+    const task = Promise.resolve().then(async () => {
       if (controller.signal.aborted) throw controller.signal.reason;
-      return this.capabilitiesClient.call(name, input, {
+      const result = await this.capabilitiesClient.call(name, input, {
         signal: controller.signal, scope,
       });
+      return name === 'storage.get' ? stringifyJSONValue(result) : result;
     }).finally(() => {
       signal.removeEventListener('abort', abort);
       this.adapters.delete(controller);

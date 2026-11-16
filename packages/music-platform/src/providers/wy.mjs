@@ -52,19 +52,23 @@ export async function wyPlaylist(c, { id, page: current = 1, limit = 100 }, comp
   return c.cached(['playlist', id, current, limit, complete], async () => {
     const data = await c.wy('/api/v6/playlist/detail', { id, n: complete ? 100 : limit, s: 8 });
     const list = data.playlist, info = collection('wy', list);
-    const tracks = rows(list.tracks ?? []), ids = rows(list.trackIds ?? tracks).map(row => required(row.id));
-    const members = complete ? ids : ids.slice((current - 1) * limit, current * limit);
-    const embedded = tracks.map(wySong);
+    const tracks = rows(list.tracks ?? []), ids = rows(list.trackIds ?? tracks);
+    const offset = complete ? 0 : (current - 1) * limit;
+    const members = (complete ? ids : ids.slice(offset, current * limit)).map(row => required(row?.id));
+    const selected = new Set(members), requested = new Set(ids.map(row => scalar(row?.id)).filter(Boolean));
+    const embedded = tracks.filter(row => {
+      const s = first(row?.songInfo, row?.songData, row?.song, row);
+      const id = scalar(first(s?.id, s?.songId, s?.resourceId));
+      return id && (selected.has(id) || (complete || current === 1) && !requested.has(id));
+    }).map(wySong);
     const known = new Map(embedded.map(song => [idOf(song), song]));
     const missing = members.filter(id => !known.has(id) || !known.get(id).title.trim() || !known.get(id).artist.trim());
     const fetched = await wyDetails(c, missing);
     for (const song of fetched) known.set(idOf(song), song);
-    const offset = complete ? 0 : (current - 1) * limit;
     const available = members.flatMap((id, index) => known.has(id) ?
       [{ song: known.get(id), position: offset + index }] : []);
     // Canonical records returned for aliases remain actual records. Do not rename
     // them to the requested ID, discard them, or invent a membership association.
-    const requested = new Set(ids);
     const aliases = new Map((complete || current === 1 ? [...embedded, ...fetched] : fetched)
       .filter(song => !requested.has(idOf(song))).map(song => [idOf(song), song]));
     available.push(...[...aliases.values()].map(song => ({ song, position: null })));

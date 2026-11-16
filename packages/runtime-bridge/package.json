@@ -8,7 +8,8 @@
     "node": ">=18.20.4"
   },
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./json": "./src/json-value.js"
   },
   "scripts": {
     "test": "node --test test/*.test.js"

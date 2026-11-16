@@ -119,8 +119,12 @@ enum MusicModel {
         return song
     }
     static func sources(_ song: MJ) throws -> [MusicNativeSource] {
-        try song["sources"].array.map { row in
-            let info = sourceData(row)
+        try musicRequire(song["sources"].isArray, .corruptDocument)
+        var seen = Set<String>()
+        return try song["sources"].array.map { row in
+            let source = try cleanSource(row)
+            try musicRequire(source["sourceKey"] == row["sourceKey"] && seen.insert(row["sourceKey"].string).inserted, .nativeIDConflict)
+            let info = sourceData(source)
             return .init(sourceKey: row["sourceKey"].string, platform: info["source"].string, nativeId: info["songmid"].id)
         }
     }

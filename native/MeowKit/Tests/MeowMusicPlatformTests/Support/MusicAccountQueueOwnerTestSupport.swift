@@ -1,8 +1,8 @@
 import Foundation
+import MeowRuntime
 import XCTest
 import MeowAccounts
 import MeowMusicFeature
-import MeowJSON
 @testable import MeowMusicPlatform
 
 // Synthetic owner fixtures only: reuse the existing store, credential provider
@@ -105,10 +105,10 @@ actor MusicAccountQueueOwnerProvider: MusicAccountProvider, MusicAccountSessionP
     func cancelQR(_ id: UUID) {}
     func revoke() async { await wait("revoke") }
     private func rows(operation: String, argument: String, page: Int, count: Int,
-                      credential: AccountCredential) async throws -> [JSONValue] {
+                      credential: AccountCredential) async throws -> [RuntimeValue] {
         reads.append(.init(operation: operation, argument: argument, page: page, credential: credential))
         let batch = reads.count, uid = try await nativeID(credential)
-        let result: [JSONValue] = (0..<count).map { index in
+        let result: [RuntimeValue] = (0..<count).map { index in
             .object([
                 "songmid": .string("\(platform.rawValue)B\(batch)P\(page)I\(index)"),
                 "name": .string("Synthetic \(uid) \(argument) \(batch)"),
@@ -130,12 +130,12 @@ actor MusicAccountQueueOwnerProvider: MusicAccountProvider, MusicAccountSessionP
                                    count: shape.count, credential: publishedCredential!)
         return .init(rows: value, nextPage: shape.nextPage)
     }
-    func tracks(collectionID: String) async throws -> [JSONValue] {
+    func tracks(collectionID: String) async throws -> [RuntimeValue] {
         try await rows(operation: "tracks", argument: collectionID, page: 1, count: 65, credential: publishedCredential!)
     }
-    func collectionRows() throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func collectionRows() throws -> [RuntimeValue] { throw MusicServiceError.unsupported }
     func capabilities(mid: String) throws -> [String] { throw MusicServiceError.unsupported }
-    func resolve(mid: String, quality: String) throws -> JSONValue {
+    func resolve(mid: String, quality: String) throws -> RuntimeValue {
         throw MusicServiceError.unsupported
     }
 }
@@ -159,7 +159,7 @@ struct MusicAccountQueueOwnerFixture: Sendable {
                       providers: [.qq: provider, .netease: otherProvider], clock: { [clock] in clock.now() })
     }
     func enable() async throws { _ = try await owner.setAccess(available: true, generation: 1) }
-    static func rows(_ value: MusicNativeTrackPage) throws -> [JSONValue] {
-        try value.items.map { try JSONDecoder().decode(JSONValue.self, from: $0.data) }
+    static func rows(_ value: MusicNativeTrackPage) throws -> [RuntimeValue] {
+        try value.items.map { try RuntimeJSON.decode($0.data) }
     }
 }

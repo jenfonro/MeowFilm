@@ -13,7 +13,7 @@ public static class BridgeCodec
     private static readonly JsonSerializerOptions Serializer = new()
     {
         MaxDepth = 67, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-        Converters = { new StrictStringConverter(), new StrictCharConverter(), new StrictNodeConverter() }
+        Converters = { new StrictStringConverter(), new StrictCharConverter(), new StrictNodeConverter(), new RawElementConverter() }
     };
 
     // System.Text.Json otherwise replaces invalid UTF-16 while writing strings.
@@ -43,6 +43,14 @@ public static class BridgeCodec
             if (char.IsSurrogate(value)) Invalid();
             writer.WriteStringValue(value.ToString());
         }
+    }
+
+    private sealed class RawElementConverter : JsonConverter<JsonElement>
+    {
+        public override JsonElement Read(ref Utf8JsonReader reader, Type type, JsonSerializerOptions options) =>
+            throw new NotSupportedException();
+        public override void Write(Utf8JsonWriter writer, JsonElement value, JsonSerializerOptions options) =>
+            writer.WriteRawValue(value.GetRawText(), skipInputValidation: true);
     }
 
     // JsonValue's primitive writer bypasses the ordinary string converter.
@@ -103,6 +111,15 @@ public static class BridgeCodec
 
     public static JsonElement Value(object? value) => DecodeJSONValue(EncodeJSONValue(value));
 
+    // Only consumed identity/control fields require an unambiguous member.
+    // Ordinary extension members remain raw JSON, including repeated names.
+    public static JsonElement RequiredProperty(JsonElement value, string name)
+    {
+        if (value.ValueKind != JsonValueKind.Object ||
+            value.EnumerateObject().Count(property => property.NameEquals(name)) != 1) Invalid();
+        return value.GetProperty(name);
+    }
+
     public static JsonElement DecodeJSONValue(ReadOnlyMemory<byte> body)
     {
         var value = ParseJSON(body);
@@ -126,44 +143,25 @@ public static class BridgeCodec
 
     internal static void ValidateJSONValue(JsonElement value)
     {
-        try { ValidateValue(value, 0); }
+        try { ValidateDepth(value, 0); }
         catch (BridgeException) { throw; }
         catch { throw new BridgeException("INVALID_MESSAGE"); }
     }
 
-    private static void ValidateValue(JsonElement value, int depth)
+    private static void ValidateDepth(JsonElement value, int depth)
     {
         if (depth > 64) Invalid();
         switch (value.ValueKind)
         {
             case JsonValueKind.Object:
-                var keys = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var property in value.EnumerateObject())
-                {
-                    _ = StrictUtf8.GetByteCount(property.Name);
-                    if (!keys.Add(property.Name)) Invalid();
-                    ValidateValue(property.Value, depth + 1);
-                }
+                    ValidateDepth(property.Value, depth + 1);
                 break;
             case JsonValueKind.Array:
-                foreach (var item in value.EnumerateArray()) ValidateValue(item, depth + 1);
+                foreach (var item in value.EnumerateArray()) ValidateDepth(item, depth + 1);
                 break;
             case JsonValueKind.String:
-                var text = value.GetString()!;
-                for (var i = 0; i < text.Length; i++)
-                {
-                    if (char.IsHighSurrogate(text[i]))
-                    {
-                        if (++i >= text.Length || !char.IsLowSurrogate(text[i])) Invalid();
-                    }
-                    else if (char.IsLowSurrogate(text[i])) Invalid();
-                }
-                break;
             case JsonValueKind.Number:
-                var number = value.GetDouble();
-                if (!double.IsFinite(number)
-                    || (Math.Truncate(number) == number && Math.Abs(number) > MaximumSafeInteger)) Invalid();
-                break;
             case JsonValueKind.Null:
             case JsonValueKind.True:
             case JsonValueKind.False:

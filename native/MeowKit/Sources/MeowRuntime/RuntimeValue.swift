@@ -1,15 +1,31 @@
 import Foundation
+import MeowJSON
 
 /// Script values use Unicode scalar identity, including object member names.
 public indirect enum RuntimeValue: Sendable, Equatable {
     case null, bool(Bool), number(Double), string(String)
     case array([RuntimeValue]), object(RuntimeObject)
+    case exactNumber(JSONNumber)
+
+    /// Applies a typed projection's changes to its original object. Unchanged
+    /// members (including fields outside that projection) retain exact JSON.
+    public func applyingChanges(from previous: RuntimeValue, to next: RuntimeValue) -> RuntimeValue {
+        if previous == next { return self }
+        guard case .object(var original) = self, case .object(let before) = previous,
+              case .object(let after) = next else { return next }
+        for key in before.keys where after[key] == nil { original[key] = nil }
+        for (key, value) in after where before[key] != value {
+            original[key] = original[key]?.applyingChanges(from: before[key] ?? .null, to: value) ?? value
+        }
+        return .object(original)
+    }
 
     public static func == (lhs: RuntimeValue, rhs: RuntimeValue) -> Bool {
         switch (lhs, rhs) {
         case (.null, .null): return true
         case let (.bool(a), .bool(b)): return a == b
         case let (.number(a), .number(b)): return a == b
+        case let (.exactNumber(a), .exactNumber(b)): return a == b
         case let (.string(a), .string(b)): return a.utf8.elementsEqual(b.utf8)
         case let (.array(a), .array(b)): return a == b
         case let (.object(a), .object(b)): return a == b

@@ -159,7 +159,7 @@ export function isCandidateAllowed(candidate, { target, constraint = { action: '
       }
     }
   }
-  return !blocks.some(block => target?.id !== undefined && block.targetId === target.id &&
+  return !blocks.some(block => target?.id !== undefined && block?.targetId === target.id &&
     block.sourceKey === candidate.source?.key && block.detailId === (candidate.detailId ?? candidate.source?.detailId) &&
     block.lineId === candidate.lineId);
 }

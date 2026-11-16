@@ -1,3 +1,4 @@
+import { stringifyJSONValue, rawJSON } from '@meowfilm/runtime-bridge/json';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -1280,4 +1281,19 @@ test('externally obtained metadata seed never reads disk for a merge', async t =
     assert.deepEqual((await f.data.cachedEntry(entry)).value, entry.value);
     assert.equal(reads, 0);
   } finally { gate.resolve(); }
+});
+
+test('durable metadata preserves exact numeric extensions across owners without requesting a replacement', async t => {
+  const f = fixture(t);
+  f.state.movie.extension = { id: rawJSON('9007199254740993'), decimal: rawJSON('1.00000000000000001'),
+    overflow: rawJSON('1e400'), rawJSON: 'ordinary-property' };
+  const first = await readMovie(f);
+  await f.data.close();
+  const next = fixture(t, { dataRoot: f.dataRoot });
+  next.setResponse(() => assert.fail('precise material must survive a cache restart'));
+  const second = await readMovie(next);
+  assert.equal(stringifyJSONValue(second.value.extension), stringifyJSONValue(first.value.extension));
+  assert.equal(stringifyJSONValue(second.value.extension.id), '9007199254740993');
+  assert.equal(stringifyJSONValue(second.value.extension.overflow), '1e400');
+  assert.equal(next.observed.length, 0);
 });

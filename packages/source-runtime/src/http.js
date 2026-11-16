@@ -63,9 +63,7 @@ function formBody(value) {
 
 function normalizeCapabilityScope(value) {
   sourceObject(value);
-  sourceRequire(Object.keys(value).every(key =>
-    ['installationId', 'generation', 'protocol', 'siteId'].includes(key)) &&
-    ['installationId', 'generation', 'protocol', 'siteId'].every(key =>
+  sourceRequire(['installationId', 'generation', 'protocol', 'siteId'].every(key =>
       Object.hasOwn(value, key)));
   sourceIdentifier(value.installationId);
   sourceIdentifier(value.protocol);

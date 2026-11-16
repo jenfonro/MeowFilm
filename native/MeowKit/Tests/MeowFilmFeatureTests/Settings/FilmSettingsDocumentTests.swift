@@ -78,6 +78,23 @@ final class FilmSettingsDocumentTests: XCTestCase {
         XCTAssertEqual(try document.read(), external)
     }
 
+    func testUnrelatedEditKeepsExactNumbersAndUTF8KeysAndCASConsumesOnlyFingerprintFields() throws {
+        let root = try directory(), store = try DocumentStore(baseURL: root, namespace: FilmSettingsBlock.rules.namespace)
+        let bytes = Data(#"{"version":1,"unknown":{"n":0.12345678901234567890123456789,"é":1,"e\u0301":2}}"#.utf8)
+        try store.write(bytes, key: FilmSettingsDocument.key)
+        let document = FilmSettingsDocument(block: .rules, storage: .plain { store })
+        let original = try XCTUnwrap(try document.read())
+        let saved = try document.update { current in
+            guard case .object(var fields)? = current else { throw FilmSettingsStorageError.invalidDocument }
+            fields["rules"] = .object([:]); return .object(fields)
+        }
+        XCTAssertEqual(saved.catField("unknown"), original.catField("unknown"))
+        guard case .object(var expected) = try document.snapshot().fingerprint else { return XCTFail("fingerprint") }
+        expected["extra"] = .array([])
+        _ = try document.compareAndSwap(expected: .object(expected), document: saved)
+        XCTAssertEqual(try document.read(), saved)
+    }
+
     func testCorruptStorageAndFailedProtectedFactoryAreNotMissingDocuments() throws {
         let root = try directory(), changes = FilmSettingsTestChanges()
         let store = try DocumentStore(baseURL: root, namespace: FilmSettingsBlock.preferences.namespace)

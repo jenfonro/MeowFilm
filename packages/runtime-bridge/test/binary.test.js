@@ -864,8 +864,8 @@ test('raw and existing JSON/upload routes coexist without changing their contrac
   assert.deepEqual(await client.request({ method: 'PUT', path: '/v1/upload', body: Buffer.alloc(9), raw: true,
     contract, codes: new Set(['LIMIT']) }), { ok: false, contract, code: 'LIMIT' });
   assertJSON(await fixture.request({ path: '/v1/json', method: 'POST', body: '{"x":1,"x":2}',
-    headers: { 'content-type': 'application/json' } }).ended, 400,
-    { ok: false, contract: HTTP_PROTOCOL, code: 'INVALID_REQUEST' });
+    headers: { 'content-type': 'application/json' } }).ended, 200,
+    { ok: true, contract: HTTP_PROTOCOL, value: { x: 2 } });
   assertJSON(await fixture.request({ path: '/v1/upload', method: 'PUT', body: '{}',
     headers: { 'content-type': 'application/json' } }).ended, 415,
     { ok: false, contract: HTTP_PROTOCOL, code: 'INVALID_REQUEST' });

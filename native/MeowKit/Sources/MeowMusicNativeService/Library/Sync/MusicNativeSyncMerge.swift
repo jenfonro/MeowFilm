@@ -13,7 +13,7 @@ extension NativeMusicService {
             let platform = selection.platform.rawValue, session = round.sessions[platform]!, snapshot = round.snapshots[platform]!
             for index in collections.indices {
                 var c = collections[index]
-                guard selection.kinds.contains(MusicLibrarySyncKind(rawValue: c["kind"].string)!) else { continue }
+                guard let kind = MusicLibrarySyncKind(rawValue: c["kind"].string), selection.kinds.contains(kind) else { continue }
                 let missing = c["bindings"].array.filter { binding in
                     binding["platform"].string == platform && binding["accountId"].string == session.accountID &&
                     !snapshot.collections.contains(where: { remote in remote.id == binding["id"].string })
@@ -34,7 +34,7 @@ extension NativeMusicService {
                 }
             }
             for remote in snapshot.collections {
-                var index = collections.firstIndex { c in c["bindings"].array.contains {
+                var index = collections.firstIndex { c in c["kind"].string == remote.kind.rawValue && c["bindings"].array.contains {
                     $0["platform"].string == platform && $0["accountId"].string == session.accountID && $0["id"].string == remote.id
                 } }
                 if index == nil, remote.kind == .favorites { index = collections.firstIndex { $0["id"].string == "favorites" } }
@@ -48,7 +48,11 @@ extension NativeMusicService {
                     if matches.count == 1 { index = matches[0] }
                 }
                 if index == nil {
-                    collections.append(MusicModel.freshCollection("playlist:\(lib["nextId"].int)", remote.name))
+                    try musicRequire(lib["nextId"].isInteger && lib["nextId"].int > 0, .corruptDocument)
+                    try musicRequire(lib["nextId"].int < 9_007_199_254_740_991, .limit)
+                    let id = "playlist:\(lib["nextId"].int)"
+                    try musicRequire(!collections.contains { $0["id"].string == id }, .corruptDocument)
+                    collections.append(MusicModel.freshCollection(id, remote.name))
                     lib["nextId"] = .n(lib["nextId"].int + 1); index = collections.count - 1
                 }
                 var c = collections[index!], bindings = c["bindings"].array
@@ -63,12 +67,14 @@ extension NativeMusicService {
         }
         for index in collections.indices {
             var c = collections[index], bindings = c["bindings"].array
+            guard let kind = MusicLibrarySyncKind(rawValue: c["kind"].string),
+                  round.request.selections.contains(where: { $0.kinds.contains(kind) }) else { continue }
             let oldOrder = c["order"].strings
             var removed = Set<String>(), added = Set<String>(), firstImported = Set<String>(), sequences: [[String]] = []
             for bIndex in bindings.indices {
                 var b = bindings[bIndex]
                 guard let selection = round.request.selections.first(where: { $0.platform.rawValue == b["platform"].string }),
-                      selection.kinds.contains(MusicLibrarySyncKind(rawValue: c["kind"].string)!),
+                      selection.kinds.contains(kind),
                       let remote = round.snapshots[b["platform"].string]?.collections.first(where: { $0.id == b["id"].string }) else { continue }
                 let oldMap = b["map"]
                 var mapping = oldMap, sequence: [String] = [], actualSongs = Set<String>()
@@ -124,7 +130,8 @@ extension NativeMusicService {
         try await syncCurrent(round)
         var attempted = Set<String>(), stopped = Set<String>()
         for c in round.library["collections"].array where !c["deleted"].bool {
-            for selection in round.request.selections where selection.kinds.contains(MusicLibrarySyncKind(rawValue: c["kind"].string)!) {
+            guard let kind = MusicLibrarySyncKind(rawValue: c["kind"].string) else { continue }
+            for selection in round.request.selections where selection.kinds.contains(kind) {
                 let platform = selection.platform.rawValue
                 for id in c["order"].strings {
                     let song = try repositorySong(id, read())

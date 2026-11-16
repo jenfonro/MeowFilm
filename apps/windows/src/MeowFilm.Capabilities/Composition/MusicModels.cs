@@ -112,8 +112,10 @@ internal static class MusicDto
     {
         Require(value.ValueKind == JsonValueKind.Object && value.TryGetProperty(key, out _));
         var field = value.GetProperty(key);
-        Require(field.ValueKind == JsonValueKind.Number && field.TryGetInt64(out var parsed) && parsed is >= 0 and <= 9007199254740991);
-        return field.GetInt64();
+        decimal parsed = 0;
+        Require(field.ValueKind == JsonValueKind.Number && field.TryGetDecimal(out parsed) &&
+            parsed is >= 0 and <= 9007199254740991 && decimal.Truncate(parsed) == parsed);
+        return (long)parsed;
     }
     internal static int Count(JsonElement value, string key)
     {

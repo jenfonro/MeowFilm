@@ -3,7 +3,6 @@ import CryptoKit
 import MeowAccounts
 import MeowContracts
 import MeowMusicFeature
-import MeowJSON
 import MeowStorage
 import MeowRuntime
 
@@ -17,8 +16,8 @@ public struct MusicAccountAccessAcknowledgement: Sendable, Equatable {
 extension NativeMusicAccountService: MusicNativeAccountProviding {
     // Internal so deterministic contract fixtures can exercise these exact guards.
     func nativeBusiness(_ operation: String, platform: MusicAccountPlatform,
-                        fields: [String: JSONValue] = [:],
-                        rejectedURL: URL? = nil) async throws -> [String: JSONValue] {
+                        fields: RuntimeObject = [:],
+                        rejectedURL: URL? = nil) async throws -> RuntimeObject {
         let own = epoch, binding = accountEpochs[platform]
         var input = fields
         input["operation"] = .string(operation); input["platform"] = .string(platform.rawValue)
@@ -29,36 +28,35 @@ extension NativeMusicAccountService: MusicNativeAccountProviding {
             return result
         } catch { throw safe(error) }
     }
-    private func nativePage(_ result: [String: JSONValue], platform: MusicAccountPlatform,
+    private func nativePage(_ result: RuntimeObject, platform: MusicAccountPlatform,
                             dailyStyle: MusicDailyStyleSelection? = nil) throws -> MusicNativeTrackPage {
         let rows = try MusicAccountFields.array(result["items"])
         let cursor = try MusicAccountFields.nullableString(result["cursor"])
         // A replay of the same immutable cursor snapshot must not change its
         // public bytes merely because a JSON object enumerates keys differently.
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        return .init(items: try rows.map { .init(platform: platform.rawValue, data: try encoder.encode($0)) },
+        return .init(items: try rows.map { .init(platform: platform.rawValue, data: try RuntimeJSON.encode($0)) },
                      total: try MusicAccountFields.integer(result["total"] ?? .number(0)),
                      cursor: cursor, dailyStyle: dailyStyle)
     }
     public func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) async throws -> MusicNativeTrackPage {
         let result = try await nativeBusiness("recommendations", platform: platform,
-            fields: ["kind": .string(kind), "cursor": cursor.map(JSONValue.string) ?? .null])
+            fields: ["kind": .string(kind), "cursor": cursor.map(RuntimeValue.string) ?? .null])
         return try nativePage(result, platform: platform)
     }
     public func nativeCollections(platform: MusicAccountPlatform, cursor: String?) async throws -> MusicAccountCollectionPage {
-        let result = try await nativeBusiness("collections", platform: platform, fields: ["cursor": cursor.map(JSONValue.string) ?? .null])
+        let result = try await nativeBusiness("collections", platform: platform, fields: ["cursor": cursor.map(RuntimeValue.string) ?? .null])
         let rows = try MusicAccountFields.array(result["items"]).map { value -> MusicAccountCollection in
             let row = try MusicAccountFields.object(value)
             guard case .string(let title)? = row["title"] else { throw MusicServiceError.invalidResponse }
             return .init(id: try MusicAccountFields.string(row["id"]), title: title,
-                         count: row["count"] == .null ? nil : try MusicAccountFields.integer(row["count"]),
+                         count: try? MusicAccountFields.integer(row["count"]),
                          owned: try MusicAccountFields.bool(row["owned"]))
         }
         return .init(items: rows, cursor: try MusicAccountFields.nullableString(result["cursor"]))
     }
     public func nativeTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) async throws -> MusicNativeTrackPage {
         let result = try await nativeBusiness("tracks", platform: platform,
-            fields: ["collectionId": .string(collectionID), "cursor": cursor.map(JSONValue.string) ?? .null])
+            fields: ["collectionId": .string(collectionID), "cursor": cursor.map(RuntimeValue.string) ?? .null])
         return try nativePage(result, platform: platform)
     }
     public func nativeOptions(platform: MusicAccountPlatform, nativeID: String, sourceKey: String) async throws -> [MusicPlaybackOption] {
@@ -202,7 +200,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         let grant: UUID
         let rejectedURL: URL?
     }
-    private let audioRequests = MusicAccountSingleFlight<AudioRequestKey, JSONValue>()
+    private let audioRequests = MusicAccountSingleFlight<AudioRequestKey, RuntimeValue>()
     private struct CapabilityRequestKey: Hashable, Sendable {
         let platform: MusicAccountPlatform
         let nativeID: String
@@ -288,7 +286,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         let revision: Int
         let operation: String
         let argument: String
-        var rows: [JSONValue]
+        var rows: [RuntimeValue]
         let nextPage: Int?
         let expires: Date
         let byteCount: Int
@@ -992,15 +990,15 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             throw MusicServiceError.staleResult
         }
     }
-    private func page(_ rows: [JSONValue], platform: MusicAccountPlatform, token: AccountSessionToken, operation: String,
+    private func page(_ rows: [RuntimeValue], platform: MusicAccountPlatform, token: AccountSessionToken, operation: String,
                       argument: String, nextPage: Int? = nil, expiresAt: Date? = nil,
-                      queueLeaseID: UUID? = nil, key: String = UUID().uuidString.lowercased()) throws -> JSONValue {
+                      queueLeaseID: UUID? = nil, key: String = UUID().uuidString.lowercased()) throws -> RuntimeValue {
         let at = now(); pages = pages.filter { $0.value.expires > at }
         let expires = min(at.addingTimeInterval(120), expiresAt ?? .distantFuture)
         guard expires > at else { throw MusicServiceError.staleResult }
         // This is the existing native cursor-cache resource budget, independent
         // of upstream hop budgets or the number of songs in a business result.
-        let byteCount = try JSONEncoder().encode(rows).count, budget = 4 * 1024 * 1024
+        let byteCount = try RuntimeJSON.encode(.array(rows)).count, budget = 4 * 1024 * 1024
         guard byteCount <= budget else { throw MusicServiceError.limit }
         while pages.count >= 4 || pages.values.reduce(0, { $0 + $1.byteCount }) + byteCount > budget {
             guard let oldest = pages.min(by: { $0.value.expires < $1.value.expires })?.key else { break }
@@ -1012,10 +1010,10 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         pages[key] = value
         return try slice(value, key: key, offset: 0)
     }
-    private func slice(_ page: Page, key: String, offset: Int) throws -> JSONValue {
+    private func slice(_ page: Page, key: String, offset: Int) throws -> RuntimeValue {
         let end = min(offset + 30, page.rows.count)
         guard offset <= end else { throw MusicServiceError.invalidRequest }
-        let cursor: JSONValue = end < page.rows.count || page.nextPage != nil ? .string("\(key):\(end)") : .null
+        let cursor: RuntimeValue = end < page.rows.count || page.nextPage != nil ? .string("\(key):\(end)") : .null
         // Collections and finite recommendation batches retain every member.
         // An upstream continuation is not proof of a whole-resource total.
         let total = page.nextPage == nil ? page.rows.count : 0
@@ -1024,8 +1022,8 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     private enum BusinessOperation: String {
         case recommendations, collections, tracks, capabilities, resolve
     }
-    private func business(_ fields: [String: JSONValue], queueLease: MusicAccountQueueLease? = nil,
-                          rejectedURL: URL? = nil) async throws -> JSONValue {
+    private func business(_ fields: RuntimeObject, queueLease: MusicAccountQueueLease? = nil,
+                          rejectedURL: URL? = nil) async throws -> RuntimeValue {
         let operation = try MusicAccountFields.string(fields["operation"])
         guard let dispatched = BusinessOperation(rawValue: operation) else { throw MusicServiceError.invalidRequest }
         guard let platform = MusicAccountPlatform(rawValue: try MusicAccountFields.string(fields["platform"])) else {
@@ -1089,7 +1087,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             continuation = (key, request)
             requestedPage = next
         }
-        let result: JSONValue
+        let result: RuntimeValue
         switch dispatched {
         case .recommendations:
             let pageNumber = requestedPage
@@ -1141,7 +1139,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
                     qualities: values, expires: now().addingTimeInterval(120))
             }
             result = .object(["installationId": .string("official:" + instance), "generation": try MusicAccountFields.number(revisions[platform, default: 0]),
-                "siteId": .string(platform.rawValue), "qualities": .array(values.map(JSONValue.string)),
+                "siteId": .string(platform.rawValue), "qualities": .array(values.map(RuntimeValue.string)),
                 "title": .string(platform.title + " 官方音源"), "sourceVersion": .string("1"),
                 "contentHash": .string(SHA256.hash(data: Data(token.generation.uuidString.utf8)).map { String(format: "%02x", $0) }.joined())])
         case .resolve:
@@ -1673,8 +1671,8 @@ extension NativeMusicAccountService: MusicNativeAccountQueueProviding {
                                  cursor: String?) async throws -> MusicNativeTrackPage {
         do {
             try await checkAccountQueue(lease)
-            var fields: [String: JSONValue] = ["platform": .string(lease.platform.rawValue),
-                "cursor": cursor.map(JSONValue.string) ?? .null]
+            var fields: RuntimeObject = ["platform": .string(lease.platform.rawValue),
+                "cursor": cursor.map(RuntimeValue.string) ?? .null]
             switch kind {
             case .collection(let id):
                 fields["operation"] = .string("tracks"); fields["collectionId"] = .string(id)
@@ -1816,7 +1814,7 @@ extension NativeMusicAccountService: MusicNativePlaybackRecoveryAuthorizing {
         _ = try requireNativeHomeBinding(binding)
         return binding
     }
-    private func authorizedAudio(_ fields: [String: JSONValue], platform: MusicAccountPlatform) throws -> MusicNativeAudio {
+    private func authorizedAudio(_ fields: RuntimeObject, platform: MusicAccountPlatform) throws -> MusicNativeAudio {
         let audio = try MusicNativeAccountURLCache.audio(.object(fields))
         let authorization = playbackAuthorizations[platform] ?? MusicQueueAuthorization()
         playbackAuthorizations[platform] = authorization
@@ -1885,7 +1883,7 @@ extension NativeMusicAccountService: MusicNativePlaybackRecoveryAuthorizing {
         return audio
     }
     private func resolveGuestAudio(nativeID: String, selection: MusicPlaybackSelection,
-                                   grant: GuestAudioGrant, provider: any MusicNeteasePublicAudioProvider) async throws -> JSONValue {
+                                   grant: GuestAudioGrant, provider: any MusicNeteasePublicAudioProvider) async throws -> RuntimeValue {
         try checkGuestStandard(selection: selection, grant: grant)
         try await checkNativeHomeBinding(grant.binding)
         try checkGuestStandard(selection: selection, grant: grant)
@@ -1954,7 +1952,7 @@ extension NativeMusicAccountService: MusicNativePlaybackRecoveryAuthorizing {
             _ = try recoveryToken(platform: platform, selection: selection, own: own, expectedToken: token)
             try await checkURLCredential(lease, platform: platform, own: own, revision: revision)
             _ = try recoveryToken(platform: platform, selection: selection, own: own, expectedToken: token)
-            let qualities = try MusicAccountFields.strings(.array(values.map(JSONValue.string)))
+            let qualities = try MusicAccountFields.strings(.array(values.map(RuntimeValue.string)))
             guard qualities.contains(selection.quality) else {
                 if grants[key]?.id == priorGrant { grants.removeValue(forKey: key) }
                 throw MusicServiceError.qualityDisabled
@@ -2061,7 +2059,7 @@ extension NativeMusicAccountService: MusicNativePlaybackRecoveryAuthorizing {
 
     private func resolveCachedAudio(platform: MusicAccountPlatform, mid: String, quality: String,
                                     grant: Grant, credential: AccountCredentialUpdateLease,
-                                    own: UUID, rejectedURL: URL?) async throws -> JSONValue {
+                                    own: UUID, rejectedURL: URL?) async throws -> RuntimeValue {
         try await checkURLCredential(credential, platform: platform, own: own, revision: grant.revision)
         try checkURLGrant(grant, platform: platform, mid: mid, quality: quality, own: own)
         let key = MusicNativeAccountURLCache.Key(
@@ -2098,7 +2096,7 @@ extension NativeMusicAccountService: MusicNativePlaybackRecoveryAuthorizing {
         return value
     }
     private func resolveSharedAudio(platform: MusicAccountPlatform, mid: String, quality: String,
-                                     grant: Grant, own: UUID) async throws -> JSONValue {
+                                     grant: Grant, own: UUID) async throws -> RuntimeValue {
         try checkURLGrant(grant, platform: platform, mid: mid, quality: quality, own: own)
         let lease = try await accounts.credentialUpdateLease(for: grant.token)
         defer { lease.revoke() }
@@ -2114,7 +2112,7 @@ extension NativeMusicAccountService: MusicNativePlaybackRecoveryAuthorizing {
     }
     private func resolveGrantedAudio(platform: MusicAccountPlatform, mid: String, quality: String,
                                      grant: Grant, credential: AccountCredentialUpdateLease,
-                                     own: UUID) async throws -> JSONValue {
+                                     own: UUID) async throws -> RuntimeValue {
         try checkURLGrant(grant, platform: platform, mid: mid, quality: quality, own: own)
         try await checkURLCredential(credential, platform: platform, own: own, revision: grant.revision)
         try checkURLGrant(grant, platform: platform, mid: mid, quality: quality, own: own)
@@ -2699,10 +2697,9 @@ extension NativeMusicAccountService: MusicNativeFMProviding {
 extension NativeMusicAccountService: MusicNativeHomeActionQueueProviding {
     private func homeActionArgument(_ action: MusicHomeAction) throws -> String {
         let (operation, parameters) = MusicPlatformDTO.action(action)
-        let descriptor = JSONValue.object(["operation": .string(operation),
-            "params": try MusicPlatformDTO.json(.object(parameters))])
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        return SHA256.hash(data: try encoder.encode(descriptor)).map { String(format: "%02x", $0) }.joined()
+        let descriptor = RuntimeValue.object(["operation": .string(operation),
+            "params": .object(parameters)])
+        return SHA256.hash(data: try RuntimeJSON.encode(descriptor)).map { String(format: "%02x", $0) }.joined()
     }
 
     public func homeActionPage(_ lease: MusicAccountQueueLease, action: MusicHomeAction,
@@ -2876,10 +2873,9 @@ extension NativeMusicAccountService: MusicNativeDailyStyleProviding {
             // A stale/expired readback cannot revoke a settled write or create
             // a fresh continuation. It may only be installed on the live page.
             let receipt: () throws -> MusicDailyStyleSave = {
-                let encoder = JSONEncoder()
                 let rows = value.songs.expiresAt.map { $0 <= self.now() } == true ? [] : value.songs.rows
                 return .init(page: .init(items: try rows.map {
-                    .init(platform: "wy", data: try encoder.encode($0))
+                    .init(platform: "wy", data: try RuntimeJSON.encode($0))
                 }, total: rows.count, cursor: nil, dailyStyle: value.songs.dailyStyle),
                     saveConfirmed: value.saveConfirmed, selectionChanged: value.selectionChanged)
             }

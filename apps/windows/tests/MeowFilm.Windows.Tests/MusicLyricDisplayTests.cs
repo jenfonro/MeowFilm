@@ -338,7 +338,7 @@ public static partial class MusicLyricDisplayTests
             Check(f.Runtime.Loaded.SequenceEqual([firstId]) && !f.Runtime.Loaded.Contains(unusedId));
             Equal(1, f.Runtime.Invocations); Equal(1, f.Peer.Calls); Equal(0, f.Playback.Opens);
         }));
-        yield return new("Native lyric display source scope cannot restore another recording or accept an unknown field", async () =>
+        yield return new("Native lyric display source scope cannot restore another recording and ignores unused input fields", async () =>
         {
             await using var store = new MemoryStore();
             await using var owner = new MusicLibraryOwner(store);
@@ -348,7 +348,8 @@ public static partial class MusicLyricDisplayTests
             Equal("restored", Ok(await owner.ExecuteAsync("music.lyrics.display.get", new { song })).GetProperty("state").GetString());
             Equal("none", Ok(await owner.ExecuteAsync("music.lyrics.display.get", new { song = Song("43") })).GetProperty("state").GetString());
             int writes = store.Writes;
-            Code(await owner.ExecuteAsync("music.lyrics.display.save", new { song, sourceKey = key, lines, cookie = "SYNTHETIC" }), "INVALID_REQUEST");
+            Ok(await owner.ExecuteAsync("music.lyrics.display.save", new { song, sourceKey = key, lines, cookie = "SYNTHETIC" }));
+            Check(!Ok(await owner.ExecuteAsync("music.lyrics.display.get", new { song })).GetRawText().Contains("SYNTHETIC", StringComparison.Ordinal));
             Code(await owner.ExecuteAsync("music.lyrics.display.save", new { song = Song("43"), sourceKey = key, lines }), "TARGET_CHANGED");
             Equal(writes, store.Writes);
         });
@@ -357,10 +358,14 @@ public static partial class MusicLyricDisplayTests
             await using var store = new MemoryStore();
             await using var owner = new MusicLibraryOwner(store);
             var (song, key) = await Seed(owner);
+            Ok(await owner.ExecuteAsync("music.lyrics.display.save", new { song, sourceKey = key,
+                lines = new[] { new { time = 1, text = "a", url = "https://synthetic.invalid/" } } }));
+            var restored = Ok(await owner.ExecuteAsync("music.lyrics.display.get", new { song }));
+            Check(!restored.GetRawText().Contains("synthetic.invalid", StringComparison.Ordinal));
+            Equal("a", restored.GetProperty("lines")[0].GetProperty("text").GetString());
             var defects = new object[] {
                 new[] { new { time = 2, text = "a" }, new { time = 1, text = "b" } },
                 new[] { new { time = -1, text = "negative seek" } },
-                new[] { new { time = 1, text = "a", url = "https://synthetic.invalid/" } },
                 new[] { new { time = 1, text = "null\0" } },
                 Array.Empty<object>()
             };

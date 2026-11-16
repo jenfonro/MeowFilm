@@ -23,14 +23,17 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IDocumentStore st
         try
         {
             var saved = await document.ReadAsync(token).ConfigureAwait(false) ?? Empty;
-            Validate(saved);
-            return Providers.Select(provider => Snapshot(saved, provider.GetProperty("provider").GetString()!)).ToArray();
+            var accounts = Accounts(saved);
+            return Providers.Select(provider => Snapshot(accounts, provider.GetProperty("provider").GetString()!)).ToArray();
         }
         catch (DocumentStoreException error) { throw StorageError(error); }
     }
 
-    internal async Task<PanAccountSnapshot> ReadAsync(string provider, CancellationToken token) =>
-        (await ReadAsync(token).ConfigureAwait(false)).Single(account => account.Provider == provider);
+    internal async Task<PanAccountSnapshot> ReadAsync(string provider, CancellationToken token)
+    {
+        try { return Snapshot(Accounts(await document.ReadAsync(token).ConfigureAwait(false) ?? Empty), provider); }
+        catch (DocumentStoreException error) { throw StorageError(error); }
+    }
 
     internal Task<PanAccountSnapshot> SaveAsync(string provider, IReadOnlyDictionary<string, object> credentials,
         CancellationToken token = default) => ChangeAsync(provider, credentials, token);
@@ -39,9 +42,9 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IDocumentStore st
 
     private async Task<PanAccountSnapshot> ChangeAsync(string provider, IReadOnlyDictionary<string, object> credentials, CancellationToken token)
     {
-        if (credentials is null || credentials.Values.Any(value => value is not (string or long)))
-            throw new BridgeException("INVALID_REQUEST");
-        var replacement = JsonSerializer.SerializeToElement(credentials);
+        var fields = Fields(provider, "INVALID_REQUEST");
+        var replacement = JsonSerializer.SerializeToElement(credentials.Where(item => fields.Contains(item.Key))
+            .ToDictionary(item => item.Key, item => item.Value));
         ValidateCredentials(provider, replacement, "INVALID_REQUEST");
         JsonElement saved;
         try
@@ -49,19 +52,27 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IDocumentStore st
             saved = await document.UpdateAsync(current =>
             {
                 var root = current ?? Empty;
-                Validate(root);
-                var accounts = root.GetProperty("accounts").EnumerateObject().ToDictionary(item => item.Name, item => item.Value.Clone());
-                long revision = Snapshot(root, provider).Revision + 1;
+                var accounts = Accounts(root);
+                var account = Account(accounts, provider);
+                long revision = account is { } old ? Revision(old) + 1 : 1;
                 if (revision > BridgeCodec.MaximumSafeInteger) throw new BridgeException("STORAGE_ERROR");
-                accounts[provider] = JsonSerializer.SerializeToElement(new { revision, credentials = replacement });
-                return JsonSerializer.SerializeToElement(new { version = 1, accounts });
+                var next = account ?? JsonSerializer.SerializeToElement(new { });
+                var nextCredentials = replacement;
+                if (account is { } prior && BridgeCodec.RequiredProperty(prior, "credentials") is { ValueKind: JsonValueKind.Object } stored)
+                {
+                    // Replacing known credentials does not erase extensions owned by a newer consumer.
+                    nextCredentials = PreserveExtensions(stored, replacement, fields);
+                }
+                next = SettingsDocument.SetMember(next, "revision", JsonSerializer.SerializeToElement(revision));
+                next = SettingsDocument.SetMember(next, "credentials", nextCredentials);
+                return SettingsDocument.SetMember(root, "accounts", SettingsDocument.SetMember(accounts, provider, next));
             }, token).ConfigureAwait(false);
         }
         catch (DocumentStoreException error) { throw StorageError(error); }
         // A runtime failure cannot change the successful local commit.
         try { (runtime as IRuntimeSettingsNotifications)?.SettingsChanged("pan.accounts"); }
         catch (Exception) { }
-        return Snapshot(saved, provider);
+        return Snapshot(Accounts(saved), provider);
     }
 
     private static Exception StorageError(DocumentStoreException error) => error.Error switch
@@ -72,47 +83,54 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IDocumentStore st
         _ => new BridgeException("STORAGE_ERROR")
     };
 
-    private static void Shape(JsonElement value, string code, params string[] names)
+    private static JsonElement Accounts(JsonElement root)
     {
-        if (value.ValueKind != JsonValueKind.Object ||
-            !value.EnumerateObject().Select(item => item.Name).Order().SequenceEqual(names.Order()))
-            throw new BridgeException(code);
+        try
+        {
+            if (BridgeCodec.RequiredProperty(root, "version").GetInt32() != 1) throw new BridgeException("CORRUPT_STORAGE");
+            var accounts = BridgeCodec.RequiredProperty(root, "accounts");
+            if (accounts.ValueKind != JsonValueKind.Object) throw new BridgeException("CORRUPT_STORAGE");
+            return accounts;
+        }
+        catch { throw new BridgeException("CORRUPT_STORAGE"); }
     }
 
-    private static void Validate(JsonElement root)
+    private static JsonElement? Account(JsonElement accounts, string provider)
     {
-        const string code = "CORRUPT_STORAGE";
-        Shape(root, code, "version", "accounts");
-        if (root.GetProperty("version").ValueKind != JsonValueKind.Number ||
-            !root.GetProperty("version").TryGetInt32(out int version) || version != 1 ||
-            root.GetProperty("accounts").ValueKind != JsonValueKind.Object)
-            throw new BridgeException(code);
-        var accounts = root.GetProperty("accounts").EnumerateObject().ToArray();
-        if (accounts.Select(item => item.Name).Distinct().Count() != accounts.Length)
-            throw new BridgeException(code);
-        foreach (var account in accounts)
-        {
-            Shape(account.Value, code, "revision", "credentials");
-            if (account.Value.GetProperty("revision").ValueKind != JsonValueKind.Number ||
-                !account.Value.GetProperty("revision").TryGetInt64(out long revision) ||
-                revision is <= 0 or > BridgeCodec.MaximumSafeInteger)
-                throw new BridgeException(code);
-            ValidateCredentials(account.Name, account.Value.GetProperty("credentials"), code);
-        }
+        var matches = accounts.EnumerateObject().Where(item => item.NameEquals(provider)).ToArray();
+        if (matches.Length > 1) throw new BridgeException("CORRUPT_STORAGE");
+        return matches.Length == 0 ? null : matches[0].Value;
     }
+
+    private static long Revision(JsonElement account)
+    {
+        try
+        {
+            long revision = BridgeCodec.RequiredProperty(account, "revision").GetInt64();
+            if (revision is <= 0 or > BridgeCodec.MaximumSafeInteger) throw new BridgeException("CORRUPT_STORAGE");
+            return revision;
+        }
+        catch { throw new BridgeException("CORRUPT_STORAGE"); }
+    }
+
+    private static HashSet<string> Fields(string provider, string code)
+    {
+        var declaration = Providers.SingleOrDefault(value => value.GetProperty("provider").GetString() == provider);
+        if (declaration.ValueKind == JsonValueKind.Undefined) throw new BridgeException(code);
+        return declaration.GetProperty("credentialFields").EnumerateArray().Select(value => value.GetString()!).ToHashSet();
+    }
+
+    private static JsonElement PreserveExtensions(JsonElement original, JsonElement replacement, IReadOnlySet<string> fields) =>
+        SettingsDocument.Patch(original, replacement.EnumerateObject().ToDictionary(field => field.Name, field => field.Value), fields);
 
     private static void ValidateCredentials(string provider, JsonElement credentials, string code)
     {
-        var declaration = Providers.SingleOrDefault(value => value.GetProperty("provider").GetString() == provider);
-        if (declaration.ValueKind == JsonValueKind.Undefined || credentials.ValueKind != JsonValueKind.Object)
-            throw new BridgeException(code);
-        var allowed = declaration.GetProperty("credentialFields").EnumerateArray().Select(value => value.GetString()!).ToHashSet();
-        var fields = credentials.EnumerateObject().ToArray();
-        if (fields.Select(item => item.Name).Distinct().Count() != fields.Length)
-            throw new BridgeException(code);
+        var allowed = Fields(provider, code);
+        if (credentials.ValueKind != JsonValueKind.Object) throw new BridgeException(code);
+        var fields = credentials.EnumerateObject().Where(item => allowed.Any(name => item.NameEquals(name))).ToArray();
+        if (fields.Select(item => item.Name).Distinct().Count() != fields.Length) throw new BridgeException(code);
         foreach (var field in fields)
         {
-            if (!allowed.Contains(field.Name)) throw new BridgeException(code);
             if (field.Name is "refreshedAt" or "expiresAt")
             {
                 if (field.Value.ValueKind != JsonValueKind.Number || !field.Value.TryGetInt64(out long number) ||
@@ -125,14 +143,23 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IDocumentStore st
         }
     }
 
-    private static PanAccountSnapshot Snapshot(JsonElement root, string provider)
+    private static PanAccountSnapshot Snapshot(JsonElement accounts, string provider)
     {
-        var accounts = root.GetProperty("accounts");
-        if (!accounts.TryGetProperty(provider, out var value)) return new(provider, 0, false, "signedOut", []);
-        var fields = value.GetProperty("credentials").EnumerateObject().Where(item =>
-            item.Value.ValueKind == JsonValueKind.String ? item.Value.GetString()!.Length > 0 :
-                item.Value.ValueKind == JsonValueKind.Number && item.Value.GetInt64() > 0).Select(item => item.Name).ToArray();
-        return new(provider, value.GetProperty("revision").GetInt64(), fields.Length > 0,
-            fields.Length > 0 ? "signedIn" : "signedOut", fields);
+        var allowed = Fields(provider, "INVALID_REQUEST");
+        try
+        {
+            var value = Account(accounts, provider);
+            if (value is null) return new(provider, 0, false, "signedOut", []);
+            long revision = Revision(value.Value);
+            var credentials = BridgeCodec.RequiredProperty(value.Value, "credentials");
+            ValidateCredentials(provider, credentials, "CORRUPT_STORAGE");
+            var fields = credentials.EnumerateObject().Where(item => allowed.Any(name => item.NameEquals(name))).Where(item =>
+                item.Value.ValueKind == JsonValueKind.String ? item.Value.GetString()!.Length > 0 : item.Value.GetInt64() > 0)
+                .Select(item => item.Name).ToArray();
+            return new(provider, revision, fields.Length > 0, fields.Length > 0 ? "signedIn" : "signedOut", fields);
+        }
+        catch (BridgeException error) when (error.Code is "CORRUPT_STORAGE" or "INVALID_MESSAGE")
+        { return PanAccountSnapshot.Corrupt(provider); }
+        catch (InvalidOperationException) { return PanAccountSnapshot.Corrupt(provider); }
     }
 }

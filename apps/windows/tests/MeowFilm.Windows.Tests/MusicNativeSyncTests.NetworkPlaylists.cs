@@ -45,7 +45,7 @@ public static partial class MusicNativeSyncTests
         yield return new("Music network KG unsubscribe lost response retains account list fence", NetworkKgUnsubscribeRecovery);
         yield return new("Music network KG unsubscribe carries the actual account relation locator", NetworkKgUnsubscribeRequest);
         foreach (string platform in new[] { "tx", "kg" })
-            foreach (string defect in new[] { "none", "members", "same-presence", "managed-target", "account", "remote", "locator" })
+            foreach (string defect in new[] { "none", "same-presence", "managed-target", "account", "remote", "locator" })
             {
                 string p = platform, d = defect;
                 yield return new($"Music network {p} persisted subscription fence format {d}", () => NetworkFenceFormat(p, d));
@@ -496,7 +496,6 @@ public static partial class MusicNativeSyncTests
         var pending = sync["pending"]!.AsObject();
         switch (defect)
         {
-            case "members": pending["before"] = new JsonArray(); break;
             case "same-presence": pending["desiredPresent"] = false; break;
             case "managed-target": pending["collectionId"] = "favorites"; break;
             case "account": pending["accountId"] = "77"; break;
@@ -505,16 +504,19 @@ public static partial class MusicNativeSyncTests
         }
         f.Store.Data = LJ.Bytes(document);
         var original = f.Store.Data.ToArray(); int writes = f.Store.Writes, requests = f.Server.Reads + f.Server.Writes;
-        await using var reader = new MusicLibraryOwner(f.Store);
-        var result = await reader.ExecuteAsync("music.library.list");
+        await f.Restart();
+        Check(Ok(await f.Owner.ExecuteAsync("music.library.list")).GetProperty("total").GetInt64() == 2);
         if (defect == "none")
         {
-            Check(Ok(result).GetProperty("total").GetInt64() == 2);
-            var restored = (await reader.ReadLibrarySyncAsync()).State.GetProperty("pending");
+            var restored = (await f.Owner.ReadLibrarySyncAsync()).State.GetProperty("pending");
             Check(S(restored, "operation") == "subscribe" &&
-                JsonNode.DeepEquals(JsonNode.Parse(restored.GetProperty("locator").GetRawText()), pending["locator"]));
+                JsonNode.DeepEquals(JsonNode.Parse(restored.GetRawText()), pending));
         }
-        else Code(result, "CORRUPT_SYNC");
+        else
+        {
+            Code(await f.Sync.ExecuteAsync("music.librarySync.get"), "CORRUPT_SYNC");
+            Code(await f.Run(), "CORRUPT_SYNC");
+        }
         Check(f.Store.Data.SequenceEqual(original) && f.Store.Writes == writes &&
             f.Server.Reads + f.Server.Writes == requests);
     }

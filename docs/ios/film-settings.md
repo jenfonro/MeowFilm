@@ -2,7 +2,7 @@
 
 设置首页提供音乐设置、影视设置，以及通用分组的偏好设置、缓存管理；底部独立分组为清空本机数据。影视下提供搜索净化设置、智能匹配设置、猫源、视频源、刮削设置、网盘账号和智能播放设置。智能播放设置收纳偏好、自动准备、Manual 匹配源管理和匹配禁用管理。智能匹配下为剧集列表净化规则、集数匹配规则、电影匹配规则、站点净化设置；后者仍编辑站点名关键词，不是正则。历史继续由 Node 记录，但不在设置显示入口。播放设置及资料遵循[统一播放契约](../runtime/film-playback.md)。
 
-普通配置直接读写原生设置文档，不以运行器在线为前提；唯一 owner、离线提交及通知规则见[共同设置契约](../common/settings-storage.md)，实际 namespace、保护和迁移见[存储](storage.md#影视设置)。本文保留 iOS 现有界面，不套用 Windows 列表或弹框调整。
+普通配置直接读写原生设置文档，不以运行器在线为前提；唯一 owner、离线提交及通知规则见[共同设置契约](../common/settings-storage.md)，实际 namespace、保护和文档消费见[存储](storage.md#影视设置)。本文保留 iOS 现有界面，不套用 Windows 列表或弹框调整。
 
 手机一般三级，智能匹配规则和来源详情可到第四级，规则测试从编辑页进入独立页面。当前标题放 App 自有页头，内容只保留实际分组。分组采用公共设置卡片、动态字体与至少 44 pt 点击区；字段、选择与开关遵循[设置语义配色](architecture.md#设置语义配色)，背景／页头继续跟随主题。返回保持位置；规则草稿由 App 持有的 `FilmSettingsModel.rules` 保留，不随页面销毁。
 
@@ -70,6 +70,8 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 
 `PanAccountsModel.start()` 同步读取原生 providers／accounts，无配置读取进度，不连接运行器或自动刷新账号。`PanAccountService(document:request:)`／`PanAccountService(document:connection:)` 的 replace／clear 直接提交同一加密文档；仅有配置时显示「未验证」，真实在线观察才可显示已登录／失效，且绑定当前 revision、字段及凭据内容身份。
 
+单个账号记录损坏时，`PanAccount` 与运行器 `settings.get` 的 `{provider,errorCode:"CORRUPT_STORAGE"}` 对齐；不伪造 revision、configured、fields 或 status。该行显示「账号数据损坏」、不提供账号操作，健康兄弟仍可读取、保存和验证。文档根或解密失败仍整体报错；坏账号不自动重置，不覆盖原始记录。错误快照不能成为扫码确认或刷新成功回执，原 provider／session 身份、凭据签名及提交 CAS 约束不变。
+
 扫码、二维码轮询、显式刷新与真实网盘请求仍由运行器执行；新凭据通过受信 `pan.accounts` CAS 写回同一原生 owner。手动保存完成与扫码 confirmed 分开，不因离线无法验证而撤回已保存配置。关闭、离页及后台停止扫码轮询，已确认账号不因关闭浮层退出；手动表单仍只有当前草稿、不回显旧 Cookie／密码／token，保存则写入上述原生加密文档。
 
 ### 既有 owner 与专用验证
@@ -81,7 +83,8 @@ App 关闭先停止接纳并排空规则执行／来源任务；规则适配的 
 下列为验证入口及职责，不代表本轮已经执行；编译、传输替身与真实 App 业务须分别记录。
 
 - Swift 规则精确 filter：`FilmRuleLifecycleTests|FilmRulePersistenceTests|FilmRuleReferenceTests|FilmRuleTextTests`，覆盖原生分组 CAS／回执／失败、离线默认及文本规范化、预览取消和物理排空、UTF16 每码元往返；传输替身不代表真实 Node。
-- `FilmSettingsDocumentTests|FilmSettingsMigrationTests` 覆盖文档 CAS、按块通知及已知旧配置单向迁移；领域测试 `FilmCatNativeSettingsTests`、`PanAccountServiceTests|PanAccountsModelTests|PanLoginModelTests`、`FilmTMDBServiceTests`、`FilmPlaybackSettingsModelTests` 分别核对原生保存和在线业务边界。
+- `FilmSettingsDocumentTests` 覆盖文档 CAS、按块通知及精确 JSON 扩展保留；领域测试 `FilmCatNativeSettingsTests`、`PanAccountServiceTests|PanAccountsModelTests|PanLoginModelTests`、`FilmTMDBServiceTests`、`FilmPlaybackSettingsModelTests` 分别核对原生保存和在线业务边界。
+- `MeowfilmNativeSettingsHostTests/testNativeSettingsPreserveExactJSONThroughNodeMobile` 在真实 App 内先读取 Node 设置快照，再原生提交普通 TMDB 设置及 synthetic 高精度小数、大整数、溢出指数和不同 UTF-8 键的扩展；经实际通知、私密设置读取及 HTTP `settings.get` 返回后由 `RuntimeJSON` 比较精确材料。拒绝非空账号凭据基线，teardown 恢复原设置并等待运行器应用；主机测试或编译不能替代此 NodeMobile 链验证。
 - `MeowfilmRuntimeTests/FilmSettingsPlatformTests`：真实前台 UIKit 草稿、导航生命周期、控件、失败／重试、确认、取消、窄／宽视口和大字体截图。普通规则配置使用独立原生文档，规则执行才走 NodeMobile；来源状态／调用仍有协议夹具，不能替代实际脚本装载验收。
 - `MeowfilmFilmSettingsHostTests`：原生规则保存／草稿一致性与真实 Node 预览，固定共享 reference cases 每例两次、Unicode 属性／前后瞻／捕获／g-y／孤立码元，以及正则取消／截止／长编译／全局删除后的恢复；固定 JSON 以内嵌 Swift 常量进入宿主测试，不依赖产品载荷包含 test 目录。Node 宿主的 `native-json` 用例另保留通用无 I/O、内存失败、循环、排队／关闭与真实 C 入口不可捕获中断覆盖。Cat HTTP 五阶段与原生来源／客户端目录持久化、落盘前换代拒旧检测、前台确认／失败弹窗仍保留。显式重启不是实际内存超限实验；后台快照不能替代前台系统弹窗。`MeowfilmRuntimeHostTests` 在同一个 NodeMobile 中并发调用 source 与影视规则，验证共享载体但 Runtime／Context 独立，不另启运行器。
 

@@ -55,7 +55,7 @@ for (const platform of ['ios', 'windows']) {
       export function reportIOSRuntimeStartFailure() { throw new Error('FIXTURE_START_FAILED'); }
     ` : `
       export async function startWindowsAppRuntime({ createRuntime }) {
-        globalThis.fixtureRuntime = await createRuntime(globalThis.fixtureConfiguration).start();
+        globalThis.fixtureRuntime = await (await createRuntime(globalThis.fixtureConfiguration)).start();
       }
       export function reportWindowsRuntimeStartFailure() { throw new Error('FIXTURE_START_FAILED'); }
     `;
@@ -151,11 +151,10 @@ for (const platform of ['ios', 'windows']) {
         assert.equal(changed.value.title, 'metadata-B', 'provider mutation must revoke the old film cache');
         assert.deepEqual(await client.call('film.data.metadata', otherRequest), other);
         assert.deepEqual(counts, { A: 1, B: 1, D: 1 }, 'TMDB mutation preserves unrelated Douban cache');
-        const rejected = await client.call('tmdb.data.settings.update', { unknown: true });
-        assert.equal(rejected.ok, false);
-        assert.equal(rejected.code, 'INVALID_REQUEST');
+        const unchanged = await client.call('tmdb.data.settings.update', { unknown: true });
+        assert.equal(unchanged.ok, true);
         assert.deepEqual(await client.call('film.data.metadata', request), changed);
-        assert.deepEqual(counts, { A: 1, B: 1, D: 1 }, 'a rejected mutation does not invalidate valid film data');
+        assert.deepEqual(counts, { A: 1, B: 1, D: 1 }, 'unused fields do not invalidate valid film data');
         const release = await client.call('film.session.media.release', {});
         assert.equal(release.ok, false);
         assert.equal(release.contract, 'film.playback.v1');

@@ -27,7 +27,6 @@ enum MusicNativeCandidateDiscoveryFixture {
         document.queue["entries"] = .array([.obj([("id", .string("entry-1")), ("songId", value["songId"])])])
         document.queue["currentId"] = .string("entry-1"); document.queue["serial"] = .n(1); document.queue["revision"] = .n(1)
         document.playback["position"] = .obj([("occurrenceId", .string("entry-1")), ("seconds", .n(23))])
-        try document.validate()
         return NativeMusicMemoryDocument(try document.encode(changed: ["library", "queue", "playback"]))
     }
     static func target(_ snapshot: MusicCandidateDiscoverySnapshot, platform: String = "wy") -> MusicCandidateDiscoveryTarget? {

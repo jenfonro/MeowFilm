@@ -1,7 +1,6 @@
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Text.RegularExpressions;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
@@ -53,9 +52,8 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
             int index = 0;
             foreach (var page in pages.EnumerateArray())
             {
-                var restored = Restore(JsonNode.Parse(page.GetRawText()), song, token);
+                var restored = Restore(ProjectPage(page, platform, token), song, token);
                 var current = JsonSerializer.SerializeToElement(restored);
-                ReadPage(current, platform, token);
                 result[index++] = current;
             }
             token.ThrowIfCancellationRequested();
@@ -79,15 +77,7 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
                 writer.WriteStartArray("pages");
                 foreach (var page in snapshot.Pages)
                 {
-                    ReadPage(page, snapshot.Platform, token);
-                    writer.WriteStartObject();
-                    foreach (var property in page.EnumerateObject())
-                        if (PageField(property.Name))
-                        {
-                            writer.WritePropertyName(property.Name);
-                            JsonSerializer.Serialize(writer, Reference(JsonNode.Parse(property.Value.GetRawText()), token));
-                        }
-                    writer.WriteEndObject();
+                    JsonSerializer.Serialize(writer, ProjectPage(page, snapshot.Platform, token));
                     writer.Flush();
                     if (output.Length > LocalDocumentStore.MaximumDocumentBytes)
                         throw new DocumentStoreException(DocumentStoreError.Limit);
@@ -104,78 +94,86 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
         { throw new DocumentStoreException(DocumentStoreError.Corrupt); }
     }
 
-    private static void ReadPage(JsonElement page, string platform, CancellationToken token)
+    private static JsonObject ProjectPage(JsonElement page, string platform, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         Require(page.ValueKind == JsonValueKind.Object && MusicCatalogDto.Text(page, "platform") == platform);
         Require(!page.TryGetProperty("ok", out var ok) || ok.ValueKind == JsonValueKind.True);
-        bool hasContent = false;
-        foreach (var property in page.EnumerateObject())
-        {
-            if (!PageField(property.Name))
+        var result = new JsonObject { ["platform"] = platform };
+        foreach (string name in new[] { "entries", "sections", "items" })
+            if (page.TryGetProperty(name, out var rows))
             {
-                continue;
+                Require(rows.ValueKind == JsonValueKind.Array);
+                result[name] = new JsonArray(rows.EnumerateArray().Select(row =>
+                    Project(row, name == "sections" ? "section" : "card", token)).ToArray());
             }
-            if (property.Name == "platform") continue;
-            hasContent = true;
-            CheckContent(property.Value, token);
-        }
-        Require(hasContent);
-        _ = MusicCatalogDto.Read(page, platform, "home", "");
+        Require(result.Count > 1);
+        return result;
     }
 
-    private static bool PageField(string name) => name is "platform" or "entries" or "sections" or "items";
-
-    private static JsonNode? Reference(JsonNode? value, CancellationToken token)
+    private static JsonNode? Project(JsonElement value, string kind, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        if (value is JsonObject song && song["sources"] is JsonArray && song.ContainsKey("title"))
+        if (value.ValueKind != JsonValueKind.Object) return null;
+        if (value.TryGetProperty("display", out var display) && display.ValueKind == JsonValueKind.False)
+            return new JsonObject { ["display"] = false };
+        string fields = kind switch
         {
-            string id = song["songId"]!.GetValue<string>();
-            Require(id.Length > 0);
-            return new JsonObject { ["songId"] = id };
-        }
-        if (value is JsonObject obj)
+            "section" => "id title type layout available errorCode requiresAccount display",
+            "action" => "type id branch pageCode",
+            "channel" => "id pageCode",
+            "locator" => "kind id playlistId dirId listId version totalVersion creatorId creatorListId",
+            "preview" => "title artist cover rank lastRank",
+            "song" => "songId",
+            _ => "songId id key name subtitle creator cover kind pageCode available errorCode requiresAccount display placement canPlay rankText salesText relationship count presentation dayOfMonth decoration updateFrequency"
+        };
+        var result = new JsonObject();
+        foreach (string field in fields.Split(' '))
+            if (value.TryGetProperty(field, out var scalar))
+            {
+                if (scalar.ValueKind is JsonValueKind.Object or JsonValueKind.Array) return null;
+                result[field] = JsonNode.Parse(scalar.GetRawText());
+            }
+        if (kind == "song") return result;
+        bool bound = value.TryGetProperty("songId", out var id) && id.ValueKind == JsonValueKind.String;
+        if (kind is "card" or "preview" && value.TryGetProperty("song", out var song))
         {
-            bool bound = obj["song"] is JsonObject songValue && songValue["sources"] is JsonArray;
-            return new JsonObject(obj.Where(pair => !bound || pair.Key is not ("title" or "artist" or "cover"))
-                .Select(pair => KeyValuePair.Create(pair.Key, Reference(pair.Value, token))));
+            result["song"] = Project(song, "song", token);
+            bound = true;
         }
-        if (value is JsonArray array) return new JsonArray(array.Select(item => Reference(item, token)).ToArray());
-        return value?.DeepClone();
+        if (bound)
+            foreach (string field in new[] { "title", "artist", "cover" }) result.Remove(field);
+        foreach (string field in kind switch
+        {
+            "section" => new[] { "action" },
+            "card" => new[] { "action", "locator", "playbackSource" },
+            "action" => new[] { "channel", "locator" },
+            _ => Array.Empty<string>()
+        })
+            if (value.TryGetProperty(field, out var nested))
+                result[field] = Project(nested, field == "playbackSource" ? "action" : field, token);
+        if (kind == "section" && value.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
+            result["items"] = new JsonArray(items.EnumerateArray().Select(item => Project(item, "card", token)).ToArray());
+        if (kind == "card" && value.TryGetProperty("preview", out var preview) && preview.ValueKind == JsonValueKind.Array)
+            result["preview"] = new JsonArray(preview.EnumerateArray().Take(3).Select(item => Project(item, "preview", token)).ToArray());
+        return result;
     }
     private static JsonNode? Restore(JsonNode? value, Func<string, JsonElement?> song, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        if (value is JsonObject reference && reference.Count == 1 && reference["songId"] is JsonValue id)
+        if (value is JsonObject reference && reference["songId"] is JsonValue id)
         {
             var current = song(id.GetValue<string>());
             Require(current is not null);
-            return JsonNode.Parse(current!.Value.GetRawText());
+            var restored = JsonNode.Parse(current!.Value.GetRawText())!.AsObject();
+            foreach (var field in reference)
+                if (field.Key != "songId") restored[field.Key] = field.Value?.DeepClone();
+            return restored;
         }
         if (value is JsonObject obj)
             return new JsonObject(obj.Select(pair => KeyValuePair.Create(pair.Key, Restore(pair.Value, song, token))));
         if (value is JsonArray array) return new JsonArray(array.Select(item => Restore(item, song, token)).ToArray());
         return value?.DeepClone();
-    }
-
-    private static void CheckContent(JsonElement value, CancellationToken token)
-    {
-        token.ThrowIfCancellationRequested();
-        if (value.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var property in value.EnumerateObject())
-            {
-                // The DTO retains raw actions and songs. A durable document must
-                // not smuggle credentials or request authority through those fields.
-                Require(!Regex.IsMatch(property.Name,
-                    "cookie|token|password|secret|credential|authorization|api[-_]?key|^(headers|scope|cursor|continuation|expiresAt|snapshot|accountStamp)$",
-                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant));
-                CheckContent(property.Value, token);
-            }
-        }
-        else if (value.ValueKind == JsonValueKind.Array)
-            foreach (var item in value.EnumerateArray()) CheckContent(item, token);
     }
 
     private static bool IsCacheFailure(Exception error) => error is DocumentStoreException || IsFormatError(error);

@@ -15,11 +15,11 @@
 | `kg` | 搜索、歌曲／集合、首页／榜单／目录、个人目录、官方音频、歌词、chorus、账号与同步；Windows 反馈仍有[集成缺口](music-playback-feedback.md#平台边界) |
 | `kw`、`mg` | 现有公共搜索、歌曲／歌单和歌词消费，不新增账号或官方播放能力 |
 
-`MusicPlatformCatalog` 将共同 track／page／collection 等结果映射到原生模型。歌曲通过 `MusicLibraryOwner` 采用到唯一仓库；返回原生资料含永久 songId 和平台 `sources`，每个来源保留 `sourceKey/source/musicInfo`，平台定位仍在 musicInfo。原生不以返回 ID／条数或旧页面快照二次证明普通结果。
+`MusicPlatformCatalog` 将共同 track／page／collection 等结果映射到原生模型。歌曲通过 `MusicLibraryOwner` 采用到唯一仓库；返回原生资料含永久 songId 和平台 `sources`，每个来源保留 `sourceKey/source/musicInfo`，平台定位仍在 musicInfo。原生不以返回 ID／条数或旧页面快照二次证明普通结果；直接歌曲节点保留原卡片可见性、权限提示与播放来源。必须 items／目录列表在所属操作消费，缺失与合法空列表分开，坏项不能拖累健康兄弟或被全部丢弃成成功空页。
 
 ## 分页、首页与榜单
 
-KW／MG 集合 continuation 传完整 hop `{page,batch,index}`；QQ／KG 页保留实际 consumed offset，原生 UI 传回真实 continuation。目录预览使用已实际取得的 preview.song，排名预览投影当前仓库资料，不为卡片补发音频或跨平台搜索。
+KW／MG 集合 continuation 传完整 hop `{page,batch,index}`；QQ／KG 页保留实际 consumed offset，原生 UI 传回真实 continuation。目录登记跳过隐藏卡片，预览只使用实际展示的前三项 preview.song，排名预览投影当前仓库资料，不为卡片补发音频或跨平台搜索。
 
 `MusicHomeSnapshotStore` 使用 `music.home.v2` 保存当前首页展示；页面恢复与实时请求分离，实际图片由音乐专用共享 `ArtworkService` 处理。卡片页与个人目录 UI 见[目录](music-catalog.md)、[个人目录](music-catalog-personal-ui.md)。
 

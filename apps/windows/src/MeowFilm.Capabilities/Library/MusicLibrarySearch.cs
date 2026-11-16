@@ -32,12 +32,24 @@ public sealed partial class MusicLibraryOwner
         LJ.Obj(("order", LJ.Arr(SearchPlatforms)), ("enabled", LJ.Arr(SearchPlatforms)),
             ("pages", 1), ("concurrency", 1), ("cacheMinutes", 60));
 
-    private JsonObject SearchPolicy(JsonObject doc) => Value(doc, SearchPolicyArea) as JsonObject ??
+    private JsonObject SearchPolicy(JsonObject doc)
+    {
+        var value = Area(doc, SearchPolicyArea) ??
         LJ.Obj(("schema", 3), ("revision", 0), ("songs", EmptySearchKind()),
             ("playlists", EmptySearchKind()));
+        try { ValidateSearchPolicy(value); }
+        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
+        return value;
+    }
 
-    private JsonObject SearchHistory(JsonObject doc) => Value(doc, SearchHistoryArea) as JsonObject ??
+    private JsonObject SearchHistory(JsonObject doc)
+    {
+        var value = Area(doc, SearchHistoryArea) ??
         LJ.Obj(("schema", 2), ("revision", 0), ("items", new JsonArray()));
+        try { ValidateSearchHistory(value); }
+        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
+        return value;
+    }
 
     private static string SearchText(JsonNode? value)
     {
@@ -107,7 +119,6 @@ public sealed partial class MusicLibraryOwner
             ValidateSearchPolicy(policy);
             if (method == "music.search.settings.get")
             {
-                LJ.Fields(p, "");
                 return (LJ.Obj(("settings", policy)), false);
             }
 
@@ -117,6 +128,8 @@ public sealed partial class MusicLibraryOwner
             var next = LJ.Obj(("schema", 3), ("revision", checked(Revision(policy) + 1)),
                 ("songs", p["songs"]?.DeepClone()), ("playlists", p["playlists"]?.DeepClone()));
             ValidateSearchPolicy(next);
+            foreach (string kind in new[] { "songs", "playlists" })
+                next[kind] = LJ.Merge(LJ.Object(policy[kind]).DeepClone().AsObject(), LJ.Object(next[kind]));
             Set(doc, SearchPolicyArea, next);
             return (LJ.Obj(("settings", next)), true);
         }
@@ -125,7 +138,6 @@ public sealed partial class MusicLibraryOwner
         var entries = LJ.Array(history["items"]);
         if (method == "music.search.history.get")
         {
-            LJ.Fields(p, "");
             return (LJ.Obj(("history", history)), false);
         }
         if (method == "music.search.history.record")

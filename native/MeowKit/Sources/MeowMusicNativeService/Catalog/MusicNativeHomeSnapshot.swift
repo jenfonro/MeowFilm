@@ -74,7 +74,7 @@ enum MusicNativeHomeSnapshot {
         var result = page
         result.sections = try page.sections.map { row in
             var section = row
-            section.items = try items(row.items)
+            section.items = row.tabs.isEmpty ? try items(row.items) : []
             section.tabs = try row.tabs.map { .init(id: $0.id, title: $0.title, items: try items($0.items)) }
             return section
         }

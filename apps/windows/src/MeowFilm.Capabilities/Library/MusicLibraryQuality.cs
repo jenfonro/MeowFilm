@@ -10,11 +10,11 @@ public sealed partial class MusicLibraryOwner
 
     private JsonObject QualityPolicy(JsonObject doc)
     {
-        var policy = Value(doc, QualityPolicyArea) as JsonObject ?? MusicQualityPolicy.Default();
-        MusicQualityPolicy.Validate(policy);
+        var policy = Area(doc, QualityPolicyArea) ?? MusicQualityPolicy.Default();
+        try { MusicQualityPolicy.Validate(policy); }
+        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
         return policy;
     }
-    private static void ValidateQualityPolicy(JsonObject policy) => MusicQualityPolicy.Validate(policy);
     private string QualitySignature(JsonObject doc) => LJ.Digest(LJ.Obj(
         ("contract", "music.quality.v1"), ("scope", scope), ("policy", QualityPolicy(doc))));
     private JsonObject QualityReply(JsonObject doc) => LJ.Obj(("settings", QualityPolicy(doc)),
@@ -26,12 +26,10 @@ public sealed partial class MusicLibraryOwner
         LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
         if (method == "music.quality.settings.get")
         {
-            LJ.Fields(p, "");
             return (QualityReply(doc), false);
         }
         LJ.Require(method == "music.quality.settings.save", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "ifRevision request qualityOrder qualityEnabled spatialOrder spatialEnabled",
-            "ifRevision request qualityOrder qualityEnabled spatialOrder spatialEnabled");
+        LJ.Fields(p, "ifRevision request qualityOrder qualityEnabled spatialOrder spatialEnabled", "ifRevision request qualityOrder qualityEnabled spatialOrder spatialEnabled");
         var current = QualityPolicy(doc);
         LJ.Require(LJ.I(p["ifRevision"]) == Revision(current), "REVISION_CONFLICT");
         var next = LJ.Obj(("schema", 1), ("revision", checked(Revision(current) + 1)), ("request", p["request"]),

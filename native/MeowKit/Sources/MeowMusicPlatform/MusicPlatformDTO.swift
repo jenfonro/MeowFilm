@@ -1,6 +1,5 @@
 import Foundation
 import MeowAccounts
-import MeowJSON
 import MeowMusicFeature
 import MeowRuntime
 
@@ -37,6 +36,11 @@ public enum MusicPlatformDTO {
     public static func audio(_ value: RuntimeValue) throws -> MusicNativeAudio {
         guard let url = URL(string: try value[music: "url"].musicRequiredText()) else {
             throw MusicServiceError.upstreamInvalid
+        }
+        for key in ["expiresAt", "licenseExpiresAt"] where value[music: key] != .null {
+            guard let number = value[music: key].musicNumber, number.isFinite, number > 0 else {
+                throw MusicServiceError.upstreamInvalid
+            }
         }
         let delivery: MusicAudioDelivery?
         if !value[music: "actualQuality"].musicText.isEmpty {
@@ -89,16 +93,10 @@ public enum MusicPlatformDTO {
         case .songCollection(let ids): return ("songs", ["ids": .array(ids.map(RuntimeValue.string))])
         }
     }
-    static func json(_ value: RuntimeValue) throws -> JSONValue {
-        try JSONDecoder().decode(JSONValue.self, from: value.musicData())
-    }
-    static func runtime(_ value: JSONValue) throws -> RuntimeValue {
-        try RuntimeJSON.decode(JSONEncoder().encode(value))
-    }
-    static func rows(_ value: RuntimeValue) throws -> [JSONValue] {
+    static func rows(_ value: RuntimeValue) throws -> [RuntimeValue] {
         try value[music: "items"].musicRequiredArray().map { song in
             let track = try nativeTrack(song)
-            return try JSONDecoder().decode(JSONValue.self, from: track.data)
+            return try RuntimeJSON.decode(track.data)
         }
     }
     static func recommendation(_ value: RuntimeValue) throws -> MusicAccountRecommendation {

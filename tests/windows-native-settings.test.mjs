@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BridgeError } from '@meowfilm/runtime-bridge';
+import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { rawRequest } from '../packages/runtime-bridge/test/http-fixture.js';
 import { createWindowsNativeSettings } from '../apps/windows/runtime/native-settings.mjs';
 import { createAppRuntime } from '../apps/runtime/bootstrap.mjs';
@@ -13,13 +14,13 @@ import { createTMDBDataModule } from '../apps/runtime/modules/metadata-data.mjs'
 function pipe(t) {
   const requests = [], stopped = [];
   const settings = createWindowsNativeSettings({
-    write(line, complete) { requests.push(JSON.parse(line)); complete(); }
+    write(line, complete) { requests.push(parseJSONText(line)); complete(); }
   }, code => { stopped.push(code); settings.close(); });
   t.after(() => settings.close());
   function respond(request, document, overrides = {}) {
     const reply = { kind: 'settings.result', id: request.id, ok: true, document,
       fingerprint: { exists: document !== null, length: 0, sha256: null }, ...overrides };
-    return Buffer.from(JSON.stringify(reply) + '\n');
+    return Buffer.from(stringifyJSONValue(reply) + '\n');
   }
   return { settings, requests, stopped, respond };
 }
@@ -45,6 +46,27 @@ test('malformed private settings success retires and rejects the actual pending 
   f.settings.accept(f.respond(f.requests[0], []));
   await rejected;
   assert.deepEqual(f.stopped, ['INVALID_RESPONSE']);
+});
+
+test('Windows private settings preserve unconsumed numeric material across read and CAS write', async t => {
+  const f = pipe(t), read = f.settings.reload('pan.accounts');
+  const text = '{"version":1,"accounts":{},"extension":{"integer":9007199254740993,' +
+    '"fraction":1.0000000000000001,"overflow":1e400,"rawJSON":"ordinary"}}';
+  const before = parseJSONText(text);
+  f.settings.accept(f.respond(f.requests[0], before));
+  assert.equal(stringifyJSONValue(await read), text);
+  const document = f.settings.document('pan.accounts');
+  const changed = document.read();
+  changed.accounts.quark = { cookie: 'synthetic' };
+  const saved = document.write(changed);
+  assert.equal(stringifyJSONValue(f.requests[1].document.extension),
+    stringifyJSONValue(before.extension));
+  f.settings.accept(f.respond(f.requests[1], changed));
+  assert.equal(stringifyJSONValue((await saved).extension), stringifyJSONValue(before.extension));
+  assert.equal(stringifyJSONValue(f.settings.read('pan.accounts').extension),
+    stringifyJSONValue(before.extension));
+  document.close();
+  assert.deepEqual(f.stopped, []);
 });
 
 test('private settings CAS failure keeps the prior snapshot and close drains pending exchanges', async t => {
@@ -97,7 +119,6 @@ test('native settings HTTP notification carries only a block and metadata reread
   assert.equal((await module.methods['tmdb.data.settings.get']({})).value.language, 'zh-CN');
   latest = tmdb('en-US');
   for (const [name, input] of [
-    ['settings document', { block: 'tmdb', settings: latest.settings }],
     ['null', null], ['array', ['tmdb']], ['string', 'tmdb'], ['boolean', true], ['number', 1],
     ['missing block', {}], ['untyped block', { block: 1 }], ['empty block', { block: '' }],
     ['uppercase block', { block: 'TMDB' }], ['trailing newline', { block: 'tmdb\n' }],
@@ -113,7 +134,7 @@ test('native settings HTTP notification carries only a block and metadata reread
   assert.equal(unknown.status, 200);
   assert.deepEqual(unknown.value, { ok: false, contract: 'runtime.http.v1', code: 'INVALID_REQUEST' });
   assert.deepEqual(notified, []);
-  const accepted = await post({ block: 'tmdb' });
+  const accepted = await post({ block: 'tmdb', settings: { language: 'not-the-native-owner' } });
   assert.equal(accepted.status, 200);
   assert.deepEqual(accepted.value, { ok: true, contract: 'runtime.http.v1', value: { notified: true } });
   assert.deepEqual(notified, ['tmdb']);

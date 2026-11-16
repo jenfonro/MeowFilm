@@ -254,9 +254,7 @@ final class RuntimeHTTPClientTests: XCTestCase {
         }
         for response in [
             reply(.null),
-            .object(["ok": .bool(false), "contract": .string("music.platform.v1"), "code": .string("SCRIPT_FAILURE")]),
-            .object(["ok": .bool(false), "contract": .string("music.platform.v1"),
-                     "code": .string("AUTH_REQUIRED"), "message": .string("unconsumed")])
+            .object(["ok": .bool(false), "contract": .string("music.platform.v1"), "code": .string("SCRIPT_FAILURE")])
         ] {
             RuntimeTestURLProtocol.fixture.set { _, transport in transport.respond(response) }
             do { _ = try await client.call(module: .musicPlatform, operation: "request"); XCTFail("Invalid control envelope") }
@@ -624,7 +622,6 @@ final class RuntimeHTTPClientTests: XCTestCase {
             (reply(.null, contract: "cat.script.v2"), 200, [:]),
             (.object(["ok": .bool(true), "contract": .string("runtime.http.v1"), "value": .null]), 200, [:]),
             (.object(["ok": .bool(true), "contract": .string("music.script.v3")]), 200, [:]),
-            (.object(["ok": .bool(true), "contract": .string("music.script.v3"), "value": .null, "extra": .null]), 200, [:]),
             (.object(["ok": .bool(false), "contract": .string("music.script.v3"), "code": .string("provider secret")]), 200, [:]),
             (.object(["ok": .bool(false), "contract": .string("cat.script.v2"), "code": .string("NOT_FOUND")]), 200, [:])
         ]
@@ -649,9 +646,6 @@ final class RuntimeHTTPClientTests: XCTestCase {
         let prefix = #"{"ok":true,"contract":"music.script.v3","value":"#
         for body in [
             Data([0xff]),
-            Data(#"{"ok":true,"ok":true,"contract":"music.script.v3","value":null}"#.utf8),
-            Data((prefix + #"{"same":1,"\u0073ame":2}}"#).utf8),
-            Data((prefix + "9007199254740992}").utf8),
             Data((prefix + #""\ud800"}"#).utf8),
             Data((prefix + String(repeating: "[", count: 65) + "null" + String(repeating: "]", count: 65) + "}").utf8)
         ] {
@@ -659,6 +653,28 @@ final class RuntimeHTTPClientTests: XCTestCase {
             do { _ = try await client.call(module: .music, operation: "invoke"); XCTFail("invalid wire") }
             catch { XCTAssertEqual(error as? RuntimeHTTPError, .invalidResponse) }
         }
+        await client.close()
+    }
+
+    func testHTTPExtraMembersAndOpaqueNumbersDoNotBlockTheConsumedValue() async throws {
+        let client = try client()
+        let raw = #"{"ok":false,"ok":true,"contract":"music.script.v3","extra":1e400,"value":{"n":1234567890123456789012345,"é":1,"e\u0301":2}}"#
+        RuntimeTestURLProtocol.fixture.set { _, transport in try! transport.respond(data: Data(raw.utf8)) }
+        let expected = try RuntimeJSON.decode(Data(#"{"n":1234567890123456789012345,"é":1,"e\u0301":2}"#.utf8))
+        let actual = try await client.call(module: .music, operation: "invoke")
+        XCTAssertEqual(actual, expected)
+        let boundary = String(repeating: "[", count: 64) + "null" + String(repeating: "]", count: 64)
+        RuntimeTestURLProtocol.fixture.set { _, transport in
+            try! transport.respond(data: Data(("{\"ok\":true,\"contract\":\"music.script.v3\",\"value\":" + boundary + "}").utf8))
+        }
+        let deepest = try await client.call(module: .music, operation: "invoke")
+        XCTAssertEqual(deepest, try RuntimeJSON.decode(Data(boundary.utf8)))
+        RuntimeTestURLProtocol.fixture.set { _, transport in
+            transport.respond(.object(["ok": .bool(false), "contract": .string("music.script.v3"),
+                "code": .string("SOURCE_NOT_FOUND"), "extra": .array([])]))
+        }
+        do { _ = try await client.call(module: .music, operation: "invoke"); XCTFail("remote error") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .remote("SOURCE_NOT_FOUND")) }
         await client.close()
     }
 
@@ -1007,7 +1023,7 @@ final class RuntimeHTTPClientTests: XCTestCase {
         await fulfillment(of: [stopped], timeout: 3); await client.close()
     }
 
-    func testAppDescribeRequiresExactNineModuleOrderVersionsContractsAndMethods() async throws {
+    func testAppDescribeChecksRequiredModulesAndMethodsWithoutRejectingExtraMaterial() async throws {
         let client = try client()
         let modules: [RuntimeValue] = [
             .object(["id": .string("music"), "version": .string("0.8.0"), "contract": .string("music.script.v3")]),
@@ -1029,7 +1045,7 @@ final class RuntimeHTTPClientTests: XCTestCase {
             Array(modules.prefix(3)), Array(modules.prefix(4)),
             [modules[0], modules[1], modules[2], modules[4], modules[7]],
             Array(modules.prefix(7)), Array(modules.prefix(8)), Array(modules.prefix(4)) + Array(modules.suffix(3)),
-            modules + [modules[4]], reordered
+            modules + [modules[4]]
         ]
         for index in modules.indices {
             for (field, value) in [("version", RuntimeValue.string("invalid")),
@@ -1042,10 +1058,9 @@ final class RuntimeHTTPClientTests: XCTestCase {
         for (index, field, value) in [
             (2, "version", RuntimeValue.string("0.2.0")),
             (4, "version", .string("0.2.0")), (4, "methods", .array([])),
-            (4, "methods", .array([.string("tmdb.data.request")])),
             (4, "id", .string("music")),
             (7, "version", .string("0.2.0")), (7, "contract", .string("music.script.v3")),
-            (7, "methods", .array([])), (7, "methods", .array([.string("netease.token.get"), .string("netease.token.get")])),
+            (7, "methods", .array([])),
             (7, "methods", .array([.string("netease.token.other")])), (7, "id", .string("music")),
             (8, "methods", .array([])), (8, "methods", .array([.string("music.platform.other")]))
         ] {
@@ -1053,14 +1068,25 @@ final class RuntimeHTTPClientTests: XCTestCase {
             guard case .object(var fields) = supplied[index] else { return XCTFail("module fixture") }
             fields[field] = value; supplied[index] = .object(fields); invalid.append(supplied)
         }
-        for (index, supplied) in ([modules] + invalid).enumerated() {
+        var expanded = reordered
+        if case .object(var fields) = expanded[7] {
+            fields["methods"] = .array([.string("netease.token.get"), .string("extra"), .string("netease.token.get")])
+            expanded[7] = .object(fields)
+        }
+        var requiredOnly = modules
+        if case .object(var fields) = requiredOnly[4] {
+            fields["methods"] = .array([.string("tmdb.data.request")])
+            requiredOnly[4] = .object(fields)
+        }
+        let valid = [modules, reordered, requiredOnly, expanded + [.object(["id": .string("future")])]]
+        for (index, supplied) in (valid + invalid).enumerated() {
             RuntimeTestURLProtocol.fixture.set { _, transport in
                 transport.respond(.object(["ok": .bool(true), "contract": .string("runtime.http.v1"), "value": .object([
                     "protocol": .string("runtime.http.v1"), "product": .string("aggregate"), "modules": .array(supplied)
                 ])]))
             }
-            do { try await client.validateAppModules(); XCTAssertEqual(index, 0) }
-            catch { XCTAssertNotEqual(index, 0); XCTAssertEqual(error as? RuntimeHTTPError, .invalidResponse) }
+            do { try await client.validateAppModules(); XCTAssertLessThan(index, valid.count) }
+            catch { XCTAssertGreaterThanOrEqual(index, valid.count); XCTAssertEqual(error as? RuntimeHTTPError, .invalidResponse) }
         }
         await client.close()
     }
@@ -1105,8 +1131,7 @@ final class RuntimeHTTPClientTests: XCTestCase {
         }
         for response in [
             reply(.object(["token": .string("synthetic")])),
-            .object(["ok": .bool(false), "contract": .string("netease.token.v1"), "code": .string("SCRIPT_FAILURE")]),
-            .object(["ok": .bool(false), "contract": .string("netease.token.v1"), "code": .string("SDK_FAILURE"), "message": .string("unsafe")])
+            .object(["ok": .bool(false), "contract": .string("netease.token.v1"), "code": .string("SCRIPT_FAILURE")])
         ] {
             RuntimeTestURLProtocol.fixture.set { _, transport in transport.respond(response) }
             do { _ = try await client.call(module: .netease, operation: "get"); XCTFail("invalid envelope") }

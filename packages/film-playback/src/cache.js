@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
+import { cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 
 const defaultMaximumBytes = 32 * 1024 * 1024;
 const completenessRank = { partial: 0, complete: 1 };
@@ -27,6 +28,7 @@ function requireValue(condition) {
 // Owned, immutable JSON data. The accounting includes UTF-16 strings, property
 // names, slots and conservative object/entry overhead, not just wire JSON bytes.
 function snapshot(value, ancestors = new Set()) {
+  if (isRawJSON(value)) return { value: cloneJSONValue(value), bytes: 64 + value.rawJSON.length * 2 };
   if (value === null) return { value, bytes: 8 };
   if (typeof value === 'string') return { value, bytes: 24 + value.length * 2 };
   if (typeof value === 'boolean') return { value, bytes: 8 };

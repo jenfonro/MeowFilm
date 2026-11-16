@@ -1,3 +1,4 @@
+import { stringifyJSONValue, rawJSON } from '@meowfilm/runtime-bridge/json';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -854,4 +855,15 @@ test('stopping a page computation and resuming reuses its successful network rea
   assert.equal(recovered.rawCards[0].detailId, 0);
   assert.equal(calls.filter(call => call[0] === 'search').length, 1);
   assert.equal(calls.filter(call => call[0] === 'receipt').length, 1);
+});
+
+test('search retains exact raw extension material through rules and public projection', async t => {
+  const { service, complete } = setup(t, {
+    search: async () => page([{ vod_id: 'exact', vod_name: '作品', extension: rawJSON('9007199254740993') }], 1, 1),
+  });
+  const { sessionId } = await service.open({ query: '作品', sources: [source] });
+  const state = await complete(sessionId);
+  assert.equal(state.siteState, 'completed');
+  assert.equal(state.siteItems.length, 1);
+  assert.equal(stringifyJSONValue(state.siteItems[0].raw.extension), '9007199254740993');
 });

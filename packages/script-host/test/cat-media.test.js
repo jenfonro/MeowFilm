@@ -901,7 +901,8 @@ test('Cat aggregate accepts external Host and Origin on existing routes and open
     const headers = { host: 'media.virtual.invalid', origin: 'https://external.invalid',
       authorization: 'call-input', cookie: 'media=call-input', 'sec-fetch-site': 'cross-site' };
     const preflight = await read(fixture.url('/config'), { method: 'OPTIONS',
-      headers: { ...headers, 'access-control-request-headers': 'authorization,range' } });
+      headers: { ...headers, 'access-control-request-method': 'GET',
+        'access-control-request-headers': 'authorization,range' } });
     assert.equal(preflight.status, 204);
     assert.equal(preflight.headers['access-control-allow-origin'], headers.origin);
     assert.equal(preflight.headers['access-control-allow-headers'], 'authorization,range');

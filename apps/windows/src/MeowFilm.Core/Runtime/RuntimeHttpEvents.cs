@@ -254,10 +254,9 @@ internal sealed class RuntimeHttpEventParser(Guid sessionId) : IDisposable
         try
         {
             snapshot = BridgeCodec.DecodeJSONValue(data.GetBuffer().AsMemory(0, checked((int)data.Length)));
-            if (snapshot.ValueKind != JsonValueKind.Object
-                || !snapshot.TryGetProperty("sessionId", out var session)
-                || !Guid.TryParseExact(session.GetString(), "D", out var actualSession) || actualSession != sessionId
-                || !snapshot.TryGetProperty("sequence", out var sequence) || sequence.GetDouble() != id)
+            if (!Guid.TryParseExact(BridgeCodec.RequiredProperty(snapshot, "sessionId").GetString(), "D", out var actualSession)
+                || actualSession != sessionId
+                || !BridgeCodec.RequiredProperty(snapshot, "sequence").TryGetInt64(out var sequence) || sequence != id)
                 throw new BridgeException("INVALID_RESPONSE");
         }
         catch { throw new BridgeException("INVALID_RESPONSE"); }
