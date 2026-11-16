@@ -10,7 +10,7 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
     private readonly AppSystemPlayback source;
     private readonly SystemMediaSession session;
 
-    internal AppSystemMediaAttachment(Window window, NativeAudioPlayback music, NativePlayback video, FilmCapability film,
+    internal AppSystemMediaAttachment(Window window, NativeAudioPlayback music, FilmPlayback video, FilmCapability film,
         Func<string?> activeOwner, SystemPlaybackOwner[] owners, bool enabled = true)
         : this(window, new AudioSource(music), new VideoSource(video), film, activeOwner,
             new WindowsSystemMediaBackend(window), owners, enabled) { }
@@ -92,18 +92,19 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
         public Task SeekAsync(double seconds) => native.SeekAsync(seconds);
     }
 
-    private sealed class VideoSource(NativePlayback native) : ISystemPlayback
+    private sealed class VideoSource(FilmPlayback native) : ISystemPlayback
     {
-        public SystemPlaybackState State => new(native.OwnerId, native.Identity, native.Title,
-            native.HasMedia || native.ContinuationPending, native.IsPlaying, native.PositionSeconds, native.DurationSeconds);
+        public SystemPlaybackState State => new("film", native.Identity, "", native.HasOutput,
+            native.HasOutput && !native.PauseRequested, native.PositionSeconds, native.DurationSeconds,
+            Kind: SystemPlaybackKind.Video);
         public event PropertyChangedEventHandler? PropertyChanged
         {
             add => native.PropertyChanged += value;
             remove => native.PropertyChanged -= value;
         }
-        public Task PlayAsync() => native.ResumeAsync();
-        public Task PauseAsync() => native.PauseAsync();
+        public Task PlayAsync() => native.Scope is { } scope ? native.SetPausedAsync(scope, false) : Task.CompletedTask;
+        public Task PauseAsync() => native.Scope is { } scope ? native.SetPausedAsync(scope, true) : Task.CompletedTask;
         public Task StopAsync() => native.StopAsync();
-        public Task SeekAsync(double seconds) => native.SeekAsync(seconds);
+        public Task SeekAsync(double seconds) => native.Scope is { } scope ? native.SeekAsync(scope, seconds) : Task.CompletedTask;
     }
 }

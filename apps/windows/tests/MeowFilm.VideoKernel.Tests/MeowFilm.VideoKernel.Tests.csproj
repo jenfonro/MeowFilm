@@ -8,6 +8,7 @@
     <ProjectReference Include="../../src/MeowFilm.Media/MeowFilm.Media.csproj" />
     <Compile Include="../MeowFilm.Windows.Tests/FFmpegVideoFixtures.cs" Link="Shared/FFmpegVideoFixtures.cs" />
     <Compile Include="../MeowFilm.Windows.Tests/FFmpegVideoKernelTests.cs" Link="Shared/FFmpegVideoKernelTests.cs" />
+    <Compile Include="../MeowFilm.Windows.Tests/FilmKernelIntegrationTests.cs" Link="Shared/FilmKernelIntegrationTests.cs" />
     <Compile Include="../MeowFilm.Windows.Tests/GlobalUsings.cs" Link="Shared/GlobalUsings.cs" />
     <Compile Include="../MeowFilm.Windows.Tests/AdaptiveMediaTests.cs" Link="Shared/AdaptiveMediaTests.cs" />
     <Compile Include="../MeowFilm.Windows.Tests/RuntimeMediaTests.cs" Link="Shared/RuntimeMediaTests.cs" />

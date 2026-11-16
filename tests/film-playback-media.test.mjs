@@ -852,6 +852,46 @@ async function paused(url) {
   return { ...transfer, incoming: response };
 }
 
+test('E43: release drains an EOF-buffered binary pipeline without waiting for an impossible end event', { timeout: 10000 }, async t => {
+  const body = Buffer.alloc(65536 + 2048, 0xa7), sent = deferred();
+  const upstream = await source(t, (_request, response) => {
+    response.once('finish', () => sent.resolve());
+    binary(_request, response, body);
+  });
+  let incoming, downstream, hold = true;
+  const createServer = http.createServer, request = http.request;
+  t.mock.method(http, 'createServer', function (...args) {
+    const server = createServer.apply(this, args);
+    server.on('request', (_request, response) => {
+      if (hold) { downstream = response; response.cork(); }
+    });
+    return server;
+  });
+  t.mock.method(http, 'request', function (...args) {
+    const outgoing = request.apply(this, args);
+    if (new URL(args[0]).origin === upstream.url)
+      outgoing.prependOnceListener('response', response => { incoming = response; });
+    return outgoing;
+  });
+  const media = service(t), receipt = await media.prepare({ url: upstream.url, headers: credentials });
+  const transfer = open(receipt.url), rejected = assert.rejects(transfer.response);
+  t.after(() => transfer.request.destroy());
+  await sent.promise;
+  for (let step = 0; step < 100 && !(incoming?.complete && incoming.readableLength > 0 &&
+      downstream?.writableNeedDrain); step++) await delay(10);
+  assert.ok(incoming?.complete && incoming.readableLength > 0 && downstream?.writableNeedDrain,
+    'real upstream EOF must remain buffered behind the corked HTTP response');
+  assert.equal(incoming.readableEnded, false);
+  await media.release(receipt.id);
+  await rejected;
+  assert.equal(incoming.closed, true);
+  assert.equal(downstream.closed, true);
+  hold = false;
+  assert.equal((await read(receipt.url)).status, 404);
+  const fresh = await media.prepare({ url: upstream.url, headers: credentials });
+  assert.deepEqual((await read(fresh.url)).body, body, 'retired operations leave the transport usable');
+});
+
 test('E41/M5: a slow reader backpressures the binary stream; release cancels and drains the physical transfer', { timeout: 10000 }, async t => {
   const state = {}, upstream = await source(t, (_request, response) => endless(response, state));
   const media = service(t), prepared = await media.prepare({ url: upstream.url, headers: credentials });

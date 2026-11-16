@@ -821,6 +821,7 @@ public static class AdaptiveMediaTests
         internal readonly ConcurrentQueue<Request> Requests = new();
         internal Func<string, Reply> Route = _ => new Reply([]) { Status = 404 };
         internal bool RequireAuthorization = true;
+        internal IReadOnlyDictionary<string, string>? RequiredHeaders;
         internal int Blocked;
         internal Origin()
         {
@@ -861,6 +862,8 @@ public static class AdaptiveMediaTests
                     var headers = lines.Skip(1).Where(l => l.Contains(':')).Select(l => l.Split(':', 2))
                         .ToDictionary(p => p[0], p => p[1].Trim(), StringComparer.OrdinalIgnoreCase);
                     bool authorized = headers.GetValueOrDefault("Authorization") == Credential;
+                    if (RequiredHeaders is { } required)
+                        authorized &= required.All(pair => headers.GetValueOrDefault(pair.Key) == pair.Value);
                     Requests.Enqueue(new(path, authorized,
                         new[] { "Authorization", "Cookie", "Referer", "X-Fixture" }.Any(headers.ContainsKey),
                         headers.GetValueOrDefault("User-Agent", "").StartsWith("MeowAdaptive/", StringComparison.Ordinal),

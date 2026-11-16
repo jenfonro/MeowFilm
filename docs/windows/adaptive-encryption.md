@@ -4,8 +4,9 @@
 
 This document describes identity AES-128 HLS VOD and the bounded
 [live HLS profile](live-hls.md) in the existing `AdaptiveMediaSession` path.
-The separate film typed-input path uses the pinned FFmpeg private demux bridge
-for legitimate ClearKey; see [native media playback](media-playback.md).
+The separate film typed-input path uses the independent FilmKernel with pinned
+FFmpeg and controlled AVIO for legitimate ClearKey, and its own WASAPI/D3D11
+output; see [native media playback](media-playback.md).
 It does not broaden the supported inputs or trust boundary listed below.
 
 Supported inputs:

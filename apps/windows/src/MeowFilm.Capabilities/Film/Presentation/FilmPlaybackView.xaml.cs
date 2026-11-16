@@ -222,7 +222,9 @@ public partial class FilmPlaybackView : UserControl
             rateGeneration++; aspectGeneration++;
             UpdateControlSelections();
         }
-        if (!page.OwnsNativeMedia || !pip && (!IsLoaded || !IsVisible))
+        // Mount the stable surface before commit; an empty HWND is not media
+        // output, but the first real Present must not target its parking window.
+        if (pip ? !page.OwnsNativeMedia : !IsLoaded || !IsVisible)
         {
             DetachOverlay();
             VideoHost.Content = null;

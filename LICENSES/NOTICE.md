@@ -748,7 +748,7 @@ identify the texts, not a removal of upstream's “or later” grant.
   including the core's upstream deinterlacing filters.
   The exact recipe and source adaptations are in `scripts/ios-video-kernel.json`
   and `native/VideoKernel/patches/ffmpeg-native-output.patch`.
-- Windows builds a private avformat/avcodec/avutil demux library with decoders,
+- The legacy Windows VideoKernel builds a private avformat/avcodec/avutil demux library with decoders,
   encoders, network protocols and GPL/nonfree components disabled. The source
   adaptations and build recipe are in `apps/windows/native/VideoKernel/`.
   Existing libVLC remains the decoder/rendering owner; the private adapter does
@@ -790,7 +790,7 @@ Pennington and Daniel Veillard. Their distinct permission/disclaimer is appended
 to `libxml2-MIT.txt` without dropping those notices.
 iOS links the Apple SDK's system libxml2 rather than shipping a second copy.
 
-The Windows native build links the GCC 13.2.0 support library `libgcc`
+The legacy Windows VideoKernel build links the GCC 13.2.0 support library `libgcc`
 statically. Its source is GCC tag `releases/gcc-13.2.0`:
 <https://github.com/gcc-mirror/gcc/tree/releases/gcc-13.2.0/libgcc>.
 Copyright (C) Free Software Foundation, Inc. The applicable grant is
@@ -802,7 +802,7 @@ grant. `GCC-Runtime-Library-Exception-3.1.txt` reproduces upstream
 The exception applies to eligible compilation processes as defined in that
 text; it does not change FFmpeg's or VLC's separate license obligations.
 
-The Windows toolchain also contributes the MinGW-w64 runtime and statically
+That legacy Windows toolchain also contributes the MinGW-w64 runtime and statically
 linked winpthreads. Installed headers identify MinGW-w64 11.0.1; upstream tag
 `v11.0.1` supplies the source notices:
 <https://github.com/mingw-w64/mingw-w64/tree/v11.0.1>.
@@ -823,6 +823,107 @@ public library interface is LGPLv2.1 or later. The corresponding license texts
 are `GPL-2.0-only.txt` and `LGPL-2.1-only.txt`; existing bundled upstream notices
 remain in the libVLC distribution. The plugin's SDK ABI and exact libvlccore
 identity are checked by the locked native build.
+
+## Windows film playback kernel — independent KSPlayer-derived native implementation
+
+`apps/windows/native/FilmKernel/` is the movie-only native kernel. Its
+track/decode/flush and bounded-frame mechanisms are ported from this project's
+KSPlayer-derived Apple kernel, whose upstream source is KSPlayer
+`d0d063ab1f045735129b6617591ad2148d88d5db` by kintan/kingslay and contributors,
+identified above. This derivative is covered by the project's GPL-3.0-only
+license (`GPL-3.0-only.txt`), not MIT. It is not an official Windows build of
+the Apple Swift SDK and does not include upstream player controls or demos.
+D3D11 output, WASAPI device consumption/clock and DOVI composition are Windows
+implementations. The film kernel does not link libVLC, libmpv or another music
+playback owner; the legacy Windows and music paths and their notices remain.
+
+The authoritative 16-source inventory, exact archive URLs/SHA-256, upstream
+license-file SHA-256, source-tree identities and checked local build inputs are
+in `apps/windows/native/FilmKernel/film-kernel.lock.json`. The following source
+revisions are fixed; a tag below is not permission to substitute a newer tag.
+
+| Source | Fixed version/revision and upstream | License and use |
+| --- | --- | --- |
+| FFmpeg | [8.1.2, `38b88335f99e76ed89ff3c93f877fdefce736c13`](https://github.com/FFmpeg/FFmpeg/tree/38b88335f99e76ed89ff3c93f877fdefce736c13) | LGPL-2.1-or-later; avformat/avcodec/avutil/avfilter/swresample/swscale |
+| libplacebo | [7.387.0, `v7.387.0`](https://github.com/haasn/libplacebo/tree/v7.387.0) | LGPL-2.1-or-later; D3D11 shaders, HDR color mapping, DOVI reshape and enhancement-layer composition |
+| libass | [0.17.4](https://github.com/libass/libass/tree/0.17.4) | ISC; subtitle rendering with the Windows DirectWrite font provider |
+| FreeType | [2.14.1, `VER-2-14-1`](https://github.com/freetype/freetype/tree/VER-2-14-1) | GPL-2.0-or-later alternative selected for this GPLv3 derivative; separate contributed-file notices retained |
+| FriBidi | [1.0.16, `v1.0.16`](https://github.com/fribidi/fribidi/tree/v1.0.16) | LGPL-2.1-or-later; bidirectional text and shaping |
+| HarfBuzz | [11.5.1](https://github.com/harfbuzz/harfbuzz/tree/11.5.1) | Old MIT; text shaping, with the separate Microsoft USE notice |
+| dav1d | [1.5.3](https://github.com/videolan/dav1d/tree/1.5.3) | BSD-2-Clause; AV1 software decoding |
+| glslang | [15.1.0](https://github.com/KhronosGroup/glslang/tree/15.1.0) | Upstream mixed BSD/MIT/Apache/GPL-with-Bison-exception and NVIDIA notices; runtime shader compilation |
+| SPIRV-Cross | [1.4.309.0, `vulkan-sdk-1.4.309.0`](https://github.com/KhronosGroup/SPIRV-Cross/tree/vulkan-sdk-1.4.309.0) | Apache-2.0 alternative selected for library code; Khronos SPIR-V header notice retained; shader translation |
+| fast_float | [`97b54ca9e75f5303507699d27c6b4f4efe4641a1`](https://github.com/fastfloat/fast_float/tree/97b54ca9e75f5303507699d27c6b4f4efe4641a1) | Apache-2.0 alternative selected; header dependency of libplacebo |
+| libxml2 | [2.14.6, `v2.14.6`](https://github.com/GNOME/libxml2/tree/v2.14.6) | MIT-style; DASH XML parsing; existing `libxml2-MIT.txt` also preserves dict/list notices |
+| zlib | [1.3.1, `v1.3.1`](https://github.com/madler/zlib/tree/v1.3.1) | zlib; existing `zlib-LICENSE.txt` is the exact locked text |
+| bzip2 | [1.0.8](https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz) | bzip2 license; libbzip2 compression support |
+| XZ Utils | [5.8.1, `v5.8.1`](https://github.com/tukaani-project/xz/tree/v5.8.1) | 0BSD for liblzma; command-line tools, scripts and their GPL/LGPL components are not shipped by this kernel |
+| Jinja | [`15206881c006c79667fe5154fe80c01c65410679`](https://github.com/pallets/jinja/tree/15206881c006c79667fe5154fe80c01c65410679) | BSD-3-Clause; libplacebo build-time template generator, not a runtime Python dependency |
+| MarkupSafe | [`297fc8e356e6836a62087949245d09a28e9f1b13`](https://github.com/pallets/markupsafe/tree/297fc8e356e6836a62087949245d09a28e9f1b13) | BSD-3-Clause; Jinja build dependency, not shipped Python code |
+
+The native recipe statically links the enabled libraries into
+`meowfilm_film_kernel.dll`. FFmpeg disables GPL/nonfree components, its own
+network/protocols, encoders, muxers, programs and avdevice; it enables decoders,
+demuxers, parsers, bitstream filters, D3D11VA and the aformat/aresample/atempo
+audio filters. The libplacebo build enables D3D11, DOVI and glslang, but not
+libdovi, shaderc, Vulkan, OpenGL, demos or tests. The source and build
+adaptations are identified by the lock and the adjacent patches, including
+controlled AVIO/ClearKey handling, DOVI fixes and native GNU make response-file
+generation for Windows static archives. Source configuration is not
+proof of the final DLL's imports or static-link closure.
+
+`film_dovi.cpp` adapts only the NAL-63 enhancement-layer extraction mechanism
+from FFmpeg master at **`0834db516348d253b2c51f969188501d324c698d`**:
+[libavcodec/bsf/dovi_split.c](https://github.com/FFmpeg/FFmpeg/blob/0834db516348d253b2c51f969188501d324c698d/libavcodec/bsf/dovi_split.c),
+upstream source SHA-256
+`00da865a8d3dbd6b7d993c0121554201525fe5d4480ac8a39f2ab161a4a1714a`,
+LGPL-2.1-or-later, FFmpeg contributors. The adjacent `ffmpeg-dovi.patch` also
+backports hvcE enhancement configuration from that revision and corrects RPU
+association/parsing in the pinned 8.1.2 decoder. This is not use of master
+FFmpeg's BSF ABI, an upgrade of the decoding baseline, or an extraction from
+mpv. No mpv source or executable is linked or distributed by this film kernel.
+
+The output is standard D3D11/DXGI native HDR using DOVI dynamic metadata and
+required enhancement-layer samples, not merely the HDR10 base layer. It does
+not emit proprietary DV/LLDV transport signals, force a display's HDR/DV mode
+or introduce HDR-to-SDR fallback. These are implementation boundaries, not
+claims of verified Dolby certification, profile coverage or real display
+output.
+
+The shared `GPL-3.0-only.txt`, `GPL-2.0-only.txt`, `LGPL-2.1-only.txt`,
+`LGPL-3.0-only.txt`, `Apache-2.0.txt`, `FFmpeg-LICENSE.md`,
+`FFmpeg-IJG-NOTICE.txt`, `libxml2-MIT.txt` and `zlib-LICENSE.txt` supply the
+existing terms without duplicate GNU/Apache bodies. These text filenames do
+not remove any upstream “or later” or alternative-license grant.
+`FilmKernel-THIRD-PARTY-NOTICES.txt` preserves the additional dependency
+copyrights, distinct permission/disclaimer texts and exceptions, and names
+the existing shared ISC/MIT/BSD texts it reuses. All locked upstream license
+files are checked, including unselected alternatives and build-only sources;
+not every alternative requires another copy of its license body.
+This software is based in part on the work of the Independent JPEG Group;
+the pinned IJG files remain locally unchanged as stated in the shared notice.
+
+The film build driver selects LLVM-MinGW `20261104` (x86_64 UCRT), separately
+from the legacy GCC VideoKernel toolchain. The release's fixed build scripts
+identify [LLVM `llvmorg-23.1.5`](https://github.com/llvm/llvm-project/tree/llvmorg-23.1.5)
+and [MinGW-w64 `ee9bd87644156c41072a11ad957d1e11831a72df`](https://github.com/mingw-w64/mingw-w64/tree/ee9bd87644156c41072a11ad957d1e11831a72df).
+The LLVM exception and legacy NCSA notice are preserved once in the film
+third-party notices, with the existing Apache body reused. Existing
+`MinGW-w64-runtime-NOTICE.txt` and `winpthreads-LICENSE.txt` retain the shared
+runtime grants; the film notices additionally retain Rich Felker's musl
+copyright and the 2026 winpthreads misc.c attribution. Actual linked archives,
+compiler/runtime identities, per-file exceptions and absence of redistributed
+private toolchain DLLs still require the Windows build receipt/link-map audit.
+The upstream release identity is not evidence that a local SDK is unmodified.
+
+Static linking does not waive source/relinking obligations. Distribution must
+make the corresponding source, exact local changes and build material
+available under the applicable GPL/LGPL terms, including required installation
+information where applicable. A lock, upstream hyperlink or license manifest
+alone is not that delivery. Patent, codec and Dolby trademark/certification
+permissions are not supplied by these open-source notices.
+`redistributionPermissionVerified` remains false; this notice does not declare
+the still-unverified final binary/distribution legally or technically accepted.
 
 ## ZXing.Net — Apache-2.0 (Windows)
 

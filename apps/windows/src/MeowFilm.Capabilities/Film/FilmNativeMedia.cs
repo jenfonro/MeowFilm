@@ -30,15 +30,13 @@ internal interface IFilmNativeMedia : INotifyPropertyChanged
     Task StopAsync(NativePlaybackScope scope);
 }
 
-/// <summary>Thin consumer of the App's one NativePlayback. Never owns another libVLC instance or player.</summary>
-internal sealed class FilmNativeMedia(NativePlayback native) : IFilmNativeMedia
+/// <summary>Movie-only adapter; source sessions and credentials retain their existing owners.</summary>
+internal sealed class FilmNativeMedia(FilmPlayback native) : IFilmNativeMedia
 {
     public ContentControl View => native.VideoView;
-    public string? Identity => native.OwnerId == "film" ? native.Identity : null;
-    public NativePlaybackScope? Scope => native.ObservedVideoOutput is { OwnerId: "film" } output &&
-        output.Identity == native.Identity && native.OwnerId == "film"
-        ? new(output.OwnerId, output.Identity, output.Generation) : null;
-    public bool HasOutput => native.OwnerId == "film" && native.HasMedia && Scope is not null;
+    public string? Identity => native.Identity;
+    public NativePlaybackScope? Scope => native.Scope;
+    public bool HasOutput => native.HasOutput;
     public bool Buffering => native.IsBuffering;
     public string? FailureCode => native.LastErrorCode;
     public bool Paused => native.PauseRequested;
@@ -60,17 +58,15 @@ internal sealed class FilmNativeMedia(NativePlayback native) : IFilmNativeMedia
             if (lease is not null) await lease.DisposeAsync();
             throw;
         }
-        // Both typed overloads take exclusive ownership on entry, even when preparation rejects.
-        await (lease is null ? native.PrepareRuntimeMediaAsync(intent, receipt.Address, input, token)
-            : native.PrepareRuntimeMediaAsync(intent, lease, input, token));
+        await native.PrepareAsync(intent, receipt.Address, input, lease, token);
     }
     public Task<bool> TryCommitAsync(RuntimeMediaPlaybackIntent intent, Func<bool> canCommit,
         Action committed, CancellationToken token) =>
-        native.TryCommitRuntimeMediaAsync(intent, canCommit, committed, token);
-    public Task DiscardAsync(RuntimeMediaPlaybackIntent intent) => native.DiscardRuntimeMediaAsync(intent);
-    public Task PauseAsync(NativePlaybackScope scope, bool paused) => native.SetRuntimePausedAsync(scope, paused);
-    public Task SeekAsync(NativePlaybackScope scope, double position) => native.SeekRuntimeAsync(scope, position);
-    public Task RateAsync(NativePlaybackScope scope, double rate) => native.SetRateAsync(scope, rate);
-    public Task AspectAsync(NativePlaybackScope scope, string? aspect) => native.SetRuntimeAspectAsync(scope, aspect);
-    public Task StopAsync(NativePlaybackScope scope) => native.StopRuntimeAsync(scope);
+        native.TryCommitAsync(intent, canCommit, committed, token);
+    public Task DiscardAsync(RuntimeMediaPlaybackIntent intent) => native.DiscardAsync(intent);
+    public Task PauseAsync(NativePlaybackScope scope, bool paused) => native.SetPausedAsync(scope, paused);
+    public Task SeekAsync(NativePlaybackScope scope, double position) => native.SeekAsync(scope, position);
+    public Task RateAsync(NativePlaybackScope scope, double rate) => native.RateAsync(scope, rate);
+    public Task AspectAsync(NativePlaybackScope scope, string? aspect) => native.AspectAsync(scope, aspect);
+    public Task StopAsync(NativePlaybackScope scope) => native.StopAsync(scope);
 }
