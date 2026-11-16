@@ -84,6 +84,39 @@ test('incomplete unidentified rows are never all collapsed into an empty identit
   assert.equal(result.books.length, 2);
 });
 
+test('merge isolates bad entries and candidates without losing healthy source order', () => {
+  const healthy = [book('one', '/a'), book('two', '/b'), book('three', '/c', '未知')];
+  const expected = process({ operation: 'merge', books: healthy });
+  for (const invalid of [null, false, 7, 'bad book', []]) {
+    for (let index = 0; index <= healthy.length; index++) {
+      const books = healthy.toSpliced(index, 0, invalid);
+      assert.deepEqual(process({ operation: 'merge', books }), expected);
+      assert.deepEqual(process({ operation: 'merge', books: [{ candidates: books }] }), expected);
+    }
+  }
+  const books = [null, { candidates: [healthy[0], null, healthy[1]] }, false, healthy[2]];
+  const before = structuredClone(books);
+  assert.deepEqual(process({ operation: 'merge', books }), expected);
+  assert.deepEqual(books, before);
+});
+
+test('merge distinguishes unusable roots and all-bad lists from empty groups and incomplete books', () => {
+  for (const books of [null, {}, '[]', 7]) {
+    assert.throws(() => process({ operation: 'merge', books }), /INVALID_BOOKS/);
+  }
+  for (const books of [[null], [false, [], 7], [{ candidates: [null, []] }],
+    [null, { candidates: [] }]]) {
+    assert.throws(() => process({ operation: 'merge', books }), /INVALID_BOOK/);
+  }
+  for (const books of [[], [{ candidates: [] }]]) {
+    assert.deepEqual(process({ operation: 'merge', books }), { books: [] });
+  }
+  const result = process({ operation: 'merge', books: [null, {}, { name: '雨夜来信' }, {}] });
+  assert.equal(result.books.length, 3);
+  assert.ok(result.books.every(item => item.candidates.length === 1));
+  assert.equal(new Set(result.books.map(item => item.groupKey)).size, 3);
+});
+
 test('chapter matching tolerates Chinese numbering and punctuation but not an arbitrary same index', () => {
   const result = process({
     operation: 'matchChapter',
@@ -179,6 +212,15 @@ test('rule budgets are consumed only by actual replacements', () => {
 test('unusable active scope does not silently become an unrestricted replacement', () => {
   for (const field of ['scope', 'excludeScope']) {
     assert.throws(() => transform({ rules: [rule({ [field]: { name: 'other book' } })] }), /INVALID_RULE/);
+  }
+});
+
+test('an unmatched scope leaves unused exclusion materials untouched', () => {
+  for (const excludeScope of [{ name: '雨夜来信' }, ['雨夜来信'], false, 7]) {
+    assert.deepEqual(transform({ rules: [rule({
+      scope: 'other book', excludeScope, pattern: '[', isRegex: true, timeoutMillisecond: 0,
+    })] }), transform({}));
+    assert.throws(() => transform({ rules: [rule({ scope: '雨夜来信', excludeScope })] }), /INVALID_RULE/);
   }
 });
 

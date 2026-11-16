@@ -367,6 +367,104 @@ public static class FilmPlaybackContractTests
             Check(sent.GetProperty("season").GetInt32() == 0 && sent.GetProperty("episode").GetInt32() == 0 &&
                 !sent.TryGetProperty("globalEpisode", out _), "a real special coordinate is preserved without a fabricated global mapping");
         });
+        yield return Test("bad unselected metadata menu rows preserve healthy siblings SSE media and incremental directories", async () =>
+        {
+            await using var rig = new FilmPlaybackRig();
+            await rig.OpenAsync();
+            rig.Runtime.Change(root =>
+            {
+                root["metadataSources"] = JsonNode.Parse("""
+                    [
+                      {"id":"tmdb:100","provider":"tmdb","metadataId":"100","kind":"tv"},
+                      {"id":"future:300","provider":"future"},
+                      {"id":"bad-provider","provider":{"unused":true}},
+                      {"id":17,"provider":"tmdb"},
+                      {"id":"","provider":"douban"},
+                      {"provider":"tmdb"},
+                      null,
+                      {"id":"douban:200","provider":"douban","metadataId":"200","kind":"tv"}
+                    ]
+                    """);
+                root["metadata"]!["overview"] = "同快照的有效主资料";
+                root["sources"] = Node(FilmJson.Encode(new[]
+                { new { id = "site-choice", source = new { key = "cat:fixture:site:1", name = "准确站点", generation = 1 } } }));
+                root["browsing"] = Node(SourceBrowsing());
+            });
+            rig.Runtime.Attempt("menu-first", Candidate("one"));
+            await Until(() => rig.Native.SettledIdentity == "menu-first" && rig.Page.CurrentCandidateId == "one");
+            Check(rig.Page.Overview == "同快照的有效主资料" && !rig.Page.ConnectionFailed &&
+                rig.Page.MetadataSources.Select(row => row.MetadataSourceId).SequenceEqual(new[] { "tmdb:100", "douban:200" }) &&
+                rig.Page.MetadataSources.Select(row => row.Label).SequenceEqual(new[] { "TMDB", "豆瓣" }) &&
+                rig.Page.SelectedSource is { Id: "site-choice" } && rig.Page.HasMetadataMappings,
+                "a healthy-bad-healthy metadata menu preserves original order, the main snapshot and its actual media attempt");
+            var menu = rig.Page.MetadataSources;
+            var sources = rig.Page.Sources;
+            var directory = rig.Page.EpisodeDirectory;
+            var episodes = rig.Page.Episodes;
+            Check(directory is not null && episodes.Count == 1, "the actual selected source owns its populated directory");
+            var changes = new List<string?>();
+            rig.Page.PropertyChanged += (_, change) => changes.Add(change.PropertyName);
+            rig.Runtime.Change(root => root["metadataSources"]![2]!["provider"] = JsonNode.Parse("[1,2]"));
+            rig.Runtime.Attempt("menu-second", Candidate("two", 2),
+                target: rig.Runtime.Target with { Episode = 2, GlobalEpisode = 2 });
+            await Until(() => rig.Native.SettledIdentity == "menu-second" && rig.Page.CurrentCandidateId == "two");
+            Check(rig.Native.Intents.Count == 2 && rig.Native.HasOutput && !rig.Page.ConnectionFailed &&
+                ReferenceEquals(menu, rig.Page.MetadataSources) && ReferenceEquals(sources, rig.Page.Sources) &&
+                ReferenceEquals(directory, rig.Page.EpisodeDirectory) && ReferenceEquals(episodes, rig.Page.Episodes) &&
+                !changes.Any(name => name is nameof(FilmPlaybackPage.MetadataSources) or nameof(FilmPlaybackPage.Sources) or
+                    nameof(FilmPlaybackPage.EpisodeDirectory) or nameof(FilmPlaybackPage.Episodes)),
+                "later SSE and media continue while changes to an unused bad row never rebuild unchanged menus or the selected directory");
+        });
+        yield return Test("selected metadata provider and identity are required even when the menu rows do not change", async () =>
+        {
+            foreach (string bad in new[]
+            {
+                """{"id":"selected","provider":"future"}""",
+                """{"id":"selected","provider":[]}""",
+                """{"id":"selected"}""",
+                """{"id":17,"provider":"tmdb"}""",
+                """{"id":"","provider":"tmdb"}""",
+                """{"provider":"tmdb"}"""
+            })
+            {
+                var card = Card();
+                var page = new FilmPlaybackPage(card, card.PlaybackContext!, null, null);
+                var root = Node(Snapshot(Guid.NewGuid(), 1, card.PlaybackContext!.Target,
+                    card.PlaybackContext.Metadata!.Value)).AsObject();
+                root["metadataSources"]!.AsArray().Add(JsonNode.Parse(bad));
+                page.Apply(new(JsonSerializer.SerializeToElement(root)));
+                Check(page.MetadataSources.Count == 1, "the unused bad row is not selectable");
+                string id = FilmJson.Text(FilmJson.Encode(JsonNode.Parse(bad)!), "id");
+                root["metadataSourceId"] = id.Length > 0 ? id : "missing-selection";
+                root["sequence"] = 2;
+                await Error("INVALID_RESPONSE", () =>
+                {
+                    page.Apply(new(JsonSerializer.SerializeToElement(root)));
+                    return Task.CompletedTask;
+                });
+                Check(page.MetadataSourceId == "tmdb:100" && page.ActiveTarget == card.PlaybackContext.Target,
+                    "an invalid selected identity cannot replace the accepted page or fall back to a healthy sibling");
+            }
+            var exactCard = Card();
+            var exact = Node(Snapshot(Guid.NewGuid(), 1, exactCard.PlaybackContext!.Target,
+                exactCard.PlaybackContext.Metadata!.Value)).AsObject();
+            exact["metadataSourceId"] = "17";
+            exact["metadataSources"] = JsonNode.Parse("""
+                [{"id":17,"provider":"future"},{"id":"17","provider":"tmdb","metadataId":"100","kind":"tv"}]
+                """);
+            var exactSnapshot = new FilmPlaybackSnapshot(JsonSerializer.SerializeToElement(exact));
+            var exactPage = new FilmPlaybackPage(exactCard, exactCard.PlaybackContext!, null, null);
+            exactPage.Apply(exactSnapshot);
+            Check(exactSnapshot.SelectedMetadataSource.GetProperty("id").ValueKind == JsonValueKind.String &&
+                exactPage.MetadataSources.Single() is { MetadataSourceId: "17", Provider: "tmdb" },
+                "an unselected numeric id cannot shadow the exact string identity of the selected healthy row");
+            exact["metadataSourceId"] = 17;
+            await Error("INVALID_RESPONSE", () =>
+            {
+                exactPage.Apply(new(JsonSerializer.SerializeToElement(exact)));
+                return Task.CompletedTask;
+            });
+        });
         yield return Test("only proven metadata associations appear and switching uses current provider plus explicit keepSource", async () =>
         {
             await using var rig = new FilmPlaybackRig();

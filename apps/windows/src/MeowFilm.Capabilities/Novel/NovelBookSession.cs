@@ -21,7 +21,7 @@ public sealed class NovelBookSession(NovelSourceService sources, NovelLibrary li
     public bool Loading { get; private set; }
     public bool RestoreByRatio { get; private set; }
     internal bool ConsumeRatioRestore() { bool value = RestoreByRatio; RestoreByRatio = false; return value; }
-    private (string Title, NovelBlock[] Blocks, string ImageStyle, IReadOnlyList<NovelRule> Rules, string Conversion)? rawContent;
+    private (string Title, NovelBlock[] Blocks, string ImageStyle, JsonElement Rules, string Conversion)? rawContent;
     public event EventHandler? Changed;
     public Func<IReadOnlyList<NovelChapter>, CancellationToken, Task<int?>>? SelectChapterAsync { get; set; }
     private async Task<(NovelBook Book, NovelChapter[] Chapters, string IdentityKey)> MetadataAsync(NovelBook book, CancellationToken token)
@@ -116,7 +116,7 @@ public sealed class NovelBookSession(NovelSourceService sources, NovelLibrary li
             : match.GetProperty("index").GetInt32();
     }
     private sealed record ContentResult(string Title, NovelBlock[] Blocks, string ImageStyle, NovelChapter Chapter,
-        string RawTitle, NovelBlock[] RawBlocks, IReadOnlyList<NovelRule> Rules, string Conversion);
+        string RawTitle, NovelBlock[] RawBlocks, JsonElement Rules, string Conversion);
     private async Task<ContentResult> ContentAsync(NovelBook book,
         IReadOnlyList<NovelChapter> chapters, NovelChapter chapter, CancellationToken token)
     {
@@ -132,14 +132,14 @@ public sealed class NovelBookSession(NovelSourceService sources, NovelLibrary li
         return new(clean.Title, clean.Blocks, NovelJson.Text(value, "imageStyle"), resolvedChapter,
             title, blocks, clean.Rules, clean.Conversion);
     }
-    private bool SettingsCurrent(IReadOnlyList<NovelRule> selected, string conversion) =>
-        conversion == library.Appearance.ReadingConversion && selected.SequenceEqual(library.Rules);
-    private async Task<(string Title, NovelBlock[] Blocks, IReadOnlyList<NovelRule> Rules, string Conversion)> ProcessAsync(
+    private bool SettingsCurrent(JsonElement selected, string conversion) =>
+        conversion == library.Appearance.ReadingConversion && JsonElement.DeepEquals(selected, library.RuleInputs);
+    private async Task<(string Title, NovelBlock[] Blocks, JsonElement Rules, string Conversion)> ProcessAsync(
         string title, NovelBlock[] blocks, NovelBook book, NovelSource source, CancellationToken token)
     {
         while (true)
         {
-            var selected = library.Rules; string conversion = library.Appearance.ReadingConversion;
+            var selected = library.RuleInputs; string conversion = library.Appearance.ReadingConversion;
             var clean = await rules.TransformAsync(title, blocks, book, source, selected, conversion, token);
             token.ThrowIfCancellationRequested();
             if (!sources.IsCurrent(source)) throw new OperationCanceledException(token);

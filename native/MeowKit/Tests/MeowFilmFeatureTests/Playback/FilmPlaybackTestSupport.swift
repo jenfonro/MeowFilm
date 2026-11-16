@@ -35,20 +35,28 @@ enum FilmPlaybackFixture {
                  "season": .number(1), "episode": .number(1), "globalEpisode": .number(1)])
     }
     static func identifiedBrowsing(_ value: RuntimeValue) -> RuntimeValue {
-        var fields = value.filmObject!
-        fields["lines"] = .array((fields["lines"]?.filmArray ?? []).map { value in
-            var row = value.filmObject!
-            row["businessId"] = .string("fixture-line-\(row["id"]!.filmScalar!)")
-            row["playbackTarget"] = sourceTarget(lineID: row["id"])
-            return .object(row)
-        })
-        for name in ["episodes", "originalEpisodes"] where fields[name] != nil {
-            fields[name] = .array(fields[name]!.filmArray!.map { value in
-                var row = value.filmObject!
-                row["businessId"] = row["id"]
-                row["playbackTarget"] = sourceTarget(lineID: fields["lineId"], candidateID: row["candidateId"]?.filmText)
+        guard var fields = value.filmObject else { return value }
+        if let lines = fields["lines"]?.filmArray {
+            fields["lines"] = .array(lines.map { value in
+                guard var row = value.filmObject, let id = row["id"],
+                      let identity = try? FilmPlaybackIdentifier(id), row["label"]?.filmText != nil else { return value }
+                row["businessId"] = row["businessId"] ?? .string("fixture-line-\(identity.display)")
+                row["playbackTarget"] = row["playbackTarget"] ?? sourceTarget(lineID: id)
                 return .object(row)
             })
+        }
+        if fields["error"]?.filmText == nil {
+            for name in ["episodes", "originalEpisodes"] {
+                guard let rows = fields[name]?.filmArray else { continue }
+                fields[name] = .array(rows.map { value in
+                    guard var row = value.filmObject, let id = row["id"]?.filmText,
+                          row["name"]?.filmText != nil else { return value }
+                    row["businessId"] = row["businessId"] ?? .string(id)
+                    row["playbackTarget"] = row["playbackTarget"] ??
+                        sourceTarget(lineID: fields["lineId"], candidateID: row["candidateId"]?.filmText)
+                    return .object(row)
+                })
+            }
         }
         return .object(fields)
     }
@@ -77,22 +85,28 @@ enum FilmPlaybackFixture {
             "browsing": identifiedBrowsing(browsing ?? .object(["sourceId": .null, "lineId": .null, "loading": .bool(false),
                                              "error": .null, "lines": .array([]), "episodes": .array([])])),
             "episodes": .array(episodes.map { value in
-                var row = value.filmObject!
-                var address = target.filmObject!
+                guard var row = value.filmObject, let season = row["season"]?.filmInteger,
+                      let episode = row["episode"]?.filmInteger, var address = target.filmObject else { return value }
                 address["season"] = row["season"]; address["episode"] = row["episode"]
-                row["businessId"] = .string("fixture-season-\(row["season"]!.filmInteger!)-episode-\(row["episode"]!.filmInteger!)")
-                row["playbackTarget"] = .object(address)
+                address["globalEpisode"] = row["globalEpisode"]
+                row["businessId"] = row["businessId"] ?? .string("fixture-season-\(season)-episode-\(episode)")
+                row["playbackTarget"] = row["playbackTarget"] ?? .object(address)
                 return .object(row)
             }), "candidates": .array(candidates),
             "attempt": attempt, "current": current, "searchComplete": .bool(false),
-            "preferences": FilmPlaybackPreferences.defaults.value, "shortVideo": .bool(false),
+            "shortVideo": .bool(false),
             "previewEpisodes": .bool(false), "reportError": .null, "prefetch": .array([]),
         ]
         fields["metadataSources"] = metadataSources.map { rows in .array(rows.map { value in
-            var row = value.filmObject!
-            row["businessId"] = row["id"]
-            row["playbackTarget"] = .object(["id": row["id"]!, "kind": row["kind"]!, "title": row["title"]!,
-                "metadataProvider": row["provider"]!, "metadataId": row["metadataId"]!])
+            guard var row = value.filmObject, let id = row["id"]?.filmText,
+                  let provider = row["provider"]?.filmText.flatMap(FilmMetadataProvider.init(rawValue:)),
+                  let kind = row["kind"]?.filmText.flatMap(FilmPlaybackKind.init(rawValue:)),
+                  let title = row["title"]?.filmText, let metadataID = row["metadataId"],
+                  (try? FilmPlaybackIdentifier(metadataID)) != nil else { return value }
+            row["businessId"] = row["businessId"] ?? .string(id)
+            row["playbackTarget"] = row["playbackTarget"] ?? .object([
+                "id": .string(id), "kind": .string(kind.rawValue), "title": .string(title),
+                "metadataProvider": .string(provider.rawValue), "metadataId": metadataID])
             return .object(row)
         }) }
         fields["metadataSourceId"] = metadataSourceID.map(RuntimeValue.string)

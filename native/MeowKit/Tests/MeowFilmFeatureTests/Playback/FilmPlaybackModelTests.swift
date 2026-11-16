@@ -157,7 +157,8 @@ final class FilmPlaybackModelTests: XCTestCase {
                 calls = await server.calls()
                 let opens = calls.filter { $0.0 == "session.open" }
                 XCTAssertEqual(opens.count, 2)
-                XCTAssertEqual(opens.last?.1.filmObject?["target"], .object(before.target.value))
+                XCTAssertEqual(opens.last?.1.filmObject?["target"], .object(FilmPlaybackFixture.request().target.value))
+                XCTAssertEqual(opens.last?.1.filmObject?["resumeTarget"], .object(before.target.value))
                 XCTAssertTrue(media.prepared.isEmpty)
                 await model.close()
             }
@@ -587,7 +588,8 @@ final class FilmPlaybackModelTests: XCTestCase {
             let metadataSource: RuntimeValue = .object(["id": .string("confirmed"), "provider": .string("tmdb"),
                 "metadataId": .number(19), "kind": .string(kind.rawValue), "title": .string("可靠作品")])
             func candidate(_ id: String) -> RuntimeValue {
-                .object(["id": .string(id), "source": FilmPlaybackFixture.source, "lineId": .number(0),
+                .object(["businessId": .string(id), "playbackTarget": .object(target(id).value),
+                    "id": .string(id), "source": FilmPlaybackFixture.source, "lineId": .number(0),
                     "lineLabel": .string("原线路"), "name": .string("真实文件")])
             }
             func target(_ id: String) -> FilmPlaybackTarget {
@@ -807,18 +809,13 @@ final class FilmPlaybackModelTests: XCTestCase {
             await model.waitForPendingWork()
             await model.close(allowSystemOwner: true)
             XCTAssertTrue(model.isReleased); XCTAssertNil(model.mediaState.attemptID)
-            let idle = FilmPlaybackFixture.snapshot(100, stage: autoPrepare ? "prepared" : "idle",
-                attempt: autoPrepare ? FilmPlaybackFixture.attempt("after-background", prepareOnly: true) : .null)
-            var fields = try idle.filmRequiredObject()
-            var preferences = FilmPlaybackPreferences.defaults
-            preferences.iosAutoPrepare = autoPrepare
-            fields["preferences"] = preferences.value
-            try await server.publish(.object(fields))
+            try await server.publish(FilmPlaybackFixture.snapshot(100, stage: autoPrepare ? "prepared" : "idle",
+                attempt: autoPrepare ? FilmPlaybackFixture.attempt("after-background", prepareOnly: true) : .null))
             await model.open()?.value
             await server.awaitObservation(2)
             await model.waitForPendingWork()
             XCTAssertEqual(model.snapshot?.stage, autoPrepare ? "prepared" : "idle")
-            XCTAssertEqual(model.snapshot?.preferences.iosAutoPrepare, autoPrepare)
+            XCTAssertEqual(model.snapshot?.attempt?.prepareOnly, autoPrepare ? true : nil)
             XCTAssertEqual(media.prepared.map(\.attemptID), ["before-background"])
             XCTAssertNil(model.mediaState.attemptID)
             var calls = await server.calls()

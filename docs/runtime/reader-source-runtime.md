@@ -34,6 +34,10 @@ Legado 图片规则与轻悦时光 `imagedecrypt` 返回的字节在内部 ABI �
 
 轻悦时光 `search`／`exploreKinds`／`explore`／`toc` 必须返回数组或既有列表 wrapper（`books`／`kinds`／`chapters`／`list`）。合法空数组和 JSON 字符串包装继续支持；畸形 JSON 或非列表值报 `SCRIPT_PROTOCOL_ERROR`（公开 `SOURCE_FAILURE`），不能伪装成成功空列表。正文等非列表动作及 CatVod 普通字符串语义不变。
 
+轻悦时光目录以完整结果数组的位置作为 index。坏章（非对象、不可消费的名称／URL，或两者均空）使整份目录报 `SCRIPT_PROTOCOL_ERROR`，不删除后压缩章节；有名称的空 URL 章节和合法空目录仍保留。
+
+Legado 分类按实际 title／name、url 隔离坏项，保留健康分类、仅标题分组和仅 URL 项；合法空列表／空分类文本返回空，非空全坏或不可消费的根报告 `SCRIPT_PROTOCOL_ERROR`。搜索／发现没有 bookList、目录没有 chapterList 时，原始结果必须是 JSON 数组；坏 JSON 或非数组根报同一错误，显式选择器合法无匹配仍返回空。
+
 ## 规则与脚本
 
 公共层实现 HTML/CSS、XPath、JSONPath、正则、切片、属性、`@put`／`@get`、变量、请求模板、Header、字符集和阶段上下文。正则匹配接替换时使用匹配文本，未替换时保留匹配结构。Legado 外观同步的宿主调用通过 AST 转换为异步 capability 调用；显式 `read().then/catch/finally` 的接收者保持 Promise，不改写为 `(await read()).then/catch/finally`，原显式 await 和同步外观调用继续传播。无法安全传播 `await` 的回调（含命名函数／函数变量传入同步 Array 方法，即使内部使用显式 Promise 链）、构造器或其他结构返回 `UNSUPPORTED_SCRIPT_ASYNC`，不返回 Promise 真值或空值冒充兼容。

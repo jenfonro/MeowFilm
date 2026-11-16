@@ -10,6 +10,7 @@ import { createFilmRulesService } from '../packages/film-playback/src/rules-serv
 import { createPlaybackService } from '../packages/film-playback/src/service.js';
 import { createPlaybackData } from '../packages/film-playback/src/data.js';
 import { createPlaybackCache } from '../packages/film-playback/src/cache.js';
+import { createFilmCatalog } from '../packages/film-playback/src/catalog.js';
 import { defaultPreferences } from '../packages/film-playback/src/policy.js';
 import { playbackFeedbackFailure } from '../packages/film-playback/src/identity.js';
 import { bindRuleSnapshot, invokeFilmRules } from '../packages/film-playback/src/rules.js';
@@ -40,8 +41,11 @@ async function until(predicate) {
 }
 function fixture(overrides = {}) {
   let clock = Date.parse('2026-11-08T12:00:00Z');
-  let document = { version: 1, preferences: defaultPreferences(), history: [], manual: [], blocks: [], previewTargets: [] };
+  let document = { version: 2, preferences: defaultPreferences(), history: [], manual: [], blocks: [], previewTargets: [], groups: [] };
   const calls = [], resources = new Set(), released = [];
+  const detailCache = createPlaybackCache({ now: () => clock });
+  const metadataValues = new Map();
+  const metadataKey = target => JSON.stringify([target.metadataProvider, target.kind, target.metadataId]);
   let sequence = 0, storageError;
   const library = {
     read: () => structuredClone(document),
@@ -61,9 +65,10 @@ function fixture(overrides = {}) {
       return value === null ? null : { value, completeness: 'complete', fetchedAt: clock, expiresAt: clock + 86_400_000,
         cache: { status: 'fresh', components: { detail: { status: 'ready', fetchedAt: clock } } } };
     },
-    async metadataSources(target, { metadata: value }) {
+    async metadataSources(target) {
       return [{ provider: target.metadataProvider, metadataId: target.metadataId,
-        kind: target.kind, title: target.title, metadata: structuredClone(value) }];
+        kind: target.kind, title: target.title,
+        metadata: structuredClone(metadataValues.get(metadataKey(target))) }];
     },
     async seasonMetadata(target, season) { calls.push(['season', season]); return structuredClone(metadata.seasons.find(row => row.season_number === season)); },
     async seasonMetadataEntry(target, season, options) {
@@ -75,8 +80,11 @@ function fixture(overrides = {}) {
     async search(value, query, page) { calls.push(['search', value.key, query, page]); return { page, hasMore: false,
       items: [{ vod_id: `detail-${value.key}`, vod_name: query }] }; },
     async detail(value, id) { calls.push(['detail', value.key, id]); return detail(['Film.1080p', 'Film.720p']); },
-    async detailEntry(value, id, options) {
-      return { value: await this.detail(value, id, options), fetchedAt: clock, expiresAt: clock + 3_600_000 };
+    async detailEntry(value, id, options = {}) {
+      return detailCache.load(JSON.stringify([value, id]), async () => ({
+        value: await this.detail(value, id, options), completeness: 'complete',
+        fetchedAt: clock, expiresAt: clock + 3_600_000,
+      }), { ttl: 3_600_000, completeness: 'complete', refresh: options.refresh ?? false });
     },
     async expand(value, line) { calls.push(['expand', value.key, line.id]); return line; },
     async resolve(candidate) { calls.push(['resolve', candidate.source.key, candidate.name]);
@@ -89,6 +97,22 @@ function fixture(overrides = {}) {
     async report(candidate, value) { calls.push(['report', candidate.source.key, value]); return { ok: true }; },
     ...overrides.data,
   };
+  if (!overrides.data?.metadataSources) {
+    const read = data.targetMetadataEntry;
+    data.targetMetadataEntry = async function(target, options) {
+      const entry = await read.call(this, target, options);
+      if (entry) metadataValues.set(metadataKey(target), entry.value);
+      return entry;
+    };
+    if (data.tmdbTargetEntry) {
+      const resolve = data.tmdbTargetEntry;
+      data.tmdbTargetEntry = async function(...args) {
+        const resolved = await resolve.apply(this, args);
+        if (resolved) metadataValues.set(metadataKey(resolved.target), resolved.entry.value);
+        return resolved;
+      };
+    }
+  }
   const media = {
     async prepare(descriptor, options) { calls.push(['prepare', descriptor.url, options]); const id = `resource-${++sequence}`;
       resources.add(id); return { id, url: descriptor.url }; },
@@ -97,13 +121,26 @@ function fixture(overrides = {}) {
     async cancelPrefetch(id) { calls.push(['cancelPrefetch', id]); },
     ...overrides.media,
   };
-  const service = createPlaybackService({ data, library, media, rules: overrides.rules ?? rules, now: () => clock });
+  const catalog = createFilmCatalog({ library });
+  const service = createPlaybackService({ data, library, media, catalog, rules: overrides.rules ?? rules, now: () => clock });
   const open = async (value = {}, internal) => (await service.open({ platform: 'test', target: movie, sources: [source('a'), source('b')], ...value }, internal));
   const snapshot = id => service.snapshot({ sessionId: id });
   const command = (id, action, value = {}) => service.command({ sessionId: id, action, ...value });
   const pending = id => until(() => snapshot(id).attempt);
   const current = async id => { const attempt = await pending(id); await command(id, 'media.started', { attemptId: attempt.id }); return attempt; };
+  const metadataView = (state, value, season) => {
+    const selected = state.metadataSources.find(row => row.id === state.metadataSourceId);
+    const provider = selected?.provider ?? state.target.metadataProvider;
+    const kind = selected?.kind ?? state.target.kind, id = selected?.metadataId ?? state.target.metadataId;
+    if (!provider) return structuredClone(value);
+    const path = `${provider === 'douban' ? '/rexxar/api/v2' : '/3'}/${kind}/${id}` +
+      (season === undefined ? '' : `/season/${season}`);
+    return catalog.metadata(provider, path, value, state.target);
+  };
+  const episodeViews = (state, rows) => rows.map(row => metadataView(state,
+    { name: state.target.title, season_number: row.season, episodes: [row] }, row.season).episodes[0]);
   return { service, data, media, library, calls, released, resources, open, snapshot, command, pending, current,
+    metadataView, episodeViews,
     advance: milliseconds => { clock += milliseconds; }, failStorage: code => { storageError = code; } };
 }
 
@@ -172,17 +209,20 @@ test('stop revokes a repeated prepare while its asynchronous eligibility check i
 });
 
 test('a superseded rules refresh cannot write episodes into a newer browse selection', async t => {
-  const original = await rules.snapshot(), entered = deferred(), gate = deferred();
-  let armed = false;
+  const original = await rules.snapshot(), gate = deferred();
+  let armed = false, refreshed = false;
   const snapshot = bindRuleSnapshot(Object.freeze({ ...original }), async (request, options) => {
     const value = await invokeFilmRules(original, request, options);
     if (armed && request.operation === 'recognition.candidates') {
-      armed = false; entered.resolve(); await gate.promise;
+      armed = false; await gate.promise;
     }
     return value;
   });
   const f = fixture({ data: {
-    async detail(value) { return detail([value.detailId === 'one' ? 'Series.S01E01' : 'Series.S01E02']); },
+    async detail(value) {
+      return detail([value.detailId === 'one'
+        ? refreshed ? 'Series.S01E01.1080p' : 'Series.S01E01.720p' : 'Series.S01E02']);
+    },
   } });
   t.after(async () => { gate.resolve(); await f.service.close(); });
   const { sessionId } = await f.open({ target: tv, results: [{ sourceKey: 'a',
@@ -191,9 +231,9 @@ test('a superseded rules refresh cannot write episodes into a newer browse selec
   const [one, two] = f.snapshot(sessionId).sources;
   await f.command(sessionId, 'browse', { sourceId: one.id });
   await until(() => f.snapshot(sessionId).browsing.episodes.length === 1);
-  armed = true;
-  await f.command(sessionId, 'browse.season', { season: 1 });
-  await entered.promise;
+  armed = refreshed = true;
+  await f.command(sessionId, 'browse.refresh');
+  await until(() => !armed);
   await f.command(sessionId, 'browse', { sourceId: two.id });
   await until(() => f.snapshot(sessionId).browsing.sourceId === two.id && !f.snapshot(sessionId).browsing.loading);
   const expected = f.snapshot(sessionId).browsing;
@@ -477,7 +517,7 @@ for (const metadataFailure of [false, true]) {
     assert.equal(state.entryTarget.metadataProvider, 'tmdb');
     assert.equal(state.metadataSources[0].provider, 'tmdb');
     assert.equal(state.metadataSourceId, state.metadataSources[0].id);
-    assert.deepEqual(state.metadata, metadata);
+    assert.deepEqual(state.metadata, f.metadataView(state, metadata));
     assert.equal(state.metadataError, metadataFailure ? 'METADATA_UNAVAILABLE' : null);
     assert.equal(selected.candidate.source.detailId, 0);
     assert.equal(selected.candidate.lineId, 0);
@@ -518,16 +558,18 @@ test('a resumed metadata card accepts its owner search update without changing t
 });
 
 for (const superseded of [false, true]) {
-  test(`a page intent reports its own calculation failure but discards a superseded one (superseded=${superseded})`, async t => {
-    const original = await rules.snapshot(), entered = deferred(), gate = deferred();
-    let armed = false;
+  test(`a page directory intent reports its own calculation failure but discards a superseded one (superseded=${superseded})`, async t => {
+    const original = await rules.snapshot(), gate = deferred();
+    let armed = false, refreshed = false;
     const snapshot = bindRuleSnapshot(Object.freeze({ ...original }), async (request, options) => {
       if (armed && request.operation === 'recognition.candidates') {
-        armed = false; entered.resolve(); await gate.promise; throw error('TIMEOUT');
+        armed = false; await gate.promise; throw error('TIMEOUT');
       }
       return invokeFilmRules(original, request, options);
     });
-    const f = fixture();
+    const f = fixture({ data: { async detail() {
+      return detail([refreshed ? 'Film.1080p' : 'Film.720p']);
+    } } });
     t.after(async () => { gate.resolve(); await f.service.close(); });
     const { sessionId } = await f.open({ results: [
       { sourceKey: 'a', items: [{ id: 0, title: 'Film' }] },
@@ -536,9 +578,9 @@ for (const superseded of [false, true]) {
     await until(() => f.snapshot(sessionId).stage === 'idle');
     await f.command(sessionId, 'browse', { sourceId: f.snapshot(sessionId).sources[0].id });
     await until(() => !f.snapshot(sessionId).browsing.loading);
-    armed = true;
-    const playing = f.command(sessionId, 'play');
-    await entered.promise;
+    armed = refreshed = true;
+    await f.command(sessionId, 'browse.refresh');
+    await until(() => !armed);
     let selected;
     if (superseded) {
       await f.command(sessionId, 'browse', { sourceId: f.snapshot(sessionId).sources[1].id });
@@ -546,11 +588,16 @@ for (const superseded of [false, true]) {
       await f.command(sessionId, 'play');
       selected = await f.pending(sessionId);
     }
-    gate.resolve(); await playing;
+    gate.resolve();
+    if (superseded) await tick();
+    else await until(() => !f.snapshot(sessionId).browsing.loading);
     const state = f.snapshot(sessionId);
-    assert.equal(state.stage, superseded ? 'pending' : 'unavailable');
+    assert.equal(state.stage, superseded ? 'pending' : 'idle');
     assert.equal(state.error, superseded ? null : 'TIMEOUT');
-    assert.equal(state.target.kind, 'source');
+    assert.equal(state.target.kind, superseded ? 'source' : 'movie');
+    assert.equal(state.browsing.sourceId, state.sources[superseded ? 1 : 0].id);
+    assert.equal(state.browsing.error, null);
+    assert.deepEqual(state.browsing.episodes.map(row => row.name), ['Film.1080p']);
     assert.equal(state.attempt?.id ?? null, selected?.id ?? null);
     assert.deepEqual(f.calls.filter(row => row[0] === 'resolve').map(row => row[1]), superseded ? ['b'] : []);
     assert.equal(f.calls.filter(row => row[0] === 'prepare').length, superseded ? 1 : 0);
@@ -895,13 +942,13 @@ test('reopening an unmatched Douban seed preserves exact typed group members, se
     },
     async detail(value, id) {
       f.calls.push(['detail', value.key, id]);
-      return { ...detail(['Film.1080p', 'Film.720p']), detailId: id, raw: { id, title: 'Film' } };
+      return { ...detail(['Film.1080p', 'Film.720p']), id, title: 'Film' };
     },
   } });
   t.after(() => f.service.close());
   const first = await f.open({ platform: 'ios', target: seed, metadata: seedMetadata, sources: [source('a')] });
   await until(() => f.snapshot(first.sessionId).entryResolution === 'unmatched');
-  assert.deepEqual(f.snapshot(first.sessionId).metadata, seedMetadata);
+  assert.deepEqual(f.snapshot(first.sessionId).metadata, f.metadataView(f.snapshot(first.sessionId), seedMetadata));
   await f.command(first.sessionId, 'search.more');
   await until(() => f.snapshot(first.sessionId).searchComplete);
   const row = f.snapshot(first.sessionId).sources.find(row => row.source.detailId === '0');
@@ -923,7 +970,7 @@ test('reopening an unmatched Douban seed preserves exact typed group members, se
   assert.equal(current.entryResolution, 'unmatched');
   assert.deepEqual(current.entryTarget, seed);
   assert.deepEqual(current.target, saved.target);
-  assert.deepEqual(current.metadata, seedMetadata);
+  assert.deepEqual(current.metadata, f.metadataView(current, seedMetadata));
   assert.deepEqual(current.sources.map(row => row.source.detailId), [0, '0']);
   assert.deepEqual(current.search.map(row => [row.page, row.completed]), [[1, true]]);
   assert.equal(current.attempt, null);
@@ -935,7 +982,9 @@ test('reopening an unmatched Douban seed preserves exact typed group members, se
   assert.equal(resumed.candidate.source.detailId, '0');
   assert.deepEqual(f.snapshot(reentered.sessionId).target, saved.target);
   assert.deepEqual(f.calls.filter(row => row[0] === 'search'), [['search', 'a', 'Film', 1]]);
-  assert.deepEqual(f.calls.filter(row => row[0] === 'detail'), [['detail', 'a', '0'], ['detail', 'a', '0']]);
+  assert.deepEqual(f.calls.filter(row => row[0] === 'detail'), [['detail', 'a', '0']],
+    'explicit replay reuses the still-fresh detail entry from the same data owner');
+  assert.deepEqual(f.calls.filter(row => row[0] === 'resolve').map(row => row[2]), ['Film.720p', 'Film.720p']);
   assert.equal(lookups, 1, 'the resumed group/file must not wait on a second TMDB seed lookup');
   assert.equal(f.snapshot(reentered.sessionId).error, null);
 });
@@ -960,7 +1009,7 @@ test('an exact source resume opens directly even when the unused Douban lookup w
   assert.equal(f.snapshot(opened.sessionId).entryResolution, 'unmatched');
   assert.equal(f.snapshot(opened.sessionId).error, null);
   assert.deepEqual(f.snapshot(opened.sessionId).target, resumeTarget);
-  assert.deepEqual(f.snapshot(opened.sessionId).metadata, seedMetadata);
+  assert.deepEqual(f.snapshot(opened.sessionId).metadata, f.metadataView(f.snapshot(opened.sessionId), seedMetadata));
   assert.equal(lookups, 0);
   await f.command(opened.sessionId, 'play');
   const attempt = await f.pending(opened.sessionId);
@@ -1186,6 +1235,46 @@ test('metadata initialization, seasonal browsing, provider selection and invalid
   for (const [, actual] of reads) assert.strictEqual(actual, ruleSnapshot);
 });
 
+test('metadata discovery retains the primary entry material without another fixture producer read', async t => {
+  const target = { ...tv, id: 'tmdb:tv:99', metadataId: 99, season: 2, episode: 1 };
+  const value = { id: 99, name: 'Custom Series', aliases: ['Primary-only Alias'], status: 'Ended', seasons: [
+    { season_number: 2, episode_count: 1, episodes: [
+      { season_number: 2, episode_number: 1, name: 'Custom episode', overview: 'Primary entry material' },
+    ] },
+  ] };
+  let reads = 0;
+  const f = fixture({ data: {
+    async targetMetadataEntry() {
+      reads++;
+      return { value: structuredClone(value), expiresAt: Date.parse('2030-01-01'),
+        cache: { status: 'fresh', components: {} } };
+    },
+    async seasonMetadata() { return structuredClone(value.seasons[0]); },
+    async search(source, query, page) {
+      f.calls.push(['search', source.key, query, page]);
+      return { page, hasMore: false, items: [{ id: 'alias', title: 'Primary-only Alias' }] };
+    },
+  } });
+  t.after(() => f.service.close());
+  const { sessionId } = await f.open({ target, sources: [source('a')] });
+  await until(() => f.snapshot(sessionId).stage === 'idle');
+  await tick();
+  const state = f.snapshot(sessionId);
+  assert.deepEqual(state.metadata, f.metadataView(state, value));
+  assert.equal(state.metadataSources[0].metadataId, 99);
+  assert.deepEqual(state.episodes.map(row => [row.season, row.episode, row.name, row.overview]),
+    [[2, 1, 'Custom episode', 'Primary entry material']]);
+  assert.equal(reads, 1);
+  assert.equal(state.metadataError, null);
+  assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
+  await f.command(sessionId, 'search.more');
+  await until(() => f.snapshot(sessionId).searchComplete);
+  assert.deepEqual(f.snapshot(sessionId).sources.map(row => row.source.detailId), ['alias']);
+  assert.deepEqual(f.calls.filter(row => row[0] === 'search'), [['search', 'a', 'Series', 1]]);
+  assert.equal(reads, 1);
+  assert.equal(f.calls.some(row => ['detail', 'resolve', 'prepare'].includes(row[0])), false);
+});
+
 test('G02-C01 real data restores cached season fields and preview after returning from a source directory', async t => {
   const series = { ...tmdbAppended, id: 19, name: 'Series', genres: [], status: 'Ended',
     seasons: [{ season_number: 1, episode_count: 3 }] };
@@ -1219,7 +1308,7 @@ test('G02-C01 real data restores cached season fields and preview after returnin
   await f.command(sessionId, 'preview', { enabled: true });
   assert.deepEqual(f.snapshot(sessionId).episodes.map(row => row.episode), [1, 2, 3]);
   assert.deepEqual(f.snapshot(sessionId).episodes[2],
-    { ...season.episodes[2], season: 1, episode: 3, globalEpisode: 3 });
+    f.episodeViews(f.snapshot(sessionId), [{ ...season.episodes[2], season: 1, episode: 3, globalEpisode: 3 }])[0]);
   await f.command(sessionId, 'preview', { enabled: false });
   assert.deepEqual(f.snapshot(sessionId).episodes, initial);
   assert.deepEqual(runtime.metadataCalls.map(row => row.path), ['/3/tv/19', '/3/tv/19/season/1']);
@@ -1265,14 +1354,15 @@ for (const state of ['idle', 'prepared', 'playing']) {
     }
     const before = f.snapshot(sessionId), sourceCalls = structuredClone(runtime.calls);
     const prepares = f.calls.filter(row => row[0] === 'prepare').length, history = f.library.read().history;
-    const initial = season.episodes.slice(0, 2).map(row =>
-      ({ ...row, season: 1, episode: row.episode_number, globalEpisode: row.episode_number }));
+    const initial = f.episodeViews(before, season.episodes.slice(0, 2).map(row =>
+      ({ ...row, season: 1, episode: row.episode_number, globalEpisode: row.episode_number })));
     assert.deepEqual(before.episodes, initial);
     await f.command(sessionId, 'search.update', searchContext(tv, 1, { sources, results, search, metadataTarget: tv }));
     await until(() => f.snapshot(sessionId).sequence >= before.sequence + 2);
     const updated = f.snapshot(sessionId);
     assert.deepEqual(updated.episodes, initial);
-    assert.deepEqual(updated.metadata.seasons[0].episodes, season.episodes);
+    assert.deepEqual(updated.metadata.seasons[0].episodes,
+      f.metadataView(updated, { ...updated.metadata, seasons: [season] }).seasons[0].episodes);
     assert.deepEqual(updated.target, before.target);
     assert.deepEqual(updated.attempt, before.attempt);
     assert.deepEqual(updated.current, before.current);
@@ -1281,8 +1371,8 @@ for (const state of ['idle', 'prepared', 'playing']) {
     await assert.rejects(f.command(sessionId, 'select.episode', { episode: { season: 1, episode: 3 } }),
       { code: 'NO_MATCH' });
     await f.command(sessionId, 'preview', { enabled: true });
-    assert.deepEqual(f.snapshot(sessionId).episodes, season.episodes.map(row =>
-      ({ ...row, season: 1, episode: row.episode_number, globalEpisode: row.episode_number })));
+    assert.deepEqual(f.snapshot(sessionId).episodes, f.episodeViews(f.snapshot(sessionId), season.episodes.map(row =>
+      ({ ...row, season: 1, episode: row.episode_number, globalEpisode: row.episode_number }))));
     await f.command(sessionId, 'preview', { enabled: false });
     assert.deepEqual(f.snapshot(sessionId).episodes, initial);
     assert.deepEqual(runtime.metadataCalls.map(row => row.path), ['/3/tv/19', '/3/tv/19/season/1']);
@@ -1349,10 +1439,11 @@ test('FR-Node-02 real data expired S1 playback preserves the newer full S2 brows
   await f.command(sessionId, 'browse.season', { season: 2 });
   await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).browsing.season === 2);
   const second = f.snapshot(sessionId);
-  const visible = seasons[2].episodes.slice(0, 2).map(row =>
-    ({ ...row, season: 2, episode: row.episode_number, globalEpisode: 2 + row.episode_number }));
+  const visible = f.episodeViews(second, seasons[2].episodes.slice(0, 2).map(row =>
+    ({ ...row, season: 2, episode: row.episode_number, globalEpisode: 2 + row.episode_number })));
   assert.deepEqual(second.episodes, visible);
-  assert.deepEqual(second.metadata.seasons.find(row => row.season_number === 2).episodes, seasons[2].episodes);
+  assert.deepEqual(second.metadata.seasons.find(row => row.season_number === 2).episodes,
+    f.metadataView(second, { ...second.metadata, seasons: [seasons[2]] }).seasons[0].episodes);
   assert.equal(second.browsing.error, null);
   gate.resolve();
   const attempt = await f.pending(sessionId), final = f.snapshot(sessionId);
@@ -1368,8 +1459,8 @@ test('FR-Node-02 real data expired S1 playback preserves the newer full S2 brows
   await assert.rejects(f.command(sessionId, 'select.episode', { episode: { season: 2, episode: 3 } }),
     { code: 'NO_MATCH' });
   await f.command(sessionId, 'preview', { enabled: true });
-  assert.deepEqual(f.snapshot(sessionId).episodes, seasons[2].episodes.map(row =>
-    ({ ...row, season: 2, episode: row.episode_number, globalEpisode: 2 + row.episode_number })));
+  assert.deepEqual(f.snapshot(sessionId).episodes, f.episodeViews(f.snapshot(sessionId), seasons[2].episodes.map(row =>
+    ({ ...row, season: 2, episode: row.episode_number, globalEpisode: 2 + row.episode_number }))));
   await f.command(sessionId, 'preview', { enabled: false });
   assert.deepEqual(f.snapshot(sessionId).episodes, visible);
   assert.equal(f.snapshot(sessionId).attempt.id, attempt.id);
@@ -1402,7 +1493,7 @@ test('G02-C01 real data preserves a selected season-zero episode-zero and an exp
   await f.command(sessionId, 'browse.season', { season: 0 });
   await until(() => !f.snapshot(sessionId).browsing.loading);
   const special = f.snapshot(sessionId).episodes;
-  assert.deepEqual(special, [{ ...seasons[0].episodes[0], season: 0, episode: 0 }]);
+  assert.deepEqual(special, f.episodeViews(f.snapshot(sessionId), [{ ...seasons[0].episodes[0], season: 0, episode: 0 }]));
   await f.command(sessionId, 'browse.metadata', { metadataSourceId: primary.id });
   await until(() => !f.snapshot(sessionId).browsing.loading);
   assert.equal(f.snapshot(sessionId).browsing.season, 0);
@@ -1472,15 +1563,16 @@ test('G02-C01 real data supplements verified Douban episodes without replacing t
   await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).metadataSourceId === first.id);
   assert.equal(f.snapshot(sessionId).metadata.id, '20');
   assert.equal(f.snapshot(sessionId).target.metadataId, '20');
-  const mapped = { name: 'TMDB episode 1', still_path: '/tmdb-1.jpg', air_date: '2020-01-01',
-    season: 1, episode: 1, globalEpisode: 1 };
+  const mapped = f.episodeViews(f.snapshot(sessionId), [{ name: 'TMDB episode 1',
+    still_path: '/tmdb-1.jpg', air_date: '2020-01-01', season: 1, episode: 1, globalEpisode: 1 }])[0];
   assert.deepEqual(f.snapshot(sessionId).episodes, [mapped]);
   await f.command(sessionId, 'preview', { enabled: true });
   assert.deepEqual(f.snapshot(sessionId).episodes, [mapped]);
   await f.command(sessionId, 'browse.metadata', { metadataSourceId: second.id });
   await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).metadataSourceId === second.id);
   assert.equal(f.snapshot(sessionId).metadata.id, 19);
-  assert.deepEqual(f.snapshot(sessionId).episodes[2], { ...season.episodes[2], season: 1, episode: 3, globalEpisode: 3 });
+  assert.deepEqual(f.snapshot(sessionId).episodes[2],
+    f.episodeViews(f.snapshot(sessionId), [{ ...season.episodes[2], season: 1, episode: 3, globalEpisode: 3 }])[0]);
   assert.deepEqual(calls.filter(([provider]) => provider === 'tmdb'),
     [['tmdb', '/3/tv/19'], ['tmdb', '/3/tv/19/season/1']]);
   assert.deepEqual(calls.filter(([provider]) => provider === 'douban'),
@@ -1601,10 +1693,10 @@ test('four-season TMDB and Douban lists keep different totals, map available det
   assert.deepEqual([mapped.target.metadataProvider, mapped.target.metadataId, mapped.target.season,
     mapped.target.episode, mapped.target.globalEpisode], ['douban', '20', 2, 1, 4]);
   assert.equal(mapped.episodes.length, 2);
-  assert.deepEqual(mapped.episodes[0], { name: 'TMDB S2E1', overview: 'Overview 2/1',
+  assert.deepEqual(mapped.episodes[0], f.episodeViews(mapped, [{ name: 'TMDB S2E1', overview: 'Overview 2/1',
     still_path: '/season-2-episode-1.jpg', runtime: 40, air_date: '2020-01-01',
-    season: 2, episode: 1, globalEpisode: 4 });
-  assert.deepEqual(mapped.episodes[1], { season: 2, episode: 2, globalEpisode: 5 });
+    season: 2, episode: 1, globalEpisode: 4 }])[0]);
+  assert.deepEqual(mapped.episodes[1], f.episodeViews(mapped, [{ season: 2, episode: 2, globalEpisode: 5 }])[0]);
   assert.equal(mapped.metadata.id, '20');
   await f.command(id, 'browse.metadata', { metadataSourceId: tmdb.id });
   await until(() => !f.snapshot(id).browsing.loading && f.snapshot(id).metadataSourceId === tmdb.id);
@@ -1633,11 +1725,11 @@ for (const secondSeasonCount of [0, null]) {
     assert.equal(mapped.metadata.id, '20');
     assert.deepEqual(mapped.metadata.doubanSeasons.map(row => [row.season, row.episodeCount, row.metadataId]),
       [[1, 3, '20'], [2, 2, '21'], [3, 2, '22'], [4, 2, '23']]);
-    assert.deepEqual(mapped.episodes, [
+    assert.deepEqual(mapped.episodes, f.episodeViews(mapped, [
       { name: 'TMDB S2E1', overview: 'Overview 2/1', still_path: '/season-2-episode-1.jpg',
         runtime: 40, air_date: '2020-01-01', season: 2, episode: 1, globalEpisode: 4 },
       { season: 2, episode: 2, globalEpisode: 5 },
-    ]);
+    ]));
     assert.equal(mapped.metadataError, null);
     assert.equal(mapped.browsing.error, null);
     const tmdb = before.metadataSources.find(row => row.provider === 'tmdb');
@@ -1691,11 +1783,11 @@ for (const cached of [true, false]) {
       [[1, 3, '20'], [2, 2, '21'], [3, 2, '22'], [4, 2, '23']]);
     assert.equal(failed.browsing.season, requestedSeason);
     if (cached) assert.deepEqual(failed.episodes, before.episodes, 'stale reference details remain displayable');
-    else assert.deepEqual(failed.episodes, [
+    else assert.deepEqual(failed.episodes, f.episodeViews(failed, [
       { season: 1, episode: 1, globalEpisode: 1 },
       { season: 1, episode: 2, globalEpisode: 2 },
       { season: 1, episode: 3, globalEpisode: 3 },
-    ], 'missing optional details leave the real primary season available');
+    ]), 'missing optional details leave the real primary season available');
     assert.equal(failed.attempt, null);
     assert.equal(failed.current, null);
     assert.deepEqual(f.library.read().history, []);
@@ -2140,8 +2232,8 @@ test('E22 stopping source status prevents detail but an explicit browse after st
       },
     } }],
   ]) });
-  const f = fixture({ data: { ...data, detail(...args) {
-    const work = data.detail(...args);
+  const f = fixture({ data: { ...data, detailEntry(...args) {
+    const work = data.detailEntry(...args);
     details.push(work.then(value => ({ value }), failure => ({ failure })));
     return work;
   } } });
@@ -2762,7 +2854,42 @@ test('metadata handoff retains original freshness evidence and never trusts a ca
   await until(() => f.snapshot(sessionId).stage === 'idle');
   assert.deepEqual(f.calls.filter(call => ['handoff', 'metadata'].includes(call[0])),
     [['handoff', [entry]], ['metadata', movie.id]]);
-  assert.deepEqual(f.snapshot(sessionId).metadata, { id: 17 });
+  assert.deepEqual(f.snapshot(sessionId).metadata, f.metadataView(f.snapshot(sessionId), { id: 17 }));
+});
+
+test('E49 malformed optional metadata content does not block initialization or a late search carrier', async t => {
+  const at = Date.parse('2026-11-08T12:00:00Z'), requests = [];
+  const result = value => ({ ok: true, value });
+  const cache = createPlaybackCache({ now: () => at });
+  const data = createPlaybackData({ cache, now: () => at, modules: new Map([
+    ['tmdb', { methods: {
+      'tmdb.data.settings.get': async () => result({ revision: 'current-config' }),
+      'tmdb.data.request': async ({ path }) => {
+        requests.push(path);
+        return result({ ...tmdbAppended, id: 17, title: `Loaded ${requests.length}`,
+          genres: [], runtime: 100, release_date: '2020-01-01' });
+      },
+    } }],
+  ]) });
+  const f = fixture({ data });
+  t.after(async () => { await f.service.close(); await data.close(); await cache.close(); });
+  const entry = { kind: 'metadata', provider: 'tmdb', path: '/3/movie/17',
+    query: { append_to_response: 'credits,similar,images' }, settings: { revision: 'current-config' },
+    fetchedAt: at - 1000, completeness: 'complete', value: { id: 17, title: 'Incomplete' } };
+  const { sessionId } = await f.open({ sources: [], cacheEntries: [entry] });
+  await until(() => f.snapshot(sessionId).stage === 'idle');
+  assert.equal(f.snapshot(sessionId).metadata.title, 'Loaded 1');
+  assert.equal(f.snapshot(sessionId).metadataError, null);
+  assert.deepEqual(requests, ['/3/movie/17']);
+  await data.invalidate('tmdb');
+  await f.command(sessionId, 'search.update', searchContext(movie, 1, {
+    sources: [], metadataTarget: movie, cacheEntries: [entry],
+  }));
+  await until(() => f.snapshot(sessionId).metadata?.title === 'Loaded 2');
+  assert.deepEqual(requests, ['/3/movie/17', '/3/movie/17']);
+  assert.equal(f.snapshot(sessionId).target.id, movie.id);
+  assert.equal(f.snapshot(sessionId).metadataError, null);
+  assert.equal(f.snapshot(sessionId).attempt, null);
 });
 
 test('metadata association is independent of primary playback and only verified selectors can be selected', async t => {
@@ -3082,8 +3209,8 @@ test('the old output ending during same-episode source replacement preserves the
 
 for (const retained of [true, false]) {
   test(`raw-source resume ${retained ? 'restores the exact unnumbered file' : 'does not apply missing-file progress to another file'}`, async t => {
-    let items = ['One', 'Two'];
-    const f = fixture({ data: { async detail() { return detail(items); } } });
+    let items = ['One', 'Two'], reads = 0;
+    const f = fixture({ data: { async detail() { reads++; return detail(items); } } });
     t.after(() => f.service.close());
     const target = { id: 'source:a:raw', kind: 'source', title: 'Raw', source: { key: 'a', detailId: 'raw' } };
     const { sessionId } = (await f.open({ target }));
@@ -3096,7 +3223,10 @@ for (const retained of [true, false]) {
     await f.command(sessionId, 'media.progress', { attemptId: current.id, position: 43, duration: 100, paused: true });
     await f.command(sessionId, 'stop');
     await f.service.release({ sessionId });
-    if (!retained) items = ['One'];
+    if (!retained) {
+      items = ['One'];
+      f.advance(3_600_000);
+    }
     const reopened = (await f.open({ platform: 'windows', target }));
     if (retained) {
       const next = await f.pending(reopened.sessionId);
@@ -3107,7 +3237,10 @@ for (const retained of [true, false]) {
       await until(() => f.snapshot(reopened.sessionId).stage === 'unavailable');
       assert.equal(f.snapshot(reopened.sessionId).error, 'NOT_FOUND');
       assert.equal(f.snapshot(reopened.sessionId).attempt, null);
+      assert.equal(f.calls.filter(row => row[0] === 'prepare').length, 1);
+      assert.equal(f.resources.size, 0);
     }
+    assert.equal(reads, retained ? 1 : 2);
   });
 }
 
@@ -3658,7 +3791,7 @@ test('hint detail errors and identity mismatches continue in order without fetch
     async detail(value, id) {
       f.calls.push(['detail', value.key, id]);
       if (id === 'error') throw error('UPSTREAM_HTTP');
-      return { ...detail(['Film.1080p']), detailId: id, raw: { id, title: id === 'wrong' ? 'Other' : 'Film' } };
+      return { ...detail(['Film.1080p']), id, title: id === 'wrong' ? 'Other' : 'Film' };
     },
   } });
   t.after(() => f.service.close());
@@ -3677,7 +3810,7 @@ test('opening and browsing hints does no source work until selected and no resol
   const gate = deferred();
   const f = fixture({ data: { async detail(value, id) {
     f.calls.push(['detail', value.key, id]); await gate.promise;
-    return { ...detail(['Film.1080p']), detailId: id, raw: { detailId: id, title: 'Film' } };
+    return { ...detail(['Film.1080p']), detailId: id, title: 'Film' };
   } } });
   t.after(async () => { gate.resolve(); await f.service.close(); });
   const proof = { selectionId: movie.id, revision: 0, target: movie,
@@ -3701,7 +3834,7 @@ test('opening and browsing hints does no source work until selected and no resol
 test('history/manual linkage cannot turn an unverified hint into candidate evidence', async t => {
   const f = fixture({ data: { async detail(value, id) {
     f.calls.push(['detail', value.key, id]);
-    return { ...detail(['Film.1080p']), detailId: id, raw: { id, title: 'Other Film' } };
+    return { ...detail(['Film.1080p']), id, title: 'Other Film' };
   }, async search(value, query, page) { f.calls.push(['search', page]); return { page, hasMore: false, items: [] }; } } });
   t.after(() => f.service.close());
   f.library.update(document => {
@@ -3747,7 +3880,7 @@ test('late hint detail cannot produce candidates or media after its exact source
   const gate = deferred();
   const f = fixture({ data: { async detail(value, id) {
     f.calls.push(['detail', id]); await gate.promise;
-    return { ...detail(['Film.1080p']), detailId: id, raw: { id, title: 'Film' } };
+    return { ...detail(['Film.1080p']), id, title: 'Film' };
   } } });
   t.after(async () => { gate.resolve(); await f.service.close(); });
   const { sessionId } = (await f.open({ platform: 'windows', sources: [source('a')],
@@ -3949,7 +4082,7 @@ test('raw opaque reopen restores only that exact candidate history rather than a
 test('a successfully read but nonmatching hint resets manual request failures without approving its candidates', async t => {
   const f = fixture({ data: { async detail(value, id) {
     f.calls.push(['detail', value.key, id]);
-    return { ...detail(['Film.1080p']), detailId: id, raw: { id, title: 'Other Film' } };
+    return { ...detail(['Film.1080p']), id, title: 'Other Film' };
   } } });
   t.after(() => f.service.close());
   f.library.update(document => { document.manual.push({ id: 'manual-hint', targetId: movie.id,
@@ -4225,7 +4358,7 @@ for (const carrier of ['group', 'tmdb']) {
     assert.equal(opened.metadata, null);
     await until(() => f.snapshot(opened.sessionId).stage === 'idle');
     assert.deepEqual(f.snapshot(opened.sessionId).target, currentTarget);
-    assert.deepEqual(f.snapshot(opened.sessionId).metadata, currentMetadata);
+    assert.deepEqual(f.snapshot(opened.sessionId).metadata, f.metadataView(f.snapshot(opened.sessionId), currentMetadata));
     assert.equal(f.calls.some(row => ['search', 'detail', 'expand', 'resolve', 'prepare'].includes(row[0])), false);
   });
 }
@@ -4287,7 +4420,7 @@ for (const output of ['pending', 'current']) for (const carrier of ['group', 'tm
     assert.deepEqual(after.sources.map(row => [row.source.key, row.source.detailId]),
       [['a', 0], ['a', '0'], ['b', 0]]);
     assert.deepEqual(after.search.map(row => [row.page, row.completed]), [[2, true], [1, false]]);
-    if (carrier === 'tmdb') assert.deepEqual(after.metadata, carrierMetadata);
+    if (carrier === 'tmdb') assert.deepEqual(after.metadata, f.metadataView(after, carrierMetadata));
     const repeated = searchContext(target, 2, {
       target: carrier === 'tmdb' ? carrierTarget : { ...target, members: [lateMembers[1]] },
       selectionMembers: [lateMembers[1]],
@@ -4385,9 +4518,10 @@ for (const keepSource of [false, true]) {
         return target.metadataProvider === 'douban' ? structuredClone(selectedMetadata)
           : { id: 17, title: 'Film', runtime: 100 };
       },
-      async metadataSources(target, { metadata: value }) {
+      async metadataSources(target) {
         return [{ provider: target.metadataProvider, metadataId: target.metadataId, kind: target.kind,
-          title: target.title, metadata: structuredClone(value) },
+          title: target.title, metadata: target.metadataProvider === 'douban'
+            ? structuredClone(selectedMetadata) : { id: 17, title: 'Film', runtime: 100 } },
         { provider: 'douban', metadataId: 81, kind: 'movie', title: 'Film', metadata: selectedMetadata }];
       },
     } });
@@ -4423,7 +4557,7 @@ for (const keepSource of [false, true]) {
     await tick();
     const after = f.snapshot(sessionId);
     assert.deepEqual(after.target, before.target);
-    assert.deepEqual(after.metadata, selectedMetadata);
+    assert.deepEqual(after.metadata, f.metadataView(after, selectedMetadata));
     assert.equal(after.metadataSourceId, douban.id);
     assert.equal(after.current.attemptId, current.id);
     assert.equal(after.attempt, null);
@@ -5274,26 +5408,33 @@ test('starting an exact file does not cancel in-flight content-source admission 
 });
 
 test('exact source preparation reports directory loading and resolving, never smart matching', async t => {
-  const resolution = deferred(), stages = [], frames = [];
-  const f = fixture({ data: { async resolve(candidate) {
-    stages.push(f.snapshot(id).stage);
-    await resolution.promise;
-    throw error('UPSTREAM_HTTP');
-  } } });
-  t.after(async () => { resolution.resolve(); await f.service.close(); });
+  const directory = deferred(), resolution = deferred(), stages = [], frames = [];
+  const f = fixture({ data: {
+    async detail() { await directory.promise; return detail(['Film.1080p']); },
+    async resolve() {
+      stages.push(f.snapshot(id).stage);
+      await resolution.promise;
+      throw error('UPSTREAM_HTTP');
+    },
+  } });
+  t.after(async () => { directory.resolve(); resolution.resolve(); await f.service.close(); });
   const { sessionId: id } = await f.open({ target: groupTarget() });
   await until(() => f.snapshot(id).stage === 'idle');
   const stream = f.service.events(id);
   t.after(() => stream.dispose());
-  stream.body.on('data', chunk => frames.push(JSON.parse(/data: (.+)\n/.exec(chunk.toString())[1]).stage));
+  stream.body.on('data', chunk => frames.push(JSON.parse(/data: (.+)\n/.exec(chunk.toString())[1])));
   await tick();
-  await f.command(id, 'play');
+  const playing = f.command(id, 'play');
+  await until(() => frames.some(frame => frame.browsing.loading));
+  assert.equal(f.snapshot(id).browsing.loading, true);
+  directory.resolve();
+  await playing;
   await until(() => stages.length > 0);
   assert.deepEqual(stages, ['resolving']);
+  await until(() => frames.some(frame => frame.stage === 'resolving'));
   resolution.resolve();
   await until(() => f.snapshot(id).stage === 'unavailable');
-  assert.ok(frames.includes('loading'));
-  assert.equal(frames.some(stage => ['cached', 'history', 'manual', 'searching'].includes(stage)), false);
+  assert.equal(frames.some(frame => ['cached', 'history', 'manual', 'searching'].includes(frame.stage)), false);
   assert.equal(f.snapshot(id).error, 'UPSTREAM_HTTP');
   assert.equal(f.calls.some(row => row[0] === 'search'), false);
 });

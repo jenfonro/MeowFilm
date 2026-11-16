@@ -77,9 +77,44 @@ public static class FilmMetadataRuntimeTests
             value.GetProperty("images").GetProperty("posters")[0].GetProperty("file_path").GetString() == prefix + "/poster.png",
             "credits, similar and images arrive intact with the requested stable image size");
     }
+    internal static JsonElement MetadataBody(JsonElement metadata, JsonElement raw, FilmPlaybackTarget target)
+    {
+        var body = JsonNode.Parse(metadata.GetRawText())!.AsObject();
+        RemoveIdentity(body, raw, target);
+        return FilmJson.Encode(body);
+        static void RemoveIdentity(JsonObject body, JsonElement raw, FilmPlaybackTarget target)
+        {
+            var value = FilmJson.Encode(body);
+            string identity = target.Id + (target.Season is { } season ? ":season:" + season : "");
+            Check(!raw.TryGetProperty("businessId", out _) && !raw.TryGetProperty("playbackTarget", out _) &&
+                value.GetProperty("businessId").GetString() == identity &&
+                JsonElement.DeepEquals(value.GetProperty("playbackTarget"), FilmJson.Encode(target.Wire())),
+                "public metadata publishes the exact stable provider, target and season identity without decorating the raw cache");
+            body.Remove("businessId"); body.Remove("playbackTarget");
+            if (raw.TryGetProperty("seasons", out var seasons))
+                for (int index = 0; index < seasons.GetArrayLength(); index++)
+                    RemoveIdentity(body["seasons"]![index]!.AsObject(), seasons[index],
+                        target with { Season = seasons[index].GetProperty("season_number").GetInt32() });
+            if (raw.TryGetProperty("similar", out var similar) && similar.TryGetProperty("results", out var results))
+                for (int index = 0; index < results.GetArrayLength(); index++)
+                {
+                    var row = results[index];
+                    string id = row.GetProperty("id").GetInt64().ToString();
+                    string kind = row.TryGetProperty("media_type", out var type) ? type.GetString()! : target.Kind;
+                    string title = row.TryGetProperty("title", out var name) ? name.GetString()! : row.GetProperty("name").GetString()!;
+                    RemoveIdentity(body["similar"]!["results"]![index]!.AsObject(), row,
+                        new($"{target.MetadataProvider}:{kind}:{id}", kind, title, target.MetadataProvider, id));
+                }
+        }
+    }
     private static object SearchIdentity(string query) =>
         new { kind = "metadata", provider = "tmdb", path = "/3/search/multi",
             query = new { query, page = 1, language = "zh-CN" }, imageSize = "w500" };
+    private static object SearchInput(string query) =>
+        new { provider = "tmdb", path = "/3/search/multi", query = new { query, page = 1 }, imageSize = "w500" };
+    private static object DetailInput(string type = "tv") =>
+        new { provider = "tmdb", path = "/3/" + type + "/7",
+            query = new { append_to_response = "credits,similar,images" }, imageSize = "original" };
     private static object DetailIdentity(string type = "tv", string size = "original") =>
         new { kind = "metadata", provider = "tmdb", path = "/3/" + type + "/7",
             query = new { language = "zh-CN", append_to_response = "credits,similar,images" }, imageSize = size };
@@ -286,7 +321,11 @@ public static class FilmMetadataRuntimeTests
             Check(starts == 0 && (await metadata.GetSettingsAsync()).Language == "ja-JP" &&
                 (await metadata.GetDoubanSettingsAsync()).SearchBase == "https://douban.fixture.invalid",
                 "real native protected documents remain readable and writable with no runtime session");
-            await BridgeTests.Expect("CLOSED", () => metadata.SearchAsync("离线", default));
+            await BridgeTests.Expect("CLOSED", async () =>
+            {
+                var connection = await runtime.CaptureConnectionAsync();
+                await new FilmPlaybackClient(connection.Client).CallAsync("data.metadata", SearchInput("离线"), connection.Revoked);
+            });
             Check(starts == 0, "actual metadata requests fail offline without recovering Node or rolling back settings");
         }
         await using var cold = await RuntimeHost.OpenAsync(root);
@@ -332,27 +371,27 @@ public static class FilmMetadataRuntimeTests
                 Capture(view, "tmdb-settings-narrow.png");
                 await SaveView(view);
                 await host.WaitSettingsAsync("tmdb");
-                await Credentials(host.Metadata, upstream, "初始保留", expectedToken: "synthetic.access.token");
+                await Credentials(host, upstream, "初始保留", expectedToken: "synthetic.access.token");
                 await SaveView(view);
                 await host.WaitSettingsAsync("tmdb");
                 Check(host.Metadata.Settings is { ApiKey: "synthetic.access.token", AccessToken: "" } &&
                     token.Text == "synthetic.access.token", "an unedited plain token survives another save");
-                await Credentials(host.Metadata, upstream, "未修改", expectedToken: "synthetic.access.token");
+                await Credentials(host, upstream, "未修改", expectedToken: "synthetic.access.token");
                 token.Text = "synthetic.replacement.token";
                 await SaveView(view);
                 await host.WaitSettingsAsync("tmdb");
                 Check(token.Text == "synthetic.replacement.token", "successful replacement remains visible and editable");
-                await Credentials(host.Metadata, upstream, "替换", expectedToken: "synthetic.replacement.token");
+                await Credentials(host, upstream, "替换", expectedToken: "synthetic.replacement.token");
                 token.Text = "synthetic-replacement-key"; await SaveView(view);
                 await host.WaitSettingsAsync("tmdb");
                 Check(host.Metadata.Settings is { ApiKey: "synthetic-replacement-key", AccessToken: "" },
                     "the same input replaces v4 authentication with a v3 key");
-                await Credentials(host.Metadata, upstream, "改用key", expectedKey: "synthetic-replacement-key");
+                await Credentials(host, upstream, "改用key", expectedKey: "synthetic-replacement-key");
                 token.Text = "   "; await SaveView(view);
                 await host.WaitSettingsAsync("tmdb");
                 Check(host.Metadata.Settings is { ApiKey: "", AccessToken: "" } && token.Text == "",
                     "an empty save clears credentials without a separate clear action");
-                await Credentials(host.Metadata, upstream, "清空");
+                await Credentials(host, upstream, "清空");
                 string savedBase = host.Metadata.Settings!.ApiBase;
                 apiBase.Text = "https://invalid.example/?query=not-a-base"; token.Text = "synthetic-retry-key";
                 await SaveView(view);
@@ -375,16 +414,16 @@ public static class FilmMetadataRuntimeTests
         await using var restored = await RuntimeHost.OpenAsync(data);
         Check(restored.Metadata.Settings is { ApiKey: "synthetic-retry-key", AccessToken: "" },
             "native plain and cleared credentials restore in a new process");
-        await Credentials(restored.Metadata, upstream, "重启恢复", expectedKey: "synthetic-retry-key");
+        await Credentials(restored, upstream, "重启恢复", expectedKey: "synthetic-retry-key");
     }
 
-    private static async Task Credentials(FilmMetadataService metadata, RuntimeHttpClientTests.Server upstream, string probe,
+    private static async Task Credentials(RuntimeHost host, RuntimeHttpClientTests.Server upstream, string probe,
         string? expectedToken = null, string? expectedKey = null)
     {
         // Each probe is a distinct content key: a no-op settings save must not be
         // mistaken for revocation merely to force another credential observation.
         string word = "配置验证:" + probe;
-        var search = metadata.SearchAsync(word, default);
+        var search = host.FilmAsync("data.metadata", SearchInput(word));
         await using var exchange = await upstream.AcceptAsync();
         Request(exchange, "/3/search/multi");
         var query = Query(exchange);
@@ -412,7 +451,7 @@ public static class FilmMetadataRuntimeTests
         { ["apiBase"] = upstream.BaseUrl, ["imageBase"] = upstream.BaseUrl + "/img" });
         await host.WaitSettingsAsync("tmdb");
         using var cancel = new CancellationTokenSource();
-        var query = host.Metadata.SearchAsync("挂起", cancel.Token);
+        var query = host.FilmAsync("data.metadata", SearchInput("挂起"), cancel.Token);
         await using var pending = await upstream.AcceptAsync();
         Request(pending, "/3/search/multi");
         cancel.Cancel();
@@ -427,7 +466,7 @@ public static class FilmMetadataRuntimeTests
             receipt.GetProperty("fetchedAt").GetInt64() > 0 &&
             receipt.GetProperty("expiresAt").GetInt64() > receipt.GetProperty("fetchedAt").GetInt64(),
             "only the real Node producer supplies complete content and original configuration/freshness evidence after UI cancellation");
-        var repeated = await host.Metadata.SearchAsync("挂起", default).WaitAsync(TimeSpan.FromSeconds(5));
+        var repeated = await host.FilmAsync("data.metadata", SearchInput("挂起")).WaitAsync(TimeSpan.FromSeconds(5));
         var retained = await host.FilmAsync("data.cache.entry", SearchIdentity("挂起"));
         var expected = JsonNode.Parse(receipt.GetProperty("value").GetRawText())!;
         var row = expected["results"]![0]!;
@@ -448,11 +487,11 @@ public static class FilmMetadataRuntimeTests
         await using var host = await RuntimeHost.OpenAsync(NewData());
         await host.Metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["apiBase"] = upstream.BaseUrl });
         await host.WaitSettingsAsync("tmdb");
-        var first = host.Metadata.DetailAsync("tv", 7, default);
+        var first = host.FilmAsync("data.metadata", DetailInput());
         await using (var pending = await upstream.AcceptAsync())
         {
             DetailRequest(pending, "/3/tv/7");
-            var second = host.Metadata.DetailAsync("tv", 7, default);
+            var second = host.FilmAsync("data.metadata", DetailInput());
             Check((await host.FilmAsync("data.cache.entry", DetailIdentity())).ValueKind == JsonValueKind.Null &&
                 !first.IsCompleted && !second.IsCompleted, "concurrent full-detail waiters cannot complete from a partial or invented cache entry");
             await pending.ReplyAsync(Json(DetailPayload("并发详情")));
@@ -462,7 +501,7 @@ public static class FilmMetadataRuntimeTests
                 "two concurrent complete-detail reads share one actual upstream body");
         }
         var receipt = await CachedAsync(host, DetailIdentity());
-        var repeat = await host.Metadata.DetailAsync("tv", 7, default).WaitAsync(TimeSpan.FromSeconds(5));
+        var repeat = await host.FilmAsync("data.metadata", DetailInput()).WaitAsync(TimeSpan.FromSeconds(5));
         var expected = JsonNode.Parse(receipt.GetProperty("value").GetRawText())!;
         expected["businessId"] = "tmdb:tv:7";
         expected["playbackTarget"] = JsonSerializer.SerializeToNode(new
@@ -508,7 +547,7 @@ public static class FilmMetadataRuntimeTests
             await pending.ReplyAsync(Json(DetailPayload("不同查询")));
         }
         CompleteDetail(await differentQuery, "不同查询");
-        var movie = host.Metadata.DetailAsync("movie", 7, default);
+        var movie = host.FilmAsync("data.metadata", DetailInput("movie"));
         await using (var pending = await upstream.AcceptAsync())
         {
             DetailRequest(pending, "/3/movie/7");
@@ -528,7 +567,7 @@ public static class FilmMetadataRuntimeTests
         await host.Metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["apiBase"] = before.BaseUrl });
         await host.WaitSettingsAsync("tmdb");
         string oldRevision = await host.SettingsRevisionAsync();
-        var ready = host.Metadata.DetailAsync("tv", 7, default);
+        var ready = host.FilmAsync("data.metadata", DetailInput());
         await using (var exchange = await before.AcceptAsync())
         {
             DetailRequest(exchange, "/3/tv/7");
@@ -538,7 +577,7 @@ public static class FilmMetadataRuntimeTests
         var oldEntry = await CachedAsync(host, DetailIdentity());
         Check(oldEntry.GetProperty("settings").GetProperty("revision").GetString() == oldRevision,
             "the old ready entry carries its actual metadata settings revision");
-        var query = host.Metadata.SearchAsync("撤权", default);
+        var query = host.FilmAsync("data.metadata", SearchInput("撤权"));
         await using var pending = await before.AcceptAsync();
         Request(pending, "/3/search/multi");
         var save = host.Metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["apiBase"] = after.BaseUrl });
@@ -552,7 +591,7 @@ public static class FilmMetadataRuntimeTests
             (await host.FilmAsync("data.cache.entry", DetailIdentity())).ValueKind == JsonValueKind.Null &&
             !before.HasConnection && !after.HasConnection,
             "the completed settings mutation has a disconnected old socket and neither pending nor ready old content is authorized by the new revision");
-        var current = host.Metadata.DetailAsync("tv", 7, default);
+        var current = host.FilmAsync("data.metadata", DetailInput());
         await using (var exchange = await after.AcceptAsync())
         {
             DetailRequest(exchange, "/3/tv/7");
@@ -573,7 +612,7 @@ public static class FilmMetadataRuntimeTests
         await using var host = await RuntimeHost.OpenAsync(NewData());
         await host.Metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["apiBase"] = upstream.BaseUrl });
         await host.WaitSettingsAsync("tmdb");
-        var query = host.Metadata.SearchAsync("关闭", default);
+        var query = host.FilmAsync("data.metadata", SearchInput("关闭"));
         await using var pending = await upstream.AcceptAsync();
         Request(pending, "/3/search/multi");
         int process = host.ProcessId;

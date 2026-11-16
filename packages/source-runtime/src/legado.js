@@ -315,7 +315,8 @@ export class LegadoAdapter {
   async list(rule, content, payload, invocation, extra = {}) {
     if (rule) return this.values(rule, content, payload, invocation, extra);
     const parsed = parseJSON(content);
-    return Array.isArray(parsed) ? parsed : [];
+    sourceRequire(Array.isArray(parsed), 'SCRIPT_PROTOCOL_ERROR');
+    return parsed;
   }
 
   async initialized(rule, content, payload, invocation, extra = {}) {
@@ -374,7 +375,8 @@ export class LegadoAdapter {
       }
     }
     const results = [];
-    const variables = this.kernel.invocations.get(invocation.id).variables;
+    if (!list.length) return results;
+    const variables = this.kernel.ruleVariables(invocation.id);
     for (const item of list) {
       this.kernel.invocations.get(invocation.id).variables = new Map(variables);
       const book = await this.book(item, rule, payload, invocation, baseUrl);
@@ -402,20 +404,26 @@ export class LegadoAdapter {
     let items;
     if (Array.isArray(value)) items = value;
     else {
-      items = String(value ?? '').split(/\r?\n/).map(line => {
+      sourceRequire(typeof value === 'string', 'SCRIPT_PROTOCOL_ERROR');
+      items = value.split(/\r?\n/).filter(line => line.trim()).map(line => {
         const separator = line.indexOf('::');
         return separator < 0 ? null : {
           title: line.slice(0, separator), url: line.slice(separator + 2),
         };
-      }).filter(Boolean);
+      });
     }
-    return {
-      kinds: items.map(item => ({
-        title: String(item.title ?? item.name ?? ''),
-        url: String(item.url ?? ''),
+    const kinds = [];
+    for (const item of items) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const title = item.title ?? item.name ?? '', url = item.url ?? '';
+      if (typeof title !== 'string' || typeof url !== 'string' || !title && !url) continue;
+      kinds.push({
+        title, url,
         style: item.style && typeof item.style === 'object' ? item.style : {},
-      })).filter(item => item.title || item.url),
-    };
+      });
+    }
+    sourceRequire(!items.length || kinds.length, 'SCRIPT_PROTOCOL_ERROR');
+    return { kinds };
   }
 
   async explore(payload, invocation) {
@@ -432,6 +440,7 @@ export class LegadoAdapter {
   async bookInfo(payload, invocation) {
     const bookUrl = String(payload.bookUrl ?? payload.url ?? '');
     sourceRequire(bookUrl);
+    this.kernel.ruleVariables(invocation.id);
     const response = await this.request(bookUrl, payload, invocation, { baseUrl: bookUrl });
     const base = { ...(payload.book ?? {}), bookUrl };
     const content = await this.initialized(this.bookInfoRule, response.data, payload, invocation, {
@@ -458,6 +467,7 @@ export class LegadoAdapter {
     payload = { ...payload, book };
     let initialUrl = String(payload.tocUrl ?? book.tocUrl ?? payload.bookUrl ?? payload.url ?? '');
     sourceRequire(initialUrl);
+    this.kernel.ruleVariables(invocation.id);
     if (this.tocRule.preUpdateJs) {
       const updated = await this.evaluate(
         `(async () => { ${scriptBody(this.tocRule.preUpdateJs)}\n; return JSON.stringify(book); })()`,
@@ -555,6 +565,7 @@ export class LegadoAdapter {
   async content(payload, invocation) {
     const firstUrl = String(payload.chapterUrl ?? payload.chapter?.chapterUrl ?? payload.chapter?.url ?? payload.url ?? '');
     sourceRequire(firstUrl);
+    this.kernel.ruleVariables(invocation.id);
     const chapter = { ...(payload.chapter ?? {}) };
     let title = String(chapter.title ?? chapter.name ?? '');
     if (chapter.isVolume && title && firstUrl.startsWith(title)) {
@@ -688,6 +699,7 @@ export class LegadoAdapter {
   async payAction(payload, invocation) {
     sourceRequire(this.contentRule.payAction, 'UNSUPPORTED_ACTION');
     sourceRequire(payload.bookUrl && (payload.chapterUrl || payload.chapter?.chapterUrl || payload.chapter?.url));
+    this.kernel.ruleVariables(invocation.id);
     const baseUrl = payload.chapterUrl ?? payload.chapter?.chapterUrl ?? payload.chapter?.url;
     const action = String(this.contentRule.payAction).trim();
     let value = /^(?:https?:\/\/|\/|\.)/i.test(action)

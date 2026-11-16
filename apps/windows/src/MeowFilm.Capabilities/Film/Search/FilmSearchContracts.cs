@@ -1,5 +1,4 @@
 using System.Text.Json;
-using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities;
 
@@ -18,22 +17,11 @@ public sealed record FilmSearchSource(FilmCatSource Cat, FilmVideoSource Site)
     });
 }
 
-/// <summary>The successful response and its actual producer; cache receipts keep their original provenance.</summary>
-public sealed record FilmSearchData(JsonElement Value, RuntimeConnection? Owner = null, JsonElement? CacheEntry = null);
-
 public interface IFilmSearchSources
 {
     event EventHandler? Changed;
     IReadOnlyList<FilmSearchSource> CurrentSearchSources { get; }
     Task<IReadOnlyList<FilmSearchSource>> ReadSearchSourcesAsync(CancellationToken token);
-}
-
-/// <summary>The adapter returns original TMDB JSON; image resolution belongs to data access.</summary>
-public interface IFilmSearchMetadata
-{
-    Task<FilmSearchData> SearchAsync(string query, CancellationToken token);
-    Task<FilmSearchData> DetailAsync(string type, long id, CancellationToken token);
-    string ResolveImage(string path);
 }
 
 public sealed class FilmSearchContext

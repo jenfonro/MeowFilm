@@ -7,6 +7,7 @@ import { after } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createFilmRulesService } from '../packages/film-playback/src/rules-service.js';
 import { createPlaybackService } from '../packages/film-playback/src/service.js';
+import { createPlaybackCache } from '../packages/film-playback/src/cache.js';
 import { defaultPreferences } from '../packages/film-playback/src/policy.js';
 
 // F-level scheduling evidence: the service is real; providers, storage and media
@@ -55,6 +56,7 @@ function fixture({ details = {}, pages = {}, shares = {}, metadata, onResolve } 
     blocks: [], previewTargets: [] };
   let resourceSequence = 0;
   const calls = [], resources = new Map(), addresses = new Map();
+  const detailCache = createPlaybackCache();
   const library = {
     read: () => structuredClone(document),
     update(mutator) {
@@ -74,9 +76,10 @@ function fixture({ details = {}, pages = {}, shares = {}, metadata, onResolve } 
         fetchedAt: Date.parse('2026-11-08T12:00:00Z'), expiresAt: Date.parse('2026-11-09T12:00:00Z'),
         cache: { status: 'fresh', components: {} } };
     },
-    async metadataSources(target, { metadata: value }) {
+    async metadataSources(target) {
       return [{ provider: target.metadataProvider, metadataId: target.metadataId,
-        kind: target.kind, title: target.title, metadata: structuredClone(value) }];
+        kind: target.kind, title: target.title,
+        metadata: structuredClone(target.kind === 'tv' ? metadata : { id: 17, title: 'Film' }) }];
     },
     async seasonMetadata(target, season) {
       calls.push({ type: 'season', season });
@@ -102,6 +105,12 @@ function fixture({ details = {}, pages = {}, shares = {}, metadata, onResolve } 
       assert.ok(Object.hasOwn(details[value.key] ?? {}, detailId),
         `Unexpected detail request: ${value.key}/${detailId}`);
       return structuredClone(details[value.key][detailId]);
+    },
+    async detailEntry(value, id, options = {}) {
+      return detailCache.load(JSON.stringify([value, id]), async () => ({
+        value: await this.detail(value, id, options), completeness: 'complete',
+        fetchedAt: Date.now(), expiresAt: Date.now() + 3_600_000,
+      }), { ttl: 3_600_000, completeness: 'complete', refresh: options.refresh ?? false });
     },
     async expand(value, input) {
       calls.push({ type: 'expand', sourceKey: value.key, lineId: input.id });
@@ -154,7 +163,10 @@ function fixture({ details = {}, pages = {}, shares = {}, metadata, onResolve } 
   };
   const trace = type => calls.filter(call => call.type === type);
   return { service, library, calls, resources, open, snapshot, command, pending, commit, trace,
-    setDetail(sourceKey, id, value) { details[sourceKey][id] = structuredClone(value); } };
+    setDetail(sourceKey, id, value) {
+      details[sourceKey][id] = structuredClone(value);
+      void detailCache.invalidate();
+    } };
 }
 
 async function browseKnown(f, sessionId, detailId) {
@@ -163,6 +175,11 @@ async function browseKnown(f, sessionId, detailId) {
   assert.ok(selected, `Expected a handed-off result: ${detailId}`);
   await f.command(sessionId, 'browse', { sourceId: selected.id });
   await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).browsing.episodes.length);
+}
+async function playMetadata(f, sessionId) {
+  const primary = f.snapshot(sessionId).metadataSources.find(row => row.provider === 'tmdb');
+  await f.command(sessionId, 'browse.metadata', { metadataSourceId: primary.id });
+  await f.command(sessionId, 'play');
 }
 function assertNoLaterWork(f, detailIds) {
   assert.equal(f.trace('detail').some(call => detailIds.includes(call.detailId)), false);
@@ -248,7 +265,7 @@ test('F04 media failures traverse known history manual unresolved results and in
   const { sessionId } = (await f.open({ results: [{ sourceKey: 'a', items: [result('known'), result('deferred')] }],
     search: [{ sourceKey: 'a', page: 1, completed: false }] }));
   await browseKnown(f, sessionId, 'known');
-  await f.command(sessionId, 'play');
+  await playMetadata(f, sessionId);
   const stages = [
     ['known', ['history', 'manual', 'deferred', 'searched']],
     ['history', ['manual', 'deferred', 'searched']],
@@ -327,10 +344,9 @@ test('F06 fixed quality survives a failed replacement without degrading or destr
   seedConstrainedStages(f);
   const { sessionId } = (await f.open({ results: [{ sourceKey: 'a', items: [result('known'), result('deferred')] }] }));
   await browseKnown(f, sessionId, 'known');
-  const selected = f.snapshot(sessionId).candidates.find(candidate => candidate.name === 'Film.old-output.1080p');
-  assert.ok(selected);
-  await f.command(sessionId, 'select.candidate', { candidateId: selected.id });
+  await f.command(sessionId, 'quality', { quality: '1080p' });
   const old = await f.commit(sessionId);
+  assert.equal(old.candidate.name, 'Film.old-output.1080p');
   const receipt = f.service.attempt({ sessionId, attemptId: old.id });
   await f.command(sessionId, 'media.progress', { attemptId: old.id, position: 47, duration: 120, paused: true });
   assert.equal(f.library.read().history[0].detailId, 'known');
@@ -363,7 +379,7 @@ test('F07 block carries the confirmed attempt and persists only its exact line a
   (await f.service.updateManual({ action: 'save', item: manualSite('blocked') }));
   const { sessionId } = (await f.open({ results: [{ sourceKey: 'a', items: [result('blocked')] }] }));
   await browseKnown(f, sessionId, 'blocked');
-  await f.command(sessionId, 'play');
+  await playMetadata(f, sessionId);
   const original = await f.commit(sessionId);
   const confirmation = f.snapshot(sessionId);
   const confirmedAttemptId = confirmation.current?.attemptId ?? confirmation.attempt?.id;
@@ -402,7 +418,7 @@ test('F08 switch excludes aliases of only the accurate file across stages withou
   const input = { results: [{ sourceKey: 'a', items: [result('known'), result('deferred')] }] };
   const { sessionId } = (await f.open(input));
   await browseKnown(f, sessionId, 'known');
-  await f.command(sessionId, 'play');
+  await playMetadata(f, sessionId);
   const original = await f.commit(sessionId);
   await f.command(sessionId, 'media.progress', { attemptId: original.id, position: 37, duration: 120, paused: true });
   await f.command(sessionId, 'switch');
