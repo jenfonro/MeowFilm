@@ -442,6 +442,12 @@ public static class FilmSettingsUiTests
     {
         await using var scene = await Scene.Create();
         await scene.Select("videos");
+        var toolbar = (StackPanel)scene.Element<Grid>("VideosPage").Children[0];
+        var actions = toolbar.Children.OfType<Button>().ToArray();
+        Check(actions.Select(button => button.Content?.ToString()).SequenceEqual(["检测所选", "删除所选"]) &&
+            ReferenceEquals(actions[0].Style, scene.View.FindResource("Settings.PrimaryButton")) &&
+            ReferenceEquals(actions[1].Style, scene.View.FindResource("MeowFilm.ManagementDeleteSelected")),
+            "video toolbar detection uses the shared save style and deletion uses the ordinary outline style");
         var grid = scene.Element<ManagementList>("VideosList");
         Check(Headers(grid).SequenceEqual(["站源名称", "检测状态", "启用", "首页显示", "搜索启用", "操作"]),
             "video headers omit routing, errors, aggregation and sorting columns");
@@ -519,6 +525,9 @@ public static class FilmSettingsUiTests
             "cat title and exact action order share the public compact row");
         Check(toolbar.Children.OfType<Button>().Last().Style == scene.View.FindResource("MeowFilm.ManagementDeleteSelected"),
             "the top delete action uses the shared outline style, not the filled row delete pill");
+        Check(toolbar.Children.OfType<Button>().Take(2).All(button =>
+                ReferenceEquals(button.Style, scene.View.FindResource("Settings.PrimaryButton"))),
+            "both cat import actions reuse the shared save button style");
         Click(Button(scene.View, "添加本地文件")); await Drain();
         Check(scene.Element<StackPanel>("CatFileField").Visibility == Visibility.Visible &&
             scene.Element<StackPanel>("CatUrlField").Visibility == Visibility.Collapsed,
