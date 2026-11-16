@@ -17,6 +17,7 @@ NATIVE_UNICODE_LICENSE = "../../LICENSES/Unicode-3.0.txt"
 PROJECT_NOTICES = "../../LICENSES/NOTICE.md"
 PROJECT_LICENSE = "../../LICENSES/GPL-3.0-only.txt"
 VIDEO_LICENSES = ("LGPL-2.1-only.txt", "LGPL-3.0-only.txt", "FFmpeg-LICENSE.md", "FFmpeg-IJG-NOTICE.txt")
+AUDIO_LICENSES = ("FFmpeg-audio-NOTICES.txt",)
 
 
 def source_paths(root, directories):
@@ -89,7 +90,7 @@ def generate():
         "runtimeTestMovie", "runtimeTestMovieBuild", "runtimeTestResources",
         "runtimeTestConfigs", "runtimeTestDebug", "runtimeTestRelease", "runtimeTestDependency", "runtimeTestProxy",
     ]})
-    libraries = ["MeowContracts", "MeowStorage", "MeowPlayback", "MeowAccounts", "MeowUI", "MeowRuntime",
+    libraries = ["MeowContracts", "MeowStorage", "MeowPlayback", "MeowPlaybackVideo", "MeowAccounts", "MeowUI", "MeowRuntime",
                  "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicNativeService", "MeowFilmFeature", "MeowNovelFeature"]
     objects = []
     def obj(key, content):
@@ -130,16 +131,16 @@ def generate():
     obj("projectLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = GPL-3.0-only.txt; path = {quoted(PROJECT_LICENSE)}; sourceTree = "<group>";')
     obj("projectLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['projectLicense']};")
     obj("nodeLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['nodeLicense']};")
-    video_license_references, video_license_builds = [], []
-    for filename in VIDEO_LICENSES:
+    media_license_references, media_license_builds = [], []
+    for filename in VIDEO_LICENSES + AUDIO_LICENSES:
         reference, build = identifier(f"{product}:license:{filename}"), identifier(f"{product}:license-build:{filename}")
-        video_license_references.append(reference)
-        video_license_builds.append(build)
+        media_license_references.append(reference)
+        media_license_builds.append(build)
         objects.append(f'\t\t{reference} = {{ isa = PBXFileReference; lastKnownFileType = text; name = {quoted(filename)}; path = {quoted("../../LICENSES/" + filename)}; sourceTree = "<group>"; }};')
         objects.append(f"\t\t{build} = {{ isa = PBXBuildFile; fileRef = {reference}; }};")
     obj("app", f'isa = PBXFileReference; explicitFileType = wrapper.application; path = {name}.app; sourceTree = BUILT_PRODUCTS_DIR;')
     obj("productsGroup", f'isa = PBXGroup; children = ({ids["app"]}, {ids["uiTests"]}, {ids["runtimeTests"]},); name = Products; sourceTree = "<group>";')
-    obj("mainGroup", f'isa = PBXGroup; children = {seq(app_references + video_license_references + [ids["assets"], ids["nodeFramework"], ids["scriptHostFramework"], ids["runtimePayload"], ids["nodeLicense"], ids["javascriptLicense"], ids["unicodeLicense"], ids["projectNotices"], ids["projectLicense"], ids["uiTestGroup"], ids["runtimeTestGroup"], ids["productsGroup"]])}; sourceTree = "<group>";')
+    obj("mainGroup", f'isa = PBXGroup; children = {seq(app_references + media_license_references + [ids["assets"], ids["nodeFramework"], ids["scriptHostFramework"], ids["runtimePayload"], ids["nodeLicense"], ids["javascriptLicense"], ids["unicodeLicense"], ids["projectNotices"], ids["projectLicense"], ids["uiTestGroup"], ids["runtimeTestGroup"], ids["productsGroup"]])}; sourceTree = "<group>";')
     obj("sources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = {seq(app_builds)}; runOnlyForDeploymentPostprocessing = 0;')
     package_ids, framework_ids = [], []
     for library in libraries:
@@ -150,7 +151,7 @@ def generate():
         objects.append(f"\t\t{dependency_id} = {{ isa = XCSwiftPackageProductDependency; package = {ids['package']}; productName = {library}; }};")
         objects.append(f"\t\t{build_id} = {{ isa = PBXBuildFile; productRef = {dependency_id}; }};")
     obj("frameworks", f"isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = {seq(framework_ids + [ids['nodeFrameworkLink']])}; runOnlyForDeploymentPostprocessing = 0;")
-    obj("resources", f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = {seq([ids["assetsBuild"], ids["runtimePayloadBuild"], ids["nodeLicenseBuild"], ids["javascriptLicenseBuild"], ids["unicodeLicenseBuild"], ids["projectNoticesBuild"], ids["projectLicenseBuild"]] + video_license_builds)}; runOnlyForDeploymentPostprocessing = 0;')
+    obj("resources", f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = {seq([ids["assetsBuild"], ids["runtimePayloadBuild"], ids["nodeLicenseBuild"], ids["javascriptLicenseBuild"], ids["unicodeLicenseBuild"], ids["projectNoticesBuild"], ids["projectLicenseBuild"]] + media_license_builds)}; runOnlyForDeploymentPostprocessing = 0;')
     obj("package", 'isa = XCLocalSwiftPackageReference; relativePath = ../../native/MeowKit;')
     common_project = "CLANG_ENABLE_MODULES = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0;"
     conditions = "FEATURE_MUSIC"

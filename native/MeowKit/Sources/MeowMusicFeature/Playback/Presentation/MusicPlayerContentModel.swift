@@ -591,7 +591,7 @@ public final class MusicPlayerContentModel {
         let buffers: [Range<Double>] = complete ? [0..<1] : fraction > 0 ? [0..<fraction] : []
         let next = MusicPlayerClockState(
             position: model.position, duration: model.duration, rate: playback.preferredRate,
-            playing: matching && model.phase == .playing && playback.player.timeControlStatus == .playing,
+            playing: matching && model.phase == .playing && playback.isOutputPlaying,
             buffers: buffers,
             chorus: chorus.map { MusicReferenceProgressGeometry.fraction($0.start, duration: model.duration) })
         if clock != next { clock = next; clockUpdates.send() }

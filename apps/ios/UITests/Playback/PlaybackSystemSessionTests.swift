@@ -13,7 +13,7 @@ import MeowContracts
 /// or an upstream HLS/physical-headphone acceptance test.
 @MainActor
 final class PlaybackSystemSessionTests: XCTestCase {
-    func testPlayerReadsAndSeeksTheOwnedByteSourceWithoutOpeningTheRemoteURL() async throws {
+    func testAudioDecoderReadsAndSeeksTheOwnedByteSourceWithoutOpeningTheRemoteURL() async throws {
         let file = try silentFile()
         defer { try? FileManager.default.removeItem(at: file) }
         let source = SystemSessionBytes(data: try Data(contentsOf: file))
@@ -32,7 +32,7 @@ final class PlaybackSystemSessionTests: XCTestCase {
         _ = controller.setVolume(0, attempt: attempt)
         await fulfillment(of: [played], timeout: 5)
         XCTAssertTrue(controller.requiresLocalMediaFetch)
-        XCTAssertFalse(controller.player.allowsExternalPlayback)
+        XCTAssertTrue(controller.hasMusicOutput)
         _ = controller.pause(attempt: attempt)
         _ = controller.seek(to: 20, attempt: attempt)
         await fulfillment(of: [seeked], timeout: 5)
@@ -141,10 +141,13 @@ final class PlaybackSystemSessionTests: XCTestCase {
     }
 
     private func controllerReleaseSettlesPendingSeek(offMain: Bool) async throws {
-        let notifications = ReleaseNotificationCenter(), startup = HeldSystemHLSStartup()
+        let notifications = ReleaseNotificationCenter()
+        let entered = expectation(description: "Owned input preparation entered")
+        let gate = SystemOutputWait { entered.fulfill() }
+        let source = SystemSessionBytes(data: Data(repeating: 0, count: 64), gate: gate)
         var controller: PlaybackController? = PlaybackController(
             audioSessionActions: .init(activate: { XCTFail("Held preparation must not activate audio") }, deactivate: {}),
-            systemNotifications: notifications, startScopedHLS: startup.start)
+            systemNotifications: notifications)
         weak var weakController = controller
         var ownerProbe: ControllerReleaseProbe? = ControllerReleaseProbe()
         weak var weakOwnerProbe = ownerProbe
@@ -154,9 +157,9 @@ final class PlaybackSystemSessionTests: XCTestCase {
             }
         ownerProbe = nil
         let attempt = try XCTUnwrap(controller).playAttempt(resource: .init(id: "held-release",
-            url: URL(string: "https://media.invalid/held-release.m3u8")!, title: "Held release",
-            headers: ["X-Media-Test": "synthetic"]), owner: "release-pending-seek", autoplay: false)
-        XCTAssertTrue(startup.isWaiting)
+            url: URL(string: "https://media.invalid/held-release.wav")!, title: "Held release",
+            byteSource: source), owner: "release-pending-seek", autoplay: false)
+        await fulfillment(of: [entered], timeout: 5)
         XCTAssertGreaterThan(notifications.activeCount, 0)
         var seekProbe: ControllerReleaseProbe? = ControllerReleaseProbe()
         weak var weakSeekProbe = seekProbe
@@ -196,14 +199,14 @@ final class PlaybackSystemSessionTests: XCTestCase {
         XCTAssertEqual(notifications.activeCount, 0)
         XCTAssertEqual(notifications.removalCount, notifications.registrationCount)
         postOutputUnavailable(to: notifications)
-        try startup.complete(with: URL(fileURLWithPath: "/not-read/after-controller-release.m3u8"))
+        await gate.release()
         await Task.yield()
         XCTAssertEqual(results.map(\.outcome), [.stopped], "Late preparation cannot settle a retired seek twice")
         lease.cancel()
         XCTAssertEqual(notifications.removalCount, notifications.registrationCount)
     }
 
-    func testOffMainControllerReleaseDetachesRetainedNativePlayerAndReleasesOwner() async throws {
+    func testOffMainControllerReleaseDetachesRetainedAudioSessionAndReleasesOwner() async throws {
         let file = try silentFile()
         defer { try? FileManager.default.removeItem(at: file) }
         let notifications = ReleaseNotificationCenter()
@@ -211,7 +214,6 @@ final class PlaybackSystemSessionTests: XCTestCase {
             audioSessionActions: .init(activate: { XCTFail("Paused preparation must not activate audio") }, deactivate: {}),
             systemNotifications: notifications)
         weak var weakController = controller
-        let player = try XCTUnwrap(controller).player
         let prepared = expectation(description: "Native item ready without audio activation")
         var probe: ControllerReleaseProbe? = ControllerReleaseProbe()
         weak var weakProbe = probe
@@ -224,8 +226,9 @@ final class PlaybackSystemSessionTests: XCTestCase {
         _ = try XCTUnwrap(controller).playAttempt(resource: .init(id: "release-native",
             url: file, title: "Paused native release"), owner: "release-native", autoplay: false)
         await fulfillment(of: [prepared], timeout: 5)
-        XCTAssertNotNil(player.currentItem)
-        XCTAssertEqual(player.rate, 0)
+        let media = try XCTUnwrap(controller?.activeAudioMedia)
+        XCTAssertTrue(media.isReady)
+        XCTAssertFalse(media.session?.hasOutput == true)
         XCTAssertGreaterThan(notifications.activeCount, 0)
         let box = FinalReleaseBox(try XCTUnwrap(controller))
         controller = nil
@@ -233,8 +236,8 @@ final class PlaybackSystemSessionTests: XCTestCase {
         releaseOffMain(box, then: cleaned)
         XCTAssertNil(weakController)
         await fulfillment(of: [cleaned], timeout: 3)
-        XCTAssertNil(player.currentItem, "An externally retained AVPlayer must not retain the old media item")
-        XCTAssertEqual(player.rate, 0)
+        XCTAssertFalse(media.isReady, "A retained audio owner must be revoked")
+        XCTAssertFalse(media.session?.hasOutput == true)
         XCTAssertTrue(lease.isCancelled)
         XCTAssertNil(weakProbe)
         XCTAssertEqual(notifications.activeCount, 0)
@@ -268,8 +271,11 @@ final class PlaybackSystemSessionTests: XCTestCase {
     private func interruptedHandoff(endedBeforeReady: Bool) async throws {
         let file = try silentFile()
         defer { try? FileManager.default.removeItem(at: file) }
-        let notifications = NotificationCenter(), startup = HeldSystemHLSStartup()
-        let controller = PlaybackController(systemNotifications: notifications, startScopedHLS: startup.start)
+        let notifications = NotificationCenter()
+        let entered = expectation(description: "Replacement byte preparation entered")
+        let gate = SystemOutputWait { entered.fulfill() }
+        let source = SystemSessionBytes(data: try Data(contentsOf: file), gate: gate)
+        let controller = PlaybackController(systemNotifications: notifications)
         let musicPlayed = expectation(description: "Music is playing before interruption")
         let filmReady = expectation(description: "Replacement is ready")
         let filmPlayed = expectation(description: "Explicit replacement playback")
@@ -287,25 +293,25 @@ final class PlaybackSystemSessionTests: XCTestCase {
         await fulfillment(of: [musicPlayed], timeout: 5)
         postInterruption(.began, to: notifications)
         XCTAssertEqual(controller.snapshot.phase, .paused)
-        XCTAssertEqual(controller.player.rate, 0)
+        XCTAssertEqual(controller.actualRate, 0)
 
         let next = controller.playAttempt(resource: try .init(id: "film",
-            url: URL(string: "https://media.invalid/scoped.m3u8")!, title: "Film",
-            headers: ["X-Media-Test": "synthetic"]), owner: "film")
+            url: URL(string: "https://media.invalid/scoped.wav")!, title: "Film",
+            byteSource: source), owner: "film")
         _ = controller.setVolume(0, attempt: next)
-        XCTAssertTrue(startup.isWaiting)
-        XCTAssertNil(controller.player.currentItem, "The interruption end must arrive before installing the replacement item")
+        await fulfillment(of: [entered], timeout: 5)
+        XCTAssertFalse(controller.isMusicPrepared, "The interruption end precedes actual decode readiness")
         if endedBeforeReady { postInterruption(.ended, shouldResume: true, to: notifications) }
-        try startup.complete(with: file)
+        await gate.release()
         await fulfillment(of: [filmReady], timeout: 5)
-        XCTAssertEqual(controller.player.rate, 0)
+        XCTAssertEqual(controller.actualRate, 0)
         XCTAssertEqual(played, [old], "The new owner cannot inherit the old owner's automatic-resume permission")
         XCTAssertFalse(controller.systemCommand(.play, generation: old.id))
         XCTAssertTrue(controller.systemCommand(.play, generation: next.id))
         await fulfillment(of: [filmPlayed], timeout: 5)
         XCTAssertEqual(controller.currentAttempt, next)
         XCTAssertEqual(controller.snapshot.phase, .playing)
-        XCTAssertGreaterThan(controller.player.rate, 0)
+        XCTAssertGreaterThan(controller.actualRate, 0)
         XCTAssertEqual(played, [old, next])
         if !endedBeforeReady {
             postInterruption(.ended, shouldResume: false, to: notifications)
@@ -325,7 +331,7 @@ final class PlaybackSystemSessionTests: XCTestCase {
             XCTFail("Output loss must not fabricate a play/pause command"); return false
         }, onOutputUnavailable: {
             outputs += 1
-            wasPausedBeforeDelivery.append(controller.player.rate == 0)
+            wasPausedBeforeDelivery.append(controller.actualRate == 0)
         }) { event in if event.kind == .played { playing.fulfill() } }
         defer { controller.stop(); lease.cancel() }
         let attempt = controller.playAttempt(resource: try .init(id: "output", url: file, title: "Output"), owner: "music")
@@ -336,7 +342,7 @@ final class PlaybackSystemSessionTests: XCTestCase {
             userInfo: [AVAudioSessionRouteChangeReasonKey: NSNumber(value: AVAudioSession.RouteChangeReason.newDeviceAvailable.rawValue)])
         XCTAssertEqual(outputs, 0)
         postOutputUnavailable(to: notifications)
-        XCTAssertEqual(controller.player.rate, 0)
+        XCTAssertEqual(controller.actualRate, 0)
         XCTAssertEqual(controller.snapshot.phase, .paused)
         postOutputUnavailable(to: notifications)
         XCTAssertEqual(outputs, 2, "An already-paused item may still own pending business navigation")
@@ -473,7 +479,7 @@ final class PlaybackSystemSessionTests: XCTestCase {
         await request.value
         await model.flushPlaybackFacts()
         XCTAssertNil(controller.currentAttempt, "The old source receipt cannot commit a native attempt")
-        XCTAssertEqual(controller.player.rate, 0)
+        XCTAssertEqual(controller.actualRate, 0)
         XCTAssertEqual(played, [original])
         XCTAssertEqual(model.queue, queue)
         XCTAssertEqual(model.current?.id, current)
@@ -490,21 +496,22 @@ final class PlaybackSystemSessionTests: XCTestCase {
     }
 
     func testInterruptionPauseDoesNotBecomeOwnerPauseAndResetClearsPendingPlayback() async throws {
-        let notifications = NotificationCenter(), startup = HeldSystemHLSStartup()
-        let controller = PlaybackController(systemNotifications: notifications, startScopedHLS: startup.start)
+        let notifications = NotificationCenter()
+        let gate = SystemOutputWait {}
+        let source = SystemSessionBytes(data: Data(repeating: 0, count: 64), gate: gate)
+        let controller = PlaybackController(systemNotifications: notifications)
         var ownerPauses = 0
         let lease = try controller.bind(owner: "music", onPlayPause: { _, _ in ownerPauses += 1; return true }) { _ in }
         defer { controller.stop(); lease.cancel() }
         let attempt = controller.playAttempt(resource: try .init(id: "pending",
-            url: URL(string: "https://media.invalid/pending.m3u8")!, title: "Pending",
-            headers: ["X-Media-Test": "synthetic"]), owner: "music")
+            url: URL(string: "https://media.invalid/pending.wav")!, title: "Pending", byteSource: source), owner: "music")
         postInterruption(.began, to: notifications)
         XCTAssertEqual(controller.snapshot.phase, .paused)
         XCTAssertEqual(ownerPauses, 0)
         notifications.post(name: AVAudioSession.mediaServicesWereResetNotification, object: AVAudioSession.sharedInstance())
         XCTAssertEqual(controller.snapshot.phase, .failed)
         XCTAssertEqual(controller.lastError as? NativePlaybackError, .mediaServicesReset)
-        XCTAssertNil(controller.player.currentItem)
+        XCTAssertNil(controller.activeAudioMedia)
         XCTAssertFalse(controller.systemCommand(.play, generation: attempt.id))
         postInterruption(.ended, shouldResume: true, to: notifications)
         postOutputUnavailable(to: notifications)
@@ -601,11 +608,17 @@ private final class SystemSessionBytes: PlaybackByteSource, @unchecked Sendable 
     let data: Data
     private let lock = NSLock()
     private var reads = 0, retired = false
-    init(data: Data) { self.data = data }
+    private let gate: SystemOutputWait?
+    init(data: Data, gate: SystemOutputWait? = nil) { self.data = data; self.gate = gate }
     var progress: PlaybackCacheProgress { .init(received: Int64(data.count), length: Int64(data.count), complete: true) }
     var readCount: Int { lock.withLock { reads } }
     var isRetired: Bool { lock.withLock { retired } }
-    func information() async throws -> PlaybackByteInformation { .init(length: Int64(data.count), mime: "audio/wav") }
+    func information() async throws -> PlaybackByteInformation {
+        await gate?.wait()
+        try Task.checkCancellation()
+        if isRetired { throw CancellationError() }
+        return .init(length: Int64(data.count), mime: "audio/wav")
+    }
     func read(offset: Int64, count: Int) async throws -> Data {
         try lock.withLock {
             if retired { throw CancellationError() }
@@ -614,7 +627,7 @@ private final class SystemSessionBytes: PlaybackByteSource, @unchecked Sendable 
         }
     }
     func updates() -> AsyncStream<PlaybackCacheProgress> { AsyncStream { $0.yield(progress); $0.finish() } }
-    func retire() { lock.withLock { retired = true } }
+    func retire() { lock.withLock { retired = true }; if let gate { Task { await gate.release() } } }
 }
 
 /// Initialized on main, then transferred to one release site. The lock protects
@@ -670,20 +683,6 @@ private final class ReleaseNotificationCenter: NotificationCenter, @unchecked Se
 }
 
 @MainActor
-private final class HeldSystemHLSStartup {
-    private var completion: (@Sendable (Result<URL, PlaybackNetworkError>) -> Void)?
-    var isWaiting: Bool { completion != nil }
-    func start(_ route: HLSLoopbackRoute, completion: @escaping @Sendable (Result<URL, PlaybackNetworkError>) -> Void) {
-        self.completion = completion
-    }
-    func complete(with file: URL) throws {
-        let callback = try XCTUnwrap(completion)
-        completion = nil
-        callback(.success(file))
-    }
-}
-
-@MainActor
 private final class SystemRemoteTargetRecorder {
     private(set) var registered: [MPRemoteCommand] = []
     private(set) var removed: [Int] = []
@@ -713,7 +712,7 @@ private actor SystemOutputWait {
 }
 
 /// Real controller/source admission with only the source receipts held. The
-/// local media and player preparation remain AVFoundation, not a fake player.
+/// local media preparation uses the actual FFmpeg audio core, not a fake player.
 private actor SystemOutputMusicService: MusicServing, MusicSourcePlaybackServing {
     let file: URL
     private let entries: [MusicQueueEntry] = ["first", "second"].map {
@@ -810,7 +809,6 @@ extension PlaybackSystemSessionTests {
         var controller: PlaybackController? = PlaybackController(audioSessionActions: probe.actions,
             systemNotifications: notifications)
         weak var weakController = controller
-        let player = try XCTUnwrap(controller).player
         let lease = try XCTUnwrap(controller).bind(owner: "release-activation") { event in
             if event.kind == .played { XCTFail("A released controller cannot start after late activation") }
         }
@@ -818,7 +816,8 @@ extension PlaybackSystemSessionTests {
             url: file, title: "Held activation release"), owner: "release-activation")
         _ = try XCTUnwrap(controller).setVolume(0, attempt: attempt)
         await fulfillment(of: [gate.entered], timeout: 5)
-        XCTAssertEqual(player.rate, 0)
+        let media = try XCTUnwrap(controller?.activeAudioMedia)
+        XCTAssertEqual(media.session?.rate, 0)
         let box = FinalReleaseBox(try XCTUnwrap(controller))
         controller = nil
         let cleaned = expectation(description: "Controller cleanup submitted its audio release")
@@ -826,15 +825,15 @@ extension PlaybackSystemSessionTests {
         XCTAssertNil(weakController)
         await fulfillment(of: [cleaned], timeout: 3)
         XCTAssertTrue(lease.isCancelled)
-        XCTAssertNil(player.currentItem)
+        XCTAssertFalse(media.isReady)
         XCTAssertEqual(notifications.activeCount, 0)
         XCTAssertEqual(probe.counts.deactivations, 0, "Release must serialize behind the held activation")
         gate.open()
         await fulfillment(of: [audioReleased], timeout: 3)
         XCTAssertEqual(probe.counts.activations, 1)
         XCTAssertEqual(probe.counts.deactivations, 1)
-        XCTAssertEqual(player.rate, 0)
-        XCTAssertNil(player.currentItem)
+        XCTAssertFalse(media.session?.hasOutput == true)
+        XCTAssertFalse(media.isReady)
         XCTAssertEqual(notifications.removalCount, notifications.registrationCount)
         lease.cancel()
     }
@@ -892,23 +891,23 @@ extension PlaybackSystemSessionTests {
         _ = controller.setVolume(0, attempt: attempt)
         await fulfillment(of: [first], timeout: 5)
         controller.pause()
-        XCTAssertEqual(controller.player.rate, 0)
+        XCTAssertEqual(controller.actualRate, 0)
         XCTAssertEqual(controller.snapshot.phase, .paused)
         XCTAssertFalse(controller.wantsPlayback)
         XCTAssertEqual(pauses.last?.snapshot.phase, .paused, "Actual pause is delivered before returning to the caller")
         await fulfillment(of: [releaseGate.entered], timeout: 3)
         controller.resume()
-        XCTAssertEqual(controller.player.rate, 0)
+        XCTAssertEqual(controller.actualRate, 0)
         XCTAssertEqual(probe.counts.activations, 1, "Resume cannot overlap the held release")
         releaseGate.open()
         await fulfillment(of: [activationGate.entered], timeout: 3)
         XCTAssertTrue(controller.setPreferredRate(1.5, attempt: attempt))
-        XCTAssertEqual(controller.player.rate, 0, "Rate changes must obey the same audio admission")
+        XCTAssertEqual(controller.actualRate, 0, "Rate changes must obey the same audio admission")
         XCTAssertNotEqual(controller.snapshot.phase, .playing)
         XCTAssertEqual(plays, 1)
         activationGate.open()
         await fulfillment(of: [resumed], timeout: 5)
-        XCTAssertGreaterThan(controller.player.rate, 0)
+        XCTAssertGreaterThan(controller.actualRate, 0)
         XCTAssertEqual(controller.currentAttempt, attempt)
         XCTAssertNil(controller.lastError)
     }
@@ -947,7 +946,7 @@ extension PlaybackSystemSessionTests {
         XCTAssertTrue(controller.resume(attempt: next))
         await fulfillment(of: [newGate.entered], timeout: 3)
         XCTAssertTrue(played.isEmpty); XCTAssertTrue(failed.isEmpty)
-        XCTAssertEqual(controller.player.rate, 0)
+        XCTAssertEqual(controller.actualRate, 0)
         XCTAssertNil(controller.lastError, "A retired owner's activation error is not the successor's error")
         newGate.open()
         await fulfillment(of: [playing], timeout: 5)
@@ -984,7 +983,7 @@ extension PlaybackSystemSessionTests {
         XCTAssertEqual(controller.snapshot.phase, .paused)
         secondGate.open()
         await fulfillment(of: [drained], timeout: 3)
-        XCTAssertEqual(controller.player.rate, 0)
+        XCTAssertEqual(controller.actualRate, 0)
         XCTAssertFalse(controller.wantsPlayback); XCTAssertTrue(played.isEmpty)
         controller.resume()
         await fulfillment(of: [playing], timeout: 5)
@@ -1011,7 +1010,7 @@ extension PlaybackSystemSessionTests {
             gate.open()
             await fulfillment(of: [released], timeout: 3)
             XCTAssertTrue(played.isEmpty)
-            XCTAssertEqual(controller.player.rate, 0)
+            XCTAssertEqual(controller.actualRate, 0)
             XCTAssertEqual(controller.snapshot.phase, stopped ? .idle : .paused)
             if stopped { XCTAssertNil(controller.currentAttempt) }
         }
@@ -1038,11 +1037,11 @@ extension PlaybackSystemSessionTests {
         XCTAssertTrue(failures.isEmpty); XCTAssertTrue(plays.isEmpty)
         XCTAssertEqual(controller.snapshot.phase, .paused)
         XCTAssertEqual(controller.lastError as? NativePlaybackError, .audioSessionUnavailable)
-        let item = try XCTUnwrap(controller.player.currentItem), position = controller.snapshot.position
+        let item = try XCTUnwrap(controller.activeAudioMedia), position = controller.snapshot.position
         XCTAssertTrue(controller.resume(attempt: attempt))
         await fulfillment(of: [playing], timeout: 5)
         XCTAssertEqual(plays, [attempt]); XCTAssertTrue(failures.isEmpty)
-        XCTAssertTrue(controller.player.currentItem === item)
+        XCTAssertTrue(controller.activeAudioMedia === item)
         XCTAssertGreaterThanOrEqual(controller.snapshot.position, position)
         XCTAssertNil(controller.lastError)
         XCTAssertEqual(probe.counts.activations, 2)
@@ -1072,7 +1071,7 @@ extension PlaybackSystemSessionTests {
         controller.pause()
         await fulfillment(of: [failure], timeout: 3)
         XCTAssertEqual(controller.snapshot.phase, .paused)
-        XCTAssertEqual(controller.player.rate, 0)
+        XCTAssertEqual(controller.actualRate, 0)
         controller.pause()
         await fulfillment(of: [recovered], timeout: 3)
         XCTAssertGreaterThanOrEqual(probe.counts.deactivations, 2)

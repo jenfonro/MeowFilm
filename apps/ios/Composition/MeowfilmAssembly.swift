@@ -2,6 +2,7 @@ import UIKit
 import Combine
 import MeowContracts
 import MeowPlayback
+import MeowPlaybackVideo
 import MeowMusicFeature
 import MeowMusicPlatform
 import MeowMusicNativeService
@@ -17,7 +18,7 @@ private let musicAccessGeneration: UInt64 = 1
 
 @MainActor
 final class MeowfilmAssembly: ObservableObject {
-    let playback = PlaybackController(volumePreferences: PlaybackVolumePreferences())
+    let playback = PlaybackController(volumePreferences: PlaybackVolumePreferences(), videoDecoderFactory: makePlaybackVideoDecoder)
     let appearance = MusicAppearancePreferencesStore()
     let filmLibrary = FilmLibrary()
     lazy var filmSources: [any FilmSource] = [DoubanFilmSource { [weak self] in

@@ -8,10 +8,11 @@ import sys
 # App source directories are declared by the project generator, not duplicated here.
 import runpy
 APPLICATION_DIRECTORIES = set(runpy.run_path(str(Path(__file__).with_name("generate-ios-project.py")))["APPLICATION_DIRECTORIES"])
-SHARED_TARGETS = {"MeowContracts", "MeowJSON", "MeowStorage", "MeowAccounts", "MeowPlayback", "MeowUI", "MeowRuntime"}
+SHARED_TARGETS = {"MeowContracts", "MeowJSON", "MeowStorage", "MeowAccounts", "MeowAudio", "MeowPlayback", "MeowPlaybackVideo", "MeowUI", "MeowRuntime"}
 # Native packages linked by the current client.
 LOCAL_PRODUCTS = {
     "MeowVideoKernel": ("videokernel", "../VideoKernel"),
+    "CMeowAudioKernel": ("audiokernel", "../AudioKernel"),
 }
 
 def application_membership(base, project_text):
@@ -195,6 +196,17 @@ def check(root):
                 walk(dependency, path + [name])
     for name in sources:
         walk(name, [])
+    def closure(name, seen=None):
+        seen = set() if seen is None else seen
+        if name in seen:
+            return seen
+        seen.add(name)
+        for dependency in targets.get(name, ()):
+            closure(dependency, seen)
+        return seen
+    for name in ("MeowAudio", "MeowPlayback", "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicNativeService"):
+        if name in sources and closure(name) & {"MeowVideoKernel", "MeowPlaybackVideo"}:
+            failures.append("Music/audio closure depends on video: " + name)
     for parent in (root / "apps/ios", package / "Sources", package / "Tests"):
         for path in parent.rglob("*"):
             if parent == root / "apps/ios" and path.relative_to(parent).parts[0] == ".cache":

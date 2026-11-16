@@ -3,6 +3,7 @@ import XCTest
 import AVFoundation
 import Combine
 import MeowContracts
+import MeowPlaybackVideo
 @testable import MeowPlayback
 
 @MainActor
@@ -14,7 +15,7 @@ final class PlaybackVideoOwnershipTests: XCTestCase {
     }
 
     func testCommitHandoffFollowsDonorExitAndPrecedesStartedButNeverRunsForFailureOrCancellation() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         var order: [String] = []
         let music = try controller.bind(owner: "music") { event in
             if event.kind == .replaced { order.append("exit") }
@@ -55,7 +56,7 @@ final class PlaybackVideoOwnershipTests: XCTestCase {
     }
 
     func testReentrantNewMusicDuringCommitPublicationSkipsTheOlderHandoff() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         let resource = try PlaybackResource(id: "new-music", url: input().url, title: "New explicit music")
         var handoffs = 0, started = 0
         let film = try bindWindowedVideo(controller, owner: "film", willCommit: {
@@ -80,7 +81,7 @@ final class PlaybackVideoOwnershipTests: XCTestCase {
     }
 
     func testVideoSystemPlayPauseAndToggleUseCurrentIntentAndRejectOldAttempt() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         let film = try bindWindowedVideo(controller, owner: "film") { _ in }
         let firstMedia = try PlaybackVideoMediaLease(attemptID: "commands", input: input()) {}
         let first = try await film.play(firstMedia, paused: true)
@@ -109,7 +110,7 @@ final class PlaybackVideoOwnershipTests: XCTestCase {
         let film = try bindWindowedVideo(controller, owner: "film") { _ in XCTFail("No formal play, no event") }
         var releases = 0
         let media = try PlaybackVideoMediaLease(attemptID: "node", input: input()) { releases += 1 }
-        XCTAssertNil(controller.currentAttempt); XCTAssertNil(controller.player.currentItem)
+        XCTAssertNil(controller.currentAttempt); XCTAssertNil(controller.activeAudioMedia)
         XCTAssertNil(film.currentAttempt); XCTAssertEqual(controller.snapshot.phase, .idle)
         async let first: Void = media.close()
         async let second: Void = media.close()
@@ -119,19 +120,19 @@ final class PlaybackVideoOwnershipTests: XCTestCase {
     }
 
     func testFailedCandidateRetainsTheMusicOwnerAndPauseIntent() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         var events: [PlaybackVideoEvent.Kind] = []
         let film = try bindWindowedVideo(controller, owner: "film") { events.append($0.kind) }
         let music = controller.playAttempt(resource: try .init(id: "music",
             url: input().url, title: "synthetic"), owner: "music", autoplay: false)
-        let donor = controller.player
+        let donor = controller.activeAudioMedia
         var releases = 0
         let media = try PlaybackVideoMediaLease(attemptID: "failed", input: input(missing: true)) { releases += 1 }
         do { _ = try await film.play(media); XCTFail("missing media cannot commit") }
         catch { XCTAssertNotNil(error as? PlaybackVideoError) }
         XCTAssertEqual(controller.currentAttempt, music)
-        XCTAssertTrue(controller.player === donor)
-        XCTAssertEqual(controller.player.rate, 0)
+        XCTAssertTrue(controller.activeAudioMedia === donor)
+        XCTAssertEqual(controller.actualRate, 0)
         XCTAssertFalse(events.contains(.started))
         XCTAssertTrue(events.contains(.failed)); XCTAssertEqual(releases, 1)
         try await film.close()
@@ -140,7 +141,7 @@ final class PlaybackVideoOwnershipTests: XCTestCase {
     }
 
     func testPreparedVideoCannotCommitAfterNewerMusicCommand() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         let resource = try PlaybackResource(id: "music", url: input().url, title: "synthetic")
         var started = 0
         let film = try bindWindowedVideo(controller, owner: "film") { event in
@@ -156,7 +157,7 @@ final class PlaybackVideoOwnershipTests: XCTestCase {
     }
 
     func testScopedStopOfVideoCandidateDoesNotStopMusicDonor() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         let music = controller.playAttempt(resource: try .init(id: "music",
             url: input().url, title: "synthetic"), owner: "music", autoplay: false)
         let film = try bindWindowedVideo(controller, owner: "film") { event in
@@ -167,14 +168,14 @@ final class PlaybackVideoOwnershipTests: XCTestCase {
         let media = try PlaybackVideoMediaLease(attemptID: "scoped-stop", input: input()) { releases += 1 }
         do { _ = try await film.play(media); XCTFail("stopped video candidate") } catch {}
         XCTAssertEqual(controller.currentAttempt, music)
-        XCTAssertNotNil(controller.player.currentItem)
-        XCTAssertEqual(controller.player.rate, 0)
+        XCTAssertNotNil(controller.activeAudioMedia)
+        XCTAssertEqual(controller.actualRate, 0)
         XCTAssertEqual(releases, 1)
         try await film.close(); controller.stop()
     }
 
     func testRealFirstFrameCommitsOneOwnerAndControlsAreAttemptFenced() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         var events: [PlaybackVideoEvent] = []
         let film = try bindWindowedVideo(controller, owner: "film") { events.append($0) }
         let music = controller.playAttempt(resource: try .init(id: "music",
@@ -184,7 +185,7 @@ final class PlaybackVideoOwnershipTests: XCTestCase {
         let attempt = try await film.play(media, paused: true)
         XCTAssertEqual(controller.currentAttempt, attempt)
         XCTAssertEqual(film.currentAttemptID, "node-start")
-        XCTAssertNil(controller.player.currentItem, "film has no AVPlayer bypass")
+        XCTAssertNil(controller.activeAudioMedia, "film has no music output bypass")
         XCTAssertEqual(events.filter { $0.kind == .started }.map(\.attemptID), ["node-start"])
         XCTAssertFalse(controller.wantsPlayback)
         XCTAssertEqual(events.last { $0.kind == .started }?.wantsPlayback, false)
@@ -211,7 +212,7 @@ final class PlaybackVideoOwnershipTests: XCTestCase {
     }
 
     func testVideoReplacementPreservesPositionPauseAndHealthyDonorOnFailure() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         let film = try bindWindowedVideo(controller, owner: "film") { _ in }
         var releases = 0
         let first = try PlaybackVideoMediaLease(attemptID: "first", input: input()) { releases += 1 }
@@ -238,7 +239,7 @@ final class PlaybackVideoOwnershipTests: XCTestCase {
     }
 
     func testActualResumePublishesIntentThroughVideoProgressWithoutWaitingForTimeAdvance() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         let resumed = expectation(description: "actual resume event")
         var observedResume = false
         let film = try bindWindowedVideo(controller, owner: "film") { event in
@@ -256,7 +257,7 @@ final class PlaybackVideoOwnershipTests: XCTestCase {
     }
 
     func testCancelPreparedCandidateDrainsWithoutPublishingStarted() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         var film: PlaybackVideoLease!
         var cancellation: Task<Void, Error>?
         var started = 0, released = 0
@@ -277,7 +278,7 @@ final class PlaybackVideoOwnershipTests: XCTestCase {
     }
 
     func testResourceReleaseFailureRemainsObservableAcrossRepeatedClose() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         let film = try bindWindowedVideo(controller, owner: "film") { _ in }
         var releases = 0
         let media = try PlaybackVideoMediaLease(attemptID: "release-failure", input: input(missing: true)) {

@@ -1,6 +1,7 @@
 #if os(iOS) || os(macOS)
 import XCTest
 import MeowContracts
+import MeowPlaybackVideo
 @testable import MeowPlayback
 
 /// Controlled OS-boundary tests, NOT proof of iPhone PiP continuity. Real
@@ -16,7 +17,7 @@ final class PlaybackVideoPictureInPictureTests: XCTestCase {
                        pip: ControlledPictureInPicture) async throws -> (PlaybackVideoTransport, PlayAttempt) {
         let input = try input("first")
         let media = try PlaybackVideoMediaLease(attemptID: "first-node", input: input) {}
-        let transport = try PlaybackVideoTransport(media: media, input: XCTUnwrap(media.takeInput()))
+        let transport = try PlaybackVideoTransport(media: media, input: XCTUnwrap(media.takeInput()), decoder: makePlaybackVideoDecoder())
         addTeardownBlock { try await transport.close() }
         try await transport.prepare()
         window.stage(transport)
@@ -29,7 +30,7 @@ final class PlaybackVideoPictureInPictureTests: XCTestCase {
     }
 
     func testSameLeaseMovesSameControllerAndOldRetirementCannotStopIt() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         var events: [PlaybackVideoEvent] = []
         let window = try PlaybackVideoTestWindow()
         let film = try bindWindowedVideo(controller, owner: "film", window: window) { events.append($0) }
@@ -57,7 +58,7 @@ final class PlaybackVideoPictureInPictureTests: XCTestCase {
     }
 
     func testLossOnRebindDoesNotInheritActiveAndLaterLossNamesNewAttempt() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         var events: [PlaybackVideoEvent] = []
         let window = try PlaybackVideoTestWindow()
         let film = try bindWindowedVideo(controller, owner: "film", window: window) { events.append($0) }
@@ -80,7 +81,7 @@ final class PlaybackVideoPictureInPictureTests: XCTestCase {
     }
 
     func testPendingStartIsNotTransferredOrBackgroundPermission() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         let window = try PlaybackVideoTestWindow()
         let film = try bindWindowedVideo(controller, owner: "film", window: window) { _ in }
         let pip = ControlledPictureInPicture(active: false)
@@ -98,7 +99,7 @@ final class PlaybackVideoPictureInPictureTests: XCTestCase {
 
     func testOtherLeaseAndMusicNeverInheritSystemController() async throws {
         for music in [false, true] {
-            let controller = PlaybackController()
+            let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
             var events: [PlaybackVideoEvent] = []
             let window = try PlaybackVideoTestWindow()
             let film = try bindWindowedVideo(controller, owner: "film", window: window) { events.append($0) }
@@ -124,7 +125,7 @@ final class PlaybackVideoPictureInPictureTests: XCTestCase {
     }
 
     func testFailedCandidateLeavesDonorSystemControllerUntouched() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         let window = try PlaybackVideoTestWindow()
         let film = try bindWindowedVideo(controller, owner: "film", window: window) { _ in }
         let pip = ControlledPictureInPicture(active: true)
@@ -140,7 +141,7 @@ final class PlaybackVideoPictureInPictureTests: XCTestCase {
     }
 
     func testCommittedFailureKeepsTerminalEventAfterFinalProgressAndEndsExactOwner() async throws {
-        let controller = PlaybackController()
+        let controller = PlaybackController(videoDecoderFactory: makePlaybackVideoDecoder)
         var events: [PlaybackVideoEvent] = []
         let window = try PlaybackVideoTestWindow()
         let film = try bindWindowedVideo(controller, owner: "film", window: window) { events.append($0) }
@@ -153,7 +154,7 @@ final class PlaybackVideoPictureInPictureTests: XCTestCase {
         }
         XCTAssertGreaterThan(transport.position, controller.snapshot.position)
         events.removeAll()
-        transport.kernel.onFailure?(.decodeFailed)
+        transport.kernel.onFailure?(PlaybackVideoError.decodingFailed)
         XCTAssertEqual(events.filter { $0.kind == .failed }.map(\.nativeAttempt), [attempt])
         XCTAssertEqual(events.filter { $0.kind == .systemOwnerEnded }.map(\.nativeAttempt), [attempt])
         XCTAssertEqual(events.last?.kind, .systemOwnerEnded)

@@ -3,7 +3,7 @@ import XCTest
 import MeowContracts
 @testable import MeowPlayback
 #if canImport(AVFoundation)
-import AVFoundation
+import MeowAudio
 #endif
 
 /// Real URLSession delegate plumbing, deterministic URLProtocol bytes. No
@@ -229,21 +229,21 @@ final class ProgressiveMediaLoaderTests: XCTestCase {
     }
 
     #if canImport(AVFoundation)
-    func testPublicAVAssetLoaderParsesSyntheticWAVOverControlledURLSession() async throws {
+    @MainActor
+    func testAudioDecoderParsesSyntheticWAVOverControlledURLSession() async throws {
         let fixture = PlaybackHTTPFixture(body: Self.wave(), pathExtension: "wav", mime: "audio/wav")
         defer { fixture.close() }
         let budget = PlaybackNetworkBudget(limits: makeLimits())
-        let binding = try NativePlaybackAsset(plan: plan(fixture.url), budget: budget,
-                                               configuration: configuration()) { _ in }
-        defer { binding.invalidate() }
-        XCTAssertEqual(binding.asset.url.scheme, "meow-progressive")
-        XCTAssertFalse(binding.asset.url.absoluteString.contains(fixture.url.host!))
-        let playable = try await binding.asset.load(.isPlayable)
-        let duration = try await binding.asset.load(.duration)
-        XCTAssertTrue(playable)
-        XCTAssertEqual(duration.seconds, 0.25, accuracy: 0.01)
+        let input = PlaybackAudioInput(plan: try plan(fixture.url), budget: budget,
+                                      configuration: configuration()) { _ in }
+        let session = AudioPlaybackSession(input: input)
+        try await session.prepare()
+        XCTAssertEqual(session.information?.duration ?? 0, 0.25, accuracy: 0.01)
+        XCTAssertFalse(session.hasOutput)
         XCTAssertFalse(fixture.requests.isEmpty)
         XCTAssertTrue(fixture.requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer synthetic" })
+        try await session.close()
+        XCTAssertEqual(budget.usage.activeTasks, 0)
     }
 
     private static func wave() -> Data {

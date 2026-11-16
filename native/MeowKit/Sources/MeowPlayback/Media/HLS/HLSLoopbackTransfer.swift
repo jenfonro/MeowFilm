@@ -79,6 +79,7 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
         // Both the actual URLSession completion and submitted Network payload
         // completion have occurred. Retirement alone never reaches this call.
         transfer.reservation.complete()
+        finishCloseIfDrained()
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,

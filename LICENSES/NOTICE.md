@@ -701,6 +701,37 @@ relinking/rebuilding obligations, including these scripts and the identified
 FFmpeg sources; a hash-pinned release is not a waiver of those obligations.
 The source and generated managed pins can be rebuilt together.
 
+## Apple music audio kernel — FFmpeg
+
+`native/AudioKernel` uses the same unmodified FFmpeg 9.0.1 official archive,
+tag, commit, archive hash and release-signature provenance recorded in the
+audio entry above. The independent Apple recipe is pinned in
+`scripts/ios-audio-kernel.json` and built by
+`scripts/prepare-ios-audio-kernel.py`; it does not use the Windows bindings,
+DLL recipe, NAudio or the video kernel's FFmpeg source.
+
+The LGPL 2.1-or-later audio closure contains libavutil, libswresample,
+libavcodec and libavformat. GPL, version3, nonfree, programs, video decoders,
+avfilter and swscale are disabled. HTTP/TCP/crypto are included solely for
+the application's exact scoped HLS loopback capability; ordinary upstream
+input is managed custom AVIO. The C adapter is original project code, not a
+copy of KSPlayer or another player. Static audio libraries are linked inside
+the dynamic `CMeowAudioKernel.framework`, with two-level namespace and only
+the seven `meow_audio_decoder_*` exports. FFmpeg symbols are private to that
+framework and do not interpose on the existing video FFmpeg 8.1.2.
+
+Apple build inputs use the selected Xcode SDK and Clang toolchain. The App
+embeds this framework and includes the existing `FFmpeg-LICENSE.md`,
+`LGPL-2.1-only.txt` and `FFmpeg-audio-NOTICES.txt`; no duplicate license text
+is created. The source, target settings and exact build/verification recipe
+are available in this repository and the identified upstream archive.
+Redistributors must provide the applicable corresponding source and allow
+rebuilding/relinking or replacing the LGPL component, including the
+application source and adapter/build recipe needed for that process.
+Dynamic encapsulation, code signing and iOS installation restrictions do not
+waive those obligations; a signed App or a prepared XCFramework alone is not
+a claim of redistribution compliance.
+
 ## Video playback kernel — FFmpeg, KSPlayer and libxml2
 
 FFmpeg 8.1.2 is built from the pinned upstream revision

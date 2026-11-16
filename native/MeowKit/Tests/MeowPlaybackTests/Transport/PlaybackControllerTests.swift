@@ -5,15 +5,15 @@ import XCTest
 import MeowContracts
 @testable import MeowPlayback
 
-/// Empty-player and preflight-only tests. None creates an AVPlayerItem, opens a
+/// Silent-construction and preflight-only tests. None creates an audio input, opens a
 /// media file, contacts a server or activates an audio session.
 final class PlaybackControllerTests: XCTestCase {
     func testConstructionIsPassiveAndPlayerIsSharedAcrossIdleOperations() async {
         await MainActor.run {
             let controller = PlaybackController()
-            let player = controller.player
-            XCTAssertNil(player.currentItem)
-            XCTAssertEqual(player.rate, 0)
+            let initial = controller.snapshot
+            XCTAssertFalse(controller.hasActiveMusicInput)
+            XCTAssertFalse(controller.hasMusicOutput)
             XCTAssertEqual(controller.snapshot, PlaybackSnapshot())
             XCTAssertEqual(controller.title, "")
             XCTAssertNil(controller.lastError)
@@ -21,8 +21,8 @@ final class PlaybackControllerTests: XCTestCase {
             controller.resume()
             controller.seek(to: 20)
             controller.stop()
-            XCTAssertTrue(controller.player === player)
-            XCTAssertNil(controller.player.currentItem)
+            XCTAssertEqual(controller.snapshot, initial)
+            XCTAssertNil(controller.activeAudioMedia)
             XCTAssertEqual(controller.snapshot, PlaybackSnapshot())
         }
     }
@@ -34,14 +34,13 @@ final class PlaybackControllerTests: XCTestCase {
         )
         await MainActor.run {
             let controller = PlaybackController()
-            let player = controller.player
             controller.play(resource: resource, owner: "film")
             XCTAssertEqual(controller.snapshot.phase, .failed)
             XCTAssertEqual(controller.title, "请求头测试")
             XCTAssertEqual(controller.lastError as? PlaybackNetworkError, .headersOnLocalFile)
-            XCTAssertNil(controller.player.currentItem)
-            XCTAssertTrue(controller.player === player)
-            XCTAssertEqual(controller.player.rate, 0)
+            XCTAssertNil(controller.activeAudioMedia)
+            XCTAssertFalse(controller.hasMusicOutput)
+            XCTAssertEqual(controller.actualRate, 0)
             controller.resume()
             XCTAssertEqual(controller.snapshot.phase, .failed)
             controller.stop(owner: "music")
@@ -60,7 +59,7 @@ final class PlaybackControllerTests: XCTestCase {
         await MainActor.run {
             let controller = PlaybackController()
             controller.play(resource: resource, owner: " ")
-            XCTAssertNil(controller.player.currentItem)
+            XCTAssertNil(controller.activeAudioMedia)
             XCTAssertEqual(controller.lastError as? ContractError, .invalidIdentifier)
         }
     }

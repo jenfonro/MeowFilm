@@ -375,14 +375,14 @@ final class MusicLiveAcceptanceTests: XCTestCase {
             if context.model.notices.error != nil {
                 throw safeFailures.latest().map { $0 as any Error } ?? Failure.mediaFailed
             }
-            if playback.snapshot.phase == .failed || playback.player.currentItem?.status == .failed {
+            if playback.snapshot.phase == .failed || playback.snapshot.phase == .failed {
                 throw Failure.mediaFailed
             }
             if let attempt = playback.currentAttempt, attempt.id != oldAttempt,
                attempt.owner == "music", context.model.activeNativeAttemptID == attempt.id,
                context.model.activePlaybackSelection?.siteId == "wy",
                playback.snapshot.resourceID == attempt.resourceID,
-               playback.player.currentItem?.status == .readyToPlay,
+               playback.isMusicPrepared,
                [.playing, .paused, .buffering].contains(playback.snapshot.phase) {
                 // This is AVFoundation readiness for the exact admitted attempt,
                 // not a resolved URL, persisted queue or simulated media event.
@@ -435,7 +435,7 @@ final class MusicLiveAcceptanceTests: XCTestCase {
                 try require(assembly.shutdownError == nil, Failure.shutdownFailed)
                 try await waitUntil(timeout: 15) {
                     let usage = assembly.playback.networkUsage
-                    return assembly.playback.player.currentItem == nil && usage.activeTasks == 0 &&
+                    return !assembly.playback.hasActiveMusicInput && usage.activeTasks == 0 &&
                         usage.activeConnections == 0 && usage.activeListeners == 0 && usage.reservedPayloadBytes == 0
                 }
                 record("cleanup.closed-and-drained")

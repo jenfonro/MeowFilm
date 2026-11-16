@@ -1,25 +1,24 @@
 #if os(iOS) || os(macOS)
 import Foundation
 import MeowContracts
-import MeowVideoKernel
 
 @MainActor
 final class PlaybackVideoTransport {
     var systemRelease: Task<NativePlaybackError?, Never>?
     let media: PlaybackVideoMediaLease
     let title: String
-    let kernel: VideoSession
-    var output: VideoOutput { kernel.output }
+    let kernel: any PlaybackVideoDecoding
+    var output: any PlaybackVideoOutput { kernel.output }
     private var input: PlaybackVideoInput?
     private var closing: Task<Void, Error>?
     private(set) var attempt: PlayAttempt?
     var position: Double { kernel.position }
-    var duration: Double? { kernel.info?.duration }
+    var duration: Double? { kernel.duration }
     private var pictureInPicture: (any PlaybackVideoPictureInPictureControlling)?
 
-    init(media: PlaybackVideoMediaLease, input: PlaybackVideoInput) throws {
+    init(media: PlaybackVideoMediaLease, input: PlaybackVideoInput, decoder: any PlaybackVideoDecoding) throws {
         self.media = media; self.input = input; title = input.title
-        kernel = try VideoSession()
+        kernel = decoder
     }
 
     func prepare() async throws {

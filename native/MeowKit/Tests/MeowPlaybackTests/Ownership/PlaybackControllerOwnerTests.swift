@@ -7,7 +7,7 @@ import MeowContracts
 @testable import MeowPlayback
 
 /// Only passive construction and deliberately rejected preflight. These tests
-/// do not create AVPlayerItem, read media, contact a network or activate audio.
+/// do not create audio input, read media, contact a network or activate audio.
 final class PlaybackControllerOwnerTests: XCTestCase {
     private func rejectedResource(id: String = "same", title: String = "测试") throws -> PlaybackResource {
         try PlaybackResource(id: id, url: URL(fileURLWithPath: "/not-read/by-tests"),
@@ -17,7 +17,7 @@ final class PlaybackControllerOwnerTests: XCTestCase {
     func testRegisterEnableUpdateAndCancelArePassive() async throws {
         try await MainActor.run {
             let controller = PlaybackController()
-            let player = controller.player
+            let initial = controller.snapshot
             var callbacks = 0
             let lease = try controller.bind(
                 owner: "one", commands: .init(previous: { _ in callbacks += 1; return true },
@@ -31,9 +31,8 @@ final class PlaybackControllerOwnerTests: XCTestCase {
             lease.cancel()
             XCTAssertEqual(callbacks, 0)
             XCTAssertNil(controller.currentAttempt)
-            XCTAssertNil(controller.player.currentItem)
-            XCTAssertTrue(controller.player === player)
-            XCTAssertEqual(player.rate, 0)
+            XCTAssertNil(controller.activeAudioMedia)
+            XCTAssertFalse(controller.hasMusicOutput)
             XCTAssertEqual(controller.snapshot, PlaybackSnapshot())
             XCTAssertNil(controller.lastError)
         }
@@ -53,14 +52,14 @@ final class PlaybackControllerOwnerTests: XCTestCase {
             XCTAssertEqual(events.first?.attempt, attempt)
             XCTAssertEqual(events.first?.snapshot, controller.snapshot)
             XCTAssertEqual(events.first?.error as? PlaybackNetworkError, .headersOnLocalFile)
-            XCTAssertNil(controller.player.currentItem)
+            XCTAssertNil(controller.activeAudioMedia)
             let failedSnapshot = controller.snapshot
             for _ in 0..<2 {
                 XCTAssertTrue(controller.pause(attempt: attempt))
                 XCTAssertEqual(controller.snapshot, failedSnapshot)
                 XCTAssertEqual(controller.currentAttempt, attempt)
                 XCTAssertEqual(controller.lastError as? PlaybackNetworkError, .headersOnLocalFile)
-                XCTAssertNil(controller.player.currentItem)
+                XCTAssertNil(controller.activeAudioMedia)
                 XCTAssertEqual(events.map(\.kind), [.failed])
             }
             XCTAssertFalse(controller.resume(attempt: attempt))
@@ -107,7 +106,7 @@ final class PlaybackControllerOwnerTests: XCTestCase {
             XCTAssertEqual(snapshots.count, 2, "Initial idle plus a single distinct failed snapshot")
             XCTAssertNotEqual(first.id, second.id)
             XCTAssertEqual(controller.currentAttempt, second)
-            XCTAssertNil(controller.player.currentItem)
+            XCTAssertNil(controller.activeAudioMedia)
         }
     }
 
@@ -126,7 +125,7 @@ final class PlaybackControllerOwnerTests: XCTestCase {
             controller.stop()
             XCTAssertFalse(controller.seek(to: 20, attempt: current) { _ in calls += 1 })
             XCTAssertEqual(calls, 0)
-            XCTAssertNil(controller.player.currentItem)
+            XCTAssertNil(controller.activeAudioMedia)
         }
     }
 
@@ -135,7 +134,7 @@ final class PlaybackControllerOwnerTests: XCTestCase {
         let second = try rejectedResource(id: "second", title: "新标题")
         try await MainActor.run {
             let controller = PlaybackController()
-            let player = controller.player
+            let initial = controller.snapshot
             var next: PlayAttempt?
             var events: [PlaybackEvent] = []
             let one = try controller.bind(owner: "one") { event in
@@ -157,8 +156,8 @@ final class PlaybackControllerOwnerTests: XCTestCase {
             XCTAssertEqual(controller.snapshot.owner, "two")
             XCTAssertEqual(controller.title, "新标题")
             XCTAssertFalse(controller.stop(attempt: returned))
-            XCTAssertTrue(controller.player === player)
-            XCTAssertNil(controller.player.currentItem)
+            XCTAssertFalse(controller.hasMusicOutput)
+            XCTAssertNil(controller.activeAudioMedia)
         }
     }
 
@@ -179,7 +178,7 @@ final class PlaybackControllerOwnerTests: XCTestCase {
             XCTAssertNil(controller.lastError)
             XCTAssertEqual(controller.title, "")
             XCTAssertEqual(controller.snapshot, PlaybackSnapshot())
-            XCTAssertNil(controller.player.currentItem)
+            XCTAssertNil(controller.activeAudioMedia)
         }
     }
 
@@ -204,7 +203,7 @@ final class PlaybackControllerOwnerTests: XCTestCase {
             XCTAssertEqual(controller.snapshot.resourceID, "third")
             XCTAssertEqual(controller.title, "最终标题")
             XCTAssertEqual(secondEvents, [.replaced])
-            XCTAssertNil(controller.player.currentItem)
+            XCTAssertNil(controller.activeAudioMedia)
         }
     }
 
@@ -263,7 +262,7 @@ final class PlaybackControllerOwnerTests: XCTestCase {
             XCTAssertEqual(controller.title, "新")
             XCTAssertEqual(events.map(\.kind), [.replaced, .failed])
             XCTAssertEqual(events.last?.attempt, next)
-            XCTAssertNil(controller.player.currentItem)
+            XCTAssertNil(controller.activeAudioMedia)
         }
     }
 }
