@@ -34,6 +34,14 @@ internal sealed class FFmpegHttpTransport : IDisposable
     }
     internal bool Cancelled => _lifetime.IsCancellationRequested;
 
+    internal async Task<long> CopyCompleteAsync(Uri address, Stream destination, long maximumBytes,
+        CancellationToken token, Action<long>? progress, Action<long?>? opened)
+    {
+        using var reader = new Reader(this, address, 0, -1, progressive: true);
+        using var abort = _lifetime.Token.Register(reader.Abort);
+        return await reader.CopyCompleteAsync(destination, maximumBytes, token, progress, opened).ConfigureAwait(false);
+    }
+
     internal int Open(IntPtr ignored, IntPtr uri, long offset, long end,
         out ulong handle, out long size, out int seekable, out uint locationSize)
     {
@@ -162,6 +170,7 @@ internal sealed class FFmpegHttpTransport : IDisposable
         private readonly object _io = new();
         private readonly FFmpegHttpTransport _owner;
         private readonly long _end;
+        private readonly bool _progressive;
         private readonly byte[] _buffer = new byte[BufferCapacity];
         private HttpResponseMessage? _response;
         private Stream? _body;
@@ -174,27 +183,30 @@ internal sealed class FFmpegHttpTransport : IDisposable
         internal long? Length { get; private set; }
         internal bool CanSeek { get; private set; }
 
-        internal Reader(FFmpegHttpTransport owner, Uri address, long start, long end)
+        internal Reader(FFmpegHttpTransport owner, Uri address, long start, long end, bool progressive = false)
         {
             if (start < 0 || end < -1 || end >= 0 && end <= start)
                 throw new PlaybackException(PlaybackError.HttpInvalidRange);
-            _owner = owner; Address = address; _position = start; _end = end;
+            _owner = owner; Address = address; _position = start; _end = end; _progressive = progressive;
         }
         internal async Task OpenAsync(bool initial, CancellationToken operation = default)
         {
-            using var deadline = _owner.Deadline(_owner._options.RequestTimeout, operation);
-            var token = deadline.Token;
+            using var deadline = _progressive ? null : _owner.Deadline(_owner._options.RequestTimeout, operation);
+            var token = deadline?.Token ?? operation;
             var visited = new HashSet<string>(StringComparer.Ordinal);
             for (int hop = 0; ; hop++)
             {
                 token.ThrowIfCancellationRequested();
                 NativeHttpMediaOptions.ValidateSyntax(Address);
+                if (_progressive) NativeHttpMediaPolicy.RejectAdaptivePath(Address);
                 if (!visited.Add(Address.AbsoluteUri)) throw new PlaybackException(PlaybackError.HttpRedirectFailed);
                 using var request = new HttpRequestMessage(HttpMethod.Get, Address)
                 {
                     Version = new Version(1, 1), VersionPolicy = HttpVersionPolicy.RequestVersionExact
                 };
-                foreach (var (name, value) in _owner._headers) request.Headers.TryAddWithoutValidation(name, value);
+                foreach (var (name, value) in _owner._headers)
+                    if (!request.Headers.TryAddWithoutValidation(name, value))
+                        throw new PlaybackException(PlaybackError.UnsupportedHeaders);
                 NativeHttpMediaOptions.ApplyUserInfo(request);
                 request.Headers.AcceptEncoding.ParseAdd("identity");
                 request.Headers.Range = new RangeHeaderValue(_position, _end >= 0 ? _end - 1 : null);
@@ -209,11 +221,12 @@ internal sealed class FFmpegHttpTransport : IDisposable
                 int status = (int)response.StatusCode;
                 if (status is 301 or 302 or 303 or 307 or 308)
                 {
-                    if (!initial || hop >= _owner._options.MaximumRedirects ||
+                    if (!initial && !_progressive || hop >= _owner._options.MaximumRedirects ||
                         response.Headers.Location is not { } location)
                         throw new PlaybackException(PlaybackError.HttpRedirectFailed);
                     var next = location.IsAbsoluteUri ? location : new Uri(Address, location);
                     NativeHttpMediaOptions.ValidateSyntax(next);
+                    if (!initial) throw new PlaybackException(PlaybackError.HttpRepresentationChanged);
                     Address = next; Abort(); continue;
                 }
                 if (!initial && status is 200 or 412)
@@ -232,6 +245,13 @@ internal sealed class FFmpegHttpTransport : IDisposable
                 if (response.Content.Headers.ContentType?.MediaType?.StartsWith("multipart/",
                     StringComparison.OrdinalIgnoreCase) == true)
                     throw new PlaybackException(PlaybackError.HttpInvalidRange);
+                if (_progressive)
+                {
+                    string type = response.Content.Headers.ContentType?.MediaType?.ToLowerInvariant() ?? "";
+                    if (type.Contains("mpegurl", StringComparison.Ordinal) || type.Contains("dash", StringComparison.Ordinal) ||
+                        type.Contains("vnd.ms-sstr", StringComparison.Ordinal))
+                        throw new PlaybackException(PlaybackError.UnsupportedAdaptive);
+                }
                 long? total;
                 if (status == 206)
                 {
@@ -253,8 +273,10 @@ internal sealed class FFmpegHttpTransport : IDisposable
                 }
                 var tag = response.Headers.ETag is { IsWeak: false } etag && etag.Tag != "*" ? etag.ToString() : null;
                 var modified = response.Content.Headers.LastModified;
+                if (_progressive && initial && _responseEnd != total && tag is null)
+                    throw new PlaybackException(PlaybackError.HttpInvalidRange);
                 if (!initial && (Length != total || _etag is not null && _etag != tag ||
-                    _modified is not null && _modified != modified))
+                    !_progressive && _modified is not null && _modified != modified))
                     throw new PlaybackException(PlaybackError.HttpRepresentationChanged);
                 if (initial)
                 {
@@ -271,35 +293,94 @@ internal sealed class FFmpegHttpTransport : IDisposable
         {
             lock (_io)
             {
-                _owner._lifetime.Token.ThrowIfCancellationRequested();
-                token.ThrowIfCancellationRequested();
-                if (Volatile.Read(ref _disposed) != 0 || output == IntPtr.Zero || length <= 0)
+                if (output == IntPtr.Zero || length <= 0)
                     throw new PlaybackException(PlaybackError.ReadFailed);
-                if (_end >= 0 && _position == _end || Length == _position) return 0;
-                if (_body is null || _responseEnd is { } end && _position == end)
-                {
-                    if (!CanSeek) throw new PlaybackException(PlaybackError.HttpTruncated);
-                    // AVIO can seek within its own buffer without a seek callback.
-                    // Resume at the last byte actually delivered to that buffer.
-                    Abort(); OpenAsync(initial: false, token).GetAwaiter().GetResult();
-                }
-                int count = Math.Min(length, BufferCapacity);
-                if (_responseEnd is { } limit) count = (int)Math.Min(count, limit - _position);
-                using var deadline = _owner.Deadline(_owner._options.ReadTimeout, token);
-                int read;
-                try { read = _body!.ReadAsync(_buffer.AsMemory(0, count), deadline.Token).AsTask().GetAwaiter().GetResult(); }
-                catch (OperationCanceledException) when (token.IsCancellationRequested)
-                {
-                    Abort();
-                    throw;
-                }
-                if (read == 0 && _responseEnd is { } expected && _position != expected)
-                    throw new PlaybackException(PlaybackError.HttpTruncated);
+                int read = ReadAsync(_buffer.AsMemory(0, Math.Min(length, BufferCapacity)), token).GetAwaiter().GetResult();
                 Marshal.Copy(_buffer, 0, output, read);
                 CryptographicOperations.ZeroMemory(_buffer.AsSpan(0, read));
-                _position += read;
                 return read;
             }
+        }
+        private async Task<int> ReadAsync(Memory<byte> destination, CancellationToken token, bool probe = false)
+        {
+            _owner._lifetime.Token.ThrowIfCancellationRequested();
+            token.ThrowIfCancellationRequested();
+            if (Volatile.Read(ref _disposed) != 0) throw new PlaybackException(PlaybackError.ReadFailed);
+            if (_end >= 0 && _position == _end || Length == _position) return 0;
+            using var transferDeadline = _progressive && !probe ? _owner.Deadline(_owner._options.ReadTimeout, token) : null;
+            var readToken = transferDeadline?.Token ?? token;
+            if (_body is null || _responseEnd is { } end && _position == end)
+            {
+                if (!CanSeek) throw new PlaybackException(PlaybackError.HttpTruncated);
+                // AVIO can seek within its own buffer without a seek callback.
+                // Resume at the last byte actually delivered to that buffer.
+                Abort(); await OpenAsync(initial: false, readToken).ConfigureAwait(false);
+            }
+            int count = destination.Length;
+            if (_responseEnd is { } limit) count = (int)Math.Min(count, limit - _position);
+            using var deadline = _progressive ? null : _owner.Deadline(_owner._options.ReadTimeout, token);
+            readToken = deadline?.Token ?? readToken;
+            int read;
+            try { read = await _body!.ReadAsync(destination[..count], readToken).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                Abort();
+                throw;
+            }
+            if (read == 0 && _responseEnd is { } expected && _position != expected)
+                throw new PlaybackException(PlaybackError.HttpTruncated);
+            _position += read;
+            return read;
+        }
+        internal async Task<long> CopyCompleteAsync(Stream destination, long maximumBytes, CancellationToken token,
+            Action<long>? progress, Action<long?>? opened)
+        {
+            int prefix = 0;
+            using (var deadline = _owner.Deadline(_owner._options.RequestTimeout, token))
+            {
+                await OpenAsync(initial: true, deadline.Token).ConfigureAwait(false);
+                if (Length > maximumBytes) throw new PlaybackException(PlaybackError.InvalidRequest);
+                while (prefix < 512)
+                {
+                    int read = await ReadAsync(_buffer.AsMemory(prefix, 512 - prefix), deadline.Token, probe: true)
+                        .ConfigureAwait(false);
+                    if (read == 0) break;
+                    prefix += read;
+                }
+            }
+            RequireProgressiveFormat(_buffer.AsSpan(0, prefix));
+            opened?.Invoke(Length);
+            long written = 0;
+            int count = prefix;
+            while (count > 0)
+            {
+                token.ThrowIfCancellationRequested();
+                if (written + count > maximumBytes) throw new PlaybackException(PlaybackError.InvalidRequest);
+                await destination.WriteAsync(_buffer.AsMemory(0, count), token).ConfigureAwait(false);
+                written += count;
+                progress?.Invoke(written);
+                count = await ReadAsync(_buffer, token).ConfigureAwait(false);
+            }
+            if (written == 0 || Length is { } expected && written != expected)
+                throw new PlaybackException(PlaybackError.HttpTruncated);
+            return written;
+        }
+        private static void RequireProgressiveFormat(ReadOnlySpan<byte> bytes)
+        {
+            string text = Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF', ' ', '\t', '\r', '\n');
+            if (text.StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("<MPD", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("<SmoothStreamingMedia", StringComparison.OrdinalIgnoreCase))
+                throw new PlaybackException(PlaybackError.UnsupportedAdaptive);
+            if (bytes.Length >= 12 && (bytes[..4].SequenceEqual("RIFF"u8) &&
+                (bytes.Slice(8, 4).SequenceEqual("WAVE"u8) || bytes.Slice(8, 4).SequenceEqual("AVI "u8)) ||
+                bytes.Slice(4, 4).SequenceEqual("ftyp"u8)) ||
+                bytes.StartsWith("fLaC"u8) || bytes.StartsWith("OggS"u8) ||
+                bytes.StartsWith(new byte[] { 0x1a, 0x45, 0xdf, 0xa3 }) || bytes.StartsWith("ID3"u8) ||
+                bytes.Length >= 4 && bytes[0] == 0xff &&
+                ((bytes[1] & 0xf6) == 0xf0 || (bytes[1] & 0xe0) == 0xe0 && (bytes[1] & 6) != 0))
+                return;
+            throw new PlaybackException(PlaybackError.HttpFormatUnsupported);
         }
         internal long Seek(long offset, int whence, CancellationToken token)
         {

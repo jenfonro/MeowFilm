@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Windows.Threading;
-using MeowFilm.Media;
 
 namespace MeowFilm.SystemMedia;
 
@@ -56,10 +55,6 @@ public sealed class SystemMediaSession : IAsyncDisposable
             throw;
         }
     }
-
-    public SystemMediaSession(NativePlayback playback, ISystemMediaBackend backend,
-        IEnumerable<SystemPlaybackOwner> owners, Dispatcher? dispatcher = null, bool enabled = true)
-        : this(new NativeSource(playback), backend, owners, dispatcher, enabled) { }
 
     /// <summary>Call on the owning dispatcher; this does not stop playback or resume a suspended session.</summary>
     public void SetEnabled(bool enabled)
@@ -263,19 +258,5 @@ public sealed class SystemMediaSession : IAsyncDisposable
         }
     }
 
-    internal sealed class NativeSource(NativePlayback native) : ISystemPlayback
-    {
-        public SystemPlaybackState State => new(native.OwnerId, native.Identity, native.Title,
-            native.HasMedia || native.ContinuationPending, native.IsPlaying, native.PositionSeconds, native.DurationSeconds);
-        public event PropertyChangedEventHandler? PropertyChanged
-        {
-            add => native.PropertyChanged += value;
-            remove => native.PropertyChanged -= value;
-        }
-        public Task PlayAsync() => native.ResumeAsync();
-        public Task PauseAsync() => native.PauseAsync();
-        public Task StopAsync() => native.StopAsync();
-        public Task SeekAsync(double seconds) => native.SeekAsync(seconds);
-    }
     private sealed record Target(long Generation, string? Owner, string? Identity, bool Enabled);
 }

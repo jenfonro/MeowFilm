@@ -15,7 +15,7 @@ final class PlaybackStateMachineTests: XCTestCase {
     private func readyState(start: TimeInterval = 0) throws -> (PlaybackStateMachine, UUID) {
         var state = PlaybackStateMachine()
         let generation = state.begin(resource: try resource(start: start), owner: "music")
-        state.ready(generation: generation, duration: 120, ranges: [])
+        state.ready(generation: generation, duration: 120)
         return (state, generation)
     }
 
@@ -74,7 +74,7 @@ final class PlaybackStateMachineTests: XCTestCase {
         let second = state.begin(resource: try resource(), owner: "music")
         XCTAssertNotEqual(first, second)
         let expected = state.snapshot
-        state.ready(generation: first, duration: 200, ranges: [])
+        state.ready(generation: first, duration: 200)
         state.progress(generation: first, position: 17)
         state.transport(generation: first, state: .playing)
         state.end(generation: first)
@@ -125,11 +125,26 @@ final class PlaybackStateMachineTests: XCTestCase {
         XCTAssertEqual(state.snapshot.phase, .playing)
     }
 
+    func testKnownDurationDoesNotOverrideDecoderSeekability() throws {
+        var state = PlaybackStateMachine()
+        let generation = state.begin(resource: try resource(), owner: "music")
+        state.ready(generation: generation, duration: 120, seekable: false)
+        XCTAssertEqual(state.snapshot.duration, 120)
+        XCTAssertTrue(state.shouldPlay)
+        XCTAssertFalse(state.canSeek)
+        XCTAssertFalse(state.commandContext.accepts(.seek(10), generation: generation))
+        XCTAssertFalse(state.requestSeek(to: 10))
+        XCTAssertNil(state.outstandingSeek)
+        state.updateTimeline(generation: generation, duration: 130)
+        XCTAssertEqual(state.snapshot.duration, 130)
+        XCTAssertFalse(state.canSeek)
+    }
+
 
     func testRepeatedReadinessAndResumeDoNotRevertActualPlaying() throws {
         var (state, generation) = try readyState()
         state.transport(generation: generation, state: .playing)
-        state.ready(generation: generation, duration: 120, ranges: [])
+        state.ready(generation: generation, duration: 120)
         XCTAssertTrue(state.resume())
         XCTAssertEqual(state.snapshot.phase, .playing)
     }
@@ -209,7 +224,7 @@ final class PlaybackStateMachineTests: XCTestCase {
         var state = PlaybackStateMachine()
         let generation = state.begin(resource: try resource(start: 32), owner: "music")
         XCTAssertNil(state.takeSeekIfPossible())
-        state.ready(generation: generation, duration: 120, ranges: [])
+        state.ready(generation: generation, duration: 120)
         XCTAssertFalse(state.shouldPlay)
         let seek = try XCTUnwrap(state.takeSeekIfPossible())
         XCTAssertEqual(seek.position, 32)
@@ -227,7 +242,7 @@ final class PlaybackStateMachineTests: XCTestCase {
         var state = PlaybackStateMachine()
         let generation = state.begin(resource: try resource(), owner: "music")
         state.pause()
-        state.ready(generation: generation, duration: 120, ranges: [])
+        state.ready(generation: generation, duration: 120)
         XCTAssertFalse(state.shouldPlay)
         XCTAssertEqual(state.snapshot.phase, .paused)
     }
@@ -246,7 +261,7 @@ final class PlaybackStateMachineTests: XCTestCase {
         var state = PlaybackStateMachine()
         let generation = state.begin(resource: try resource(start: 10), owner: "music")
         XCTAssertTrue(state.requestSeek(to: 40))
-        state.ready(generation: generation, duration: 120, ranges: [])
+        state.ready(generation: generation, duration: 120)
         XCTAssertEqual(state.takeSeekIfPossible()?.position, 40)
     }
 
@@ -304,21 +319,10 @@ final class PlaybackStateMachineTests: XCTestCase {
         XCTAssertFalse(state.shouldPlay)
     }
 
-    func testLiveSeekUsesActualRangesIncludingGaps() throws {
-        var state = PlaybackStateMachine()
-        let generation = state.begin(resource: try resource(start: 185), owner: "film")
-        let early = try XCTUnwrap(PlaybackStateMachine.TimeRange(start: 100, end: 150))
-        let late = try XCTUnwrap(PlaybackStateMachine.TimeRange(start: 200, end: 250))
-        state.ready(generation: generation, duration: .infinity, ranges: [late, early])
-        XCTAssertNil(state.snapshot.duration)
-        XCTAssertTrue(state.canSeek)
-        XCTAssertEqual(state.takeSeekIfPossible()?.position, 200)
-    }
-
     func testUnseekableReadyItemWaitsAndCanTimeOut() throws {
         var state = PlaybackStateMachine()
         let generation = state.begin(resource: try resource(start: 10), owner: "film")
-        state.ready(generation: generation, duration: nil, ranges: [])
+        state.ready(generation: generation, duration: nil)
         let pending = try XCTUnwrap(state.pendingSeek)
         XCTAssertNil(state.takeSeekIfPossible())
         XCTAssertFalse(state.canSeek)
@@ -328,14 +332,24 @@ final class PlaybackStateMachineTests: XCTestCase {
         XCTAssertFalse(state.resume())
     }
 
-    func testLateSeekabilityUnblocksQueuedLiveSeek() throws {
+    func testLateDurationUnblocksQueuedSeekWithoutInventingPosition() throws {
+        // Policy input only; production currently reads duration at preparation,
+        // not from a later dynamic-timeline subscription.
         var state = PlaybackStateMachine()
         let generation = state.begin(resource: try resource(start: 10), owner: "film")
-        state.ready(generation: generation, duration: nil, ranges: [])
+        state.ready(generation: generation, duration: nil)
+        let pending = try XCTUnwrap(state.pendingSeek)
         XCTAssertNil(state.takeSeekIfPossible())
-        state.updateTimeline(generation: generation, duration: nil,
-                             ranges: [try XCTUnwrap(PlaybackStateMachine.TimeRange(start: 100, end: 200))])
-        XCTAssertEqual(state.takeSeekIfPossible()?.position, 100)
+        state.updateTimeline(generation: generation, duration: 120)
+        XCTAssertTrue(state.canSeek)
+        let seek = try XCTUnwrap(state.takeSeekIfPossible())
+        XCTAssertEqual(seek.generation, generation)
+        XCTAssertEqual(seek.id, pending.id)
+        XCTAssertEqual(seek.position, 10)
+        XCTAssertEqual(state.snapshot.position, 0)
+        state.completeSeek(seek, finished: true, actualPosition: 10)
+        XCTAssertEqual(state.snapshot.position, 10)
+        XCTAssertTrue(state.shouldPlay)
     }
 
     func testOldTimeoutDoesNotCancelNewerSeek() throws {
@@ -391,10 +405,10 @@ final class PlaybackStateMachineTests: XCTestCase {
     func testInvalidDurationsAndProgressNeverEnterSnapshot() throws {
         var (state, generation) = try readyState()
         for invalid in [Double.nan, Double.infinity, -1, 0] {
-            state.updateTimeline(generation: generation, duration: invalid, ranges: [])
+            state.updateTimeline(generation: generation, duration: invalid)
             XCTAssertNil(state.snapshot.duration)
         }
-        state.updateTimeline(generation: generation, duration: 120, ranges: [])
+        state.updateTimeline(generation: generation, duration: 120)
         state.progress(generation: generation, position: 10)
         for invalid in [Double.nan, Double.infinity, -1] {
             state.progress(generation: generation, position: invalid)
@@ -402,14 +416,6 @@ final class PlaybackStateMachineTests: XCTestCase {
         }
         state.progress(generation: generation, position: 999)
         XCTAssertEqual(state.snapshot.position, 120)
-    }
-
-    func testInvalidRangesAreDiscarded() {
-        XCTAssertNil(PlaybackStateMachine.TimeRange(start: -.infinity, end: 100))
-        XCTAssertNil(PlaybackStateMachine.TimeRange(start: 10, end: .nan))
-        XCTAssertNil(PlaybackStateMachine.TimeRange(start: -1, end: 10))
-        XCTAssertNil(PlaybackStateMachine.TimeRange(start: 10, end: 10))
-        XCTAssertNil(PlaybackStateMachine.TimeRange(start: 20, end: 10))
     }
 
     func testExplicitResumeRequiresSuccessfulAudioAdmissionWithoutEndNotification() throws {
@@ -487,7 +493,7 @@ final class PlaybackStateMachineTests: XCTestCase {
         var (state, _) = try readyState()
         state.interruptionBegan()
         let new = state.begin(resource: try resource(id: "film"), owner: "film")
-        state.ready(generation: new, duration: 300, ranges: [])
+        state.ready(generation: new, duration: 300)
         XCTAssertTrue(state.isInterrupted)
         state.interruptionEnded(shouldResume: true)
         XCTAssertFalse(state.shouldPlay)
@@ -498,7 +504,7 @@ final class PlaybackStateMachineTests: XCTestCase {
         var (state, _) = try readyState()
         state.interruptionBegan()
         let new = state.begin(resource: try resource(id: "film"), owner: "film")
-        state.ready(generation: new, duration: 300, ranges: [])
+        state.ready(generation: new, duration: 300)
         state.resume()
         XCTAssertFalse(state.shouldPlay)
         state.interruptionEnded(shouldResume: true)
@@ -536,7 +542,7 @@ final class PlaybackStateMachineTests: XCTestCase {
         XCTAssertEqual(state.error as? NativePlaybackError, .mediaServicesReset)
         XCTAssertFalse(state.resume())
         let next = state.begin(resource: try resource(), owner: "music")
-        state.ready(generation: next, duration: 120, ranges: [])
+        state.ready(generation: next, duration: 120)
         XCTAssertTrue(state.shouldPlay)
     }
 
@@ -546,7 +552,7 @@ final class PlaybackStateMachineTests: XCTestCase {
         state.fail(NativePlaybackError.playbackFailed, generation: generation)
         let failed = state.snapshot
         state.completeSeek(seek, finished: true, actualPosition: 20)
-        state.ready(generation: generation, duration: 120, ranges: [])
+        state.ready(generation: generation, duration: 120)
         state.transport(generation: generation, state: .playing)
         state.progress(generation: generation, position: 30)
         state.end(generation: generation)
@@ -557,20 +563,47 @@ final class PlaybackStateMachineTests: XCTestCase {
     func testTimelineRefreshDoesNotInventTransportChange() throws {
         var (state, generation) = try readyState()
         state.transport(generation: generation, state: .playing)
-        state.updateTimeline(generation: generation, duration: 130, ranges: [])
+        state.updateTimeline(generation: generation, duration: 130)
         XCTAssertEqual(state.snapshot.phase, .playing)
         XCTAssertEqual(state.snapshot.duration, 130)
     }
 
-    func testNativeScrubAfterEndLeavesPausedAtActualPosition() throws {
+    func testAfterEndSamplingPreservesEndedUntilExplicitReplaySeeksToZero() throws {
         var (state, generation) = try readyState()
+        state.progress(generation: generation, position: 119.7)
         state.end(generation: generation)
+        let ended = try XCTUnwrap(state.takeEvents().last { $0.kind == .ended })
+        XCTAssertEqual(ended.snapshot.position, 119.7)
         state.progress(generation: generation, position: 120)
         XCTAssertEqual(state.snapshot.phase, .ended)
-        state.progress(generation: generation, position: 30)
-        XCTAssertEqual(state.snapshot.phase, .paused)
-        XCTAssertEqual(state.snapshot.position, 30)
+        state.progress(generation: generation, position: 119.7)
+        XCTAssertEqual(state.snapshot.phase, .ended)
+        XCTAssertEqual(state.snapshot.position, 120)
         XCTAssertFalse(state.shouldPlay)
+        XCTAssertTrue(state.takeEvents().isEmpty)
+        XCTAssertTrue(state.resume())
+        let rewind = try XCTUnwrap(state.takeSeekIfPossible())
+        XCTAssertEqual(rewind.position, 0)
+        XCTAssertFalse(state.shouldPlay)
+        state.completeSeek(rewind, finished: true, actualPosition: 0)
+        XCTAssertEqual(state.snapshot.position, 0)
+        XCTAssertTrue(state.shouldPlay)
+    }
+
+    func testReadinessRejectsUnsupportedQueuedStartAndExplicitSeek() throws {
+        for start in [0.0, 34.0] {
+            var state = PlaybackStateMachine()
+            let generation = state.begin(resource: try resource(start: start), owner: "music")
+            if start == 0 { XCTAssertTrue(state.requestSeek(to: 34)) }
+            XCTAssertNil(state.takeSeekIfPossible())
+            state.ready(generation: generation, duration: 120, seekable: false)
+            XCTAssertNil(state.takeSeekIfPossible())
+            XCTAssertEqual(state.snapshot.phase, .failed)
+            XCTAssertEqual(state.error as? NativePlaybackError, .seekFailed)
+            XCTAssertNil(state.outstandingSeek)
+            XCTAssertFalse(state.shouldPlay)
+            XCTAssertEqual(state.takeSeekResults().map(\.outcome), [.failed])
+        }
     }
 
     func testStallNeverOverridesManualPause() throws {

@@ -30,6 +30,9 @@ public static class FilmPlaybackNativeIntegrationTests
                 () => AutoPlayAsync(headers, reports: headers));
         yield return Case("same-episode replacement really seeks and stays paused, malformed candidate keeps the donor",
             ReplacementAsync);
+        foreach (bool pause in new[] { true, false })
+            yield return Case($"same-episode stale receipt cannot overwrite newer donor pause={pause}",
+                () => LatePauseAsync(pause));
         yield return Case("close drains its real session and delayed receipt cannot stop a newer native owner",
             CloseRaceAsync);
         yield return Case("SSE disposal keeps real output alive but exact runtime death physically retires native media",
@@ -315,6 +318,38 @@ public static class FilmPlaybackNativeIntegrationTests
             "only the intentional candidate prepare failure is notified; the healthy donor never emits active failure");
     }
 
+    private static async Task LatePauseAsync(bool pause)
+    {
+        await using var f = await FilmPlaybackNativeFixture.CreateAsync(headers: true, longVideo: true);
+        var owner = await f.OpenAsync();
+        string first = await f.OutputAsync(owner);
+        await owner.Session.SetPausedAsync(!pause);
+        var donor = f.CurrentAllocation();
+        var gate = f.Traffic.HoldNextReceipt();
+        try
+        {
+            await owner.Page.CommandAsync("switch");
+            var receipt = await gate.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Check(receipt.Paused == !pause && f.Native.Identity == first,
+                "the real runtime has issued the old paused receipt while the donor still owns output");
+            await owner.Session.SetPausedAsync(pause);
+            Check(f.Native.PauseRequested == pause && owner.Session.IsPlaying == !pause,
+                "the later user control has actually reached the donor before replacement");
+            gate.Release();
+            await Until(() => f.Native.Identity == receipt.AttemptId && owner.Session.HasOutput,
+                "the replacement uses the stale real receipt but the latest live donor pause");
+            string next = await f.OutputAsync(owner, pauseAfterOutput: false);
+            Check(next == receipt.AttemptId && f.Native.PauseRequested == pause &&
+                owner.Session.IsPlaying == !pause && donor.PhysicallyReleased &&
+                !donor.Matches(f.CurrentAllocation()) && f.FailureCodes.Length == 0,
+                "the exact new native owner starts with the latest pause in either direction, without a repairing control");
+            await f.ResourceRetiredAsync(f.Traffic.Receipts(owner.Id).Single(row => row.AttemptId == first));
+            await owner.Session.CloseSessionAsync();
+            await f.ResourceRetiredAsync(receipt);
+        }
+        finally { gate.Release(); }
+    }
+
     private static async Task CloseRaceAsync()
     {
         await using var f = await FilmPlaybackNativeFixture.CreateAsync(headers: true, longVideo: true);
@@ -411,7 +446,7 @@ public static class FilmPlaybackNativeIntegrationTests
 
         await Until(() => allocation.PhysicallyReleased && !f.Native.HasOutput && !owner.Session.HasOutput &&
             f.CurrentSession is null &&
-            AdaptiveMediaTests.Field(f.Native, "pending") is null,
+            NativeMediaFixtures.Field(f.Native, "pending") is null,
             "runtime lifetime revocation alone joins actual movie decode/render/audio workers, readers and resource release");
         Check(epoch.Revoked.IsCancellationRequested && allocation.PhysicallyReleased,
             "physical native retirement precedes any test close/stop cleanup");

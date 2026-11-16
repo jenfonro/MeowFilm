@@ -32,6 +32,8 @@ reference 只复用活跃事实；原本没有元数据的 source／group 不补
 
 `FilmPlaybackModel`／`MeowfilmFilmMedia` 的媒体接缝把真实 attempt 交给共享 MeowPlayback 的两阶段 prepare／commit；播放状态来自实际内核输出，不用本地计时模拟。MeowVideoKernel 适配固定源码 KSMEPlayer 的真实解码／原生输出，保留完整渲染视图及实际首帧确认；核心关闭等待真实输入、解码、轨道、音频与渲染工作退出后才释放媒体 receipt。直连输入的 HTTP headers／Cookie 通过每实例 KSOptions 注入，运行器 receipt 保持空原生上下文。Node 仍拥有业务会话及媒体资源授权，见[共同原生播放契约](../common/film/playback.md)。影片收藏继续由稳定 `FilmLibrary` 持有，用原 namespace `meowfilm.film.library.v1` 保存身份记录，新增可选 `businessID/playbackTarget`；`contains`／`toggle` 仍识别原来源／影片／类型记录，不清空旧收藏。它不复制进 Node v2 历史／人工匹配／屏蔽／偏好／聚合注册库，也不写音乐曲库。
 
+视频定位能力由 `VideoSession → PlaybackVideoDecoding → PlaybackController` 透传：准备后的有限 HLS／DASH 时间线使用实际探测到的 demuxer 时间定位能力，不要求主清单支持 HTTP Range；普通 progressive 输入使用核心的字节定位能力。未准备、失败或已撤销的 session 不接受 seek，已知时长不等于可定位。不按 URL 后缀或调用方 format hint 推断能力，也不新增 live／DVR 时间线支持。
+
 媒体准备或真实播放失败的 `media.failed` 回执携带已有原生适配器的有限 `code`，不发送异常正文、URL 或凭据。运行器区分取回执、准备和播放阶段，保留真实原生失败原因；候选续选的过程错误不重复弹出最终错误。客户端沿用准确 attempt、取消、资源释放与系统 owner 边界，不因错误码扩展改变手动准确播放或自动准备策略。
 
 iOS 请求继续携带 `platform: ios`，正常新进入的自动准备由运行器 `iosAutoPrepare` 与既有入口范围控制。

@@ -1,8 +1,6 @@
 using MeowFilm.Windows.Tests;
 
-namespace MeowFilm.Windows.Tests;
-
-public sealed record TestCase(string Name, Func<Task> Run);
+namespace MeowFilm.FilmKernel.Tests;
 
 internal static class Program
 {
@@ -11,10 +9,10 @@ internal static class Program
         TestWorkspace.Initialize();
         var groups = new Dictionary<string, Func<IEnumerable<TestCase>>>(StringComparer.Ordinal)
         {
-            [nameof(FFmpegVideoKernelTests)] = FFmpegVideoKernelTests.Cases,
             [nameof(FilmKernelIntegrationTests)] = FilmKernelIntegrationTests.Cases,
             [nameof(RuntimeMediaTests)] = RuntimeMediaTests.Cases,
-            [nameof(MediaOutputTests)] = MediaOutputTests.Cases
+            [nameof(NativeVideoInputTests)] = NativeVideoInputTests.Cases,
+            [nameof(NativeHttpMediaTransferTests)] = NativeHttpMediaTransferTests.Cases
         };
         if (args.Length < 2 || args[0] != "--group" || args.Skip(1).Any(name => !groups.ContainsKey(name)))
             throw new ArgumentException("Choose --group <explicit direct-test groups>; no full App target.");
@@ -22,7 +20,7 @@ internal static class Program
         var cases = selected.SelectMany(name => groups[name]()).ToArray();
         if (cases.Length == 0 || cases.Select(test => test.Name).Distinct().Count() != cases.Length)
             throw new InvalidOperationException("Empty or duplicate direct-test inventory.");
-        Console.WriteLine("SCOPE video-kernel-direct:" + string.Join(',', selected));
+        Console.WriteLine("SCOPE film-kernel-direct:" + string.Join(',', selected));
         int failed = 0;
         foreach (var test in cases)
         {

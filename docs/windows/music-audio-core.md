@@ -1,19 +1,19 @@
 # Windows 独立音乐核心
 
-音乐由独立的 `MeowFilm.Audio` 工程内 `NativeAudioPlayback` 管理，直接项目依赖只有 `MeowFilm.Core`，托管包直接依赖为 `NAudio.Core`、`NAudio.Wasapi` 和 `FFmpeg.AutoGen`，不创建或调用 LibVLC。视频保留 `MeowFilm.Media` 中的 `NativePlayback`。中性的 occurrence scope、continuation、read lease 与受控 HTTP 机制归 `MeowFilm.Core`；解码和输出分别归各端内核，不通过视频工程间接复用。
+音乐由独立的 `MeowFilm.Audio` 工程内 `NativeAudioPlayback` 管理，直接项目依赖只有 `MeowFilm.Core`，托管包直接依赖为 `NAudio.Core`、`NAudio.Wasapi` 和 `FFmpeg.AutoGen`。电影由 `MeowFilm.Media` 中独立的 `FilmPlayback`／`FilmKernel` 管理。中性的 occurrence scope、continuation、read lease 与受控 HTTP 机制归 `MeowFilm.Core`；解码和输出分别归各端内核，不通过视频工程间接复用。
 
 ## 管线与依赖
 
 `授权输入 → FFmpeg custom AVIO → 音频解码 → swresample 48 kHz 双声道 float PCM → atempo → 有界 PCM 缓冲 → NAudio EffectChain → WASAPI`
 
 - 托管包精确锁定 `NAudio.Core`／`NAudio.Wasapi` 3.3.0 与 `FFmpeg.AutoGen` 9.0.1.1；`NAudio.Core` 的传递依赖 `System.Numerics.Tensors` 锁定为 9.0.0。这些包均为 MIT 许可。`NAudio.Effects` 在 `NAudio.Core` 内，不是独立 NuGet 包；`FFmpeg.AutoGen` 只提供托管 C API 绑定，不携带 FFmpeg 原生库。
-- 音频原生库从签名校验过的 FFmpeg 9.0.1 精确源码构建；版本、来源、树哈希、编译参数、ABI、架构和工具链见 `apps/windows/native/AudioKernel/audio-kernel.lock.json`。视频的 FFmpeg 静态 demux 插件不参与此管线。
+- 音频原生库从签名校验过的 FFmpeg 9.0.1 精确源码构建；版本、来源、树哈希、编译参数、ABI、架构和工具链见 `apps/windows/native/AudioKernel/audio-kernel.lock.json`。电影的独立 FFmpeg 8.1.2 静态闭包不参与此管线。
 - 原生构建禁用 GPL、version3、nonfree、网络协议、自带程序及视频 decoder；只启用受控音频解封装、解码、重采样和必要音频滤镜，内置 URL 协议仅保留 `file`。FFmpeg 共享库采用 LGPL 2.1-or-later，而非绑定包的 MIT；来源、许可正文、附加声明及工具链运行库条款统一见[许可来源说明](../../LICENSES/NOTICE.md)，源码与重链接／重构建义务不因哈希锁定而免除。共享 DLL 随 App 放入 `audio-kernel/win-x64`，不启动 ffmpeg.exe，不依赖用户安装 FFmpeg。
 - 准备入口为 `scripts/windows/build-audio-kernel.ps1`。完整已验证原生产物按来源、工具链及配置身份共享；源码和可写构建目录属于本副本。加载前核对产物、回执、PE 架构、库版本／构建配置和哈希，不从 PATH 回退加载 DLL。
 
 ## 输入与安全边界
 
-- 本地 URI 只由原生打开为只读文件租约；缓存与授权文件直接转移 `INativeMediaReadLease`。FFmpeg 不重新解释路径，也不能从容器中打开外部引用。
+- 本地 URI 只由原生打开为只读文件租约；缓存与授权文件直接转移 `INativeMediaReadLease`，具体约束见[读取租约](media-playback.md#音乐读取租约)。FFmpeg 不重新解释路径，也不能从容器中打开外部引用。
 - HTTP(S) 经受控 transport，保留头快照、重定向、Range、表示一致性、超时及固定错误分类；不形成 Cookie jar，不在 Node 中传输音频字节。
 - 撤销和取消先关闭输入、解除读取阻塞，再等待解码与输出线程退出；暂停不豁免授权撤销。拒绝接收的 read lease 也必须释放。
 - read lease 在排入 dispatcher 前登记归属；尚未执行的请求取消后直接释放，Stop／Dispose 等待其物理释放回执。释放失败明确返回 `MEDIA_RELEASE_FAILED`，不作为完成排空或允许重新接收输入。
@@ -41,6 +41,8 @@
 
 ## 缓存与验证
 
-`NativeAudioCacheProbe` 仅创建 FFmpeg 解码器，检查实际时长并定位末尾静音解码至 EOF；不创建 WASAPI、SMTC 或 LibVLC。文件容器完整性检查仍归既有缓存 owner，二者不能互相替代。
+`MusicAudioFileCache` 的完整文件 producer 使用 Core 的 `NativeHttpMediaTransfer.CopyCompleteAsync`，底层复用 `FFmpegHttpTransport` 私有 Reader 的同一打开、读取、Range 与表示身份机制。它不持有原生播放器、解码器或输出；拒绝初始／重定向自适应路径、HLS／DASH／SmoothStreaming Content-Type 及前 512 字节中的 manifest 标记，再按已识别的普通容器前缀顺序复制。服务器截短的 `206` 分段须有 strong ETag，后续范围、已绑定的 strong ETag 和总长度必须一致；续段重定向、validator 缺失或变更均按表示变化拒绝，不拼接不同对象。已知长度须完整匹配，未知长度读取到实际 EOF，空内容、截断或超出调用方字节预算明确失败。初始打开与完整探测共用 RequestTimeout，正文的一次 ReadTimeout 同时覆盖续段请求和读取；无法发送的声明 header 在请求前拒绝。打开长度和连续写入进度只作为文件 producer 回执，不表示已完成音频校验。
+
+`NativeAudioCacheProbe` 仅创建 FFmpeg 解码器，检查实际时长并定位末尾静音解码至 EOF；不创建 WASAPI 或 SMTC。文件容器完整性和预期大小检查仍归既有缓存 owner，HTTP 完整复制与实际音频校验不能互相替代。
 
 真实 decoder、生命周期替身、真实 WASAPI 和业务回归分别验证。`NativeAudioOutput.Dummy` 仅用于确定性 no-device 测试，不证明真实扬声器出声或设备时钟。测试结果与本次运行证据保留在任务记录，不将编译成功描述为听感验收。
