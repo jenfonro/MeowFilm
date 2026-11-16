@@ -47,13 +47,13 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             guard let self else { return }
             let primary = page === self.main
             self.root.setRootVisible(primary, animated: animated)
-            self.root.setPlayerSurfaceVisible(!self.isSettingsBranchVisible)
+            self.root.setSettingsVisible(self.isSettingsBranchVisible)
             self.root.setReadingVisible(page is NovelReaderViewController || self.navigation.viewControllers.contains { $0 is NovelReaderViewController })
         }
         navigation.didShowPage = { [weak self] page in
             guard let self else { return }
             self.root.setRootVisible(page === self.main, animated: false)
-            self.root.setPlayerSurfaceVisible(!self.isSettingsBranchVisible)
+            self.root.setSettingsVisible(self.isSettingsBranchVisible)
             if !(page is FilmDetailViewController), self.filmPlayer == nil {
                 self.activateFilmPage(page)
             }

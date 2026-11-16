@@ -952,6 +952,10 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
         root.select(.recommend)
         window.layoutIfNeeded()
         let dock = try XCTUnwrap(root.dock)
+        let backdrop = try XCTUnwrap(root.view.subviews.first { $0.accessibilityIdentifier == "app.bottomBackdrop" })
+        XCTAssertTrue(backdrop.superview === root.view, "Page chrome must not be inside the moving dock")
+        let expectedBackdrop = backdrop.convert(backdrop.bounds, to: window)
+        XCTAssertEqual(expectedBackdrop.height, 8 + 58 + 56 + root.view.safeAreaInsets.bottom, accuracy: 0.1)
         func descendants(_ view: UIView) -> [UIView] { view.subviews.flatMap { [$0] + descendants($0) } }
         let buttons = try ["recommend", "film", "novel", "library"].map { name in
             try XCTUnwrap(descendants(dock).compactMap { $0 as? UIButton }.first {
@@ -966,19 +970,7 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
             CGPoint(x: 2, y: expectedFrames[0].midY),
             CGPoint(x: 2, y: window.bounds.maxY - 2),
         ]
-        func alpha(_ image: UIImage, at point: CGPoint) throws -> UInt8 {
-            let pixels = try XCTUnwrap(image.cgImage)
-            let crop = try XCTUnwrap(pixels.cropping(to: CGRect(
-                x: floor(point.x), y: floor(point.y), width: 1, height: 1)))
-            var pixel = [UInt8](repeating: 0, count: 4)
-            try pixel.withUnsafeMutableBytes { bytes in
-                let context = try XCTUnwrap(CGContext(data: bytes.baseAddress, width: 1, height: 1,
-                    bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
-                    bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue))
-                context.draw(crop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
-            }
-            return pixel[3]
-        }
+        let fadePoints = [expectedBackdrop.minY - 2, expectedBackdrop.minY + 8 + 29]
         let compactHeight = surface.dockHeight
         let compact = expectation(description: "compact dock rendered")
         let expanding = expectation(description: "first intermediate expansion frame")
@@ -991,9 +983,14 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
             do {
                 XCTAssertEqual(window.windowScene?.activationState, .foregroundActive)
                 let host = try XCTUnwrap(window.layer.presentation())
-                let layer = try XCTUnwrap(dock.layer.presentation())
+                let layer = try XCTUnwrap(backdrop.layer.presentation())
                 let playerLayer = try XCTUnwrap(surface.layer.presentation())
                 let height = playerLayer.bounds.height
+                let backdropFrame = layer.convert(layer.bounds, to: host)
+                XCTAssertEqual(backdropFrame.minX, expectedBackdrop.minX, accuracy: 0.5, phase)
+                XCTAssertEqual(backdropFrame.minY, expectedBackdrop.minY, accuracy: 0.5, phase)
+                XCTAssertEqual(backdropFrame.width, expectedBackdrop.width, accuracy: 0.5, phase)
+                XCTAssertEqual(backdropFrame.height, expectedBackdrop.height, accuracy: 0.5, phase)
                 for (button, expected) in zip(buttons, expectedFrames) {
                     let buttonLayer = try XCTUnwrap(button.layer.presentation())
                     let frame = buttonLayer.convert(buttonLayer.bounds, to: host)
@@ -1015,26 +1012,15 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
                         ancestor = current.superlayer
                     }
                 }
-                // Render only the dock on transparency: the page beneath it must
-                // not accidentally make a missing or partially faded shield pass.
-                let format = UIGraphicsImageRendererFormat()
-                format.scale = 1; format.opaque = false
-                let image = UIGraphicsImageRenderer(bounds: layer.bounds, format: format).image {
-                    layer.render(in: $0.cgContext)
-                }
-                let alphas = try points.map {
-                    let point = layer.convert($0, from: host)
-                    return try alpha(image, at: CGPoint(x: point.x - layer.bounds.minX,
-                                                       y: point.y - layer.bounds.minY))
-                }
-                XCTAssertTrue(alphas.allSatisfy { $0 >= 254 }, "\(phase): dock shield alpha \(alphas)")
-                let playerFrame = playerLayer.convert(playerLayer.bounds, to: layer)
-                let fadeAlphas = try [playerFrame.minY - 2, playerFrame.midY].map {
-                    try alpha(image, at: CGPoint(x: 2 - layer.bounds.minX, y: $0 - layer.bounds.minY))
-                }
+                // Isolate page chrome on transparency; the page and player must
+                // not conceal a missing shield or a changing fade profile.
+                let image = backdropImage(layer, in: host)
+                let alphas = try points.map { try backdropAlpha(image, at: $0) }
+                XCTAssertTrue(alphas.allSatisfy { $0 >= 254 }, "\(phase): page shield alpha \(alphas)")
+                let fadeAlphas = try fadePoints.map { try backdropAlpha(image, at: CGPoint(x: 2, y: $0)) }
                 XCTAssertLessThanOrEqual(fadeAlphas[0], 1, "\(phase): retain the clear top inset")
-                XCTAssertEqual(Double(fadeAlphas[1]), 128, accuracy: 4, "\(phase): fade tracks the moving player")
-                rows.append("\(phase),\(height),\(alphas),\(fadeAlphas)")
+                XCTAssertEqual(Double(fadeAlphas[1]), 128, accuracy: 4, "\(phase): page fade stays fixed")
+                rows.append("\(phase),\(height),\(backdropFrame.minY),\(backdropFrame.height),\(alphas),\(fadeAlphas)")
                 let target = surface.dockHeight
                 if abs(height - target) < 0.1 { settledFrames += 1 } else { settledFrames = 0 }
                 let ready: XCTestExpectation?
@@ -1076,10 +1062,164 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
         phase = "collapsed"; settledFrames = 0; surface.collapse()
         await fulfillment(of: [collapsed], timeout: 5)
         XCTAssertEqual(surface.form, .compact)
-        let data = XCTAttachment(string: "phase,surfaceHeight,shieldAlpha,fadeAlpha\n" + rows.joined(separator: "\n"))
+        let data = XCTAttachment(string: "phase,surfaceHeight,backdropY,backdropHeight,shieldAlpha,fadeAlpha\n" + rows.joined(separator: "\n"))
         data.name = "root-dock-presentation-frames"; data.lifetime = .keepAlways; add(data)
         let networkCalls = await network.calls
         XCTAssertEqual(networkCalls, 0)
+    }
+
+    func testSearchAndResultsKeepFixedOpaqueBackdropAcrossPlayerAndContentLayoutChanges() async throws {
+        let foreground = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated {
+            UIApplication.shared.applicationState == .active &&
+                UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive }
+        } }, evaluatedWith: nil)
+        await fulfillment(of: [foreground], timeout: 5)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let network = MusicStartupNoNetwork()
+        let service = NativeMusicService(document: MusicStartupDocument(failure: nil), platformClient: network.client())
+        let playback = PlaybackController()
+        let model = MusicViewModel(service: service, playback: playback)
+        model.nativeAttempt = .init(id: UUID(), resourceID: "music:fixed-backdrop")
+        model.playbackState.queue = [.init(id: "fixed-backdrop", track: .init(
+            ref: .init(kind: .queue, id: "fixed-backdrop"), songId: "fixed-backdrop", title: "Fixed backdrop"))]
+        model.playbackState.state = .init(currentId: "fixed-backdrop", total: 1)
+        model.playbackState.phase = .paused
+        let suite = UUID().uuidString, defaults = UserDefaults(suiteName: suite)!
+        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let history = SearchHistoryStore(defaults: defaults)
+        let router = MusicFixedBackdropRouter()
+        let content = MusicPlayerContentModel(model: model, playback: playback,
+            appearance: appearance, presentation: router.primaryPlaybackPresentation)
+        addTeardownBlock { await model.close(); await service.close(); defaults.removePersistentDomain(forName: suite) }
+        let search = MusicSearchViewController(model: model, appearance: appearance, router: router, history: history)
+        let navigation = PageNavigationController(themeProvider: appearance)
+        navigation.setViewControllers([search], animated: false)
+        let root = MeowfilmRootContainerViewController(navigation: navigation, themeProvider: appearance)
+        let previousWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.windowLevel = .normal + 1
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        defer {
+            PageViewController.invalidatePages(in: root)
+            window.isHidden = true; window.rootViewController = nil
+            previousWindow?.makeKey()
+        }
+        let surface = MusicPlayerSurface(content: content)
+        root.setRootVisible(false, animated: false)
+        root.install(surface: surface)
+        window.layoutIfNeeded()
+        let backdrop = try XCTUnwrap(root.view.subviews.first { $0.accessibilityIdentifier == "app.bottomBackdrop" })
+        let expected = backdrop.convert(backdrop.bounds, to: window)
+        XCTAssertEqual(expected.height, 8 + 58 + root.view.safeAreaInsets.bottom, accuracy: 0.1)
+        func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
+        let table = try XCTUnwrap(descendants(search.view).compactMap { $0 as? UITableView }.first {
+            $0.accessibilityIdentifier == "music.search.discovery"
+        })
+        let initialContentHeight = table.contentSize.height
+        let points = [expected.minY - 2, expected.minY + 2, expected.midY, expected.maxY - 2]
+        let phases = ["search", "expanded", "history", "results", "collapsed"]
+        let ready = Dictionary(uniqueKeysWithValues: phases.map { ($0, expectation(description: $0)) })
+        var phase = "search", sampled = Set<String>(), stableFrames = 0, rows: [String] = []
+        let observer = MusicDockChromeFrameObserver { [self] in
+            do {
+                XCTAssertEqual(window.windowScene?.activationState, .foregroundActive)
+                let host = try XCTUnwrap(window.layer.presentation())
+                let layer = try XCTUnwrap(backdrop.layer.presentation())
+                let player = try XCTUnwrap(surface.layer.presentation())
+                let frame = layer.convert(layer.bounds, to: host)
+                XCTAssertEqual(frame.minX, expected.minX, accuracy: 0.5, phase)
+                XCTAssertEqual(frame.minY, expected.minY, accuracy: 0.5, phase)
+                XCTAssertEqual(frame.width, expected.width, accuracy: 0.5, phase)
+                XCTAssertEqual(frame.height, expected.height, accuracy: 0.5, phase)
+                let image = backdropImage(layer, in: host)
+                let alphas = try points.map { try backdropAlpha(image, at: CGPoint(x: 2, y: $0)) }
+                XCTAssertLessThanOrEqual(alphas[0], 1, "\(phase): no shield above the fixed page band")
+                XCTAssertTrue(alphas.dropFirst().allSatisfy { $0 >= 254 }, "\(phase): opaque page band \(alphas)")
+                rows.append("\(phase),\(player.bounds.height),\(frame.minY),\(frame.height),\(alphas)")
+                let settled = abs(player.bounds.height - surface.dockHeight) < 0.1
+                stableFrames = settled ? stableFrames + 1 : 0
+                let visible = (navigation.topViewController as? PageViewController)?.isPageVisible == true
+                let measured = phase != "history" || table.contentSize.height > initialContentHeight
+                if visible && measured && stableFrames >= 2 && sampled.insert(phase).inserted {
+                    let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image {
+                        host.render(in: $0.cgContext)
+                    })
+                    attachment.name = "fixed-page-backdrop-" + phase; attachment.lifetime = .keepAlways; add(attachment)
+                    ready[phase]?.fulfill()
+                }
+            } catch { XCTFail("Fixed page backdrop sampling failed: \(error)") }
+        }
+        let displayLink = CADisplayLink(target: observer, selector: #selector(MusicDockChromeFrameObserver.sample(_:)))
+        displayLink.add(to: .main, forMode: .common)
+        defer { displayLink.invalidate() }
+        await fulfillment(of: [ready["search"]!], timeout: 5)
+        XCTAssertTrue(search.isPageVisible)
+        phase = "expanded"; stableFrames = 0
+        let intent = content.presentation.beginHomePlayback()
+        XCTAssertTrue(content.presentation.finishHomePlayback(intent, playback: .init(
+            occurrenceID: "fixed-backdrop", nativeAttemptID: model.activeNativeAttemptID!,
+            accessGeneration: model.accountAccessGeneration)))
+        await fulfillment(of: [ready["expanded"]!], timeout: 5)
+        XCTAssertEqual(surface.form, .card)
+        phase = "history"; stableFrames = 0
+        search.view.endEditing(true)
+        for index in 0..<20 { history.record("Fixed backdrop history row \(index)") }
+        await fulfillment(of: [ready["history"]!], timeout: 5)
+        XCTAssertGreaterThan(table.contentSize.height, initialContentHeight, "Exercise real content layout, not only the player")
+        let results = MusicSearchResultsViewController(model: model, query: "", appearance: appearance,
+            router: router, history: history)
+        phase = "results"; stableFrames = 0
+        navigation.pushViewController(results, animated: false)
+        window.layoutIfNeeded()
+        let previousInset = results.view.safeAreaInsets.bottom
+        results.additionalSafeAreaInsets.bottom = 120
+        window.layoutIfNeeded()
+        await fulfillment(of: [ready["results"]!], timeout: 5)
+        XCTAssertTrue(navigation.topViewController === results && results.isPageVisible)
+        XCTAssertGreaterThan(results.view.safeAreaInsets.bottom, previousInset + 100)
+        phase = "collapsed"; stableFrames = 0; surface.collapse()
+        await fulfillment(of: [ready["collapsed"]!], timeout: 5)
+        XCTAssertEqual(surface.form, .compact)
+        displayLink.invalidate()
+        root.setSettingsVisible(true); window.layoutIfNeeded()
+        XCTAssertTrue(backdrop.isHidden, "Settings-style pages retain their existing chrome visibility")
+        XCTAssertEqual(backdrop.convert(backdrop.bounds, to: window), expected)
+        root.setSettingsVisible(false); root.setReadingVisible(true); window.layoutIfNeeded()
+        XCTAssertTrue(backdrop.isHidden)
+        root.setReadingVisible(false); window.layoutIfNeeded()
+        XCTAssertFalse(backdrop.isHidden)
+        XCTAssertEqual(backdrop.convert(backdrop.bounds, to: window), expected)
+        let data = XCTAttachment(string: "phase,surfaceHeight,backdropY,backdropHeight,alpha\n" + rows.joined(separator: "\n"))
+        data.name = "search-results-fixed-backdrop-frames"; data.lifetime = .keepAlways; add(data)
+        let calls = await network.calls
+        XCTAssertEqual(calls, 0)
+    }
+
+    private func backdropImage(_ layer: CALayer, in window: CALayer) -> UIImage {
+        let frame = layer.convert(layer.bounds, to: window)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1; format.opaque = false
+        return UIGraphicsImageRenderer(bounds: window.bounds, format: format).image {
+            $0.cgContext.translateBy(x: frame.minX - layer.bounds.minX, y: frame.minY - layer.bounds.minY)
+            layer.render(in: $0.cgContext)
+        }
+    }
+
+    private func backdropAlpha(_ image: UIImage, at point: CGPoint) throws -> UInt8 {
+        let pixels = try XCTUnwrap(image.cgImage)
+        let crop = try XCTUnwrap(pixels.cropping(to: CGRect(
+            x: floor(point.x), y: floor(point.y), width: 1, height: 1)))
+        var pixel = [UInt8](repeating: 0, count: 4)
+        try pixel.withUnsafeMutableBytes { bytes in
+            let context = try XCTUnwrap(CGContext(data: bytes.baseAddress, width: 1, height: 1,
+                bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(crop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+        return pixel[3]
     }
 
     func testCardMorphKeepsButtonsStationaryDuringExpansionAndReversal() async throws {
@@ -1354,6 +1494,18 @@ private final class MusicDockChromeFrameObserver: NSObject {
     }
 
     @objc func sample(_ displayLink: CADisplayLink) { onFrame() }
+}
+
+@MainActor
+private final class MusicFixedBackdropRouter: MusicUIRouting {
+    let primaryPlaybackPresentation = MusicMiniPlayerPresentation()
+    func showSearch() {}
+    func showSettings() {}
+    func showPublicBrowse(_ request: MusicPublicBrowseRequest, title: String) {}
+    func showPublicCollection(_ collection: MusicPublicBrowseCollection) {}
+    func showLocalCollection(_ collection: MusicCollection) {}
+    func showPlayer(_ destination: MusicPlaybackDestination) {}
+    func selectChannel(_ channel: MusicPublicBrowseChannel) {}
 }
 
 @MainActor
