@@ -4,14 +4,29 @@ import MeowRuntime
 import MeowUI
 
 @MainActor
-final class FilmManualMatchEditor: FilmSettingsListController {
-    override var avoidsKeyboard: Bool { true }
+final class FilmManualMatchEditor: FilmSettingsFormController {
     private let owner: FilmPlaybackSettingsModel
     private let original: FilmManualMatch?
     private let id: String
     private var kind: String
-    private let target: UITextField, name: UITextField, sourceKey: UITextField, detailID: UITextField
-    private let share: UITextField, password: UITextField, season: UITextField
+    private let siteFields = UIStackView(), shareFields = UIStackView()
+    private lazy var target = text("影片身份", id: "film.manual.target", value: original?.targetID ?? "")
+    private lazy var name = text("名称", id: "film.manual.name", value: original?.name ?? "")
+    private lazy var sourceKey = text("来源身份", id: "film.manual.source",
+        value: original?.value["sourceKey"]?.filmText ?? "", in: siteFields)
+    private lazy var detailID = text("站点详情 ID", id: "film.manual.detail",
+        value: original?.value["detailId"]?.filmScalar ?? "", in: siteFields)
+    private lazy var share = text("分享地址", id: "film.manual.share",
+        value: original?.value["share"]?.filmObject?["url"]?.filmText ?? "", in: shareFields)
+    private lazy var password = text("提取码", id: "film.manual.password",
+        value: original?.value["share"]?.filmObject?["password"]?.filmText ?? "", in: shareFields)
+    private lazy var season = text("季线索", id: "film.manual.season",
+        value: original?.value["seasonHint"]?.filmScalar ?? "")
+    private lazy var kindButton = option("", id: "film.manual.kind", disclosure: true) { [weak self] in self?.chooseKind() }
+    private lazy var detailTypeButton = option("", id: "film.manual.detail-type", disclosure: true) { [weak self] in self?.chooseDetailType() }
+    private lazy var providerButton = option("", id: "film.manual.provider", disclosure: true) { [weak self] in self?.chooseProvider() }
+    private lazy var saveButton = PageHeaderTextButton(title: "保存") { [weak self] in self?.save() }
+    private var controls: [UIControl] = []
     private var numericDetailID: Bool
     private var provider: FilmPanProvider?
     private var enabled: Bool
@@ -22,80 +37,64 @@ final class FilmManualMatchEditor: FilmSettingsListController {
         self.owner = owner; original = item
         id = item?.id ?? UUID().uuidString.lowercased(); kind = item?.kind ?? "site"
         enabled = item?.enabled ?? true; autoDisable = item?.autoDisable ?? true
-        target = filmTextField("影片身份", id: "film.manual.target", value: item?.targetID ?? "")
-        name = filmTextField("名称", id: "film.manual.name", value: item?.name ?? "")
-        sourceKey = filmTextField("来源身份", id: "film.manual.source", value: item?.value["sourceKey"]?.filmText ?? "")
-        detailID = filmTextField("站点详情 ID", id: "film.manual.detail", value: item?.value["detailId"]?.filmScalar ?? "")
-        share = filmTextField("分享地址", id: "film.manual.share",
-                              value: item?.value["share"]?.filmObject?["url"]?.filmText ?? "")
-        password = filmTextField("提取码", id: "film.manual.password",
-                                 value: item?.value["share"]?.filmObject?["password"]?.filmText ?? "")
-        season = filmTextField("季线索", id: "film.manual.season",
-                               value: item?.value["seasonHint"]?.filmScalar ?? "")
         numericDetailID = item?.value["detailId"]?.filmNumber != nil
         provider = item?.value["provider"]?.filmText.flatMap(FilmPanProvider.init(rawValue:))
         super.init(themeProvider: themeProvider)
         pageTitle = item == nil ? "添加人工匹配" : "编辑人工匹配"
-        share.textContentType = .none; password.textContentType = .none
-        season.keyboardType = .numberPad
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        pageHeader.setTrailing([PageHeaderTextButton(title: "保存") { [weak self] in self?.save() }])
-        update()
+        view.accessibilityIdentifier = "film.manual.editor"
+        form.accessibilityIdentifier = "film.manual.form"
+        pageHeader.setTrailing([saveButton])
+        form.addSection(optionRow([kindButton]))
+        controls.append(kindButton)
+        _ = target; _ = name
+        if owner.playbackSnapshot?() != nil || owner.library?.history.isEmpty == false {
+            let choose = option("选择影片", id: "film.manual.choose-target", disclosure: true) { [weak self] in self?.chooseTarget() }
+            form.addSection(optionRow([choose])); controls.append(choose)
+        }
+        siteFields.axis = .vertical; shareFields.axis = .vertical
+        _ = sourceKey
+        if !siteChoices.isEmpty {
+            let choose = option("选择站点详情", id: "film.manual.choose-source", disclosure: true) { [weak self] in self?.chooseSource() }
+            siteFields.addArrangedSubview(optionRow([choose])); controls.append(choose)
+        }
+        _ = detailID; siteFields.addArrangedSubview(optionRow([detailTypeButton]))
+        form.addSection(siteFields)
+        shareFields.addArrangedSubview(optionRow([providerButton]))
+        _ = share; _ = password; form.addSection(shareFields)
+        share.keyboardType = .URL; share.textContentType = .none; password.textContentType = .none
+        _ = season; season.keyboardType = .numberPad
+        let enabled = ManagementFormView.check("启用", value: self.enabled) { [weak self] in self?.enabled = $0 }
+        enabled.accessibilityIdentifier = "film.manual.enabled"
+        let autoDisable = ManagementFormView.check("连续失败自动停用", value: self.autoDisable) { [weak self] in self?.autoDisable = $0 }
+        autoDisable.accessibilityIdentifier = "film.manual.auto-disable"
+        form.addSection(optionRow([enabled, autoDisable]))
+        controls += [detailTypeButton, providerButton, enabled, autoDisable, target, name, sourceKey, detailID, share, password, season]
+        if let original {
+            let failures = UILabel()
+            failures.text = "失败次数：\(original.failureCount)"; failures.numberOfLines = 0
+            failures.font = .preferredFont(forTextStyle: .subheadline); failures.adjustsFontForContentSizeCategory = true
+            failures.accessibilityIdentifier = "film.manual.failures"
+            form.addSection(optionRow([failures]))
+            let remove = option("删除", id: "film.manual.remove", destructive: true) { [weak self] in self?.remove() }
+            form.addSection(optionRow([remove])); controls.append(remove)
+        }
+        update(); applyTheme()
     }
 
     private func update() {
-        var rows: [FilmSettingsRow] = [
-            field("影片身份", target), field("名称", name),
-            .init(title: "类型", detail: kind == "site" ? "站点" : "分享", id: "film.manual.kind",
-                  enabled: task == nil, disclosure: true, action: { [weak self] in self?.chooseKind() }),
-        ]
-        if owner.playbackSnapshot?() != nil || owner.library?.history.isEmpty == false {
-            rows.insert(.init(title: "选择影片", id: "film.manual.choose-target", enabled: task == nil,
-                              disclosure: true, action: { [weak self] in self?.chooseTarget() }), at: 1)
-        }
-        if kind == "site" {
-            rows += [field("来源身份", sourceKey)]
-            if !siteChoices.isEmpty {
-                rows.append(.init(title: "选择站点详情", id: "film.manual.choose-source", enabled: task == nil,
-                                  disclosure: true, action: { [weak self] in self?.chooseSource() }))
-            }
-            rows += [
-                field("站点详情 ID", detailID),
-                .init(title: "详情 ID 类型", detail: numericDetailID ? "数字" : "文本",
-                      id: "film.manual.detail-type", enabled: task == nil, disclosure: true,
-                      action: { [weak self] in self?.chooseDetailType() }),
-            ]
-        } else {
-            rows += [
-                .init(title: "网盘", detail: provider?.title ?? "未选择", id: "film.manual.provider",
-                      enabled: task == nil, disclosure: true, action: { [weak self] in self?.chooseProvider() }),
-                field("分享地址", share), field("提取码", password),
-            ]
-        }
-        rows += [field("季线索", season),
-            filmSwitchRow("启用", id: "film.manual.enabled", isOn: enabled, enabled: task == nil) { [weak self] in self?.enabled = $0 },
-            filmSwitchRow("连续失败自动停用", id: "film.manual.auto-disable", isOn: autoDisable, enabled: task == nil) { [weak self] in self?.autoDisable = $0 },
-        ]
-        if let original {
-            rows.append(.init(title: "失败次数", detail: "\(original.failureCount)", id: "film.manual.failures"))
-            rows.append(.init(title: "删除", id: "film.manual.remove", enabled: task == nil, destructive: true,
-                              action: { [weak self] in self?.remove() }))
-        }
-        sections = [.init(title: "", rows: rows)]
-        render()
-    }
-
-    private func field(_ title: String, _ field: UITextField) -> FilmSettingsRow {
-        let label = UILabel()
-        label.text = title; label.font = .preferredFont(forTextStyle: .subheadline)
-        label.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).muted) }
-        field.textColor = UIColor(theme.settings.ink); field.isEnabled = task == nil
-        let stack = UIStackView(arrangedSubviews: [label, field])
-        stack.axis = .vertical; stack.spacing = 8
-        return .init(title: title, id: "", content: stack)
+        siteFields.isHidden = kind != "site"; shareFields.isHidden = kind == "site"
+        kindButton.configuration?.title = "类型：\(kind == "site" ? "站点" : "分享")"
+        kindButton.accessibilityLabel = "类型"; kindButton.accessibilityValue = kind == "site" ? "站点" : "分享"
+        detailTypeButton.configuration?.title = "详情 ID 类型：\(numericDetailID ? "数字" : "文本")"
+        detailTypeButton.accessibilityLabel = "详情 ID 类型"; detailTypeButton.accessibilityValue = numericDetailID ? "数字" : "文本"
+        providerButton.configuration?.title = "网盘：\(provider?.title ?? "未选择")"
+        providerButton.accessibilityLabel = "网盘"; providerButton.accessibilityValue = provider?.title ?? "未选择"
+        for control in controls { control.isEnabled = task == nil }
+        saveButton.isEnabled = task == nil
     }
 
     private func chooseKind() {
@@ -155,8 +154,8 @@ final class FilmManualMatchEditor: FilmSettingsListController {
         let alert = UIAlertController(title: title, message: nil, preferredStyle: .actionSheet)
         for (name, action) in choices { alert.addAction(UIAlertAction(title: name, style: .default) { _ in action() }) }
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.popoverPresentationController?.sourceView = table
-        alert.popoverPresentationController?.sourceRect = CGRect(x: table.bounds.midX, y: table.bounds.midY, width: 1, height: 1)
+        alert.popoverPresentationController?.sourceView = form
+        alert.popoverPresentationController?.sourceRect = CGRect(x: form.bounds.midX, y: form.bounds.midY, width: 1, height: 1)
         present(alert, animated: true)
     }
 
@@ -199,6 +198,7 @@ final class FilmManualMatchEditor: FilmSettingsListController {
 
     private func save() {
         guard task == nil else { return }
+        view.endEditing(true)
         do {
             let value = try item()
             task = Task { [weak self] in

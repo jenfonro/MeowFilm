@@ -213,22 +213,20 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
 
 @MainActor
 func filmTextField(_ title: String, id: String, value: String = "") -> UITextField {
-    let field = UITextField()
+    let field = SettingsTextField()
     field.text = value
     field.placeholder = title
     field.accessibilityLabel = title; field.accessibilityIdentifier = id
     field.font = .preferredFont(forTextStyle: .body)
     field.adjustsFontForContentSizeCategory = true
     field.autocorrectionType = .no; field.autocapitalizationType = .none
-    field.leftView = UIView(frame: CGRect(x: 0, y: 0, width: 8, height: 1))
-    field.leftViewMode = .always
-    field.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+    field.heightAnchor.constraint(greaterThanOrEqualToConstant: 36).isActive = true
     return field
 }
 
 @MainActor
 func filmTextView(_ title: String, id: String, value: String = "") -> UITextView {
-    let field = UITextView()
+    let field = SettingsTextView()
     field.text = value; field.accessibilityLabel = title; field.accessibilityIdentifier = id
     field.font = .preferredFont(forTextStyle: .body)
     field.adjustsFontForContentSizeCategory = true; field.backgroundColor = .clear
@@ -241,7 +239,8 @@ func filmTextView(_ title: String, id: String, value: String = "") -> UITextView
 @MainActor
 func filmSwitchRow(_ title: String, id: String, isOn: Bool, enabled: Bool,
                    change: @escaping (Bool) -> Void) -> FilmSettingsRow {
-    let control = UISwitch()
+    let switchView = SettingsSwitch()
+    let control = switchView.control
     control.isOn = isOn; control.isEnabled = enabled
     control.accessibilityLabel = title; control.accessibilityIdentifier = id + ".switch"
     control.addAction(UIAction { [weak control] _ in
@@ -252,9 +251,8 @@ func filmSwitchRow(_ title: String, id: String, isOn: Bool, enabled: Bool,
     label.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).ink) }
     label.font = .preferredFont(forTextStyle: .body)
     label.adjustsFontForContentSizeCategory = true; label.numberOfLines = 0
-    let stack = UIStackView(arrangedSubviews: [label, control])
+    let stack = UIStackView(arrangedSubviews: [label, switchView])
     stack.alignment = .center; stack.spacing = 12
-    stack.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
     return .init(title: title, id: id, enabled: enabled, action: { change(!isOn) }, content: stack)
 }
 #endif

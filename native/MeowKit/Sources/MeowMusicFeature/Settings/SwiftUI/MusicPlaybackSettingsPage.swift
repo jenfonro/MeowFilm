@@ -95,12 +95,15 @@ struct MusicQualitySettingsContent: View {
         List {
             if !spatial {
                 Section {
-                    Picker("请求音质", selection: Binding(get: { state.value.requestQuality }, set: state.setRequestQuality)) {
+                    MusicSettingsMenuRow(selection: Binding(
+                        get: { state.value.requestQuality }, set: state.setRequestQuality
+                    ), selectedTitle: MusicQualityLabel.name(state.value.requestQuality)) {
                         ForEach(MusicSourceQualityPolicy.qualities, id: \.self) { quality in
                             Text(MusicQualityLabel.name(quality)).tag(quality)
                         }
+                    } label: {
+                        Text("请求音质")
                     }
-                    .pickerStyle(.menu)
                     .disabled(!state.available || state.busy)
                     .modifier(MusicSettingsRowStyle(theme: theme, first: true, last: true))
                 }

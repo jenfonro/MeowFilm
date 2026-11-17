@@ -59,16 +59,16 @@ public struct MusicSettingsContent: View {
                     destinationRow(destination)
                 }
                 if let catalogSource, !catalogSource.available.isEmpty {
-                    Picker(selection: Binding(get: { catalogSource.selected }, set: { selectCatalogSource($0) })) {
+                    MusicSettingsMenuRow(selection: Binding(
+                        get: { catalogSource.selected }, set: { selectCatalogSource($0) }
+                    ), selectedTitle: catalogSource.selected.title, identifier: "music.settings.catalogSource") {
                         ForEach(catalogSource.available) { platform in
                             Text(platform.title).tag(platform)
                         }
                     } label: {
                         MusicSettingsIconLabel(symbol: "music.note.house", title: "数据源", theme: theme)
                     }
-                    .pickerStyle(.menu)
                     .disabled(savingCatalogSource)
-                    .accessibilityIdentifier("music.settings.catalogSource")
                     .modifier(MusicSettingsRowStyle(theme: theme, first: false, last: true))
                 }
             }
@@ -130,10 +130,41 @@ struct MusicPlatformLogo: View {
 struct MusicPlatformLabel: View {
     let platform: MusicPublicBrowsePlatform
     let theme: PageTheme
+    @ScaledMetric(relativeTo: .body) private var markSize = UIFont.preferredFont(
+        forTextStyle: .body, compatibleWith: UITraitCollection(preferredContentSizeCategory: .large)
+    ).lineHeight
 
     var body: some View {
         AccountPlatformLabel(title: platform.title, assetName: platform.settingsLogoName,
-                             symbol: "music.note", theme: theme)
+                             symbol: "music.note", size: markSize, theme: theme)
+    }
+}
+
+/// The menu is an ordinary text-line accessory, not a system button-sized row.
+struct MusicSettingsMenuRow<Selection: Hashable, Options: View, Label: View>: View {
+    @Binding var selection: Selection
+    let selectedTitle: String
+    var identifier = ""
+    @ViewBuilder var options: () -> Options
+    @ViewBuilder var label: () -> Label
+
+    var body: some View {
+        HStack(spacing: 12) {
+            label().fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Menu {
+                Picker(selection: $selection, content: options, label: { EmptyView() })
+            } label: {
+                HStack(spacing: 4) {
+                    Text(selectedTitle).fixedSize(horizontal: false, vertical: true)
+                    Image(systemName: "chevron.down").font(.caption).accessibilityHidden(true)
+                }
+                .multilineTextAlignment(.trailing)
+                .contentShape(Rectangle().inset(by: -SettingsVisualMetrics.rowVerticalPadding))
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier(identifier)
+        }
     }
 }
 
@@ -184,57 +215,7 @@ struct MusicSettingsDivider: View {
     }
 }
 
-struct MusicSettingsSectionHeader: View {
-    let title: String
-    let theme: PageTheme
-
-    var body: some View {
-        Text(title)
-            .font(.subheadline.weight(.regular))
-            .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
-            .textCase(nil)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
-struct MusicSettingsRowStyle: ViewModifier {
-    let theme: PageTheme
-    let first, last: Bool
-
-    func body(content: Content) -> some View {
-        content
-            .font(.body.weight(.regular))
-            .foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
-            .padding(.horizontal, SettingsVisualMetrics.rowHorizontalPadding)
-            .padding(.vertical, SettingsVisualMetrics.rowVerticalPadding)
-            .frame(maxWidth: .infinity, minHeight: SettingsVisualMetrics.rowHeight,
-                   alignment: .leading)
-            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
-            .listRowSeparator(.hidden)
-            .listRowBackground(SettingsRowBackground(theme: theme, first: first, last: last,
-                showsSeparator: !last))
-    }
-}
-
-struct MusicSettingsListStyle: ViewModifier {
-    let theme: PageTheme
-
-    func body(content: Content) -> some View {
-        content
-            .listStyle(.grouped)
-            .scrollContentBackground(.hidden)
-            .contentMargins(.horizontal, SettingsVisualMetrics.cardHorizontalInset,
-                            for: .scrollContent)
-            .contentMargins(.top, 0, for: .scrollContent)
-            .listSectionSpacing(SettingsVisualMetrics.sectionSpacing)
-            .environment(\.defaultMinListRowHeight, SettingsVisualMetrics.rowHeight)
-            .environment(\.defaultMinListHeaderHeight, 0)
-            .font(.body.weight(.regular))
-            .fontWeight(.regular)
-            .textCase(nil)
-            .foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
-            .tint(Color(uiColor: UIColor(theme.settings.accent)))
-            .background(Color.clear)
-    }
-}
+typealias MusicSettingsSectionHeader = SettingsListSectionHeader
+typealias MusicSettingsRowStyle = SettingsListRowStyle
+typealias MusicSettingsListStyle = SettingsListStyle
 #endif
