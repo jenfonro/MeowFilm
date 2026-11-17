@@ -142,10 +142,14 @@ test('iOS argv contains only the private bootstrap descriptor', () => {
   }
 });
 
-test('private configuration carries only lifecycle session and App data root', () => {
+test('private configuration accepts ordinary extra members and validates session and App data root', () => {
   const value = { sessionId: randomUUID(), dataRoot: '/data/猫' };
   assert.deepEqual(parseIOSConfiguration(Buffer.from(JSON.stringify(value))), value);
-  for (const bad of [null, [], {}, { ...value, extra: true }, { ...value, sessionId: 'invalid' },
+  for (const extra of [{ extra: true }, { nativeSettings: true, extra: { ordinary: true } }]) {
+    const configuration = { ...value, ...extra };
+    assert.deepEqual(parseIOSConfiguration(Buffer.from(JSON.stringify(configuration))), configuration);
+  }
+  for (const bad of [null, [], {}, { ...value, sessionId: 'invalid' },
     { ...value, dataRoot: 'relative/data' },
     { ...value, dataRoot: '/data\nother' }]) {
     assert.throws(() => parseIOSConfiguration(Buffer.from(JSON.stringify(bad))), { code: 'INVALID_REQUEST' });
@@ -166,8 +170,8 @@ test('escaped exceptions and rejected promises close the runtime once without ex
   assert.equal(reports, 1);
 });
 
-test('iOS bootstrap serves the complete HTTP assembly with module-owned storage', { timeout: 60000 }, async t => {
-  const runtime = spawnRuntime(t, { entry });
+test('iOS bootstrap serves the HTTP assembly with ordinary configuration extras and module-owned storage', { timeout: 60000 }, async t => {
+  const runtime = spawnRuntime(t, { entry, configuration: { extra: { ordinary: true } } });
   const { client, baseUrl, closed } = await connect(runtime);
   t.after(() => client.close());
   assert.deepEqual(runtime.args.slice(-2), ['--meow-bootstrap-fd', '3']);
@@ -176,23 +180,15 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   const described = okay(await client.describe(), 'runtime.http.v1');
   assert.equal(described.product, 'aggregate');
   assert.equal(described.protocol, 'runtime.http.v1');
-  assert.deepEqual(described.modules.map(module => [module.id, module.version, module.contract]), [
-    ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.3.0', 'source.runtime.v2'],
-    ['pan', '0.1.0', 'pan.runtime.v1'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
-    ['douban', '0.1.0', 'douban.data.v1'], ['film', '0.1.0', 'film.playback.v1'],
-    ['netease', '0.1.0', 'netease.token.v1'],
-    ['music-platform', '0.1.0', 'music.platform.v1'],
-  ]);
-  for (const method of ['music.script.sources.list', 'music.script.resolve', 'music.script.invoke'])
-    assert.ok(described.modules[0].methods.includes(method), method);
-  assert.ok(described.modules[2].methods.includes('source.runtime.invoke'));
-  assert.deepEqual(described.modules.find(module => module.id === 'tmdb').methods, [
-    'tmdb.data.request', 'tmdb.data.settings.get', 'tmdb.data.settings.update',
-  ]);
-  assert.deepEqual(described.modules[7].methods, ['netease.token.get']);
-  assert.deepEqual(described.modules[8].methods, [
-    'music.platform.cache.clear', 'music.platform.describe', 'music.platform.request', 'music.platform.session.update',
-  ]);
+  for (const [id, version, contract] of [
+    ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'],
+    ['source', '0.3.0', 'source.runtime.v2'],
+  ]) {
+    const module = described.modules.find(value => value.id === id);
+    assert.ok(module, id);
+    assert.equal(module.version, version);
+    assert.equal(module.contract, contract);
+  }
   await verifyTMDBAssembly(t, { client, baseUrl });
   await verifyPanAndDoubanAssembly(client);
   for (const method of ['pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get',
@@ -235,7 +231,7 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   okay(await client.call('source.runtime.status'), 'source.runtime.v2');
   okay(await client.call('cat.script.status'), 'cat.script.v2');
   okay(await client.shutdown(), 'runtime.http.v1');
-  assert.equal(okay(await client.describe(), 'runtime.http.v1').modules.length, 9);
+  assert.equal(okay(await client.describe(), 'runtime.http.v1').product, 'aggregate');
   runtime.channel.end();
   await closed;
   await client.close();

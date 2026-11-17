@@ -181,8 +181,7 @@ public static class AppLauncher
                     // Native pages and business owners never wait for this start:
                     // a failed runtime only makes script sources unavailable.
                     var root = Path.Combine(AppContext.BaseDirectory, "runtime");
-                    var bundle = await Task.Run(() => RuntimeBundle.Verify(root, definition.Id,
-                        definition.RuntimeModules), token).ConfigureAwait(false);
+                    var bundle = await Task.Run(() => RuntimeBundle.Verify(root, definition.Id), token).ConfigureAwait(false);
                     token.ThrowIfCancellationRequested();
                     return await NodeRuntime.StartAsync(Path.Combine(root, "node.exe"), bundle,
                         definition.RuntimeModules, paths.ScriptRuntime, token, ownerRevoked: token,

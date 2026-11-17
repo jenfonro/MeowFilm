@@ -1,7 +1,10 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
+
+[assembly: InternalsVisibleTo("MeowFilm.Platform")]
 
 namespace MeowFilm.Core.Runtime;
 
@@ -16,9 +19,11 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
     private readonly HashSet<TaskCompletionSource> pending = [];
     private Task? disposal;
 
-    public RuntimeHttpClient(string baseUrl)
+    public RuntimeHttpClient(string baseUrl) : this(RuntimeHttpProtocol.ValidateEndpoint(baseUrl)) { }
+
+    internal RuntimeHttpClient(Uri endpoint)
     {
-        endpoint = RuntimeHttpProtocol.ValidateEndpoint(baseUrl);
+        this.endpoint = endpoint;
         client = new(new SocketsHttpHandler
         {
             UseProxy = false, AllowAutoRedirect = false, UseCookies = false,
@@ -55,7 +60,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         {
             if (method is null || !method.StartsWith(contract.Prefix, StringComparison.Ordinal)) continue;
             var operation = method[contract.Prefix.Length..];
-            if (!contract.Operations.Contains(operation, StringComparer.Ordinal)) break;
+            if (!RuntimeHttpProtocol.ValidOperation(operation)) break;
             return SendJsonAsync($"/v1/{id}/{operation}", parameters ?? new { }, contract, timeout, cancellationToken);
         }
         throw new BridgeException("METHOD_UNAVAILABLE");

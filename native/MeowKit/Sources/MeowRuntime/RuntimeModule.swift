@@ -1,6 +1,6 @@
 import Foundation
 
-public enum RuntimeModule: String, CaseIterable, Sendable {
+public enum RuntimeModule: String, Sendable {
     case music, cat, source, pan, tmdb, douban, film, netease
     case musicPlatform = "music-platform"
 

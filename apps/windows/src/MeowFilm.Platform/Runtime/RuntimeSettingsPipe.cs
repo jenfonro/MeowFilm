@@ -13,7 +13,7 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IDocumentStore? store,
     private readonly byte[] buffer = new byte[4096];
     private int offset, count;
 
-    internal async Task<string> ReadyAsync(CancellationToken token)
+    internal async Task<Uri> ReadyAsync(CancellationToken token)
     {
         for (;;)
         {
@@ -26,8 +26,7 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IDocumentStore? store,
                     if (BridgeCodec.RequiredProperty(value, "protocol").GetString() != RuntimeHttpProtocol.Name)
                         throw new BridgeException("INVALID_RESPONSE");
                     string endpoint = BridgeCodec.RequiredProperty(value, "baseUrl").GetString()!;
-                    _ = RuntimeHttpProtocol.ValidateEndpoint(endpoint);
-                    return endpoint;
+                    return RuntimeHttpProtocol.ValidateEndpoint(endpoint);
                 }
                 await RespondAsync(value, token).ConfigureAwait(false);
             }
@@ -39,6 +38,9 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IDocumentStore? store,
     {
         try
         {
+            if (store is null || namespaces is null)
+                return offset != count || await stream.ReadAsync(buffer).ConfigureAwait(false) != 0
+                    ? "INVALID_RESPONSE" : "CLOSED";
             for (;;)
             {
                 var line = await ReadAsync(CancellationToken.None).ConfigureAwait(false);
@@ -56,6 +58,7 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IDocumentStore? store,
         catch (InvalidOperationException) { return "INVALID_RESPONSE"; }
         catch (FormatException) { return "INVALID_RESPONSE"; }
         catch (IOException) { return "CLOSED"; }
+        finally { CryptographicOperations.ZeroMemory(buffer); }
     }
 
     private async Task RespondAsync(JsonElement request, CancellationToken token)

@@ -40,7 +40,7 @@ public static partial class NovelTests
     {
         string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT") ?? throw new InvalidOperationException("Runtime bundles required");
         RuntimeModule[] modules = RuntimeHttpClientTests.Modules;
-        var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules);
+        var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate");
         string data = TestWorkspace.DataPath("novel-runtime-library");
         string configuration = TestWorkspace.DataPath("novel-runtime-configuration"); Directory.CreateDirectory(configuration); string id; long revision;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));

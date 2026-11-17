@@ -33,17 +33,19 @@ Windows 包装使用当前 `common-native` 通用运行器；仅 `--product aggr
 
 ## 输入闭包与信任边界
 
-Windows 平台模块按序为 `music@0.8.0`、`cat@0.2.0`、`source@0.3.0`、`pan@0.1.0`、`tmdb@0.1.0`、`douban@0.1.0`、`film@0.1.0`、`netease@0.1.0`、`music-platform@0.1.0`，契约分别为 `music.script.v3`、`cat.script.v2`、`source.runtime.v2`、`pan.runtime.v1`、`tmdb.data.v1`、`douban.data.v1`、`film.playback.v1`、`netease.token.v1`、`music.platform.v1`；平台 manifest 与实际 entry、原生 describe 严格一致。通用默认 `createRuntime` 仍为原三模块。完整 HTTP 源码/JSON 不使用平台业务分片。
+Windows 平台模块按序为 `music@0.8.0`、`cat@0.2.0`、`source@0.3.0`、`pan@0.1.0`、`tmdb@0.1.0`、`douban@0.1.0`、`film@0.1.0`、`netease@0.1.0`、`music-platform@0.1.0`，契约分别为 `music.script.v3`、`cat.script.v2`、`source.runtime.v2`、`pan.runtime.v1`、`tmdb.data.v1`、`douban.data.v1`、`film.playback.v1`、`netease.token.v1`、`music.platform.v1`；构造与连接顺序由实际 entry 的依赖保证。manifest 的 modules 是交付描述，不作为启动数量、顺序或唯一性镜像；原生 live describe 仍核对所需模块身份、唯一性及契约。通用默认 `createRuntime` 仍为原三模块。完整 HTTP 源码/JSON 不使用平台业务分片。
 
-载荷包含公共 `app/` 入口及九模块（另含 source 内部的 `modules/source-rules.mjs`）、`app/windows/` 两个包装文件，以及 `@meowfilm/{runtime-bridge,script-host,source-runtime,novel-rules,pan-runtime,film-playback,film-rules,film-search,netease-token,music-platform}` 和根锁解析的运行依赖。`source-rules.mjs` 只借用公开的 `@meowfilm/novel-rules` 与 `@meowfilm/script-host/native-json` 入口。`script-host/build/Release/` 的原生 addon、SDK、构建回执只按公共策略精确路径及哈希放行，不加载 WASM/asm.js 或任意附加 native binary。
+载荷包含公共 `app/` 入口及九模块（另含 source 内部的 `modules/source-rules.mjs`）、`app/windows/` 平台包装及其实际导入依赖，以及 `@meowfilm/{runtime-bridge,script-host,source-runtime,novel-rules,pan-runtime,film-playback,film-rules,film-search,netease-token,music-platform}` 和根锁解析的运行依赖。`source-rules.mjs` 只借用公开的 `@meowfilm/novel-rules` 与 `@meowfilm/script-host/native-json` 入口。`script-host/build/Release/` 的原生 addon、SDK、构建回执只按公共策略精确路径及哈希放行，不加载 WASM/asm.js 或任意附加 native binary。
 
 `scripts/script-host-native.json` 固定 QuickJS-NG、OpenSSL、zlib、Node headers、补丁、构建工具和输入；回执记录真实平台/架构、源码树、文件哈希和构建命令。Node-API ABI、来源、许可、SDK 和所有输入必须匹配；打包不重建、不安装、不修锁。中央许可及包内实际许可均按库存复制，见[许可说明](../licenses.md)。
 
 - root/output 为显式本机绝对路径，拒绝 UNC、源树覆盖、链接或重解析祖先。
 - workspace 安装链接必须准确指向本仓库；输出成为普通目录，不借用全局或其他工作区依赖。
 - 根锁身份、来源、SRI、版本、peer/optional 关系、导出及实际文件逐项核对。不得绕过缺失的最近依赖去找祖先。
-- 拒绝路径穿越、大小写/Unicode 冲突、非受信二进制、额外平台文件；测试/缓存/隐私文件不入包，许可不因 files 裁剪丢失。
+- 拒绝路径穿越、大小写/Unicode 冲突和非受信二进制。平台 helper 按 entry 的实际引用闭包收集，未引用普通文件不阻断构建、不入包；测试/缓存/隐私文件不入包，许可不因 files 裁剪丢失。
 - 新输出独占创建，完成前核对完整 byte/hash inventory 与输入未变；失败保留 failed 清单。manifest 不自哈希。
+
+交付清单 `files` 为实际许可／说明增加 `role: "documentation"`，仍记录并交付全部 bytes/hash。启动 `RuntimeBundle` 按该角色跳过非执行格式的材料，包括无后缀许可和 `LICENSE.extra`，不读取、哈希或要求其存在；JS、JSON、native／WASM 等执行或解析格式即使被标为 documentation 也不豁免，不按 LICENSE 名称批准。其余记录仍要求安全路径、存在、长度及 SHA256 一致，涵盖 Node、入口／Worker／规则 JS、SDK、package.json 和 native receipt。额外普通 `.md`／`.txt` 不阻断启动；其他未登记文件，包括会遮蔽 extensionless 解析的文件、JS／JSON／native，以及任何 reparse 项仍拒绝。该启动一致性检查不是独立签名或来源认证，不替代打包及实际 native 装载的信任校验。
 
 影视规则与搜索程序、小说纯规则程序属于 Node 载荷，由公共 script-host 原生 addon 执行并使用独立 Runtime／Context。Windows Capabilities 不再内嵌规则或搜索 JS 资源，Platform 不再构建／复制独立规则 DLL，App 不登记客户端影视规则文档。影视规则唯一存储、预览及搜索投影通过现有 film HTTP／SSE 访问；小说规则配置仍由原生持有，完整快照交给 source 的固定规则 RPC 执行。缺失运行器时返回真实错误，不保留旧引擎依赖或回退。源码与许可使用 `scripts/script-host-native.json` 的共同锁和构建回执。
 
