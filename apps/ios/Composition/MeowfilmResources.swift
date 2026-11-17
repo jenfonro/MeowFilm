@@ -46,9 +46,11 @@ struct MeowfilmResources: Sendable {
         let cacheRoot = caches?.appendingPathComponent("meowfilm", isDirectory: true)
             .appendingPathComponent("documents", isDirectory: true)
         musicLibrary = MusicNativeLibraryDatabase(url: libraryRoot.appendingPathComponent("music-library-v1", isDirectory: true).appendingPathComponent(MusicNativeLibraryDatabase.filename))
-        musicPresentationCache = MusicNativePresentationCache(storeFactory: Self.documentFactory(
-            base: cacheRoot, namespace: MusicNativePresentationCache.namespace,
-            maximumDocumentBytes: 16 * 1024 * 1024))
+        musicPresentationCache = MusicNativePresentationCache(storeFactory: {
+            guard let cacheRoot else { throw DocumentStoreError.storageFailure }
+            try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
+            return try ResourceFileStore(baseURL: cacheRoot, namespace: MusicNativePresentationCache.namespace)
+        })
         if let caches {
             musicAudioCache = NativeMusicAudioFileCache(rootURL: caches.resolvingSymlinksInPath()
                 .appendingPathComponent("meowfilm.music.audio-resources.v1", isDirectory: true), presentationCache: musicPresentationCache)
