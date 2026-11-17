@@ -12,8 +12,8 @@ private final class RecordPreviewRandom: @unchecked Sendable {
 
 final class MusicNativeRecordPreviewTests: XCTestCase {
     func testPreviewUsesOccurrenceOrderAndDoesNotMutateStorageOrDrawShuffle() async throws {
-        let random = RecordPreviewRandom(), store = NativeMusicMemoryDocument()
-        let service = NativeMusicService(document: store, platformClient: try NativeMusicFixture.client(),
+        let random = RecordPreviewRandom(), store = NativeMusicTestLibrary()
+        let service = NativeMusicService(database: store, platformClient: try NativeMusicFixture.client(),
             random: { random.draw() })
         try await service.setAccess(available: true, generation: 1)
         var refs: [MusicReference] = []

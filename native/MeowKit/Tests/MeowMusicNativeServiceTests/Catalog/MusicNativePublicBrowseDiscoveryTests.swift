@@ -25,7 +25,7 @@ final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
     func testHomeConsumesAlreadyCompletedSummariesWithoutReadingMembers() async throws {
         let cover = "https://p1.music.126.net/radar.jpg?param=800y800&quality=90"
         let peer = NativeMusicResultFixture([D.page([D.section("entries", items: [D.collection("41", title: "私人雷达", cover: cover), D.collection("42", title: "补齐歌单名")], type: "entries")])])
-        let document = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(document, platform: peer), page = try await service.publicDiscovery(.home, cursor: nil)
+        let document = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(document, platform: peer), page = try await service.publicDiscovery(.home, cursor: nil)
         XCTAssertEqual(page.sections[0].items.map(\.title), ["私人雷达", "补齐歌单名"]); XCTAssertEqual(page.sections[0].items[0].artwork?.absoluteString, cover)
         guard case .collection(let collection) = page.sections[0].items[0].content else { return XCTFail("collection required") }
         XCTAssertEqual(collection.artwork, page.sections[0].items[0].artwork); XCTAssertEqual(document.snapshot().2, 0)

@@ -107,10 +107,10 @@ final class KugouSnapshotStore: MusicHomeSnapshotStoring, @unchecked Sendable {
     func write(_ value: Data) { lock.lock(); data = value; lock.unlock() }
     func clear() { lock.lock(); data = nil; lock.unlock() }
 }
-func kugouService(_ peer: any MusicPlatformFixtureResponding, document: any MusicNativeDocumentStoring = NativeMusicMemoryDocument(),
+func kugouService(_ peer: any MusicPlatformFixtureResponding, document: any MusicNativeLibraryStoring = NativeMusicTestLibrary(),
                   snapshot: (any MusicHomeSnapshotStoring)? = nil, accounts: (any MusicNativeAccountProviding)? = nil,
                   enabled: Set<MusicPublicBrowsePlatform> = [.netease, .qq, .kugou], select: Bool = true) async throws -> NativeMusicService {
-    let value = NativeMusicService(document: document, accounts: accounts, platformClient: try peer.makeClient(), enabledPlatforms: enabled,
+    let value = NativeMusicService(database: document, accounts: accounts, platformClient: try peer.makeClient(), enabledPlatforms: enabled,
         homeSnapshot: snapshot, clock: { NativeMusicFixture.date })
     try await value.setAccess(available: true, generation: 1)
     if select { _ = try await value.selectHomeSource(.kugou, ifRevision: 0) }; return value

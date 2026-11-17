@@ -32,7 +32,7 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
         original.queue["entries"] = .array(original.queue["entries"].array.map { row in
             var row = row; row["context"] = original.queue["source"]; return row
         })
-        let store = NativeMusicMemoryDocument(try original.encode(changed: ["library", "queue", "playback", "history"]))
+        let store = NativeMusicTestLibrary(try original.encode(changed: ["library", "queue", "playback", "history"]))
         let accounts = SimilarModeAccountFixture([[], ["400", "500"]])
         let service = try await NativeMusicFixture.service(store, accounts: accounts)
         let player = HeartbeatReturnPlayer(), model = MusicViewModel(service: service, player: player)
@@ -55,7 +55,7 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
     @MainActor private func returnThroughModel(paused: Bool, failFirst: Bool = false, recommendation: Bool = false) async throws {
         var original = try document()
         let originalRows = original.queue["entries"].array
-        let store = NativeMusicMemoryDocument(try original.encode(changed: ["library", "queue", "playback", "history"]))
+        let store = NativeMusicTestLibrary(try original.encode(changed: ["library", "queue", "playback", "history"]))
         let accounts = SimilarModeAccountFixture([["400", "500", "600"]], metadata: true)
         let service = try await NativeMusicFixture.service(store, accounts: accounts)
         let initial = try await service.state()
@@ -89,7 +89,7 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
         let before = try MusicDocument(store.snapshot().0, runID: "evidence")
         let retained = try XCTUnwrap(before.queue["entries"].array.first { $0["id"].string == current.id })
         let targets = try await service.similarFeedbackTargets(entry: retained,
-            song: before.library["library"]["songs"][retained["songId"].string], context: retained["context"])
+            song: (try before.fixtureSong(retained["songId"].string)), context: retained["context"])
         let proof = try XCTUnwrap(targets.first?.recommendationProof)
         XCTAssertTrue(proof.authorization.isActive)
         let sessionID = try XCTUnwrap(model.similarMode).id
@@ -157,7 +157,7 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
         let live = await service.liveRecommendation(entryID: current.id)
         XCTAssertNil(live)
         let ordinaryTargets = try await service.similarFeedbackTargets(entry: retained,
-            song: restored.library["library"]["songs"][retained["songId"].string], context: retained["context"])
+            song: (try restored.fixtureSong(retained["songId"].string)), context: retained["context"])
         XCTAssertTrue(ordinaryTargets.allSatisfy { $0.recommendationProof == nil })
         XCTAssertFalse(ordinaryTargets.contains { $0.source == "aiMode" })
         let accepted = try await service.recordSimilarPlaybackFact(fact(candidate, .progress, position: 44))
@@ -168,7 +168,7 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
     func testHeartbeatReturnPreservesDifferentOccurrencesOfSameRecording() async throws {
         var original = try document(["100", "200", "500"])
         let originalRows = original.queue["entries"].array
-        let store = NativeMusicMemoryDocument(try original.encode(changed: ["library", "queue", "playback", "history"]))
+        let store = NativeMusicTestLibrary(try original.encode(changed: ["library", "queue", "playback", "history"]))
         let service = try await NativeMusicFixture.service(store, accounts: SimilarModeAccountFixture([["400", "500", "600"]]))
         _ = try await service.enterSimilarMode()
         let queue = try await service.queue()
@@ -183,8 +183,8 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
 
         let restored = try MusicDocument(store.snapshot().0, runID: "evidence")
         XCTAssertEqual(restored.queue["entries"].array, [originalRows[0], originalRows[1], retained, originalRows[2]])
-        XCTAssertEqual(restored.queue["entries"].array.filter {
-            MusicNativeSimilarData.nativeID(restored.library["library"]["songs"][$0["songId"].string]) == "500"
+        XCTAssertEqual(try restored.queue["entries"].array.filter {
+            MusicNativeSimilarData.nativeID((try restored.fixtureSong($0["songId"].string))) == "500"
         }.map { $0["id"].string }, [current.id, "entry-3"])
         XCTAssertEqual(result.state.currentId, current.id); XCTAssertEqual(result.action, .keepCurrent)
         XCTAssertEqual(store.snapshot().2, writes + 1)
@@ -203,7 +203,7 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
             ("continue", .bool(false)), ("offset", .n(0)), ("exhausted", .bool(false)), ("scope", .string("synthetic-scope")),
             ("status", .string("ready")), ("batches", .array([])), ("attempted", .array([]))
         ])
-        let store = NativeMusicMemoryDocument(try saved.encode(changed: ["library", "queue", "playback", "history"]))
+        let store = NativeMusicTestLibrary(try saved.encode(changed: ["library", "queue", "playback", "history"]))
         let service = try await NativeMusicFixture.service(store, accounts: SimilarModeAccountFixture([]))
         let restoredSession = try await service.similarModeSnapshot()
         XCTAssertTrue(try XCTUnwrap(restoredSession).active)
@@ -226,7 +226,7 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
     }
 
     func testHeartbeatReturnToEmptyCheckpointRetainsOnlyCurrentOccurrence() async throws {
-        let store = NativeMusicMemoryDocument()
+        let store = NativeMusicTestLibrary()
         let service = try await NativeMusicFixture.service(store, accounts: SimilarModeAccountFixture([["400", "500", "600"]]))
         _ = try await service.startSimilarMode(.heartbeat)
         let queue = try await service.queue(), current = queue.entries[1]
@@ -247,7 +247,7 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
 
     func testSongRoamingHasNoReturnCheckpointAndCannotRestoreAnOlderQueue() async throws {
         var original = try document()
-        let store = NativeMusicMemoryDocument(try original.encode(changed: ["library", "queue", "playback", "history"]))
+        let store = NativeMusicTestLibrary(try original.encode(changed: ["library", "queue", "playback", "history"]))
         let service = try await NativeMusicFixture.service(store, accounts: SimilarModeAccountFixture([["400", "500", "600"]]))
         _ = try await service.startSimilarMode(.songRoaming(sourceIDs: ["200"], sourceName: "SIMILAR"))
         let queue = try await service.queue(), current = queue.entries[1]
@@ -266,7 +266,7 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
 
     func testActiveSongRecommendationReturnRejectsLateTailBatchAfterCheckpointRestore() async throws {
         var original = try document()
-        let store = NativeMusicMemoryDocument(try original.encode(changed: ["library", "queue", "playback", "history"]))
+        let store = NativeMusicTestLibrary(try original.encode(changed: ["library", "queue", "playback", "history"]))
         let accounts = SimilarModeAccountFixture([["400", "500", "600"], ["700", "800"]])
         let service = try await NativeMusicFixture.service(store, accounts: accounts)
         _ = try await service.startSimilarMode(.recommendations(occurrenceID: "entry-2", expectedRevision: 0))
@@ -298,9 +298,9 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
     func testHeartbeatReturnCommittedCancellationKeepsABECButInvalidatesAttemptAndRuntime() async throws {
         var original = try document()
         let rows = original.queue["entries"].array
-        let store = NativeMusicMemoryDocument(try original.encode(changed: ["library", "queue", "playback", "history"]))
+        let store = NativeMusicTestLibrary(try original.encode(changed: ["library", "queue", "playback", "history"]))
         let controlled = SimilarModeControlledDocument(store)
-        let service = NativeMusicService(document: controlled,
+        let service = NativeMusicService(database: controlled,
             accounts: SimilarModeAccountFixture([["400", "500", "600"]], metadata: true),
             platformClient: try NativeMusicFixture.client(), clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
@@ -313,7 +313,7 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
         let before = try MusicDocument(store.snapshot().0, runID: "evidence")
         let retained = try XCTUnwrap(before.queue["entries"].array.first { $0["id"].string == current.id })
         let targets = try await service.similarFeedbackTargets(entry: retained,
-            song: before.library["library"]["songs"][retained["songId"].string], context: retained["context"])
+            song: (try before.fixtureSong(retained["songId"].string)), context: retained["context"])
         let proof = try XCTUnwrap(targets.first?.recommendationProof)
         let writes = store.snapshot().2
         controlled.cancelAfterNextCommit()

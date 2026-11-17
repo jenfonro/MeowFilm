@@ -61,7 +61,7 @@ public sealed partial class MusicLibraryOwner
             else LJ.Require(reference["intent"] is null);
         }
     }
-    private (JsonObject Result, bool Mutate) NetworkPlaylistCommand(string method, JsonObject p, JsonObject doc)
+    private (JsonObject Result, bool Mutate) NetworkPlaylistCommand(string method, JsonObject p, MusicLibraryData doc)
     {
         var wrapper = LibraryState(doc); var library = LJ.Object(wrapper["library"]); var references = NetworkPlaylists(library);
         if (method == "music.library.network.list")

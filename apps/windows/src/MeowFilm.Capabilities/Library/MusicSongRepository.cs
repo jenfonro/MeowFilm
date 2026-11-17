@@ -7,24 +7,27 @@ public sealed partial class MusicLibraryOwner
 {
     internal enum PlatformSongShape { Song, SongDetail, Page, Catalog, Discovery, None }
     private readonly object repositoryGate = new();
-    private JsonObject? indexedDocument;
-    private NativeMusicSongGroups? repositoryIndex;
     private readonly Dictionary<string, HashSet<string>> failedArtwork = new(StringComparer.Ordinal);
     private readonly Dictionary<(string SongId, string Platform), long> songObservations = new();
     private long songObservation;
-    internal event Action? SongMetadataChanged;
+    internal event Action<IReadOnlySet<string>>? SongMetadataChanged;
     internal long BeginSongObservation() => Interlocked.Increment(ref songObservation);
 
     internal JsonElement? SongSnapshot(string id)
     {
-        var current = document;
-        return current is not null && Repository(current)[id] is JsonObject song ? LJ.Element(song) : null;
+        lock (repositoryGate)
+        {
+            LJ.Require(!closed && !preparing, "CLOSED");
+            return visibleSongs?.Read(id) is { } song ? LJ.Element(song) : null;
+        }
     }
-    internal IReadOnlyList<JsonObject> SongSnapshots()
+    internal IReadOnlyList<JsonObject> SongSnapshots(string query)
     {
-        var current = document;
-        return current is null ? [] : Repository(current)
-            .Select(pair => NativeMusicSong.Normalize(pair.Value)).ToArray();
+        lock (repositoryGate)
+        {
+            LJ.Require(!closed && !preparing, "CLOSED");
+            return visibleSongs is null ? [] : visibleSongs.Query(query).Select(visibleSongs.Read).OfType<JsonObject>().ToArray();
+        }
     }
 
     internal async Task ArtworkLoadCompletedAsync(string address, bool succeeded)
@@ -33,103 +36,110 @@ public sealed partial class MusicLibraryOwner
         try
         {
             if (closed || preparing) return;
+            if (succeeded && failedArtwork.Count == 0) return;
             await LoadAsync(CancellationToken.None).ConfigureAwait(false);
             if (pending is not null || recommendationUnknown is not null) return;
-            var candidate = document!.DeepClone().AsObject();
+            var ids = document!.Songs.Artwork(address);
+            if (ids.Count == 0) return;
+            if (succeeded)
+            {
+                foreach (string id in ids) failedArtwork.Remove(id);
+                return;
+            }
+            var candidate = document.Candidate(true);
             var policy = MetadataPolicy(candidate);
             var platforms = LJ.Array(policy["platforms"]).Select(value => LJ.S(value)).ToArray();
             var enabled = LJ.Array(policy["enabled"]).Select(value => LJ.S(value)).ToHashSet(StringComparer.Ordinal);
             bool changed = false;
-            foreach (var pair in Repository(candidate))
+            foreach (string id in ids)
             {
-                var song = LJ.Object(pair.Value);
-                if (LJ.S(song["cover_url"]) != address) continue;
-                if (!failedArtwork.TryGetValue(pair.Key, out var failed))
-                    failedArtwork[pair.Key] = failed = new(StringComparer.Ordinal);
-                if (succeeded) { failedArtwork.Remove(pair.Key); continue; }
-                if (!failed.Add(address)) continue;
+                var song = candidate.Songs.Read(id)!;
+                if (!failedArtwork.TryGetValue(id, out var failed))
+                    failedArtwork[id] = failed = new(StringComparer.Ordinal);
+                failed.Add(address);
                 var next = MusicArtworkPolicy.Sources(LJ.Element(song), platforms, enabled)
                     .FirstOrDefault(source => !failed.Contains(source.Address));
                 if (next.Address is null) continue;
                 song["artworkSourceKey"] = next.SourceKey;
                 song["artworkSourceImage"] = next.Address;
                 song["cover_url"] = next.Address;
+                candidate.Songs.Set(song);
                 changed = true;
             }
             if (changed) await CommitAsync(candidate, PendingOwner.SongMetadata, CancellationToken.None).ConfigureAwait(false);
         }
         finally { gate.Release(); }
     }
-    private void NotifySongMetadataChanged()
+    private void NotifySongMetadataChanged(IReadOnlySet<string> ids)
     {
         if (SongMetadataChanged is not { } changed) return;
-        foreach (Action observer in changed.GetInvocationList())
-            try { observer(); } catch { /* An observer cannot reverse the durable receipt. */ }
+        foreach (Action<IReadOnlySet<string>> observer in changed.GetInvocationList())
+            try { observer(ids); } catch { /* An observer cannot reverse the durable receipt. */ }
+    }
+    private void AcceptSongObservations(IReadOnlyDictionary<(string SongId, string Platform), long>? accepted)
+    {
+        if (accepted is null) return;
+        foreach (var pair in accepted)
+            songObservations[pair.Key] = Math.Max(songObservations.GetValueOrDefault(pair.Key), pair.Value);
     }
 
-    private JsonObject Repository(JsonObject doc) => LJ.Object(LJ.Object(LibraryState(doc)["library"])["songs"]);
-    private JsonObject SongReference(JsonObject doc, JsonNode? songId) =>
-        NativeMusicSong.Normalize(Repository(doc)[LJ.S(songId)] ?? throw new MusicLibraryException("SONG_NOT_FOUND"));
-    private JsonObject EntrySong(JsonObject doc, JsonObject entry) => SongReference(doc, entry["songId"]);
+    private static JsonObject SongReference(MusicLibraryData doc, JsonNode? songId) =>
+        doc.Songs.Read(LJ.S(songId)) ?? throw new MusicLibraryException("SONG_NOT_FOUND");
+    private static JsonObject EntrySong(MusicLibraryData doc, JsonObject entry) => SongReference(doc, entry["songId"]);
 
-    private JsonObject[] RegisterSongs(JsonObject doc, IEnumerable<JsonObject> input, bool authoritative = false,
+    private JsonObject[] RegisterSongs(MusicLibraryData doc, IEnumerable<JsonObject> input, bool authoritative = false,
         long observation = 0, Dictionary<(string SongId, string Platform), long>? accepted = null)
     {
-        var state = LibraryState(doc); var library = LJ.Object(state["library"]); var store = LJ.Object(library["songs"]);
-        var groups = IndexLibrarySongs(library);
         var policy = MetadataPolicy(doc);
         var platforms = LJ.Array(policy["platforms"]).Select(value => LJ.S(value)).ToArray();
         var enabled = LJ.Array(policy["enabled"]).Select(value => LJ.S(value)).ToHashSet(StringComparer.Ordinal);
         var ids = new List<string>();
         foreach (var song in input)
         {
-            var incoming = new NativeMusicSong.Recordings(NativeMusicSong.Normalize(song));
-            var existing = groups.Find(incoming);
-            var observedPlatforms = incoming.Sources.Select(source => LJ.S(source["source"])).Distinct().ToArray();
+            var incoming = NativeMusicSong.Normalize(song);
+            string? existing = doc.Songs.Find(incoming);
+            var observedPlatforms = LJ.Array(incoming["sources"]).OfType<JsonObject>()
+                .Select(source => LJ.S(source["source"])).Distinct().ToArray();
             if (authoritative && existing is not null &&
-                observedPlatforms.Any(platform => songObservations.GetValueOrDefault((existing.Id, platform)) > observation))
-            { ids.Add(existing.Id); continue; }
-            var record = groups.Add(incoming, preferIncoming: authoritative);
+                observedPlatforms.Any(platform => songObservations.GetValueOrDefault((existing, platform)) > observation))
+            { ids.Add(existing); continue; }
+            var record = new NativeMusicSong.Recordings(doc.Songs.Register(incoming, existing, authoritative));
             record.SelectArtwork(platforms, enabled);
-            store[record.Id] = record.ToSong(); ids.Add(record.Id);
+            doc.Songs.Set(record.ToSong()); ids.Add(record.Id);
             if (authoritative && accepted is not null)
                 foreach (string platform in observedPlatforms) accepted[(record.Id, platform)] = observation;
         }
-        Set(doc, "library", state);
-        return ids.Select(id => NativeMusicSong.Normalize(store[id])).ToArray();
+        if (doc.Songs.Changes.Count > 0 && !HasValue(doc, "library")) Set(doc, "library", LibraryState(doc));
+        return ids.Select(id => doc.Songs.Read(id)!).ToArray();
     }
-    private void ApplyArtworkPolicy(JsonObject doc, bool force = false)
+    private void ApplyArtworkPolicy(MusicLibraryData doc, bool force = false)
     {
         if (!HasValue(doc, "library")) return;
-        var state = LibraryState(doc);
-        var songs = LJ.Object(state["library"]!["songs"]);
         var policy = MetadataPolicy(doc);
         var platforms = LJ.Array(policy["platforms"]).Select(value => LJ.S(value)).ToArray();
         var enabled = LJ.Array(policy["enabled"]).Select(value => LJ.S(value)).ToHashSet(StringComparer.Ordinal);
-        foreach (var pair in songs.ToArray())
+        foreach (string id in doc.Songs.Ids())
         {
-            var record = new NativeMusicSong.Recordings(LJ.Object(pair.Value));
+            var record = new NativeMusicSong.Recordings(doc.Songs.Read(id)!);
             record.SelectArtwork(platforms, enabled, force);
-            songs[pair.Key] = record.ToSong();
+            doc.Songs.Set(record.ToSong());
         }
-        Set(doc, "library", state);
     }
     internal JsonObject ProjectRepository(JsonObject value, PlatformSongShape shape)
     {
         lock (repositoryGate)
         {
-            var current = document;
-            if (current is null) return value.DeepClone().AsObject();
-            if (!ReferenceEquals(current, indexedDocument))
-            {
-                repositoryIndex = IndexLibrarySongs(LJ.Object(LibraryState(current)["library"]));
-                indexedDocument = current;
-            }
+            LJ.Require(!closed && !preparing, "CLOSED");
+            if (visibleSongs is null) return value.DeepClone().AsObject();
             var output = value.DeepClone().AsObject();
             foreach (var song in PlatformSongs(output, shape))
             {
-                var normalized = NativeMusicSong.Normalize(song);
-                var projected = repositoryIndex!.Find(new(normalized))?.ToSong() ?? normalized;
+                // Registered identity is enough for a projection. Only an unknown
+                // source needs metadata normalization and recording comparison.
+                string? id = visibleSongs.Registered(song);
+                var normalized = id is null ? NativeMusicSong.Normalize(song) : null;
+                id ??= visibleSongs.Find(normalized!);
+                var projected = id is null ? normalized! : visibleSongs.Read(id)!;
                 song.Clear();
                 foreach (var pair in projected) song[pair.Key] = pair.Value?.DeepClone();
             }
@@ -194,7 +204,7 @@ public sealed partial class MusicLibraryOwner
             LJ.Require(!closed && !preparing, "CLOSED");
             await LoadAsync(token).ConfigureAwait(false);
             LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
-            var candidate = document!.DeepClone().AsObject();
+            var candidate = document!.Candidate(true);
             var accepted = new Dictionary<(string SongId, string Platform), long>();
             var adopted = RegisterSongs(candidate, songs, authoritative, observation, accepted);
             for (int i = 0; i < songs.Length; i++)
@@ -203,9 +213,7 @@ public sealed partial class MusicLibraryOwner
                 foreach (var pair in adopted[i]) songs[i][pair.Key] = pair.Value?.DeepClone();
             }
             token.ThrowIfCancellationRequested();
-            if (!JsonNode.DeepEquals(candidate, document))
-                await CommitAsync(candidate, PendingOwner.SongMetadata, token).ConfigureAwait(false);
-            foreach (var pair in accepted) songObservations[pair.Key] = pair.Value;
+            await CommitAsync(candidate, PendingOwner.SongMetadata, token, accepted).ConfigureAwait(false);
             return LJ.Element(output);
         }
         finally { gate.Release(); }

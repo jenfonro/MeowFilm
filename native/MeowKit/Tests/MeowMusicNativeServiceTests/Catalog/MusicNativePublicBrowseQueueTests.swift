@@ -48,7 +48,7 @@ final class MusicNativePublicBrowseQueueTests: XCTestCase {
         catch { XCTAssertTrue(error is CancellationError || error as? MusicServiceError == .closed) }
     }
     @MainActor func testSavedReferenceOpensCurrentMembersAndReadFailureNeverChangesItsIdentity() async throws {
-        let peer = QQBrowsePeer(count: 1), store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let peer = QQBrowsePeer(count: 1), store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
         let saved = try await service.saveNetworkPlaylist(peer.collection, intent: .init())
         let before = await peer.calls(); XCTAssertTrue(before.isEmpty)
         let remote = try XCTUnwrap(saved.remoteCollection)
@@ -102,7 +102,7 @@ final class MusicNativePublicBrowseQueueTests: XCTestCase {
         await source.close(); await service.close()
     }
     func testExplicitQueueActionKeeps650RepeatedOccurrencesWithOneAtomicQueueCommit() async throws {
-        let peer = QQBrowsePeer(count: 650), store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let peer = QQBrowsePeer(count: 650), store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
         let source = try await service.openPublicQueue(.init(collection: peer.collection))
         let before = store.snapshot().2, preview = try await service.remoteQueuePage(source, cursor: nil)
         XCTAssertEqual(preview.items.count, 30)
@@ -114,7 +114,7 @@ final class MusicNativePublicBrowseQueueTests: XCTestCase {
         await source.close(); await service.close()
     }
     func testProtectionRevokesPublicSourceSynchronouslyWithoutQueueCommit() async throws {
-        let peer = QQBrowsePeer(count: 3), store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let peer = QQBrowsePeer(count: 3), store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
         let source = try await service.openPublicQueue(.init(collection: peer.collection))
         let before = store.snapshot().0; service.revokeAccess(generation: 2)
         XCTAssertFalse(source.authorization.isActive)
@@ -123,7 +123,7 @@ final class MusicNativePublicBrowseQueueTests: XCTestCase {
         await source.close(); await service.close()
     }
     func testCompleteResultFailurePublishesNoSourceAndDoesNotWriteQueue() async throws {
-        let peer = NativeMusicResultFixture(failure: .upstreamFailed), store = NativeMusicMemoryDocument()
+        let peer = NativeMusicResultFixture(failure: .upstreamFailed), store = NativeMusicTestLibrary()
         let service = try await NativeMusicFixture.service(store, platform: peer)
         await assertMusicFailure(.upstreamFailed) { _ = try await service.openPublicQueue(.init(collection: MusicNativePublicBrowseFixture.collection)) }
         XCTAssertEqual(store.snapshot().2, 0)
@@ -146,7 +146,7 @@ final class MusicNativePublicBrowseQueueTests: XCTestCase {
     }
     func testCancelledNonCooperativeSearchCannotPublishAndPhysicalPeerEndsBeforeTeardown() async throws {
         let gate = NativeMusicGate(), peer = NativeMusicResultFixture([.object(["items": .array([]), "total": .number(0)])], gate: gate)
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
         let task = Task { try await service.publicPlaylists(platform: .netease, query: "synthetic", cursor: nil) }
         await gate.started(); task.cancel()
         do { _ = try await task.value; XCTFail("late search") } catch { XCTAssertEqual(error as? MusicServiceError, .cancelled) }

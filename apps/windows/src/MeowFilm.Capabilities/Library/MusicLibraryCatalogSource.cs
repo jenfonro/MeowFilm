@@ -5,7 +5,7 @@ namespace MeowFilm.Capabilities.Library;
 public sealed partial class MusicLibraryOwner
 {
     private const string CatalogSourceArea = "native-catalog-source";
-    private JsonObject CatalogSource(JsonObject doc) => Value(doc, CatalogSourceArea) as JsonObject ??
+    private JsonObject CatalogSource(MusicLibraryData doc) => Value(doc, CatalogSourceArea) as JsonObject ??
         LJ.Obj(("schema", 1), ("revision", 0), ("platform", "wy"));
 
     private static void ValidateCatalogSource(JsonObject settings)
@@ -16,7 +16,7 @@ public sealed partial class MusicLibraryOwner
         LJ.Require(LJ.S(settings["platform"]) is "wy" or "kg");
     }
 
-    private (JsonObject Result, bool Mutate) CatalogSourceCommand(string method, JsonObject p, JsonObject doc)
+    private (JsonObject Result, bool Mutate) CatalogSourceCommand(string method, JsonObject p, MusicLibraryData doc)
     {
         LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
         var settings = CatalogSource(doc);

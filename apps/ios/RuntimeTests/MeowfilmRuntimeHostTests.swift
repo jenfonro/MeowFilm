@@ -529,6 +529,39 @@ final class MeowfilmScriptShutdownHostTests: XCTestCase {
 /// transport that rejects every request. No Keychain or runtime is opened.
 @MainActor
 final class MeowfilmMusicStartupHostTests: XCTestCase {
+    func testSQLiteSongsAndControlsReopenInsideTheAppContainer() throws {
+        let base = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: true)
+        let root = try MusicNativeLibraryDatabase.canonicalSystemBaseURL(base)
+            .appendingPathComponent("music-sqlite-host-" + UUID().uuidString, isDirectory: true)
+        let file = root.appendingPathComponent(MusicNativeLibraryDatabase.filename)
+        let database = MusicNativeLibraryDatabase(url: file)
+        defer { try? database.close(); try? FileManager.default.removeItem(at: root) }
+        var song = try MusicModel.normalize(.init(platform: "tx", data: MJ.obj([
+            ("songmid", .string("host-synthetic-song")), ("name", .string("Host synthetic song")),
+            ("singer", .string("Fixture")), ("duration", .n(180))]).bytes))
+        let id = UUID().uuidString.lowercased()
+        song["songId"] = .string(id)
+        try database.withTransaction {
+            try $0.saveSong(song.bytes)
+            try $0.saveArea("catalogSource", data: MusicModel.catalogSource.bytes)
+        }
+        let committed = try database.readSnapshot()
+        XCTAssertEqual(committed.revision, 1)
+        XCTAssertEqual(try database.sourceOwner(key: song["sources"].array[0]["sourceKey"].string), id)
+        let protection = try FileManager.default.attributesOfItem(atPath: root.path)[.protectionKey]
+        XCTAssertNotEqual(NativeFileProtectionVerification.inspect(protection), .rejected)
+        try database.close()
+        let reopened = MusicNativeLibraryDatabase(url: file)
+        defer { try? reopened.close() }
+        XCTAssertEqual(try reopened.readSnapshot().identity, committed.identity)
+        XCTAssertEqual(try reopened.readSnapshot().areas["catalogSource"], MusicModel.catalogSource.bytes)
+        let restored = try MJ.parse(XCTUnwrap(reopened.songData(id: id)))
+        XCTAssertEqual(restored["songId"], .string(id))
+        XCTAssertEqual(restored["sources"], song["sources"])
+        XCTAssertEqual(try reopened.allSongIDs(), [id])
+    }
+
     func testLocalPreparationHoldsPublicationAndCacheMissEntersBeforeLibraryLoad() async {
         let fixture = MusicStartupFixture()
         addTeardownBlock { await fixture.close() }
@@ -919,7 +952,7 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             .first { $0.activationState == .foregroundActive })
         let network = MusicStartupNoNetwork()
-        let service = NativeMusicService(document: MusicStartupDocument(failure: nil),
+        let service = NativeMusicService(database: MusicStartupLibrary(failure: nil),
                                         platformClient: network.client())
         let playback = PlaybackController()
         let model = MusicViewModel(service: service, playback: playback)
@@ -1077,7 +1110,7 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             .first { $0.activationState == .foregroundActive })
         let network = MusicStartupNoNetwork()
-        let service = NativeMusicService(document: MusicStartupDocument(failure: nil), platformClient: network.client())
+        let service = NativeMusicService(database: MusicStartupLibrary(failure: nil), platformClient: network.client())
         let playback = PlaybackController()
         let model = MusicViewModel(service: service, playback: playback)
         model.nativeAttempt = .init(id: UUID(), resourceID: "music:fixed-backdrop")
@@ -1234,7 +1267,7 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             .first { $0.activationState == .foregroundActive })
         let network = MusicStartupNoNetwork()
-        let service = NativeMusicService(document: MusicStartupDocument(failure: nil),
+        let service = NativeMusicService(database: MusicStartupLibrary(failure: nil),
                                         platformClient: network.client())
         let playback = PlaybackController()
         let model = MusicViewModel(service: service, playback: playback)
@@ -1360,7 +1393,7 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
             return try MusicHostPlatformRuntime.page(await catalog.search(query: "Fixture", page: 1, limit: 3))
         }
         let platform = runtime.client()
-        let service = NativeMusicService(document: MusicStartupDocument(failure: nil),
+        let service = NativeMusicService(database: MusicStartupLibrary(failure: nil),
                                         platformClient: platform)
         addTeardownBlock {
             await service.close()
@@ -1536,9 +1569,9 @@ private actor MusicCapsuleHostCatalog {
 @MainActor
 final class MeowfilmMusicShutdownHostTests: XCTestCase {
     func testAssemblyReleaseClosesPublishedModelWithoutExplicitShutdown() async throws {
-        let document = MusicStartupDocument(failure: nil)
+        let document = MusicStartupLibrary(failure: nil)
         let accounts = MusicShutdownAccounts(), player = MusicShutdownPlayer(), network = MusicStartupNoNetwork()
-        let service = NativeMusicService(document: document, accounts: accounts, platformClient: network.client())
+        let service = NativeMusicService(database: document, accounts: accounts, platformClient: network.client())
         var assembly: MeowfilmAssembly? = MeowfilmAssembly()
         await assembly?.prepareMusic(service, prepareAccounts: {}, makeModel: {
             MusicViewModel(service: service, player: player)
@@ -1556,7 +1589,7 @@ final class MeowfilmMusicShutdownHostTests: XCTestCase {
     }
 
     func testShutdownRetiresProductAccessBeforeACKAndWaitsForPhysicalFeedbackDrain() async throws {
-        let assembly = MeowfilmAssembly(), document = MusicStartupDocument(failure: nil)
+        let assembly = MeowfilmAssembly(), document = MusicStartupLibrary(failure: nil)
         let accounts = MusicShutdownAccounts(), player = MusicShutdownPlayer()
         let runtime = try MusicHostPlatformRuntime { fields in
             guard fields[music: "operation"] == .string("search") else {
@@ -1566,7 +1599,7 @@ final class MeowfilmMusicShutdownHostTests: XCTestCase {
             return try MusicHostPlatformRuntime.page(await accounts.search(query: "SyntheticMID", page: 1, limit: 30))
         }
         let platform = runtime.client()
-        let service = NativeMusicService(document: document, accounts: accounts,
+        let service = NativeMusicService(database: document, accounts: accounts,
             platformClient: platform, monotonicClock: { 0 })
         addTeardownBlock {
             await accounts.releaseStart()
@@ -1615,10 +1648,9 @@ final class MeowfilmMusicShutdownHostTests: XCTestCase {
         let drained = await accounts.stateAtClose()
         XCTAssertEqual(drained?.currentId, occurrence)
         XCTAssertEqual(drained?.position, 7, "The final native fact must drain before access revocation")
-        let data = try XCTUnwrap(document.read())
-        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        let records = try XCTUnwrap(root["records"] as? [String: Any])
-        let playback = try XCTUnwrap(records[MusicModel.key("playback")] as? [String: Any])
+        let snapshot = try document.readSnapshot()
+        let data = try XCTUnwrap(snapshot.areas["playback"])
+        let playback = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let position = try XCTUnwrap(playback["position"] as? [String: Any])
         XCTAssertEqual(position["occurrenceId"] as? String, occurrence)
         XCTAssertEqual(position["seconds"] as? Double, 0, "The existing queue contract does not restore elapsed media time")
@@ -1735,16 +1767,16 @@ private actor MusicShutdownAccounts: MusicNativeAccountProviding, MusicNativeFee
 @MainActor
 private final class MusicStartupFixture {
     let assembly = MeowfilmAssembly()
-    let document: MusicStartupDocument
+    let document: MusicStartupLibrary
     let home: MusicStartupHomeSnapshot
     let network = MusicStartupNoNetwork()
     let service: NativeMusicService
     private(set) var modelsCreated = 0
 
     init(homeData: Data? = nil) {
-        document = MusicStartupDocument(failure: nil)
+        document = MusicStartupLibrary(failure: nil)
         home = MusicStartupHomeSnapshot(data: homeData)
-        service = NativeMusicService(document: document, platformClient: network.client(), homeSnapshot: home)
+        service = NativeMusicService(database: document, platformClient: network.client(), homeSnapshot: home)
     }
 
     func prepare(accounts: () async throws -> Void) async {
@@ -1776,40 +1808,42 @@ private final class MusicStartupPreparation {
     }
 }
 
-final class MusicStartupDocument: MusicNativeDocumentStoring, @unchecked Sendable {
+final class MusicStartupLibrary: MusicNativeLibraryStoring, @unchecked Sendable {
     private let lock = NSLock()
     private var failure: MusicServiceError?
-    private var value: Data?
-    private var count = 0
-    private var writeCount = 0
+    private var count = 0, writeCount = 0
     private var nextCommitReceipt: MusicSettingsHostCommitReceipt?
+    private let root = FileManager.default.temporaryDirectory.appendingPathComponent("music-startup-sqlite-" + UUID().uuidString, isDirectory: true)
+    private lazy var backing = MusicNativeLibraryDatabase(urlFactory: { [root] in
+        try MusicNativeLibraryDatabase.canonicalSystemBaseURL(root.deletingLastPathComponent())
+            .appendingPathComponent(root.lastPathComponent, isDirectory: true)
+            .appendingPathComponent(MusicNativeLibraryDatabase.filename)
+    })
     init(failure: MusicServiceError?) { self.failure = failure }
+    deinit { try? backing.close(); try? FileManager.default.removeItem(at: root) }
     var reads: Int { lock.lock(); defer { lock.unlock() }; return count }
     var writes: Int { lock.lock(); defer { lock.unlock() }; return writeCount }
-    fileprivate func failReads(_ failure: MusicServiceError) {
-        lock.lock(); defer { lock.unlock() }
-        self.failure = failure
-    }
-    fileprivate func holdNextCommit(_ receipt: MusicSettingsHostCommitReceipt) {
-        lock.lock(); defer { lock.unlock() }
-        nextCommitReceipt = receipt
-    }
-    func read() throws -> Data? {
-        lock.lock(); defer { lock.unlock() }
-        count += 1
+    fileprivate func failReads(_ failure: MusicServiceError) { lock.lock(); defer { lock.unlock() }; self.failure = failure }
+    fileprivate func holdNextCommit(_ receipt: MusicSettingsHostCommitReceipt) { lock.lock(); defer { lock.unlock() }; nextCommitReceipt = receipt }
+    func readSnapshot() throws -> MusicNativeLibrarySnapshot {
+        lock.lock(); count += 1; let failure = failure; lock.unlock()
         if let failure { throw failure }
-        return value
+        return try backing.readSnapshot()
     }
-    func compareAndSwap(expected: Data?, replacement: Data) throws {
-        lock.lock()
-        guard value == expected else { lock.unlock(); throw MusicServiceError.storageConflict }
-        value = replacement
-        writeCount += 1
-        let receipt = nextCommitReceipt
-        nextCommitReceipt = nil
-        lock.unlock()
-        try receipt?.deliver()
+    func songData(id: String) throws -> Data? { try backing.songData(id: id) }
+    func containsSong(id: String) throws -> Bool { try backing.containsSong(id: id) }
+    func sourceOwner(key: String) throws -> String? { try backing.sourceOwner(key: key) }
+    func candidateIDs(lookupKey: String) throws -> [String] { try backing.candidateIDs(lookupKey: lookupKey) }
+    func querySongIDs(query: String) throws -> [String] { try backing.querySongIDs(query: query) }
+    func allSongIDs() throws -> [String] { try backing.allSongIDs() }
+    func withTransaction<T>(commit: (_ action: () throws -> Void) throws -> Void, _ body: (any MusicNativeLibraryWriting) throws -> T) throws -> T {
+        try backing.withTransaction(commit: { action in
+            try withoutActuallyEscaping(action) { try commit($0) }
+            lock.lock(); writeCount += 1; let receipt = nextCommitReceipt; nextCommitReceipt = nil; lock.unlock()
+            try receipt?.deliver()
+        }, body)
     }
+    func close() throws { try backing.close() }
 }
 
 private final class MusicSettingsHostCommitReceipt: @unchecked Sendable {

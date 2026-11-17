@@ -34,13 +34,13 @@ private actor MusicSearchDiscoveryModelGate {
 private actor MusicSearchDiscoveryModelService: MusicSearchDiscoveryProviding, MusicPublicBrowsing,
     MusicSearchHotPlaybackProviding, MusicSongRepositoryReading {
     private var songs: [String: MusicRemoteTrack] = [:]
-    private var songObserver: AsyncStream<Void>.Continuation?
+    private var songObserver: AsyncStream<Set<String>>.Continuation?
     func repositoryTracks(songIDs: Set<String>) -> [String: MusicRemoteTrack] { songs.filter { songIDs.contains($0.key) } }
-    func songChanges() -> AsyncStream<Void> {
-        let pair = AsyncStream<Void>.makeStream(); songObserver = pair.continuation
+    func songChanges() -> AsyncStream<Set<String>> {
+        let pair = AsyncStream<Set<String>>.makeStream(); songObserver = pair.continuation
         return pair.stream
     }
-    func publishSong(_ track: MusicRemoteTrack) { songs[track.songId] = track; songObserver?.yield(()) }
+    func publishSong(_ track: MusicRemoteTrack) { songs[track.songId] = track; songObserver?.yield([track.songId]) }
     struct DiscoveryStep: Sendable {
         let components: Set<MusicSearchDiscoveryFailure.Component>
         let value: MusicSearchDiscoverySnapshot?

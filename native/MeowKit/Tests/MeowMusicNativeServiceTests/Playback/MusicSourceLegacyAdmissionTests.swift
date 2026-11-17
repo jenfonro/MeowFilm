@@ -60,7 +60,7 @@ final class MusicSourceLegacyAdmissionTests: XCTestCase {
     private func accounts(_ clock: MusicRecoveryTestClock) -> MusicRecoveryTestAccounts {
         .init(platform: .qq, nativeID: "101", clock: clock)
     }
-    private func store() throws -> NativeMusicMemoryDocument {
+    private func store() throws -> NativeMusicTestLibrary {
         try MusicNativeCandidateDiscoveryFixture.store(song:
             NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101")))
     }
@@ -274,7 +274,7 @@ final class MusicSourceLegacyAdmissionTests: XCTestCase {
             [.obj([("id", .string("entry-2")), ("songId", other["songId"])])])
         document.queue["serial"] = .n(2)
         store.replace(try document.encode(changed: ["library", "queue"]))
-        let service = NativeMusicService(document: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
+        let service = NativeMusicService(database: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
             audioFileCache: LegacyAdmissionEmptyCache(), clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)
         let session: (any MusicCandidateDiscoverySession)?

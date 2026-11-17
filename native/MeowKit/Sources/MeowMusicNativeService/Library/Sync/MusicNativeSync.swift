@@ -56,7 +56,6 @@ extension NativeMusicService: MusicLibrarySyncing {
             // Metadata adoption does not advance the user's library revision.
             // Preserve its current facts rather than writing this round's older
             // display projection over concurrent metadata observations.
-            library["songs"] = d.library["library"]["songs"]
             d.library["library"] = library; d.library["sync"] = ledger; d.library["revision"] = .n(expected + 1)
         }
         round.library = library; round.revision = expected + 1

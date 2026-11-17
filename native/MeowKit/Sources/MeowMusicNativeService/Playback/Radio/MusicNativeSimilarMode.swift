@@ -8,7 +8,10 @@ extension NativeMusicService: MusicSimilarModeServing {
     public func similarModeSnapshot() async throws -> MusicSimilarModeSnapshot? {
         try await restoreSimilarSessionIfNeeded()
         try check()
-        let repository = try read().library["library"]["songs"]
+        let ids = [similarMode.active?.seed["songId"].string, similarMode.preview?.seed["songId"].string].compactMap { $0 } +
+            (similarMode.active?.batches ?? []).map { $0["basedOnSongId"].string } +
+            (similarMode.preview?.songs ?? []).map { $0["songId"].string }
+        let repository = try read().projectSongs(ids.filter { !$0.isEmpty })
         if let active = similarMode.active {
             guard active.lease.authorization.isActive else { try cancelSimilarModeState(); return nil }
             let retry = active.continueEnabled && active.pending == nil &&
@@ -67,10 +70,10 @@ extension NativeMusicService: MusicSimilarModeServing {
         return source["collectionId"].string == "favorites" ||
             (source["platform"].string == "wy" && source["sourceId"].string == "favorites")
     }
-    func similarCanEnter(_ d: MusicDocument) -> Bool {
-        heartbeatSource(d) && platformEnabled("wy") && accounts is any MusicNativeSimilarModeProviding &&
+    func similarCanEnter(_ d: MusicDocument) throws -> Bool {
+        try heartbeatSource(d) && platformEnabled("wy") && accounts is any MusicNativeSimilarModeProviding &&
             d.queue["entries"].array.first(where: { $0["id"] == d.queue["currentId"] })
-                .flatMap { MusicNativeSimilarData.nativeID(d.library["library"]["songs"][$0["songId"].string]) } != nil
+                .flatMap { MusicNativeSimilarData.nativeID(try d.song($0["songId"].string)) } != nil
     }
     public func previewSimilarMode() async throws -> MusicSimilarModeSnapshot? {
         try await restoreSimilarSessionIfNeeded()

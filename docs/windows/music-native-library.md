@@ -4,18 +4,18 @@
 
 ## 责任
 
-`MeowFilm.Capabilities.Library.MusicLibraryOwner` 是音乐曲库、队列、历史及相关设置的唯一原生文档写入者；脚本安装与私有数据归公共音乐模块。
+`MeowFilm.Capabilities.Library.MusicLibraryOwner` 是音乐曲库、队列、历史及相关设置的唯一原生业务写入者；脚本安装与私有数据归公共音乐模块。
 
-- 文档命名空间固定为 `music.library.v2`。
+- App 持有 `MusicLibraryDatabase`，文件为业务数据根下 `music-library/music-library.sqlite3`；owner 借用 `IMusicLibraryStore`，不释放 App 的数据库。
 - 默认 scope 为 `local`。
-- 普通业务不经 Node 读写该文档。
-- 同一 App 内不得再装配第二个文档 writer。
+- 普通业务不经 Node 读写该数据库。
+- 同一 App 内不得再装配第二个歌曲 writer；不探测、读取、迁移或删除旧音乐文档。
 
 ## 公开边界
 
 ```csharp
-MusicLibraryOwner(IDocumentStore store)
-MusicLibraryOwner(IDocumentStore store, string scope)
+MusicLibraryOwner(IMusicLibraryStore store, IDocumentStore? cacheStore = null)
+MusicLibraryOwner(IMusicLibraryStore store, string scope, IDocumentStore? cacheStore = null)
 
 Task<JsonElement> ExecuteAsync(
     string method,
@@ -51,29 +51,26 @@ ValueTask DisposeAsync();
 
 `AppendQueueAsync` 是完整歌单的进程内 next 入口，返回 `{ok:true,currentId,version,mode}`，不返回全量 entryIds。它在唯一串行边界核对 `expectedVersion`，创建独立 occurrence 并将整段按输入顺序插在当前曲之后，一次 CAS、一次版本递增；当前曲、模式及旧优先队列保留，新段优先于旧 priority。空队列选中首曲且 priority 为空，不调用媒体播放。失败不分批落盘；CAS 准入前取消不写入，准入后报告真实结果，未知写入使用既有 reconcile 机制，不重放。
 
-普通 `music.queue.append` 接受 `songs/context/next`，保持 `entryIds` 回执与 512KiB 输入字节边界，不接受 `expectedVersion`。完整入口沿现有 16MiB 完整输入、8MiB 文档资源边界；两者不以歌曲条数截断，空输入不允许。队列当前 schema 为 1，entry 只存 `id/songId/context`，读取时由唯一歌曲仓库投影资料。
+普通 `music.queue.append` 接受 `songs/context/next`，保持 `entryIds` 回执与 512KiB 输入字节边界，不接受 `expectedVersion`。完整入口沿现有 16MiB 完整输入边界；控制 area 每条仍限 8MiB，歌曲不再受整库 8MiB 文档上限。两者不以歌曲条数截断，空输入不允许。队列当前 schema 为 1，entry 只存 `id/songId/context`，读取时由唯一歌曲仓库投影资料。
 
-## 唯一当前文档
+## 唯一当前数据库
 
-根文档严格为：
+官方 `Microsoft.Data.Sqlite` 10.0.15／SQLitePCLRaw 2.1.13 提供 SQLite，标准 NuGet win-x64 资产发布，无 ORM、自制日志或 VFS。数据库 `user_version=1`，四表：
 
-```json
-{
-  "version": 1,
-  "entries": [
-    { "key": "[\"meowfilm\",\"music\",1,\"local\",\"library\"]", "value": {} }
-  ]
-}
-```
+| 表 | 内容与索引 |
+| --- | --- |
+| `header` | 单行 format／scope／generation／receipt，真实变更事务推进 generation 并写唯一回执 |
+| `songs` | 永久 UUID、单曲元数据 JSON；来源不内嵌；录音 fingerprint＋固定 baseline_duration、本地 locator、封面 URL 与精确查询索引 |
+| `song_sources` | source_key 主键，song_id 外键、平台／原生 ID／必要变体、顺序及单来源 JSON；已登记来源不可删除或重绑 |
+| `areas` | name 主键及小型控制 JSON，不内嵌 songs |
 
-要求：
+单连接、Pooling=false、FULL 同步、PERSIST rollback journal；一次短 SQL 事务写实际变更歌曲／来源／控制与回执。主库与固定 journal 复用平台 no-follow／单链接 pins，初始化在原生 exclusive locking 中完成热 journal 恢复，再恢复 normal locking；不删除热日志或关闭耐久。路径及同权限恶意并发限制见[存储安全](protected-storage.md#music-record-database)。
 
-- UTF-8 字节必须等于当前 canonical JSON 编码；重复属性、非规范持久整数、额外根字段和未知 entry 均拒绝。
-- entry key 必须属于当前 owner 的明确 area；脚本实例私有存储不在此文档。
-- 缺少可选 area 表示该 area 尚未创建；entry 已存在但值为 `null`、错误类型或错误 schema 时不是空状态。
-- 按各 area 当前字段、schema 及引用约束校验；不符合契约的文档保持原字节不变并明确失败，读取不执行格式转换或回退。
+普通读只取得控制状态或按 ID／来源键取得相关歌曲；命令的逐记录工作集只保留本轮读写，发布的长期 reader 不缓存全库歌曲。未知或损坏的新格式返回 `CORRUPT_STORAGE`，不覆盖为空库；持久化的非法策略不当作用户写入参数返回。来源、歌曲与控制引用仍按现行领域契约校验；本代次已验证且不会删除的歌曲关系无需在小型控制提交时重复查询，新增关系仍核对真实记录。缺少可选 area 表示尚未创建，已有 null／错误类型不是空状态。
 
-当前普通 area：
+未知提交保留精确 Before／After 回执；只读对账为 After 时结算本次来源观察代次，为 Before 时恢复命令前随机导航及失败状态，不重放原操作。直接歌曲／来源读取与关闭、准备关闭在同一同步读门结算；owner 关闭不依靠释放借用数据库来撤销读取。
+
+当前控制 area：
 
 ```text
 library
@@ -98,9 +95,9 @@ playback-settings
 共享图片和歌词展示字节存于 `MusicPresentationCache` 的 `music.presentation-resources.v1`，不属于业务 area，不参与整库提交；手工歌词仍属于 `native-local-lyrics`。完整 URL 图片键、预算、清理隔离等共同语义见[展示资源](../common/music/presentation-resources.md)，本端接线见[元数据策略](music-metadata-policy.md)。
 
 脚本安装与私有 KV 由[公共音乐模块](../runtime/music-script-runtime.md)唯一持久化。
-本 owner 只从空数据建立并读取当前 namespace，不检查或承接历史脚本条目。
+本 owner 只从空数据建立并读取当前数据库，不检查或承接历史脚本条目。
 `native-source-exclusions` 保存 schema 1、revision、items，每项包含 songId/provider/platform/providerName/title/artist/at。
-同身份幂等添加，只显式 remove 解除，不随缓存清理删除。沿用根文档的字节资源边界，不另设条数上限。
+同身份幂等添加，只显式 remove 解除，不随缓存清理删除。沿用控制 area 的字节资源边界，不另设条数上限。
 
 ## 在线设置当前格式
 
@@ -174,21 +171,21 @@ wrapper 只有以下字段：
 `wrapper.revision` 必须等于 `library.revision`。`library` 只有：
 
 ```text
-version ownerId revision nextId collections songs accounts networkPlaylists
+version ownerId revision nextId collections accounts networkPlaylists
 ```
 
 约束：
 
-- `version` 为 `2`，`ownerId` 精确等于当前 scope；只解码当前 wrapper/library 格式，不提供版本识别或转换。
+- wrapper schema 与 library `version` 均为 `3`，`ownerId` 精确等于当前 scope；只解码当前控制格式，不提供旧版本转换。
 - `nextId` 大于所有现存 `playlist:<正整数>` 的编号。
 - 只有一个收藏集合：`id=favorites`、`kind=favorites`；它没有 `deleted` 或 `locallyCreated` 字段。
 - 普通歌单 ID 必须为 canonical `playlist:<正整数>`。
 - `deleted`、`locallyCreated` 若存在只能为 `true`。
-- `order` 无重复，并且每项都引用当前 `songs`。
+- `order` 无重复，并且每项都引用数据库中当前歌曲。
 - `accounts` 只允许 `wy`、`tx`、`kg`，账号 ID 使用当前安全账号发布的非空字符串，不猜测长度或数字格式。
 - binding 只允许相同三个平台且 `writable=true`；账号、远端集合和成员定位均保留共同结果的完整非空字符串，`map` 方向为实际成员 key 到永久 songId。账号精确关联、成员 occurrence、当前仓库引用及写事务 CAS/pending 仍由原生同步 owner 保证。
 - intent 的 `acknowledged` 只包含该集合中现存 binding 的 canonical binding key。
-- `songs` 以永久 UUID 为键，记录自身 songId 与键一致；来源不能跨记录重绑。临时媒体 URL、凭据和签名资源字段不得进入持久歌曲。
+- `songs.song_id` 为永久 UUID，记录自身 songId 与键一致；来源不能跨记录重绑。临时媒体 URL、凭据和签名资源字段不得进入持久歌曲。
 - 集合 order、队列 entry 和历史只持久 songId 引用；展示时读取仓库当前资料。队列 occurrence 与歌曲 ID 分离，资料补全不推进 queue version。
 
 ### 网络引用字段与回执
@@ -225,10 +222,10 @@ Catalog 的 `music.catalog.playlist.save` 只转交上述元信息命令，不�
 共同匹配、固定基准、永久身份、资料不足与多候选规则以[歌曲仓库契约](../common/music/smart-playback.md#歌曲身份与唯一仓库)为唯一来源。
 
 - `NativeMusicSong` 是原生投影，保留 title、artist／artists、album、duration、cover_url 与 `sources`；来源项保留 `sourceKey/source/musicInfo`。
-- `NativeMusicSongGroups` 索引仓库已有记录及来源归属，新记录只在实际采用时分配 UUID；`MusicSongRepository` 在 library owner 的 CAS 边界采用平台资料。
+- `MusicSongSession` 按 SQL 来源／本地定位／录音候选索引取得单曲，仅维护命令内真实变化的索引；新记录只在实际采用时分配 UUID。`MusicSongRepository` 在 library owner 的事务边界采用平台资料。
 - `localFileId` 是本地文件授权定位，不从永久 songId 反解文件。已登记本地 locator 复用其歌曲记录。
-- 选定封面及来源字段保存在仓库；采用、明确设置重选及实际加载结果由同一 owner 更新。成功提交后发布 `SongMetadataChanged`，页面／搜索／当前播放只重投影资料，不重建队列或联网证明内容。
-- `MusicSongMatchStore` 的 `music.source-discovery.v1` 只保存 source discovery 状态和排除，不复制完整 Song 或重新生成身份。同步检查点重新读取当前仓库后重建操作内索引。
+- 选定封面及来源字段保存在仓库；采用、明确设置重选及实际图片失败由同一 owner 更新。成功提交后发布携带变更 ID 集合的 `SongMetadataChanged`，呈现只重投影受影响资料，不重建队列或联网证明内容。正常图片成功无需读取或复制歌曲库。
+- `MusicSongMatchStore` 的 `music.source-discovery.v1` 只保存 source discovery 状态和排除，不复制完整 Song 或重新生成身份。同步检查点只含控制 JSON，引擎按来源键／永久 ID 读取当前歌曲，单次匹配只采用对应记录。
 
 ## 当前命令
 
@@ -303,11 +300,11 @@ music.online.song
 
 `native-desktop-lyrics` 是独立 schema 1 area，含 `schema`、`revision`、`layout`（single/double）、`normalColor`、`highlightColor`，以及可选窗口 `geometry`。几何对象含显示器设备名 `monitor`、相对该显示器工作区左上角的 DIP 偏移 `x`／`y` 和 DIP 尺寸 `width`／`height`；不带几何的既有设置仍可读取。颜色为不透明 `#RRGGBB`，保存规范为大写；缺失 area 只读返回单行、普通色 `#FFB5C5`、高亮色 `#FFF2A8`，不迁移或重写其他 area。`music.lyrics.desktop.settings.save` 接受 `ifRevision`、三个原设置值和可选 `geometry`，返回权威 `settings`；未知字段拒绝，无变化不写盘。歌词校正、锁定与源译文开关不跨重启保存。消费者在成功回执或对应权威读取后才安装值，失败通过现有通知通道报告；具体窗口交互见[原生歌词应用链](music-lyric-application.md)。
 
-## CAS、取消与关闭
+## 事务、取消与关闭
 
-- 所有持久写入在同一 owner gate 内对完整 envelope 执行 CAS。
-- CAS 准入后不把取消解释为回滚；丢失写入回执时保留内存候选并阻止后续写。
-- `appearance`、`metadata`、`quality`、桌面歌词设置、浏览数据源、官方音源设置、`queue` 和搜索策略在各自写入回执不确定时，只允许对应的权威 current read 在 owner gate 内读取实际文档并核对该次 CAS 的 before/after 指纹；该读取会结算同职责的未知 CAS 结果，不重放业务命令。桌面歌词通过 `music.lyrics.desktop.settings.get`，浏览数据源与官方音源分别通过 `music.catalogSource.settings.get`、`music.officialSources.settings.get` 结算对应 save。
+- 所有持久写入在同一 owner gate 内，以 generation／receipt 在同一 SQL 事务核对并写实际变更集；零变化不提交。
+- 事务准入后不把取消解释为回滚；丢失写入回执时保留本轮候选与受影响歌曲的 before 版本，不提前展示未确认资料，阻止后续写。
+- `appearance`、`metadata`、`quality`、桌面歌词设置、浏览数据源、官方音源设置、`queue` 和搜索策略在各自写入回执不确定时，只允许对应的权威 current read 在 owner gate 内读取实际控制与 generation／receipt，核对该次 before／after revision；该读取会结算同职责未知结果，不重放业务命令。桌面歌词通过 `music.lyrics.desktop.settings.get`，浏览数据源与官方音源分别通过 `music.catalogSource.settings.get`、`music.officialSources.settings.get` 结算对应 save。
 - 其他职责以及跨职责命令继续由显式 `ReconcileAsync` 协调；recommendation 使用其 nonce reconcile。一个职责的 current read 不得替另一个职责结算未知写入。
 - 第三状态保持 `STORAGE_CONFLICT`，不提供“丢弃旧数据后继续”的回退入口。
 - `PrepareShutdownAsync` 封闭新业务并要求未知写已结算；取消关闭只恢复当前 owner，不重放写入。

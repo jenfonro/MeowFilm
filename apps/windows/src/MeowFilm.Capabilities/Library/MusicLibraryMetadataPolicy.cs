@@ -6,7 +6,7 @@ public sealed partial class MusicLibraryOwner
 {
     private const string MetadataPolicyArea = "native-metadata-policy";
     internal static readonly string[] MetadataPlatforms = ["wy", "tx", "kg", "kw", "mg"];
-    private JsonObject MetadataPolicy(JsonObject doc) => Value(doc, MetadataPolicyArea) as JsonObject ??
+    private JsonObject MetadataPolicy(MusicLibraryData doc) => Value(doc, MetadataPolicyArea) as JsonObject ??
         LJ.Obj(("schema", 1), ("revision", 0), ("platforms", LJ.Arr(MetadataPlatforms)),
             ("enabled", LJ.Arr(MetadataPlatforms)));
 
@@ -23,7 +23,7 @@ public sealed partial class MusicLibraryOwner
             enabled.All(MetadataPlatforms.Contains));
     }
 
-    private (JsonObject Result, bool Mutate) MetadataPolicyCommand(string method, JsonObject p, JsonObject doc)
+    private (JsonObject Result, bool Mutate) MetadataPolicyCommand(string method, JsonObject p, MusicLibraryData doc)
     {
         // Unknown CAS may already have disabled a platform. No consumer may use
         // the old in-memory policy until the single owner reconciles its receipt.
@@ -45,7 +45,7 @@ public sealed partial class MusicLibraryOwner
         return (LJ.Obj(("settings", next)), true);
     }
 
-    private bool MetadataSourceEnabled(JsonObject doc, JsonObject song, string sourceKey)
+    private bool MetadataSourceEnabled(MusicLibraryData doc, JsonObject song, string sourceKey)
     {
         var platform = LJ.Array(song["sources"]).OfType<JsonObject>()
             .FirstOrDefault(source => LJ.S(source["sourceKey"]) == sourceKey)?["source"];

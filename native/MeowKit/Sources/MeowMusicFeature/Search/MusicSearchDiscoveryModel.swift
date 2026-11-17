@@ -118,27 +118,31 @@ final class MusicSearchDiscoveryModel: ObservableObject {
         songObservation = Task { [weak self] in
             let changes = await repository.songChanges()
             await self?.refreshSongProjections(repository, access: access)
-            for await _ in changes {
+            for await changed in changes {
                 guard !Task.isCancelled else { return }
-                await self?.refreshSongProjections(repository, access: access)
+                await self?.refreshSongProjections(repository, access: access, changed: changed)
             }
         }
     }
-    private func refreshSongProjections(_ repository: any MusicSongRepositoryReading, access: UUID) async {
+    private func refreshSongProjections(_ repository: any MusicSongRepositoryReading, access: UUID, changed: Set<String>? = nil) async {
         guard !Task.isCancelled, available, visible, !closed, generation == access else { return }
         let own = request, projection = UUID()
-        songProjectionID = projection
-        let ids = Set(chartContent.values.flatMap { value -> [String] in
+        let referenced = Set(chartContent.values.flatMap { value -> [String] in
             guard case .loaded(let detail) = value else { return [] }
             return detail.members.map { $0.track.songId }
         })
+        let ids = changed.map { referenced.intersection($0) } ?? referenced
+        guard !ids.isEmpty else { return }
+        songProjectionID = projection
         do {
             let songs = try await repository.repositoryTracks(songIDs: ids)
             guard admits(own, access: access), visible, songProjectionID == projection else { return }
             for key in Array(chartContent.keys) {
-                guard case .loaded(let detail) = chartContent[key] else { continue }
+                guard case .loaded(let detail) = chartContent[key],
+                      detail.members.contains(where: { songs[$0.track.songId] != nil }) else { continue }
                 chartContent[key] = .loaded(.init(collection: detail.collection, members: detail.members.map {
-                    .init(nativeID: $0.nativeID, sourcePosition: $0.sourcePosition, track: $0.track.projected(songs))
+                    guard songs[$0.track.songId] != nil else { return $0 }
+                    return .init(nativeID: $0.nativeID, sourcePosition: $0.sourcePosition, track: $0.track.projected(songs))
                 }, total: detail.total, cursor: detail.cursor, notice: detail.notice, consumed: detail.consumed))
             }
         } catch {}

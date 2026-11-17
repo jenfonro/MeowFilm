@@ -14,6 +14,7 @@ LOCAL_PRODUCTS = {
     "MeowVideoKernel": ("videokernel", "../VideoKernel"),
     "CMeowAudioKernel": ("audiokernel", "../AudioKernel"),
 }
+SYSTEM_TARGETS = {"CSQLite": {"MeowMusicNativeService"}}
 
 def application_membership(base, project_text):
     """Exact source closure in each target, not just PBXFileReference presence."""
@@ -153,15 +154,33 @@ def check(root):
         kinds[name] = kind
     sources = {name for name, kind in kinds.items() if kind == "regular"}
     tests = {name for name, kind in kinds.items() if kind == "test"}
+    systems = {name for name, kind in kinds.items() if kind == "system"}
+    if not systems <= SYSTEM_TARGETS.keys():
+        failures.append("Unapproved system target")
+    for declaration in manifest["targets"]:
+        name = declaration["name"]
+        if name not in systems:
+            continue
+        if (name != "CSQLite" or declaration.get("pkgConfig") != "sqlite3" or targets[name]
+                or declaration.get("providers") or declaration.get("path") is not None):
+            failures.append("Invalid system target: " + name)
+            continue
+        directory = package / "Sources" / name
+        modulemap, shim = directory / "module.modulemap", directory / "shim.h"
+        expected_module = r'module\s+CSQLite\s+\[system\]\s*\{\s*header\s+"shim\.h"\s+link\s+"sqlite3"\s+export\s+\*\s*\}'
+        if (not directory.is_dir() or {path.name for path in directory.iterdir()} != {"module.modulemap", "shim.h"}
+                or not modulemap.is_file() or not re.fullmatch(expected_module, modulemap.read_text(encoding="utf-8").strip())
+                or not shim.is_file() or shim.read_text(encoding="utf-8").strip() != "#include <sqlite3.h>"):
+            failures.append("Invalid system module: " + name)
     if not sources:
         failures.append("No package source targets")
-    for folder, expected in (("Sources", sources), ("Tests", tests)):
+    for folder, expected in (("Sources", sources | systems), ("Tests", tests)):
         parent = package / folder
         actual = {p.name for p in parent.iterdir() if p.is_dir()} if parent.exists() else set()
         if actual != expected:
             failures.append("{} directories: missing={}, extra={}".format(folder, sorted(expected - actual), sorted(actual - expected)))
         for target in sorted(expected):
-            if not list((parent / target).rglob("*.swift")):
+            if target not in systems and not list((parent / target).rglob("*.swift")):
                 failures.append("Empty target: " + target)
     product_targets = [(item["name"], item["targets"]) for item in manifest["products"]]
     products = {name for name, _ in product_targets}
@@ -172,16 +191,19 @@ def check(root):
         if not linked or not linked <= sources:
             failures.append("Invalid package product targets: " + name)
     for target, dependencies in targets.items():
-        if not dependencies <= sources | external:
+        if not dependencies <= sources | external | systems:
             failures.append("Non-source dependency: " + target)
-        folder = "Sources" if target in sources else "Tests"
+        for system in dependencies & systems:
+            if target not in SYSTEM_TARGETS.get(system, set()):
+                failures.append("Unapproved system dependency: " + target)
+        folder = "Sources" if target in sources | systems else "Tests"
         imported = set()
         for path in (package / folder / target).rglob("*.swift"):
             if path.is_symlink() or not path.resolve().is_relative_to((package / folder / target).resolve()):
                 failures.append("Linked source: " + str(path.relative_to(root)))
                 continue
             text = path.read_text(encoding="utf-8")
-            imported.update(re.findall(r"^(?:@testable )?import (Meow\w+)", text, re.M))
+            imported.update(re.findall(r"^(?:@testable )?import (Meow\w+|CSQLite)", text, re.M))
         if not imported <= dependencies:
             failures.append("Undeclared imports for {}: {}".format(target, sorted(imported - dependencies)))
         if target in SHARED_TARGETS:

@@ -57,7 +57,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `MeowRuntime` | runtime.http.v1 客户端、严格 JSON、事件观察／取消／关闭与单次内嵌启动机制；fd 仅交接受信启动及生命期 | 无 |
 | `MeowMusicFeature` | 音乐界面、交互、公开业务契约与音乐外观策略 | Contracts、Storage、Playback、UI |
 | `MeowMusicPlatform` | 网易、QQ、酷狗协议、账号、加密、HTTP 与文件缓存 | Feature、Audio、Contracts、JSON、Accounts、Storage |
-| `MeowMusicNativeService` | 曲库、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | Contracts、JSON、Feature、Runtime、Storage |
+| `MeowMusicNativeService` | SQLite 曲库、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | 系统 CSQLite、Contracts、JSON、Feature、Runtime、Storage |
 | `MeowFilmFeature` | 影视页面、规则／搜索 RPC 消费者及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | UI、JSON、Storage、Runtime |
 | `native/VideoKernel` | 电影候选准备／提交、实际首帧、轨道与关闭适配 | 固定源码 KSPlayer，无业务或系统媒体会话 owner |
 | `native/KSPlayer` | core-only KSPlayer：解码、轨道／字幕、缓冲／同步、原生音频与 Metal／sample-buffer 输出 | FFmpeg 8.1.2 与 Apple 系统媒体框架，不编译上游播放控件 |
@@ -179,10 +179,10 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | 身份 | 所有者／用途 |
 | --- | --- |
 | `dev.meowfilm.aggregate` | 固定产品身份；安装宿主改写安装标识时，内部存储身份不变 |
-| Application Support 下 `meowfilm/documents` | 曲库普通文档根目录 |
+| Application Support 下 `meowfilm/documents` | 原生业务数据根目录 |
 | Caches 下 `meowfilm/documents` | 普通缓存文档根目录 |
 | Application Support 下 `meowfilm/script-runtime/music-platform` | Node 唯一维护的匿名协议状态 |
-| `music.library.v3` | 永久歌曲仓库、引用队列、历史和播放记录 |
+| `music-library-v1/music-library-v1.sqlite3` | 系统 SQLite 永久歌曲仓库、来源索引、引用队列、历史和播放记录 |
 | `dev.meowfilm.aggregate.music.platform.accounts.v1` | 三平台 Keychain 账号凭据与固定账号槽 |
 | `music.platform.audio-locators.v1` | 账号作用域下的官方音频定位缓存 |
 | `meowfilm.music.audio-resources.v1` | 实际播放后的完整音频缓存 |

@@ -34,7 +34,7 @@ public static partial class MusicLyricDisplayTests
             string key;
             var lines = MusicLyricTiming.Parse("[00:01]long locator");
             await using (var cache = new CacheDocumentStore(disk))
-            await using (var owner = new MusicLibraryOwner(store, cacheStore: cache))
+            await using (var owner = new MusicLibraryOwner(MusicTestStores.For(store), cacheStore: cache))
             {
                 Ok(await owner.ExecuteAsync("music.queue.replace", new { songs = new[] { Song("canonical/" + new string('x', 9000)) }, index = 0 }));
                 song = Ok(await owner.ExecuteAsync("music.queue.get")).GetProperty("current").GetProperty("song").Clone();
@@ -44,7 +44,7 @@ public static partial class MusicLyricDisplayTests
             }
             int writes = store.Writes;
             await using var coldCache = new CacheDocumentStore(disk);
-            await using var cold = new MusicLibraryOwner(store, cacheStore: coldCache);
+            await using var cold = new MusicLibraryOwner(MusicTestStores.For(store), cacheStore: coldCache);
             var restored = Ok(await cold.ExecuteAsync("music.lyrics.display.get", new { song, sourceKey = key }));
             Equal("restored", restored.GetProperty("state").GetString());
             Equal(key, restored.GetProperty("sourceKey").GetString());
@@ -118,8 +118,8 @@ public static partial class MusicLyricDisplayTests
                     MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail, default);
                 Equal(2, f.Module.Lyrics.Count); Equal(1, f.Peer.Calls); Equal(0, f.Runtime.Calls);
                 Equal("", f.Module.LyricStatus);
-                var document = await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace);
-                Check(!Encoding.UTF8.GetString(document.Data!).Contains("SYNTHETIC_LYRIC", StringComparison.Ordinal));
+                var document = f.Access.Records.Root;
+                Check(!document.ToJsonString().Contains("SYNTHETIC_LYRIC", StringComparison.Ordinal));
                 await f.Cache.DrainAsync();
                 var display = await f.Cache.ReadAsync(MusicLibraryOwner.LyricDisplayNamespace);
                 Check(Encoding.UTF8.GetString(display.Data!).Contains("SYNTHETIC_LYRIC", StringComparison.Ordinal));
@@ -341,7 +341,7 @@ public static partial class MusicLyricDisplayTests
         yield return new("Native lyric display source scope cannot restore another recording or accept an unknown field", async () =>
         {
             await using var store = new MemoryStore();
-            await using var owner = new MusicLibraryOwner(store);
+            await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
             var (song, key) = await Seed(owner);
             var lines = MusicLyricTiming.Parse("[00:01]text", "", 120);
             Ok(await owner.ExecuteAsync("music.lyrics.display.save", new { song, sourceKey = key, lines }));
@@ -355,7 +355,7 @@ public static partial class MusicLyricDisplayTests
         yield return new("Native lyric display malformed or unsorted timed rows cannot enter durable snapshot", async () =>
         {
             await using var store = new MemoryStore();
-            await using var owner = new MusicLibraryOwner(store);
+            await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
             var (song, key) = await Seed(owner);
             var defects = new object[] {
                 new[] { new { time = 2, text = "a" }, new { time = 1, text = "b" } },
@@ -374,7 +374,7 @@ public static partial class MusicLyricDisplayTests
             await using var store = new MemoryStore();
             await using var disk = new DisplayDisk { FailWrite = true };
             await using var cache = new CacheDocumentStore(disk);
-            await using var owner = new MusicLibraryOwner(store, cacheStore: cache);
+            await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), cacheStore: cache);
             var (song, key) = await Seed(owner);
             var lines = MusicLyricTiming.Parse("[00:01]text");
             Ok(await owner.ExecuteAsync("music.lyrics.display.save", new { song, sourceKey = key, lines }));
@@ -390,7 +390,7 @@ public static partial class MusicLyricDisplayTests
                 await using var store = new MemoryStore();
                 await using var disk = new DisplayDisk { HoldRead = reading, HoldWrite = !reading };
                 await using var cache = new CacheDocumentStore(disk);
-                await using var owner = new MusicLibraryOwner(store, cacheStore: cache);
+                await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), cacheStore: cache);
                 var (song, key) = await Seed(owner);
                 Task<JsonElement> operation = reading
                     ? owner.ExecuteAsync("music.lyrics.display.get", new { song, sourceKey = key })
@@ -411,7 +411,7 @@ public static partial class MusicLyricDisplayTests
             await using var store = new MemoryStore();
             await using var disk = new DisplayDisk { HoldRead = true };
             await using var cache = new CacheDocumentStore(disk);
-            await using var owner = new MusicLibraryOwner(store, cacheStore: cache);
+            await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), cacheStore: cache);
             var (song, key) = await Seed(owner);
             using var cancellation = new CancellationTokenSource();
             var read = owner.ExecuteAsync("music.lyrics.display.get", new { song, sourceKey = key }, cancellation.Token);
@@ -432,7 +432,7 @@ public static partial class MusicLyricDisplayTests
         {
             await using var store = new MemoryStore();
             await using var cache = new CacheDocumentStore();
-            await using var owner = new MusicLibraryOwner(store, cacheStore: cache);
+            await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), cacheStore: cache);
             var (song, key) = await Seed(owner);
             var lines = MusicLyricTiming.Parse("[00:01]<00:01.000>A<00:02.000>B<00:03.000>");
             Ok(await owner.ExecuteAsync("music.lyrics.display.save", new { song, sourceKey = key, lines }));
@@ -452,7 +452,7 @@ public static partial class MusicLyricDisplayTests
         {
             await using var store = new MemoryStore();
             await using var cache = new CacheDocumentStore();
-            await using var owner = new MusicLibraryOwner(store, cacheStore: cache);
+            await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), cacheStore: cache);
             var (song, key) = await Seed(owner);
             await cache.DisposeAsync();
             Ok(await owner.ExecuteAsync("music.lyrics.display.save", new { song, sourceKey = key, lines = MusicLyricTiming.Parse("[00:01]text") }));
@@ -466,7 +466,7 @@ public static partial class MusicLyricDisplayTests
             {
                 await using var store = new MemoryStore();
                 await using var disk = new DisplayDisk { Data = bytes, FailRead = bytes is null };
-                await using var owner = new MusicLibraryOwner(store, cacheStore: disk);
+                await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), cacheStore: disk);
                 var (song, key) = await Seed(owner);
                 int writes = store.Writes;
                 Equal("none", Ok(await owner.ExecuteAsync("music.lyrics.display.get", new { song, sourceKey = key })).GetProperty("state").GetString());
@@ -477,7 +477,7 @@ public static partial class MusicLyricDisplayTests
         yield return new("Native lyric display disabled preference prevents restoring previously saved text", async () =>
         {
             await using var store = new MemoryStore();
-            await using var owner = new MusicLibraryOwner(store);
+            await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
             var (song, key) = await Seed(owner);
             Ok(await owner.ExecuteAsync("music.lyrics.display.save", new {
                 song, sourceKey = key, lines = MusicLyricTiming.Parse("[offset:-500]\n[00:01]text")
@@ -539,8 +539,8 @@ public static partial class MusicLyricDisplayTests
                 Equal("", f.Module.LyricStatus); Equal(2, f.Module.Lyrics.Count);
                 Check(f.Module.CanRemoveLocalLyrics); Equal(0, f.Runtime.Calls); Equal(0, f.Peer.Calls);
                 Equal(0, f.Playback.Opens); Check((await File.ReadAllBytesAsync(selected)).SequenceEqual(original));
-                var document = await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace);
-                string text = Encoding.UTF8.GetString(document.Data!);
+                var document = f.Access.Records.Root;
+                string text = document.ToJsonString();
                 Check(text.Contains("native-local-lyrics", StringComparison.Ordinal));
                 Check(!text.Contains(selected, StringComparison.Ordinal) && !text.Contains("chosen.lrc", StringComparison.Ordinal));
             }
@@ -563,11 +563,11 @@ public static partial class MusicLyricDisplayTests
             string root = NewRoot(), selected = Path.Combine(root, "cancel.lrc");
             await File.WriteAllTextAsync(selected, "[00:01]not admitted");
             await using var f = await Fixture.Create(root);
-            var before = await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace);
+            var before = f.Access.Records.Snapshot().Revision;
             f.Dialogs.LyricFile = selected; f.Dialogs.Accept = false;
             await f.Module.ImportLocalLyricsAsync();
-            var after = await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace);
-            Equal(before.Fingerprint, after.Fingerprint);
+            var after = f.Access.Records.Snapshot().Revision;
+            Equal(before, after);
             Equal(0, f.Peer.Calls); Equal(0, f.Runtime.Calls); Check(!f.Module.CanRemoveLocalLyrics);
         }));
         yield return new("Native metadata disabled platform suppresses the previously saved display on restart", () => Sta(async () =>
@@ -798,7 +798,7 @@ public static partial class MusicLyricDisplayTests
             Runtime.Platform.OnRequest = Peer.Read;
             ScriptPath = Path.Combine(root, "lyric-source.js");
             Store = new(root, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
-            Access = new(Store);
+            Access = new(Store, Path.Combine(root, "music-records"));
             Cache = new(() =>
             {
                 string cacheRoot = Path.Combine(root, "cache");
@@ -806,7 +806,7 @@ public static partial class MusicLyricDisplayTests
                 return new LocalDocumentStore(cacheRoot, AppIdentity.CacheNamespaces,
                     protectedNamespaces: AppIdentity.CacheProtectedNamespaces);
             });
-            Application = new(Access, Runtime, Cache);
+            Application = new(Access, MusicTestStores.For(Access), Runtime, Cache);
             if (holdSync) Application.LibrarySyncChanged += HoldSyncNotice;
             Module = new(decorate?.Invoke(Application) ?? Application, Access, Playback, Dialogs);
             if (holdSync) Application.LibrarySyncChanged += () => SyncNoticeDelivered.TrySetResult();
@@ -861,31 +861,34 @@ public static partial class MusicLyricDisplayTests
                 finally
                 {
                     try { await Runtime.DisposeAsync(); }
-                    finally { await Cache.DisposeAsync(); await Store.DisposeAsync(); }
+                    finally { await Cache.DisposeAsync(); await Access.Records.DisposeAsync(); await Store.DisposeAsync(); }
                 }
             }
         }
     }
-    private sealed class WriteFaultStore(IDocumentStore store) : IDocumentStore
+    private sealed class WriteFaultStore : IDocumentStore
     {
+        private readonly IDocumentStore store;
+        internal readonly MusicRecordTestStore Records;
         internal bool FailAfterLibraryWrite;
         internal int LibraryWrites;
         internal Func<Task>? BeforeLibraryReceipt;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => store.ReadAsync(ns, token);
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes,
-            DocumentFingerprint expected, CancellationToken token = default)
+        internal WriteFaultStore(IDocumentStore store, string recordsRoot)
         {
-            var result = await store.WriteAsync(ns, bytes, expected, token);
-            if (ns == MusicLibraryOwner.DocumentNamespace)
+            this.store = store; Records = MusicTestStores.Use(this, recordsRoot);
+            MusicTestStores.Attach(store, Records);
+            Records.AfterCommit = async (_, _) =>
             {
                 LibraryWrites++;
                 if (BeforeLibraryReceipt is { } beforeReceipt) await beforeReceipt().ConfigureAwait(false);
                 if (FailAfterLibraryWrite)
                 { FailAfterLibraryWrite = false; throw new DocumentStoreException(DocumentStoreError.Unavailable); }
-            }
-            return result;
+            };
         }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask; // Fixture owns the real DPAPI store.
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => store.ReadAsync(ns, token);
+        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
+            DocumentFingerprint expected, CancellationToken token = default) => store.WriteAsync(ns, data, expected, token);
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask; // Fixture owns both stores.
     }
     private sealed class LyricPeer
     {
@@ -1025,25 +1028,7 @@ public static partial class MusicLyricDisplayTests
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
-    private sealed class MemoryStore : IDocumentStore
+    private sealed class MemoryStore : MusicRecordTestStore
     {
-        private byte[]? data;
-        internal int Writes;
-        internal bool FailAfterWrite;
-        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken token = default)
-        {
-            token.ThrowIfCancellationRequested(); Equal(MusicLibraryOwner.DocumentNamespace, documentNamespace);
-            return Task.FromResult(new DocumentSnapshot(data?.ToArray(), data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(data)));
-        }
-        public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> bytes,
-            DocumentFingerprint expected, CancellationToken token = default)
-        {
-            Equal(MusicLibraryOwner.DocumentNamespace, documentNamespace); token.ThrowIfCancellationRequested();
-            Equal(data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(data), expected);
-            Writes++; data = bytes.ToArray();
-            if (FailAfterWrite) { FailAfterWrite = false; throw new DocumentStoreException(DocumentStoreError.Unavailable); }
-            return Task.FromResult(DocumentFingerprint.FromBytes(data));
-        }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

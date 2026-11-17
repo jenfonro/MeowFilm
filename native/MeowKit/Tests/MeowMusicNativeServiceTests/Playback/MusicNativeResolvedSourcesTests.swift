@@ -54,7 +54,7 @@ final class MusicNativeResolvedSourcesTests: XCTestCase {
             XCTAssertEqual(current.entries.first?.track.songId, song["songId"].string)
             XCTAssertEqual(current.entries.first?.track.title, "Current matching title")
             XCTAssertEqual(current.entries.first?.track.duration, 101)
-            XCTAssertEqual(after.library["library"]["songs"][song["songId"].string]["baselineDuration"].number, 100)
+            XCTAssertEqual((try after.fixtureSong(song["songId"].string))["baselineDuration"].number, 100)
         } catch {
             await barrier.release()
             await inspection.close(); await service.close()
@@ -194,7 +194,7 @@ final class MusicNativeResolvedSourcesTests: XCTestCase {
             fileURL: URL(fileURLWithPath: "/synthetic-cache/recording.flac"), duration: 180,
             measuredQuality: "flac", expiresAt: clock.now().addingTimeInterval(3600)))
         let cache = MusicNativeMemorySourceDiscoveryCache()
-        let service = NativeMusicService(document: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
+        let service = NativeMusicService(database: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
             sourceDiscovery: cache, audioFileCache: file, clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)
         let hit = try await service.cachedPlayback(attemptID: UUID().uuidString.lowercased(), occurrenceID: "entry-1", selection: nil)
@@ -348,7 +348,7 @@ final class MusicNativeResolvedSourcesTests: XCTestCase {
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
         let slow = NativeMusicGate(), lower = expectation(description: "Ready peer reaches next tier")
         let accounts = MusicInspectionConcurrencyAccounts(slow: slow, onLower: { lower.fulfill() })
-        let service = NativeMusicService(document: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
+        let service = NativeMusicService(database: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
             enabledPlatforms: [.netease, .qq], clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         _ = try await service.updateSettings(.init(ifRevision: 0, qualityEnabled: ["lossless", "standard"],

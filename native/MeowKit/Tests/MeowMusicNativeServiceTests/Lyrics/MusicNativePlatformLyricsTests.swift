@@ -8,7 +8,7 @@ import MeowRuntime
 final class MusicNativePlatformLyricsTests: XCTestCase {
     func testSearchQueueLyricsUseCanonicalTextWithoutPlaybackAttemptScriptOrAccount() async throws {
         for platform in ["kw", "mg"] {
-            let scripts = MusicNativeLyricsNoScript(), accounts = NativeMusicAccountFixture(), store = NativeMusicMemoryDocument()
+            let scripts = MusicNativeLyricsNoScript(), accounts = NativeMusicAccountFixture(), store = NativeMusicTestLibrary()
             let peer = MusicNativeLyricsFixture.peer(platform: platform)
             let service = try await NativeMusicFixture.service(store, scripts: scripts, accounts: accounts, platform: peer)
             let page = try await service.search(platform: platform, query: "Synthetic", page: 1, limit: 30)
@@ -32,7 +32,7 @@ final class MusicNativePlatformLyricsTests: XCTestCase {
     func testCancellationProtectionAndChangedOccurrenceRejectLateLyricsAndFinishProducer() async throws {
         for platform in ["kw", "mg"] {
             for reason in ["cancel", "lock", "occurrence"] {
-                let gate = NativeMusicGate(), store = NativeMusicMemoryDocument()
+                let gate = NativeMusicGate(), store = NativeMusicTestLibrary()
                 let peer = MusicNativeLyricsFixture.peer(platform: platform, gate: gate)
                 let service = try await NativeMusicFixture.service(store, platform: peer)
                 let page = try await service.search(platform: platform, query: "Synthetic", page: 1, limit: 30)

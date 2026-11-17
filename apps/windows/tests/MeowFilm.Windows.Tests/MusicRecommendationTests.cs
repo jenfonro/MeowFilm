@@ -1711,37 +1711,8 @@ internal static class RecommendationTest
         internal void Complete(string kind, params string[] ids) => result.TrySetResult(Batch(kind, ids));
         internal void Complete(JsonElement value) => result.TrySetResult(value);
     }
-    internal sealed class Store : IDocumentStore
+    internal sealed class Store : MusicRecordTestStore
     {
-        private readonly object gate = new();
-        internal byte[]? Bytes;
-        internal int Writes, Failure;
-        internal Action? AfterRead, BeforeWrite;
-        internal TaskCompletionSource? Entered, Release;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken ct = default)
-        {
-            ct.ThrowIfCancellationRequested(); Check(ns == MusicLibraryOwner.DocumentNamespace);
-            DocumentSnapshot result;
-            lock (gate) result = new(Bytes?.ToArray(), Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes));
-            AfterRead?.Invoke();
-            return Task.FromResult(result);
-        }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken ct = default)
-        {
-            Check(ns == MusicLibraryOwner.DocumentNamespace);
-            BeforeWrite?.Invoke();
-            if (Release is { } signal) { Entered!.TrySetResult(); await signal.Task; }
-            lock (gate)
-            {
-                Check((Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes)) == expected, "CAS expected");
-                int fail = Failure; Failure = 0; Writes++;
-                if (fail == 1) throw new DocumentStoreException(DocumentStoreError.Storage);
-                Bytes = bytes.ToArray();
-                if (fail == 2) throw new DocumentStoreException(DocumentStoreError.Storage);
-                return DocumentFingerprint.FromBytes(Bytes);
-            }
-        }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
     internal sealed class Fixture : IAsyncDisposable
     {
@@ -1756,7 +1727,7 @@ internal static class RecommendationTest
         internal Fixture(IMusicPlatformCatalog? actual = null,
             Func<MusicRecommendationSelection, CancellationToken, Task<bool>>? selectionAsync = null)
         {
-            Library = new(Store); Port = new(Library);
+            Library = new(MusicTestStores.For(Store)); Port = new(Library);
             Rec = new(actual ?? Catalog, Port, selectionAsync ?? ((value, _) =>
             { if (value.IsCurrent()) { Selections.Enqueue(value); OnSelection?.Invoke(value); } return Task.FromResult(value.IsCurrent()); }), Clock,
                 actual is null ? Catalog.Read : null);

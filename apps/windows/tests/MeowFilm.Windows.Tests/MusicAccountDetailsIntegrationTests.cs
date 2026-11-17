@@ -59,7 +59,7 @@ public static partial class MusicUiTests
             await f.Module.DeactivateSettingsAsync(); await f.Module.ActivateSettingsAsync();
             Equal("Fresh native name", row.DisplayName); Equal(1, f.Peer.Requests);
             await f.Module.DisposeAsync();
-            await using var cold = new MusicNativeApplication(f.Store, f.Runtime, f.Cache);
+            await using var cold = new MusicNativeApplication(f.Store, MusicTestStores.For(f.Store), f.Runtime, f.Cache);
             var cached = await cold.ReadDetailsAsync("wy");
             Equal("saved", cached.State); Equal("Fresh native name", cached.Profile?.DisplayName);
             True(cached.Membership.Vip == true && cached.Generation == 1, "cold cache never creates a verified login");
@@ -113,7 +113,7 @@ public static partial class MusicUiTests
         private DetailsScene()
         {
             Runtime.OnRequest = Peer.Respond;
-            App = new(Store, Runtime, Cache);
+            App = new(Store, MusicTestStores.For(Store), Runtime, Cache);
             Module = new(App, Store, new PlaybackProbe(), new Dialogs());
         }
         internal static async Task<DetailsScene> Create()

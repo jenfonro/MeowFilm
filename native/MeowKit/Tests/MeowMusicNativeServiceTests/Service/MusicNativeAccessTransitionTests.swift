@@ -20,8 +20,8 @@ private actor AccessTransitionAudioCache: MusicAudioFileCaching {
 
 final class MusicNativeAccessTransitionTests: XCTestCase {
     func testNewScopeCannotReadOrWriteBeforeOldCachesFinishRetiring() async throws {
-        let store = NativeMusicMemoryDocument(), gate = NativeMusicGate(), platform = NativeMusicPlatformFixture()
-        let service = NativeMusicService(document: store, platformClient: try platform.makeClient(),
+        let store = NativeMusicTestLibrary(), gate = NativeMusicGate(), platform = NativeMusicPlatformFixture()
+        let service = NativeMusicService(database: store, platformClient: try platform.makeClient(),
             audioFileCache: AccessTransitionAudioCache(gate))
         let enabling = Task { try await service.setAccess(available: true, generation: 1) }
         await gate.started()

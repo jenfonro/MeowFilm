@@ -238,7 +238,7 @@ private struct SystemPlaybackPlayerEvidence: Equatable {
         let scripts: SystemPlaybackAdmissionScripts
         let player: SystemPlaybackAdmissionPlayer
         let model: MusicViewModel
-        let store: NativeMusicMemoryDocument
+        let store: NativeMusicTestLibrary
     }
     private func fixture(providers: [String: [String]] = ["a": ["flac", "128k"], "b": ["flac", "128k"]],
                          paused: Bool = true, recordInitialFacts: Bool = true) async throws -> Fixture {
@@ -252,7 +252,7 @@ private struct SystemPlaybackPlayerEvidence: Equatable {
         ])
         document.queue["currentId"] = .string("entry-1")
         document.queue["serial"] = .n(2); document.queue["revision"] = .n(1)
-        let store = NativeMusicMemoryDocument(try document.encode(changed: ["library", "queue"]))
+        let store = NativeMusicTestLibrary(try document.encode(changed: ["library", "queue"]))
         let scripts = SystemPlaybackAdmissionScripts(providers)
         let native = try await NativeMusicFixture.service(store, scripts: scripts)
         let service = SystemPlaybackAdmissionService(native), player = SystemPlaybackAdmissionPlayer()

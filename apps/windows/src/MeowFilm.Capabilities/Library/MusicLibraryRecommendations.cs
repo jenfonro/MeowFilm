@@ -38,7 +38,7 @@ public sealed partial class MusicLibraryOwner
         result = new();
         return false;
     }
-    private RecommendationCheckpoint CaptureRecommendation(JsonObject doc)
+    private RecommendationCheckpoint CaptureRecommendation(MusicLibraryData doc)
     {
         var q = (JsonObject)Queue(doc).DeepClone();
         int bytes = LJ.Bytes(q).Length;
@@ -72,9 +72,9 @@ public sealed partial class MusicLibraryOwner
     private void SettleRecommendation(Pending? attempt)
     {
         if (attempt?.Recommendation is not { } change) return;
-        LJ.Require(fingerprint == attempt.Before || fingerprint == attempt.After, "STORAGE_CONFLICT");
+        LJ.Require(revision == attempt.Before || revision == attempt.After, "STORAGE_CONFLICT");
         if (recommendationReceipt?.Nonce != change.Nonce)
-            AcceptRecommendation(change, fingerprint == attempt.After);
+            AcceptRecommendation(change, revision == attempt.After);
         if (ReferenceEquals(recommendationUnknown, attempt)) recommendationUnknown = null;
     }
     private void ClearRecommendations()
@@ -85,7 +85,7 @@ public sealed partial class MusicLibraryOwner
         recommendationUnknown = null;
     }
     private async Task<(JsonObject Result, bool Mutate)> RecommendationCommandAsync(
-        string method, JsonObject p, JsonObject doc, CancellationToken token)
+        string method, JsonObject p, MusicLibraryData doc, CancellationToken token)
     {
         const string prefix = "music.queue.recommendation.";
         string action = method[prefix.Length..];
@@ -207,7 +207,7 @@ public sealed partial class MusicLibraryOwner
                 }
                 Select(restored, current, false, shuffleHistory);
             }
-            ValidateQueue(restored, true, Repository(doc));
+            ValidateQueue(restored, true, doc.Songs.Contains);
             Archive(currentQueue, doc);
             Set(doc, "queue", restored);
             shuffleHistory = saved.History.ToList(); failedEntries.Clear(); failedEntries.UnionWith(saved.Failed);

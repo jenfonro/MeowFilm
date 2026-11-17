@@ -32,11 +32,11 @@ public sealed partial class MusicLibraryOwner
         LJ.Obj(("order", LJ.Arr(SearchPlatforms)), ("enabled", LJ.Arr(SearchPlatforms)),
             ("pages", 1), ("concurrency", 1), ("cacheMinutes", 60));
 
-    private JsonObject SearchPolicy(JsonObject doc) => Value(doc, SearchPolicyArea) as JsonObject ??
+    private JsonObject SearchPolicy(MusicLibraryData doc) => Value(doc, SearchPolicyArea) as JsonObject ??
         LJ.Obj(("schema", 3), ("revision", 0), ("songs", EmptySearchKind()),
             ("playlists", EmptySearchKind()));
 
-    private JsonObject SearchHistory(JsonObject doc) => Value(doc, SearchHistoryArea) as JsonObject ??
+    private JsonObject SearchHistory(MusicLibraryData doc) => Value(doc, SearchHistoryArea) as JsonObject ??
         LJ.Obj(("schema", 2), ("revision", 0), ("items", new JsonArray()));
 
     private static string SearchText(JsonNode? value)
@@ -98,7 +98,7 @@ public sealed partial class MusicLibraryOwner
         }
     }
 
-    private (JsonObject Result, bool Mutate) SearchCommand(string method, JsonObject p, JsonObject doc)
+    private (JsonObject Result, bool Mutate) SearchCommand(string method, JsonObject p, MusicLibraryData doc)
     {
         LJ.Require(pending is null, "PENDING_WRITE");
         if (method.StartsWith("music.search.settings.", StringComparison.Ordinal))

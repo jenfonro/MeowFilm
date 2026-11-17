@@ -108,7 +108,8 @@ internal static class MusicLiveAcceptance
                 Path.Combine(data, "scripts"));
             report.Record("live.runtime-pid", "PASS", count: runtime.ProcessId);
             var observed = new ObservedRuntime(runtime, report);
-            application = new(store, observed, cache);
+            MusicTestStores.Use(store, Path.Combine(data, "native", "music-library"));
+            application = new(store, MusicTestStores.For(store), observed, cache);
             player = new(audioOutput: NativeAudioOutput.SystemDefault);
             module = new(application, store, player, playbackCacheRoot: Path.Combine(data, "media"), cacheStore: cache);
 
@@ -229,7 +230,7 @@ internal static class MusicLiveAcceptance
             if (cache is not null) closed &= await report.StepAsync("close.cache-drain", async () =>
             { await cache.DisposeAsync(); return 1; });
             if (cacheBacking is not null) closed &= await report.StepAsync("close.cache-store", async () => { await cacheBacking.DisposeAsync(); return 1; });
-            if (store is not null) closed &= await report.StepAsync("close.native-store", async () => { await store.DisposeAsync(); return 1; });
+            if (store is not null) closed &= await report.StepAsync("close.native-store", async () => { await MusicTestStores.For(store).DisposeAsync(); await store.DisposeAsync(); return 1; });
             if (window is not null) window.Close();
             // Only this newly created data subtree, and only after every owner has physically closed.
             if (closed) await report.StepAsync("close.owned-data", () =>

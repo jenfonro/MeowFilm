@@ -5,24 +5,186 @@ import MeowMusicTestSupport
 import MeowRuntime
 @testable import MeowMusicNativeService
 
-// All values are synthetic. No Keychain, network, Node or reference checkout.
-final class NativeMusicMemoryDocument: MusicNativeDocumentStoring, @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: Data?
+// Synthetic snapshots are test data, not a production serialization port.
+// Business tests exercise real SQLite rows and transactions; this wrapper only
+// adds deterministic failure injection and explicit fixture inspection.
+final class NativeMusicTestLibrary: MusicNativeLibraryStoring, @unchecked Sendable {
+    private let lock = NSRecursiveLock()
+    private let root = FileManager.default.temporaryDirectory.appendingPathComponent("meow-music-sqlite-" + UUID().uuidString, isDirectory: true)
+    private lazy var backing = makeBacking()
+    private var seed: Data?
+    private var initialized = false
     private var failure: MusicServiceError?
     private var reads = 0, writes = 0
-    init(_ value: Data? = nil) { self.value = value }
-    func read() throws -> Data? { lock.lock(); defer { lock.unlock() }; reads += 1; return value }
-    func compareAndSwap(expected: Data?, replacement: Data) throws {
-        lock.lock(); defer { lock.unlock() }
-        if let failure { throw failure }
-        guard value == expected else { throw MusicServiceError.storageConflict }
-        value = replacement; writes += 1
+    private var revisionOffset = 0, importedRevision = 0
+    init(_ value: Data? = nil) { seed = value }
+    deinit { try? backing.close(); try? FileManager.default.removeItem(at: root) }
+    private func makeBacking() -> MusicNativeLibraryDatabase {
+        let root = self.root
+        return MusicNativeLibraryDatabase(urlFactory: {
+            try MusicNativeLibraryDatabase.canonicalSystemBaseURL(root.deletingLastPathComponent())
+                .appendingPathComponent(root.lastPathComponent, isDirectory: true)
+                .appendingPathComponent(MusicNativeLibraryDatabase.filename)
+        })
     }
+    private func storage() throws -> MusicNativeLibraryDatabase {
+        if initialized { return backing }
+        if let seed {
+            let raw = try MJ.parse(seed)
+            try musicRequire(raw["areas"].isObject && raw["songs"].isObject && raw["revision"].isInteger && raw["areas"].fields.allSatisfy { MusicDocument.areas.contains($0.0) }, .corruptDocument)
+            try backing.withTransaction { writer in
+                for (id, song) in raw["songs"].fields {
+                    try MusicLibraryValidation.validateSong(song, id: id)
+                    try writer.saveSong(song.bytes)
+                }
+                for (name, data) in raw["areas"].fields { try writer.saveArea(name, data: data.bytes) }
+            }
+        }
+        if let seed { revisionOffset = try MJ.parse(seed)["revision"].int - backing.readSnapshot().revision }
+        importedRevision = try backing.readSnapshot().revision
+        initialized = true; return backing
+    }
+    func readSnapshot() throws -> MusicNativeLibrarySnapshot {
+        lock.lock(); defer { lock.unlock() }
+        reads += 1
+        let value = try storage().readSnapshot()
+        return .init(revision: value.revision + revisionOffset, receipt: value.receipt, areas: value.areas)
+    }
+    func songData(id: String) throws -> Data? { lock.lock(); defer { lock.unlock() }; return try storage().songData(id: id) }
+    func containsSong(id: String) throws -> Bool { lock.lock(); defer { lock.unlock() }; return try storage().containsSong(id: id) }
+    func sourceOwner(key: String) throws -> String? { lock.lock(); defer { lock.unlock() }; return try storage().sourceOwner(key: key) }
+    func candidateIDs(lookupKey: String) throws -> [String] { lock.lock(); defer { lock.unlock() }; return try storage().candidateIDs(lookupKey: lookupKey) }
+    func querySongIDs(query: String) throws -> [String] { lock.lock(); defer { lock.unlock() }; return try storage().querySongIDs(query: query) }
+    func allSongIDs() throws -> [String] { lock.lock(); defer { lock.unlock() }; return try storage().allSongIDs() }
+    func withTransaction<T>(commit: (_ action: () throws -> Void) throws -> Void, _ body: (any MusicNativeLibraryWriting) throws -> T) throws -> T {
+        lock.lock(); defer { lock.unlock() }
+        let database = try storage(), before = try database.readSnapshot().revision
+        let value = try database.withTransaction(commit: { action in
+            if let failure = self.failure { throw failure }
+            try withoutActuallyEscaping(action) { try commit($0) }
+        }) { try body(NativeMusicFixtureWriter(base: $0, revisionOffset: revisionOffset)) }
+        if try database.readSnapshot().revision != before { writes += 1 }
+        return value
+    }
+    // In-memory fixture lifetime is independent of a service's lifetime. Actual
+    // SQLite close/reopen is covered by NativeMusicSQLiteTests.
+    func close() throws {}
     func fail(_ value: MusicServiceError?) { lock.lock(); failure = value; lock.unlock() }
-    func replace(_ value: Data?) { lock.lock(); self.value = value; lock.unlock() }
-    func snapshot() -> (Data?, Int, Int) { lock.lock(); defer { lock.unlock() }; return (value, reads, writes) }
+    func read() throws -> Data? {
+        lock.lock(); defer { lock.unlock() }
+        guard initialized else { return seed }
+        let snapshot = try backing.readSnapshot()
+        if snapshot.revision == importedRevision, let seed { return seed }
+        if snapshot.revision == 0 && snapshot.areas.isEmpty { return nil }
+        let songs = try MJ.obj(backing.allSongIDs().map { ($0, try MJ.parse(backing.songData(id: $0)!)) })
+        return MJ.obj([("revision", .n(snapshot.revision + revisionOffset)), ("songs", songs),
+            ("areas", .obj(try snapshot.areas.sorted { $0.key < $1.key }.map { ($0.key, try MJ.parse($0.value)) }))]).bytes
+    }
+    func replaceSnapshot(expected: Data?, replacement: Data) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard try read() == expected else { throw MusicServiceError.storageConflict }
+        replace(replacement)
+    }
+    func replace(_ value: Data?) {
+        lock.lock(); defer { lock.unlock() }
+        try? backing.close(); try? FileManager.default.removeItem(at: root)
+        backing = makeBacking()
+        initialized = false; seed = value; revisionOffset = 0
+    }
+    func snapshot() -> (Data?, Int, Int) {
+        lock.lock(); defer { lock.unlock() }
+        return ((try? read()) ?? seed, reads, writes)
+    }
 }
+
+private struct NativeMusicFixtureWriter: MusicNativeLibraryWriting {
+    let base: any MusicNativeLibraryWriting
+    let revisionOffset: Int
+    var changedSongIDs: Set<String> { base.changedSongIDs }
+    func readSnapshot() throws -> MusicNativeLibrarySnapshot { let value = try base.readSnapshot(); return .init(revision: value.revision + revisionOffset, receipt: value.receipt, areas: value.areas) }
+    func songData(id: String) throws -> Data? { try base.songData(id: id) }
+    func containsSong(id: String) throws -> Bool { try base.containsSong(id: id) }
+    func sourceOwner(key: String) throws -> String? { try base.sourceOwner(key: key) }
+    func candidateIDs(lookupKey: String) throws -> [String] { try base.candidateIDs(lookupKey: lookupKey) }
+    func querySongIDs(query: String) throws -> [String] { try base.querySongIDs(query: query) }
+    func allSongIDs() throws -> [String] { try base.allSongIDs() }
+    func saveSong(_ data: Data) throws { try base.saveSong(data) }
+    func saveArea(_ area: String, data: Data) throws { try base.saveArea(area, data: data) }
+}
+
+/// Only fixture setup/inspection materializes all songs. Production does not
+/// encode a whole library or offer a replacement-document entry point.
+extension MusicDocument {
+    init(_ data: Data?, runID: String) throws {
+        let fixture = NativeMusicFixtureRows(data)
+        let snapshot = try fixture.readSnapshot()
+        try self.init(snapshot: snapshot, runID: runID, songs: fixture)
+        library["library"]["songs"] = try fixture.songObject()
+    }
+    var fixtureSnapshot: MJ { (try? MJ.parse(fixtureData())) ?? .null }
+    func fixtureSong(_ id: String) throws -> MJ {
+        if library["library"].contains("songs") { return library["library"]["songs"][id] }
+        return try song(id)
+    }
+    func fixtureSongs() throws -> MJ {
+        if library["library"].contains("songs") { return library["library"]["songs"] }
+        return try .obj(songRows.allSongIDs().map { ($0, try song($0)) })
+    }
+    func fixtureData() throws -> Data {
+        let songs = try MJ.obj(fixtureSongs().fields.sorted { $0.0 < $1.0 })
+        var controls = library; controls["library"].remove("songs")
+        return MJ.obj([("revision", .n(revision)), ("songs", songs),
+            ("areas", .obj([("catalogSource", catalogSource), ("history", history), ("library", controls), ("playback", playback), ("queue", queue)]))]).bytes
+    }
+    mutating func encode(changed: Set<String>) throws -> Data {
+        revision += 1
+        var raw = try MJ.parse(fixtureData())
+        raw["areas"]["playback"]["position"]["seconds"] = .n(0)
+        return raw.bytes
+    }
+}
+private final class NativeMusicFixtureRows: MusicNativeLibraryReading, @unchecked Sendable {
+    let data: Data?
+    init(_ data: Data?) { self.data = data }
+    private func raw() throws -> MJ { try data.map { try MJ.parse($0) } ?? .obj([("revision", .n(0)), ("areas", .obj()), ("songs", .obj())]) }
+    func readSnapshot() throws -> MusicNativeLibrarySnapshot {
+        let raw = try raw()
+        try musicRequire(raw["areas"].isObject && raw["songs"].isObject && raw["revision"].isInteger && raw["areas"].fields.allSatisfy { MusicDocument.areas.contains($0.0) }, .corruptDocument)
+        return .init(revision: raw["revision"].int, receipt: "", areas: Dictionary(uniqueKeysWithValues: raw["areas"].fields.map { ($0.0, $0.1.bytes) }))
+    }
+    func songObject() throws -> MJ { try raw()["songs"] }
+    func songData(id: String) throws -> Data? { let value = try songObject()[id]; return value.isObject ? value.bytes : nil }
+    func containsSong(id: String) throws -> Bool { try songObject()[id].isObject }
+    func sourceOwner(key: String) throws -> String? { try songObject().fields.first { $0.1["sources"].array.contains { $0["sourceKey"].string == key } }?.0 }
+    func candidateIDs(lookupKey: String) throws -> [String] { try songObject().fields.filter { MusicModel.descriptor($0.1).lookupKey == lookupKey }.map(\.0) }
+    func querySongIDs(query: String) throws -> [String] { try songObject().fields.filter { MusicRecordingIdentity.normalize($0.1["title"].string + " " + $0.1["artist"].string) == query }.map(\.0) }
+    func allSongIDs() throws -> [String] { try songObject().fields.map(\.0) }
+}
+
+protocol NativeMusicTestLibraryWrapping: MusicNativeLibraryStoring {
+    var backingLibrary: NativeMusicTestLibrary { get }
+}
+extension NativeMusicTestLibraryWrapping {
+    func songData(id: String) throws -> Data? { try backingLibrary.songData(id: id) }
+    func containsSong(id: String) throws -> Bool { try backingLibrary.containsSong(id: id) }
+    func sourceOwner(key: String) throws -> String? { try backingLibrary.sourceOwner(key: key) }
+    func candidateIDs(lookupKey: String) throws -> [String] { try backingLibrary.candidateIDs(lookupKey: lookupKey) }
+    func querySongIDs(query: String) throws -> [String] { try backingLibrary.querySongIDs(query: query) }
+    func allSongIDs() throws -> [String] { try backingLibrary.allSongIDs() }
+    func close() throws { try backingLibrary.close() }
+    func read() throws -> Data? { try backingLibrary.read() }
+    func withTransaction<T>(commit: (_ action: () throws -> Void) throws -> Void, _ body: (any MusicNativeLibraryWriting) throws -> T) throws -> T {
+        try backingLibrary.withTransaction(commit: commit, body)
+    }
+}
+extension NativeMusicService {
+    func seedRepositorySongs(_ songs: [MJ]) throws {
+        try transaction(["library"]) { _ in
+            for song in songs { try saveRepositorySong(song) }
+        }
+    }
+}
+
 actor NativeMusicGate {
     private var waiting = false, released = false
     private var starts: [CheckedContinuation<Void, Never>] = []
@@ -65,14 +227,14 @@ enum NativeMusicFixture {
         .init(installationID: installation, generation: generation, enabled: true, state: state, version: "1",
               contentHash: hash, revisionHash: hash, capabilities: [.init(siteID: "tx", title: "LX synthetic", actions: ["musicUrl", "lyric"], qualities: ["128k", "flac"])])
     }
-    static func service(_ store: NativeMusicMemoryDocument = .init(), scripts: (any MusicScriptResolving)? = nil,
+    static func service(_ store: NativeMusicTestLibrary = .init(), scripts: (any MusicScriptResolving)? = nil,
                         accounts: (any MusicNativeAccountProviding)? = nil,
                         platform: (any MusicPlatformFixtureResponding)? = nil,
                         sourceDiscovery: (any MusicSourceDiscoveryCaching)? = nil,
                         clock: @escaping @Sendable () -> Date = { date },
                         monotonicClock: @escaping @Sendable () -> TimeInterval = { 0 }) async throws -> NativeMusicService {
         let peer = platform ?? (accounts as? any MusicPlatformFixtureResponding) ?? NativeMusicPlatformFixture()
-        let service = NativeMusicService(document: store, scripts: scripts, accounts: accounts,
+        let service = NativeMusicService(database: store, scripts: scripts, accounts: accounts,
             platformClient: try peer.makeClient(), sourceDiscovery: sourceDiscovery,
             clock: clock, monotonicClock: monotonicClock, random: { 0 })
         try await service.setAccess(available: true, generation: 1); return service

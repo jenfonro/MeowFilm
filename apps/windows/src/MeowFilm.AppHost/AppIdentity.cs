@@ -30,7 +30,7 @@ public static class AppIdentity
         Array.AsReadOnly(new[] { "music.accounts.v2", "pan.accounts.v1", "film.tmdb.v1", "film.douban.v1", "film.cat-sources.v1" });
     public static IReadOnlyList<string> NativeNamespaces { get; } = Array.AsReadOnly(new[]
     {
-        "app.appearance.v1", "app.window.v1", "app.media-controls.v1", "music.library.v2", "music.files.v2", "music.accounts.v2", "music.feedback.v2",
+        "app.appearance.v1", "app.window.v1", "app.media-controls.v1", "music.files.v2", "music.accounts.v2", "music.feedback.v2",
         "music.playback-outbox.v2",
         "music.fm-selection.v2", "film.video-sources.v1", "film.library.v1", "film.cat-sources.v1",
         "pan.accounts.v1", "film.tmdb.v1", "film.douban.v1", "film.rules.v1", "film.preferences.v1",

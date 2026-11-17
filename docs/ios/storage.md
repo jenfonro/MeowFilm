@@ -1,11 +1,11 @@
-# 本地文档存储
+# 本地存储
 
 `MeowStorage` 提供两种同步 Data API 文档存储，按数据敏感性选用。产品装配提供专用目录和命名空间；调用方负责业务 JSON 编解码与有效性。
 
 | 数据 | 存储 | 位置 |
 | --- | --- | --- |
 | 通用／音乐外观、音乐搜索偏好、播放音量 | 原生 UserDefaults | 当前 App domain，不经运行器 |
-| 永久歌曲仓库、引用队列、历史、设置（`music.library.v3`） | 普通文档 | Application Support 下 `meowfilm/documents`，参与备份 |
+| 永久歌曲仓库、引用队列、历史、设置 | 系统 SQLite | Application Support 下 `meowfilm/documents/music-library-v1/music-library-v1.sqlite3`，参与备份 |
 | 小说书架／历史、阅读排版与净化规则（`novel.library.v1`） | 普通文档 | `meowfilm/documents/novel.library.v1/library.json`，参与备份 |
 | 影视规则、智能播放偏好 | 普通文档 | `meowfilm/documents/{film.rules.v1,film.preferences.v1}/settings.json`，参与备份 |
 | 猫源来源意图、网盘凭据、TMDB／豆瓣配置 | 加密文档 | `meowfilm/documents/protected-settings` 下按 namespace/key 散列存放，排除备份 |
@@ -15,6 +15,16 @@
 | 平台匿名协议状态 | Node 私有文档 | Application Support 下 `meowfilm/script-runtime/music-platform`，不保存原生账号凭据 |
 | 账号凭据（`<bundle>.music.platform.accounts.v1`） | `MeowAccounts` Keychain 凭据 | `afterFirstUnlockThisDeviceOnly`，不同步；bundle 使用稳定产品身份 |
 | 实际播放后的音频 | 音频文件缓存 | Caches 下 `meowfilm.music.audio-resources.v1`，Data Protection class C |
+
+## 音乐数据库
+
+`MusicNativeLibraryDatabase` 使用系统 sqlite3（SwiftPM `CSQLite` systemLibrary），不引 ORM 或第二份 SQLite 二进制。`user_version=1`；`songs` 保存单曲元数据，`song_sources` 保存唯一来源键、歌曲外键与有序单来源资料，`areas` 保存控制 JSON，`state` 保存单行 revision／receipt。录音 lookup_key 与精确 search_query 索引支持相关记录查询。
+
+WAL／FULL、单连接和短本地事务；歌曲、来源索引与实际变化控制同次提交，零变化不推进 revision 或写 WAL。解析后的控制状态及事务读取 fence 使用 revision／receipt 的精确身份；提交回调内读取本次候选身份，确认提交后复用已验证控制关系，不重新查询未变化的歌曲引用。普通读不物化全库；只有真实全库策略变更枚举。来源不可删除／重绑，已固定的录音基准不可改变；图片字节及缓存索引不进入本库。
+
+Application Support 的受信系统基目录先经 POSIX `realpath` 解析，再追加应用自有目录；不解析自有路径来放行链接。目录采用 class C（completeUntilFirstUserAuthentication），主库以 SQLite NOFOLLOW 打开；锁屏访问仍沿现有音乐 access fence，事务内不 await。COMMIT 在真正存储提交周围核对准入；未知回执按持久 receipt 判断，不重放。系统 VFS 管理 WAL／SHM，不声称主库 NOFOLLOW 覆盖同权限恶意 sidecar 竞态。
+
+仅新路径／格式生效，旧音乐文档不探测、迁移、读取或删除。损坏或未知新格式失败，不覆盖为空库。原生接口与消费者见[音乐能力](music.md)。
 
 ## 普通文档
 
@@ -29,9 +39,9 @@
 
 ### 音乐数据源偏好
 
-- `music.library.v3` envelope 的 `records` 包含 `catalogSource` 区，key 为 JSON 字符串 `["meowfilm","music",3,"device","catalogSource"]`。
+- 音乐数据库 `areas` 表的 `catalogSource` 行保存数据源偏好。
 - 记录字段封闭：`{"schema":1,"revision":0,"platform":"wy"}`；platform 只允许 `wy`／`kg`，revision 必须为非负 JSON 安全整数。记录缺失时默认网易云、revision 0，读取不写盘；未知字段、非法类型、版本或平台明确返回 `corruptDocument`，保留原文件。
-- 保存使用文档 transaction CAS，并核对该记录独立的 revision；成功切换加一，同值保存不写盘，过期 revision 返回 `staleRevision`。与 playback 的 `settingsRevision` 无关，不重写 library、queue、playback 或 history。
+- 保存使用数据库事务，并核对该记录独立的 revision；成功切换加一，同值保存不写盘，过期 revision 返回 `staleRevision`。与 playback 的 `settingsRevision` 无关，不重写 library、queue、playback 或 history。
 
 ## 加密文档
 
@@ -85,7 +95,7 @@
 
 Cat 安装事实、源码与私有卷继续使用 `meowfilm/script-runtime/cat`，可编辑来源意图迁入下述原生设置块；客户端视频选项、排序、检测与删除记录仍属于 `film.video-sources.v1`。不把公共独立入口的默认根目录套到旧安装上，再用空 status 清掉客户端记录；除下述已知设置迁移外，不扫描／清理旧安装。
 
-内置官方源开关属于 `music.library.v3` 的 playback 记录 `officialSources`，值为 `wy`／`tx`／`kg` 的无重复数组；新建文档显式写入全部启用，当前格式文档必须包含该数组，空数组全部关闭，不接受缺失、null 或未知平台。写入使用既有 settingsRevision／文档 CAS，不创建第二份设置事实来源。
+内置官方源开关属于音乐数据库 playback area 的 `officialSources`，值为 `wy`／`tx`／`kg` 的无重复数组；新建控制状态显式写入全部启用，当前格式必须包含该数组，空数组全部关闭，不接受缺失、null 或未知平台。写入使用既有 settingsRevision／数据库事务，不创建第二份设置事实来源。
 
 ## 影视设置
 

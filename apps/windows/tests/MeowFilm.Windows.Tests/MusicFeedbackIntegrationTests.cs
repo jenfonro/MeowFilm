@@ -36,7 +36,7 @@ public static partial class MusicUiTests
             byte[] empty = NeteasePlaybackOutboxDocument.Encode([]);
             var receipt = await store.WriteAsync(NeteasePlaybackOutboxDocument.Namespace, empty, missing.Fingerprint);
             await using var runtime = new MusicPlatformRuntimeFixture();
-            await using var app = new MusicNativeApplication(store, runtime);
+            await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             await app.InitializeAsync(); await app.Feedback.DrainAsync(); await app.PrepareShutdownAsync();
             var saved = await store.ReadAsync(NeteasePlaybackOutboxDocument.Namespace);
             Equal(receipt, saved.Fingerprint);
@@ -47,7 +47,7 @@ public static partial class MusicUiTests
         {
             await using var store = ServiceStore();
             await using var runtime = new MusicPlatformRuntimeFixture();
-            await using var app = new MusicNativeApplication(store, runtime);
+            await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             var reply = await ServiceCall(app, "music.librarySync.get");
             foreach (var platform in reply.GetProperty("platforms").EnumerateObject())
                 True(!platform.Value.GetProperty("favorites").GetBoolean() &&
@@ -61,7 +61,7 @@ public static partial class MusicUiTests
         {
             await using var store = ServiceStore();
             await using var runtime = new MusicPlatformRuntimeFixture();
-            await using var app = new MusicNativeApplication(store, runtime);
+            await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             var observed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             int notifications = 0;
             app.LibrarySyncChanged += () => { Interlocked.Increment(ref notifications); observed.TrySetResult(); };
@@ -80,7 +80,7 @@ public static partial class MusicUiTests
         {
             await using var store = ServiceStore();
             await using var runtime = new MusicPlatformRuntimeFixture();
-            await using var app = new MusicNativeApplication(store, runtime);
+            await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             var created = await ServiceCall(app, "music.library.create", new { name = "接续歌单" });
             string id = created.GetProperty("collection").GetProperty("id").GetString()!;
             await app.PrepareShutdownAsync(); await app.CancelShutdownPreparationAsync();
@@ -93,7 +93,7 @@ public static partial class MusicUiTests
         {
             await using var store = ServiceStore();
             await using var runtime = new MusicPlatformRuntimeFixture();
-            await using var app = new MusicNativeApplication(store, runtime);
+            await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             var before = await ServiceCall(app, "music.librarySync.get");
             var denied = await app.ExecuteAsync("music.librarySync.set", new {
                 platform = "wy", favorites = true, playlists = true,
@@ -112,7 +112,7 @@ public static partial class MusicUiTests
                 await preferences.ReadAsync(); await preferences.SaveAsync(0, ["wy"]);
             }
             await using var runtime = new MusicPlatformRuntimeFixture();
-            var app = new MusicNativeApplication(store, runtime);
+            var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             await using var module = new MusicCapability(app, store, new PlaybackProbe(), new Dialogs());
             await module.InitializeAsync(default);
             True(module.FeedbackPlatforms.Single(p => p.Platform == "wy").Enabled, "saved consent is restored");
@@ -133,12 +133,12 @@ public static partial class MusicUiTests
         {
             await using var store = ServiceStore();
             await using var runtime = new MusicPlatformRuntimeFixture();
-            await using (var app = new MusicNativeApplication(store, runtime))
+            await using (var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime))
             {
                 await ServiceCall(app, "music.queue.replace", new { songs = new[] { Song("original-recording") }, index = 0,
                     context = new { sourcePlatform = "wy", sourceType = "playlist", sourceId = "500", sourceTitle = "列表" } });
             }
-            await using var reopened = new MusicNativeApplication(store, runtime);
+            await using var reopened = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             var reply = await ServiceCall(reopened, "music.queue.get", new { offset = 0, limit = 1 });
             var context = reply.GetProperty("current").GetProperty("context");
             Equal("wy", context.GetProperty("sourcePlatform").GetString());
@@ -151,7 +151,7 @@ public static partial class MusicUiTests
             await using var store = ServiceStore();
             await using var runtime = new MusicPlatformRuntimeFixture();
             string entryId, songId;
-            await using (var app = new MusicNativeApplication(store, runtime))
+            await using (var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime))
             {
                 await ServiceCall(app, "music.queue.replace", new { songs = new[] { Song("retained") }, index = 0 });
                 await ServiceCall(app, "music.queue.replace", new { songs = new[] { Song("current") }, index = 0,
@@ -161,7 +161,7 @@ public static partial class MusicUiTests
                 entryId = current.GetProperty("id").GetString()!;
                 songId = current.GetProperty("song").GetProperty("songId").GetString()!;
             }
-            await using var reopened = new MusicNativeApplication(store, runtime);
+            await using var reopened = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             var restored = (await ServiceCall(reopened, "music.queue.get")).GetProperty("current");
             Equal(entryId, restored.GetProperty("id").GetString());
             Equal(songId, restored.GetProperty("song").GetProperty("songId").GetString());
@@ -172,15 +172,15 @@ public static partial class MusicUiTests
         {
             await using var store = ServiceStore();
             await using var runtime = new MusicPlatformRuntimeFixture();
-            await using var app = new MusicNativeApplication(store, runtime);
+            await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             await ServiceCall(app, "music.queue.replace", new { songs = new[] { Song("retained") }, index = 0 });
             var queue = await ServiceCall(app, "music.queue.get");
-            var before = (await store.ReadAsync(MusicLibraryOwner.DocumentNamespace)).Fingerprint;
+            var before = (await MusicTestStores.For(store).ReadAsync("local")).Revision;
             var invalid = await app.ExecuteAsync("music.queue.replace", new { songs = new[] { Song("rejected") }, index = 0,
                 context = new { sourcePlatform = "wy", sourceType = "playlist", sourceId = new[] { "500" } } });
             True(!invalid.GetProperty("ok").GetBoolean(), "non-string context cannot be consumed");
             Equal("INVALID_REQUEST", invalid.GetProperty("code").GetString());
-            Equal(before, (await store.ReadAsync(MusicLibraryOwner.DocumentNamespace)).Fingerprint);
+            Equal(before, (await MusicTestStores.For(store).ReadAsync("local")).Revision);
             True(JsonElement.DeepEquals(queue, await ServiceCall(app, "music.queue.get")),
                 "the rejected input leaves every queue control and song reference unchanged");
             Equal(0, runtime.Requests.Count);

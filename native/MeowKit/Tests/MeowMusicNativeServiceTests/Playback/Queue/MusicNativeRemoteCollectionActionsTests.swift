@@ -4,7 +4,7 @@ import MeowMusicFeature
 
 final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
     func testSavePersistsOnlyRemoteIdentityWithoutReadingMembersOrChangingPlayback() async throws {
-        let store = NativeMusicMemoryDocument(), scripts = NativeMusicScriptFixture(), accounts = NativeMusicAccountFixture()
+        let store = NativeMusicTestLibrary(), scripts = NativeMusicScriptFixture(), accounts = NativeMusicAccountFixture()
         let service = try await NativeMusicFixture.service(store, scripts: scripts, accounts: accounts)
         _ = try await MusicAccountQueueFixture.seed(service)
         let before = store.snapshot(), old = try MusicDocument(before.0, runID: "fixture")
@@ -21,10 +21,10 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
         XCTAssertEqual(current.queue, old.queue); XCTAssertEqual(current.playback, old.playback)
         XCTAssertEqual(current.history, old.history)
         XCTAssertEqual(current.library["library"]["collections"], old.library["library"]["collections"])
-        XCTAssertEqual(current.library["library"]["songs"], old.library["library"]["songs"])
+        XCTAssertEqual((try current.fixtureSongs()), (try old.fixtureSongs()))
         XCTAssertEqual(current.library["library"]["nextId"], old.library["library"]["nextId"])
-        XCTAssertEqual(Set(current.envelope["records"].fields.map(\.0)),
-                       Set(old.envelope["records"].fields.map(\.0)).union([MusicModel.key("library")]))
+        XCTAssertEqual(Set(current.fixtureSnapshot["areas"].fields.map(\.0)),
+                       Set(old.fixtureSnapshot["areas"].fields.map(\.0)).union(["library"]))
         let reference = current.library["library"]["networkReferences"].array.first!
         XCTAssertEqual(reference["remoteID"].string, "501"); XCTAssertEqual(reference["platform"].string, "tx")
         XCTAssertFalse(reference.contains("order")); XCTAssertFalse(reference.contains("members"))
@@ -35,7 +35,7 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
     }
 
     func testRepeatedSaveIsIdempotentAndNeverCreatesManagedMembership() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let pages = MusicRemoteCollectionActionsFixture.pages([
             MusicRemoteCollectionActionsFixture.track("B"), MusicRemoteCollectionActionsFixture.track("A")
         ])
@@ -46,7 +46,7 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
         XCTAssertEqual(first, second)
         XCTAssertEqual(store.snapshot().0, before.0); XCTAssertEqual(store.snapshot().2, before.2)
         let document = try MusicDocument(store.snapshot().0, runID: "fixture")
-        XCTAssertTrue(document.library["library"]["songs"].fields.isEmpty)
+        XCTAssertTrue((try document.fixtureSongs()).fields.isEmpty)
         XCTAssertEqual(document.library["library"]["collections"].array.count, 1)
         XCTAssertEqual(document.library["library"]["networkReferences"].array.count, 1)
         XCTAssertEqual(document.library["library"]["nextId"].int, 1)
@@ -56,7 +56,7 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
     }
 
     func testUnavailableMembersDoNotBlockReferenceAndCASFailureLeavesNoPartialWrite() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         _ = try await MusicAccountQueueFixture.seed(service)
         let before = store.snapshot()
         let pages = MusicRemoteCollectionActionsFixture.pages((0..<31).map { MusicRemoteCollectionActionsFixture.track("MID\($0)") })
@@ -78,7 +78,7 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
 
     func testSaveRejectsLateReplyAfterSourceIntentProtectionEpochOrTaskCancellation() async throws {
         for mode in 0..<5 {
-            let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+            let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
             let gate = NativeMusicGate(), probe = MusicRemoteCollectionActionsProbe(), intent = MusicQueueAuthorization()
             await probe.holdValidation(1, gate: gate)
             let pages = MusicRemoteCollectionActionsFixture.pages([])
@@ -110,7 +110,7 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
 
     func testOwnerValidationAndIntentFencePreventSaveBeforeTheSingleCAS() async throws {
         for revokeIntent in [false, true] {
-            let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+            let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
             let probe = MusicRemoteCollectionActionsProbe(), gate = NativeMusicGate(), intent = MusicQueueAuthorization()
             await probe.holdValidation(1, gate: gate)
             let source = MusicRemoteCollectionActionsFixture.source(MusicRemoteCollectionActionsFixture.pages([]), probe: probe)
@@ -132,14 +132,14 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
             (.init(platform: .netease, nativeID: "501", title: "Other platform"), .unsupported)
         ]
         for (collection, expected) in cases {
-            let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+            let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
             let source = MusicRemoteCollectionActionsFixture.source(MusicRemoteCollectionActionsFixture.pages([]), collection: collection)
             do { _ = try await service.saveRemoteCollection(source: source, name: "Remote", intent: .init()); XCTFail("invalid identity") }
             catch { XCTAssertEqual(error as? MusicServiceError, expected) }
             XCTAssertNil(store.snapshot().0); XCTAssertEqual(store.snapshot().2, 0)
             await source.close(); await service.close()
         }
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let collection = MusicPublicBrowseCollection(platform: .qq, nativeID: "playlist:1", title: "String locator")
         let source = MusicRemoteCollectionActionsFixture.source(MusicRemoteCollectionActionsFixture.pages([]), collection: collection)
         let saved = try await service.saveRemoteCollection(source: source, name: "Remote", intent: .init())
@@ -149,7 +149,7 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
     }
 
     func testMalformedOrMixedMembersAreNotImportedWhenSavingAReference() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let rows: [MusicNativeTrackData] = [
             .init(platform: "tx", data: Data("{}".utf8)),
             .init(platform: "wy", data: NativeMusicFixture.track().data)
@@ -159,12 +159,12 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
         let requests = await pages.events()
         XCTAssertTrue(requests.isEmpty)
         let document = try MusicDocument(store.snapshot().0, runID: "fixture")
-        XCTAssertTrue(document.library["library"]["songs"].fields.isEmpty)
+        XCTAssertTrue((try document.fixtureSongs()).fields.isEmpty)
         await source.close()
     }
 
     func testReferenceCanRepresentALargePlaylistWithoutReadingMembers() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let pages = MusicRemoteCollectionActionsFixture.pages([])
         let source = MusicRemoteCollectionActionsFixture.source(pages,
             collection: .init(platform: .qq, nativeID: "501", title: "Large", count: 2001))
@@ -173,12 +173,12 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
         let requests = await pages.events()
         XCTAssertTrue(requests.isEmpty)
         let document = try MusicDocument(store.snapshot().0, runID: "fixture")
-        XCTAssertTrue(document.library["library"]["songs"].fields.isEmpty)
+        XCTAssertTrue((try document.fixtureSongs()).fields.isEmpty)
         await source.close()
     }
 
     func testReferenceDisplayTitleDoesNotUseTheManagedPlaylistNameLimit() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let title = String(repeating: "T", count: 1001), pages = MusicRemoteCollectionActionsFixture.pages([])
         let collection = MusicPublicBrowseCollection(platform: .qq, nativeID: "501", title: title)
         let source = MusicRemoteCollectionActionsFixture.source(pages, collection: collection)
@@ -191,7 +191,7 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
     }
 
     func testEmptyReferenceIsSavedButBlankNameFailsBeforeAnySourceValidation() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let pages = MusicRemoteCollectionActionsFixture.pages([]), probe = MusicRemoteCollectionActionsProbe()
         let source = MusicRemoteCollectionActionsFixture.source(pages, probe: probe)
         do { _ = try await service.saveRemoteCollection(source: source, name: " \n ", intent: .init()); XCTFail("blank name") }

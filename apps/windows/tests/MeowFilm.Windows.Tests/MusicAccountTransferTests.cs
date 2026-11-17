@@ -504,7 +504,7 @@ internal sealed class TransferFixture : IAsyncDisposable
         Runtime.OnOtherCall = (call, token) => scripts.CallAsync(call.Method, call.Payload, token);
         Owner = Runtime.CreateAccountOwner(Store, detailsCacheStore: detailsCacheStore); Owner.SessionChanged += Notifications.Add;
     }
-    internal MusicNativeApplication Application() => new(Store, Runtime);
+    internal MusicNativeApplication Application() => new(Store, MusicTestStores.For(Store), Runtime);
     internal static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     internal static JsonObject Shared() => JsonNode.Parse(System.IO.File.ReadAllBytes(Path.Combine(TestWorkspace.SourceRoot,
         "tests", "fixtures", "music-account-transfer", "accounts-v1.json")))!.AsObject();

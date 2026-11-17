@@ -170,5 +170,13 @@ internal static class LJ
         var all = values.ToArray();
         return Obj((field, Arr(offset >= all.Length ? [] : all.Skip((int)offset).Take(limit))), ("total", all.Length), ("offset", offset), ("limit", limit));
     }
+    internal static JsonObject Page<T>(IEnumerable<T> values, JsonObject p, Func<T, JsonNode?> project, string field = "items")
+    {
+        long offset = p["offset"] is null ? 0 : I(p["offset"]);
+        int limit = p["limit"] is null ? 50 : (int)I(p["limit"], 1, 100);
+        var all = values.ToArray();
+        return Obj((field, Arr(offset >= all.Length ? [] : all.Skip((int)offset).Take(limit).Select(project))),
+            ("total", all.Length), ("offset", offset), ("limit", limit));
+    }
     internal static JsonObject Merge(JsonObject a, JsonObject b) { foreach (var p in b) a[p.Key] = p.Value?.DeepClone(); return a; }
 }

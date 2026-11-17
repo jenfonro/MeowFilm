@@ -99,8 +99,8 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         try await service.close(); await session.close(); await runtime.close()
     }
     func testStorageFailuresAndHostFailureAreNotEmptySourceLists() async throws {
-        let runtime = MusicScriptTestRuntime(), session = RuntimeSession(launcher: runtime)
-        let service = NativeMusicScriptService(connection: { try await session.connection() })
+        let runtime = MusicScriptTestRuntime()
+        let service = NativeMusicScriptService(connection: { try await runtime.connect() })
         await service.start()
         await runtime.fail("CORRUPT_STORAGE")
         await scriptExpectFailure(.corruptDocument) { try await service.scriptSources() }
@@ -111,7 +111,6 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         await service.start()
         let connects = await runtime.metrics().connects; XCTAssertEqual(connects, 1)
         await scriptExpectFailure(.scriptCleanupFailed) { try await service.close() }
-        await session.close()
     }
     func testDirectoryReadsKeepIdleStartingAndFailedWithoutRunningOrRetryingScripts() async throws {
         for state in [MusicScriptSourceItem.State.idle, .starting, .failed] {
@@ -538,7 +537,7 @@ extension NativeMusicScriptServiceTests {
         let qq = MusicNativeCandidateDiscoveryQQ(items: [MusicNativeCandidateDiscoveryFixture.track("tx", id: "101")])
         let http = MusicNativeDiscoveryPlatforms()
         let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("kw", id: "123"))
-        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song),
+        let service = NativeMusicService(database: try MusicNativeCandidateDiscoveryFixture.store(song: song),
             scripts: scripts,
             accounts: accounts,
             platformClient: try NativeMusicFixture.routes(primary: qq, others: http).makeClient(),

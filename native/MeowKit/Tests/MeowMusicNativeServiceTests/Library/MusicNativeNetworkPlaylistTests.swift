@@ -4,7 +4,7 @@ import MeowMusicFeature
 
 final class MusicNativeNetworkPlaylistTests: XCTestCase {
     func testIdentityUsesPlatformAndRemoteIDNotTitleAndSurvivesReopening() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let a = try await service.saveNetworkPlaylist(.init(platform: .qq, nativeID: "501", title: "Same"), intent: .init())
         let b = try await service.saveNetworkPlaylist(.init(platform: .qq, nativeID: "502", title: "Same"), intent: .init())
         let c = try await service.saveNetworkPlaylist(.init(platform: .netease, nativeID: "501", title: "Same"), intent: .init())
@@ -23,7 +23,7 @@ final class MusicNativeNetworkPlaylistTests: XCTestCase {
     }
 
     func testNetworkReferenceRejectsMembersRenameOrderAndRemoteDeletion() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let reference = try await service.saveNetworkPlaylist(.init(platform: .qq, nativeID: "501", title: "Remote"), intent: .init())
         let before = store.snapshot()
         do { _ = try await service.tracks(in: reference); XCTFail("local members") }
@@ -43,7 +43,7 @@ final class MusicNativeNetworkPlaylistTests: XCTestCase {
 
     func testLocalCancellationUsesReferenceRevisionAndCASAndCanBeSavedAgain() async throws {
         for platform in [MusicPublicBrowsePlatform.netease, .qq, .kugou] {
-            let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+            let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
             let collection = MusicPublicBrowseCollection(platform: platform, nativeID: "501", title: "Remote")
             let saved = try await service.saveNetworkPlaylist(collection, intent: .init())
             let before = store.snapshot()
@@ -78,7 +78,7 @@ final class MusicNativeNetworkPlaylistTests: XCTestCase {
     }
 
     func testKuwoAndMiguRemainLocalAcrossSaveCancelAndResave() async throws {
-        let store = NativeMusicMemoryDocument(), accounts = NativeMusicAccountFixture()
+        let store = NativeMusicTestLibrary(), accounts = NativeMusicAccountFixture()
         let service = try await NativeMusicFixture.service(store, accounts: accounts)
         for platform in [MusicPublicBrowsePlatform.kuwo, .migu] {
             let collection = MusicPublicBrowseCollection(platform: platform, nativeID: "501", title: platform.title)
@@ -96,7 +96,7 @@ final class MusicNativeNetworkPlaylistTests: XCTestCase {
     }
 
     func testKuwoAndMiguCancellationReleasesReferencesAcrossReopening() async throws {
-        let store = NativeMusicMemoryDocument(), accounts = NativeMusicAccountFixture()
+        let store = NativeMusicTestLibrary(), accounts = NativeMusicAccountFixture()
         var service = try await NativeMusicFixture.service(store, accounts: accounts)
         for nativeID in ["501", "502"] {
             var saved: [MusicCollection] = []
@@ -137,7 +137,7 @@ final class MusicNativeNetworkPlaylistTests: XCTestCase {
 
     func testKuwoAndMiguCancellationPreservesRevisionAndCASAcrossResaving() async throws {
         for platform in [MusicPublicBrowsePlatform.kuwo, .migu] {
-            let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+            let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
             let collection = MusicPublicBrowseCollection(platform: platform, nativeID: "501", title: "Remote")
             let saved = try await service.saveNetworkPlaylist(collection, intent: .init())
             let before = store.snapshot()
@@ -171,7 +171,7 @@ final class MusicNativeNetworkPlaylistTests: XCTestCase {
     }
 
     func testCurrentNetworkStorageRejectsMembersBadIdentityAndCorruptRelationshipWithoutRewrite() async throws {
-        let valid = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(valid)
+        let valid = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(valid)
         _ = try await service.saveNetworkPlaylist(.init(platform: .qq, nativeID: "501", title: "Remote"), intent: .init())
         let current = try NativeSyncFixture.document(valid)
         await service.close()
@@ -187,7 +187,7 @@ final class MusicNativeNetworkPlaylistTests: XCTestCase {
                     [MusicModel.freshCollection(rows[0]["id"].string, "Managed identity collision")])
             }
             document.library["library"]["networkReferences"] = .array(rows)
-            let bytes = try document.encode(changed: ["library"]), store = NativeMusicMemoryDocument(bytes)
+            let bytes = try document.encode(changed: ["library"]), store = NativeMusicTestLibrary(bytes)
             let reopened = try await NativeMusicFixture.service(store)
             do { _ = try await reopened.collections(); XCTFail("corrupt network storage") }
             catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
@@ -197,7 +197,7 @@ final class MusicNativeNetworkPlaylistTests: XCTestCase {
     }
 
     func testMalformedCurrentLibraryReferencesFailWithoutClearingOtherAreas() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         _ = try await MusicAccountQueueFixture.seed(service)
         _ = try await service.saveNetworkPlaylist(.init(platform: .qq, nativeID: "501", title: "Remote"), intent: .init())
         let current = try NativeSyncFixture.document(store)
@@ -205,7 +205,7 @@ final class MusicNativeNetworkPlaylistTests: XCTestCase {
         for malformed in [MJ.null, .obj(), .string("not an array")] {
             var document = current
             document.library["library"]["networkReferences"] = malformed
-            let bytes = try document.encode(changed: ["library"]), rejected = NativeMusicMemoryDocument(bytes)
+            let bytes = try document.encode(changed: ["library"]), rejected = NativeMusicTestLibrary(bytes)
             let reopened = try await NativeMusicFixture.service(rejected)
             do { _ = try await reopened.collections(); XCTFail("malformed current reference array") }
             catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }

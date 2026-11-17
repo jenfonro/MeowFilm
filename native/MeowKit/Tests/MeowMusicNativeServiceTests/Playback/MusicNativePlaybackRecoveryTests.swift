@@ -202,7 +202,7 @@ final class MusicNativePlaybackRecoveryTests: XCTestCase {
                 d.library["library"]["songs"][replacement["songId"].string] = replacement
                 entries[0]["songId"] = replacement["songId"]
                 d.queue["entries"] = .array(entries)
-                try f.store.compareAndSwap(expected: old, replacement: d.encode(changed: ["library", "queue"]))
+                try f.store.replaceSnapshot(expected: old, replacement: d.encode(changed: ["library", "queue"]))
             }
             let before = await f.accounts.counts()
             await fails(mutation == "recording" ? .targetChanged : .staleRevision) { try await f.recover() }

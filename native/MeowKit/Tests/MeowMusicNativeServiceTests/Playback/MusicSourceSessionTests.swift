@@ -38,47 +38,62 @@ private actor SourceSessionScripts: MusicScriptResolving {
     func calls() -> [MusicScriptRequest] { requests }
 }
 
-private final class SourceSessionCancellationDocument: MusicNativeDocumentStoring, @unchecked Sendable {
-    let base: NativeMusicMemoryDocument
+private final class SourceSessionCancellationDocument: NativeMusicTestLibraryWrapping, @unchecked Sendable {
+    let base: NativeMusicTestLibrary
+    var backingLibrary: NativeMusicTestLibrary { base }
     private let lock = NSLock()
-    private var remaining = 0, arms = 0, reads = 0, cancellations = 0
-    init(_ base: NativeMusicMemoryDocument) { self.base = base }
-    func arm(afterReads: Int) {
+    private let songID: String
+    private var armed = false, arms = 0, cancellations = 0
+    private var resolveTaskID: Int?, publicationTaskID: Int?
+    private var completedSongID: String?
+    init(_ base: NativeMusicTestLibrary, songID: String) { self.base = base; self.songID = songID }
+    func armAfterResolvedDeclaration() {
         lock.lock(); defer { lock.unlock() }
-        remaining = afterReads; arms += 1
+        armed = true; arms += 1
     }
-    func read() throws -> Data? {
-        lock.lock()
-        var cancel = false
-        if remaining > 0 {
-            reads += 1; remaining -= 1
-            cancel = remaining == 0
-        }
-        lock.unlock()
-        if cancel {
-            let cancelled = withUnsafeCurrentTask { task in
-                guard let task else { return false }
-                task.cancel()
-                return true
-            }
-            if cancelled {
-                lock.lock(); cancellations += 1; lock.unlock()
+    func readSnapshot() throws -> MusicNativeLibrarySnapshot {
+        let snapshot = try base.readSnapshot()
+        withUnsafeCurrentTask { task in
+            guard let task else { return }
+            lock.lock(); defer { lock.unlock() }
+            guard armed else { return }
+            // After the resolved declaration, owner admission still runs in the
+            // deadline child. Session.check runs in its caller after that child returns.
+            // Store only task identity values, never an escaping UnsafeCurrentTask.
+            if resolveTaskID == nil { resolveTaskID = task.hashValue }
+            else if resolveTaskID != task.hashValue, publicationTaskID == nil {
+                publicationTaskID = task.hashValue
             }
         }
-        return try base.read()
+        return snapshot
     }
-    func compareAndSwap(expected: Data?, replacement: Data) throws {
-        try base.compareAndSwap(expected: expected, replacement: replacement)
+    func songData(id: String) throws -> Data? {
+        let data = try base.songData(id: id)
+        withUnsafeCurrentTask { task in
+            guard let task else { return }
+            lock.lock(); defer { lock.unlock() }
+            guard armed, id == songID, data != nil, !task.isCancelled,
+                  publicationTaskID == task.hashValue else { return }
+            // inspectionCheck's final permanent-row read has actually completed;
+            // cancel its session executor, not the already-finished deadline child.
+            completedSongID = id
+            armed = false; task.cancel(); cancellations += 1
+        }
+        return data
     }
-    func injectionCounts() -> (arms: Int, reads: Int, cancellations: Int) {
+    func withTransaction<T>(commit: (_ action: () throws -> Void) throws -> Void, _ body: (any MusicNativeLibraryWriting) throws -> T) throws -> T {
+        return try base.withTransaction(commit: commit, body)
+    }
+    func injectionState() -> (arms: Int, resolveTaskID: Int?, publicationTaskID: Int?, completedSongID: String?, cancellations: Int) {
         lock.lock(); defer { lock.unlock() }
-        return (arms, reads, cancellations)
+        return (arms, resolveTaskID, publicationTaskID, completedSongID, cancellations)
     }
 }
 
 private actor SourceSessionPublicationScripts: MusicScriptResolving {
     private var cancellationDocument: SourceSessionCancellationDocument?
     private var requests: [MusicScriptRequest] = []
+    private var resolvedURLs: [URL] = []
     init(cancellingPublicationWith document: SourceSessionCancellationDocument? = nil) {
         cancellationDocument = document
     }
@@ -92,23 +107,22 @@ private actor SourceSessionPublicationScripts: MusicScriptResolving {
         guard installationID == "a" else { throw MusicServiceError.sourceUnavailable }
         if !requests.isEmpty, let document = cancellationDocument {
             cancellationDocument = nil
-            // The post-resolve declaration has five reads left: recording
-            // admission, final inspectionCheck, recording/provider admission,
-            // and session.check's owner inspectionCheck. The last read runs in the child,
-            // after the resolve deadline has already returned.
-            document.arm(afterReads: 5)
+            document.armAfterResolvedDeclaration()
         }
         return snapshot()
     }
     func resolve(request: MusicScriptRequest) -> MusicScriptResult<MusicNativeAudio> {
         requests.append(request)
-        return .init(value: .init(url: URL(string: "https://media.invalid/a/\(requests.count).flac")!,
+        let url = URL(string: "https://media.invalid/a/\(requests.count).flac")!
+        resolvedURLs.append(url)
+        return .init(value: .init(url: url,
                      delivery: .init(quality: "flac", evidence: .officialResponse, duration: 180)), source: snapshot())
     }
     func lyrics(request: MusicScriptRequest) -> MusicScriptResult<MusicNativeLyrics> {
         .init(value: .init(text: ""), source: snapshot())
     }
     func calls() -> [MusicScriptRequest] { requests }
+    func urls() -> [URL] { resolvedURLs }
 }
 
 final class MusicSourceSessionTests: XCTestCase {
@@ -355,39 +369,48 @@ final class MusicSourceSessionTests: XCTestCase {
         let song = try MusicNativeCandidateDiscoveryFixture.song()
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
         let historyBefore = try MusicDocument(store.read(), runID: "session-cancellation").history
-        let document = SourceSessionCancellationDocument(store)
+        let document = SourceSessionCancellationDocument(store, songID: song["songId"].string)
         let scripts = SourceSessionPublicationScripts(cancellingPublicationWith: document)
-        let service = NativeMusicService(document: document,
+        let service = NativeMusicService(database: document,
             scripts: scripts,
             platformClient: try MusicNativeCandidateDiscoveryQQ().makeClient(),
             enabledPlatforms: [.qq],
             clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
+        let storedBefore = store.snapshot()
         let first = Task { try await session.match(intent: .quality("flac")) }
         do { _ = try await first.value; XCTFail("Cancellation before publication must reject the first match") }
         catch { XCTAssertEqual(error as? MusicServiceError, .cancelled) }
-        let injected = document.injectionCounts()
-        XCTAssertEqual(injected.arms, 1); XCTAssertEqual(injected.reads, 5); XCTAssertEqual(injected.cancellations, 1)
-        let firstCalls = await scripts.calls()
+        let injected = document.injectionState()
+        XCTAssertEqual(injected.arms, 1); XCTAssertEqual(injected.cancellations, 1)
+        let resolveTaskID = try XCTUnwrap(injected.resolveTaskID)
+        let publicationTaskID = try XCTUnwrap(injected.publicationTaskID)
+        XCTAssertNotEqual(publicationTaskID, resolveTaskID, "Publication is checked after the resolve deadline returns")
+        XCTAssertEqual(injected.completedSongID, song["songId"].string, "Cancel only after the final owner row read completes")
+        let firstCalls = await scripts.calls(), firstURLs = await scripts.urls()
         XCTAssertEqual(firstCalls.count, 1)
+        XCTAssertEqual(firstURLs, [URL(string: "https://media.invalid/a/1.flac")!])
         var updates = await session.updates().makeAsyncIterator()
         let update = try await updates.next(), cancelled = try XCTUnwrap(update)
         XCTAssertFalse(cancelled.isLoading); XCTAssertTrue(cancelled.sources.isEmpty)
         let cancelledHistory = try await service.playedSongs(), cancelledExclusions = try await service.sourceExclusions()
         XCTAssertTrue(cancelledHistory.isEmpty); XCTAssertTrue(cancelledExclusions.isEmpty)
+        let cancelledStorage = store.snapshot()
+        XCTAssertEqual(cancelledStorage.0, storedBefore.0); XCTAssertEqual(cancelledStorage.2, storedBefore.2)
 
-        // The final owner's read finishes after its cancellation checks, so
+        // The final owner's row read finishes after its cancellation checks, so
         // publication must reject this response without exhausting its peer.
         // Retry this exact session without beginSelection, refresh, or reconstruction.
         let retried = try await session.match(intent: .quality("flac"))
         XCTAssertEqual(retried.selection.installationId, "a")
         XCTAssertEqual(retried.selection.siteId, "tx"); XCTAssertEqual(retried.selection.quality, "flac")
         XCTAssertEqual(retried.candidate.url, URL(string: "https://media.invalid/a/2.flac"))
-        let calls = await scripts.calls()
+        let calls = await scripts.calls(), urls = await scripts.urls()
         XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(urls, [URL(string: "https://media.invalid/a/1.flac")!, URL(string: "https://media.invalid/a/2.flac")!])
         XCTAssertTrue(calls.allSatisfy { $0.installationID == "a" && $0.siteID == "tx" && $0.quality == "flac" })
-        XCTAssertEqual(document.injectionCounts().cancellations, 1)
+        XCTAssertEqual(document.injectionState().cancellations, 1)
         let history = try await service.playedSongs(), exclusions = try await service.sourceExclusions()
         let discovery = try await service.sourceDiscoveryState(song)
         XCTAssertTrue(history.isEmpty); XCTAssertTrue(exclusions.isEmpty)
@@ -397,6 +420,8 @@ final class MusicSourceSessionTests: XCTestCase {
         XCTAssertEqual(queue.entries[0].track.sources.map(\.sourceKey), song["sources"].array.map { $0["sourceKey"].string })
         XCTAssertTrue(discovery.excluded.isEmpty)
         XCTAssertEqual(try MusicDocument(store.read(), runID: "session-cancellation").history, historyBefore)
+        let retriedStorage = store.snapshot()
+        XCTAssertEqual(retriedStorage.0, storedBefore.0); XCTAssertEqual(retriedStorage.2, storedBefore.2)
         await service.discardSource(attemptID: retried.candidate.attemptId)
         await service.close()
     }
@@ -404,8 +429,8 @@ final class MusicSourceSessionTests: XCTestCase {
         let song = try MusicNativeCandidateDiscoveryFixture.song()
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
         let historyBefore = try MusicDocument(store.read(), runID: "session-publication").history
-        let document = SourceSessionCancellationDocument(store), scripts = SourceSessionPublicationScripts()
-        let service = NativeMusicService(document: document,
+        let document = SourceSessionCancellationDocument(store, songID: song["songId"].string), scripts = SourceSessionPublicationScripts()
+        let service = NativeMusicService(database: document,
             scripts: scripts,
             platformClient: try MusicNativeCandidateDiscoveryQQ().makeClient(),
             enabledPlatforms: [.qq],
@@ -417,11 +442,13 @@ final class MusicSourceSessionTests: XCTestCase {
         XCTAssertEqual(first.selection.installationId, "a")
         XCTAssertEqual(first.selection.siteId, "tx"); XCTAssertEqual(first.selection.quality, "flac")
         XCTAssertEqual(reused.selection, first.selection); XCTAssertEqual(reused.candidate.url, first.candidate.url)
-        let calls = await scripts.calls()
+        let calls = await scripts.calls(), urls = await scripts.urls()
         XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(urls, [URL(string: "https://media.invalid/a/1.flac")!])
         XCTAssertTrue(calls.allSatisfy { $0.installationID == "a" && $0.siteID == "tx" && $0.quality == "flac" })
-        let injected = document.injectionCounts()
-        XCTAssertEqual(injected.arms, 0); XCTAssertEqual(injected.reads, 0); XCTAssertEqual(injected.cancellations, 0)
+        let injected = document.injectionState()
+        XCTAssertEqual(injected.arms, 0); XCTAssertEqual(injected.cancellations, 0)
+        XCTAssertNil(injected.resolveTaskID); XCTAssertNil(injected.publicationTaskID); XCTAssertNil(injected.completedSongID)
         let history = try await service.playedSongs(), exclusions = try await service.sourceExclusions()
         let discovery = try await service.sourceDiscoveryState(song)
         XCTAssertTrue(history.isEmpty); XCTAssertTrue(exclusions.isEmpty)

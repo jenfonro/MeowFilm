@@ -18,7 +18,6 @@ enum MusicModel {
         "musickey", "qqmusickey", "qmkeyst", "wxkey", "vkey",
         "userid", "t1", "dfid", "sid", "sessionid", "jsessionid"
     ]
-    static func key(_ area: String) -> String { MJ.array([.string("meowfilm"), .string("music"), .n(3), .string("device"), .string(area)]).json }
     static func freshCollection(_ id: String, _ name: String, _ kind: String = "playlist") -> MJ {
         .obj([("id", .string(id)), ("name", .string(name)), ("kind", .string(kind)), ("order", .array([])),
               ("revision", .n(0)), ("manualOrder", .bool(false)), ("bindings", .array([])), ("intents", .obj())])
@@ -27,7 +26,7 @@ enum MusicModel {
         .obj([("version", .n(2)), ("ownerId", .string("device")), ("revision", .n(0)), ("nextId", .n(1)),
               ("collections", .array([freshCollection("favorites", "我的收藏", "favorites")])),
               ("networkReferences", .array([])),
-              ("songs", .obj()), ("accounts", .obj()), ("status", .obj([("phase", .string("idle")), ("at", .n(0)), ("issues", .array([]))]))])
+              ("accounts", .obj()), ("status", .obj([("phase", .string("idle")), ("at", .n(0)), ("issues", .array([]))]))])
     }
     static var library: MJ { .obj([("schema", .n(2)), ("scope", .string("device")), ("revision", .n(0)), ("library", emptyLibrary)]) }
     static var queue: MJ { .obj([("schema", .n(1)), ("entries", .array([])), ("currentId", .null), ("priority", .array([])),

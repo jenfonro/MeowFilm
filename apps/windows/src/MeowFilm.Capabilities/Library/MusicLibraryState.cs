@@ -15,11 +15,11 @@ public sealed partial class MusicLibraryOwner
     private static JsonObject FreshCollection(string id, string name, string kind) =>
         LJ.Obj(("id", id), ("name", name), ("kind", kind), ("order", new JsonArray()), ("revision", 0), ("manualOrder", false),
             ("bindings", new JsonArray()), ("intents", new JsonObject()));
-    private JsonObject EmptyLibrary() => LJ.Obj(("version", 2), ("ownerId", scope), ("revision", 0), ("nextId", 1),
-        ("collections", new JsonArray(FreshCollection("favorites", "我的收藏", "favorites"))), ("songs", new JsonObject()),
+    private JsonObject EmptyLibrary() => LJ.Obj(("version", 3), ("ownerId", scope), ("revision", 0), ("nextId", 1),
+        ("collections", new JsonArray(FreshCollection("favorites", "我的收藏", "favorites"))),
         ("accounts", new JsonObject()), ("networkPlaylists", new JsonArray()));
-    private JsonObject LibraryState(JsonObject doc) => Value(doc, "library") as JsonObject ??
-        LJ.Obj(("schema", 2), ("scope", scope), ("revision", 0), ("library", EmptyLibrary()));
+    private JsonObject LibraryState(MusicLibraryData doc) => Value(doc, "library") as JsonObject ??
+        LJ.Obj(("schema", 3), ("scope", scope), ("revision", 0), ("library", EmptyLibrary()));
     private static JsonObject FindCollection(JsonObject library, string id) => LJ.Array(library["collections"]).OfType<JsonObject>()
         .FirstOrDefault(c => LJ.S(c["id"]) == id && !LJ.B(c["deleted"])) ?? throw new MusicLibraryException("COLLECTION_NOT_FOUND");
     private static JsonObject CollectionView(JsonObject c) => LJ.Obj(("id", c["id"]), ("name", c["name"]), ("kind", c["kind"]),
@@ -27,70 +27,66 @@ public sealed partial class MusicLibraryOwner
     private static string[] Order(JsonObject c) => LJ.Array(c["order"]).Select(n => LJ.S(n)).ToArray();
     private static long Revision(JsonObject o) => LJ.I(o["revision"]);
     private static void Increment(JsonObject o) => o["revision"] = checked(Revision(o) + 1);
-    private bool TryCurrentAreaKey(string encoded, out string area)
-    {
-        foreach (string candidate in CurrentAreas)
-            if (encoded == Key(candidate)) { area = candidate; return true; }
-        area = "";
-        return false;
-    }
-
-    private void ValidateDocument(JsonObject doc)
+    private void ValidateDocument(MusicLibraryData doc, bool all = false)
     {
         try
         {
-            LJ.Fields(doc, "version entries", "version entries");
-            LJ.Require(LJ.I(doc["version"]) == 1, "CORRUPT_STORAGE");
-            var entries = LJ.Array(doc["entries"]);
-            var keys = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var n in entries)
-            {
-                var entry = LJ.Object(n); LJ.Fields(entry, "key value", "key value");
-                string key = LJ.S(entry["key"]); LJ.Require(key.Length is > 0 and <= 8192 && keys.Add(key), "CORRUPT_STORAGE");
-                if (TryCurrentAreaKey(key, out _)) continue;
-                throw new MusicLibraryException("CORRUPT_STORAGE");
-            }
+            LJ.Require(doc.Areas.All(CurrentAreas.Contains), "CORRUPT_STORAGE");
+            var changed = all ? doc.Areas.ToHashSet(StringComparer.Ordinal) :
+                doc.AreaChanges().Keys.ToHashSet(StringComparer.Ordinal);
+            bool Check(string area) => changed.Contains(area);
+            var knownSongs = all || document is null ? null : ReferencedSongIds(document, changed);
+            bool ContainsSong(string id) => knownSongs?.Contains(id) == true || doc.Songs.Contains(id);
             JsonObject? currentLibrary = null;
-            if (HasValue(doc, "library"))
+            if (HasValue(doc, "library") && (Check("library") || Check(LibrarySyncArea)))
             {
                 var state = LJ.Object(Value(doc, "library"), "CORRUPT_LIBRARY");
                 LJ.Fields(state, "schema scope revision library", "schema scope revision library");
-                LJ.Require(LJ.I(state["schema"]) == 2 && LJ.S(state["scope"]) == scope, "CORRUPT_LIBRARY");
+                LJ.Require(LJ.I(state["schema"]) == 3 && LJ.S(state["scope"]) == scope, "CORRUPT_LIBRARY");
                 long wrapperRevision = Revision(state);
-                currentLibrary = ValidateLibrary(LJ.Object(state["library"]), scope);
+                currentLibrary = ValidateLibrary(LJ.Object(state["library"]), scope, ContainsSong);
                 LJ.Require(wrapperRevision == Revision(currentLibrary), "CORRUPT_LIBRARY");
             }
-            if (HasValue(doc, LibrarySyncArea))
+            if (HasValue(doc, LibrarySyncArea) && (Check(LibrarySyncArea) || Check("library")))
             {
                 var sync = LJ.Object(Value(doc, LibrarySyncArea), "CORRUPT_SYNC");
                 ValidateLibrarySync(sync);
                 LJ.Require(currentLibrary is not null, "CORRUPT_SYNC");
                 ValidateLibrarySyncRelations(sync, currentLibrary);
             }
-            var repository = currentLibrary?["songs"] as JsonObject ?? new();
-            if (HasValue(doc, "queue")) ValidateQueue(LJ.Object(Value(doc, "queue"), "CORRUPT_QUEUE"), true, repository);
-            if (HasValue(doc, "history")) ValidateHistory(LJ.Object(Value(doc, "history"), "CORRUPT_HISTORY"), repository);
-            if (HasValue(doc, "online-settings"))
+            foreach (var pair in doc.Songs.Changes)
+            {
+                var song = pair.Value;
+                LJ.Require(Guid.TryParseExact(pair.Key, "D", out var id) && pair.Key == id.ToString("D") &&
+                    LJ.S(song["songId"]) == pair.Key, "INVALID_SONG_ID");
+                LJ.Require(JsonNode.DeepEquals(song, NativeMusicSong.Normalize(song)), "INVALID_SONG");
+                foreach (var source in LJ.Array(song["sources"]).OfType<JsonObject>())
+                    LJ.Require(store.FindSource(LJ.S(source["sourceKey"])) is not { } owner || owner == pair.Key,
+                        "NATIVE_ID_CONFLICT");
+            }
+            if (Check("queue")) ValidateQueue(LJ.Object(Value(doc, "queue"), "CORRUPT_QUEUE"), true, ContainsSong);
+            if (Check("history")) ValidateHistory(LJ.Object(Value(doc, "history"), "CORRUPT_HISTORY"), ContainsSong);
+            if (Check("online-settings"))
             {
                 var settings = LJ.Object(Value(doc, "online-settings"), "CORRUPT_STORAGE");
                 ValidateSettings(settings);
             }
-            if (HasValue(doc, CatalogSourceArea))
+            if (Check(CatalogSourceArea))
                 ValidateCatalogSource(LJ.Object(Value(doc, CatalogSourceArea), "CORRUPT_STORAGE"));
-            if (HasValue(doc, OfficialSourcesArea))
+            if (Check(OfficialSourcesArea))
                 ValidateOfficialSources(LJ.Object(Value(doc, OfficialSourcesArea), "CORRUPT_STORAGE"));
-            if (HasValue(doc, QualityPolicyArea)) ValidateQualityPolicy(LJ.Object(Value(doc, QualityPolicyArea), "CORRUPT_STORAGE"));
-            if (HasValue(doc, MetadataPolicyArea)) ValidateMetadataPolicy(LJ.Object(Value(doc, MetadataPolicyArea), "CORRUPT_STORAGE"));
-            if (HasValue(doc, AppearanceArea)) ValidateAppearance(LJ.Object(Value(doc, AppearanceArea), "CORRUPT_STORAGE"));
-            if (HasValue(doc, DeviceSettingsArea)) ValidateDeviceSettings(LJ.Object(Value(doc, DeviceSettingsArea), "CORRUPT_STORAGE"));
-            if (HasValue(doc, DesktopLyricSettingsArea))
+            if (Check(QualityPolicyArea)) ValidateQualityPolicy(LJ.Object(Value(doc, QualityPolicyArea), "CORRUPT_STORAGE"));
+            if (Check(MetadataPolicyArea)) ValidateMetadataPolicy(LJ.Object(Value(doc, MetadataPolicyArea), "CORRUPT_STORAGE"));
+            if (Check(AppearanceArea)) ValidateAppearance(LJ.Object(Value(doc, AppearanceArea), "CORRUPT_STORAGE"));
+            if (Check(DeviceSettingsArea)) ValidateDeviceSettings(LJ.Object(Value(doc, DeviceSettingsArea), "CORRUPT_STORAGE"));
+            if (Check(DesktopLyricSettingsArea))
                 ValidateDesktopLyricSettings(LJ.Object(Value(doc, DesktopLyricSettingsArea), "CORRUPT_STORAGE"));
-            if (HasValue(doc, SourceExclusionsArea))
+            if (Check(SourceExclusionsArea))
                 ValidateSourceExclusions(LJ.Object(Value(doc, SourceExclusionsArea), "CORRUPT_STORAGE"));
-            if (HasValue(doc, SearchPolicyArea)) ValidateSearchPolicy(LJ.Object(Value(doc, SearchPolicyArea), "CORRUPT_STORAGE"));
-            if (HasValue(doc, SearchHistoryArea)) ValidateSearchHistory(LJ.Object(Value(doc, SearchHistoryArea), "CORRUPT_STORAGE"));
-            if (HasValue(doc, LocalLyricsArea)) ValidateLocalLyrics(LJ.Object(Value(doc, LocalLyricsArea), "CORRUPT_STORAGE"));
-            if (HasValue(doc, "playback-settings"))
+            if (Check(SearchPolicyArea)) ValidateSearchPolicy(LJ.Object(Value(doc, SearchPolicyArea), "CORRUPT_STORAGE"));
+            if (Check(SearchHistoryArea)) ValidateSearchHistory(LJ.Object(Value(doc, SearchHistoryArea), "CORRUPT_STORAGE"));
+            if (Check(LocalLyricsArea)) ValidateLocalLyrics(LJ.Object(Value(doc, LocalLyricsArea), "CORRUPT_STORAGE"));
+            if (Check("playback-settings"))
             {
                 var mode = LJ.Object(Value(doc, "playback-settings"), "CORRUPT_STORAGE"); LJ.Fields(mode, "schema mode", "schema mode");
                 LJ.Require(LJ.I(mode["schema"]) == 1, "CORRUPT_STORAGE"); _ = LJ.I(mode["mode"], 1, 3);
@@ -98,30 +94,37 @@ public sealed partial class MusicLibraryOwner
         }
         catch (MusicLibraryException e) when (e.Code == "INVALID_REQUEST") { throw new MusicLibraryException("CORRUPT_STORAGE"); }
     }
-    private static JsonObject ValidateLibrary(JsonObject raw, string owner)
+    private static HashSet<string> ReferencedSongIds(MusicLibraryData doc, IReadOnlySet<string> areas)
+    {
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        if ((areas.Contains("library") || areas.Contains(LibrarySyncArea)) && Value(doc, "library") is JsonObject library)
+            foreach (var collection in LJ.Array(library["library"]!["collections"]).OfType<JsonObject>())
+            {
+                ids.UnionWith(Order(collection));
+                ids.UnionWith(LJ.Object(collection["intents"]).Select(pair => pair.Key));
+                foreach (var binding in LJ.Array(collection["bindings"]).OfType<JsonObject>())
+                    ids.UnionWith(LJ.Object(binding["map"]).Select(pair => LJ.S(pair.Value)));
+            }
+        if (areas.Contains("queue") && Value(doc, "queue") is JsonObject queue)
+            ids.UnionWith(LJ.Array(queue["entries"]).Select(entry => LJ.S(entry?["songId"])));
+        if (areas.Contains("history") && Value(doc, "history") is JsonObject history)
+        {
+            foreach (var playlist in LJ.Array(history["playlists"]).OfType<JsonObject>())
+                ids.UnionWith(LJ.Array(playlist["entries"]).Select(entry => LJ.S(entry?["songId"])));
+            foreach (var day in LJ.Array(history["days"]).OfType<JsonObject>())
+                ids.UnionWith(LJ.Array(day["songs"]).Select(song => LJ.S(song?["songId"])));
+        }
+        return ids;
+    }
+    private static JsonObject ValidateLibrary(JsonObject raw, string owner, Func<string, bool> containsSong)
     {
         try
         {
-            LJ.Fields(raw, "version ownerId revision nextId collections songs accounts networkPlaylists",
-                "version ownerId revision nextId collections songs accounts networkPlaylists");
-            LJ.Require(LJ.I(raw["version"]) == 2 && LJ.S(raw["ownerId"]) == owner && LJ.Id(owner), "CORRUPT_LIBRARY");
+            LJ.Fields(raw, "version ownerId revision nextId collections accounts networkPlaylists",
+                "version ownerId revision nextId collections accounts networkPlaylists");
+            LJ.Require(LJ.I(raw["version"]) == 3 && LJ.S(raw["ownerId"]) == owner && LJ.Id(owner), "CORRUPT_LIBRARY");
             _ = Revision(raw); long next = LJ.I(raw["nextId"], 1);
-            var songs = LJ.Object(raw["songs"]); var collections = LJ.Array(raw["collections"]); var accounts = LJ.Object(raw["accounts"]);
-            var result = (JsonObject)raw.DeepClone(); var cleaned = new JsonObject();
-            var nativeOwners = new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (var pair in songs)
-            {
-                var song = LJ.Object(pair.Value, "INVALID_SONG");
-                LJ.Require(Guid.TryParseExact(pair.Key, "D", out _) && LJ.S(song["songId"]) == pair.Key, "INVALID_SONG_ID");
-                var normalized = NativeMusicSong.Normalize(song);
-                LJ.Require(JsonNode.DeepEquals(song, normalized), "INVALID_SONG");
-                foreach (var source in LJ.Array(song["sources"]).OfType<JsonObject>())
-                {
-                    string key = LJ.S(source["sourceKey"]);
-                    LJ.Require(!nativeOwners.TryGetValue(key, out string? existing) || existing == pair.Key, "NATIVE_ID_CONFLICT"); nativeOwners[key] = pair.Key;
-                }
-                cleaned[pair.Key] = song.DeepClone();
-            }
+            var collections = LJ.Array(raw["collections"]); var accounts = LJ.Object(raw["accounts"]);
             var ids = new HashSet<string>(); var remote = new HashSet<string>();
             long greatestPlaylist = 0;
             foreach (var n in collections)
@@ -131,7 +134,7 @@ public sealed partial class MusicLibraryOwner
                 string id = LJ.Text(c["id"]), kind = LJ.S(c["kind"]); _ = LJ.Text(c["name"], 200); _ = Revision(c);
                 var order = LJ.Array(c["order"]); var binds = LJ.Array(c["bindings"]); var intents = LJ.Object(c["intents"]);
                 LJ.Require(ids.Add(id) && kind is "favorites" or "playlist" && LJ.IsBool(c["manualOrder"]) &&
-                    order.All(value => value is JsonValue scalar && scalar.TryGetValue<string>(out string? songId) && songs.ContainsKey(songId)) &&
+                    order.All(value => value is JsonValue scalar && scalar.TryGetValue<string>(out string? songId) && containsSong(songId)) &&
                     order.Select(value => LJ.S(value)).Distinct(StringComparer.Ordinal).Count() == order.Count, "INVALID_COLLECTION");
                 LJ.Require(kind != "favorites" || id == "favorites" &&
                     !c.ContainsKey("deleted") && !c.ContainsKey("locallyCreated"), "INVALID_FAVORITES");
@@ -162,7 +165,7 @@ public sealed partial class MusicLibraryOwner
                     _ = NetworkPlaylistText(b["name"]);
                     LJ.Require(LJ.S(accounts[platform]) == account, "ACCOUNT_MISMATCH");
                     LJ.Require(map.All(p => p.Key.Length > 0 && p.Value is JsonValue scalar &&
-                        scalar.TryGetValue<string>(out string? songId) && songs.ContainsKey(songId)), "INVALID_BINDING");
+                        scalar.TryGetValue<string>(out string? songId) && containsSong(songId)), "INVALID_BINDING");
                 }
                 LJ.Require(binds.All(b => b is JsonObject), "INVALID_BINDING");
                 foreach (var intent in intents)
@@ -171,7 +174,7 @@ public sealed partial class MusicLibraryOwner
                     JsonArray? acknowledged = null;
                     if (i.ContainsKey("acknowledged"))
                         acknowledged = LJ.Array(i["acknowledged"], "INVALID_INTENT");
-                    LJ.Require(songs.ContainsKey(intent.Key) && LJ.IsBool(i["present"]) && LJ.IsBool(i["pending"]) &&
+                    LJ.Require(containsSong(intent.Key) && LJ.IsBool(i["present"]) && LJ.IsBool(i["pending"]) &&
                         LJ.S(i["origin"]) is "local" or "remote" &&
                         (acknowledged is null || acknowledged.All(value => value is JsonValue scalar &&
                             scalar.TryGetValue<string>(out string? binding) && bound.Contains(binding)) &&
@@ -184,8 +187,7 @@ public sealed partial class MusicLibraryOwner
             LJ.Require(accounts.All(p => SyncPlatforms.Contains(p.Key) && p.Value is JsonValue scalar &&
                 scalar.TryGetValue<string>(out string? account) && account is { Length: > 0 }), "INVALID_ACCOUNT");
             ValidateNetworkPlaylists(raw);
-            result["songs"] = cleaned;
-            return result;
+            return raw;
         }
         catch (MusicLibraryException error)
         {

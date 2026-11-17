@@ -70,6 +70,33 @@ The new runtime implementation remains application source under GPL-3.0-only.
   the application uses an installed compatible Runtime and does not bundle or
   silently install that browser runtime.
 
+## Microsoft.Data.Sqlite — MIT
+
+- NuGet packages: `Microsoft.Data.Sqlite` and `Microsoft.Data.Sqlite.Core`
+  `10.0.15`, locked in the Windows capability project and affected consumer locks.
+- Copyright (c) .NET Foundation and Contributors. The upstream MIT text is
+  identical to the existing `dotnet-runtime-MIT.txt`, which is reused.
+- Source: `https://github.com/dotnet/dotnet`, package repository commit
+  `8e0f8ed2312954727f8919d7d1c2f78b483b4ee7`.
+- Used as the Windows native music repository's ADO.NET SQLite provider;
+  no ORM or system SQLite installation is included.
+
+## SQLitePCLRaw / SQLite — Apache-2.0 / public domain
+
+- NuGet packages: `SQLitePCLRaw.bundle_e_sqlite3`, `SQLitePCLRaw.core`,
+  `SQLitePCLRaw.provider.e_sqlite3` and `SQLitePCLRaw.lib.e_sqlite3` `2.1.13`.
+- Copyright 2014-2024 SourceGear, LLC. Package license: `Apache-2.0.txt`.
+  Source: `https://github.com/ericsink/SQLitePCL.raw`.
+- The Windows `win-x64` publish uses the package's
+  `runtimes/win-x64/native/e_sqlite3.dll`; other platform assets are not
+  application runtime dependencies.
+- The SQLite engine source is public domain. Its upstream license information
+  is preserved in `sqlite-LICENSE.md`, from
+  `https://github.com/sqlite/sqlite/blob/version-3.53.3/LICENSE.md`.
+  SQLite's build-only third-party configuration scripts are not distributed.
+- iOS uses the operating system's sqlite3 through the SwiftPM `CSQLite`
+  system-library module; it does not bundle SQLitePCLRaw or another SQLite binary.
+
 ## iWebPlus / iWebPlayer — Apache-2.0
 
 - Source: `songloft-plugin-iwebplus` `b900c259d991a73768cc36a28b48539b31961668`.

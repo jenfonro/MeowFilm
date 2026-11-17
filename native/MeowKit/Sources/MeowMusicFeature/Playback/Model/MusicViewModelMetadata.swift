@@ -13,29 +13,33 @@ extension MusicViewModel {
         songRepositoryObservation = Task { [weak self] in
             let changes = await repository.songChanges()
             await self?.refreshRepositoryProjections(repository, access: access)
-            for await _ in changes {
+            for await changed in changes {
                 guard !Task.isCancelled else { return }
-                await self?.refreshRepositoryProjections(repository, access: access)
+                await self?.refreshRepositoryProjections(repository, access: access, changed: changed)
             }
         }
     }
-    func refreshRepositoryProjections(_ repository: any MusicSongRepositoryReading, access: UUID) async {
+    func refreshRepositoryProjections(_ repository: any MusicSongRepositoryReading, access: UUID, changed: Set<String>? = nil) async {
         guard !Task.isCancelled, isAvailable, !isClosed, lifecycle == access else { return }
         let projection = UUID()
+        let referenced = Set(queue.map { $0.track.songId } + playedSongs.map { $0.track.songId })
+        let ids = changed.map { referenced.intersection($0) } ?? referenced
+        guard !ids.isEmpty else { return }
         songRepositoryProjectionID = projection
-        let ids = Set(queue.map { $0.track.songId } + playedSongs.map { $0.track.songId })
         do {
             let songs = try await repository.repositoryTracks(songIDs: ids)
             try check(access)
             guard songRepositoryProjectionID == projection else { return }
             playbackState.queue = queue.map {
-                .init(id: $0.id, track: $0.track.projected(songs), sourceTitle: $0.sourceTitle,
+                guard songs[$0.track.songId] != nil else { return $0 }
+                return .init(id: $0.id, track: $0.track.projected(songs), sourceTitle: $0.sourceTitle,
                     remoteSessionID: $0.remoteSessionID, displayIdentity: $0.displayIdentity)
             }
             libraryState.playedSongs = playedSongs.map {
-                .init(date: $0.date, at: $0.at, track: $0.track.projected(songs), displayIdentity: $0.displayIdentity)
+                guard songs[$0.track.songId] != nil else { return $0 }
+                return .init(date: $0.date, at: $0.at, track: $0.track.projected(songs), displayIdentity: $0.displayIdentity)
             }
-            if let current { playbackMetadata.project(current.track) }
+            if let current, songs[current.track.songId] != nil { playbackMetadata.project(current.track) }
         } catch { /* A display read does not change queue or media admission. */ }
     }
     func configureMetadata() {

@@ -2,14 +2,14 @@
 
 ## 所有权
 
-- `MusicLibraryOwner` 是 `music.library.v2` 的唯一 writer；永久歌曲规则见[共同歌曲仓库](../common/music/smart-playback.md)，图片规则见[共享展示资源](../common/music/presentation-resources.md)。
-- 元数据平台顺序、启用集合和本地歌词均属于当前曲库文档；设置页、歌词页、平台协议和脚本不能直接写保护存储。
+- `MusicLibraryOwner` 是原生音乐数据库的唯一业务 writer；永久歌曲规则见[共同歌曲仓库](../common/music/smart-playback.md)，图片规则见[共享展示资源](../common/music/presentation-resources.md)。
+- 元数据平台顺序、启用集合和本地歌词均属于当前曲库控制 area；设置页、歌词页、平台协议和脚本不能直接写保护存储。
 - 普通设置、读取本地歌词和保存本地歌词不调用脚本服务。只有实际查询已启用洛雪音源时才进入脚本执行边界。
 - 设置控件即时保存，没有“保存设置”或“重新读取设置”按钮，也没有独立服务端配置副本。
 
-## 当前文档区域
+## 当前控制区域
 
-`music.library.v2` 只接受 `MusicLibraryState.CurrentAreas`；脚本存储不在此文档。未知区域、重复 key、非当前 schema、损坏字段或关系错误使整份文档失败，且不会写回原数据。
+音乐数据库只接受 `MusicLibraryOwner.CurrentAreas`；脚本存储不在此库。未知区域、非当前 schema、损坏字段或关系错误明确失败，不写回原数据；格式与事务见[原生曲库](music-native-library.md#唯一当前数据库)。
 
 元数据相关区域为：
 
@@ -20,7 +20,7 @@ native-local-lyrics
 
 区域尚未创建时，owner 使用当前内存默认值，表示用户尚未修改该项。区域一旦存在就必须完整通过当前校验，损坏值不能退化为默认。
 
-不兼容文档保持原样并明确失败。
+不兼容的当前控制记录保持原样并明确失败。
 
 ## 元数据平台偏好
 

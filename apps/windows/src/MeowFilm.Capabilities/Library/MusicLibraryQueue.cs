@@ -11,11 +11,11 @@ public sealed partial class MusicLibraryOwner
     internal Func<string, JsonElement?>? QueueSelectionSource { get; set; }
     private readonly HashSet<string> failedEntries = [];
     private (long Version, string Current, int Mode, string Target)? preloadNext;
-    private JsonObject Queue(JsonObject doc) => Value(doc, "queue") as JsonObject ??
+    private JsonObject Queue(MusicLibraryData doc) => Value(doc, "queue") as JsonObject ??
         LJ.Obj(("schema", 1), ("entries", new JsonArray()), ("currentId", null), ("priority", new JsonArray()), ("source", null));
-    private JsonObject History(JsonObject doc) => Value(doc, "history") as JsonObject ?? LJ.Obj(("schema", 1), ("playlists", new JsonArray()), ("days", new JsonArray()));
-    private int Mode(JsonObject doc) => Value(doc, "playback-settings") is JsonObject m ? (int)LJ.I(m["mode"], 1, 3) : 1;
-    private JsonObject Position(JsonObject q, JsonObject doc) => LJ.Obj(("currentId", q["currentId"]), ("version", queueVersion), ("mode", Mode(doc)));
+    private JsonObject History(MusicLibraryData doc) => Value(doc, "history") as JsonObject ?? LJ.Obj(("schema", 1), ("playlists", new JsonArray()), ("days", new JsonArray()));
+    private int Mode(MusicLibraryData doc) => Value(doc, "playback-settings") is JsonObject m ? (int)LJ.I(m["mode"], 1, 3) : 1;
+    private JsonObject Position(JsonObject q, MusicLibraryData doc) => LJ.Obj(("currentId", q["currentId"]), ("version", queueVersion), ("mode", Mode(doc)));
     private static string QueueText(JsonNode? value) =>
         value is JsonValue scalar && scalar.TryGetValue<string>(out var text)
             ? text : throw new MusicLibraryException("INVALID_REQUEST");
@@ -64,12 +64,12 @@ public sealed partial class MusicLibraryOwner
         LJ.Fields(source, "id title kind platform", "id title");
         foreach (var field in source) _ = QueueText(field.Value);
     }
-    private JsonObject EntryView(JsonNode? n, JsonObject doc)
+    private JsonObject EntryView(JsonNode? n, MusicLibraryData doc)
     {
         var e = LJ.Object(n);
         return LJ.Obj(("id", e["id"]), ("key", e["songId"]), ("song", EntrySong(doc, e)), ("context", ContextView(e["context"])));
     }
-    private static void ValidateQueue(JsonObject q, bool schema, JsonObject repository)
+    private static void ValidateQueue(JsonObject q, bool schema, Func<string, bool> containsSong)
     {
         try
         {
@@ -96,7 +96,7 @@ public sealed partial class MusicLibraryOwner
                 string id = LJ.S(entry["id"]);
                 LJ.Require(Regex.IsMatch(id, "^entry-[1-9][0-9]*$", RegexOptions.CultureInvariant, NativeMusicSong.RegexTimeout) &&
                     long.TryParse(id[6..], out long serial) && serial <= LJ.MaxInteger && ids.Add(id), "CORRUPT_QUEUE");
-                LJ.Require(repository.ContainsKey(LJ.S(entry["songId"])), "CORRUPT_QUEUE");
+                LJ.Require(containsSong(LJ.S(entry["songId"])), "CORRUPT_QUEUE");
                 ValidateContext(LJ.Object(entry["context"], "CORRUPT_QUEUE"));
             }
             string current = LJ.S(q["currentId"]);
@@ -120,7 +120,7 @@ public sealed partial class MusicLibraryOwner
         }
         catch (MusicLibraryException e) when (e.Code != "LIMIT") { throw new MusicLibraryException("CORRUPT_QUEUE"); }
     }
-    private static void ValidateHistory(JsonObject history, JsonObject repository)
+    private static void ValidateHistory(JsonObject history, Func<string, bool> containsSong)
     {
         try
         {
@@ -131,7 +131,7 @@ public sealed partial class MusicLibraryOwner
             var ids = new HashSet<string>();
             foreach (var a in playlists.OfType<JsonObject>())
             {
-                ValidateQueue(a, false, repository);
+                ValidateQueue(a, false, containsSong);
                 LJ.Require(ids.Add(LJ.S(a["id"])), "CORRUPT_HISTORY");
             }
             LJ.Require(playlists.All(p => p is JsonObject), "CORRUPT_HISTORY"); ids.Clear();
@@ -145,7 +145,7 @@ public sealed partial class MusicLibraryOwner
                 foreach (var row in songs.OfType<JsonObject>())
                 {
                     LJ.Fields(row, "songId context at", "songId context at");
-                    LJ.Require(repository.ContainsKey(LJ.S(row["songId"])), "CORRUPT_HISTORY");
+                    LJ.Require(containsSong(LJ.S(row["songId"])), "CORRUPT_HISTORY");
                     ValidateContext(LJ.Object(row["context"], "CORRUPT_HISTORY"));
                     long at = LJ.I(row["at"], 1);
                     LJ.Require(at <= previous, "CORRUPT_HISTORY");
@@ -168,7 +168,7 @@ public sealed partial class MusicLibraryOwner
         LJ.Require(serial < LJ.MaxInteger, "LIMIT"); var c = (JsonObject)context.DeepClone(); c.Remove("queueSource");
         return LJ.Obj(("id", "entry-" + ++serial), ("songId", LJ.S(song["songId"])), ("context", c));
     }
-    private void Archive(JsonObject previous, JsonObject doc)
+    private void Archive(JsonObject previous, MusicLibraryData doc)
     {
         var entries = LJ.Array(previous["entries"]); if (entries.Count < 2) return;
         var history = History(doc);
@@ -185,13 +185,13 @@ public sealed partial class MusicLibraryOwner
         if (remember && current.Length > 0 && current != id) { history.Add(current); if (history.Count > 100) history.RemoveAt(0); }
         q["currentId"] = id; q["priority"] = LJ.Arr((q["priority"] as JsonArray ?? []).Select(n => LJ.S(n)).Where(s => s != id));
     }
-    private (JsonObject Result, bool Mutate) QueueCommand(string method, JsonObject p, JsonObject doc, bool full)
+    private (JsonObject Result, bool Mutate) QueueCommand(string method, JsonObject p, MusicLibraryData doc, bool full)
     {
         var q = Queue(doc); var entries = LJ.Array(q["entries"]); string current = LJ.S(q["currentId"]);
         if (method == "music.queue.get")
         {
             LJ.Fields(p, "offset limit");
-            return (LJ.Merge(LJ.Page(entries.Select(e => EntryView(e, doc)), p, "entries"),
+            return (LJ.Merge(LJ.Page(entries, p, e => EntryView(e, doc), "entries"),
                 LJ.Merge(Position(q, doc), LJ.Obj(("current", entries.FirstOrDefault(e => LJ.S(e?["id"]) == current) is { } e ? EntryView(e, doc) : null),
                     ("source", SourceView(q["source"])), ("hasPriority", LJ.Array(q["priority"]).Count > 0),
                     ("persistence", LJ.Obj(("state", "saved")))))), false);
@@ -239,7 +239,7 @@ public sealed partial class MusicLibraryOwner
                 {
                     LJ.Fields(p, "id ifRevision index", "id ifRevision index"); var library = LJ.Object(LibraryState(doc)["library"]); var c = FindCollection(library, LJ.Text(p["id"]));
                     LJ.Require(Revision(c) == LJ.I(p["ifRevision"]), "REVISION_CONFLICT");
-                    songs = Order(c).Select(id => NativeMusicSong.Normalize(LJ.Object(library["songs"])[id])).ToArray();
+                    songs = Order(c).Select(id => SongReference(doc, JsonValue.Create(id))).ToArray();
                     index = (int)LJ.I(p["index"], 0, songs.Length - 1);
                     context = LJ.Obj(("playlistId", c["id"]), ("sourceTitle", c["name"]), ("queueSource", LJ.Obj(("id", c["id"]), ("title", c["name"]), ("kind", c["kind"]))));
                 }
@@ -340,7 +340,7 @@ public sealed partial class MusicLibraryOwner
         Set(doc, "queue", q);
         return (LJ.Merge(result ?? new JsonObject(), Position(q, doc)), true);
     }
-    private (JsonObject Result, bool Mutate) HistoryCommand(string method, JsonObject p, JsonObject doc)
+    private (JsonObject Result, bool Mutate) HistoryCommand(string method, JsonObject p, MusicLibraryData doc)
     {
         var h = History(doc);
         if (method is "music.history.list" or "music.history.detail" or "music.history.get")
@@ -353,9 +353,9 @@ public sealed partial class MusicLibraryOwner
                     LJ.Obj(("id", v["date"]), ("date", v["date"]), ("count", LJ.Array(v["songs"]).Count))), p), false);
             string id = LJ.Text(p["id"]); var item = list.OfType<JsonObject>().FirstOrDefault(i => LJ.S(i[kind == "playlists" ? "id" : "date"]) == id)
                 ?? throw new MusicLibraryException("HISTORY_NOT_FOUND");
-            return kind == "days" ? (LJ.Merge(LJ.Page(LJ.Array(item["songs"]).OfType<JsonObject>().Select(v =>
-                LJ.Obj(("song", SongReference(doc, v["songId"])), ("context", ContextView(v["context"])), ("at", v["at"]))), p), LJ.Obj(("id", id), ("date", id))), false) :
-                (LJ.Merge(LJ.Page(LJ.Array(item["entries"]).Select(e => EntryView(e, doc)), p, "entries"), LJ.Obj(("id", id), ("title", item["title"]), ("at", item["at"]), ("currentId", item["currentId"]), ("source", SourceView(item["source"])))), false);
+            return kind == "days" ? (LJ.Merge(LJ.Page(LJ.Array(item["songs"]).OfType<JsonObject>(), p, v =>
+                LJ.Obj(("song", SongReference(doc, v["songId"])), ("context", ContextView(v["context"])), ("at", v["at"]))), LJ.Obj(("id", id), ("date", id))), false) :
+                (LJ.Merge(LJ.Page(LJ.Array(item["entries"]), p, e => EntryView(e, doc), "entries"), LJ.Obj(("id", id), ("title", item["title"]), ("at", item["at"]), ("currentId", item["currentId"]), ("source", SourceView(item["source"])))), false);
         }
         LJ.Require(pending is null, "PENDING_WRITE");
         switch (method)

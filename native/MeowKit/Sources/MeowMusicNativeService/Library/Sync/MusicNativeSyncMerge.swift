@@ -6,7 +6,6 @@ import MeowMusicFeature
 
 extension NativeMusicService {
     func syncMerge(_ round: inout MusicNativeSyncRound) throws {
-        round.library["songs"] = try read().library["library"]["songs"]
         var lib = round.library, collections = lib["collections"].array
         var firstBindings = Set<String>()
         for selection in round.request.selections {
@@ -73,7 +72,7 @@ extension NativeMusicService {
                 let oldMap = b["map"]
                 var mapping = oldMap, sequence: [String] = [], actualSongs = Set<String>()
                 for member in remote.members {
-                    let id = try registeredSongID(.init(platform: selection.platform.rawValue, data: member.track), library: lib)
+                    let id = try registeredSongID(.init(platform: selection.platform.rawValue, data: member.track))
                     mapping[member.occurrenceID] = .string(id); sequence.append(id); actualSongs.insert(id)
                 }
                 if firstBindings.contains(MusicNativeSyncLogic.bindingKey(b)) { firstImported.formUnion(actualSongs) }

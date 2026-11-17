@@ -1,10 +1,8 @@
-using System.Text.Json.Nodes;
-
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    internal async Task<IReadOnlyList<JsonObject>> ReadMatchingSongsAsync(CancellationToken cancellationToken)
+    internal async Task<IReadOnlySet<string>> ReadMatchingSongIdsAsync(IEnumerable<string> ids, CancellationToken cancellationToken)
     {
         await EnterAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -14,9 +12,8 @@ public sealed partial class MusicLibraryOwner
             cancellationToken.ThrowIfCancellationRequested();
             var attempt = pending ?? recommendationUnknown;
             LJ.Require(attempt is null, attempt?.Code ?? "PENDING_WRITE");
-            var library = LJ.Object(LibraryState(document!)["library"]);
-            var songs = LJ.Object(library["songs"]);
-            return songs.Select(pair => LJ.Object(pair.Value).DeepClone().AsObject()).ToArray();
+            var songs = new MusicSongSession(store);
+            return ids.Distinct(StringComparer.Ordinal).Where(songs.Contains).ToHashSet(StringComparer.Ordinal);
         }
         finally { gate.Release(); }
     }

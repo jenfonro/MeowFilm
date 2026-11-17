@@ -21,7 +21,7 @@ public static class MusicMetadataPolicyTests
         {
             var reverse = Platforms.Reverse().ToArray();
             Ok(await owner.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 0, platforms = reverse, enabled = Array.Empty<string>() }));
-            await using var reopened = new MusicLibraryOwner(store);
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
             var settings = Ok(await reopened.ExecuteAsync("music.metadata.settings.get")).GetProperty("settings");
             Equal(string.Join(',', reverse), string.Join(',', settings.GetProperty("platforms").EnumerateArray().Select(x => x.GetString())));
             Equal(0, settings.GetProperty("enabled").GetArrayLength()); Equal(1L, settings.GetProperty("revision").GetInt64());
@@ -72,7 +72,7 @@ public static class MusicMetadataPolicyTests
             var listed = detail.GetProperty("songs")[0];
             Equal(selected, listed.GetProperty("cover_url").GetString());
             Ok(await owner.ExecuteAsync("music.queue.replace", new { songs = new[] { listed }, index = 0 }));
-            await using var cold = new MusicLibraryOwner(store);
+            await using var cold = new MusicLibraryOwner(MusicTestStores.For(store));
             var current = Ok(await cold.ExecuteAsync("music.queue.get")).GetProperty("current").GetProperty("song");
             Equal(listed.GetProperty("songId").GetString(), current.GetProperty("songId").GetString());
             Equal(selected, current.GetProperty("cover_url").GetString());
@@ -92,10 +92,10 @@ public static class MusicMetadataPolicyTests
         {
             Ok(await owner.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 0, platforms = Platforms, enabled = Platforms }));
             var document = JsonNode.Parse(store.Data!)!.AsObject();
-            var entry = document["entries"]!.AsArray().OfType<JsonObject>().Single();
-            entry["value"]!["enabled"] = new JsonArray("not-a-platform");
+            var entry = document["areas"]!.AsObject().Single().Value!;
+            entry["enabled"] = new JsonArray("not-a-platform");
             store.Data = Encoding.UTF8.GetBytes(document.ToJsonString());
-            await using var reopened = new MusicLibraryOwner(store);
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
             Code(await reopened.ExecuteAsync("music.metadata.settings.get"), "CORRUPT_STORAGE");
         });
         yield return Case("local lyrics use an exact local identity with no online source key", async (owner, _) =>
@@ -169,7 +169,7 @@ public static class MusicMetadataPolicyTests
     private static TestCase Case(string name, Func<MusicLibraryOwner, Store, Task> body) =>
         new("Native metadata policy " + name, async () =>
         {
-            await using var store = new Store(); var owner = new MusicLibraryOwner(store);
+            await using var store = new Store(); var owner = new MusicLibraryOwner(MusicTestStores.For(store));
             try { await body(owner, store); } finally { await owner.AbortAsync(); }
         });
     private static JsonElement LocalSong(string id = "one") =>
@@ -181,24 +181,7 @@ public static class MusicMetadataPolicyTests
     { if (!result.GetProperty("ok").GetBoolean()) throw new InvalidOperationException(result.GetProperty("code").GetString()); return result; }
     private static void Code(JsonElement result, string code)
     { Check(!result.GetProperty("ok").GetBoolean()); Equal(code, result.GetProperty("code").GetString()); }
-    private sealed class Store : IDocumentStore
+    private sealed class Store : MusicRecordTestStore
     {
-        internal byte[]? Data;
-        internal int Writes;
-        internal bool FailAfterWrite;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
-        {
-            token.ThrowIfCancellationRequested(); Equal(MusicLibraryOwner.DocumentNamespace, ns);
-            return Task.FromResult(new DocumentSnapshot(Data?.ToArray(), Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data)));
-        }
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
-        {
-            token.ThrowIfCancellationRequested(); Equal(MusicLibraryOwner.DocumentNamespace, ns);
-            Equal(Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data), expected);
-            Data = data.ToArray(); Writes++;
-            if (FailAfterWrite) { FailAfterWrite = false; throw new DocumentStoreException(DocumentStoreError.Unavailable); }
-            return Task.FromResult(DocumentFingerprint.FromBytes(Data));
-        }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

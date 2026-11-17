@@ -25,7 +25,7 @@ public static partial class MusicNativeLibraryTests
             result.GetProperty("version").GetInt64() == version + 1 && result.GetProperty("mode").GetInt32() == 2);
         Check(!result.TryGetProperty("entryIds", out _) && f.Store.Writes == writes + 1);
         var entries = f.Store.State("queue")["entries"]!.AsArray();
-        var repository = f.Store.State("library")["library"]!["songs"]!.AsObject();
+        var repository = f.Store.Root["songs"]!.AsObject();
         var expected = new[] { "library:local:a" }.Concat(Enumerable.Range(0, 1005).Select(i => "library:local:" + (i == 501 ? "0" : i.ToString())))
             .Concat(new[] { "library:local:prior", "library:local:b", "library:local:c" });
         Check(entries.Select(e => repository[e!["songId"]!.GetValue<string>()]!["localFileId"]!.GetValue<string>()).SequenceEqual(expected));

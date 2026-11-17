@@ -5,7 +5,7 @@ import XCTest
 
 final class MusicOfficialSourceSettingsTests: XCTestCase {
     func testDefaultIsReadOnlyAndThreeIndependentSwitchesPersistIncludingAllOff() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         var state = try await service.state()
         XCTAssertEqual(state.officialSources, MusicAccountPlatform.allCases)
         XCTAssertNil(store.snapshot().0); XCTAssertEqual(store.snapshot().2, 0)
@@ -33,7 +33,7 @@ final class MusicOfficialSourceSettingsTests: XCTestCase {
         for value in [MJ.null, .string("tx"), .strings(["wy", "wy"]), .strings(["kw"]), .array([.n(1)])] {
             var document = try MusicDocument(nil, runID: "test")
             document.playback["officialSources"] = value
-            let store = NativeMusicMemoryDocument(try document.encode(changed: ["playback"]))
+            let store = NativeMusicTestLibrary(try document.encode(changed: ["playback"]))
             let service = try await NativeMusicFixture.service(store)
             await scriptExpectFailure(.corruptDocument) { try await service.state() }
             await service.close()
@@ -44,7 +44,7 @@ final class MusicOfficialSourceSettingsTests: XCTestCase {
         var document = try MusicDocument(nil, runID: "test")
         XCTAssertEqual(document.playback["officialSources"].strings, MusicAccountPlatform.allCases.map(\.rawValue))
         document.playback.remove("officialSources")
-        let bytes = try document.encode(changed: ["playback"]), store = NativeMusicMemoryDocument(bytes)
+        let bytes = try document.encode(changed: ["playback"]), store = NativeMusicTestLibrary(bytes)
         let service = try await NativeMusicFixture.service(store)
         await scriptExpectFailure(.corruptDocument) { try await service.state() }
         await scriptExpectFailure(.corruptDocument) {

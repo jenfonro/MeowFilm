@@ -18,7 +18,7 @@ enum MusicNativeCandidateDiscoveryFixture {
         return .init(platform: platform, data: data.bytes)
     }
     static func song() throws -> MJ { try NativeMusicFixture.storedSong(track()) }
-    static func store(song: MJ? = nil) throws -> NativeMusicMemoryDocument {
+    static func store(song: MJ? = nil) throws -> NativeMusicTestLibrary {
         var document = try MusicDocument(nil, runID: "fixture")
         var value = try song ?? self.song()
         if value["songId"].string.isEmpty { value["songId"] = .string(UUID().uuidString.lowercased()) }
@@ -27,8 +27,8 @@ enum MusicNativeCandidateDiscoveryFixture {
         document.queue["entries"] = .array([.obj([("id", .string("entry-1")), ("songId", value["songId"])])])
         document.queue["currentId"] = .string("entry-1"); document.queue["serial"] = .n(1); document.queue["revision"] = .n(1)
         document.playback["position"] = .obj([("occurrenceId", .string("entry-1")), ("seconds", .n(23))])
-        try document.validate()
-        return NativeMusicMemoryDocument(try document.encode(changed: ["library", "queue", "playback"]))
+        _ = try MusicDocument(try document.fixtureData(), runID: "fixture")
+        return NativeMusicTestLibrary(try document.encode(changed: ["library", "queue", "playback"]))
     }
     static func target(_ snapshot: MusicCandidateDiscoverySnapshot, platform: String = "wy") -> MusicCandidateDiscoveryTarget? {
         snapshot.options.first { $0.playback.siteId == platform }?.target(quality: "128k")

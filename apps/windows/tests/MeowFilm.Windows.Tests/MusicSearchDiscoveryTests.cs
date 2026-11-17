@@ -8,7 +8,6 @@ using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.Search;
-using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -98,21 +97,11 @@ public static class MusicSearchDiscoveryTests
         internal async Task Block(CancellationToken token)
         { using var registration = token.Register(() => Cancelled.TrySetResult()); Entered.TrySetResult(); await Release.Task; }
     }
-    private sealed class Store : IDocumentStore
-    {
-        private readonly MusicPlatformRuntimeFixture.MemoryStore inner = new();
-        internal Hold? Hold;
-        internal int Writes, Disposals;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
-        { Writes++; if (Hold is { } hold) await hold.Block(token); return await inner.WriteAsync(ns, data, expected, token); }
-        public async ValueTask DisposeAsync() { Disposals++; await inner.DisposeAsync(); }
-    }
     private sealed class Fixture : IAsyncDisposable
     {
         internal readonly Sessions Sessions = new();
         internal readonly MusicPlatformRuntimeFixture Runtime = new();
-        internal readonly Store Store = new();
+        internal readonly MusicRecordTestStore Store = new();
         internal readonly MusicLibraryOwner Library;
         internal readonly NativeMusicSearchDiscovery Service;
         internal Func<MusicPlatformRuntimeFixture.Call, CancellationToken, Task<JsonElement>>? Reply;
@@ -127,7 +116,7 @@ public static class MusicSearchDiscoveryTests
         {
             var hold = new Hold(); Holds.Add(hold);
             if (boundary == "publication") Runtime.OnSessionUpdate = async (_, token) => { await hold.Block(token); return MusicPlatformRuntimeFixture.Json(new { published = true }); };
-            else if (boundary == "metadata") Store.Hold = hold;
+            else if (boundary == "metadata") Store.BeforeCommit = (_, token) => hold.Block(token);
             else Reply = async (_, token) => { await hold.Block(token); return Data(); };
             return hold;
         }
@@ -234,7 +223,7 @@ public static class MusicSearchDiscoveryTests
     private static async Task FailureCase(string code)
     {
         await using var f = new Fixture(); f.Reply = (_, _) => throw new MusicPlatformException(code);
-        await Failure(code, () => f.Service.ReadAsync()); Check(f.Store.Writes == 0 && f.Runtime.Requests.Count == 1);
+        await Failure(code, () => f.Service.ReadAsync()); Check(f.Store.WriteCalls == 0 && f.Store.Writes == 0 && f.Runtime.Requests.Count == 1);
     }
     private static async Task FailedRefresh()
     {
@@ -276,6 +265,8 @@ public static class MusicSearchDiscoveryTests
         var read = f.Service.ReadAsync(cancellationToken: cancel.Token); await Wait(hold.Entered.Task); Task? cleanup = null;
         try
         {
+            if (boundary == "metadata") Check(f.Store.WriteCalls == 1 && f.Store.Writes == 0 && f.Store.SongIds().Count == 0,
+                "Metadata hold must precede the actual SQLite write");
             switch (action)
             {
                 case "cancel": cancel.Cancel(); break;
@@ -290,12 +281,17 @@ public static class MusicSearchDiscoveryTests
                 if (boundary != "metadata") await Wait(hold.Cancelled.Task);
                 await Task.Delay(30); Check(!read.IsCompleted && (cleanup is null || !cleanup.IsCompleted));
             }
+            if (boundary == "metadata") Check(!hold.Cancelled.Task.IsCompleted && !f.Store.Disposed &&
+                f.Store.Writes == 0 && f.Store.SongIds().Count == 0,
+                "An admitted metadata commit must remain owned until physical settlement");
         }
         finally { hold.Release.TrySetResult(); }
         await Failure(action switch { "timeout" => "TIMEOUT", "invalidate" => "STALE_SESSION", "close" => "CLOSED", _ => "CANCELLED" }, () => read);
         if (cleanup is not null) await cleanup;
         if (action == "cancel") Check((await f.Service.ReadAsync()).Charts.Length == 3);
-        Check(f.Runtime.Disposals == 0 && f.Store.Disposals == 0);
+        if (boundary == "metadata") Check(f.Store.WriteCalls == 1 && f.Store.Writes == 1 && f.Store.SongIds().Count == 60,
+            "Metadata must settle once without cancelling or replaying the admitted SQLite commit");
+        Check(f.Runtime.Disposals == 0 && !f.Store.Disposed);
     }
     private static async Task Replacement(bool refresh)
     {
@@ -358,7 +354,7 @@ public static class MusicSearchDiscoveryTests
         Check((await f.Service.ReadAsync()).Generation == saved.Generation && f.Runtime.Requests.Count == 1);
         var first = f.Service.DisposeAsync().AsTask(); var second = f.Service.DisposeAsync().AsTask(); Check(ReferenceEquals(first, second)); await first;
         await Failure("CLOSED", () => f.Service.ReadAsync()); await Failure("CLOSED", () => Task.FromResult(f.Service.Rotate(saved.Generation)));
-        f.Service.Invalidate(); await f.Service.CancelAndDrainAsync(); Check(f.Runtime.Disposals == 0 && f.Store.Disposals == 0);
+        f.Service.Invalidate(); await f.Service.CancelAndDrainAsync(); Check(f.Runtime.Disposals == 0 && !f.Store.Disposed);
     }
     private static async Task RotateFence()
     {

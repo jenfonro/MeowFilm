@@ -470,9 +470,8 @@ extension NativeMusicService: MusicHomeBrowsing {
                                       source: load.source, epoch: own, songs: songs)
             current.nextCursor = page.cursor
             current.sections = cursor == nil ? value.sections : mergeHomeSections(current.sections, value.sections)
-            let repository = try read().library["library"]["songs"]
-            let display = try MusicNativeHomeSnapshot.references(.init(sections: current.sections), songs: repository)
-            let cachedDisplay = try MusicNativeHomeSnapshot.references(value, songs: repository)
+            let display = try MusicNativeHomeSnapshot.references(.init(sections: current.sections), sourceOwner: { try repositoryReader.sourceOwner(key: $0) })
+            let cachedDisplay = try MusicNativeHomeSnapshot.references(value, sourceOwner: { try repositoryReader.sourceOwner(key: $0) })
             return try access.perform {
                 // Section errors are failed reads, never a new empty snapshot.
                 guard value.sections.allSatisfy({ $0.error == nil }) else { return page }

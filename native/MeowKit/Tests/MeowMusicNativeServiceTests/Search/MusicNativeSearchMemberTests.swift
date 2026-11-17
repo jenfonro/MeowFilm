@@ -43,7 +43,7 @@ final class MusicNativeSearchMemberTests: XCTestCase {
         let good = try MusicPlatformFixture.song(MusicNativePublicBrowseFixture.track("17"))
         let bad: RuntimeValue = .object(["title": .string("No locator"), "sources": .array([])])
         let peer = NativeMusicResultFixture([.object(["id": .string("41"), "items": .array([good, bad]), "total": .number(2)])])
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
         await assertMusicFailure(.upstreamInvalid) { _ = try await service.publicDetail(self.collection, cursor: nil) }
         XCTAssertNil(store.snapshot().0); XCTAssertEqual(store.snapshot().2, 0)
         await service.close()
@@ -72,7 +72,7 @@ final class MusicNativeSearchMemberTests: XCTestCase {
         let peer = NativeMusicResultFixture([try MusicNativePublicBrowseFixture.page([], total: 31, consumed: 30,
             continuation: .object(["page": .number(2), "offset": .number(30)])),
             try MusicNativePublicBrowseFixture.page(["31"], total: 31, positions: [30])])
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
         let first = try await service.publicDetail(collection, cursor: nil)
         XCTAssertTrue(first.tracks.isEmpty); XCTAssertEqual(first.consumed, 30); XCTAssertEqual(store.snapshot().2, 0)
         let second = try await service.publicDetail(collection, cursor: XCTUnwrap(first.cursor))
@@ -92,7 +92,7 @@ final class MusicNativeSearchMemberTests: XCTestCase {
     func testCurrentDetailMetadataChangesWithoutChangingPermanentReferenceOrQueue() async throws {
         let peer = NativeMusicResultFixture([try MusicNativePublicBrowseFixture.page(["17"]),
             try MusicNativePublicBrowseFixture.page(["17"], title: "Current collection")])
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
         let first = try await service.publicDetail(collection, cursor: nil), before = try await service.read()
         let current = try await service.publicDetail(collection, cursor: nil), after = try await service.read()
         XCTAssertEqual(first.tracks[0].songId, current.tracks[0].songId); XCTAssertEqual(current.collection.title, "Current collection")

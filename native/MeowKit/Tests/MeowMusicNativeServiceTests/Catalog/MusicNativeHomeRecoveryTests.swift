@@ -151,7 +151,7 @@ private actor RecoveryHomePeer: MusicPlatformFixtureResponding {
 final class MusicNativeHomeRecoveryTests: XCTestCase {
     private func service(_ account: RecoveryHomeAccount, store: RecoveryHomeStore = .init(),
                          http: any MusicPlatformFixtureResponding = NativeMusicResultFixture(failure: .upstreamFailed)) async throws -> NativeMusicService {
-        let value = NativeMusicService(document: NativeMusicMemoryDocument(),
+        let value = NativeMusicService(database: NativeMusicTestLibrary(),
             accounts: account,
             platformClient: try http.makeClient(),
             enabledPlatforms: [.netease, .kugou],

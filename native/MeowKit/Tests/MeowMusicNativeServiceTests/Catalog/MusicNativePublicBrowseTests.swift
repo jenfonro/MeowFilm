@@ -32,7 +32,7 @@ final class MusicNativePublicBrowseTests: XCTestCase {
     func testWYPlaylistSearchUsesCanonicalCollectionsWithoutSongsScriptsOrAccounts() async throws {
         let peer = NativeMusicResultFixture([.object(["items": .array([.object(["id": .string(MusicNativePublicBrowseFixture.id),
             "name": .string("Synthetic"), "count": .number(1)])]), "total": .number(1)])])
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
         let page = try await service.publicPlaylists(platform: .netease, query: "test", cursor: nil)
         XCTAssertEqual(page.items.first?.nativeID, MusicNativePublicBrowseFixture.id); XCTAssertNil(page.cursor)
         XCTAssertNil(store.snapshot().0); XCTAssertEqual(store.snapshot().2, 0)
@@ -117,7 +117,7 @@ final class MusicNativePublicBrowseTests: XCTestCase {
         let peer = NativeMusicResultFixture([try MusicNativePublicBrowseFixture.page([], total: 31, consumed: 30, continuation: .object(["page": .number(2)])),
             try MusicNativePublicBrowseFixture.page(["31"], total: 31, positions: [30]),
             try MusicNativePublicBrowseFixture.page(["31"], total: 31, positions: [30])])
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
         let first = try await service.publicDetail(MusicNativePublicBrowseFixture.collection, cursor: nil)
         XCTAssertTrue(first.tracks.isEmpty); XCTAssertEqual(first.consumed, 30)
         let second = try await service.publicDetail(first.collection, cursor: XCTUnwrap(first.cursor))
@@ -128,7 +128,7 @@ final class MusicNativePublicBrowseTests: XCTestCase {
         let saved = try await service.saveRemoteCollection(source: source, name: "Incomplete", intent: .init())
         XCTAssertEqual(saved.networkReference?.remoteID, "41"); XCTAssertEqual(saved.count, 31)
         let after = try await service.read(); XCTAssertEqual(after.queue, before.queue); XCTAssertEqual(after.playback, before.playback)
-        XCTAssertEqual(after.library["library"]["songs"], before.library["library"]["songs"]); XCTAssertEqual(store.snapshot().2, writes + 1)
+        XCTAssertEqual((try after.fixtureSongs()), (try before.fixtureSongs())); XCTAssertEqual(store.snapshot().2, writes + 1)
         await source.close(); await service.close()
     }
     func testWYAllUnavailableQueueIsContentUnavailableNotAuthenticationFailure() async throws {

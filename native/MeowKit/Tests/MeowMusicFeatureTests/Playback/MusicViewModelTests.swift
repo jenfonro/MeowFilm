@@ -18,7 +18,7 @@ private let musicOfficialSelection = MusicPlaybackSelection(installationId: "off
 /// Business-port fixture, not a real platform, document or media engine.
 private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     MusicCachedPlaybackRecoveryServing, MusicResolvedSourcesServing, MusicAccountBrowsing, MusicArtworkSelecting,
-    MusicSongRepositoryReading, MusicPublicBrowsing, MusicPublicPlaylistSearching {
+    MusicSongRepositoryReading, MusicCollectionMembershipServing, MusicPublicBrowsing, MusicPublicPlaylistSearching {
     static let songID = "D0000000-0000-4000-8000-000000000001"
     var entries: [MusicQueueEntry] = (1...3).map { index in
         MusicQueueEntry(id: "entry-\(index)", track: MusicRemoteTrack(
@@ -55,22 +55,31 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     }
     var historyItems: [MusicPlayedSong] = []
     private var repositoryRecords: [String: MusicRemoteTrack] = [:]
-    private var repositoryObservers: [UUID: AsyncStream<Void>.Continuation] = [:]
+    private var repositoryObservers: [UUID: AsyncStream<Set<String>>.Continuation] = [:]
+    private var repositoryRequests: [Set<String>] = []
+    func repositoryReadRequests() -> [Set<String>] { repositoryRequests }
+    func resetRepositoryReadRequests() { repositoryRequests = [] }
+    func finishRepositoryNotifications() { repositoryObservers.values.forEach { $0.finish() } }
     private var repositoryGate: MusicCollectionGate?
+    func setProjectionTracks(_ tracks: [MusicRemoteTrack]) {
+        entries = tracks.enumerated().map { .init(id: "entry-\($0.offset + 1)", track: $0.element) }
+        current = entries.first?.id ?? ""
+    }
     func setSearchItems(_ items: [MusicRemoteTrack]) { searchItems = items }
     func setHistoryItems(_ items: [MusicPlayedSong]) { historyItems = items }
     func publishRepository(_ tracks: [MusicRemoteTrack]) {
         for track in tracks { repositoryRecords[track.songId] = track }
-        for observer in repositoryObservers.values { observer.yield(()) }
+        for observer in repositoryObservers.values { observer.yield(Set(tracks.map(\.songId))) }
     }
     func blockRepository(_ gate: MusicCollectionGate) { repositoryGate = gate }
     func repositoryTracks(songIDs: Set<String>) async -> [String: MusicRemoteTrack] {
+        repositoryRequests.append(songIDs)
         let result = repositoryRecords.filter { songIDs.contains($0.key) }
         if let gate = repositoryGate { repositoryGate = nil; await gate.wait() }
         return result
     }
-    func songChanges() -> AsyncStream<Void> {
-        let id = UUID(), pair = AsyncStream<Void>.makeStream()
+    func songChanges() -> AsyncStream<Set<String>> {
+        let id = UUID(), pair = AsyncStream<Set<String>>.makeStream()
         repositoryObservers[id] = pair.continuation
         pair.continuation.onTermination = { [weak self] _ in Task { await self?.removeRepositoryObserver(id) } }
         return pair.stream
@@ -194,6 +203,13 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
                          sources: track.sources, artwork: track.artwork, artistNames: track.artistNames,
                          sourcePosition: track.sourcePosition)
         }
+    }
+    func collectionReferences(in collection: MusicCollection) -> [MusicReference] {
+        var seen = Set<String>()
+        return entries.map { $0.track.songId }.filter { seen.insert($0).inserted }.map { .init(kind: .library, id: $0) }
+    }
+    func changeCollectionMembership(_ collection: MusicCollection, adding: [MusicReference], removing: [MusicReference]) throws -> MusicCollection {
+        throw MusicServiceError.unsupported
     }
     func createPlaylist(name: String, refs: [MusicReference]) async throws -> MusicCollection { throw MusicServiceError.unsupported }
     func editPlaylist(_ collection: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) async throws -> MusicCollection { throw MusicServiceError.unsupported }
@@ -734,6 +750,89 @@ final class MusicViewModelTests: XCTestCase {
         XCTAssertEqual(afterStateReads, stateReads); XCTAssertEqual(afterSearchReads, searchReads)
         XCTAssertEqual(afterCacheCounts, cacheCounts, "Projection must not fetch audio, candidates or lyrics")
         collection.disappear(); search.disappear(); await model.close()
+    }
+
+    @MainActor func testKChangesReachLargeSearchCollectionAndQueueWithoutFullProjectionReads() async throws {
+        let (service, _, model) = setup()
+        let tracks = (0..<401).map { MusicCollectionService.track("song-\($0)") }
+        await service.setProjectionTracks(tracks); await service.setSearchItems(tracks)
+        await model.load()
+        let search = MusicSearchResultsModel(owner: model)
+        search.setAccess(available: true, generation: model.accountAccessGeneration); search.appear()
+        search.submit("songs", preferences: .init(songPlatforms: [.netease], searchPlaylists: false))
+        await search.finishPendingReads()
+        let page = MusicCollectionViewModel(model: model, collectionID: "favorites")
+        await page.appear()?.value
+        XCTAssertEqual(search.songs.count, tracks.count); XCTAssertEqual(page.tracks.count, tracks.count)
+        func changed(_ index: Int, prefix: String) -> MusicRemoteTrack {
+            .init(ref: tracks[index].ref, songId: tracks[index].songId, title: "\(prefix) \(index)",
+                artist: tracks[index].artist, sources: tracks[index].sources)
+        }
+        // Establish each subscription and finish its initial full projection.
+        let ready = changed(0, prefix: "Ready")
+        let readiness = [expectation(description: "queue ready"), expectation(description: "collection ready"), expectation(description: "search ready")]
+        let initialObservers = [
+            model.playbackState.$queue.filter { $0.first?.track.title == ready.title }.prefix(1).sink { _ in readiness[0].fulfill() },
+            page.$tracks.filter { $0.first?.title == ready.title }.prefix(1).sink { _ in readiness[1].fulfill() },
+            search.$songs.filter { $0.contains { $0.track.title == ready.title } }.prefix(1).sink { _ in readiness[2].fulfill() }
+        ]
+        await service.publishRepository([ready]); await fulfillment(of: readiness, timeout: 2)
+        initialObservers.forEach { $0.cancel() }
+        await service.resetRepositoryReadRequests()
+        let changedTracks = [changed(4, prefix: "Updated"), changed(300, prefix: "Updated")]
+        let expected = Set(changedTracks.map(\.songId))
+        let done = [expectation(description: "queue K updated"), expectation(description: "collection K updated"), expectation(description: "search K updated")]
+        let observers = [
+            model.playbackState.$queue.filter { $0.count > 300 && $0[300].track.title == changedTracks[1].title }.prefix(1).sink { _ in done[0].fulfill() },
+            page.$tracks.filter { $0.count > 300 && $0[300].title == changedTracks[1].title }.prefix(1).sink { _ in done[1].fulfill() },
+            search.$songs.filter { $0.contains { $0.track.title == changedTracks[1].title } }.prefix(1).sink { _ in done[2].fulfill() }
+        ]
+        await service.publishRepository([MusicCollectionService.track("not-referenced")])
+        await service.publishRepository(changedTracks)
+        await fulfillment(of: done, timeout: 2)
+        observers.forEach { $0.cancel() }
+        let requests = await service.repositoryReadRequests()
+        XCTAssertEqual(requests.count, 3); XCTAssertTrue(requests.allSatisfy { $0 == expected })
+        XCTAssertEqual(page.tracks[1], tracks[1])
+        XCTAssertEqual(model.queue.map(\.id), (1...401).map { "entry-\($0)" })
+        page.disappear(); search.disappear(); await model.close()
+    }
+
+    @MainActor func testRepositoryChangesReadOnlyIntersectingIDsAndDrainPendingBatches() async throws {
+        let (service, player, model) = setup()
+        await model.load(); await model.playbackMetadata.flush()
+        await service.finishRepositoryNotifications(); await model.songRepositoryObservation?.value
+        let tracks = (0..<10_000).map { MusicCollectionService.track("song-\($0)") }
+        model.playbackState.queue = tracks.enumerated().map { .init(id: "occurrence-\($0.offset)", track: $0.element) }
+        model.libraryState.playedSongs = tracks.map { .init(date: "2026-11-16", at: 1, track: $0) }
+        let ids = model.queue.map(\.id), revision = model.state.revision, resources = player.resources.count
+        await service.resetRepositoryReadRequests()
+        let entered = expectation(description: "initial full projection pending")
+        let gate = MusicCollectionGate { entered.fulfill() }
+        await service.blockRepository(gate)
+        model.observeSongRepository()
+        await fulfillment(of: [entered], timeout: 2)
+        let first = [0, 42].map { index in
+            MusicRemoteTrack(ref: tracks[index].ref, songId: tracks[index].songId, title: "First \(index)")
+        }
+        let second = [99, 9_999].map { index in
+            MusicRemoteTrack(ref: tracks[index].ref, songId: tracks[index].songId, title: "Second \(index)")
+        }
+        await service.publishRepository([MusicCollectionService.track("unrelated")])
+        await service.publishRepository(first)
+        await service.publishRepository(second)
+        await service.finishRepositoryNotifications()
+        await gate.release(); await model.songRepositoryObservation?.value
+        let requests = await service.repositoryReadRequests()
+        XCTAssertEqual(requests, [Set(tracks.map(\.songId)), Set(first.map(\.songId)), Set(second.map(\.songId))])
+        for track in first + second {
+            XCTAssertEqual(model.queue.first { $0.track.songId == track.songId }?.track.title, track.title)
+            XCTAssertEqual(model.playedSongs.first { $0.track.songId == track.songId }?.track.title, track.title)
+        }
+        XCTAssertEqual(model.queue[1].track, tracks[1])
+        XCTAssertEqual(model.queue.map(\.id), ids); XCTAssertEqual(model.state.revision, revision)
+        XCTAssertEqual(player.resources.count, resources)
+        await model.close()
     }
 
     @MainActor func testRepositoryReadFromRevokedAccessCannotRefillQueueOrMetadata() async {

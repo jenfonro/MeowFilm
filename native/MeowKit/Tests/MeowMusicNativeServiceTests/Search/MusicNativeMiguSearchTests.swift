@@ -57,11 +57,11 @@ final class MusicNativeMiguSearchTests: XCTestCase {
             ("url", .string("https://private.invalid/signed"))])])
         info["Cookie"] = .string("synthetic-not-a-cookie"); info["token"] = .string("synthetic-not-a-token")
         let peer = NativeMusicResultFixture([try MusicPlatformFixture.page([.init(platform: "mg", data: info.bytes)], platform: "mg")])
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
         let page = try await service.search(platform: "mg", query: "Synthetic", page: 1, limit: 30)
         let track = try XCTUnwrap(page.items.first)
         let document = try MusicDocument(store.snapshot().0, runID: "inspect")
-        let song = document.library["library"]["songs"][track.songId]
+        let song = (try document.fixtureSong(track.songId))
         let locator = try XCTUnwrap(song["sources"].array.first)["musicInfo"]
         XCTAssertEqual(locator["songmid"].string, "123"); XCTAssertEqual(locator["copyrightId"].string, "600123")
         XCTAssertEqual(locator["contentId"].string, "60090001")

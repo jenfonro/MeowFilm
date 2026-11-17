@@ -42,7 +42,7 @@ public static class MusicCatalogClientStorageTests
         string root = CreateRoot(), id;
         await using (var store = new Store(root))
         await using (var runtime = Runtime())
-        await using (var app = new MusicNativeApplication(store, runtime))
+        await using (var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime))
         {
             var home = Ok(await app.ExecuteAsync("music.catalog.home", new { platform = "wy" }));
             var song = home.GetProperty("sections")[0].GetProperty("items")[0];
@@ -53,7 +53,7 @@ public static class MusicCatalogClientStorageTests
         }
         await using var coldStore = new Store(root);
         await using var coldRuntime = Runtime();
-        await using var cold = new MusicNativeApplication(coldStore, coldRuntime);
+        await using var cold = new MusicNativeApplication(coldStore, MusicTestStores.For(coldStore), coldRuntime);
         var queue = Ok(await cold.ExecuteAsync("music.queue.get"));
         Check(queue.GetProperty("current").GetProperty("song").GetProperty("songId").GetString() == id &&
             queue.GetProperty("current").GetProperty("song").GetProperty("title").GetString() == "Synthetic track" &&
@@ -63,7 +63,7 @@ public static class MusicCatalogClientStorageTests
     {
         await using var store = new Store(CreateRoot()) { Hold = true };
         await using var runtime = Runtime();
-        await using var app = new MusicNativeApplication(store, runtime);
+        await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
         using var cancellation = new CancellationTokenSource();
         var home = app.ExecuteAsync("music.catalog.home", new { platform = "wy" }, cancellation.Token);
         await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancellation.Cancel();
@@ -77,19 +77,19 @@ public static class MusicCatalogClientStorageTests
     {
         await using var store = new Store(CreateRoot());
         await using var runtime = Runtime();
-        await using var app = new MusicNativeApplication(store, runtime);
+        await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
         using var cancellation = new CancellationTokenSource(); cancellation.Cancel();
         Error(await app.ExecuteAsync("music.catalog.home", new { platform = "wy" }, cancellation.Token), "CANCELLED");
-        var saved = await store.ReadAsync(MusicLibraryOwner.DocumentNamespace);
-        try { Check(saved.Data is null && store.Writes == 0 && runtime.Requests.Count == 0, "Pre-admission cancellation changed durable state"); }
-        finally { if (saved.Data is { } bytes) CryptographicOperations.ZeroMemory(bytes); }
+        var saved = await store.Records.ReadAsync("local");
+        Check(saved.Revision == MusicLibraryRevision.Empty && store.Writes == 0 && runtime.Requests.Count == 0,
+            "Pre-admission cancellation changed durable state");
     }
     private static async Task Shutdown()
     {
         string root = CreateRoot();
         await using (var store = new Store(root) { Hold = true })
         await using (var runtime = Runtime())
-        await using (var app = new MusicNativeApplication(store, runtime))
+        await using (var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime))
         {
             var home = app.ExecuteAsync("music.catalog.home", new { platform = "wy" });
             await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -99,7 +99,7 @@ public static class MusicCatalogClientStorageTests
         }
         await using var reopened = new Store(root);
         await using var peer = Runtime();
-        await using var owner = new MusicNativeApplication(reopened, peer);
+        await using var owner = new MusicNativeApplication(reopened, MusicTestStores.For(reopened), peer);
         Ok(await owner.ExecuteAsync("music.catalog.home", new { platform = "wy" }));
         Check(reopened.Writes == 0, "Reopen lost or replayed confirmed metadata");
     }
@@ -107,7 +107,7 @@ public static class MusicCatalogClientStorageTests
     {
         await using var store = new Store(CreateRoot()) { LoseReceipt = true };
         await using var runtime = Runtime();
-        await using var library = new MusicLibraryOwner(store);
+        await using var library = new MusicLibraryOwner(MusicTestStores.For(store));
         await using var catalog = new MusicNativeCatalogOwner(runtime.Catalog, library);
         Error(await catalog.ExecuteAsync("music.catalog.home", new { platform = "wy" }), "COMMIT_UNKNOWN");
         Error(await catalog.ExecuteAsync("music.catalog.home", new { platform = "wy" }), "PENDING_WRITE");
@@ -126,7 +126,7 @@ public static class MusicCatalogClientStorageTests
             using var registration = token.Register(() => cancelled.TrySetResult());
             entered.TrySetResult(); await release.Task; return Home();
         };
-        await using var app = new MusicNativeApplication(store, runtime);
+        await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
         using var cancellation = new CancellationTokenSource();
         var home = app.ExecuteAsync("music.catalog.home", new { platform = "wy" }, cancellation.Token);
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancellation.Cancel();
@@ -155,20 +155,30 @@ public static class MusicCatalogClientStorageTests
     private static JsonElement Home() => MusicPlatformRuntimeFixture.Json(new {
         platform = "wy", sections = new[] { new { id = "tracks", title = "Synthetic", type = "songs", items = new[] { Song } } },
         more = false, continuation = (object?)null });
-    private sealed class Store(string root) : IDocumentStore
+    private sealed class Store : IDocumentStore
     {
-        private readonly LocalDocumentStore inner = new(root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces);
-        internal int Writes, Disposals;
+        private readonly LocalDocumentStore inner;
+        internal readonly MusicRecordTestStore Records;
+        internal int Writes => Records.Writes;
+        internal int Disposals;
         internal bool Hold, LoseReceipt;
         internal readonly TaskCompletionSource Entered = Signal(), Release = Signal();
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
+        internal Store(string root)
         {
-            Writes++; Entered.TrySetResult(); if (Hold) await Release.Task;
-            var receipt = await inner.WriteAsync(ns, data, expected, token);
-            if (LoseReceipt) { LoseReceipt = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
-            return receipt;
+            inner = new(root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces);
+            Records = MusicTestStores.Use(this, Path.Combine(root, "music-records"));
+            Records.BeforeCommit = async (_, _) =>
+            { Entered.TrySetResult(); if (Hold) await Release.Task; };
+            Records.AfterCommit = (_, _) =>
+            {
+                if (LoseReceipt) { LoseReceipt = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
+                return Task.CompletedTask;
+            };
         }
-        public async ValueTask DisposeAsync() { Release.TrySetResult(); Disposals++; await inner.DisposeAsync(); }
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
+        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
+            DocumentFingerprint expected, CancellationToken token = default) => inner.WriteAsync(ns, data, expected, token);
+        public async ValueTask DisposeAsync()
+        { Release.TrySetResult(); Disposals++; await Records.DisposeAsync(); await inner.DisposeAsync(); }
     }
 }

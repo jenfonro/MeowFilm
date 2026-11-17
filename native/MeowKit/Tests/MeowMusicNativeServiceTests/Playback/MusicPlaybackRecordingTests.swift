@@ -29,7 +29,7 @@ final class MusicPlaybackRecordingTests: XCTestCase {
         for enrich in [false, true] {
             let store = try MusicNativeCandidateDiscoveryFixture.store()
             let bytes = RecordingFailingBytes()
-            let service = NativeMusicService(document: store, scripts: NativeMusicScriptFixture(),
+            let service = NativeMusicService(database: store, scripts: NativeMusicScriptFixture(),
                 platformClient: try NativeMusicFixture.client(), enabledPlatforms: [.qq], audioFileCache: bytes,
                 clock: { NativeMusicFixture.date })
             try await service.setAccess(available: true, generation: 1)
@@ -57,7 +57,7 @@ final class MusicPlaybackRecordingTests: XCTestCase {
             let document = try MusicDocument(store.read(), runID: "audit")
             XCTAssertEqual(document.queue["entries"].array.count, 1)
             let songID = document.queue["entries"].array[0]["songId"].string
-            XCTAssertEqual(document.library["library"]["songs"][songID]["sources"].array.count, enrich ? 2 : 1)
+            XCTAssertEqual((try document.fixtureSong(songID))["sources"].array.count, enrich ? 2 : 1)
             await session.close(); await service.close()
         }
     }
@@ -90,7 +90,7 @@ final class MusicPlaybackRecordingTests: XCTestCase {
             let peer = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "101"))
             let store = try MusicNativeCandidateDiscoveryFixture.store(song: original)
             let clock = MusicRecoveryTestClock(), accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "101", clock: clock)
-            let service = NativeMusicService(document: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
+            let service = NativeMusicService(database: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
                 enabledPlatforms: [.qq], clock: { clock.now() })
             try await service.setAccess(available: true, generation: 1)
             try await service.retainSongMetadata([peer])
@@ -123,7 +123,7 @@ final class MusicPlaybackRecordingTests: XCTestCase {
             let playing = try await service.read()
             XCTAssertEqual(playing.queue, before.queue, route)
             let played = try XCTUnwrap(playing.history["days"].array.first?["songs"].array.first)
-            XCTAssertEqual(playing.library["library"]["songs"][played["songId"].string]["sources"].array.count, 2)
+            XCTAssertEqual((try playing.fixtureSong(played["songId"].string))["sources"].array.count, 2)
             let metadata = try await service.metadataCandidates(occurrenceID: "entry-1")
             XCTAssertTrue(metadata.candidates.contains { $0.source == peerSource(peer) }, route)
             let lyrics = try await service.lyrics(occurrenceId: "entry-1", sourceKey: option.sourceKey)

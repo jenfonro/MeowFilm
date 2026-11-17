@@ -51,7 +51,7 @@ public static class MusicNativeLyricsTests
         yield return Case("local lyric settings retire their own work without revoking unrelated platform reads", async () => {
             await using var store = new MusicPlatformRuntimeFixture.MemoryStore();
             await using var runtime = new MusicPlatformRuntimeFixture();
-            await using var app = new MusicNativeApplication(store, runtime);
+            await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             var catalogEntered = Signal(); var lyricEntered = Signal(); var release = Signal();
             runtime.OnRequest = async (call, token) => {
                 if (call.Operation == "search") catalogEntered.TrySetResult();

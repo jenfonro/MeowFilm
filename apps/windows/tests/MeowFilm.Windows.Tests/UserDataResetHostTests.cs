@@ -90,7 +90,7 @@ public static class UserDataResetHostTests
                             return new LocalDocumentStore(paths.Caches, AppIdentity.CacheNamespaces,
                                 protectedNamespaces: AppIdentity.CacheProtectedNamespaces);
                         });
-                        var module = new ProbeModule(store, runtime, cacheStore);
+                        var module = new ProbeModule(store, runtime, cacheStore, Path.Combine(paths.Documents, "music-library"));
                         modules.Add(module); owners.Add(module);
                     },
                     async () =>
@@ -216,9 +216,13 @@ public static class UserDataResetHostTests
         public IDocumentStore Store { get; }
         public CacheDocumentStore Cache { get; }
         public MusicNativeApplication Native { get; }
+        public MusicRecordTestStore Records { get; }
         public bool Released { get; private set; }
-        public ProbeModule(IDocumentStore store, IRuntimeClient runtime, CacheDocumentStore cache)
-        { Store = store; Cache = cache; Native = new MusicNativeApplication(store, runtime, cache); }
+        public ProbeModule(IDocumentStore store, IRuntimeClient runtime, CacheDocumentStore cache, string databaseRoot)
+        {
+            Store = store; Cache = cache; Records = MusicTestStores.Use(store, databaseRoot);
+            Native = new MusicNativeApplication(store, Records, runtime, cache);
+        }
         public string Id => "probe";
         public string Title => "测试";
         public string Version => "1";
@@ -242,6 +246,7 @@ public static class UserDataResetHostTests
             var snapshot = await Store.ReadAsync("film.library.v1");
             await Store.WriteAsync("film.library.v1", "late old generation write"u8.ToArray(), snapshot.Fingerprint);
             Cache.Save(MusicHomeSnapshotStore.Namespace, "late old generation cache"u8.ToArray());
+            await Records.DisposeAsync();
             Released = true;
         }
     }

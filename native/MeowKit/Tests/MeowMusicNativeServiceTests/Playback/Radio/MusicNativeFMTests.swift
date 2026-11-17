@@ -173,7 +173,7 @@ final class MusicNativeFMTests: XCTestCase {
 
     func testReplacementProtectionAndAccountRevocationRejectLateBatch() async throws {
         for change in ["clear", "protection", "account"] {
-            let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, scripts: NativeMusicScriptFixture())
+            let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, scripts: NativeMusicScriptFixture())
             let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("A")], [NativeMusicFixture.track("B")]])
             let source = MusicAccountQueueFixture.source(loader, kind: .fm)
             let start = try await MusicAccountQueueFixture.start(service, source)

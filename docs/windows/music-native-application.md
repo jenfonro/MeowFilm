@@ -26,6 +26,7 @@ MusicFeedbackController
 
 ```text
 IDocumentStore
+IMusicLibraryStore
 CacheDocumentStore
 IRuntimeClient
 播放内核
@@ -53,7 +54,7 @@ public interface IMusicApplication : IAsyncDisposable
 }
 ```
 
-`MusicCapability` 拥有 application；App 仍拥有业务 store、独立缓存 store、runtime 和 playback。缓存 store 惰性创建，歌词展示、账号展示、来源候选、自动匹配、首页与音频索引不与业务文档共用根锁或写入队列；成功业务结果只发布缓存内存快照，异步落盘由缓存 owner 排队并在关闭时实际排空。
+`MusicCapability` 拥有 application；App 仍拥有业务 document store、`MusicLibraryDatabase`、独立缓存 store、runtime 和 playback。歌曲数据库在首次准入时打开，与 document store 不双写。缓存 store 惰性创建，歌词展示、账号展示、来源候选、自动匹配、首页与音频索引不与业务文档共用根锁或写入队列；成功业务结果只发布缓存内存快照，异步落盘由缓存 owner 排队并在关闭时实际排空。
 
 ## 当前路由
 

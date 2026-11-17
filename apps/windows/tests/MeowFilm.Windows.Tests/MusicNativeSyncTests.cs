@@ -55,17 +55,17 @@ public static partial class MusicNativeSyncTests
         yield return new("Music sync blocked scheduled round does not retry-loop", ScheduledFailure);
         yield return new("Music sync completes every selected collection without a round request quota", RequestBudget);
         yield return new("Music sync resolves every selected mapping without a lookup quota", MappingLookupBudget);
-        yield return new("Music sync unknown before CAS prevents remote dispatch", () => UnknownCas(false));
-        yield return new("Music sync unknown after CAS durable fence recovers without replay", () => UnknownCas(true));
+        yield return new("Music sync unknown before commit prevents remote dispatch", () => UnknownTransaction(false));
+        yield return new("Music sync unknown after commit durable fence recovers without replay", () => UnknownTransaction(true));
         yield return new("Music sync pending write partial acknowledgement survives reopen", PartialAck);
-        yield return new("Music sync independent queue changes survive sync envelope commit", QueuePreserved);
+        yield return new("Music sync independent queue changes survive sync record commit", QueuePreserved);
         foreach (var corruption in SyncCorruptions())
         {
             var current = corruption;
             yield return new("Music sync rejects current document " + current.Name + " without side effects",
                 () => Corrupt(current.Apply));
         }
-        yield return new("Music sync real DPAPI restart settings bindings pending without credentials", Dpapi);
+        yield return new("Music sync real SQLite restart settings bindings pending without credentials", SQLiteReopen);
         yield return new("Music sync viewmodel immediate switches confirmation and visibility", ViewModel);
         yield return new("Music platform settings XAML initializes on native STA without module state", View);
         yield return new("Music sync KG order uses the shared client without a native cloud hook", KgCloudMissing);
@@ -112,23 +112,20 @@ public static partial class MusicNativeSyncTests
         { cancellationToken.ThrowIfCancellationRequested(); return ValueTask.FromResult(Values.GetValueOrDefault(platform)); }
         public bool IsCurrent(MusicPlatformSession session) => Values.GetValueOrDefault(session.Platform) == session;
     }
-    private sealed class Store : IDocumentStore
+    private sealed class Store : MusicRecordTestStore
     {
-        internal byte[]? Data; internal int Writes; internal bool FailMarker, FailAfter;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default) => Task.FromResult(new DocumentSnapshot(Data?.ToArray(), Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data)));
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken cancellationToken = default)
+        internal bool FailMarker;
+        internal new bool FailAfter;
+        internal Store()
         {
-            Check(ns == MusicLibraryOwner.DocumentNamespace, "SECOND_NAMESPACE"); cancellationToken.ThrowIfCancellationRequested();
-            var current = Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data);
-            if (current != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-            var obj = JsonNode.Parse(data.Span)!.AsObject(); bool marker = obj["entries"]!.AsArray().Any(e => e!["key"]!.GetValue<string>().Contains("library-sync", StringComparison.Ordinal) && e["value"]?["pending"] is JsonObject);
-            bool fail = FailMarker && marker; if (fail) FailMarker = false;
-            if (fail && !FailAfter) throw new DocumentStoreException(DocumentStoreError.Storage);
-            Data = data.ToArray(); Writes++;
-            if (fail) throw new DocumentStoreException(DocumentStoreError.Storage);
-            return Task.FromResult(DocumentFingerprint.FromBytes(Data));
+            BeforeCommit = (changes, _) =>
+            {
+                if (FailMarker && changes.Areas.Any(pair => pair.Key.Contains("library-sync", StringComparison.Ordinal)
+                    && pair.Value["pending"] is JsonObject))
+                { FailMarker = false; Failure = FailAfter ? 2 : 1; }
+                return Task.CompletedTask;
+            };
         }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
     private sealed class Fixture : IAsyncDisposable
     {
@@ -142,7 +139,7 @@ public static partial class MusicNativeSyncTests
             Runtime.OnRequest = (call, token) => (call.Platform == Server.Platform ? Server
                 : second is not null && call.Platform == second.Platform ? second
                 : throw new InvalidOperationException("Unexpected sync platform")).Respond(call, token);
-            Owner = new(Store); Sync = new(Owner, Sessions, Runtime.Client, clock);
+            Owner = new(MusicTestStores.For(Store)); Sync = new(Owner, Sessions, Runtime.Client, clock);
         }
         internal async Task Enable(bool favorites = true, bool playlists = false)
         {
@@ -156,7 +153,7 @@ public static partial class MusicNativeSyncTests
             return Ok(await Owner.ExecuteAsync("music.library.addSongs", new { id = "favorites", ifRevision = c.GetProperty("revision").GetInt64(), songs = new[] { Song(Server.Platform, Native(Server.Platform, n), n) } }));
         }
         internal async Task Restart()
-        { await Sync.DisposeAsync(); await Owner.AbortAsync(); Owner = new(Store); Sync = new(Owner, Sessions, Runtime.Client, clock); }
+        { await Sync.DisposeAsync(); await Owner.AbortAsync(); Owner = new(MusicTestStores.For(Store)); Sync = new(Owner, Sessions, Runtime.Client, clock); }
         public async ValueTask DisposeAsync() { Server.Release?.TrySetResult(); await Sync.DisposeAsync(); await Owner.AbortAsync(); await Runtime.DisposeAsync(); }
     }
     private sealed class Entry(string id, string name, bool favorite = false, bool writable = true)
@@ -461,7 +458,7 @@ public static partial class MusicNativeSyncTests
         Ok(await f.Run()); Check(f.Server.Writes == 0 && remote.Songs.Count == 1 && f.Server.SubscriptionMemberReads == 0);
         var snapshot = await f.Owner.ReadLibrarySyncAsync();
         Check(snapshot.Library.GetProperty("networkPlaylists").GetArrayLength() == 1 &&
-            snapshot.Library.GetProperty("songs").EnumerateObject().Count() == 0 &&
+            MusicTestStores.For(f.Store).SongIds().Count == 0 &&
             snapshot.Library.GetProperty("collections").GetArrayLength() == 1);
     }
     private static async Task Pages(string platform)
@@ -643,7 +640,7 @@ public static partial class MusicNativeSyncTests
         Check(f.Server.SearchReads == 32 && f.Server.Reads == 1 + 32 &&
             f.Server.Writes == 0, "MAPPING_LOOKUP_REQUEST_COUNT");
     }
-    private static async Task UnknownCas(bool after)
+    private static async Task UnknownTransaction(bool after)
     {
         await using var f = new Fixture(); await f.Enable(false, true); Ok(await f.Owner.CreatePlaylistAsync("Local", [])); f.Store.FailMarker = true; f.Store.FailAfter = after;
         Code(await f.Run(), "COMMIT_UNKNOWN"); Check(f.Server.Creates == 0);
@@ -674,7 +671,7 @@ public static partial class MusicNativeSyncTests
             var again = Ok(await f.Owner.ExecuteAsync("music.queue.get"));
             Check(again.GetProperty("entries").GetArrayLength() == 1);
             Check(JsonElement.DeepEquals(again, current) &&
-                (await f.Owner.ReadLibrarySyncAsync()).Library.GetProperty("songs").TryGetProperty(songId, out _) &&
+                MusicTestStores.For(f.Store).ContainsSong(songId) &&
                 f.Server.Writes == 0, "SYNC_COMMIT_LOST_THE_NEW_QUEUE_REFERENCE_OR_CHANGED_ITS_FACTS");
             await f.Restart();
             var cold = Ok(await f.Owner.ExecuteAsync("music.queue.get"));
@@ -837,10 +834,7 @@ public static partial class MusicNativeSyncTests
             sync["status"] = Status("partial", "", O(new { platform = "tx", collectionId = "missing", code = "UNMAPPED_SONG" })));
         yield return new("with sync state but no library state", (root, _, _) =>
         {
-            var entries = root["entries"]!.AsArray();
-            var libraryEntry = entries.Single(entry =>
-                entry!["key"]!.GetValue<string>().EndsWith(",\"library\"]", StringComparison.Ordinal));
-            entries.Remove(libraryEntry);
+            root["areas"]!.AsObject().Remove("library");
         });
     }
     private static async Task Corrupt(Action<JsonObject, JsonObject, JsonObject> apply)
@@ -850,17 +844,14 @@ public static partial class MusicNativeSyncTests
         await f.Sync.DisposeAsync();
         await f.Owner.AbortAsync();
         var root = JsonNode.Parse(f.Store.Data!)!.AsObject();
-        var entries = root["entries"]!.AsArray();
-        var sync = entries.Single(entry =>
-            entry!["key"]!.GetValue<string>().Contains("\"library-sync\"", StringComparison.Ordinal))!["value"]!.AsObject();
-        var library = entries.Single(entry =>
-            entry!["key"]!.GetValue<string>().EndsWith(",\"library\"]", StringComparison.Ordinal))!["value"]!["library"]!.AsObject();
+        var sync = root["areas"]!["library-sync"]!.AsObject();
+        var library = root["areas"]!["library"]!["library"]!.AsObject();
         apply(root, sync, library);
         f.Store.Data = LJ.Bytes(root);
         byte[] original = f.Store.Data.ToArray();
         f.Store.Writes = 0;
         f.Server.Reads = f.Server.Writes = f.Server.Creates = 0;
-        f.Owner = new(f.Store);
+        f.Owner = new(MusicTestStores.For(f.Store));
         f.Sync = new(f.Owner, f.Sessions, f.Runtime.Client);
         Code(await f.Owner.ExecuteAsync("music.library.list"), "CORRUPT_SYNC");
         Code(await f.Sync.ExecuteAsync("music.librarySync.get"), "CORRUPT_SYNC");
@@ -875,19 +866,19 @@ public static partial class MusicNativeSyncTests
         Check(f.Server.Reads == 0 && f.Server.Writes == 0 && f.Server.Creates == 0 &&
             f.Store.Writes == 0 && f.Store.Data!.SequenceEqual(original));
     }
-    private static async Task Dpapi()
+    private static async Task SQLiteReopen()
     {
         string path = Path.GetFullPath(TestWorkspace.DataPath("music-library-sync-20261023", "dpapi-" + Guid.NewGuid().ToString("N"))); Directory.CreateDirectory(path);
         var sessions = new Sessions(); var server = new Server("tx");
         await using var runtime = new MusicPlatformRuntimeFixture(); runtime.Client.BindSessions(sessions); runtime.OnRequest = server.Respond;
-        await using var store = new LocalDocumentStore(path, [MusicLibraryOwner.DocumentNamespace]);
-        var owner = new MusicLibraryOwner(store);
+        await using var store = new MusicRecordTestStore(path);
+        var owner = new MusicLibraryOwner(MusicTestStores.For(store));
         await using (var sync = new MusicLibrarySyncService(owner, sessions, runtime.Client))
         {
             Ok(await sync.ExecuteAsync("music.librarySync.set", new { platform = "tx", favorites = false, playlists = true, ifRevision = 0, confirm = true }));
             Ok(await owner.CreatePlaylistAsync("Local", [])); server.DropWrites = true; Code(await sync.ExecuteAsync("music.librarySync.run"), "CREATE_UNCONFIRMED");
         }
-        await owner.AbortAsync(); owner = new(store); await using var next = new MusicLibrarySyncService(owner, sessions, runtime.Client);
+        await owner.AbortAsync(); owner = new(MusicTestStores.For(store)); await using var next = new MusicLibrarySyncService(owner, sessions, runtime.Client);
         Code(await next.ExecuteAsync("music.librarySync.run"), "CREATE_UNCONFIRMED"); Check(server.Creates == 1);
         var snapshot = await owner.ReadLibrarySyncAsync(); Check(!snapshot.State.GetRawText().Contains("synthetic-only", StringComparison.Ordinal));
         await next.AbortAsync(); await owner.AbortAsync();

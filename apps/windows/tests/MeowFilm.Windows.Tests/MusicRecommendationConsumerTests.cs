@@ -364,7 +364,7 @@ public static partial class MusicUiTests
         private RecommendationScene()
         {
             Runtime.Platform.OnRequest = Http.Read;
-            App = new(Store, Runtime, _ => Reports, null);
+            App = new(Store, MusicTestStores.For(Store), Runtime, _ => Reports, null);
             Module = new(App, Store, Playback, Dialog);
         }
         internal static async Task<RecommendationScene> Create(bool account = true)
@@ -459,36 +459,26 @@ public static partial class MusicUiTests
     private sealed class RecommendationStore : IDocumentStore
     {
         private readonly LocalDocumentStore inner = ServiceStore();
-        private readonly ConcurrentDictionary<DocumentFingerprint, string> queueSnapshots = new();
+        internal RecommendationStore()
+        {
+            var records = MusicTestStores.For(this);
+            records.BeforeCommit = (changes, _) =>
+            {
+                LibraryWrites++;
+                if (changes.Areas.ContainsKey("queue"))
+                {
+                    QueueWrites++;
+                    records.Failure = UnknownNextQueueWrite is false ? 1 : UnknownNextQueueWrite is true ? 2 : 0;
+                    UnknownNextQueueWrite = null;
+                }
+                return Task.CompletedTask;
+            };
+        }
         internal bool? UnknownNextQueueWrite;
         internal int LibraryWrites, QueueWrites;
-        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default)
-        {
-            var document = await inner.ReadAsync(ns, cancellationToken);
-            if (ns == MusicLibraryOwner.DocumentNamespace)
-                queueSnapshots[document.Fingerprint] = document.Data is null ? "" : MusicNativeRecommendationTests.PersistedQueue(document.Data);
-            return document;
-        }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> value,
-            DocumentFingerprint expected, CancellationToken cancellationToken = default)
-        {
-            if (ns != MusicLibraryOwner.DocumentNamespace)
-                return await inner.WriteAsync(ns, value, expected, cancellationToken);
-            Interlocked.Increment(ref LibraryWrites);
-            True(queueSnapshots.TryGetValue(expected, out var before), "queue CAS must use an observed document");
-            string queue = MusicNativeRecommendationTests.PersistedQueue(value);
-            bool? unknown = null;
-            if (queue != before)
-            {
-                Interlocked.Increment(ref QueueWrites);
-                unknown = UnknownNextQueueWrite; UnknownNextQueueWrite = null;
-            }
-            if (unknown == false) throw new DocumentStoreException(DocumentStoreError.Storage);
-            var receipt = await inner.WriteAsync(ns, value, expected, cancellationToken);
-            queueSnapshots[receipt] = queue;
-            if (unknown == true) throw new DocumentStoreException(DocumentStoreError.Storage);
-            return receipt;
-        }
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
+        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
+            DocumentFingerprint expected, CancellationToken token = default) => inner.WriteAsync(ns, data, expected, token);
         public ValueTask DisposeAsync() => inner.DisposeAsync();
     }
     private sealed class RecommendationHttp

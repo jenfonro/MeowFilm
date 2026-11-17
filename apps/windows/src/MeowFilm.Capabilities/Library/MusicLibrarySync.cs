@@ -11,10 +11,8 @@ public sealed class MusicLibrarySyncSnapshot
         Owner = owner; Library = LJ.Element(library); State = LJ.Element(state); SongObservation = songObservation;
         Stamp = ControlStamp(library, state);
     }
-    internal static JsonObject ControlLibrary(JsonObject library) => new(library.Where(pair => pair.Key != "songs")
-        .Select(pair => KeyValuePair.Create(pair.Key, pair.Value?.DeepClone())));
     internal static string ControlStamp(JsonObject library, JsonObject state) =>
-        LJ.Digest(new JsonArray(ControlLibrary(library), state.DeepClone()));
+        LJ.Digest(new JsonArray(library.DeepClone(), state.DeepClone()));
     internal MusicLibraryOwner Owner { get; }
     internal string Stamp { get; }
     internal long SongObservation { get; }
@@ -36,7 +34,7 @@ public sealed partial class MusicLibraryOwner
         return LJ.Obj(("schema", 2), ("revision", 0), ("platforms", platforms), ("pending", null),
             ("confirmation", null), ("approved", null), ("status", LJ.Obj(("phase", "idle"), ("code", ""), ("at", 0), ("issues", new JsonArray()))));
     }
-    private JsonObject LibrarySync(JsonObject doc) => HasValue(doc, LibrarySyncArea)
+    private JsonObject LibrarySync(MusicLibraryData doc) => HasValue(doc, LibrarySyncArea)
         ? LJ.Object(Value(doc, LibrarySyncArea), "CORRUPT_SYNC") : EmptyLibrarySync();
     private static void ValidateLibrarySync(JsonObject s)
     {
@@ -188,10 +186,29 @@ public sealed partial class MusicLibraryOwner
         {
             LJ.Require(!closed && !preparing, "CLOSED"); LJ.Require(pending is null, pending?.Code ?? "PENDING_WRITE");
             await LoadAsync(cancellationToken).ConfigureAwait(false);
-            var state = LibrarySync(document!); ValidateLibrarySync(state);
-            return new(this, LJ.Object(LibraryState(document!)["library"]), state, BeginSongObservation());
+            var candidate = document!.Candidate(false);
+            var state = LibrarySync(candidate); ValidateLibrarySync(state);
+            return SyncSnapshot(candidate, state, BeginSongObservation());
         }
         finally { gate.Release(); }
+    }
+    private MusicLibrarySyncSnapshot SyncSnapshot(MusicLibraryData data, JsonObject state, long observation) =>
+        new(this, LJ.Object(LibraryState(data)["library"]), state, observation);
+    internal JsonObject ReadLibrarySyncSong(string id)
+    {
+        lock (repositoryGate)
+        {
+            LJ.Require(!closed && !preparing, "CLOSED");
+            return visibleSongs?.Read(id) ?? throw new MusicLibraryException("SONG_NOT_FOUND");
+        }
+    }
+    internal string FindLibrarySyncSource(string key)
+    {
+        lock (repositoryGate)
+        {
+            LJ.Require(!closed && !preparing, "CLOSED");
+            return visibleSongs?.SourceOwner(key) ?? throw new MusicLibraryException("SONG_NOT_FOUND");
+        }
     }
     private void CheckLibrarySyncLocked(MusicLibrarySyncSnapshot expected)
     {
@@ -213,20 +230,18 @@ public sealed partial class MusicLibraryOwner
         try
         {
             CheckLibrarySyncLocked(expected);
-            var candidate = document!.DeepClone().AsObject();
+            var candidate = document!.Candidate(true);
             var accepted = new Dictionary<(string SongId, string Platform), long>();
             _ = RegisterSongs(candidate, songs.Where(row => row.HasMetadata).Select(row => row.Song),
                 authoritative: true, observation: expected.SongObservation, accepted: accepted);
             _ = RegisterSongs(candidate, songs.Where(row => !row.HasMetadata).Select(row => row.Song));
             cancellationToken.ThrowIfCancellationRequested();
-            if (!JsonNode.DeepEquals(candidate, document))
-                await CommitAsync(candidate, PendingOwner.Sync, cancellationToken).ConfigureAwait(false);
-            foreach (var pair in accepted) songObservations[pair.Key] = pair.Value;
-            return new(this, LJ.Object(LibraryState(candidate)["library"]), LibrarySync(candidate), expected.SongObservation);
+            await CommitAsync(candidate, PendingOwner.Sync, cancellationToken, accepted).ConfigureAwait(false);
+            return SyncSnapshot(candidate, LibrarySync(candidate), expected.SongObservation);
         }
         finally { gate.Release(); }
     }
-    /// <summary>Only this owner writes. Unrelated queue/settings changes are retained in the same envelope CAS.</summary>
+    /// <summary>Only this owner writes. Unrelated records are not part of the sync transaction.</summary>
     public async Task<MusicLibrarySyncSnapshot> CommitLibrarySyncAsync(MusicLibrarySyncSnapshot expected,
         JsonElement library, JsonElement state, CancellationToken cancellationToken = default)
     {
@@ -237,34 +252,18 @@ public sealed partial class MusicLibraryOwner
         try
         {
             CheckLibrarySyncLocked(expected);
-            nextLibrary = ValidateLibrary(nextLibrary, scope); ValidateLibrarySync(nextState);
+            ValidateLibrarySync(nextState);
             LJ.Require(Revision(nextLibrary) == expected.Library.GetProperty("revision").GetInt64() &&
                 Revision(nextState) == expected.State.GetProperty("revision").GetInt64(), "SYNC_SUPERSEDED");
-            var candidate = (JsonObject)document!.DeepClone(); var wrapper = (JsonObject)LibraryState(candidate).DeepClone();
+            var candidate = document!.Candidate(true); var wrapper = LibraryState(candidate);
             var previousLibrary = JsonNode.Parse(expected.Library.GetRawText())!.AsObject();
-            var previousSongs = LJ.Object(previousLibrary["songs"]);
-            var changedSongs = LJ.Object(nextLibrary["songs"]).Where(pair =>
-                !JsonNode.DeepEquals(pair.Value, previousSongs[pair.Key])).ToArray();
-            var accepted = new Dictionary<(string SongId, string Platform), long>();
-            // Membership already uses registered source owners. Only genuine source
-            // observations may enrich the current repository; a plan never replaces it.
-            if (changedSongs.Length > 0)
-                _ = RegisterSongs(candidate, changedSongs.Select(pair => LJ.Object(pair.Value)),
-                    authoritative: true, observation: expected.SongObservation, accepted: accepted);
-            nextLibrary["songs"] = Repository(candidate).DeepClone();
-            if (!JsonNode.DeepEquals(MusicLibrarySyncSnapshot.ControlLibrary(nextLibrary),
-                MusicLibrarySyncSnapshot.ControlLibrary(previousLibrary)))
+            if (!JsonNode.DeepEquals(nextLibrary, previousLibrary))
             { Increment(nextLibrary); Increment(wrapper); }
             Increment(nextState); wrapper["library"] = nextLibrary.DeepClone();
             Set(candidate, "library", wrapper); Set(candidate, LibrarySyncArea, nextState);
-            ApplyArtworkPolicy(candidate);
             await CommitAsync(candidate, PendingOwner.Sync, cancellationToken).ConfigureAwait(false);
-            foreach (var pair in accepted) songObservations[pair.Key] = pair.Value;
-            return new(this, LJ.Object(LibraryState(candidate)["library"]), nextState, BeginSongObservation());
+            return SyncSnapshot(candidate, nextState, BeginSongObservation());
         }
         finally { gate.Release(); }
     }
-    internal static string[] AddLibrarySyncSongs(JsonObject library, IEnumerable<JsonObject> songs, NativeMusicSongGroups groups) =>
-        AddSongs(library, songs, groups, authoritative: true);
-
 }

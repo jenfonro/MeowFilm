@@ -68,7 +68,7 @@ public static partial class MusicUiTests
         internal string[] EntryIds = [];
         private PlaybackResponsivenessFixture()
         {
-            Application = new MusicNativeApplication(Store, Runtime, Cache);
+            Application = new MusicNativeApplication(Store, MusicTestStores.For(Store), Runtime, Cache);
             Module = new MusicCapability(Application, Store, Playback, cacheStore: Cache);
         }
         internal static async Task<PlaybackResponsivenessFixture> Create()
@@ -120,6 +120,14 @@ public static partial class MusicUiTests
         private SynchronousLibraryWriteHold? nextWrite;
         private int libraryWrites;
         internal int LibraryWrites => Volatile.Read(ref libraryWrites);
+        internal BlockingLibraryDocumentStore()
+        {
+            MusicTestStores.For(this).BeforeCommit = (_, _) =>
+            {
+                Interlocked.Increment(ref libraryWrites);
+                Interlocked.Exchange(ref nextWrite, null)?.Wait(); return Task.CompletedTask;
+            };
+        }
         internal SynchronousLibraryWriteHold HoldNextLibraryWrite()
         {
             var hold = new SynchronousLibraryWriteHold();
@@ -131,11 +139,6 @@ public static partial class MusicUiTests
         public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
             DocumentFingerprint expected, CancellationToken cancellationToken = default)
         {
-            if (documentNamespace == MusicLibraryOwner.DocumentNamespace)
-            {
-                Interlocked.Increment(ref libraryWrites);
-                Interlocked.Exchange(ref nextWrite, null)?.Wait();
-            }
             return inner.WriteAsync(documentNamespace, data, expected, cancellationToken);
         }
         public ValueTask DisposeAsync() => inner.DisposeAsync();

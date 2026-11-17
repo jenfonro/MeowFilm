@@ -15,7 +15,7 @@ final class MusicNativeFeedbackOutboxIntegrationTests: XCTestCase {
     private struct Fixture {
         let owner: NativeMusicAccountService
         let native: NativeMusicService
-        let settingsDocument: NativeMusicMemoryDocument
+        let settingsDocument: NativeMusicTestLibrary
         let outbox: DocumentStore
         let peer: NativeFeedbackOfflinePeer
         let clock: NativeMusicFixtureClock
@@ -43,8 +43,8 @@ final class MusicNativeFeedbackOutboxIntegrationTests: XCTestCase {
                 platformClient: client, feedbackOutboxStoreFactory: { outbox }, clock: { clock.now() })
         }
         _ = try await owner.setAccess(available: true, generation: 1)
-        let settingsDocument = NativeMusicMemoryDocument()
-        let native = NativeMusicService(document: settingsDocument, accounts: owner, platformClient: client,
+        let settingsDocument = NativeMusicTestLibrary()
+        let native = NativeMusicService(database: settingsDocument, accounts: owner, platformClient: client,
             clock: { clock.now() }, monotonicClock: { clock.now().timeIntervalSince(NativeMusicFixture.date) })
         addTeardownBlock {
             if let heldUpload { await heldUpload.gate.release() }

@@ -29,7 +29,7 @@ import MeowMusicFeature
     func testBothSearchToDetailPagingToPlayAllOrSelectedOccurrenceUseOneQueueAndPlayerOwner() async throws {
         for platform in MusicNativePublicBrowseFiveFixture.platforms {
             for playAll in [true, false] {
-                let store = NativeMusicMemoryDocument(), http = MusicNativePublicBrowseFivePeer(platform, repeats: true)
+                let store = NativeMusicTestLibrary(), http = MusicNativePublicBrowseFivePeer(platform, repeats: true)
                 let scripts = MusicNativePublicBrowseFiveScripts(platform: platform.rawValue), accounts = NativeMusicAccountFixture()
                 let service = try await NativeMusicFixture.service(store, scripts: scripts, accounts: accounts, platform: http)
                 let state = try await service.state()

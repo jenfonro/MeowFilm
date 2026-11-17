@@ -2651,7 +2651,7 @@ public static partial class MusicCatalogTests
             const string address = "https://art.example.test/song.jpg";
             var view = new MusicCatalogView();
             await using var store = new MusicOfficialAudioTests.MemoryStore();
-            await using var library = new MeowFilm.Capabilities.Library.MusicLibraryOwner(store);
+            await using var library = new MeowFilm.Capabilities.Library.MusicLibraryOwner(MusicTestStores.For(store));
             var song = await MusicSongFixture.AdoptAsync(library,
                 MusicSongFixture.Online("wy", "1", "测试歌曲 Song", "测试歌手 / Artist", cover: address));
             var songRow = SongRow.Read(MusicSongFixture.Element(song));
@@ -2981,7 +2981,7 @@ public static partial class MusicCatalogTests
         {
             this.store = store; this.root = root;
             runtime.Platform.OnRequest = transport.Read;
-            var native = new MusicNativeApplication(store, runtime);
+            var native = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             IMusicApplication application = native;
             if (vipAccount) application = Vip = new(native);
             Client = new(application); Module = new(Client, store, Playback);

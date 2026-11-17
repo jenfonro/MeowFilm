@@ -62,7 +62,7 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         return root
     }
     /// The discovery queue fixture with the same recording saved in favorites.
-    private func favoriteStore(_ song: MJ) throws -> NativeMusicMemoryDocument {
+    private func favoriteStore(_ song: MJ) throws -> NativeMusicTestLibrary {
         var document = try MusicDocument(nil, runID: "favorite")
         document.queue["entries"] = .array([.obj([("id", .string("entry-1")), ("songId", song["songId"])])])
         document.queue["currentId"] = .string("entry-1"); document.queue["serial"] = .n(1); document.queue["revision"] = .n(1)
@@ -70,8 +70,8 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         var favorites = document.library["library"]["collections"].array[0]
         favorites["order"] = .strings([song["songId"].string])
         document.library["library"]["collections"] = .array([favorites])
-        try document.validate()
-        return NativeMusicMemoryDocument(try document.encode(changed: ["queue", "playback", "library"]))
+        _ = try MusicDocument(try document.fixtureData(), runID: "fixture")
+        return NativeMusicTestLibrary(try document.encode(changed: ["queue", "playback", "library"]))
     }
 
     func testMemoryCacheKeepsCompatibleSourcesWithOriginalCheckTimeRegardlessOfAge() async throws {
@@ -354,7 +354,7 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         song["sources"] = .array(rows)
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song), qq = MusicNativeMalformedDiscoveryQQ()
         let cache = MusicNativeMemorySourceDiscoveryCache()
-        let service = NativeMusicService(document: store,
+        let service = NativeMusicService(database: store,
             scripts: MusicNativeCandidateDiscoveryScripts(),
             platformClient: try qq.makeClient(),
             sourceDiscovery: cache,
@@ -405,7 +405,7 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         let cache = MusicNativeMemorySourceDiscoveryCache()
         await record(cache, song: song, platform: "tx", sources: [])
         let qq = MusicNativeCandidateDiscoveryQQ(fail: .rateLimited)
-        let service = NativeMusicService(document: store,
+        let service = NativeMusicService(database: store,
             scripts: MusicNativeCandidateDiscoveryScripts(),
             platformClient: try qq.makeClient(),
             sourceDiscovery: cache,
@@ -427,7 +427,7 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         rows[0]["musicInfo"]["duration"] = .n(0)
         song["sources"] = .array(rows)
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song), qq = MusicNativeCandidateDiscoveryQQ()
-        let service = NativeMusicService(document: store,
+        let service = NativeMusicService(database: store,
             scripts: MusicNativeCandidateDiscoveryScripts(),
             platformClient: try qq.makeClient(),
             enabledPlatforms: [.qq],
@@ -460,7 +460,7 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
             MusicNativeCandidateDiscoveryFixture.track()
         ])
         let cache = MusicNativeMemorySourceDiscoveryCache()
-        let service = NativeMusicService(document: store,
+        let service = NativeMusicService(database: store,
             scripts: MusicNativeCandidateDiscoveryScripts(),
             platformClient: try qq.makeClient(),
             sourceDiscovery: cache,
@@ -570,7 +570,7 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: seed)
         let cache = MusicNativeMemorySourceDiscoveryCache()
         let http = MusicNativeDiscoveryPlatforms(), qq = MusicNativeCandidateDiscoveryQQ()
-        let first = NativeMusicService(document: store,
+        let first = NativeMusicService(database: store,
             platformClient: try NativeMusicFixture.routes(primary: qq, others: http).makeClient(),
             sourceDiscovery: cache,
             enabledPlatforms: [.netease, .qq, .kugou],
@@ -582,7 +582,7 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         let initialEntries = await entry(cache, seed), initialCalls = await http.calls()
         XCTAssertEqual(Set(initialEntries.keys), ["wy", "tx", "kg"])
         XCTAssertEqual(Set(initialCalls), ["wy", "kg"])
-        let second = NativeMusicService(document: store,
+        let second = NativeMusicService(database: store,
             scripts: MusicNativeCandidateDiscoveryScripts(),
             platformClient: try NativeMusicFixture.routes(primary: qq, others: http).makeClient(),
             sourceDiscovery: cache,

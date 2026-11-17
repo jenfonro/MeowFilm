@@ -7,7 +7,7 @@ final class MusicNativeFeedbackTests: XCTestCase {
     func testConfirmedSettingsReceiptSurvivesUnrelatedRevisionOrAccessRevocationAndClearsOnlyItsUnknown() async throws {
         for revoke in [false, true] {
             let entered = expectation(description: "Confirmed settings reached physical configuration")
-            let store = NativeMusicMemoryDocument(), accounts = FeedbackSettingsAccounts(entered: entered), gate = NativeMusicGate()
+            let store = NativeMusicTestLibrary(), accounts = FeedbackSettingsAccounts(entered: entered), gate = NativeMusicGate()
             let service = try await NativeMusicFixture.service(store, accounts: accounts)
             addTeardownBlock { await gate.release(); await service.close() }
             let receipts = MusicSettingsReceiptOwner(), key = "playback/feedback/tx"
@@ -18,7 +18,7 @@ final class MusicNativeFeedbackTests: XCTestCase {
                 try await service.setPlaybackFeedback(platform: .qq, enabled: true, expectedRevision: 0)
             }
             await fulfillment(of: [entered], timeout: 3)
-            let committed = try MJ.parse(XCTUnwrap(store.snapshot().0))["records"][MusicModel.key("playback")]
+            let committed = try MJ.parse(XCTUnwrap(store.snapshot().0))["areas"]["playback"]
             XCTAssertEqual(committed["feedback"]["platforms"]["tx"]["enabled"], .bool(true))
             if revoke { service.revokeAccess(generation: 2) }
             else {
@@ -30,7 +30,7 @@ final class MusicNativeFeedbackTests: XCTestCase {
             XCTAssertEqual(result.revision, 1)
             XCTAssertEqual(result.platforms[.qq], .init(enabled: true, generation: 1))
             XCTAssertEqual(receipts.unknown.map(\.setting), ["playback/feedback/wy"])
-            let saved = try MJ.parse(XCTUnwrap(store.snapshot().0))["records"][MusicModel.key("playback")]
+            let saved = try MJ.parse(XCTUnwrap(store.snapshot().0))["areas"]["playback"]
             XCTAssertEqual(saved["feedback"], committed["feedback"])
             XCTAssertEqual(store.snapshot().2, revoke ? 1 : 2, "The confirmed write is never replayed")
             if revoke {
@@ -42,7 +42,7 @@ final class MusicNativeFeedbackTests: XCTestCase {
     }
 
     func testOptionalSettingsDefaultOffPreserveLibraryUnknownPlaybackFieldsAndColdReadTrue() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
         let collection = try await service.createPlaylist(name: "Retained", refs: page.items.map(\.ref))
         let old = try await service.playbackFeedbackSettings()
@@ -51,14 +51,13 @@ final class MusicNativeFeedbackTests: XCTestCase {
         let originalBytes = try XCTUnwrap(store.snapshot().0), original = try MJ.parse(originalBytes)
         var draft = try MusicDocument(originalBytes, runID: "synthetic")
         draft.playback["syntheticFutureField"] = .obj([("retained", .string("original"))])
-        try store.compareAndSwap(expected: originalBytes, replacement: draft.encode(changed: ["playback"]))
+        try store.replaceSnapshot(expected: originalBytes, replacement: draft.encode(changed: ["playback"]))
         let enabled = try await service.setPlaybackFeedback(platform: .kugou, enabled: true, expectedRevision: old.revision)
         XCTAssertEqual(enabled.platforms[.kugou], MusicPlaybackFeedbackSetting(enabled: true, generation: 1))
-        let saved = try MJ.parse(XCTUnwrap(store.snapshot().0)), records = saved["records"]
-        XCTAssertEqual(saved["version"], original["version"])
-        XCTAssertEqual(records[MusicModel.key("library")], original["records"][MusicModel.key("library")])
-        XCTAssertEqual(records[MusicModel.key("playback")]["syntheticFutureField"], draft.playback["syntheticFutureField"])
-        XCTAssertEqual(records[MusicModel.key("playback")]["mode"], draft.playback["mode"])
+        let saved = try MJ.parse(XCTUnwrap(store.snapshot().0)), records = saved["areas"]
+        XCTAssertEqual(records["library"], original["areas"]["library"])
+        XCTAssertEqual(records["playback"]["syntheticFutureField"], draft.playback["syntheticFutureField"])
+        XCTAssertEqual(records["playback"]["mode"], draft.playback["mode"])
         await service.close()
         let cold = try await NativeMusicFixture.service(store)
         let coldSettings = try await cold.playbackFeedbackSettings(), tracks = try await cold.tracks(in: collection)
@@ -67,7 +66,7 @@ final class MusicNativeFeedbackTests: XCTestCase {
     }
 
     func testSettingsCASAndProtectionFailWithoutResetOrReplay() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let first = try await service.setPlaybackFeedback(platform: .qq, enabled: true, expectedRevision: 0)
         let before = store.snapshot()
         do { _ = try await service.setPlaybackFeedback(platform: .qq, enabled: false, expectedRevision: 0); XCTFail("stale CAS") }
@@ -88,13 +87,13 @@ final class MusicNativeFeedbackTests: XCTestCase {
     }
 
     func testMalformedFeedbackFailsClosedWithoutMakingOtherLibraryDataEmpty() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
         let collection = try await service.createPlaylist(name: "Retained", refs: page.items.map(\.ref))
         let before = store.snapshot().0
         var draft = try MusicDocument(before, runID: "synthetic")
         draft.playback["feedback"] = .obj([("schema", .n(99)), ("platforms", .obj())])
-        try store.compareAndSwap(expected: before, replacement: draft.encode(changed: ["playback"]))
+        try store.replaceSnapshot(expected: before, replacement: draft.encode(changed: ["playback"]))
         let malformed = store.snapshot()
         do { _ = try await service.playbackFeedbackSettings(); XCTFail("unknown schema") }
         catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }

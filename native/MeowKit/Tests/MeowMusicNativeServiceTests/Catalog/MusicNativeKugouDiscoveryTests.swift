@@ -111,7 +111,7 @@ final class MusicNativeKugouDiscoveryTests: XCTestCase {
     }
     func testRequiredCanonicalSongLocatorFailureIsNotEmptySuccessOrPartialAdoption() async throws {
         let peer = KugouDiscoveryPeer { _, _ in F.page([F.section("songs", items: [.object(["sources": .array([.object(["source": .string("kg"), "musicInfo": .object(["name": .string("broken")])])])])], layout: "songs")]) }
-        let document = NativeMusicMemoryDocument(), service = try await kugouService(peer, document: document), writes = document.snapshot().2
+        let document = NativeMusicTestLibrary(), service = try await kugouService(peer, document: document), writes = document.snapshot().2
         await assertMusicFailure(.upstreamInvalid) { _ = try await service.homePage(cursor: nil, refresh: true) }
         XCTAssertEqual(document.snapshot().2, writes); await finishKugou(service, peer, operations: ["home"])
     }

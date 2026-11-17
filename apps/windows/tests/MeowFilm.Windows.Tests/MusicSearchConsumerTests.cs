@@ -521,7 +521,7 @@ public static partial class MusicUiTests
             await using var runtime = new NativeMusicScriptTestRuntime();
             var http = new SearchHttp { SearchResult = (count, _) => new { items = SearchSongPage(count).ToArray(), more = false } };
             runtime.Platform.OnRequest = http.Read;
-            var inner = new MusicNativeApplication(store, runtime);
+            var inner = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             var forwarder = new SearchSnapshotForwarder(inner);
             await using var module = new MusicCapability(forwarder, store, new PlaybackProbe(), new Dialogs());
             await module.InitializeAsync(default); await Drain();
@@ -831,7 +831,7 @@ public static partial class MusicUiTests
         {
             await using var store = ServiceStore();
             await using var runtime = new NativeMusicScriptTestRuntime();
-            var inner = new MusicNativeApplication(store, runtime);
+            var inner = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             var consumer = new SyncDuringResume(inner);
             await using var module = new MusicCapability(consumer, store, new PlaybackProbe(), new Dialogs());
             await module.InitializeAsync(default);
@@ -948,7 +948,7 @@ public static partial class MusicUiTests
         {
             var platform = scriptRuntime is QualityFixture.ScriptRuntime selected ? selected.Platform : Runtime.Platform;
             platform.OnRequest = Http.Read;
-            App = new(Store, scriptRuntime ?? Runtime, null, null, clock);
+            App = new(Store, MusicTestStores.For(Store), scriptRuntime ?? Runtime, null, null, clock);
             Module = new(App, Store, new PlaybackProbe(), new Dialogs());
         }
         internal static async Task<SearchScene> Create(TimeProvider? clock = null, IRuntimeClient? scriptRuntime = null)

@@ -24,17 +24,18 @@ private actor ExclusionHistoryScripts: MusicScriptResolving {
 
 // Inject the real session notification while its final owner check is suspended.
 // The public CAS/notification chain is covered separately by inFlight below.
-private final class ExclusionPublicationDocument: MusicNativeDocumentStoring, @unchecked Sendable {
-    let base: NativeMusicMemoryDocument
+private final class ExclusionPublicationDocument: NativeMusicTestLibraryWrapping, @unchecked Sendable {
+    let base: NativeMusicTestLibrary
+    var backingLibrary: NativeMusicTestLibrary { base }
     private let lock = NSLock()
     private var remaining = 0, notifications = 0
     private var action: (@Sendable () throws -> Void)?
-    init(_ base: NativeMusicMemoryDocument) { self.base = base }
+    init(_ base: NativeMusicTestLibrary) { self.base = base }
     func arm(afterReads: Int, action: @escaping @Sendable () throws -> Void) {
         lock.lock(); defer { lock.unlock() }
         remaining = afterReads; self.action = action
     }
-    func read() throws -> Data? {
+    func readSnapshot() throws -> MusicNativeLibrarySnapshot {
         lock.lock()
         var notify: (@Sendable () throws -> Void)?
         if action != nil {
@@ -43,10 +44,10 @@ private final class ExclusionPublicationDocument: MusicNativeDocumentStoring, @u
         }
         lock.unlock()
         try notify?()
-        return try base.read()
+        return try base.readSnapshot()
     }
-    func compareAndSwap(expected: Data?, replacement: Data) throws {
-        try base.compareAndSwap(expected: expected, replacement: replacement)
+    func withTransaction<T>(commit: (_ action: () throws -> Void) throws -> Void, _ body: (any MusicNativeLibraryWriting) throws -> T) throws -> T {
+        return try base.withTransaction(commit: commit, body)
     }
     func notificationCount() -> Int { lock.lock(); defer { lock.unlock() }; return notifications }
 }
@@ -184,7 +185,7 @@ final class MusicSourceExclusionHistoryTests: XCTestCase {
     }
     private func inFlight(_ entry: Entry, otherScope: String? = nil) async throws {
         let gate = MusicNativeCandidateDiscoveryBarrier(), scripts = ExclusionHistoryScripts(gate: gate)
-        let service = NativeMusicService(document: try ExclusionTestFixture.store(),
+        let service = NativeMusicService(database: try ExclusionTestFixture.store(),
             scripts: scripts,
             platformClient: try MusicNativeCandidateDiscoveryQQ().makeClient(),
             enabledPlatforms: [.qq],
@@ -288,7 +289,7 @@ final class MusicSourceExclusionHistoryTests: XCTestCase {
         let document = ExclusionPublicationDocument(try ExclusionTestFixture.store())
         let notification = MusicNativeCandidateDiscoveryBarrier()
         let scripts = ExclusionHistoryScripts(gate: notification)
-        let service = NativeMusicService(document: document,
+        let service = NativeMusicService(database: document,
             scripts: scripts,
             platformClient: try MusicNativeCandidateDiscoveryQQ().makeClient(),
             enabledPlatforms: [.qq],

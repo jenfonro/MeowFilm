@@ -5,9 +5,10 @@ import MeowMusicTestSupport
 
 private typealias F = KugouDiscoveryFixture
 
-private struct CatalogFailingDocument: MusicNativeDocumentStoring {
-    func read() throws -> Data? { throw MusicServiceError.storageFailed }
-    func compareAndSwap(expected: Data?, replacement: Data) throws { throw MusicServiceError.storageFailed }
+private struct CatalogFailingDocument: NativeMusicTestLibraryWrapping {
+    let backingLibrary = NativeMusicTestLibrary()
+    func readSnapshot() throws -> MusicNativeLibrarySnapshot { throw MusicServiceError.storageFailed }
+    func withTransaction<T>(commit: (_ action: () throws -> Void) throws -> Void, _ body: (any MusicNativeLibraryWriting) throws -> T) throws -> T { throw MusicServiceError.storageFailed }
 }
 
 private actor CatalogAccount: MusicNativeAccountProviding, MusicNativeHomeDisplayProviding {
@@ -90,18 +91,17 @@ private actor CatalogAccount: MusicNativeAccountProviding, MusicNativeHomeDispla
 }
 final class MusicNativeCatalogSourceTests: XCTestCase {
     private func envelope(_ records: [(String, MJ)]) -> Data {
-        MJ.obj([("version", .n(1)), ("scope", .string("device")), ("revision", .n(0)),
-            ("records", .obj(records.map { (MusicModel.key($0.0), $0.1) }))]).bytes
+        MJ.obj([("revision", .n(0)), ("areas", .obj(records)), ("songs", .obj())]).bytes
     }
     func testDefaultIsNeteaseWithoutWritesAndUnavailableSourcesAreRejected() async throws {
-        let peer = KugouDiscoveryPeer(), document = NativeMusicMemoryDocument(), service = try await kugouService(peer, document: document, select: false)
+        let peer = KugouDiscoveryPeer(), document = NativeMusicTestLibrary(), service = try await kugouService(peer, document: document, select: false)
         let selected = try await service.homeSourceSelection(); XCTAssertEqual(selected.selected, .netease); XCTAssertEqual(selected.revision, 0)
         XCTAssertEqual(document.snapshot().2, 0)
         for source in [MusicPublicBrowsePlatform.qq, .kuwo, .migu] { await assertMusicFailure(.unsupported) { _ = try await service.selectHomeSource(source, ifRevision: 0) } }
         await finishKugou(service, peer, operations: [])
     }
     func testDisabledSelectedSourceDoesNotFallBackButCanBeChanged() async throws {
-        let peer = KugouDiscoveryPeer(), document = NativeMusicMemoryDocument()
+        let peer = KugouDiscoveryPeer(), document = NativeMusicTestLibrary()
         let first = try await kugouService(peer, document: document); await first.close()
         let service = try await kugouService(peer, document: document, enabled: [.netease], select: false)
         await assertMusicFailure(.unsupported) { _ = try await service.homePage(cursor: nil, refresh: true) }
@@ -109,7 +109,7 @@ final class MusicNativeCatalogSourceTests: XCTestCase {
         await finishKugou(service, peer, operations: [])
     }
     func testSaveIsDurableIdempotentAndUsedByFirstHomeAfterRecreation() async throws {
-        let peer = KugouDiscoveryPeer(), document = NativeMusicMemoryDocument(), service = try await kugouService(peer, document: document)
+        let peer = KugouDiscoveryPeer(), document = NativeMusicTestLibrary(), service = try await kugouService(peer, document: document)
         _ = try await service.selectHomeSource(.kugou, ifRevision: 1); XCTAssertEqual(document.snapshot().2, 1); await service.close()
         let restored = try await kugouService(peer, document: document, select: false), selected = try await restored.homeSourceSelection()
         XCTAssertEqual(selected.selected, .kugou); XCTAssertEqual(selected.revision, 1)
@@ -117,7 +117,7 @@ final class MusicNativeCatalogSourceTests: XCTestCase {
         await finishKugou(restored, peer, operations: ["home"])
     }
     func testRevisionConflictsWithinAndBetweenServicesNeverWrite() async throws {
-        let peer = KugouDiscoveryPeer(), document = NativeMusicMemoryDocument(), first = try await kugouService(peer, document: document, select: false)
+        let peer = KugouDiscoveryPeer(), document = NativeMusicTestLibrary(), first = try await kugouService(peer, document: document, select: false)
         let second = try await kugouService(peer, document: document, select: false); _ = try await second.homeSourceSelection()
         _ = try await first.selectHomeSource(.kugou, ifRevision: 0); let before = document.snapshot()
         await assertMusicFailure(.staleRevision) { _ = try await first.selectHomeSource(.netease, ifRevision: 0) }
@@ -131,7 +131,7 @@ final class MusicNativeCatalogSourceTests: XCTestCase {
             #"{"schema":1,"revision":0}"#, #"{"schema":1,"revision":0,"platform":"kg","extra":true}"#,
             #"{"schema":2,"revision":0,"platform":"kg"}"#, #"{"schema":1,"revision":1.5,"platform":"kg"}"#,
             #"{"schema":1,"revision":"1","platform":"kg"}"#, #"{"schema":1,"revision":-1,"platform":"kg"}"#, #""kg""#, "null"] {
-            let peer = KugouDiscoveryPeer(), document = NativeMusicMemoryDocument(envelope([("catalogSource", F.json(raw))])), service = try await kugouService(peer, document: document, select: false)
+            let peer = KugouDiscoveryPeer(), document = NativeMusicTestLibrary(envelope([("catalogSource", F.json(raw))])), service = try await kugouService(peer, document: document, select: false)
             await assertMusicFailure(.corruptDocument) { _ = try await service.homeSourceSelection() }
             await assertMusicFailure(.corruptDocument) { _ = try await service.homePage(cursor: nil, refresh: true) }
             await assertMusicFailure(.corruptDocument) { _ = try await service.publicDiscovery(.channels, cursor: nil) }
@@ -143,7 +143,7 @@ final class MusicNativeCatalogSourceTests: XCTestCase {
         await assertMusicFailure(.storageFailed) { _ = try await service.homeSourceSelection() }
         await assertMusicFailure(.storageFailed) { _ = try await service.homePage(cursor: nil, refresh: true) }
         await finishKugou(service, peer, operations: [])
-        let document = NativeMusicMemoryDocument(), saving = try await kugouService(peer, document: document, select: false)
+        let document = NativeMusicTestLibrary(), saving = try await kugouService(peer, document: document, select: false)
         document.fail(.storageFailed)
         await assertMusicFailure(.storageFailed) { _ = try await saving.selectHomeSource(.kugou, ifRevision: 0) }
         let selected = try await saving.homeSourceSelection(); XCTAssertEqual(selected.selected, .netease); XCTAssertEqual(selected.revision, 0)
@@ -192,7 +192,7 @@ final class MusicNativeCatalogSourceTests: XCTestCase {
         await finishKugou(service, peer, operations: [])
     }
     func testSavingSourceDoesNotRewriteLibraryQueuePlaybackOrHistory() async throws {
-        let peer = KugouDiscoveryPeer(), document = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(document)
+        let peer = KugouDiscoveryPeer(), document = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(document)
         let track = try await service.search(platform: "tx", query: "kept", page: 1, limit: 30).items[0]
         _ = try await service.changeQueue(.replace([track.ref], index: 0), expectedRevision: 0)
         let before = try await service.read(); _ = try await service.selectHomeSource(.kugou, ifRevision: 0); let after = try await service.read()
@@ -201,7 +201,7 @@ final class MusicNativeCatalogSourceTests: XCTestCase {
     }
     func testForeignCollectionUsesItsPlatformAndNeverChangesHomePreference() async throws {
         for platform in [MusicPublicBrowsePlatform.netease, .kugou] {
-            let peer = NativeMusicResultFixture(failure: .upstreamFailed), document = NativeMusicMemoryDocument(), service = try await kugouService(peer, document: document, select: platform == .netease)
+            let peer = NativeMusicResultFixture(failure: .upstreamFailed), document = NativeMusicTestLibrary(), service = try await kugouService(peer, document: document, select: platform == .netease)
             let before = try await service.homeSourceSelection(), writes = document.snapshot().2
             await assertMusicFailure(.upstreamFailed) { _ = try await service.publicDetail(.init(platform: platform, nativeID: "foreign", title: "Foreign"), cursor: nil) }
             let calls = await peer.calls(), after = try await service.homeSourceSelection()
@@ -241,7 +241,7 @@ final class MusicNativeCatalogSourceTests: XCTestCase {
             NativeDiscoveryFixture.page([NativeDiscoveryFixture.section("featured",
                 items: [NativeDiscoveryFixture.collection("wy-featured")])])
         }
-        let document = NativeMusicMemoryDocument(), service = try await kugouService(peer, document: document)
+        let document = NativeMusicTestLibrary(), service = try await kugouService(peer, document: document)
         let before = try await service.homeSourceSelection(), writes = document.snapshot().2
         let channel = MusicPublicBrowseChannel(id: "featured", title: "Featured", kind: .featured, platform: .netease)
         let page = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
@@ -256,7 +256,7 @@ final class MusicNativeCatalogSourceTests: XCTestCase {
         await finishKugou(service, peer, operations: ["channel"])
     }
     func testCurrentKugouSnapshotColdReadPreservesRepositoryLocatorsWithoutAuthority() async throws {
-        let peer = KugouDiscoveryPeer(), document = NativeMusicMemoryDocument(), snapshot = KugouSnapshotStore(), service = try await kugouService(peer, document: document, snapshot: snapshot)
+        let peer = KugouDiscoveryPeer(), document = NativeMusicTestLibrary(), snapshot = KugouSnapshotStore(), service = try await kugouService(peer, document: document, snapshot: snapshot)
         let live = try await service.homePage(cursor: nil, refresh: true), bytes = try XCTUnwrap(snapshot.read())
         let storedBytes = document.snapshot().0, writes = document.snapshot().2
         await service.close()
@@ -278,7 +278,7 @@ final class MusicNativeCatalogSourceTests: XCTestCase {
         await finishKugou(reopened, peer, operations: ["home"])
     }
     func testAdoptingNewDurableRevisionRetiresCursorEvenWhenPlatformIsUnchanged() async throws {
-        let peer = KugouDiscoveryPeer(), document = NativeMusicMemoryDocument(), reader = try await kugouService(peer, document: document)
+        let peer = KugouDiscoveryPeer(), document = NativeMusicTestLibrary(), reader = try await kugouService(peer, document: document)
         let page = try await reader.homePage(cursor: nil, refresh: true), cursor = try XCTUnwrap(page.cursor), writer = try await kugouService(peer, document: document, select: false)
         _ = try await writer.selectHomeSource(.netease, ifRevision: 1); _ = try await writer.selectHomeSource(.kugou, ifRevision: 2)
         let current = try await reader.homeSourceSelection(); XCTAssertEqual(current.revision, 3)

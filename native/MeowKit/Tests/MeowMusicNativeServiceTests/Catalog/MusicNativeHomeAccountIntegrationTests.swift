@@ -212,7 +212,7 @@ private struct HomeAccountIntegrationFixture: Sendable {
         owner = .init(accounts: accounts, scopes: [.netease: identity], providers: [.netease: provider],
                       clock: { NativeMusicFixture.date })
         http = .init(failure: guestFailure)
-        service = .init(document: NativeMusicMemoryDocument(), accounts: owner,
+        service = .init(database: NativeMusicTestLibrary(), accounts: owner,
                         platformClient: try http.makeClient(), enabledPlatforms: [.netease], homeSnapshot: snapshot,
                         clock: { NativeMusicFixture.date })
     }

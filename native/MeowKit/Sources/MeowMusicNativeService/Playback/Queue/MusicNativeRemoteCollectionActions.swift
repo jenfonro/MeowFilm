@@ -38,10 +38,15 @@ extension NativeMusicService: MusicRemoteCollectionServing {
         try await work { try await source.validate() }
         try check(own); try intent.check(); try source.authorization.check()
         let state = try read()
+        var matches: [String: Bool] = [:]
         let filtered = try references.filter { reference in
+            try check(own); try intent.check(); try source.authorization.check()
+            if let matched = matches[reference.songID] { return matched }
             let song = try repositorySong(reference.songID, state)
-            return MusicRemoteCollectionFilter.matches(title: song["title"].string, artist: song["artist"].string,
+            let matched = MusicRemoteCollectionFilter.matches(title: song["title"].string, artist: song["artist"].string,
                 album: song["album"].string, query: query)
+            matches[reference.songID] = matched
+            return matched
         }
         try musicRequire(!filtered.isEmpty, .notFound)
         let child = try source.authorization.perform {

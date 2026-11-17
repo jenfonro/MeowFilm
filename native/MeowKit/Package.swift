@@ -26,6 +26,7 @@ let package = Package(
         .package(path: "../AudioKernel")
     ],
     targets: [
+        .systemLibrary(name: "CSQLite", pkgConfig: "sqlite3"),
         .target(name: "MeowContracts", dependencies: []),
         .target(name: "MeowJSON", dependencies: []),
         .target(name: "MeowStorage", dependencies: ["MeowContracts"]),
@@ -39,7 +40,7 @@ let package = Package(
         .target(name: "MeowRuntime", dependencies: []),
         .target(name: "MeowMusicFeature", dependencies: ["MeowContracts", "MeowStorage", "MeowPlayback", "MeowUI"]),
         .target(name: "MeowMusicPlatform", dependencies: ["MeowMusicFeature", "MeowAudio", "MeowContracts", "MeowJSON", "MeowAccounts", "MeowStorage", "MeowRuntime", "MeowUI"]),
-        .target(name: "MeowMusicNativeService", dependencies: ["MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowMusicPlatform", "MeowRuntime", "MeowStorage"]),
+        .target(name: "MeowMusicNativeService", dependencies: ["CSQLite", "MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowMusicPlatform", "MeowRuntime", "MeowStorage"]),
         .target(name: "MeowFilmFeature", dependencies: ["MeowUI", "MeowJSON", "MeowStorage", "MeowRuntime"]),
         .target(name: "MeowNovelFeature", dependencies: ["MeowUI", "MeowStorage", "MeowRuntime"]),
         .target(name: "MeowMusicTestSupport", dependencies: ["MeowMusicFeature", "MeowMusicPlatform", "MeowRuntime"]),

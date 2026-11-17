@@ -122,7 +122,7 @@ final class MusicSourceManagementStateTests: XCTestCase {
     }
 
     func testPageUsesOneListAndConfirmedOwnerSettingsAndSupportsBothImportActionsEnableAndDelete() async throws {
-        let scripts = MusicSourceManagementFixture(), store = NativeMusicMemoryDocument()
+        let scripts = MusicSourceManagementFixture(), store = NativeMusicTestLibrary()
         let service = try await NativeMusicFixture.service(store)
         let model = MusicViewModel(service: service, player: SourceSettingsPlayer(), scriptSources: scripts)
         await model.load()

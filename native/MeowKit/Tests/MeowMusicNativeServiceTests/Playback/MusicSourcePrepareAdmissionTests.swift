@@ -98,8 +98,8 @@ final class MusicSourcePrepareAdmissionTests: XCTestCase {
             let after = try await service.read()
             XCTAssertEqual(after.queue, before.queue); XCTAssertEqual(after.playback, before.playback)
             XCTAssertEqual(after.history, before.history)
-            XCTAssertEqual(after.library["library"]["songs"][song["songId"].string]["songId"], song["songId"])
-            XCTAssertEqual(after.library["library"]["songs"][song["songId"].string]["baselineDuration"].number, 100)
+            XCTAssertEqual((try after.fixtureSong(song["songId"].string))["songId"], song["songId"])
+            XCTAssertEqual((try after.fixtureSong(song["songId"].string))["baselineDuration"].number, 100)
             await service.close()
         }
     }
@@ -145,7 +145,7 @@ final class MusicSourcePrepareAdmissionTests: XCTestCase {
             XCTAssertEqual(after.queue, before.queue)
             XCTAssertEqual(after.playback, before.playback)
             XCTAssertEqual(after.history, before.history)
-            XCTAssertEqual(after.library["library"]["songs"][song["songId"].string]["baselineDuration"].number, 100)
+            XCTAssertEqual((try after.fixtureSong(song["songId"].string))["baselineDuration"].number, 100)
             await session.close(retainingAttemptID: nil); await service.close()
         }
     }
@@ -193,7 +193,7 @@ final class MusicSourcePrepareAdmissionTests: XCTestCase {
             let after = try await service.read()
             XCTAssertEqual(after.queue, before.queue)
             XCTAssertEqual(after.playback, before.playback)
-            XCTAssertEqual(after.library["library"]["songs"][song["songId"].string]["baselineDuration"].number, 100)
+            XCTAssertEqual((try after.fixtureSong(song["songId"].string))["baselineDuration"].number, 100)
             let history = try await service.playedSongs()
             XCTAssertTrue(history.isEmpty)
             await service.close()
