@@ -5,8 +5,10 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using System.Windows.Controls;
+using System.Windows.Media.Imaging;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Desktop.Artwork;
 using MeowFilm.Media;
 using MeowFilm.Platform.Storage;
 
@@ -18,6 +20,23 @@ internal static class FilmPlaybackFixture
     internal const string Assets = "pack://application:,,,/MeowFilm.Capabilities;component/Film/Presentation/Assets/";
     internal static readonly string[] Posters = ["poster-bad-kids.jpg", "poster-long-night.jpg", "poster-day-and-night.jpg",
         "poster-burning-ice.jpg", "poster-reset.jpg", "poster-knockout.jpg", "poster-long-season.jpg"];
+    internal sealed class BundledArtworkLoader : IArtworkLoader
+    {
+        public Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var image = new BitmapImage(new Uri(address, UriKind.Absolute));
+            image.Freeze();
+            return Task.FromResult<IArtworkLease>(new ArtworkLease(image));
+        }
+
+        private sealed class ArtworkLease(BitmapSource image) : IArtworkLease
+        {
+            public BitmapSource Image => image;
+            public void Dispose() { }
+        }
+    }
+
     internal static FilmCardItem Card(string kind = "tv", int number = 100, string? title = null, string? poster = null)
     {
         var target = new FilmPlaybackTarget($"tmdb:{kind}:{number}", kind, title ?? $"契约样例 {number}", "tmdb", number.ToString());

@@ -132,18 +132,31 @@ final class FilmPosterCell: UICollectionViewCell {
 final class FilmSectionHeader: UICollectionReusableView {
     static let reuseIdentifier = "FilmSectionHeader"
     private let titleLabel = UILabel()
-    private let more = UIButton(type: .system)
+    private let titleButton = UIButton(type: .system)
     private var onMore: (() -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         titleLabel.font = .systemFont(ofSize: 18)
         titleLabel.accessibilityTraits = .header
-        more.setTitle("查看更多", for: .normal)
-        more.titleLabel?.font = .systemFont(ofSize: 13)
-        more.addAction(UIAction { [weak self] _ in self?.onMore?() }, for: .touchUpInside)
+        var configuration = UIButton.Configuration.plain()
+        configuration.image = UIImage(systemName: "chevron.forward")
+        configuration.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+        configuration.imagePlacement = .trailing
+        configuration.imagePadding = 8
+        configuration.contentInsets = .zero
+        configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
+            var attributes = $0
+            attributes.font = .systemFont(ofSize: 18)
+            return attributes
+        }
+        titleButton.configuration = configuration
+        titleButton.contentHorizontalAlignment = .leading
+        titleButton.titleLabel?.lineBreakMode = .byTruncatingTail
+        titleButton.accessibilityTraits.insert(.header)
+        titleButton.addAction(UIAction { [weak self] _ in self?.onMore?() }, for: .touchUpInside)
         addSubview(titleLabel)
-        addSubview(more)
+        addSubview(titleButton)
     }
 
     @available(*, unavailable)
@@ -153,18 +166,20 @@ final class FilmSectionHeader: UICollectionReusableView {
         titleLabel.text = title
         titleLabel.textColor = UIColor(theme.ink)
         self.onMore = onMore
-        more.isHidden = onMore == nil
-        more.tintColor = UIColor(theme.muted)
-        more.accessibilityIdentifier = "film.home.more.\(sectionID)"
-        more.accessibilityLabel = "查看更多\(title)"
+        titleLabel.isHidden = onMore != nil
+        titleButton.isHidden = onMore == nil
+        titleButton.configuration?.title = title
+        titleButton.configuration?.baseForegroundColor = UIColor(theme.ink)
+        titleButton.accessibilityIdentifier = "film.home.more.\(sectionID)"
+        titleButton.accessibilityLabel = "查看更多\(title)"
         setNeedsLayout()
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let width: CGFloat = more.isHidden ? 0 : 72
-        more.frame = CGRect(x: bounds.width - width, y: 0, width: width, height: bounds.height)
-        titleLabel.frame = CGRect(x: 0, y: 8, width: max(0, bounds.width - width), height: bounds.height - 16)
+        let width = min(bounds.width, ceil(titleButton.intrinsicContentSize.width))
+        titleButton.frame = CGRect(x: 0, y: 0, width: width, height: bounds.height)
+        titleLabel.frame = CGRect(x: 0, y: 8, width: bounds.width, height: bounds.height - 16)
     }
 }
 

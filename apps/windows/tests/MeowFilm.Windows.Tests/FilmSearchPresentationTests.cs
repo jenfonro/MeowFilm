@@ -11,6 +11,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
+using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -38,7 +39,9 @@ public static partial class MusicUiTests
         var aggregate = CardWithLabels(SearchFixture.Card("group:aggregate", "site", "聚合片", members), "聚合", "更新至第2季第12集");
         var tv = CardWithLabels(SearchFixture.Card("tmdb:tv:7", "tmdb", "森林大帝", []), "剧集", "共2季78集");
         var movie = FilmJson.Encode(new { id = "tmdb:movie:8", displayKey = "tmdb:movie:8", sourceKind = "tmdb",
-            title = "流浪地球", poster = "", textBadge = "2019", siteLabel = "电影", tmdbType = "movie", tmdbId = 8,
+            businessId = "tmdb:movie:8", playbackTarget = new FilmPlaybackTarget("tmdb:movie:8", "movie", "流浪地球", "tmdb", "8").Wire(),
+            title = "流浪地球", poster = FilmPlaybackFixture.Assets + FilmPlaybackFixture.Posters[0],
+            textBadge = "2019", siteLabel = "电影", tmdbType = "movie", tmdbId = 8,
             aggregateItems = Array.Empty<object>() });
         var longCard = CardWithLabels(SearchFixture.Member(sourceConfig, "long", longTitle),
             string.Concat(Enumerable.Repeat("很长的站点名称", 12)), string.Concat(Enumerable.Repeat("更新至第100季第100集", 8)));
@@ -50,6 +53,7 @@ public static partial class MusicUiTests
         True(f.Page.Cards.Count == 6 && f.Page.Cards.Select(card => card.Subtitle).Take(4).SequenceEqual(["来源甲", "聚合", "剧集", "电影"]),
             "the actual search projection retains site, aggregate, television and movie label semantics");
         using var source = SearchRenderSource(f.Shell, out var root);
+        ArtworkScope.SetLoader(root, new FilmPlaybackFixture.BundledArtworkLoader());
         var columnCounts = new HashSet<int>();
         var posterWidths = new HashSet<double>();
         int requests = f.Runtime.SearchOpens;
@@ -58,7 +62,11 @@ public static partial class MusicUiTests
             SearchLayout(root, width, 800); await Drain(); SearchLayout(root, width, 800);
             var cards = Visuals(f.Page.View).OfType<FilmCard>().ToArray();
             Equal(6, cards.Length);
+            True(Visuals(cards[0]).OfType<ArtworkImage>().Single().Source is not null,
+                "search visual evidence includes decoded bundled artwork beneath the text badge");
             var panel = Visuals(f.Page.View).OfType<FilmSearchVirtualizingPanel>().Single();
+            int columns = Math.Max(1, (int)Math.Floor((panel.ViewportWidth + 36) / 216));
+            double expectedWidth = (panel.ViewportWidth - (columns - 1) * 36) / columns;
             columnCounts.Add(cards.Count(card => card.TranslatePoint(new Point(), panel).Y < 1));
             foreach (var card in cards)
             {
@@ -66,9 +74,10 @@ public static partial class MusicUiTests
                 var poster = (Grid)card.FindName("PosterFrame");
                 var label = (Border)card.FindName("SiteLabel");
                 var subtitle = (TextBlock)card.FindName("Subtitle");
-                True(poster.ActualWidth >= 143.5 && poster.ActualWidth <= 176.5 &&
+                True(Math.Abs(poster.ActualWidth - expectedWidth) <= 1 &&
                     Math.Abs(poster.ActualHeight - poster.ActualWidth * 1.5) <= 1,
-                    "search posters shrink within readable bounds and retain the maximum reference ratio");
+                    $"search follows the frontend's 180 DIP minimum, equal columns, 36 DIP gap and two-to-three posters: " +
+                    $"window={width}, viewport={panel.ViewportWidth}, expected={expectedWidth}, card={card.RenderSize}, poster={poster.RenderSize}");
                 posterWidths.Add(poster.ActualWidth);
                 True(Math.Abs(card.ActualHeight - poster.ActualHeight - (item.HasSubtitle ? 54 : 30)) <= 1,
                     "caption and source-chip rows keep their native height while the poster changes size");
@@ -76,7 +85,7 @@ public static partial class MusicUiTests
                 Equal(item.HasSubtitle ? Visibility.Visible : Visibility.Collapsed, label.Visibility);
                 if (item.HasSubtitle)
                 {
-                    True(label.ActualWidth <= 176 && label.TranslatePoint(new Point(), card).Y >= poster.ActualHeight &&
+                    True(label.ActualWidth <= card.ActualWidth && label.TranslatePoint(new Point(), card).Y >= poster.ActualHeight &&
                         label.TranslatePoint(new Point(0, label.ActualHeight), card).Y <= card.ActualHeight + .5 &&
                         Math.Abs(label.TranslatePoint(new Point(label.ActualWidth / 2, 0), card).X - card.ActualWidth / 2) < 1,
                         $"bounded source/type chip stays centered below the poster without overlap or clipping: {label.RenderSize} at {label.TranslatePoint(new Point(), card)}, card {card.RenderSize}");
@@ -102,11 +111,20 @@ public static partial class MusicUiTests
                     Equal(Color.FromRgb(0xF9, 0x73, 0x16), ((SolidColorBrush)badge.Background).Color);
                     Equal(Colors.White, ((SolidColorBrush)text.Foreground).Color);
                     Equal(new CornerRadius(8), badge.CornerRadius); Equal(new Thickness(8, 2, 8, 2), badge.Padding);
-                    Equal(10d, text.FontSize); Equal(FontWeights.Normal, text.FontWeight);
+                    Equal(12d, text.FontSize); Equal(FontWeights.Normal, text.FontWeight);
                     Equal(TextTrimming.CharacterEllipsis, text.TextTrimming);
+                    CardMotion.Transition((Button)card.FindName("HitButton"), true, animate: false);
+                    await Drain();
+                    var badgeTransform = text.TransformToAncestor(root);
+                    Point badgeOrigin = badgeTransform.Transform(new Point()), badgeUnit = badgeTransform.Transform(new Point(1, 1));
+                    True(badge.Effect is null &&
+                        Math.Abs(badgeUnit.X - badgeOrigin.X - 1) < .001 &&
+                        Math.Abs(badgeUnit.Y - badgeOrigin.Y - 1) < .001,
+                        "badge glyphs stay at native scale without shadow composition while the poster is hovered");
+                    CardMotion.Transition((Button)card.FindName("HitButton"), false, animate: false);
                 }
                 var title = Visuals(card).OfType<TextBlock>().Single(text => text.Text == item.Title);
-                True(title.TextTrimming == TextTrimming.CharacterEllipsis && title.ActualWidth <= 176,
+                True(title.TextTrimming == TextTrimming.CharacterEllipsis && title.ActualWidth <= card.ActualWidth,
                     "long titles trim within the bounded native card width");
                 var transform = title.TransformToAncestor(root);
                 Point origin = transform.Transform(new Point()), unit = transform.Transform(new Point(1, 1));
@@ -119,7 +137,7 @@ public static partial class MusicUiTests
                 var bounds = new Rect(card.TranslatePoint(new Point(), f.Page.View), card.RenderSize);
                 True(bounds.Left >= 0 && bounds.Right <= f.Page.View.ActualWidth + .5, "narrow layout wraps real cards inside its viewport");
             }
-            SaveSearchEvidence(root, width, 800, $"cards-{width}.png");
+            await SaveSearchEvidence(root, width, 800, $"cards-{width}.png");
         }
         True(columnCounts.Count > 1 && posterWidths.Count > 1 && f.Runtime.SearchOpens == requests,
             "resizing changes complete column count and poster size without another search");
@@ -151,9 +169,10 @@ public static partial class MusicUiTests
     {
         var value = JsonNode.Parse(card.GetRawText())!.AsObject();
         value["siteLabel"] = label; value["textBadge"] = badge;
+        value["poster"] = FilmPlaybackFixture.Assets + FilmPlaybackFixture.Posters[6];
         return JsonSerializer.SerializeToElement(value);
     }
-    private static void SaveSearchEvidence(FrameworkElement root, int width, int height, string name)
+    private static async Task SaveSearchEvidence(FrameworkElement root, int width, int height, string name)
     {
         string path = TestWorkspace.DataPath("film-search", name); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var image = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32); image.Render(root);
@@ -163,6 +182,18 @@ public static partial class MusicUiTests
         var png = new PngBitmapEncoder(); png.Frames.Add(BitmapFrame.Create(image));
         using (var output = File.Create(path)) png.Save(output);
         Console.WriteLine("EVIDENCE film-search " + path);
+        if (Environment.GetEnvironmentVariable("MEOWFILM_TEST_DESKTOP_EXPECTED_USER") is null) return;
+        var source = (HwndSource)PresentationSource.FromVisual(root);
+        source.RootVisual = null;
+        var window = new DesktopWindow { Content = root, SizeToContent = SizeToContent.WidthAndHeight, Left = 24, Top = 24,
+            WindowStyle = WindowStyle.None, ShowInTaskbar = false, Topmost = true };
+        try
+        {
+            window.Show();
+            window.UpdateLayout();
+            await NativeDesktopCapture.SaveAsync(root, Path.GetFileNameWithoutExtension(name));
+        }
+        finally { window.Content = null; window.Close(); source.RootVisual = root; }
     }
     private static async Task UnifiedTabs()
     {
@@ -248,7 +279,7 @@ public static partial class MusicUiTests
         Equal(1, f.Runtime.SearchOpens); Equal(1, f.Runtime.Calls.Count(call => call.Method == "film.search.command" && FilmJson.Text(call.Input, "action") == "more")); Equal(48, f.Page.Cards.Count);
         source.RootVisual = null;
     }
-    private static HwndSource SearchRenderSource(ShellWindow shell, out FrameworkElement root)
+    private static HwndSource SearchRenderSource(ShellWindow shell, out FrameworkElement root, int width = 1110, int height = 800)
     {
         root = (FrameworkElement)shell.Content;
         // Preserve the real window's inherited context when its content moves to a hidden HWND.
@@ -264,7 +295,7 @@ public static partial class MusicUiTests
         root.UseLayoutRounding = shell.UseLayoutRounding;
         shell.Content = null;
         return new(new HwndSourceParameters("film-search-offscreen")
-        { Width = 1110, Height = 800, WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000000 }) { RootVisual = root };
+        { Width = width, Height = height, WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000000 }) { RootVisual = root };
     }
     private static void SearchLayout(FrameworkElement root, int width, int height)
     {
