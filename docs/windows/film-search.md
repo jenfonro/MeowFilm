@@ -17,7 +17,7 @@
 - `FilmSearchService` 固定借用一个 `RuntimeConnection`，通过 `film.playback.v1` 调用 `film.search.open/snapshot/command/release/handoff`，以 `film` 事件通道订阅 `/v1/film/events/{sessionId}`。同一快照同时提供完整 `cards/rawCards` 与通道状态。
 - Node 唯一执行规则、识别、相关度、分页、聚合与排序，持有来源原始响应和规则快照。客户端只显示选定数组并转发动作，不再直接发搜索内容请求、执行 JS、排序或从卡片生成缓存 seed。
 - Capabilities 无规则／搜索 JS 内嵌资源；Platform 不再构建或复制独立规则 DLL。实际执行由运行器载荷的公共 script-host addon 提供，缺失运行器或方法时显示真实错误，无原生回退。
-- 正式 entry、manifest 与原生 describe 精确装配 `music,cat,source,pan,tmdb,douban,film,netease,music-platform` 九模块。通用默认三模块不变；加入豆瓣模块不扩展搜索范围。运行器装配与依赖分别见[平台接入](app-runtime.md)、[打包](runtime-packaging.md)。
+- 正式 entry 装配 `music,cat,source,pan,tmdb,douban,film,netease,music-platform` 九模块；manifest 记录交付描述，原生 live describe 核对所需模块身份、唯一性及契约，不以静态数组镜像预检数量、顺序或业务方法。通用默认三模块不变；加入豆瓣模块不扩展搜索范围。运行器装配与依赖分别见[平台接入](app-runtime.md)、[打包](runtime-packaging.md)。
 - `FilmMetadataService` 直接读写 TMDB／豆瓣[原生唯一设置文档](native-settings.md)，提交运行器清缓存动作并维护这些操作的关闭排空；`ResolveImage` 保留供装配使用的原引用投影。搜索与详情内容由 Node 搜索／播放会话提供，图片经 `IRuntimeImageClient` 和 `ArtworkService` 消费。有效配置消费、内容缓存、完整度与同 key producer 合并归 [Node 数据 owner](../runtime/film-playback.md)；原生图片缓存与解码预算不等于搜索结果条数限制。原生保存回执与 Node 实际应用分开确认。
 
 ## 搜索生命周期

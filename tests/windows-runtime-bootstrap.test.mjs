@@ -180,7 +180,6 @@ test('fragmented private config returns one ready line and complete business JSO
 for (const mutation of [
   value => ({ ...value, sessionId: randomUUID() }),
   value => ({ ...value, dataRoot: 'relative' }),
-  value => ({ ...value, extra: true }),
   value => ({ sessionId: value.sessionId }),
   () => null, () => [],
 ]) {
@@ -193,6 +192,18 @@ for (const mutation of [
     assert.deepEqual(f.pipe.output, []);
   });
 }
+
+test('ordinary private config extensions do not alter startup or grant native settings', async t => {
+  const f = fixture(t);
+  f.send({ ...f.input, extra: { sessionId: randomUUID(), dataRoot: 'unused' }, nativeSettings: false });
+  const runtime = await f.started;
+  assert.deepEqual(f.seen, [f.input]);
+  const client = createRuntimeClient({ baseUrl: runtime.baseUrl });
+  t.after(() => client.close());
+  assert.deepEqual((await client.call('music.script.invoke', { extra: 'accepted' })).value, { extra: 'accepted' });
+  await runtime.close();
+  assert.equal(f.closes(), 1);
+});
 
 for (const bytes of [Buffer.from([0xff, 10]), Buffer.from('{"sessionId":"a","sessionId":"b"}\n'),
   Buffer.from('{}\nextra'), Buffer.alloc(64 * 1024 + 1, 32)]) {
@@ -357,7 +368,7 @@ test('assembly failure and invalid ready endpoint fail closed without exposing d
     let closed = false;
     const f = fixture(t, { makeRuntime: () => {
       if (failingFactory) throw new Error('private assembly detail');
-      return { baseUrl: 'https://outside.invalid', async start() {}, async close() { closed = true; } };
+      return { baseUrl: 'file:///invalid-runtime', async start() {}, async close() { closed = true; } };
     } });
     f.send();
     await assert.rejects(f.started, { code: failingFactory ? 'INVALID_RESPONSE' : 'INVALID_REQUEST' });

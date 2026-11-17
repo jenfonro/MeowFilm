@@ -72,7 +72,7 @@ try {
     $Manifest.files = @($Manifest.files) + @([pscustomobject]@{
         path = 'node.exe'; bytes = (Get-Item -LiteralPath $WindowsNode).Length; sha256 = $NodeRuntime.sha256
     }) + @([pscustomobject]@{
-        path = 'node-LICENSE.txt'; bytes = (Get-Item -LiteralPath $NodeLicense).Length; sha256 = $NodeRuntime.licenseSha256
+        path = 'node-LICENSE.txt'; role = 'documentation'; bytes = (Get-Item -LiteralPath $NodeLicense).Length; sha256 = $NodeRuntime.licenseSha256
     })
     $Manifest | Add-Member -NotePropertyName node -NotePropertyValue $NodeRuntime
     [System.IO.File]::WriteAllText($ManifestPath, ($Manifest | ConvertTo-Json -Depth 50) + "`n", [System.Text.UTF8Encoding]::new($false))
