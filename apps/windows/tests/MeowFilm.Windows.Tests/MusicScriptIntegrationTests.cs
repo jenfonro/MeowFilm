@@ -69,7 +69,7 @@ public static class MusicScriptIntegrationTests
                     ?? throw new InvalidOperationException("Verified Node required.");
                 RuntimeModule[] modules = RuntimeHttpClientTests.Modules;
                 return Child = await NodeRuntime.StartAsync(node,
-                    RuntimeBundle.Verify(System.IO.Path.Combine(bundles, "aggregate"), "aggregate", modules),
+                    RuntimeBundle.Verify(System.IO.Path.Combine(bundles, "aggregate"), "aggregate"),
                     modules,
                     System.IO.Path.Combine(path, "script-runtime"), token);
             });

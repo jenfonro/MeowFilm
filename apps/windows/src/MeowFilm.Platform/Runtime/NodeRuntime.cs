@@ -131,11 +131,11 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
             var ready = await settingsPipe.ReadyAsync(deadline.Token).ConfigureAwait(false);
             client = new RuntimeHttpClient(ready);
             runtime = new NodeRuntime(child, server, client, output, error, exited, job,
-                RuntimeHttpProtocol.ValidateEndpoint(ready), ownerRevoked, settingsPipe);
+                ready, ownerRevoked, settingsPipe);
             var description = await client.DescribeAsync(deadline.Token).ConfigureAwait(false);
             if (!description.GetProperty("ok").GetBoolean())
                 throw new BridgeException(description.GetProperty("code").GetString()!);
-            _ = ValidateDescription(description.GetProperty("value"), bundle.Product, expectedModules);
+            RuntimeHttpProtocol.ValidateDescription(description.GetProperty("value"), bundle.Product, expectedModules);
             deadline.Token.ThrowIfCancellationRequested();
             if (!runtime.IsConnected) throw new BridgeException("CLOSED");
             return runtime;
@@ -168,9 +168,6 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
             throw new BridgeException(cancellationToken.IsCancellationRequested ? "CANCELLED" : failure);
         }
     }
-
-    public static HashSet<string> ValidateDescription(JsonElement description, string product,
-        IReadOnlyList<RuntimeModule> modules) => RuntimeHttpProtocol.ValidateDescription(description, product, modules);
 
     public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
     {

@@ -33,12 +33,26 @@ class IOSSourceLayoutTests(unittest.TestCase):
                          ["Application/Lifetime/Owner.swift", "Application/Main.swift"])
         self.assertEqual(generator.source_paths(self.root, ("UITests",)), ["UITests/Tests.swift"])
 
-    def test_empty_and_missing_responsibility_directories_are_rejected(self):
-        with self.assertRaisesRegex(ValueError, "Missing source directory"):
+    def test_empty_source_group_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Empty source group"):
             generator.source_paths(self.root, ("Application",))
         (self.root / "apps/ios/Application").mkdir(parents=True)
-        with self.assertRaisesRegex(ValueError, "Empty source directory"):
+        with self.assertRaisesRegex(ValueError, "Empty source group"):
             generator.source_paths(self.root, ("Application",))
+
+    def test_app_sources_do_not_require_every_responsibility_directory(self):
+        self.write("Application/Main.swift")
+        (self.root / "apps/ios/Composition").mkdir()
+        self.write("UITests/Tests.swift")
+        self.write("RuntimeTests/Tests.swift")
+        (self.root / "apps/ios/Info.plist").write_bytes(plistlib.dumps({}))
+        self.assertEqual(generator.source_paths(self.root, generator.APPLICATION_DIRECTORIES),
+                         ["Application/Main.swift"])
+        with patch.object(generator, "ROOT", self.root):
+            generator.generate()
+        project = (self.root / "apps/ios/Meowfilm.xcodeproj/project.pbxproj").read_text()
+        for path in ("Application/Main.swift", "UITests/Tests.swift", "RuntimeTests/Tests.swift"):
+            self.assertIn(f'path = "{path}";', project)
 
     def test_linked_sources_are_rejected_without_following_them(self):
         linked = self.write("Application/Main.swift")

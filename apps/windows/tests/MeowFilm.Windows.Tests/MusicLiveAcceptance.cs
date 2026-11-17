@@ -96,7 +96,7 @@ internal static class MusicLiveAcceptance
                 ?? throw new LiveFailure("NOT_COVERED");
             var bundle = RuntimeBundle.Verify(Path.Combine(
                 TestWorkspace.ValidatePath(TestWorkspace.ResultsRoot, bundleRoot), AppIdentity.RuntimeId),
-                AppIdentity.RuntimeId, AppIdentity.ScriptModules);
+                AppIdentity.RuntimeId);
             Directory.CreateDirectory(Path.Combine(data, "native"));
             Directory.CreateDirectory(Path.Combine(data, "cache"));
             store = new(Path.Combine(data, "native"), AppIdentity.NativeNamespaces,

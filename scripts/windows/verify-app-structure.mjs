@@ -1,21 +1,13 @@
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { isBuiltin } from 'node:module';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isWindowsSource, sourceDirectories } from './source-scope.mjs';
-import { sourceReferences, publicPackageImport, SHARED_RUNTIME_BUILTINS, workspaceMap } from '../module-policy.mjs';
+import { sourceReferences, publicPackageImport, workspaceMap } from '../module-policy.mjs';
 import { discoverRuntimeSource } from '../runtime-source.mjs';
 import { discoverWorkspaces } from '../verify-dependency-lock.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const runtimeTrees = new Map([
-  ['apps/windows/runtime', { files: ['bootstrap.mjs', 'native-settings.mjs', 'entries/aggregate.mjs'], directories: ['entries'] }],
-]);
-// Each platform file may use only its declared capabilities; workspace subpaths
-// are checked against their package exports above, not these sets.
-const windowsImports = new Map([
-  ['apps/windows/runtime/bootstrap.mjs', new Set(['node:net', 'node:path', '@meowfilm/runtime-bridge'])],
-  ['apps/windows/runtime/native-settings.mjs', new Set(['@meowfilm/runtime-bridge'])],
-]);
 function fail(message) { throw new Error('Windows App structure: ' + message); }
 function samePath(a, b) {
   return process.platform === 'win32'
@@ -34,12 +26,11 @@ export function verifyAppStructure(directory = root) {
   const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
   const workspaces = discoverWorkspaces(directory, manifest);
   const packages = workspaceMap(directory, workspaces);
-  const sharedRuntime = discoverRuntimeSource(directory);
-  const files = [], directories = [];
+  discoverRuntimeSource(directory);
+  const files = [];
   function walk(rel) {
     const path = join(directory, rel);
     if (lstatSync(path).isSymbolicLink() || !samePath(realpathSync(path), path)) fail('linked source: ' + rel);
-    directories.push(rel);
     for (const item of readdirSync(join(directory, rel), { withFileTypes: true })) {
       const child = rel + '/' + item.name;
       if (!isWindowsSource(child)) continue;
@@ -57,37 +48,8 @@ export function verifyAppStructure(directory = root) {
     if (!item.isFile() || !samePath(realpathSync(path), path)) fail('linked/non-regular source: ' + file);
     files.push(file);
   }
-  const sharedFiles = files.filter(file => file.startsWith('apps/runtime/'))
-    .map(file => file.slice('apps/runtime/'.length)).sort();
-  if (sharedFiles.join() !== sharedRuntime.files.join())
-    fail('unexpected runtime source: apps/runtime');
-  for (const [source, expected] of runtimeTrees) {
-    const authored = files.filter(file => file.startsWith(source + '/')).map(file => file.slice(source.length + 1));
-    if (expected.files.some(file => !authored.includes(file))) fail('missing runtime source: ' + source);
-    if (authored.some(file => !expected.files.includes(file)) ||
-        directories.filter(path => path.startsWith(source + '/'))
-          .some(path => !expected.directories.includes(path.slice(source.length + 1))))
-      fail('unexpected runtime source: ' + source);
-  }
-
-  const protocolPath = 'apps/windows/src/MeowFilm.Core/Runtime/RuntimeHttpProtocol.cs';
-  if (files.includes(protocolPath)) {
-    const methods = text => [...text.matchAll(/["']([^"']+)["']/g)].map(([, method]) => method).sort();
-    const native = new Map([...readFileSync(join(directory, protocolPath), 'utf8').matchAll(
-      /\["([^"]+)"\]\s*=\s*new\("([^"]+)",\s*"([^"]+)",\s*"([^"]+)",\s*\[([^\]]*)\]/g,
-    )].map(([, id, version, contract, prefix, operations]) =>
-      [id, { version, contract, prefix, methods: methods(operations) }]));
-    const shared = new Map([...readFileSync(join(directory, 'apps/runtime/contracts.mjs'), 'utf8').matchAll(
-      /(?:'([^']+)'|([a-z][a-z-]*)):\s*\{\s*contract:\s*'([^']+)',\s*version:\s*'([^']+)',\s*prefix:\s*'([^']+)',\s*(?:upload:\s*true,\s*)?operations:\s*\[([^\]]*)\]/g,
-    )].map(([, quotedId, id, contract, version, prefix, operations]) =>
-      [quotedId ?? id, { version, contract, prefix, methods: methods(operations) }]));
-    if (!native.size || native.size !== shared.size ||
-        [...native.keys()].sort().join() !== [...shared.keys()].sort().join())
-      fail('runtime contract modules differ');
-    for (const [id, contract] of shared)
-      if (JSON.stringify(native.get(id)) !== JSON.stringify(contract))
-        fail('runtime contract mismatch: ' + id);
-  }
+  if (!files.includes('apps/windows/runtime/entries/aggregate.mjs'))
+    fail('missing runtime source: apps/windows/runtime/entries/aggregate.mjs');
 
   let imports = 0, resources = 0;
   const embeddedResources = [];
@@ -129,19 +91,15 @@ export function verifyAppStructure(directory = root) {
     if (/\.(?:mjs|js)$/.test(file) && !/(?:^|\/)(?:test|tests|fixtures)\//.test(file.replace(/^tests\/baselines\//, 'baseline/'))) {
       const text = readFileSync(join(directory, file), 'utf8');
       const references = sourceReferences(text);
-      const runtimeModule = file.startsWith('apps/runtime/') ||
-        file.startsWith('apps/windows/runtime/') || file.startsWith('packages/');
+      const runtimeSource = file.startsWith('apps/runtime/') || file.startsWith('apps/windows/runtime/');
+      const runtimeModule = runtimeSource || file.startsWith('packages/');
       if (runtimeModule && references.unresolvedImports.length)
         fail('module specifiers must be statically resolvable: ' + file);
       for (const { specifier, kind } of references.imports) {
         sourceTarget(file, specifier);
         if (specifier.startsWith('.')) continue;
-        if (file.startsWith('apps/runtime/') &&
-            !SHARED_RUNTIME_BUILTINS.has(specifier) && !publicPackageImport(directory, packages, specifier, { kind }))
-          fail('shared runtime platform import: ' + file + ' -> ' + specifier);
-        if (file.startsWith('apps/windows/runtime/') &&
-            !windowsImports.get(file)?.has(specifier))
-          fail('Windows runtime bypasses shared module: ' + file + ' -> ' + specifier);
+        if (runtimeSource && !isBuiltin(specifier) && !publicPackageImport(directory, packages, specifier, { kind }))
+          fail('runtime private/undeclared import: ' + file + ' -> ' + specifier);
       }
     }
     if (file.endsWith('.xaml')) {

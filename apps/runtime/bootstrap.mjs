@@ -41,7 +41,8 @@ export function createAppRuntime({ sessionId,
           !module.methods || typeof module.methods !== 'object') invalid();
       const entries = Object.entries(module.methods);
       for (const [name, handler] of entries) {
-        if (!name.startsWith(contract.prefix) || !contract.operations.includes(name.slice(contract.prefix.length)) ||
+        if (!name.startsWith(contract.prefix) ||
+            !/^[a-z]+(?:\.[a-z][a-zA-Z]*)*$(?![\s\S])/.test(name.slice(contract.prefix.length)) ||
             typeof handler !== 'function' || methods.has(name)) invalid();
         methods.set(name, handler);
       }

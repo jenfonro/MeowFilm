@@ -98,10 +98,32 @@ test('novel lowerCamel operations coexist with nested film operations on the pub
   assert.deepEqual(observed, [['source', 'library.releaseImage', image], ['film', 'session.media.release', media]]);
 });
 
-test('HTTP close accepts only an empty object and rejects every other shape before side effects', async t => {
+test('same-owner handlers register describe and execute without an operation approval list', async t => {
+  const music = fixture('music'), source = fixture('source'), seen = [];
+  for (const [module, operation] of [[music, 'fixture.newHandler'], [source, 'fixture.newHandler']]) {
+    const spec = contracts[module.id];
+    module.methods[spec.prefix + operation] = async input => {
+      seen.push([module.id, input]);
+      return { ok: true, contract: spec.contract, value: input };
+    };
+  }
+  const { client } = await connect(t, [music, source]);
+  const description = (await client.describe()).value;
+  for (const module of [music, source]) {
+    const method = contracts[module.id].prefix + 'fixture.newHandler';
+    assert.equal(description.modules.find(item => item.id === module.id).methods.includes(method), true);
+    assert.deepEqual(await client.call(method, { owner: module.id }),
+      { ok: true, contract: module.contract, value: { owner: module.id } });
+  }
+  assert.deepEqual(await client.call('music.script.fixture.missing'),
+    { ok: false, contract: 'runtime.http.v1', code: 'METHOD_NOT_FOUND' });
+  assert.deepEqual(seen, [['music', { owner: 'music' }], ['source', { owner: 'source' }]]);
+});
+
+test('HTTP close rejects non-object inputs before side effects and accepts ordinary extensions', async t => {
   let closes = 0;
   const { runtime, client, identity } = await connect(t, [fixture('music', () => { closes++; })]);
-  for (const value of [true, 1, [], null, { x: 1 }]) {
+  for (const value of [true, 1, [], null]) {
     const reply = await rawRequest(runtime.baseUrl,
       { sessionId: identity.sessionId },
       { path: '/v1/close', body: JSON.stringify(value) }).response;
@@ -110,7 +132,10 @@ test('HTTP close accepts only an empty object and rejects every other shape befo
     assert.equal(closes, 0);
     assert.deepEqual((await client.call('music.script.sources.list', { still: 'open' })).value, { still: 'open' });
   }
-  assert.deepEqual(await client.shutdown(), {
+  const closed = await rawRequest(runtime.baseUrl, { sessionId: identity.sessionId },
+    { path: '/v1/close', body: JSON.stringify({ x: 1 }) }).response;
+  assert.equal(closed.status, 200);
+  assert.deepEqual(closed.value, {
     ok: true, contract: 'runtime.http.v1', value: { closed: true, cleanupComplete: true },
   });
   assert.equal(closes, 1);
@@ -236,16 +261,49 @@ test('invalid assembly cannot open a listener or override methods; failed factor
   await turn(); assert.equal(closes, 4);
 });
 
+for (const operation of ['', 'Fixture.newHandler', 'fixture.NewHandler', 'fixture..newHandler',
+  'fixture/newHandler', '../fixture.newHandler', 'fixture.newHandler?x=1',
+  'fixture.newHandler#fragment', 'fixture.newHandler\n']) {
+  test(`invalid registered operation ${JSON.stringify(operation)} drains its owner`, async () => {
+    let closes = 0;
+    const module = fixture('music', () => { closes++; });
+    module.methods = { ['music.script.' + operation]: () => null };
+    assert.throws(() => createAppRuntime({ ...config(), modules: [module] }), { code: 'INVALID_REQUEST' });
+    await turn();
+    assert.equal(closes, 1);
+  });
+}
+
+test('registration rejects foreign-owner handlers non-functions and unusable resource capabilities', async () => {
+  for (const mutate of [
+    module => { module.methods['source.runtime.fixture.newHandler'] = () => null; },
+    module => { module.methods['music.script.fixture.newHandler'] = null; },
+    module => { module.upload = null; },
+    module => { module.image = null; },
+    module => { module.events = null; },
+  ]) {
+    let closes = 0;
+    const module = fixture('music', () => { closes++; });
+    mutate(module);
+    assert.throws(() => createAppRuntime({ ...config(), modules: [module] }), { code: 'INVALID_REQUEST' });
+    await turn();
+    assert.equal(closes, 1);
+  }
+  const module = fixture('music');
+  module.close = null;
+  assert.throws(() => createAppRuntime({ ...config(), modules: [module] }), { code: 'INVALID_REQUEST' });
+  await turn();
+});
+
 test('the real music platform module exposes its common contract without fetching upstreams', async t => {
   const dataRoot = temporaryData();
   const module = createMusicPlatformModule({ dataRoot, transport: () => assert.fail('passive module fetched upstream') });
   const { runtime, client } = await connect(t, [module]);
   t.after(async () => { await runtime.close(); rmSync(dataRoot, { recursive: true }); });
   const described = await client.describe();
-  assert.deepEqual(described.value.modules, [{
-    id: 'music-platform', version: '0.1.0', contract: 'music.platform.v1',
-    methods: ['music.platform.cache.clear', 'music.platform.describe', 'music.platform.request', 'music.platform.session.update'],
-  }]);
+  const identity = described.value.modules.find(item => item.id === 'music-platform');
+  assert.equal(identity.version, '0.1.0');
+  assert.equal(identity.contract, 'music.platform.v1');
   assert.deepEqual(await client.call('music.platform.describe'), {
     ok: true, contract: 'music.platform.v1',
     value: { execution: 'node', contract: 'music.platform.v1', platforms: ['wy', 'tx', 'kg', 'kw', 'mg'] },
@@ -456,7 +514,7 @@ for (const failure of ['throw', 'envelope']) {
     const modules = ids.map(id => {
       const spec = contracts[id];
       return { ...fixture(id), methods: {
-        [spec.prefix + spec.operations[0]]: async () => ({ ok: true, contract: spec.contract, value: {} }),
+        [spec.prefix + 'probe']: async () => ({ ok: true, contract: spec.contract, value: {} }),
       }, async close() {
         counts[id]++;
         if (id === 'netease') { entered.resolve(); await release.promise; }

@@ -16,7 +16,7 @@ Audio / Media / Platform / Desktop → Core
 
 Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口、一套导航与设置、一个原生播放协调、一个系统媒体会话。原生媒体基础设施由既有音频链和影视媒体共同使用；当前不装配下载能力。`SystemMedia` 只消费本模块的中性 `ISystemPlayback`／`ISystemMediaBackend`，项目不引用具体播放工程；音乐／电影 typed 投影由 App 装配。
 
-`scripts/windows/verify-app-structure.mjs` 检查 Windows 源码、公共 `apps/runtime`／`packages`、Windows／共享引擎工具和 `scripts/` 根层的共享 Node `.mjs` 工具，不按文件名登记，也不递归扫描整个 `scripts`。iOS 专属工具放在 `scripts/ios/`，专属模板只在其生成运行时中解析；Windows 源码或工具不能反向导入这些工具或模板。相对导入、链接安全、运行时目录闭包和 WPF 资源检查保持；EmbeddedResource 的实际路径、逻辑身份及清单也由此检查。Windows 构建输入指纹采用相同源码／工具范围及生成目录排除规则，并包含本端配置、测试、共享引擎输入和随包许可；独立 iOS 代码、工具目录及测试不影响该指纹，共享引擎工具仍按整个职责目录计入。
+`scripts/windows/verify-app-structure.mjs` 检查 Windows 源码、公共 `apps/runtime`／`packages`、Windows／共享引擎工具和 `scripts/` 根层的共享 Node `.mjs` 工具，不按文件名登记，也不递归扫描整个 `scripts`。iOS 专属工具放在 `scripts/ios/`，专属模板只在其生成运行时中解析；Windows 源码或工具不能反向导入这些工具或模板。相对导入、链接安全、实际运行时入口与依赖和 WPF 资源检查保持；EmbeddedResource 的实际路径、逻辑身份及清单也由此检查。公共与 Windows Node 运行器使用 `node:module` 的 `isBuiltin()` 识别内置模块，workspace 导入按包声明的公开 `exports` 和实际目标文件解析，新增公开子路径或被引用的 helper 无需逐文件登记。portable source-runtime 的无 Node／宿主全局边界仍由公共依赖检查负责，第三方脚本权限不因此改变。结构检查不解析 C#／JS 源码中的完整操作表；协议与方法行为由实际消费者回归验证。Windows 构建输入指纹采用相同源码／工具范围及生成目录排除规则，并包含本端配置、测试、共享引擎输入和随包许可；独立 iOS 代码、工具目录及测试不影响该指纹，共享引擎工具仍按整个职责目录计入。
 
 ## 能力源码
 
