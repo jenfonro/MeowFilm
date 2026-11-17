@@ -3,6 +3,7 @@ import {
   createScriptHost, createNodeNetwork, createSourceDownload, PrivateDocuments, ScriptHostError, SCRIPT_LIMITS,
 } from '@meowfilm/script-host';
 import { BridgeError, validateJSONValue } from '@meowfilm/runtime-bridge';
+import { parseJSONText, stringifyJSONValue, cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { contracts } from '../contracts.mjs';
 import { SourceCandidates, InstallationOperations } from './source-candidates.mjs';
 
@@ -59,12 +60,22 @@ function text(value, max = 128) {
 function installation(value) {
   requireValue(typeof value === 'string' && uuidPattern.test(value));
 }
-function snapshot(value) { validateJSONValue(value); return structuredClone(value); }
+function snapshot(value) { return cloneJSONValue(value); }
 const plainText = (value, max, empty = true) => typeof value === 'string' &&
   (empty || value.length > 0) && scalars(value) <= max && !control.test(value);
 // Object ordering is not a content change; array ordering remains meaningful.
-const canonical = value => JSON.stringify(value, (_key, item) => object(item)
-  ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : item);
+function canonical(value) {
+  function ordered(item) {
+    if (isRawJSON(item)) return item;
+    if (Array.isArray(item)) return item.map(ordered);
+    return object(item) ? Object.fromEntries(Object.entries(item)
+      .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+      .map(([key, value]) => [key, ordered(value)])) : item;
+  }
+  return stringifyJSONValue(ordered(value), -Infinity);
+}
+// LX consumes JavaScript Numbers; never replace the exact stored JSON with this projection.
+const lxValue = value => JSON.parse(stringifyJSONValue(value, -Infinity));
 function decode(bytes) {
   // The byte round-trip rejects malformed UTF-8 without requiring ICU.
   const source = bytes.toString('utf8');
@@ -166,7 +177,7 @@ function validData(value) {
     new Set(values.map(entry => entry.key)).size === values.length);
 }
 // Internal document wrappers do not consume the guest value's JSON depth budget.
-const encodedLength = value => Buffer.byteLength(JSON.stringify(value));
+const encodedLength = value => Buffer.byteLength(stringifyJSONValue(value, -Infinity));
 function errorCode(error) {
   if (error instanceof Failure) return error.code;
   if (error instanceof BridgeError) return 'INVALID_REQUEST';
@@ -243,7 +254,7 @@ function mediaCandidate(raw, clock, expected, duration = 0) {
 }
 /** LX musicInfo with the conventional mm:ss interval derived from a known duration. */
 function lxInfo(musicInfo) {
-  const info = structuredClone(musicInfo);
+  const info = { ...musicInfo };
   if (typeof info.duration === 'number' && Number.isFinite(info.duration) && info.duration >= 0) {
     const pad = value => String(Math.floor(value)).padStart(2, '0');
     info.interval = `${pad(info.duration / 60)}:${pad(info.duration % 60)}`;
@@ -332,7 +343,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     const bytes = documents.read('catalog.json');
     if (!bytes) return cached = { schema: 1, revision: 0, installations: [] };
     let value;
-    try { value = JSON.parse(decode(bytes)); }
+    try { value = parseJSONText(decode(bytes), -Infinity); }
     catch { throw new Failure('CORRUPT_STORAGE'); }
     finally { bytes.fill(0); }
     requireValue(validCatalog(value), 'CORRUPT_STORAGE');
@@ -346,11 +357,11 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   /** Applies change to the current catalog and replaces the file in the same turn.
    * change returns false for a no-op. A failed write never publishes a guess. */
   function commit(change) {
-    const next = structuredClone(catalog());
+    const next = cloneJSONValue(catalog(), -Infinity);
     if (change(next) === false) return;
     next.revision += 1;
     requireValue(validCatalog(next));
-    const bytes = Buffer.from(JSON.stringify(next));
+    const bytes = Buffer.from(stringifyJSONValue(next, -Infinity));
     try { documents.write('catalog.json', bytes); }
     catch (error) { cached = null; throw error; }
     finally { bytes.fill(0); }
@@ -433,7 +444,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     const bytes = documents.read(dataName(id));
     if (!bytes) return { schema: 1, sites: {} };
     let value;
-    try { value = JSON.parse(decode(bytes)); }
+    try { value = parseJSONText(decode(bytes), -Infinity); }
     catch { throw new Failure('CORRUPT_STORAGE'); }
     finally { bytes.fill(0); }
     requireValue(validData(value), 'CORRUPT_STORAGE');
@@ -463,7 +474,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       requireValue(Object.hasOwn(record.capabilities, input.siteId), 'PERMISSION_DENIED');
       const data = readData(input.installationId);
       const values = Object.hasOwn(data.sites, input.siteId) ? data.sites[input.siteId] : [];
-      if (operation === 'get') return values.find(entry => entry.key === input.key)?.value ?? null;
+      if (operation === 'get') return lxValue(values.find(entry => entry.key === input.key)?.value ?? null);
       const next = values.filter(entry => entry.key !== input.key);
       if (operation === 'set') {
         let size;
@@ -474,7 +485,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       const sites = { ...data.sites };
       if (next.length) sites[input.siteId] = next; else delete sites[input.siteId];
       requireValue(next.length <= 64 && encodedLength(next) <= 65536 && Object.keys(sites).length <= 32, 'LIMIT');
-      const bytes = Buffer.from(JSON.stringify({ schema: 1, sites }));
+      const bytes = Buffer.from(stringifyJSONValue({ schema: 1, sites }, -Infinity));
       try {
         requireValue(bytes.length <= 512 * 1024, 'LIMIT');
         documents.write(dataName(input.installationId), bytes);
@@ -940,11 +951,12 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
           /^[A-Za-z0-9_]{1,32}$/.test(params.quality) && object(params.musicInfo));
         const expected = { installationId: params.installationId, siteKey: params.platform,
           requestedQuality: params.quality };
+        const musicInfo = lxInfo(lxValue(params.musicInfo));
         return run(params.installationId, params.platform, 'musicUrl',
-          { type: params.quality, musicInfo: lxInfo(params.musicInfo) }, signal, (value, record) => ({
+          { type: params.quality, musicInfo }, signal, (value, record) => ({
             installationId: params.installationId, generation: record.generation, contentHash: record.contentHash,
             platform: params.platform, quality: params.quality,
-            ...mediaCandidate(value, clock, expected, params.musicInfo.duration),
+            ...mediaCandidate(value, clock, expected, musicInfo.duration),
           }));
       }),
     'music.script.invoke': business(['installationId', 'siteId', 'operation', 'payload'], undefined,
@@ -952,8 +964,8 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         installation(params.installationId);
         requireValue(typeof params.siteId === 'string' && sitePattern.test(params.siteId) &&
           typeof params.operation === 'string' && sitePattern.test(params.operation) && object(params.payload));
-        const payload = object(params.payload.musicInfo)
-          ? { ...params.payload, musicInfo: lxInfo(params.payload.musicInfo) } : params.payload;
+        const payload = lxValue(params.payload);
+        if (object(payload.musicInfo)) payload.musicInfo = lxInfo(payload.musicInfo);
         return run(params.installationId, params.siteId, params.operation, payload, signal, value => value);
       }),
     'music.script.close': async (params = {}) => {

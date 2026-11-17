@@ -278,7 +278,10 @@ final class MeowfilmAssembly: ObservableObject {
     func makeFilmPlayback(item: FilmItem, kind: FilmPlaybackKind,
                           entrySurface: String? = nil) throws -> FilmPlaybackModel {
         guard !closed, let resources else { throw FilmPlaybackError(code: "CLOSED") }
-        guard let target = item.playbackTarget else { throw FilmPlaybackError(code: "INVALID_REQUEST") }
+        guard let target = item.playbackTarget, let businessID = item.businessID, !businessID.isEmpty,
+              target.id.utf8.elementsEqual(businessID.utf8) else {
+            throw FilmPlaybackError(code: "INVALID_REQUEST")
+        }
         let metadata = try item.metadataSeed.map(RuntimeJSON.decode)
         return try makeFilmPlayback { [weak self] in
             guard let self else { throw FilmPlaybackError(code: "CLOSED") }

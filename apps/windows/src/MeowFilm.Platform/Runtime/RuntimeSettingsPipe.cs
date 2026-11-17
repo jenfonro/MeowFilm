@@ -20,13 +20,12 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IDocumentStore? store,
             var line = await ReadAsync(token).ConfigureAwait(false) ?? throw new BridgeException("CLOSED");
             try
             {
-                using var document = JsonDocument.Parse(line);
-                var value = document.RootElement;
-                if (value.TryGetProperty("protocol", out var protocol))
+                var value = BridgeCodec.DecodeJSONValue(line);
+                if (value.TryGetProperty("protocol", out _))
                 {
-                    if (value.EnumerateObject().Count() != 2 || protocol.GetString() != RuntimeHttpProtocol.Name)
+                    if (BridgeCodec.RequiredProperty(value, "protocol").GetString() != RuntimeHttpProtocol.Name)
                         throw new BridgeException("INVALID_RESPONSE");
-                    string endpoint = value.GetProperty("baseUrl").GetString()!;
+                    string endpoint = BridgeCodec.RequiredProperty(value, "baseUrl").GetString()!;
                     _ = RuntimeHttpProtocol.ValidateEndpoint(endpoint);
                     return endpoint;
                 }
@@ -46,31 +45,30 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IDocumentStore? store,
                 if (line is null) return "CLOSED";
                 try
                 {
-                    using var document = JsonDocument.Parse(line);
-                    await RespondAsync(document.RootElement, CancellationToken.None).ConfigureAwait(false);
+                    await RespondAsync(BridgeCodec.DecodeJSONValue(line), CancellationToken.None).ConfigureAwait(false);
                 }
                 finally { CryptographicOperations.ZeroMemory(line); }
             }
         }
         catch (BridgeException) { return "INVALID_RESPONSE"; }
         catch (JsonException) { return "INVALID_RESPONSE"; }
-        catch (IOException) { return "CLOSED"; }
         catch (ObjectDisposedException) { return "CLOSED"; }
+        catch (InvalidOperationException) { return "INVALID_RESPONSE"; }
+        catch (FormatException) { return "INVALID_RESPONSE"; }
+        catch (IOException) { return "CLOSED"; }
     }
 
     private async Task RespondAsync(JsonElement request, CancellationToken token)
     {
-        if (store is null || namespaces is null || request.ValueKind != JsonValueKind.Object ||
-            !request.TryGetProperty("id", out var identity) || !identity.TryGetInt64(out long id) ||
+        if (store is null || namespaces is null ||
+            !BridgeCodec.RequiredProperty(request, "id").TryGetInt64(out long id) ||
             id is < 1 or > BridgeCodec.MaximumSafeInteger ||
-            !request.TryGetProperty("block", out var blockValue) || blockValue.ValueKind != JsonValueKind.String ||
-            !request.TryGetProperty("kind", out var kindValue) || kindValue.ValueKind != JsonValueKind.String ||
-            !namespaces.TryGetValue(blockValue.GetString()!, out var documentNamespace))
+            BridgeCodec.RequiredProperty(request, "block").GetString() is not { } block ||
+            BridgeCodec.RequiredProperty(request, "kind").GetString() is not { } kind ||
+            !namespaces.TryGetValue(block, out var documentNamespace))
             throw new BridgeException("INVALID_RESPONSE");
-        string kind = kindValue.GetString()!;
         if (kind is not ("settings.read" or "settings.write") ||
-            request.EnumerateObject().Count() != (kind == "settings.read" ? 3 : 5) ||
-            kind == "settings.write" && blockValue.GetString() != "pan.accounts")
+            kind == "settings.write" && block != "pan.accounts")
             throw new BridgeException("INVALID_RESPONSE");
         object reply;
         byte[]? data = null;
@@ -85,12 +83,12 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IDocumentStore? store,
             }
             else
             {
-                var expected = request.GetProperty("expected");
-                var before = new DocumentFingerprint(expected.GetProperty("exists").GetBoolean(),
-                    expected.GetProperty("length").GetInt32(),
-                    expected.GetProperty("sha256").ValueKind == JsonValueKind.Null ? null :
-                        expected.GetProperty("sha256").GetString());
-                data = JsonSerializer.SerializeToUtf8Bytes(request.GetProperty("document"));
+                var expected = BridgeCodec.RequiredProperty(request, "expected");
+                var hash = BridgeCodec.RequiredProperty(expected, "sha256");
+                var before = new DocumentFingerprint(BridgeCodec.RequiredProperty(expected, "exists").GetBoolean(),
+                    BridgeCodec.RequiredProperty(expected, "length").GetInt32(),
+                    hash.ValueKind == JsonValueKind.Null ? null : hash.GetString());
+                data = BridgeCodec.EncodeJSONValue(BridgeCodec.RequiredProperty(request, "document"));
                 fingerprint = await store.WriteAsync(documentNamespace, data, before, token).ConfigureAwait(false);
             }
             using var json = data is null ? null : JsonDocument.Parse(data);
@@ -103,7 +101,7 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IDocumentStore? store,
                 code = error.Error == DocumentStoreError.Conflict ? "STORAGE_CONFLICT" : "STORAGE_ERROR" };
         }
         finally { if (data is not null) CryptographicOperations.ZeroMemory(data); }
-        byte[] response = JsonSerializer.SerializeToUtf8Bytes(reply);
+        byte[] response = BridgeCodec.EncodeJSONValue(reply);
         try
         {
             if (response.Length > MaximumFrameBytes) throw new BridgeException("INVALID_RESPONSE");

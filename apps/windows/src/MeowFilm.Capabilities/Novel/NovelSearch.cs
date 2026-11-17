@@ -28,21 +28,21 @@ public sealed class NovelSearch(NovelSourceService sources, NovelRuleProgram rul
         if (!restart && Query == query && States.Count > 0)
             return Loading ? CurrentTask : States.Any(s => s.Status is "已取消" or "等待") ? LoadMoreAsync(token) : Task.CompletedTask;
         Reset(); Query = query;
-        foreach (var source in sources.Sources.Where(s => s.Enabled && s.Actions.Contains("search")))
-            States.Add(new(source, "等待", 0, false));
-        return LoadMoreAsync(token);
+        return LoadMoreAsync(true, token);
     }
     public void SourcesChanged()
     {
+        if (States.Count == 0) return;
         var available = sources.Sources.Where(s => s.Enabled && s.Actions.Contains("search")).ToArray();
         if (available.Length == States.Count && available.All(s => States.Any(state =>
             state.Source.InstallationId == s.InstallationId && state.Source.Revision == s.Revision))) return;
         Reset(); Changed?.Invoke(this, EventArgs.Empty);
     }
     private void Reset() { Cancel(); raw.Clear(); Books.Clear(); Groups = []; States.Clear(); }
-    public Task LoadMoreAsync(CancellationToken token = default)
+    public Task LoadMoreAsync(CancellationToken token = default) => LoadMoreAsync(false, token);
+    private Task LoadMoreAsync(bool initialize, CancellationToken token)
     {
-        if (Loading || Query.Length == 0 || States.All(s => s.Ended)) return CurrentTask;
+        if (Loading || Query.Length == 0 || (!initialize && States.All(s => s.Ended))) return CurrentTask;
         request?.Dispose(); request = CancellationTokenSource.CreateLinkedTokenSource(token);
         long id = ++generation; string query = Query;
         Loading = true; Changed?.Invoke(this, EventArgs.Empty);
@@ -50,6 +50,14 @@ public sealed class NovelSearch(NovelSourceService sources, NovelRuleProgram rul
         {
             try
             {
+                if (initialize)
+                {
+                    await sources.EnsureExecutionReadyAsync(ct);
+                    ct.ThrowIfCancellationRequested();
+                    if (id != generation) return false;
+                    foreach (var source in sources.Sources.Where(s => s.Enabled && s.Actions.Contains("search")))
+                        States.Add(new(source, "等待", 0, false));
+                }
                 await Task.WhenAll(States.Where(s => !s.Ended).ToArray().Select(SearchOne));
                 return true;
                 async Task SearchOne(NovelSearchSourceState state)

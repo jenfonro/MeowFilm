@@ -82,7 +82,7 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
             spinner.accessibilityLabel = "正在操作账号"; spinner.startAnimating()
             columns.columns[1].addArrangedSubview(spinner)
         } else {
-            let label = UILabel(); label.text = row.account?.status.title ?? "不可用"
+            let label = UILabel(); label.text = row.statusTitle
             label.accessibilityIdentifier = "pan.accounts.status"
             label.font = .preferredFont(forTextStyle: .subheadline); label.numberOfLines = 0
             label.adjustsFontForContentSizeCategory = true

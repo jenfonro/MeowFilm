@@ -1,8 +1,8 @@
 import Foundation
+import MeowRuntime
 import XCTest
 import MeowAccounts
 import MeowMusicFeature
-import MeowJSON
 @testable import MeowMusicPlatform
 
 // Synthetic credentials/peers only. These fixtures never instantiate URLSession,
@@ -109,10 +109,10 @@ actor MusicAccountFeedbackProviderFixture: MusicAccountFeedbackProvider, MusicNe
     func recommendations(kind: String, page: Int) throws -> MusicAccountRecommendation {
         throw MusicServiceError.unsupported
     }
-    func collectionRows() -> [JSONValue] { [] }
-    func tracks(collectionID: String) -> [JSONValue] { [] }
+    func collectionRows() -> [RuntimeValue] { [] }
+    func tracks(collectionID: String) -> [RuntimeValue] { [] }
     func capabilities(mid: String) -> [String] { [] }
-    func resolve(mid: String, quality: String) throws -> JSONValue {
+    func resolve(mid: String, quality: String) throws -> RuntimeValue {
         throw MusicServiceError.unsupported
     }
 }

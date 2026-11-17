@@ -47,6 +47,12 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IDocumentStore st
     public Task RefreshAsync(CancellationToken token = default) => RefreshAsync(false, token);
     internal Task EnsureReadyAsync(CancellationToken token = default) =>
         initialized ? Task.CompletedTask : RefreshAsync(true, token);
+    internal Task EnsureExecutionReadyAsync(CancellationToken token) => work.Run(async ct =>
+    {
+        await EnsureReadyAsync(ct);
+        await ApplyLatestAsync(ct);
+        return true;
+    }, token);
     private Task RefreshAsync(bool onlyMissing, CancellationToken token) => work.Run(async ct =>
     {
         await changes.WaitAsync(ct);
@@ -67,7 +73,9 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IDocumentStore st
         {
             var source = item.Source();
             var previous = sources.FirstOrDefault(s => s.InstallationId == item.InstallationId && s.Revision == item.Revision);
-            return previous is null ? source : source with { Actions = previous.Actions, ErrorCode = previous.ErrorCode };
+            return previous is null ? source : source with { Actions = previous.Actions, ErrorCode = previous.ErrorCode,
+                Weight = previous.Weight, LastUpdateTime = previous.LastUpdateTime,
+                RespondTime = previous.RespondTime, HasExplore = previous.HasExplore };
         }).ToArray());
     }
     public async Task StartAsync(CancellationToken token = default)
@@ -123,7 +131,8 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IDocumentStore st
                 Publish(next.Sources.Select(item =>
                 {
                     var applied = projected.Single(source => source.InstallationId == item.InstallationId);
-                    return item.Source() with { Actions = applied.Actions, ErrorCode = applied.ErrorCode };
+                    var source = item.Enabled && applied.ErrorCode is null ? item.SourceFromDefinition() : item.Source();
+                    return source with { Actions = applied.Actions, ErrorCode = applied.ErrorCode };
                 }).ToArray());
                 if (sources.Any(source => source.Enabled && source.ErrorCode is not null))
                     ApplyFailed?.Invoke(this, "书源配置已保存，部分书源未能生效");
@@ -344,7 +353,7 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IDocumentStore st
     public Task<JsonElement> GetAsync(NovelSource source, CancellationToken token = default) => work.Run(async ct =>
     {
         await configuration.LoadAsync(ct); var item = configuration.Require(source);
-        return NovelJson.Value(new { source = item.Source(), definition = item.Definition });
+        return NovelJson.Value(new { source = sources.FirstOrDefault(value => value.InstallationId == item.InstallationId && value.Revision == item.Revision) ?? item.Source(), definition = item.Definition });
     }, token);
     public Task<JsonElement> SaveAsync(NovelSource source, string definition, CancellationToken token = default) => work.Run(async ct =>
     {
@@ -354,7 +363,7 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IDocumentStore st
             await configuration.LoadAsync(ct);
             var saved = await configuration.SaveAsync(source, source.Protocol, definition, ct);
             PublishConfiguration(); ScheduleApplication(true);
-            return NovelJson.Value(new { source = saved.Source() });
+            return NovelJson.Value(new { source = saved.SourceFromDefinition() });
         }
         finally { changes.Release(); }
     }, token);
@@ -362,7 +371,7 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IDocumentStore st
         EditAsync(async ct =>
         {
             var saved = await configuration.SaveAsync(null, protocol, definition, ct);
-            return NovelJson.Value(new { source = saved.Source() });
+            return NovelJson.Value(new { source = saved.SourceFromDefinition() });
         }, token);
     public Task<JsonElement> UpdateAsync(NovelSource source, object patch, CancellationToken token = default) =>
         EditAsync(async ct => { await configuration.UpdateAsync(source, NovelJson.Value(patch), ct);

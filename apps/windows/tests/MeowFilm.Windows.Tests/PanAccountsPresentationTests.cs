@@ -20,6 +20,7 @@ public static class PanAccountsPresentationTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("three-column table binds exact states and actions at wide and narrow widths", Table);
+        yield return Case("corrupt account status is visible without enabling actions or hiding healthy siblings", CorruptRows);
         yield return Case("real login button uses shared chrome, masked fields and replacement save binding", Manual);
         yield return Case("real QR controls switch methods retry and close while cancelling challenges", Qr);
         yield return Case("hide minimize unload and owner replacement cancel login without leaking a new popup", Lifetime);
@@ -28,6 +29,21 @@ public static class PanAccountsPresentationTests
     }
     private static TestCase Case(string name, Func<Task> run) =>
         new("pan-accounts-ui: " + name, () => MusicQualityConsumerTests.Sta(run));
+    private static async Task CorruptRows()
+    {
+        await using var scene = await Scene.Create(runtime => runtime.SetDocument("""
+            {"version":1,"accounts":{"baidu":{"revision":"broken","credentials":false},
+             "tianyi":{"revision":4,"credentials":{"cookie":"synthetic"}}}}
+            """));
+        var broken = scene.Model.Rows[0];
+        var healthy = scene.Model.Rows.Single(row => row.Provider == "tianyi");
+        Check(Visuals(scene.View).OfType<TextBlock>().Any(text => ReferenceEquals(text.DataContext, broken) &&
+            text.IsVisible && text.Text == "凭据损坏") && !Action(scene.View, broken, "登录").IsEnabled,
+            "the existing status column shows an explicit item error, not signed-out or retained success");
+        Check(Action(scene.View, healthy, "编辑").IsEnabled && Action(scene.View, healthy, "退出登录").IsEnabled &&
+            !scene.Model.LoadFailed && scene.Notices.Count == 0 && scene.Runtime.Calls.Count == 0 &&
+            scene.BindingErrors.ToString().Length == 0, "healthy rows and bindings remain available without a page-level failure");
+    }
     private static async Task Table()
     {
         await using var scene = await Scene.Create(runtime =>

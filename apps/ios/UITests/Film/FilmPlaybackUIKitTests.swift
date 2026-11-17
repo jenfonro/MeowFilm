@@ -1451,7 +1451,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let original = FilmItem(sourceID: "tmdb", id: "19", title: "星海航线", kind: .tv,
-            posterURL: URL(string: "https://artwork.example.invalid/poster.png"))
+            posterURL: URL(string: "https://artwork.example.invalid/poster.png"), businessID: "tmdb:tv:19",
+            playbackTarget: .init(id: "tmdb:tv:19", kind: .tv, title: "星海航线", metadataProvider: .tmdb, metadataID: "19"))
         let logo = URL(string: "https://artwork.example.invalid/logo.png")!
         let library = FilmLibrary(defaults: defaults)
         XCTAssertTrue(try library.toggle(original))

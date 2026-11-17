@@ -47,16 +47,6 @@ public static class BridgeTests
         });
         foreach (var (name, json) in new[]
         {
-            ("duplicate key", """{"a":1,"a":2}"""),
-            ("duplicate escaped key", """{"a":1,"\u0061":2}"""),
-            ("duplicate Unicode key", """{"歌曲":1,"\u6b4c\u66f2":2}"""),
-            ("nested duplicate key", """{"value":[{"x":1,"x":2}]}"""),
-            ("unsafe integer", "9007199254740992"),
-            ("negative unsafe integer", "-9007199254740992"),
-            ("nonfinite numeric range", "1e309"),
-            ("unpaired high surrogate", "\"\\ud800\""),
-            ("unpaired low surrogate", "\"\\udfff\""),
-            ("invalid Unicode key", """{"\ud800":1}"""),
             ("truncated JSON", "["),
             ("trailing comma", "[1,]"),
             ("comment", "/*x*/1"),
@@ -67,6 +57,17 @@ public static class BridgeTests
                 Throws("INVALID_MESSAGE", () => BridgeCodec.DecodeJSONValue(Encoding.UTF8.GetBytes(json)));
                 return Task.CompletedTask;
             });
+        yield return new("bridge: raw extensions preserve duplicate names and exact numbers without global numeric coercion", () =>
+        {
+            const string json = """{"future":9007199254740993,"future":1e400,"nested":{"x":0.123456789012345678901234567890,"x":-9007199254740993,"unused":"\ud800","\udfff":true}}""";
+            var value = BridgeCodec.DecodeJSONValue(Encoding.UTF8.GetBytes(json));
+            Equal(json, Encoding.UTF8.GetString(BridgeCodec.EncodeJSONValue(value)));
+            Equal(json, BridgeCodec.Value(new { value }).GetProperty("value").GetRawText());
+            Equal(2, value.EnumerateObject().Count(item => item.NameEquals("future")));
+            Equal("9007199254740992", Encoding.UTF8.GetString(BridgeCodec.EncodeJSONValue(9007199254740992L)));
+            Throws("INVALID_MESSAGE", () => BridgeCodec.RequiredProperty(value, "future"));
+            return Task.CompletedTask;
+        });
         yield return new("bridge: strict UTF-8 rejects malformed scalars and incomplete input", () =>
         {
             foreach (var bytes in new byte[][]
@@ -81,13 +82,12 @@ public static class BridgeTests
         });
         yield return new("bridge: outgoing JSON rejects lossy strings chars nodes and keys", () =>
         {
-            using var invalidElement = JsonDocument.Parse("\"\\ud800\"");
             foreach (var value in new object[]
             {
-                "\ud800", "\udfff", "x\ud800y", '\ud800', '\udfff', invalidElement.RootElement,
+                "\ud800", "\udfff", "x\ud800y", '\ud800', '\udfff',
                 JsonValue.Create("\ud800")!, new JsonObject { ["value"] = JsonValue.Create("\udfff") },
                 new JsonObject { ["\ud800"] = 1 }, new Dictionary<string, object> { ["\udfff"] = 1 },
-                double.NaN, double.PositiveInfinity, 9007199254740992L
+                double.NaN, double.PositiveInfinity
             })
             {
                 Throws("INVALID_MESSAGE", () => BridgeCodec.Value(value));
@@ -170,15 +170,14 @@ public static class BridgeTests
         {
             "null", "true", "false", "0", "-0", "0.125", "1e-9999", "5e-324", "9007199254740991",
             "9007199254740991.1", "-9007199254740991", "\"音乐🎵é e\\u0301\\u0000\"", "\"\\ud800\\udc00\"",
+            "\"\\ud800\"", "\"\\udfff\"", "{\"\\ud800\":1}",
             "[]", "{}", "{\"a\":1,\"A\":2}", "{\"\\u0000\":1}", "{\"\\u007f\":1}",
             "{\"\\u0080\":1}", "{\"歌曲\":1}", "{\"__proto__\":1}", "\uFEFF0",
             new string('[', 64) + "0" + new string(']', 64), new string('[', 65) + new string(']', 65)
         }) bodies.Add((Encoding.UTF8.GetBytes(json), true));
         foreach (var json in new[]
         {
-            "9007199254740992", "-9007199254740992", "1e309", "1.7976931348623157e308",
-            "\"\\ud800\"", "\"\\udfff\"", "\"\\ud800x\"", "{\"a\":1,\"\\u0061\":2}",
-            "{\"a\":1,\"a\":2}", "{\"\\ud800\":1}", "[1,]", "{\"a\":1,}", "NaN", "+1", "01", "/*x*/1", "",
+            "[1,]", "{\"a\":1,}", "NaN", "+1", "01", "/*x*/1", "",
             "\uFEFF\uFEFF0", new string('[', 65) + "0" + new string(']', 65), new string('[', 66) + new string(']', 66)
         }) bodies.Add((Encoding.UTF8.GetBytes(json), false));
         foreach (var invalid in new byte[][]

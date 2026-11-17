@@ -60,7 +60,7 @@ final class PanLoginModelTests: XCTestCase {
         model.setVisible(true); model.draft = ["username": "synthetic-user", "password": " synthetic-password "]
         model.save()
         XCTAssertTrue(model.saved); XCTAssertFalse(model.confirmed); XCTAssertEqual(snapshots.count, 1)
-        XCTAssertTrue(snapshots[0].configured); XCTAssertEqual(snapshots[0].status, .unverified)
+        XCTAssertEqual(snapshots[0].configured, true); XCTAssertEqual(snapshots[0].status, .unverified)
         XCTAssertEqual(try runtime.storage.credentials(.tianyi)?.panField("password"), .string(" synthetic-password "))
         XCTAssertNil(model.notice)
         let count = await runtime.count("refresh")

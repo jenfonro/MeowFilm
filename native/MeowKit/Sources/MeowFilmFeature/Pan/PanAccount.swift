@@ -108,32 +108,47 @@ public enum PanAccountAction: Sendable, Equatable { case login, refresh, logout 
 /// A display snapshot only. Native credentials imply `unverified`, never a
 /// successful login. Only an online receipt can publish signedIn or expired.
 public struct PanAccount: Equatable, Sendable {
+    public enum ErrorCode: String, Equatable, Sendable {
+        case corruptStorage = "CORRUPT_STORAGE"
+    }
     public let provider: PanProviderID
-    public let revision: Int64
-    public let configured: Bool
-    public let fields: [String]
-    public let status: PanAccountStatus
+    public let revision: Int64?
+    public let configured: Bool?
+    public let fields: [String]?
+    public let status: PanAccountStatus?
+    public let errorCode: ErrorCode?
     init(provider: PanProviderID, revision: Int64, fields: [String], status: PanAccountStatus) {
         self.provider = provider; self.revision = revision; self.fields = fields
-        configured = !fields.isEmpty; self.status = status
+        configured = !fields.isEmpty; self.status = status; errorCode = nil
+    }
+    init(corrupt provider: PanProviderID) {
+        self.provider = provider; errorCode = .corruptStorage
+        revision = nil; configured = nil; fields = nil; status = nil
     }
     init(_ value: RuntimeValue) throws {
-        guard let provider = value.panField("provider")?.panString.flatMap(PanProviderID.init(rawValue:)),
-              let revision = value.panField("revision")?.panInteger,
+        guard let provider = value.panField("provider")?.panString.flatMap(PanProviderID.init(rawValue:)) else {
+            throw PanAccountError.invalidResponse
+        }
+        if let error = value.panField("errorCode") {
+            guard error == .string(ErrorCode.corruptStorage.rawValue) else { throw PanAccountError.invalidResponse }
+            self.init(corrupt: provider)
+            return
+        }
+        guard let revision = value.panField("revision")?.panInteger,
               let configured = value.panField("configured")?.panBool,
               let status = value.panField("status")?.panString.flatMap(PanAccountStatus.init(rawValue:)),
               status != .unverified,
               let fields = value.panField("fields")?.panArray else { throw PanAccountError.invalidResponse }
-        self.provider = provider; self.revision = revision; self.configured = configured; self.status = status
-        self.fields = try fields.map {
+        let names = try fields.map {
             guard let field = $0.panString else { throw PanAccountError.invalidResponse }
             return field
         }
         let allowed = PanProvider.all.first { $0.id == provider }!.credentialFields.map(\.rawValue)
-        guard Set(self.fields).count == self.fields.count, self.fields.allSatisfy(allowed.contains),
-              configured == !self.fields.isEmpty, configured || status == .signedOut else {
+        guard Set(names).count == names.count, names.allSatisfy(allowed.contains),
+              configured == !names.isEmpty, configured || status == .signedOut else {
             throw PanAccountError.invalidResponse
         }
+        self.init(provider: provider, revision: revision, fields: names, status: status)
     }
 }
 

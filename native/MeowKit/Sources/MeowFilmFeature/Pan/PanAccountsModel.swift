@@ -7,7 +7,11 @@ public struct PanAccountRow: Identifiable, Equatable {
     public let account: PanAccount?
     public let busy: Bool
     public var id: PanProviderID { provider.id }
-    public var actions: [PanAccountAction] { account?.status.actions ?? [] }
+    public var actions: [PanAccountAction] { account?.status?.actions ?? [] }
+    public var statusTitle: String {
+        if account?.errorCode == .corruptStorage { return "账号数据损坏" }
+        return account?.status?.title ?? "不可用"
+    }
 }
 
 @MainActor
@@ -96,6 +100,7 @@ public final class PanAccountsModel: ObservableObject {
 
     public func openLogin(_ provider: PanProviderID) -> PanLoginModel? {
         guard active, login == nil, !pending.contains(provider),
+              accounts[provider]?.status != nil,
               let definition = providers.first(where: { $0.id == provider }) else { return nil }
         let ticket = begin(provider)
         let model = PanLoginModel(provider: definition, service: service, operations: accountOperations) { [weak self] account in
@@ -126,7 +131,7 @@ public final class PanAccountsModel: ObservableObject {
         operations[provider] = nil; pending.remove(provider); publish()
     }
     private func accept(_ account: PanAccount) {
-        if let old = accounts[account.provider], old.revision > account.revision { return }
+        if let old = accounts[account.provider]?.revision, let revision = account.revision, old > revision { return }
         accounts[account.provider] = account
     }
     private func publish() {

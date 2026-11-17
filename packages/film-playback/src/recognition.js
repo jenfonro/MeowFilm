@@ -1,13 +1,16 @@
 import { createHash } from 'node:crypto';
+import { stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { decodePanResource } from '@meowfilm/script-host/cat-output';
 import { buildEpisodeMap } from './episodes.js';
 import { fail, isIdentifier, resultDetailId, requireValue } from './identity.js';
 import { invokeRecognition, providerFamily } from './rules.js';
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
-const identity = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const identity = value => createHash('sha256').update(stringifyJSONValue(value)).digest('hex');
 const scalar = value => typeof value === 'string' || typeof value === 'number';
 const coordinate = value => Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+const fields = (value, keys) => Object.fromEntries(keys.filter(key => value[key] !== undefined)
+  .map(key => [key, value[key]]));
 
 function invalidDetail() {
   throw Object.assign(new Error('Invalid film playback detail'), { code: 'INVALID_DETAIL' });
@@ -158,7 +161,7 @@ export function mediaVariants(value) {
 export async function recognizeVariantCandidates(candidate, variants, { rules, signal } = {}) {
   const texts = await invokeRecognition(rules, { operation: 'recognition.candidates', target: { kind: 'source' },
     source: {}, detail: { lines: [{ episodes: variants.map(variant =>
-      ({ name: '', quality: variant.quality, fps: variant.fps })) }] } }, { signal });
+      ({ name: '', ...fields(variant, ['quality', 'fps']) })) }] } }, { signal });
   return variants.map((variant, index) => {
     const result = { ...candidate, id: `${candidate.id}:${variant.id}`, parentId: candidate.id, variant };
     // A master/file label is not evidence about each of its variants.
@@ -201,7 +204,8 @@ export function contentResults(rows, { target, rules, signal } = {}) {
 
 /** Smart eligibility for a particular metadata target. */
 export function matchesResults(rows, { target, contentIdentity, rules, signal } = {}) {
-  return invokeRecognition(rules, { operation: 'recognition.matches', rows, target, contentIdentity }, { signal });
+  return invokeRecognition(rules, { operation: 'recognition.matches', rows, target,
+    ...(contentIdentity === undefined ? {} : { contentIdentity }) }, { signal });
 }
 
 export async function matchesResult(raw, options) {
@@ -216,7 +220,7 @@ export async function recognizeCandidates(detail, { target, source = detail?.sou
   const normalized = normalizeDetail(detail, { source });
   const detailId = normalized.detailId ?? source.detailId;
   if (detailId === undefined) invalidDetail();
-  const sourceIdentity = [source.key, source.engine, source.installationId, source.siteId];
+  const sourceIdentity = [source.key, source.engine ?? null, source.installationId ?? null, source.siteId ?? null];
   const candidateSource = { ...source, detailId };
   // The session owns one complete directory; target-specific eligibility is
   // applied when selecting, not by deleting ordinary files from that owner.
@@ -227,12 +231,12 @@ export async function recognizeCandidates(detail, { target, source = detail?.sou
     if (target.source.detailId !== undefined && target.source.detailId !== detailId) return [];
   }
   const texts = await invokeRecognition(rules, { operation: 'recognition.candidates', target: { kind: target.kind },
-    source: { manualSeasonHint: source.manualSeasonHint },
-    detail: { season: normalized.season, lines: normalized.lines.map(line =>
-      ({ season: line.season, episodes: line.episodes.map(item => ({
-        name: item.name, fileName: item.fileName, path: item.path, season: item.season, episode: item.episode,
-        quality: item.quality, hdr: item.hdr, fps: item.fps ?? item.file?.fps,
-        ...(item.file ? { file: { name: item.file.name, path: item.file.path } } : {}),
+    source: fields(source, ['manualSeasonHint']),
+    detail: { ...fields(normalized, ['season']), lines: normalized.lines.map(line =>
+      ({ ...fields(line, ['season']), episodes: line.episodes.map(item => ({
+        ...fields(item, ['name', 'fileName', 'path', 'season', 'episode', 'quality', 'hdr']),
+        ...fields({ fps: item.fps ?? item.file?.fps }, ['fps']),
+        ...(item.file ? { file: fields(item.file, ['name', 'path']) } : {}),
       })) })) } }, { signal });
   let textIndex = 0;
   const map = buildEpisodeMap(target.kind === 'group' ? null : metadata);

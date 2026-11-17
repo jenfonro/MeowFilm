@@ -1,7 +1,7 @@
 import Foundation
+import MeowRuntime
 import MeowAccounts
 import MeowMusicFeature
-import MeowJSON
 
 /// Native account ownership and local paging; platform protocols run in Node.
 protocol MusicAccountProvider: Sendable {
@@ -15,11 +15,11 @@ protocol MusicAccountProvider: Sendable {
     func fileCredential(_ credential: AccountCredential) async throws -> AccountCredential
     func refresh(_ credential: AccountCredential) async throws -> MusicAccountVerified
     func recommendations(kind: String, page: Int) async throws -> MusicAccountRecommendation
-    func collectionRows() async throws -> [JSONValue]
-    func tracks(collectionID: String) async throws -> [JSONValue]
+    func collectionRows() async throws -> [RuntimeValue]
+    func tracks(collectionID: String) async throws -> [RuntimeValue]
     func collectionTrackRead(collectionID: String) async throws -> MusicAccountTrackRead
     func capabilities(mid: String) async throws -> [String]
-    func resolve(mid: String, quality: String) async throws -> JSONValue
+    func resolve(mid: String, quality: String) async throws -> RuntimeValue
 }
 protocol MusicAccountSessionPublishing: Sendable {
     func publish(_ credential: AccountCredential, scope: String, generation: Int,
@@ -35,16 +35,16 @@ struct MusicAccountLoginResult: Sendable {
     let verified: MusicAccountVerified?
 }
 struct MusicAccountRecommendation: Sendable {
-    let rows: [JSONValue]
+    let rows: [RuntimeValue]
     let nextPage: Int?
     let expiresAt: Date?
     let dailyStyle: MusicDailyStyleSelection?
-    init(rows: [JSONValue], nextPage: Int?, expiresAt: Date? = nil, dailyStyle: MusicDailyStyleSelection? = nil) {
+    init(rows: [RuntimeValue], nextPage: Int?, expiresAt: Date? = nil, dailyStyle: MusicDailyStyleSelection? = nil) {
         self.rows = rows; self.nextPage = nextPage; self.expiresAt = expiresAt; self.dailyStyle = dailyStyle
     }
 }
 struct MusicAccountTrackRead: Sendable {
-    let rows: [JSONValue]
+    let rows: [RuntimeValue]
 }
 extension MusicAccountProvider {
     func verifyForImport(_ credential: AccountCredential) async throws -> MusicAccountVerified { try await verify(credential) }

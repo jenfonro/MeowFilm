@@ -40,7 +40,7 @@ await runtime.start();
 - `settings.get {}`：读取完整设置（包括明文凭据）和不透明配置代次 `revision`。
 - `settings.update {…patch}`：原子更新指定字段；省略字段不变，凭据空字符串表示清除。成功返回与 get 同形的完整设置。
 
-普通 HTTP 操作只消费各自定义的参数。`settings.get` 忽略附加参数，`settings.update` 仅提取当前 provider 的设置字段；未知字段（包括嵌套扩展）不因白名单被拒绝，也不会成为设置或覆盖 `revision`。实际使用的设置值仍须满足 URL、凭据头等要求。此请求投影不改变现有持久文档格式和恢复行为。
+普通 HTTP 操作只消费各自定义的参数。`settings.get` 忽略附加参数，`settings.update` 仅提取当前 provider 的设置字段；未知字段（包括嵌套扩展）不因白名单被拒绝，也不会成为设置或覆盖 `revision`。实际使用的设置值仍须满足 URL、凭据头等要求。恢复和保存不预检未使用的端点或扩展成员；未知持久成员和数字原材料保留。数据、搜索、图片各自在实际请求处解释所需配置，错误不伪装为缺失或空成功。
 
 `revision` 是设置 owner 从完整有效配置生成的不透明稳定身份；包括凭据在内的有效配置改变才换代，无变化更新和冷启动保持不变。调用方只比较是否相等，不解析其内容。影视业务缓存以此隔离配置，不复制或用明文凭据充当缓存身份。身份不另写第二套持久配置，也不包含明文凭据；业务元数据的持久化、组件完整度和定向刷新由 [film data owner](film-playback.md)统一处理。
 
@@ -56,7 +56,7 @@ await runtime.start();
 
 `createTMDBDataModule`／`createDoubanDataModule` 可接收 `nativeSettings`，读取 `tmdb`／`douban` 块的同形文档。此时唯一持久值由原生 owner 保存，不再读取或写入上述 Node 设置文件；HTTP `settings.update` 返回 `PERMISSION_DENIED`，`settings.get` 仍返回当前快照。缺失使用默认值，损坏明确失败，不回退旧文件。
 
-App 冷启动先读配置，活跃块通知由装配层重读并调用模块 `settingsChanged()`，撤销旧配置在途请求及相关 film 缓存／会话资格。通知不携带凭据、不等待业务应用才结算本地保存。唯一事实来源与通知规则见[共同契约](../common/settings-storage.md)，iOS 的加密文档及生命周期见[存储](../ios/storage.md#影视设置)与[运行底座](../ios/runtime-preflight.md#原生设置私密通道)，Windows 的保护、迁移与私密能力见[原生设置](../windows/native-settings.md)。未注入的公共入口继续保持上述独立模式。
+App 冷启动先读配置，活跃块通知由装配层重读并调用模块 `settingsChanged()`，撤销旧配置在途请求及相关 film 缓存／会话资格。通知不携带凭据、不等待业务应用才结算本地保存。唯一事实来源与通知规则见[共同契约](../common/settings-storage.md)，iOS 的加密文档及生命周期见[存储](../ios/storage.md#影视设置)与[运行底座](../ios/runtime-preflight.md#原生设置私密通道)，Windows 的保护与私密能力见[原生设置](../windows/native-settings.md)。未注入的公共入口继续保持上述独立模式。
 
 ### TMDB
 

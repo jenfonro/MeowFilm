@@ -5,10 +5,14 @@ extension NativeMusicService {
     /// The only persistent song store. Sources keep their first registered
     /// owner; new sources match one candidate against its fixed baseline.
     func registerSongs(_ input: [MJ], library: inout MJ, authoritative: Bool = false, playback: MJ? = nil) throws -> [String] {
+        guard !input.isEmpty else { return [] }
         let preferences = try playback ?? read().playback
-        var store = library["songs"], owners: [String: String] = [:], candidates: [String: Set<String>] = [:]
+        var store = library["songs"], owners: [String: Set<String>] = [:], candidates: [String: Set<String>] = [:]
+        try musicRequire(store.isObject, .corruptDocument)
         for (id, song) in store.fields {
-            for source in song["sources"].array { owners[source["sourceKey"].string] = id }
+            for source in song["sources"].array where !source["sourceKey"].string.isEmpty {
+                owners[source["sourceKey"].string, default: []].insert(id)
+            }
             if let key = MusicModel.descriptor(song).lookupKey { candidates[key, default: []].insert(id) }
         }
         var result: [String] = []
@@ -18,10 +22,14 @@ extension NativeMusicService {
             // Reading it must never restore fields removed by a newer result.
             let explicit = proposed["songId"].string
             if !authoritative, !explicit.isEmpty, store.contains(explicit) {
+                try musicRequire(UUID(uuidString: explicit) != nil && musicSame(store[explicit]["songId"].string, explicit), .songIDConflict)
+                let sources = try MusicModel.sources(store[explicit])
+                for source in sources { try musicRequire(owners[source.sourceKey]?.count == 1, .nativeIDConflict) }
                 result.append(explicit)
                 continue
             }
-            let knownOwner = incoming.compactMap { owners[$0["sourceKey"].string] }.first
+            for source in incoming { try musicRequire((owners[source["sourceKey"].string]?.count ?? 0) <= 1, .nativeIDConflict) }
+            let knownOwner = incoming.compactMap { owners[$0["sourceKey"].string]?.first }.first
             let evidence = MusicModel.descriptor(proposed)
             let matches = evidence.lookupKey.map { key in
                 (candidates[key] ?? []).filter { MusicModel.descriptor(store[$0]).matches(evidence) }
@@ -33,10 +41,16 @@ extension NativeMusicService {
             else { id = UUID().uuidString.lowercased() }
 
             let existing = store[id]
+            if existing != .null {
+                try musicRequire(UUID(uuidString: id) != nil && musicSame(existing["songId"].string, id), .songIDConflict)
+                for source in try MusicModel.sources(existing) {
+                    try musicRequire(owners[source.sourceKey]?.count == 1, .nativeIDConflict)
+                }
+            }
             var song = existing == .null ? proposed : existing
             let oldKey = MusicModel.descriptor(song).lookupKey
             song["songId"] = .string(id)
-            let ownedSources = incoming.filter { owners[$0["sourceKey"].string].map { $0 == id } ?? true }
+            let ownedSources = incoming.filter { owners[$0["sourceKey"].string].map { $0 == [id] } ?? true }
             let changedArtwork = ownedSources.filter { incoming in
                 existing["sources"].array.first { $0["sourceKey"] == incoming["sourceKey"] }?["musicInfo"]["img"] != incoming["musicInfo"]["img"]
             }
@@ -55,7 +69,7 @@ extension NativeMusicService {
             if let oldKey { candidates[oldKey]?.remove(id) }
             if let key = MusicModel.descriptor(song).lookupKey { candidates[key, default: []].insert(id) }
             store[id] = song
-            for source in song["sources"].array { owners[source["sourceKey"].string] = id }
+            for source in song["sources"].array { owners[source["sourceKey"].string] = [id] }
             result.append(id)
         }
         library["songs"] = store
@@ -65,13 +79,17 @@ extension NativeMusicService {
     func repositorySong(_ id: String, _ state: MusicDocument) throws -> MJ {
         let song = state.library["library"]["songs"][id]
         guard song.isObject else { throw MusicServiceError.notFound }
+        try musicRequire(UUID(uuidString: id) != nil && musicSame(song["songId"].string, id), .songIDConflict)
+        _ = try MusicModel.sources(song)
         return song
     }
     func registeredSongID(_ value: MusicNativeTrackData, library: MJ) throws -> String {
         let key = try MusicModel.normalize(value)["sources"].array[0]["sourceKey"].string
-        guard let id = library["songs"].fields.first(where: {
+        let matches = library["songs"].fields.filter {
             $0.1["sources"].array.contains { $0["sourceKey"].string == key }
-        })?.0 else { throw MusicServiceError.notFound }
+        }
+        guard let id = matches.first?.0 else { throw MusicServiceError.notFound }
+        try musicRequire(matches.count == 1, .nativeIDConflict)
         return id
     }
     func entrySong(_ entry: MJ, _ state: MusicDocument) throws -> MJ {
@@ -180,7 +198,7 @@ extension NativeMusicService: MusicSongRepositoryReading {
         let state = try read()
         return try Dictionary(uniqueKeysWithValues: songIDs.compactMap { id in
             guard state.library["library"]["songs"][id].isObject else { return nil }
-            return (id, try MusicModel.track(state.library["library"]["songs"][id], .init(kind: .library, id: id)))
+            return (id, try MusicModel.track(repositorySong(id, state), .init(kind: .library, id: id)))
         })
     }
     public func songChanges() async -> AsyncStream<Void> {

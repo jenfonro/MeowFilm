@@ -755,11 +755,18 @@ test('E28 pan accounts and file providers reject malformed or mismatched current
   assert.equal(f.calls('pan', 'play').length, 0);
   assert.equal(f.calls('pan', 'list').length, 0);
   const row = f.accountRows[0];
-  for (const accounts of [[{ ...row, provider: 'unknown-provider' }], [row, row],
-    [{ ...row, revision: -1 }], [{ ...row, configured: 'true' }]]) {
+  for (const [accounts, code] of [
+    [[{ ...row, provider: 'unknown-provider' }], 'STALE_ACCOUNT'],
+    [[row, row], 'UPSTREAM_FORMAT'],
+    [[{ ...row, revision: -1 }], 'UPSTREAM_FORMAT'],
+    [[{ ...row, configured: 'true' }], 'UPSTREAM_FORMAT'],
+  ]) {
     f.handlers.pan['settings.get'] = () => success({ accounts });
-    await assert.rejects(f.data.accounts(), { code: 'UPSTREAM_FORMAT' });
+    assert.deepEqual(await f.data.accounts(), accounts);
+    await assert.rejects(f.data.resolve(candidate(ref(row.provider))), { code });
   }
+  assert.equal(f.calls('pan', 'prepare').length, 0);
+  assert.equal(f.calls('pan', 'play').length, 0);
 });
 
 test('E28 stored files do not prepare or borrow other accounts; yidong defaults to download only', async t => {
@@ -2063,4 +2070,37 @@ test('configured TMDB query is shared by reads and handoff keys without exportin
   assert.deepEqual(f.calls('tmdb', 'request')[1].params.query,
     { ...query, language: 'ja-JP', region: 'JP', include_adult: false });
   assert.equal(await f.data.seed(entry), undefined, 'the earlier settings receipt cannot seed the new preference identity');
+});
+
+test('Pan healthy provider lists and plays despite corrupt siblings without inventing their status', async t => {
+  const f = fixture(t);
+  f.accountRows.splice(0, f.accountRows.length, null, { provider: 'uc', errorCode: 'CORRUPT_STORAGE' },
+    { provider: 'baidu', errorCode: 'CORRUPT_STORAGE' }, { provider: 'quark', revision: 2, configured: true });
+  assert.deepEqual(await f.data.accounts(), f.accountRows);
+  const line = await f.data.expand(source, { id: 0, episodes: [{ id: 0, share: share() }] });
+  assert.equal(line.episodes.length, 1);
+  const value = await f.data.resolve(candidate(line.episodes[0].file));
+  assert.match(value.url, /\/quark\/streaming\//);
+  assert.equal(f.calls('pan', 'list').length, 1);
+  assert.equal(f.calls('pan', 'prepare').length, 1);
+  assert.deepEqual(f.calls('pan', 'play').map(row => row.params.provider), ['quark']);
+});
+
+for (const [name, accounts, code] of [
+  ['selected corrupt item', [{ provider: 'quark', errorCode: 'CORRUPT_STORAGE' },
+    { provider: 'uc', revision: 2, configured: true }], 'CORRUPT_STORAGE'],
+  ['all corrupt', [{ provider: 'quark', errorCode: 'CORRUPT_STORAGE' },
+    { provider: 'uc', errorCode: 'CORRUPT_STORAGE' }], 'CORRUPT_STORAGE'],
+  ['selected invalid revision', [{ provider: 'quark', revision: -1, configured: true }], 'UPSTREAM_FORMAT'],
+  ['ambiguous selected identity', [{ provider: 'quark', revision: 2, configured: true },
+    { provider: 'quark', revision: 2, configured: true }], 'UPSTREAM_FORMAT'],
+  ['invalid accounts root', {}, 'UPSTREAM_FORMAT'],
+]) test(`Pan ${name} fails before list/prepare/play instead of empty success`, async t => {
+  const f = fixture(t);
+  f.handlers.pan['settings.get'] = () => success({ accounts });
+  await assert.rejects(f.data.expand(source, { id: 0, episodes: [{ id: 0, share: share() }] }), { code });
+  await assert.rejects(f.data.resolve(candidate()), { code });
+  assert.equal(f.calls('pan', 'list').length, 0);
+  assert.equal(f.calls('pan', 'prepare').length, 0);
+  assert.equal(f.calls('pan', 'play').length, 0);
 });

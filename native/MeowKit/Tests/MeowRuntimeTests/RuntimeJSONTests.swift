@@ -8,9 +8,8 @@ final class RuntimeJSONTests: XCTestCase {
         let native = JSONValue.object(["音源": .number(9_007_199_254_740_992)])
         let data = try JSONEncoder().encode(native)
         XCTAssertEqual(try JSONDecoder().decode(JSONValue.self, from: data), native)
-        XCTAssertThrowsError(try RuntimeJSON.decode(data)) {
-            XCTAssertEqual($0 as? RuntimeJSONError, .invalidJSON)
-        }
+        let runtime = try RuntimeJSON.decode(data)
+        XCTAssertEqual(try RuntimeJSON.decode(RuntimeJSON.encode(runtime)), runtime)
     }
 
     func testDirectValuesUnicodeAndBusinessFieldsRoundTrip() throws {
@@ -52,26 +51,31 @@ final class RuntimeJSONTests: XCTestCase {
         XCTAssertTrue(RuntimeObject().isEmpty)
     }
 
-    func testRejectsExactDuplicatesAfterUnescapingAndAllowsSeparateObjects() throws {
-        for text in [#"{"same":1,"same":2}"#, #"{"same":1,"\u0073ame":2}"#,
-                     #"{"é":1,"\u00e9":2}"#, #"{"nested":{"x":0,"x":1}}"#] {
-            XCTAssertThrowsError(try RuntimeJSON.decode(Data(text.utf8))) {
-                XCTAssertEqual($0 as? RuntimeJSONError, .invalidJSON)
-            }
-        }
-        XCTAssertNoThrow(try RuntimeJSON.decode(Data(#"{"left":{"same":1},"right":{"same":2}}"#.utf8)))
+    func testRepeatedUTF8MembersUseTheLastValueAtEveryDepth() throws {
+        let decoded = try RuntimeJSON.decode(Data(#"{"same":1,"\u0073ame":2,"nested":{"x":0,"x":1}}"#.utf8))
+        XCTAssertEqual(decoded, .object(["same": .number(2), "nested": .object(["x": .number(1)])]))
     }
 
-    func testRejectsMalformedUTF8ScalarsGrammarAndUnsafeNumbers() {
+    func testUnconsumedNumbersKeepTheirExactDecimalValue() throws {
+        for token in ["9007199254740993", "18446744073709551617", "1e400", "1e-400",
+                      "1.234567890123456789012345678901", "1e999999999999999999999"] {
+            let value = try RuntimeJSON.decode(Data(token.utf8))
+            guard case .exactNumber(let number) = value else { return XCTFail(token) }
+            XCTAssertNil(number.exactDouble)
+            XCTAssertEqual(String(decoding: try RuntimeJSON.encode(value), as: UTF8.self), token)
+        }
+    }
+
+    func testRejectsMalformedUTF8ScalarsGrammarAndNonfiniteConstructedNumbers() {
         for bytes: [UInt8] in [[0xff], [0xc0, 0xaf], [0xed, 0xa0, 0x80], [0xf0, 0x9f], [0xf4, 0x90, 0x80, 0x80]] {
             XCTAssertThrowsError(try RuntimeJSON.decode(Data(bytes)))
         }
-        for text in ["", "0 1", "01", "[1,]", "{\"x\":NaN}", "1e400", "-1e400", "9007199254740992",
+        for text in ["", "0 1", "01", "[1,]", "{\"x\":NaN}",
                      #""\ud800""#, #""\udfff""#, #""\ud800\u0041""#, #""\x41""#,
                      "\"raw\ncontrol\"", "{\"a\":}", "true trailing", "-", "1.", "1e+"] {
             XCTAssertThrowsError(try RuntimeJSON.decode(Data(text.utf8)), text)
         }
-        for value: RuntimeValue in [.number(.infinity), .number(.nan), .number(9_007_199_254_740_992)] {
+        for value: RuntimeValue in [.number(.infinity), .number(.nan)] {
             XCTAssertThrowsError(try RuntimeJSON.encode(value))
         }
         XCTAssertEqual(try? RuntimeJSON.decode(Data(#""\ud83d\ude00""#.utf8)), .string("😀"))

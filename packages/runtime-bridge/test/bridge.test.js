@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createHttpClient, createHttpServer, HTTP_PROTOCOL } from '../src/index.js';
+import { parseJSONText, stringifyJSONValue } from '../src/json-value.js';
 import { pair, rawRequest, lifecycle, deferred, until, turn } from './http-fixture.js';
 
 const okay = reply => { assert.equal(reply.ok, true); return reply.value; };
@@ -22,12 +23,11 @@ test('HTTP accepts every-byte body writes, Unicode and legal large JSON without 
   }
 });
 
-test('HTTP rejects invalid UTF-8, duplicate keys, unsafe integers, depth and truncated bodies before dispatch', async t => {
+test('HTTP rejects invalid UTF-8, grammar, depth and truncated bodies before dispatch', async t => {
   let calls = 0;
   const { server, identity } = await pair(t, value => { calls++; return value; });
   for (const body of [Buffer.from([0xff]), Buffer.from([0xed, 0xa0, 0x80]), Buffer.from('{'),
-    Buffer.from('{"x":1,"\\u0078":2}'), Buffer.from('9007199254740992'),
-    Buffer.from('"\\ud800"'), Buffer.from('['.repeat(65) + 'null' + ']'.repeat(65))]) {
+    Buffer.from('['.repeat(65) + 'null' + ']'.repeat(65))]) {
     const result = await rawRequest(server.baseUrl, identity, { body }).response;
     assert.equal(result.status, 400);
     assert.deepEqual(result.value, { ok: false, contract: HTTP_PROTOCOL, code: 'INVALID_REQUEST' });
@@ -48,6 +48,13 @@ test('registered methods round trip all JSON types and isolate malformed results
   let nested = null;
   for (let i = 0; i < 64; i++) nested = [nested];
   assert.deepEqual(okay(await call(nested)), nested);
+});
+
+test('HTTP transports unused extensions and exact numeric JSON material', async t => {
+  const { call } = await pair(t, value => value);
+  const text = '{"extension":{"integer":9007199254740993,"fraction":1.0000000000000001,"large":1e400},' +
+    '"é":1,"é":2,"text":"\\ud800","zero":-0}';
+  assert.equal(stringifyJSONValue(okay(await call(parseJSONText(text)))), text);
 });
 
 test('nested reverse HTTP callback runs while the forward request is waiting', async t => {

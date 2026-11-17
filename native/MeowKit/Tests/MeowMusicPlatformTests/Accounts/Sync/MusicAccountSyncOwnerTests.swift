@@ -1,8 +1,8 @@
 import Foundation
+import MeowRuntime
 import XCTest
 import MeowAccounts
 import MeowMusicFeature
-import MeowJSON
 @testable import MeowMusicPlatform
 
 private actor SyncOwnerProvider: MusicAccountSyncProvider, MusicAccountSessionPublishing {
@@ -61,10 +61,10 @@ private actor SyncOwnerProvider: MusicAccountSyncProvider, MusicAccountSessionPu
     func cancelQR(_ id: UUID) {}
     func revoke() {}
     func recommendations(kind: String, page: Int) throws -> MusicAccountRecommendation { throw MusicServiceError.unsupported }
-    func collectionRows() -> [JSONValue] { [] }
-    func tracks(collectionID: String) -> [JSONValue] { [] }
+    func collectionRows() -> [RuntimeValue] { [] }
+    func tracks(collectionID: String) -> [RuntimeValue] { [] }
     func capabilities(mid: String) -> [String] { [] }
-    func resolve(mid: String, quality: String) throws -> JSONValue { throw MusicServiceError.unsupported }
+    func resolve(mid: String, quality: String) throws -> RuntimeValue { throw MusicServiceError.unsupported }
 }
 
 @MainActor final class MusicAccountSyncOwnerTests: XCTestCase {

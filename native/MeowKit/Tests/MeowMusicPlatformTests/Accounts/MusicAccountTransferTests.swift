@@ -2,7 +2,6 @@ import Foundation
 import XCTest
 import MeowAccounts
 import MeowContracts
-import MeowJSON
 import MeowMusicFeature
 import MeowRuntime
 import MeowMusicTestSupport
@@ -32,10 +31,10 @@ private actor TransferProvider: MusicAccountProvider {
     func cancelQR(_ id: UUID) {}
     func revoke() {}
     func recommendations(kind: String, page: Int) -> MusicAccountRecommendation { .init(rows: [], nextPage: nil) }
-    func collectionRows() -> [MeowJSON.JSONValue] { [] }
-    func tracks(collectionID: String) -> [MeowJSON.JSONValue] { [] }
+    func collectionRows() -> [RuntimeValue] { [] }
+    func tracks(collectionID: String) -> [RuntimeValue] { [] }
     func capabilities(mid: String) -> [String] { [] }
-    func resolve(mid: String, quality: String) throws -> MeowJSON.JSONValue { throw MusicServiceError.unsupported }
+    func resolve(mid: String, quality: String) throws -> RuntimeValue { throw MusicServiceError.unsupported }
 }
 
 private struct TransferFixture {
@@ -191,6 +190,39 @@ final class MusicAccountTransferTests: XCTestCase {
                 XCTAssertEqual($0 as? MusicAccountTransferError, .invalidFile)
             }
         }
+    }
+
+    func testImportIgnoresRootRecordAndUnselectedCredentialExtensions() async throws {
+        let fixture = try TransferFixture(); try await fixture.enable()
+        let expected = try sharedEntries()
+        var root = try XCTUnwrap(JSONSerialization.jsonObject(with: file(expected).dataForFile()) as? [String: Any])
+        root["extra"] = ["unused": [1, 2, 3]]
+        var rows = try XCTUnwrap(root["accounts"] as? [[String: Any]])
+        for index in rows.indices {
+            rows[index]["extra"] = ["unused": true]
+            var credentials = try XCTUnwrap(rows[index]["credentials"] as? [String: Any])
+            credentials["unused"] = ["mustNotBecomeCookie": "bad;\nheader"]
+            rows[index]["credentials"] = credentials
+        }
+        root["accounts"] = rows
+        let payload = try MusicAccountFilePayload(fileData: JSONSerialization.data(withJSONObject: root))
+        let decoded = try MusicAccountTransferCodec.decode(payload)
+        XCTAssertEqual(decoded.map(\.fields), expected.map(\.fields))
+        let plan = try await fixture.owner.prepareAccountImport(payload)
+        let report = await fixture.owner.importAccounts(plan, policy: .overwrite)
+        XCTAssertEqual(report.imported, MusicAccountPlatform.allCases)
+        XCTAssertTrue(report.failed.isEmpty)
+        let exported = try MusicAccountTransferCodec.decode(await fixture.owner.exportAccountFile())
+        XCTAssertEqual(exported.map(\.fields), expected.map(\.fields))
+        _ = await fixture.owner.close()
+    }
+
+    func testUnusedExtensionsKeepExactJSONKeyIdentityWithoutBecomingCredentials() throws {
+        let raw = #"{"format":"meowfilm.music-accounts","version":1,"é":1.234567890123456789,"e\u0301":1e999,"accounts":[{"platform":"tx","userId":"42","credentials":{"musicid":"42","musickey":"synthetic-key","extra":9007199254740993}}]}"#
+        let rows = try MusicAccountTransferCodec.decode(.init(fileData: Data(raw.utf8)))
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].fields, ["musicid": "42", "musickey": "synthetic-key"])
+        XCTAssertNoThrow(try MusicAccountTransferCodec.credential(rows[0]))
     }
 
     func testMalformedWholeFilesAreRejectedBeforeAnyOwnerIO() async throws {

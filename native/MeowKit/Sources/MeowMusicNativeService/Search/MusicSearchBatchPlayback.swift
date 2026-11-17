@@ -17,7 +17,7 @@ extension NativeMusicService: MusicSearchBatchPlaying {
                 let rows = try makeEntries(songs, document: &document, context: .obj([
                     ("sourceTitle", .string("搜索")), ("sourceType", .string(songs.count == 1 ? "search-song" : "search")),
                     ("searchKeyword", .string(request.query))]))
-                archive(old, into: &document)
+                try archive(old, into: &document)
                 document.queue["entries"] = .array(rows); document.queue["currentId"] = rows[request.startIndex]["id"]
                 for key in ["history", "priority", "failed"] { document.queue[key] = .array([]) }
                 document.queue["source"] = .obj([("sourceType", .string(songs.count == 1 ? "search-song" : "search")), ("sourceTitle", .string("搜索"))])

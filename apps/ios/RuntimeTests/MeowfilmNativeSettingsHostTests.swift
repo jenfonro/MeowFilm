@@ -50,6 +50,56 @@ final class MeowfilmNativeSettingsHostTests: XCTestCase {
         XCTAssertFalse(client.isClosed)
     }
 
+    func testNativeSettingsPreserveExactJSONThroughNodeMobile() async throws {
+        try NativeSettingsHost.requireSimulator()
+        let resources = try await hostResources()
+        let document = resources.filmSettings[.tmdb]
+        let original = try document.read() ?? .object([
+            "version": .number(1), "settings": FilmTMDBSettings.defaultValue,
+        ])
+        let originalSettings = try FilmTMDBSettings(XCTUnwrap(original.catField("settings")))
+        guard originalSettings.apiKey.isEmpty, originalSettings.accessToken.isEmpty else {
+            throw NativeSettingsHostFailure.unsafeBaseline
+        }
+        let client = try await resources.scriptSession.connection()
+        try await client.validateAppModules()
+        addTeardownBlock { @MainActor in
+            _ = try document.update { _ in original }
+            try await self.waitForNativeRuntimeSettings(.tmdb, resources: resources)
+            XCTAssertEqual(try document.read(), original)
+        }
+
+        var extensionFields = try RuntimeJSON.decode(Data(
+            #"{"decimal":1.234567890123456789,"largeInteger":9007199254740993,"exponent":1e400,"é":"composed","e\u0301":"decomposed"}"#.utf8
+        )).filmRequiredObject()
+        extensionFields["run"] = .string(UUID().uuidString.lowercased())
+        let exact = RuntimeValue.object(extensionFields)
+        // Prime the actual Node snapshot before the write: startup loading is
+        // not evidence that a subsequent native-change notification was applied.
+        let before = try await client.call(module: .tmdb, operation: "settings.get")
+        XCTAssertNotEqual(before.catField("syntheticExtension"), exact)
+        var settings = FilmTMDBSettings.defaultValue.filmObject!
+        settings["apiBase"] = .string("http://127.0.0.1:9/synthetic-exact-json/api")
+        settings["imageBase"] = .string("http://127.0.0.1:9/synthetic-exact-json/images")
+        settings["language"] = .string("en-US"); settings["region"] = .string("US")
+        settings["includeAdult"] = .bool(true); settings["syntheticExtension"] = exact
+        let saved = try document.update { current in
+            var root = current?.filmObject ?? ["version": .number(1)]
+            root["settings"] = .object(settings)
+            return .object(root)
+        }
+        try await waitForNativeRuntimeSettings(.tmdb, resources: resources)
+        let response = try await client.call(module: .tmdb, operation: "settings.get")
+        let returned = try XCTUnwrap(response.catField("syntheticExtension"))
+        XCTAssertEqual(returned, exact)
+        XCTAssertEqual(try RuntimeJSON.encode(returned), try RuntimeJSON.encode(exact))
+        XCTAssertEqual(response.catField("language"), .string("en-US"))
+        XCTAssertEqual(response.catField("region"), .string("US"))
+        XCTAssertEqual(response.catField("includeAdult"), .bool(true))
+        XCTAssertEqual(try document.read(), saved, "Runtime reads must not rewrite native settings")
+        XCTAssertFalse(client.isClosed)
+    }
+
     func testNativeSettingsChannelDoesNotRetainItsRuntimeSession() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -143,7 +193,7 @@ private extension XCTestCase {
         try await preferences.loadPreferences()
         XCTAssertTrue(preferences.preferences == NativeSettingsHost.preferences(run))
         let nativePan = try NativeSettingsHost.pan(resources).accounts()
-        guard nativePan.count == 7, nativePan[0].configured, nativePan[0].status == .unverified else {
+        guard nativePan.count == 7, nativePan[0].configured == true, nativePan[0].status == .unverified else {
             throw NativeSettingsHostFailure.unexpectedNativeSettings
         }
         try NativeSettingsHost.requireProtectedFiles(run: run)
@@ -175,7 +225,7 @@ private extension XCTestCase {
         }
         try await waitForNativePan(resources, client: client)
         let accounts = try NativeSettingsHost.pan(resources).accounts()
-        guard accounts.count == 7, accounts[0].configured, accounts[0].status == .unverified else {
+        guard accounts.count == 7, accounts[0].configured == true, accounts[0].status == .unverified else {
             throw NativeSettingsHostFailure.unexpectedNativeSettings
         }
         let cat = try await waitForNativeCat(NativeSettingsHost.catID(run), service: resources.filmSourceSettings)
@@ -352,7 +402,7 @@ private enum NativeSettingsHost {
         model.edit { $0 = preferences(run + suffix) }
         try await model.savePreferences()
         let account = try pan(resources).replace(.baidu, credentials: .object(["cookie": .string(secrets(run, suffix: suffix)[3])]))
-        guard account.configured, account.status == .unverified else {
+        guard account.configured == true, account.status == .unverified else {
             throw NativeSettingsHostFailure.unexpectedNativeSettings
         }
     }
@@ -546,7 +596,8 @@ private extension XCTestCase {
                zip(actual, expected).allSatisfy({ pair in
                 let (actual, expected) = pair
                 return actual.provider == expected.provider && actual.revision == expected.revision &&
-                    actual.configured == expected.configured && Set(actual.fields) == Set(expected.fields)
+                    actual.errorCode == expected.errorCode && actual.configured == expected.configured &&
+                    actual.fields.map({ Set($0) }) == expected.fields.map({ Set($0) })
             }) { return }
             try await Task.sleep(nanoseconds: 20_000_000)
         } while Date() < deadline

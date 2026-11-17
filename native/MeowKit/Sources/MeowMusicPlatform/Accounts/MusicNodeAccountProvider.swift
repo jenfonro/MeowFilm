@@ -1,7 +1,6 @@
 import Foundation
 import CoreImage
 import MeowAccounts
-import MeowJSON
 import MeowMusicFeature
 import MeowRuntime
 
@@ -152,9 +151,9 @@ actor MusicNodeAccountProvider: MusicAccountProvider, MusicAccountSessionPublish
         return try MusicPlatformDTO.recommendation(await call(operation,
             ["kind": .string(kind), "page": .number(Double(page))]))
     }
-    func collectionRows() async throws -> [JSONValue] {
+    func collectionRows() async throws -> [RuntimeValue] {
         let own = epoch
-        var result: [JSONValue] = [], page = 1
+        var result: [RuntimeValue] = [], page = 1
         var continuation: RuntimeValue = .null
         var targets: [String: RuntimeObject] = [:]
         while true {
@@ -171,7 +170,7 @@ actor MusicNodeAccountProvider: MusicAccountProvider, MusicAccountSessionPublish
                 if action[music: "type"] != .string("unsupported") { targets[id] = target }
                 result.append(.object(["id": .string(id),
                     "title": .string(row[music: "name"].musicText), "owned": .bool(row[music: "owned"].musicBool),
-                    "count": try MusicPlatformDTO.json(row[music: "count"])]))
+                    "count": row[music: "count"]]))
             }
             guard value[music: "more"].musicBool else { collectionTargets = targets; return result }
             continuation = value[music: "continuation"]
@@ -179,7 +178,7 @@ actor MusicNodeAccountProvider: MusicAccountProvider, MusicAccountSessionPublish
             guard next > page else { throw MusicServiceError.upstreamInvalid }; page = next
         }
     }
-    func tracks(collectionID: String) async throws -> [JSONValue] {
+    func tracks(collectionID: String) async throws -> [RuntimeValue] {
         let own = epoch
         // A restored private collection needs its real cloud/public locator,
         // not a comparison with the contents of an earlier page.
@@ -194,10 +193,10 @@ actor MusicNodeAccountProvider: MusicAccountProvider, MusicAccountSessionPublish
     func capabilities(mid: String) async throws -> [String] {
         try await call("audio.options", ["id": .string(mid)])[music: "qualities"].musicRequiredArray().map { try $0.musicRequiredText() }
     }
-    func resolve(mid: String, quality: String) async throws -> JSONValue {
-        try MusicPlatformDTO.json(await call("audio", ["id": .string(mid), "quality": .string(quality)]))
+    func resolve(mid: String, quality: String) async throws -> RuntimeValue {
+        try await call("audio", ["id": .string(mid), "quality": .string(quality)])
     }
-    func publicStandardAudio(nativeID: String) async throws -> JSONValue { try await resolve(mid: nativeID, quality: "128k") }
+    func publicStandardAudio(nativeID: String) async throws -> RuntimeValue { try await resolve(mid: nativeID, quality: "128k") }
     func chorus(nativeID: String) async throws -> MusicChorusPoint? {
         let value = try await call("chorus", ["id": .string(nativeID)])[music: "point"]
         guard value != .null else { return nil }

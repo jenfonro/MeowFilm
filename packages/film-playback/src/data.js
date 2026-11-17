@@ -322,11 +322,21 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
   }
   async function readAccounts(signal, deps = providers.map(provider => accountDependency(provider)), checkSchedule) {
     const value = await call('pan', 'settings.get', {}, signal, deps, checkSchedule);
-    requireValue(Array.isArray(value?.accounts) && value.accounts.every(row => object(row) &&
-      providers.includes(row.provider) && Number.isSafeInteger(row.revision) && row.revision >= 0 &&
-      typeof row.configured === 'boolean'), 'UPSTREAM_FORMAT');
-    requireValue(new Set(value.accounts.map(row => row.provider)).size === value.accounts.length, 'UPSTREAM_FORMAT');
+    requireValue(Array.isArray(value?.accounts), 'UPSTREAM_FORMAT');
     return value.accounts;
+  }
+  function selectedAccount(rows, provider, missing = 'NOT_CONFIGURED') {
+    const matches = rows.filter(row => row?.provider === provider);
+    requireValue(matches.length, missing);
+    requireValue(matches.length === 1, 'UPSTREAM_FORMAT');
+    const account = matches[0];
+    if (account.errorCode !== undefined) {
+      requireValue(account.errorCode === 'CORRUPT_STORAGE', 'UPSTREAM_FORMAT');
+      throw fail(account.errorCode);
+    }
+    requireValue(Number.isSafeInteger(account.revision) && account.revision >= 0 &&
+      typeof account.configured === 'boolean', 'UPSTREAM_FORMAT');
+    return account;
   }
   async function accounts(signal) {
     const deps = providers.map(provider => accountDependency(provider));
@@ -362,8 +372,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       const lists = new Map();
       for (const [key, share] of shares) {
         open(ownedSignal);
-        const account = rows.find(row => row.provider === share.provider);
-        requireValue(account, 'NOT_CONFIGURED');
+        const account = selectedAccount(rows, share.provider);
         const dependency = [...sourceDependencies(source), accountDependency(share.provider, account.revision)];
         const request = { kind: 'pan-list', source: scopeOf(source), provider: share.provider,
           revision: account.revision, share: { url: share.url, password: share.password ?? '' } };
@@ -692,8 +701,8 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       requireValue(candidate.provider === undefined || candidate.provider === original.provider);
       const deps = [...sourceDependencies(source), accountDependency(original.provider)];
       const rows = await readAccounts(signal, deps, checkSchedule);
-      const account = rows.find(row => row.provider === original.provider);
-      requireValue(account && account.revision === original.accountRevision, 'STALE_ACCOUNT');
+      const account = selectedAccount(rows, original.provider, 'STALE_ACCOUNT');
+      requireValue(account.revision === original.accountRevision, 'STALE_ACCOUNT');
       let file = original;
       const fileDeps = [...sourceDependencies(source), accountDependency(file.provider, file.accountRevision)];
       if (file.kind === 'share' && ['quark', 'uc', 'baidu'].includes(file.provider)) {

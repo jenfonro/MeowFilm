@@ -3,7 +3,8 @@ import MeowFilmFeature
 import MeowRuntime
 import MeowStorage
 
-/// The App's sole document instances are shared by pages and the trusted Node channel.
+/// The App's sole document instances are shared by pages and the trusted Node
+/// channel. Each block starts with its current native document.
 final class MeowfilmNativeSettings: @unchecked Sendable {
     static let keychainService = MeowfilmIdentity.bundleIdentifier + ".film.settings.keys.v1"
     let documents: [FilmSettingsBlock: FilmSettingsDocument]

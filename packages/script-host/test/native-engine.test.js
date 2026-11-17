@@ -163,6 +163,7 @@ test('typed bridge snapshots subviews, Unicode keys and byte leaves without shar
   const view = new Uint8Array(backing.buffer, backing.byteOffset + 1, 4);
   const value = Object.create(null);
   value.bytes = view; value['nul\0key'] = 'a\0b😀'; value['é'] = 1; value['e\u0301'] = 2;
+  value['\ud800'] = '\udc00'; value.large = 1e100;
   value.__proto__ = { token: 'business', blob: 'value' };
   const promise = engine.call('echo', [value]);
   backing.fill(3);
@@ -170,11 +171,12 @@ test('typed bridge snapshots subviews, Unicode keys and byte leaves without shar
   assert.deepEqual(result.bytes, Buffer.from([0, 255, 128, 42]));
   assert.equal(Object.getPrototypeOf(result), Object.prototype);
   assert.equal(result['nul\0key'], 'a\0b😀'); assert.equal(result['é'], 1); assert.equal(result['e\u0301'], 2);
+  assert.equal(result['\ud800'], '\udc00'); assert.equal(result.large, 1e100);
   assert.equal(result.__proto__.token, 'business');
   assert.deepEqual(await engine.call('echo', [Buffer.alloc(0)]), Buffer.alloc(0));
   const hostResult = await engine.call('host', [result], { scope: 42 });
   assert.equal(hostResult.bytes[0], 17); assert.equal(observed.bytes[0], 0);
-  await assert.rejects(engine.call('echo', ['\ud800']), { code: 'INVALID_ARGUMENT' });
+  assert.equal(await engine.call('echo', ['\ud800']), '\ud800');
   await assert.rejects(engine.call('echo', [Infinity]), { code: 'INVALID_ARGUMENT' });
   const cycle = {}; cycle.cycle = cycle;
   await assert.rejects(engine.call('echo', [cycle]), { code: 'INVALID_ARGUMENT' });
@@ -244,6 +246,14 @@ for (const contexts of ['single', 'dual']) {
       assert.equal(await engine.call('event', [value], { scope: 64 }), null);
       assert.deepEqual(events.at(-1), { name: 'depth', value, scope: 64 });
     }
+    const scalars = { large: 1e100, integer: 9007199254740992, '\ud800': '\udc00' };
+    assert.deepEqual(await engine.call('echo', [scalars, 'positional', 73]), scalars);
+    if (contexts === 'dual') assert.deepEqual(await engine.call('core', [scalars]), scalars);
+    assert.deepEqual(await engine.call('host', [scalars], { scope: 64 }), scalars);
+    completion = scalars;
+    assert.deepEqual(await engine.call('completion', [], { scope: 64 }), scalars);
+    assert.equal(await engine.call('event', [scalars], { scope: 64 }), null);
+    assert.deepEqual(events.at(-1), { name: 'depth', value: scalars, scope: 64 });
     const backing = Buffer.from([99, 0, 255, 128, 42, 88]);
     const view = new Uint8Array(backing.buffer, backing.byteOffset + 1, 4);
     const bytes = nestedData(64, view);
@@ -264,15 +274,13 @@ for (const contexts of ['single', 'dual']) {
     const invalid = new Map([
       ['depth', nestedData(65)], ['objectDepth', nestedData(65, null, true)],
       ['envelope', { ok: true, value: nestedData(64) }], ['cycle', cycle],
-      ['unicode', '\ud800'], ['number', Infinity], ['unsafe', Number.MAX_SAFE_INTEGER + 1],
+      ['number', Infinity],
       ['bigint', 1n],
     ]);
     const methods = `(() => {
       function invalid(kind) {
         if (kind === 'cycle') { const value = []; value.push(value); return value; }
-        if (kind === 'unicode') return '\\ud800';
         if (kind === 'number') return Infinity;
-        if (kind === 'unsafe') return 9007199254740992;
         if (kind === 'bigint') return 1n;
         let value = null;
         for (let i = 0; i < (kind === 'envelope' ? 64 : 65); i++) {
@@ -506,8 +514,10 @@ for (const contexts of ['single', 'dual']) {
       assert.deepEqual(result.encoded[key], Buffer.from(text, 'utf8'), key);
     }
     assert.deepEqual(events, [{ name: 'strings', value: expected, scope: 221 }]);
-    for (const which of ['high', 'low', 'slice']) {
-      await assert.rejects(engine.call('invalid', [which]), { code: 'INVALID_ARGUMENT' });
+    for (const [which, expected] of [
+      ['high', '\ud800'], ['low', '\udc00'], ['slice', '😀'.repeat(600).slice(1, -1)],
+    ]) {
+      assert.equal(await engine.call('invalid', [which]), expected);
     }
     await assert.rejects(engine.call('invalidEncode'), { code: 'INVALID_ARGUMENT' });
     assert.equal(engine.stats().stopped, false);

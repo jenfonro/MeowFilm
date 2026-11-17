@@ -14,15 +14,15 @@ App 通过已验证的管道发送一行 UTF-8 JSON `{sessionId,dataRoot,nativeS
 
 `RuntimeHttpClient` 接受合法 HTTP(S) 根端点，包括域名、非回环和默认端口；App 默认使用启动握手返回的本机 URL。不走系统代理、不跟随重定向、不自动重放业务。每次请求携带独立 UUID `X-Meow-Request-Id`，核对响应 ID、内容类型、状态及严格信封；公开契约见 [Runtime bridge](../runtime/runtime-bridge.md)。
 
-- `GET /v1/describe` 核对 `runtime.http.v1`、`aggregate`、准确模块及完整方法清单，顺序为：`music@0.8.0` / `music.script.v3`、`cat@0.2.0` / `cat.script.v2`、`source@0.3.0` / `source.runtime.v2`、`pan@0.1.0` / `pan.runtime.v1`、`tmdb@0.1.0` / `tmdb.data.v1`、`douban@0.1.0` / `douban.data.v1`、`film@0.1.0` / `film.playback.v1`、`netease@0.1.0` / `netease.token.v1`、`music-platform@0.1.0` / `music.platform.v1`；缺项、多项、重复项或不符版本不接受。
-- Windows `RuntimeHttpProtocol` 操作表由 `scripts/windows/verify-app-structure.mjs` 与公共 `apps/runtime/contracts.mjs` 机械核对版本、契约、前缀及完整方法集合；包含稳定业务目标解析 `film.data.target`，不因客户端漏同步而放宽启动校验。
+- `GET /v1/describe` 核对唯一 protocol／product，以及 `AppIdentity.ScriptModules` 所需模块的存在性、唯一性和 id／version／contract；按该处 `RequiredMethods` 核对原生实际调用的方法存在性，缺少必需模块或方法阻断启动。模块顺序、未用扩展、额外模块／方法或缺少未调用方法不阻断启动，不要求完整 operation 全集。TMDB／豆瓣／网易 token 由 aggregate 内部连接消费，本端只核其模块身份，不要求未调用的 HTTP 方法。请求权限仍来自本地 operation 表，额外声明不会授予调用能力。
+- Windows `RuntimeHttpProtocol` 操作表由 `scripts/windows/verify-app-structure.mjs` 与公共 `apps/runtime/contracts.mjs` 机械核对版本、契约、前缀及完整方法集合；包含稳定业务目标解析 `film.data.target`。源码机械同步与运行时动作消费是不同约束。
 - 普通调用为 `POST /v1/{module}/{operation}`，参数直接是 JSON，成功信封为 `{ok:true,contract,value}`，失败为 `{ok:false,contract,code}`；结果不再是 JSON 字符串。
 - 源码经 `UploadSourceAsync` 完整 raw PUT，由 installationId 与明确 sourceRevision 绑定。异步上传借用调用方字节直到实际发送任务结束，包括取消；业务层不管理 begin/chunk/read/release。
 - `ReadImageAsync` 只接受运行器相对图片引用，经同一客户端携带请求 ID；成功读二进制、错误解包 `502` 所属模块信封，取消等待物理响应释放。元数据消费者保留其图片预算，小说完整正文图片使用无额度重载；图片契约见[元数据运行器](../runtime/metadata-data.md)与[书源仓库](../runtime/source-library.md)。
 - 单请求取消终止其 HTTP 交换，不撤销其他请求或共同启动。App 的 epoch fence 拒绝旧代次迟到结果；恢复不会重放业务。
 - 小说纯规则只走 `source.runtime.rules.process`／`POST /v1/source/rules.process`。一次 transform 发送完整 rules 与 conversion，Node 按规则逐条计时；该路由不使用短固定 HTTP 批次总时限，由调用 owner 或连接取消并等待实际交换结束。其他 source 方法仍保持默认 30 秒，网易 token 保持 60 秒。
 
-业务 JSON 保留 64 层、严格 UTF-8、Unicode、无重复键和安全数值契约，不加总大小配额。源码的 16 MiB 是公共输入契约。没有通用反向文档 RPC；只有上述私密设置能力向受信 Node owner 提供指定设置块及所需凭据，不向用户脚本提供原生存储入口。
+业务 JSON 保留 64 层、严格 UTF-8 与 JSON 语法，不加总大小配额。`System.Text.Json` 保留原始数字与扩展，不将全树数字转成 double，不拒绝普通重复未知键，也不提前解码全树字符串或未知 Unicode 键；字符串在实际取用时由 `System.Text.Json` 解码。所消费的 ok／contract／value 或 code、描述身份及关闭回执要求唯一成员；SSE sessionId／sequence、上传 sourceRevision、设置请求 id 等实际身份和关联数字在消费处精确取整并核对范围，避免浮点舍入冒充关联成功。外层扩展不参与成员数门禁，错误呈现仍只使用有限 code，不呈现附带私密正文。源码的 16 MiB 是公共输入契约。没有通用反向文档 RPC；只有上述私密设置能力向受信 Node owner 提供指定设置块及所需凭据，不向用户脚本提供原生存储入口。
 
 ## 所有权与关闭
 

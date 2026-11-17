@@ -40,15 +40,15 @@ public static class MusicNativeAccountTests
         }
         yield return Case("owner.ordinary-validation-failure-keeps-saved-authority-without-credential-write", OrdinaryValidation);
         yield return Case("owner.failed-candidate-does-not-revoke-or-replace-existing-account", CandidateFailure);
-        yield return Case("storage.unknown-current-entry-rejected-without-write", () => UnknownEntry("unsupported-entry", new JsonObject { ["kept"] = true }));
+        yield return Case("storage.unknown-entry-survives-account-write", () => UnknownEntry("unsupported-entry", new JsonObject { ["kept"] = true }));
         yield return Case("owner.no-memory-fallback-on-store-read-error", StorageFailure);
         yield return Case("owner.canonical-profile-rejection-never-saves", ProfileReflection);
         yield return Case("owner.observer-failure-cannot-turn-commit-into-error", ObserverFailure);
         yield return Case("owner.invalid-commands-pre-cancel-and-constructor-are-passive", Passive);
         yield return Case("owner.verified-stamp-bound-to-session-not-generation-alone", VerifiedStamp);
         yield return Case("owner.observed-durable-tombstone-fences-issued-lease", DurableTombstone);
-        yield return Case("storage.noncanonical-json-number-forms-rejected", NoncanonicalNumbers);
-        yield return Case("storage.any-current-entry-corruption-rejects-whole-document", CorruptDocument);
+        yield return Case("storage.equivalent-json-number-forms-consumed", NoncanonicalNumbers);
+        yield return Case("storage.unrelated-account-corruption-does-not-block-selected-account", CorruptDocument);
         foreach (string variant in new[] { "null", "duplicate-root", "duplicate-key", "version", "null-avatar", "bad-profile", "mixed-null", "fraction", "overflow", "fingerprint" })
         { string v = variant; yield return Case("storage.current-corruption-" + v, () => Corrupt(v)); }
         foreach (string input in new[] { "MUSIC_U=x\r\nHost:x", "Cookie: MUSIC_U=x", "MUSIC_U=x; MUSIC_U=y", "MUSIC_U=x; Domain=music.163.com",
@@ -351,10 +351,11 @@ public static class MusicNativeAccountTests
         byte[] original = Encoding.UTF8.GetBytes(doc.ToJsonString());
         store.Bytes = original.ToArray();
         await using var f = new Fixture(store: store);
-        Error(await List(f.Owner), "CORRUPT_STORAGE");
-        Error(await Import(f.Owner), "CORRUPT_STORAGE");
-        Error(await Command(f.Owner, "logout"), "CORRUPT_STORAGE");
-        Check(f.Runtime.Requests.All(call => call.Operation == "qr.cancel") && store.Writes == 0 && store.Bytes!.SequenceEqual(original));
+        Ok(await List(f.Owner));
+        Ok(await Import(f.Owner));
+        Ok(await Command(f.Owner, "logout"));
+        var retained = store.Document()["entries"]!.AsArray().OfType<JsonObject>().Single(e => e["key"]!.GetValue<string>() == key);
+        Check(JsonNode.DeepEquals(retained["value"], value) && store.Writes == 2);
         CryptographicOperations.ZeroMemory(original);
     }
     private static async Task StorageFailure()
@@ -416,9 +417,9 @@ public static class MusicNativeAccountTests
         byte[] original = Encoding.UTF8.GetBytes(json);
         store.Bytes = original.ToArray();
         await using var f = new Fixture(store: store);
-        Error(await List(f.Owner), "CORRUPT_STORAGE");
-        Error(await Import(f.Owner), "CORRUPT_STORAGE");
-        Check(f.Runtime.Requests.All(call => call.Operation == "qr.cancel") && store.Writes == 0 && store.Bytes!.SequenceEqual(original));
+        Ok(await List(f.Owner));
+        Ok(await Import(f.Owner));
+        Check(store.Writes == 1);
         CryptographicOperations.ZeroMemory(original);
     }
     private static async Task CorruptDocument()
@@ -428,9 +429,10 @@ public static class MusicNativeAccountTests
         byte[] original = Encoding.UTF8.GetBytes(doc.ToJsonString());
         store.Bytes = original.ToArray();
         await using var f = new Fixture(store: store);
-        Error(await Import(f.Owner), "CORRUPT_STORAGE");
+        Ok(await Import(f.Owner));
         Error(await List(f.Owner), "CORRUPT_STORAGE");
-        Check(f.Runtime.Requests.All(call => call.Operation == "qr.cancel") && store.Writes == 0 && store.Bytes!.SequenceEqual(original));
+        Check(store.Writes == 1 && store.Document()["entries"]!.AsArray().OfType<JsonObject>()
+            .Single(e => e["key"]!.GetValue<string>() == Key("kg"))["value"] is null);
         CryptographicOperations.ZeroMemory(original);
     }
     private static async Task Corrupt(string variant)

@@ -24,7 +24,7 @@ extension NativeMusicService: MusicCollectionQueueServing {
             let old = d.queue
             let context = MJ.obj([("collectionId", source["id"]), ("sourceTitle", source["name"])])
             let rows = try makeEntries(songs, document: &d, context: context)
-            archive(old, into: &d)
+            try archive(old, into: &d)
             d.queue["entries"] = .array(rows)
             d.queue["currentId"] = rows[index]["id"]
             for key in ["history", "priority", "failed"] { d.queue[key] = .array([]) }

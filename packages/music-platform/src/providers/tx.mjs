@@ -3,7 +3,7 @@
 import { randomInt } from 'node:crypto';
 import { collection, first, image, input, mediaURL, number, page, pageNumber, protocolInteger, required, rows, scalar, text, txSong } from '../model.mjs';
 import { cookieFields, hex } from '../protocols.mjs';
-import { qrcLyrics } from '../lyrics.mjs';
+import { lyricTracks, qrcLyrics } from '../lyrics.mjs';
 import { fail } from '../errors.mjs';
 
 async function details(c, id) {
@@ -129,8 +129,10 @@ export const txProvider = {
     const data = await c.tx('music.musichallSong.PlayLyricInfo', 'GetPlayLyricInfo', {
       songMid: input(first(id, musicInfo.songmid)), type: 1, crypt: 1, lrc_t: 0, qrc: 1, qrc_t: 0,
       trans: 1, trans_t: 0, roma: 1, roma_t: 0, needSingingAnnotations: false }, false, { maximumBytes: 512 * 1024 });
-    return { text: await qrcLyrics(text(data.lyric), c.signal), translation: await qrcLyrics(text(data.trans), c.signal),
-      romanization: await qrcLyrics(text(data.roma), c.signal) };
+    return lyricTracks(await qrcLyrics(text(data.lyric), c.signal), {
+      translation: () => qrcLyrics(text(data.trans), c.signal),
+      romanization: () => qrcLyrics(text(data.roma), c.signal),
+    }, c.signal);
   },
   async chorus(c, { id, musicInfo = {} }) {
     return { platform: 'tx', id: input(first(id, musicInfo.songmid)), point: null };

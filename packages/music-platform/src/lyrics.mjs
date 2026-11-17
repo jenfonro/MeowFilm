@@ -2,7 +2,7 @@
 // Shared text conversion of the pinned QRC/KRC/Kuwo/MRC formats.
 import { inflateSync } from 'node:zlib';
 import { setImmediate } from 'node:timers/promises';
-import { fail } from './errors.mjs';
+import { errorCode, fail } from './errors.mjs';
 import { decodeJSON, utf8 } from './model.mjs';
 import { entities } from './literal.mjs';
 import { decryptQRC } from './qrc.mjs';
@@ -24,6 +24,29 @@ function output(value) {
   if (Buffer.byteLength(value) > maximumBytes) fail('LIMIT');
   return value;
 }
+export async function lyricTracks(main, optional, signal) {
+  const result = { text: main, translation: '', romanization: '' }, errors = {};
+  for (const [track, read] of Object.entries(optional)) {
+    signal?.throwIfAborted();
+    try { result[track] = await read(); }
+    catch (error) {
+      signal?.throwIfAborted();
+      const code = errorCode(error);
+      if (!['INVALID_RESPONSE', 'UPSTREAM_HTTP', 'UPSTREAM_ERROR', 'NETWORK_ERROR', 'NOT_FOUND'].includes(code)) throw error;
+      errors[track] = code;
+    }
+  }
+  signal?.throwIfAborted();
+  if (Object.keys(errors).length && !result.text && !result.translation && !result.romanization)
+    fail(Object.values(errors)[0]);
+  return Object.keys(errors).length ? { ...result, errors } : result;
+}
+function base64(value) {
+  const encoded = value.replace(/\s/g, ''), content = encoded.replace(/=+$/, '');
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || content.length % 4 === 1 ||
+      encoded.length - content.length > (4 - content.length % 4) % 4) fail('INVALID_RESPONSE');
+  return Buffer.from(encoded, 'base64');
+}
 export function lyricXML(value) {
   if (!value.trimStart().startsWith('<')) return value;
   if (/<!\s*(?:DOCTYPE|ENTITY)\b/i.test(value)) fail('INVALID_RESPONSE');
@@ -40,8 +63,7 @@ export async function qrcLyrics(encoded, signal) {
   return output(lyricXML(utf8(inflate(await decryptQRC(Buffer.from(encoded, 'hex'), signal), true))));
 }
 export function krcLyrics(encoded) {
-  const bytes = Buffer.from(encoded, 'base64');
-  if (bytes.toString('base64') !== encoded) fail('INVALID_RESPONSE');
+  const bytes = base64(encoded);
   if (bytes.subarray(0, 4).toString('ascii') !== 'krc1') fail('INVALID_RESPONSE');
   const key = [64,71,97,119,94,50,116,71,81,54,49,45,206,210,110,105];
   const encrypted = bytes.subarray(4), plain = Buffer.from(encrypted);
@@ -103,8 +125,7 @@ function literal(value) {
 export function kuwoLyrics(bytes) {
   const split = bytes.indexOf(Buffer.from('\r\n\r\n'));
   if (bytes.subarray(0, 10).toString('ascii').toLowerCase() !== 'tp=content' || split < 0) fail('INVALID_RESPONSE');
-  const base64 = utf8(inflate(bytes.subarray(split + 4))).trim(), encrypted = Buffer.from(base64, 'base64');
-  if (encrypted.toString('base64') !== base64) fail('INVALID_RESPONSE');
+  const encrypted = base64(utf8(inflate(bytes.subarray(split + 4))));
   const key = Buffer.from('yeelion');
   for (let index = 0; index < encrypted.length; index++) encrypted[index] ^= key[index % key.length];
   const value = utf8(encrypted), lines = [], translations = [], seen = new Set();

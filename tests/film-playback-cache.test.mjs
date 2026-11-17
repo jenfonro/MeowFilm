@@ -1,3 +1,4 @@
+import { stringifyJSONValue, isRawJSON, rawJSON } from '@meowfilm/runtime-bridge/json';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createPlaybackCache } from '../packages/film-playback/src/cache.js';
@@ -692,4 +693,13 @@ test('publication observes the already updated memory entry for load and seed', 
     publish: value => assert.deepEqual(cache.read('ordered-publication'), value),
   }));
   await cache.close();
+});
+
+test('cache retains exact JSON numbers without turning them into rawJSON-shaped records', async t => {
+  const cache = createPlaybackCache(); t.after(() => cache.close());
+  const material = { value: rawJSON('9007199254740993'), ordinary: { rawJSON: '9007199254740993' } };
+  const value = await cache.load('exact-material', async () => material, options());
+  assert.equal(isRawJSON(value.value), true);
+  assert.equal(isRawJSON(value.ordinary), false);
+  assert.equal(stringifyJSONValue(value), '{"value":9007199254740993,"ordinary":{"rawJSON":"9007199254740993"}}');
 });

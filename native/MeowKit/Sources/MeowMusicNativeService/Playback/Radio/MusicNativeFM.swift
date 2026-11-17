@@ -24,9 +24,11 @@ extension NativeMusicService: MusicFMPlaybackServing {
         try await checkHomeBinding(binding, epoch: own)
         let saved = try read().playback["fmSelections"][scope]
         guard saved != .null else { return .fm(mode: .default, submode: "", entry: nil) }
-        let action = try JSONDecoder().decode(MusicHomeAction.self, from: saved.bytes)
-        try musicRequire(action.isPersonalFM, .corruptDocument)
-        return action
+        do {
+            let action = try JSONDecoder().decode(MusicHomeAction.self, from: saved.bytes)
+            try musicRequire(action.isPersonalFM, .corruptDocument)
+            return action
+        } catch { throw MusicServiceError.corruptDocument }
     }
     public func fmPlaybackSnapshot() async throws -> MusicFMPlaybackSnapshot? {
         try check()

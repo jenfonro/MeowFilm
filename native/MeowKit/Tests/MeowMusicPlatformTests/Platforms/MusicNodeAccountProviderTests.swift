@@ -7,6 +7,56 @@ import MeowRuntime
 @testable import MeowMusicPlatform
 
 @MainActor final class MusicNodeAccountProviderTests: XCTestCase {
+    func testAccountPagingRetainsOpaqueNumbersAndDistinctUTF8MetadataKeys() async throws {
+        let f = try MusicNativeFixture(); try await f.enable()
+        let raw = Data(#"{"songmid":"precise","name":"Synthetic","singer":"Artist","duration":180,"types":[],"extra":{"decimal":1.234567890123456789,"huge":1e999,"integer":9007199254740993,"é":"composed","e\u0301":"decomposed"}}"#.utf8)
+        let original = try RuntimeJSON.decode(raw)
+        let track = MusicNativeTrackData(platform: "tx", data: raw)
+        await f.platform.replies("recommendations", try MusicPlatformFixture.page(Array(repeating: track, count: 31), platform: "tx"))
+        let first = try await f.service.nativeRecommendations(platform: .qq, kind: "radar", cursor: nil)
+        let cursor = try XCTUnwrap(first.cursor)
+        let second = try await f.service.nativeRecommendations(platform: .qq, kind: "radar", cursor: cursor)
+        let replay = try await f.service.nativeRecommendations(platform: .qq, kind: "radar", cursor: cursor)
+        XCTAssertEqual(first.items.count, 30); XCTAssertEqual(second.items.count, 1)
+        XCTAssertEqual(second.items.first?.data, replay.items.first?.data)
+        for row in first.items + second.items {
+            XCTAssertEqual(try RuntimeJSON.decode(row.data), original)
+        }
+        let requests = await f.platform.recorded()
+        XCTAssertEqual(requests.filter { $0.operation == "recommendations" }.count, 1)
+        _ = await f.service.close()
+    }
+
+    func testOptionalAccountCollectionCountDoesNotRejectHealthyEntries() async throws {
+        let f = try MusicNativeFixture(); try await f.enable()
+        let opaque = try RuntimeJSON.decode(Data("9007199254740993".utf8))
+        let counts: [RuntimeValue] = [.number(7), .string("unknown"), .number(-1), opaque, .null]
+        await f.platform.replies("personalPlaylists", .object(["items": .array(counts.enumerated().map { index, count in
+            .object(["id": .string("list-\(index)"), "name": .string("Synthetic"), "owned": .bool(false), "count": count])
+        }), "more": .bool(false)]))
+        let page = try await f.service.nativeCollections(platform: .qq, cursor: nil)
+        XCTAssertEqual(page.items.map(\.id), counts.indices.map { "list-\($0)" })
+        XCTAssertEqual(page.items.map(\.count), [7, nil, nil, nil, nil])
+        _ = await f.service.close()
+    }
+
+    func testConsumedOpaqueNumbersCannotBecomeRoundedCountsPositionsOrUnknownExpiry() throws {
+        let song = try MusicPlatformFixture.song(MusicAccountFixture.track())
+        for token in ["9007199254740993", "1.234567890123456789", "1e999"] {
+            let value = try RuntimeJSON.decode(Data(token.utf8))
+            XCTAssertNil(value.musicNumber)
+            XCTAssertThrowsError(try MusicPlatformDTO.count(value))
+            XCTAssertThrowsError(try MusicPlatformDTO.tracks(.object([
+                "items": .array([song]), "sourcePositions": .array([value])
+            ])))
+            for key in ["expiresAt", "licenseExpiresAt"] {
+                var fields: RuntimeObject = ["url": .string("https://media.invalid/synthetic.mp3")]
+                fields[key] = value
+                XCTAssertThrowsError(try MusicNativeAccountURLCache.audio(.object(fields)))
+            }
+        }
+    }
+
     func testUnchangedCanonicalVerificationAndRefreshKeepTheOriginalOpaqueCredentialBytes() async throws {
         for platform in [MusicAccountPlatform.netease, .qq, .kugou] {
             let cookie = "synthetic-unchanged-cookie"
@@ -281,7 +331,7 @@ import MeowRuntime
         let directory = try await provider.collectionRows()
         XCTAssertEqual(directory.count, 1)
         let rows = try await provider.tracks(collectionID: "owner:current")
-        XCTAssertEqual(try rows.map { try MusicPlatformDTO.runtime($0)[music: "songmid"].musicRequiredText() }, ids)
+        XCTAssertEqual(try rows.map { try $0[music: "songmid"].musicRequiredText() }, ids)
         XCTAssertEqual(fixture.requests().map(\.operation), ["personalPlaylists", "playlist.complete"],
                        "Ordinary reads do not double-read directory or members to prove a snapshot")
         try await client.close(); await fixture.runtime.close()
@@ -301,7 +351,7 @@ import MeowRuntime
         }
         let client = fixture.makeClient(), provider = MusicNodeAccountProvider(platform: .qq, client: client)
         let rows = try await provider.collectionRows()
-        XCTAssertEqual(try rows.map { try MusicPlatformDTO.runtime($0)[music: "id"].musicRequiredText() }, ["first", "actual-second"])
+        XCTAssertEqual(try rows.map { try $0[music: "id"].musicRequiredText() }, ["first", "actual-second"])
         XCTAssertEqual(fixture.requests().count, 2)
         try await client.close(); await fixture.runtime.close()
     }
@@ -315,7 +365,7 @@ import MeowRuntime
         let fixture = try MusicPlatformFixture { try await peer.respond($0) }
         let client = fixture.makeClient(), provider = MusicNodeAccountProvider(platform: .netease, client: client)
         let value = try await provider.publicStandardAudio(nativeID: "canonical-id")
-        let audio = try MusicPlatformDTO.audio(MusicPlatformDTO.runtime(value))
+        let audio = try MusicPlatformDTO.audio(value)
         XCTAssertEqual(audio.url.absoluteString, "https://media.invalid/current.mp3?signature=a%2Bb")
         XCTAssertEqual(audio.delivery?.quality, "128k"); XCTAssertEqual(audio.duration, 240.25)
         XCTAssertTrue(audio.fileCachePolicy.allowed); XCTAssertNil(audio.fileCachePolicy.licenseExpiresAt)

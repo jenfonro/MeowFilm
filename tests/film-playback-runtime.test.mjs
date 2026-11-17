@@ -172,6 +172,40 @@ test('film HTTP rejects a supplied empty entry group even with an exact resume t
   assert.deepEqual(f.reads, []);
 });
 
+test('film HTTP cold source reentry projects seeded TMDB identities in the first open response', async t => {
+  const target = { id: 'tmdb:tv:19', kind: 'tv', title: 'Fixture Series',
+    metadataProvider: 'tmdb', metadataId: 19 };
+  const metadata = { id: 19, name: target.title, status: 'Ended',
+    seasons: [{ season_number: 1, episode_count: 2, episodes: [1, 2].map(episode => ({
+      season_number: 1, episode_number: episode, name: `Episode ${episode}`, air_date: '2020-01-01',
+    })) }] };
+  const f = await setup(t, { metadata: () => metadata });
+  const resumeTarget = { ...rawTarget(0), title: target.title, season: 1, episode: 2, globalEpisode: 2,
+    source: { ...rawTarget(0).source, candidateId: 'restored-candidate' } };
+  const first = okay(await f.rpc('session.open', { platform: 'ios', target, resumeTarget, metadata,
+    sources: [source], restoreOnly: true }));
+  assert.equal(first.stage, 'loading');
+  assert.deepEqual(first.metadataSources, []);
+  assert.deepEqual(first.entryTarget, target);
+  assert.deepEqual(first.target, resumeTarget);
+  assert.equal(first.attempt, null);
+  assert.equal(first.current, null);
+  assert.equal(first.metadata.businessId, target.id);
+  const season = first.metadata.seasons[0];
+  assert.equal(season.businessId, `${target.id}:season:1`);
+  assert.deepEqual(season.playbackTarget, { ...target, metadataId: '19', season: 1 });
+  for (const [index, episode] of season.episodes.entries()) {
+    assert.equal(episode.businessId, `${target.id}:season:1:episode:${index + 1}`);
+    assert.deepEqual(episode.playbackTarget, { ...target, metadataId: '19', season: 1, episode: index + 1 });
+  }
+  assert.equal(first.browsing.loading, true);
+  assert.deepEqual(first.episodes, []);
+  assert.deepEqual(first.browsing.episodes, []);
+  assert.equal(f.calls.some(row => row.operation === 'play'), false);
+  assert.deepEqual(f.reads, []);
+  okay(await f.rpc('session.release', { sessionId: first.sessionId }));
+});
+
 test('film HTTP keeps a discovered seed group revoked across source replacement and metadata refresh', async t => {
   const f = await setup(t, { doubanMetadata: { id: '51', title: 'Fixture Film', poster_path: '/fixture-poster.jpg' },
     metadata: ({ path }) => {

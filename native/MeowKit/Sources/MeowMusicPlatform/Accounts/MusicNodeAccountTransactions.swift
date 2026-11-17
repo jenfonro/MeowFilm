@@ -1,5 +1,4 @@
 import Foundation
-import MeowJSON
 import MeowMusicFeature
 import MeowRuntime
 
@@ -23,8 +22,7 @@ extension MusicNodeAccountProvider: MusicAccountSyncProvider {
             return .init(id: id, name: row[music: "name"].musicText, kind: kind, writable: writable,
                 canRename: writable && kind == .playlist, canDelete: writable && kind == .playlist,
                 canOrder: writable && platform != .qq, members: members,
-                revision: MusicAccountSyncPreflight.hash(try MusicAccountSyncPreflight.encoded(
-                    MusicPlatformDTO.json(signature))))
+                revision: MusicAccountSyncPreflight.hash(try RuntimeJSON.encode(signature)))
         }
         let subscriptions = try value[music: "subscriptions"].musicRequiredArray().map { row -> MusicLibrarySyncSubscription in
             let id = try row[music: "remoteId"].musicRequiredText()
@@ -41,8 +39,7 @@ extension MusicNodeAccountProvider: MusicAccountSyncProvider {
         let owned = try directory.filter { $0[music: "owned"].musicBool }.map {
             try $0[music: "id"].musicRequiredText()
         }
-        let revision = MusicAccountSyncPreflight.hash(try MusicAccountSyncPreflight.encoded(
-            MusicPlatformDTO.json(facts)))
+        let revision = MusicAccountSyncPreflight.hash(try RuntimeJSON.encode(facts))
         return .init(accountID: try value[music: "accountId"].musicRequiredText(), collections: collections,
                      subscriptions: subscriptions, revision: revision, ownedCollectionIDs: owned)
     }

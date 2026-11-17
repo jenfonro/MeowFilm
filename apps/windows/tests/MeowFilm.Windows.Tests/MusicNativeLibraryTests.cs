@@ -436,13 +436,57 @@ public static partial class MusicNativeLibraryTests
     }
     private static async Task Corrupt()
     {
-        foreach (string raw in new[] { "null", "{}", "{\"version\":2,\"entries\":[]}", "{\"version\":1,\"version\":1,\"entries\":[]}",
-            "{\"version\":1,\"entries\":[{\"key\":\"x\",\"value\":{}},{\"key\":\"x\",\"value\":{}}]}",
-            "{\"version\":1,\"entries\":[{\"key\":\"[\\\"meowfilm\\\",\\\"music\\\",1,\\\"local\\\",\\\"queue\\\"]\",\"value\":{\"schema\":1,\"entries\":[{\"id\":\"not-an-entry\",\"song\":{}}]}}]}" })
+        foreach (string raw in new[] { "null", "{}", "{\"version\":2,\"entries\":[]}",
+            "{\"version\":1,\"version\":1,\"entries\":[]}" })
         {
             await using var f = new Fixture(); f.Store.Bytes = Encoding.UTF8.GetBytes(raw); var o = f.Owner();
             var reply = await o.ExecuteAsync("music.library.list"); Check(!reply.GetProperty("ok").GetBoolean() && f.Store.Writes == 0);
         }
+        await UnrelatedMaterials();
+    }
+    private static async Task UnrelatedMaterials()
+    {
+        var current = await CurrentDocuments();
+        string songId = current.Library["library"]!["songs"]!.AsObject().First().Key;
+        var extra = JsonNode.Parse("""{"large":900719925474099312345,"precise":0.12345678901234567890123456789,"é":1,"é":2}""")!;
+        current.Library["library"]!["songs"]![songId]!["future"] = extra.DeepClone();
+        string damagedId = Guid.NewGuid().ToString("D");
+        var damaged = Online("damaged"); damaged["songId"] = damagedId;
+        damaged["sources"]![0]!["musicInfo"] = false;
+        current.Library["library"]!["songs"]![damagedId] = damaged;
+        current.Queue["future"] = extra.DeepClone();
+        current.Queue["entries"]![0]!["context"]!["future"] = extra.DeepClone();
+        current.History["days"]![0]!["songs"]![0]!["future"] = extra.DeepClone();
+        await using var f = new Fixture();
+        var root = JsonNode.Parse(Document(("library", current.Library), ("queue", current.Queue),
+            ("history", current.History), ("online-settings", JsonValue.Create(false)!)))!.AsObject();
+        root["future"] = extra.DeepClone();
+        root["entries"]!.AsArray().Add(new JsonObject { ["key"] = "future-area", ["value"] = extra.DeepClone() });
+        f.Store.Bytes = JsonSerializer.SerializeToUtf8Bytes(root, PersistedJson);
+        var owner = f.Owner();
+        await Ok(owner, "music.library.create", new { name = "Unrelated write", extra = new { nested = true } });
+        await Ok(owner, "music.queue.get");
+        await Ok(owner, "music.history.get");
+        await Error(owner, "music.settings.get", null, "CORRUPT_STORAGE");
+        await owner.AbortAsync();
+        var cold = f.Owner();
+        await Error(cold, "music.queue.select", new { id = "entry-missing" }, "ENTRY_NOT_FOUND");
+        Check((await Ok(cold, "music.queue.get")).GetProperty("version").GetInt64() == 1);
+        await Ok(cold, "music.library.addSongs", new { id = "favorites", ifRevision = 1, songs = new[] { Song() } });
+        await Error(cold, "music.library.create", new { name = "Selected damaged source", songs = new[] { Online("damaged") } }, "INVALID_SONG");
+        var saved = f.Store.Root;
+        Check(JsonNode.DeepEquals(saved["future"], extra));
+        string raw = Encoding.UTF8.GetString(f.Store.Bytes!);
+        Check(raw.Contains("900719925474099312345", StringComparison.Ordinal) &&
+            raw.Contains("0.12345678901234567890123456789", StringComparison.Ordinal));
+        Check(JsonNode.DeepEquals(f.Store.State("library")["library"]!["songs"]![damagedId], damaged));
+        Check(JsonNode.DeepEquals(f.Store.State("library")["library"]!["songs"]![songId]!["future"], extra));
+        Check(JsonNode.DeepEquals(f.Store.State("queue")["entries"]![0]!["context"]!["future"], extra));
+        Check(JsonNode.DeepEquals(f.Store.State("history")["days"]![0]!["songs"]![0]!["future"], extra));
+        Check(saved["entries"]!.AsArray().OfType<JsonObject>()
+            .Single(e => e["key"]!.GetValue<string>() == AreaKey("online-settings"))["value"]!.GetValue<bool>() == false);
+        Check(JsonNode.DeepEquals(saved["entries"]!.AsArray().OfType<JsonObject>()
+            .Single(e => e["key"]!.GetValue<string>() == "future-area")["value"], extra));
     }
     private static string AreaKey(string area) => JsonSerializer.Serialize(new object[] { "meowfilm", "music", 1, "local", area },
         new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
@@ -469,8 +513,13 @@ public static partial class MusicNativeLibraryTests
             await using var f = new Fixture();
             f.Store.Bytes = JsonSerializer.SerializeToUtf8Bytes(new { version = 1, entries = new[] { new { key = AreaKey(area), value = (object?)null } } });
             byte[] original = f.Store.Bytes.ToArray(); var o = f.Owner();
+            string method = area switch
+            {
+                "library" => "music.library.list", "queue" or "playback-settings" => "music.queue.get",
+                "history" => "music.history.get", "online-settings" => "music.settings.get", _ => "music.sourceExclusions.list"
+            };
             for (int i = 0; i < 2; i++)
-                Check(!(await o.ExecuteAsync("music.library.create", new { name = "Never overwrite" })).GetProperty("ok").GetBoolean(), area);
+                Check(!(await o.ExecuteAsync(method)).GetProperty("ok").GetBoolean(), area);
             Check(f.Store.Writes == 0 && original.SequenceEqual(f.Store.Bytes));
         }
     }
@@ -512,29 +561,25 @@ public static partial class MusicNativeLibraryTests
             settings.GetProperty("lyrics").GetBoolean() &&
             settings.EnumerateObject().Count() == 3);
         int writes = f.Store.Writes;
-        await Error(o, "music.settings.save", new { ifRevision = 0, quality = "flac", lyrics = true }, "INVALID_REQUEST");
         await Error(o, "music.settings.save", new { ifRevision = 0 }, "INVALID_REQUEST");
         await Error(o, "music.settings.save", new { lyrics = true }, "INVALID_REQUEST");
-        await Error(o, "music.settings.save", new { ifRevision = 0, lyrics = true, target = (object?)null }, "INVALID_REQUEST");
-        await Error(o, "music.settings.save", new { ifRevision = 0, lyrics = true, target = new { installationId = "missing", platform = "wy" } }, "INVALID_REQUEST");
         Check(f.Store.Writes == writes);
-        var saved = (await Ok(o, "music.settings.save", new { ifRevision = 0, lyrics = false })).GetProperty("settings");
+        var saved = (await Ok(o, "music.settings.save", new { ifRevision = 0, lyrics = false, quality = "flac", target = new { installationId = "missing", platform = "wy" } })).GetProperty("settings");
         Check(saved.GetProperty("schema").GetInt32() == 3 && saved.GetProperty("revision").GetInt64() == 1 &&
             !saved.GetProperty("lyrics").GetBoolean() && saved.EnumerateObject().Count() == 3);
         await Error(o, "music.settings.save", new { ifRevision = 0, lyrics = true }, "REVISION_CONFLICT");
         await o.DisposeAsync();
         Check((await Ok(f.Owner(), "music.settings.get")).GetProperty("settings").GetRawText() == saved.GetRawText());
     }
-    private static async Task RejectDocument(byte[] bytes, string expected = "CORRUPT_STORAGE")
+    private static async Task RejectDocument(byte[] bytes, string expected = "CORRUPT_STORAGE", string? method = null, object? parameters = null)
     {
         await using var f = new Fixture();
         f.Store.Bytes = bytes.ToArray();
         byte[] original = f.Store.Bytes.ToArray();
         var owner = f.Owner();
-        await Error(owner, "music.library.list", null, expected);
-        await Error(owner, "music.library.create", new { name = "Must not write" }, expected);
-        await Throws(expected, async () => await owner.ReadLibrarySyncAsync());
-        Check(f.Store.Writes == 0 && original.SequenceEqual(f.Store.Bytes!), "Non-current data changed");
+        if (method is not null) await Error(owner, method, parameters, expected);
+        else await Throws(expected, async () => await owner.ReadLibrarySyncAsync());
+        Check(f.Store.Writes == 0 && original.SequenceEqual(f.Store.Bytes!), "Rejected selected data changed");
     }
     private static async Task DamagedDocuments()
     {
@@ -552,27 +597,22 @@ public static partial class MusicNativeLibraryTests
             Changed(queue, q => q["entries"]![0]!["songId"] = Guid.NewGuid().ToString("D")),
             Changed(queue, q => q.Remove("source")),
             Changed(queue, q => q["currentId"] = "entry-2"),
-            Changed(queue, q => q["priority"] = new JsonArray(JsonValue.Create("entry-1"))),
-            Changed(queue, q => q["extra"] = true)
+            Changed(queue, q => q["priority"] = new JsonArray(JsonValue.Create("entry-1")))
         })
-            await RejectDocument(Document(("library", current.Library), ("queue", invalid)), "CORRUPT_QUEUE");
+            await RejectDocument(Document(("library", current.Library), ("queue", invalid)), "CORRUPT_QUEUE", "music.queue.get");
 
         var history = current.History;
         foreach (var invalid in new[]
         {
-            Changed(history, h => h.Remove("days")),
-            Changed(history, h => h["extra"] = true),
-            Changed(history, h => h["days"]![0]!["songs"]![0]!["extra"] = true)
+            Changed(history, h => h.Remove("days"))
         })
-            await RejectDocument(Document(("library", current.Library), ("history", invalid)), "CORRUPT_HISTORY");
+            await RejectDocument(Document(("library", current.Library), ("history", invalid)), "CORRUPT_HISTORY", "music.history.get");
 
         var library = current.Library;
         string songId = library["library"]!["songs"]!.AsObject().First().Key;
         foreach (var invalid in new[]
         {
-            Changed(library, state => state["library"]!["extra"] = true),
             Changed(library, state => state["library"]!.AsObject().Remove("accounts")),
-            Changed(library, state => state["library"]!["songs"]![songId]!["title"] = new JsonArray()),
             Changed(library, state => state["library"]!["songs"]![songId]!.AsObject().Remove("sources")),
             Changed(library, state => state["revision"] = 2),
             Changed(library, state => state["library"]!["accounts"]!["kw"] = "account-a"),
@@ -604,7 +644,7 @@ public static partial class MusicNativeLibraryTests
             revision = 0,
             lyrics = true,
             target = new { installationId = "missing-installation", platform = "wy" }
-        }))));
+        }))), "CORRUPT_STORAGE", "music.settings.get");
     }
     private static Task LyricsLrc()
     {

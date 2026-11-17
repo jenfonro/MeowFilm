@@ -23,8 +23,12 @@ public sealed partial class MusicLibraryOwner
     internal IReadOnlyList<JsonObject> SongSnapshots()
     {
         var current = document;
-        return current is null ? [] : Repository(current)
-            .Select(pair => NativeMusicSong.Normalize(pair.Value)).ToArray();
+        var songs = new List<JsonObject>();
+        if (current is not null)
+            foreach (var pair in Repository(current))
+                try { songs.Add(SongReference(current, JsonValue.Create(pair.Key))); }
+                catch (MusicLibraryException) { /* A failed candidate is not a recording match. */ }
+        return songs;
     }
 
     internal async Task ArtworkLoadCompletedAsync(string address, bool succeeded)
@@ -68,8 +72,12 @@ public sealed partial class MusicLibraryOwner
     }
 
     private JsonObject Repository(JsonObject doc) => LJ.Object(LJ.Object(LibraryState(doc)["library"])["songs"]);
-    private JsonObject SongReference(JsonObject doc, JsonNode? songId) =>
-        NativeMusicSong.Normalize(Repository(doc)[LJ.S(songId)] ?? throw new MusicLibraryException("SONG_NOT_FOUND"));
+    private JsonObject SongReference(JsonObject doc, JsonNode? songId)
+    {
+        var song = LJ.Object(Repository(doc)[LJ.S(songId)] ?? throw new MusicLibraryException("SONG_NOT_FOUND"), "INVALID_SONG");
+        LJ.Require(LJ.S(song["songId"]) == LJ.S(songId), "INVALID_SONG_ID");
+        return NativeMusicSong.Normalize(song);
+    }
     private JsonObject EntrySong(JsonObject doc, JsonObject entry) => SongReference(doc, entry["songId"]);
 
     private JsonObject[] RegisterSongs(JsonObject doc, IEnumerable<JsonObject> input, bool authoritative = false,
@@ -91,14 +99,14 @@ public sealed partial class MusicLibraryOwner
             { ids.Add(existing.Id); continue; }
             var record = groups.Add(incoming, preferIncoming: authoritative);
             record.SelectArtwork(platforms, enabled);
-            store[record.Id] = record.ToSong(); ids.Add(record.Id);
+            store[record.Id] = MergeStoredSong(store[record.Id] as JsonObject, record.ToSong()); ids.Add(record.Id);
             if (authoritative && accepted is not null)
                 foreach (string platform in observedPlatforms) accepted[(record.Id, platform)] = observation;
         }
         Set(doc, "library", state);
         return ids.Select(id => NativeMusicSong.Normalize(store[id])).ToArray();
     }
-    private void ApplyArtworkPolicy(JsonObject doc, bool force = false)
+    private void ApplyArtworkPolicy(JsonObject doc, bool force = false, IEnumerable<string>? songIds = null)
     {
         if (!HasValue(doc, "library")) return;
         var state = LibraryState(doc);
@@ -106,11 +114,11 @@ public sealed partial class MusicLibraryOwner
         var policy = MetadataPolicy(doc);
         var platforms = LJ.Array(policy["platforms"]).Select(value => LJ.S(value)).ToArray();
         var enabled = LJ.Array(policy["enabled"]).Select(value => LJ.S(value)).ToHashSet(StringComparer.Ordinal);
-        foreach (var pair in songs.ToArray())
+        foreach (var id in songIds ?? songs.Select(pair => pair.Key).ToArray())
         {
-            var record = new NativeMusicSong.Recordings(LJ.Object(pair.Value));
+            var record = new NativeMusicSong.Recordings(SongReference(doc, JsonValue.Create(id)));
             record.SelectArtwork(platforms, enabled, force);
-            songs[pair.Key] = record.ToSong();
+            songs[id] = MergeStoredSong(songs[id] as JsonObject, record.ToSong());
         }
         Set(doc, "library", state);
     }
@@ -130,7 +138,6 @@ public sealed partial class MusicLibraryOwner
             {
                 var normalized = NativeMusicSong.Normalize(song);
                 var projected = repositoryIndex!.Find(new(normalized))?.ToSong() ?? normalized;
-                song.Clear();
                 foreach (var pair in projected) song[pair.Key] = pair.Value?.DeepClone();
             }
             return output;
@@ -142,19 +149,37 @@ public sealed partial class MusicLibraryOwner
     {
         static IEnumerable<JsonObject> Card(JsonObject card)
         {
-            if (card["sources"] is JsonArray && card.ContainsKey("title"))
+            if (card["display"] is JsonValue display && display.TryGetValue<bool>(out bool shown) && !shown) yield break;
+            if (card.ContainsKey("sources") && card.ContainsKey("title"))
             { yield return card; yield break; }
             if (card["song"] is JsonObject song)
             { yield return song; yield break; }
             if (card["preview"] is JsonArray preview)
-                foreach (var row in preview.OfType<JsonObject>())
+                foreach (var row in preview.Take(3).OfType<JsonObject>())
                     if (row["song"] is JsonObject previewSong) yield return previewSong;
         }
         static IEnumerable<JsonObject> Items(JsonObject container, string name)
         {
-            if (container[name] is JsonArray rows)
-                foreach (var row in rows.OfType<JsonObject>())
-                    foreach (var song in Card(row)) yield return song;
+            if (container[name] is not JsonArray rows) yield break;
+            int rejected = 0, hidden = 0, original = rows.Count;
+            foreach (var row in rows.ToArray())
+            {
+                JsonObject[] songs;
+                try
+                {
+                    LJ.Require(row is JsonObject, "INVALID_RESPONSE");
+                    if (row!["display"] is JsonValue display && display.TryGetValue<bool>(out bool shown) && !shown)
+                    { hidden++; continue; }
+                    songs = Card((JsonObject)row!).ToArray();
+                    foreach (var song in songs) _ = new NativeMusicSong.Recordings(NativeMusicSong.Normalize(song));
+                }
+                catch (MusicLibraryException)
+                {
+                    rows.Remove(row); rejected++; continue;
+                }
+                foreach (var song in songs) yield return song;
+            }
+            LJ.Require(original == hidden || rejected < original - hidden, "INVALID_RESPONSE");
         }
         switch (shape)
         {
@@ -163,14 +188,48 @@ public sealed partial class MusicLibraryOwner
                 if (result["song"] is JsonObject detailSong) yield return detailSong;
                 break;
             case PlatformSongShape.Page:
+                LJ.Require(result["items"] is JsonArray, "INVALID_RESPONSE");
                 foreach (var song in Items(result, "items")) yield return song;
                 break;
             case PlatformSongShape.Catalog:
+                LJ.Require(result["items"] is JsonArray || result["entries"] is JsonArray || result["sections"] is JsonArray,
+                    "INVALID_RESPONSE");
+                bool valid = false;
                 foreach (string name in new[] { "items", "entries" })
-                    foreach (var song in Items(result, name)) yield return song;
+                {
+                    if (result[name] is not JsonArray) continue;
+                    JsonObject[] songs;
+                    try { songs = Items(result, name).ToArray(); }
+                    catch (MusicLibraryException) { result[name] = null; continue; }
+                    valid = true;
+                    foreach (var song in songs) yield return song;
+                }
                 if (result["sections"] is JsonArray sections)
-                    foreach (var section in sections.OfType<JsonObject>())
-                        foreach (var song in Items(section, "items")) yield return song;
+                {
+                    if (sections.Count == 0) valid = true;
+                    foreach (var section in sections.ToArray())
+                    {
+                        if (section is JsonObject hidden && hidden["display"] is JsonValue display &&
+                            display.TryGetValue<bool>(out bool shown) && !shown)
+                        { valid = true; continue; }
+                        JsonObject[] songs;
+                        try
+                        {
+                            LJ.Require(section is JsonObject group && group["items"] is JsonArray, "INVALID_RESPONSE");
+                            songs = Items((JsonObject)section!, "items").ToArray();
+                        }
+                        catch (MusicLibraryException)
+                        {
+                            // Leave the failed section as unavailable for the display
+                            // consumer, which can retain other sections.
+                            if (section is JsonObject group) group["items"] = null;
+                            continue;
+                        }
+                        valid = true;
+                        foreach (var song in songs) yield return song;
+                    }
+                }
+                LJ.Require(valid, "INVALID_RESPONSE");
                 break;
             case PlatformSongShape.Discovery:
                 if (result["charts"] is JsonArray charts)
@@ -186,7 +245,7 @@ public sealed partial class MusicLibraryOwner
         if (shape == PlatformSongShape.None) return result.Clone();
         var output = JsonNode.Parse(result.GetRawText())!.AsObject();
         var songs = PlatformSongs(output, shape).ToArray();
-        if (songs.Length == 0) return result.Clone();
+        if (songs.Length == 0) return LJ.Element(output);
         if (authoritative && observation == 0) observation = BeginSongObservation();
         await EnterAsync(token).ConfigureAwait(false);
         try
@@ -199,7 +258,6 @@ public sealed partial class MusicLibraryOwner
             var adopted = RegisterSongs(candidate, songs, authoritative, observation, accepted);
             for (int i = 0; i < songs.Length; i++)
             {
-                songs[i].Clear();
                 foreach (var pair in adopted[i]) songs[i][pair.Key] = pair.Value?.DeepClone();
             }
             token.ThrowIfCancellationRequested();
@@ -213,4 +271,30 @@ public sealed partial class MusicLibraryOwner
     internal async Task<JsonObject> AdoptSongAsync(JsonObject song, CancellationToken token) =>
         JsonNode.Parse((await AdoptPlatformResultAsync(LJ.Element(song), token, authoritative: false,
             shape: PlatformSongShape.Song).ConfigureAwait(false)).GetRawText())!.AsObject();
+
+    private static JsonObject MergeStoredSong(JsonObject? previous, JsonObject song)
+    {
+        if (previous is null) return song;
+        var projection = NativeMusicSong.Normalize(previous);
+        // Missing projected fields belong to the current observation, not to stored extensions.
+        static void KeepExtensions(JsonObject raw, JsonObject projected, JsonObject current)
+        {
+            foreach (var field in raw)
+                if (!projected.ContainsKey(field.Key) && !current.ContainsKey(field.Key))
+                    current[field.Key] = field.Value?.DeepClone();
+        }
+        foreach (var source in LJ.Array(song["sources"]).OfType<JsonObject>())
+        {
+            var old = (previous["sources"] as JsonArray)?.OfType<JsonObject>()
+                .SingleOrDefault(item => LJ.S(item["sourceKey"]) == LJ.S(source["sourceKey"]));
+            if (old is null) continue;
+            var projected = LJ.Array(projection["sources"]).OfType<JsonObject>()
+                .Single(item => LJ.S(item["sourceKey"]) == LJ.S(source["sourceKey"]));
+            if (old["musicInfo"] is JsonObject oldInfo && source["musicInfo"] is JsonObject info)
+                KeepExtensions(oldInfo, LJ.Object(projected["musicInfo"]), info);
+            KeepExtensions(old, projected, source);
+        }
+        KeepExtensions(previous, projection, song);
+        return song;
+    }
 }

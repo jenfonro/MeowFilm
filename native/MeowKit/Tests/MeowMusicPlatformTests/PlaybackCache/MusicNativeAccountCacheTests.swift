@@ -1,4 +1,5 @@
 import Foundation
+import MeowRuntime
 import XCTest
 import MeowAccounts
 import MeowMusicFeature
@@ -10,7 +11,7 @@ import MeowMusicTestSupport
 private actor AccountURLCacheProvider: MusicAccountProvider {
     var verifies = 0, capabilitiesCount = 0, resolves = 0
     var qualities = ["128k", "320k"]
-    var result: JSONValue
+    var result: RuntimeValue
     var resolveGate: MusicAccountTestGate?
     var revokeGate: MusicAccountTestGate?
     init(at now: Date) {
@@ -18,7 +19,7 @@ private actor AccountURLCacheProvider: MusicAccountProvider {
             "expiresAt": .number(now.addingTimeInterval(3600).timeIntervalSince1970 * 1000)])
     }
     func counts() -> [Int] { [verifies, capabilitiesCount, resolves] }
-    func set(_ value: JSONValue) { result = value }
+    func set(_ value: RuntimeValue) { result = value }
     func allow(_ values: [String]) { qualities = values }
     func holdResolve(_ gate: MusicAccountTestGate) { resolveGate = gate }
     func holdRevoke(_ gate: MusicAccountTestGate) { revokeGate = gate }
@@ -31,7 +32,7 @@ private actor AccountURLCacheProvider: MusicAccountProvider {
     }
     func refresh(_ credential: AccountCredential) throws -> MusicAccountVerified { try verify(credential) }
     func capabilities(mid: String) -> [String] { capabilitiesCount += 1; return qualities }
-    func resolve(mid: String, quality: String) async -> JSONValue {
+    func resolve(mid: String, quality: String) async -> RuntimeValue {
         resolves += 1
         let value = result
         if let gate = resolveGate { resolveGate = nil; await gate.wait() }
@@ -42,8 +43,8 @@ private actor AccountURLCacheProvider: MusicAccountProvider {
     func pollQR(id: UUID) throws -> MusicAccountLoginResult { throw MusicServiceError.unsupported }
     func cancelQR(_ id: UUID) {}
     func recommendations(kind: String, page: Int) throws -> MusicAccountRecommendation { throw MusicServiceError.unsupported }
-    func collectionRows() throws -> [JSONValue] { throw MusicServiceError.unsupported }
-    func tracks(collectionID: String) throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func collectionRows() throws -> [RuntimeValue] { throw MusicServiceError.unsupported }
+    func tracks(collectionID: String) throws -> [RuntimeValue] { throw MusicServiceError.unsupported }
 }
 
 private struct AccountURLCacheFixture {
@@ -72,7 +73,7 @@ private struct AccountURLCacheFixture {
     private func resolve(_ service: NativeMusicAccountService, _ selected: MusicPlaybackSelection) async throws -> MusicNativeAudio {
         try await service.nativeResolve(platform: .netease, nativeID: "101", selection: selected)
     }
-    private func candidate(_ name: String, expires: Date? = nil) -> JSONValue {
+    private func candidate(_ name: String, expires: Date? = nil) -> RuntimeValue {
         .object(["url": .string("https://media.example.invalid/\(name).mp3"),
             "expiresAt": expires.map { .number($0.timeIntervalSince1970 * 1000) } ?? .null])
     }
@@ -258,7 +259,7 @@ private struct AccountURLCacheFixture {
         _ = await f.service.close()
     }
 
-    func testCorruptCurrentCacheIsAMissAndCannotOverwriteTheDamagedDocument() throws {
+    func testCorruptCurrentCacheIsAMissAndFreshValuePersistsAcrossReopen() throws {
         let (directory, store) = try disk()
         defer { try? FileManager.default.removeItem(at: directory) }
         let corrupt = Data("synthetic-invalid-cache".utf8)
@@ -270,7 +271,9 @@ private struct AccountURLCacheFixture {
         XCTAssertNil(cache.value(for: key, at: now))
         cache.put(candidate("fresh"), for: key, at: now)
         XCTAssertNotNil(cache.value(for: key, at: now))
-        XCTAssertEqual(try store.read(key: MusicNativeAccountURLCache.key), corrupt)
+        XCTAssertNotEqual(try store.read(key: MusicNativeAccountURLCache.key), corrupt)
+        var reopened = MusicNativeAccountURLCache(store: store)
+        XCTAssertEqual(reopened.value(for: key, at: now), cache.value(for: key, at: now))
         for address in ["https://user:password@media.example.invalid/a.mp3",
                         "https://media.example.invalid/a.mp3?MUSIC_U=synthetic-secret",
                         "file:///synthetic.mp3"] {
@@ -278,6 +281,30 @@ private struct AccountURLCacheFixture {
                 "url": .string(address), "expiresAt": .null
             ])))
         }
+    }
+
+    func testMalformedCacheEntryDoesNotDiscardHealthySibling() throws {
+        let (directory, store) = try disk()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let key = MusicNativeAccountURLCache.Key(scope: String(repeating: "a", count: 64),
+            platform: "wy", nativeID: "101", quality: "128k")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        var cache = MusicNativeAccountURLCache(store: store)
+        cache.put(candidate("healthy"), for: key, at: now)
+        var root = try XCTUnwrap(JSONObject.decodeValue(XCTUnwrap(store.read(key: MusicNativeAccountURLCache.key))) as? JSONObject.Fields)
+        var rows = try XCTUnwrap(root["entries"] as? [Any])
+        var healthy = try XCTUnwrap(rows[0] as? JSONObject.Fields)
+        var value = try XCTUnwrap(healthy["value"] as? JSONObject.Fields)
+        value["extra"] = try JSONObject.decodeValue(Data("1e999".utf8))
+        healthy["value"] = value; rows[0] = healthy
+        rows.insert(["key": "unreadable", "value": NSNull()], at: 0)
+        root["entries"] = rows
+        try store.write(JSONObject.encode(root), key: MusicNativeAccountURLCache.key)
+        var reopened = MusicNativeAccountURLCache(store: store)
+        XCTAssertEqual(reopened.value(for: key, at: now), cache.value(for: key, at: now))
+        reopened.put(candidate("newer"), for: key, at: now)
+        var cold = MusicNativeAccountURLCache(store: store)
+        XCTAssertEqual(cold.value(for: key, at: now), reopened.value(for: key, at: now))
     }
 
     func testConcurrentGuestCacheReadsDoNotTurnContentionIntoAccessRevocation() async throws {
@@ -346,7 +373,7 @@ private struct AccountURLCacheFixture {
         guard case .object(var value) = candidate("metadata") else { return XCTFail("Expected candidate") }
         value["actualQuality"] = .string("128k"); value["licenseExpiresAt"] = .number(1_800_086_400_000)
         value["full"] = .bool(true)
-        let original = JSONValue.object(value)
+        let original = RuntimeValue.object(value)
         cache.put(original, for: key, at: now)
         var cold = MusicNativeAccountURLCache(store: store)
         XCTAssertEqual(cold.value(for: key, at: now.addingTimeInterval(600)), original)

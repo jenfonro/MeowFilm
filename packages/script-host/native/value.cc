@@ -98,7 +98,6 @@ std::u16string QString(JSContext* ctx, JSValueConst value) {
   try { result.assign(reinterpret_cast<const char16_t*>(data), length); }
   catch (...) { JS_FreeCStringUTF16(ctx, data); throw; }
   JS_FreeCStringUTF16(ctx, data);
-  Check(ValidUnicode(result));
   return result;
 }
 std::string ExceptionCode(JSContext* ctx) {
@@ -155,7 +154,7 @@ static std::u16string NodeString(napi_env env, napi_value v) {
   NCheck(napi_get_value_string_utf16(env, v, nullptr, 0, &len));
   std::u16string s(len + 1, 0);
   NCheck(napi_get_value_string_utf16(env, v, s.data(), s.size(), &len));
-  s.resize(len); Check(ValidUnicode(s)); return s;
+  s.resize(len); return s;
 }
 static Value CopyBytes(const void* data, size_t size) {
   Check(data || !size);
@@ -170,7 +169,7 @@ Value FromNode(napi_env env, napi_value v, unsigned depth) {
   if (type == napi_boolean) { bool b; NCheck(napi_get_value_bool(env, v, &b)); return Value::Bool(b); }
   if (type == napi_number) {
     double n; NCheck(napi_get_value_double(env, v, &n));
-    Check(std::isfinite(n) && std::abs(n) <= kSafeInteger); return Value::Num(n);
+    Check(std::isfinite(n)); return Value::Num(n);
   }
   if (type == napi_string) { Value r; r.kind = Value::String; r.string = NodeString(env, v); return r; }
   Check(type == napi_object);
@@ -274,7 +273,7 @@ Value FromQuick(JSContext* ctx, JSValueConst v, unsigned depth) {
   if (JS_IsBool(v)) return Value::Bool(JS_ToBool(ctx, v));
   if (JS_IsNumber(v)) {
     double n; Check(JS_ToFloat64(ctx, &n, v) == 0);
-    Check(std::isfinite(n) && std::abs(n) <= kSafeInteger); return Value::Num(n);
+    Check(std::isfinite(n)); return Value::Num(n);
   }
   if (JS_IsString(v)) { Value out; out.kind = Value::String; out.string = QString(ctx, v); return out; }
   Check(JS_IsObject(v) && !JS_IsFunction(ctx, v) && !JS_IsPromise(v));
@@ -372,8 +371,9 @@ JSValue ToQuick(JSContext* ctx, const Value& v) {
     case Value::Object: {
       QValue out(ctx, QCheck(ctx, JS_NewObjectProto(ctx, JS_NULL)));
       for (const auto& entry : v.object) {
-        auto key = Utf8(entry.first);
-        JSAtom atom = JS_NewAtomLen(ctx, key.data(), key.size());
+        QValue key(ctx, QCheck(ctx, JS_NewStringUTF16(ctx,
+          reinterpret_cast<const uint16_t*>(entry.first.data()), entry.first.size())));
+        JSAtom atom = JS_ValueToAtom(ctx, key.value);
         Check(atom != JS_ATOM_NULL, "RESOURCE_LIMIT");
         int status;
         try { status = JS_DefinePropertyValue(ctx, out.value, atom, ToQuick(ctx, entry.second), JS_PROP_C_W_E); }

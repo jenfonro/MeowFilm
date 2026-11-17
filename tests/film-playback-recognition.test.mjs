@@ -1,3 +1,4 @@
+import { stringifyJSONValue, rawJSON } from '@meowfilm/runtime-bridge/json';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { buildEpisodeMap, matchEpisodeMaps, resolveEpisode } from '../packages/film-playback/src/episodes.js';
@@ -5,7 +6,7 @@ import { contentResults, matchesResult, mediaVariants, normalizeDetail, recogniz
   recognizeVariantCandidates } from '../packages/film-playback/src/recognition.js';
 import { compareCandidates, isCandidateAllowed } from '../packages/film-playback/src/policy.js';
 import { createRecognitionRules, providerFamily } from '../packages/film-playback/src/rules.js';
-import { checkTarget, resultDetailId } from '../packages/film-playback/src/identity.js';
+import { checkTarget, clone, identity, resultDetailId } from '../packages/film-playback/src/identity.js';
 import { encodePanResource } from '@meowfilm/script-host/cat-output';
 
 const source = { key: 'cat:install:site', engine: 'cat', installationId: 'install', siteId: 'site',
@@ -672,4 +673,22 @@ test('different season partitions require unambiguous global evidence to map epi
   const ambiguous = { seasons: [{ season_number: 1, episode_count: 2,
     episodes: [{ episode_number: 1 }, { episode_number: 1 }] }] };
   assert.equal(matchEpisodeMaps(own, ambiguous)[0].match, null);
+});
+
+test('identity cloning retains precise JSON numbers distinct from ordinary rawJSON-named properties', () => {
+  const exact = { material: rawJSON('9007199254740993') };
+  const copy = clone(exact);
+  assert.equal(stringifyJSONValue(copy), '{"material":9007199254740993}');
+  assert.equal(identity(copy), identity(exact));
+  assert.notEqual(identity(copy), identity({ material: { rawJSON: '9007199254740993' } }));
+  assert.notEqual(identity(copy), identity({ material: 9007199254740992 }));
+  assert.throws(() => clone({ material: undefined }), { code: 'INVALID_REQUEST' });
+});
+
+test('recognition sends only present optional fields but still rejects explicit non-JSON data at the native boundary', async () => {
+  const value = detail([{ id: 0 }]);
+  const rows = await recognize(value, { target: { id: 'source:raw', kind: 'source', title: '原始' } });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].playId, 0);
+  await assert.rejects(recognize(detail([{ id: 0, fps: Infinity }])), { code: 'INVALID_REQUEST' });
 });

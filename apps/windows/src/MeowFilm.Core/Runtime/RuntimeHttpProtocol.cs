@@ -147,33 +147,39 @@ public static partial class RuntimeHttpProtocol
     {
         try
         {
-            BridgeCodec.ValidateJSONValue(description);
-            if (description.ValueKind != JsonValueKind.Object || description.EnumerateObject().Count() != 3
-                || description.GetProperty("protocol").GetString() != Name
-                || description.GetProperty("product").GetString() != product
-                || expectedModules.Count != Modules.Count) throw new BridgeException("INVALID_RESPONSE");
-            var declaredModules = description.GetProperty("modules");
-            if (declaredModules.GetArrayLength() != expectedModules.Count) throw new BridgeException("INVALID_RESPONSE");
+            if (BridgeCodec.RequiredProperty(description, "protocol").GetString() != Name
+                || BridgeCodec.RequiredProperty(description, "product").GetString() != product)
+                throw new BridgeException("INVALID_RESPONSE");
+            var declaredModules = BridgeCodec.RequiredProperty(description, "modules");
+            var identities = new HashSet<string>(StringComparer.Ordinal);
             var methods = new HashSet<string>(StringComparer.Ordinal);
-            for (var index = 0; index < expectedModules.Count; index++)
+            foreach (var module in declaredModules.EnumerateArray())
             {
-                var module = declaredModules[index];
-                var expected = expectedModules[index];
-                var id = module.GetProperty("id").GetString()!;
-                if (module.EnumerateObject().Count() != 4 || id != expected.Id
-                    || !Modules.TryGetValue(id, out var contract) || expected.Version != contract.Version
-                    || module.GetProperty("version").GetString() != expected.Version
-                    || module.GetProperty("contract").GetString() != contract.Name)
+                if (module.ValueKind != JsonValueKind.Object) continue;
+                var expected = expectedModules.SingleOrDefault(item => module.EnumerateObject().Any(field =>
+                    field.NameEquals("id") && field.Value.ValueKind == JsonValueKind.String && field.Value.ValueEquals(item.Id)));
+                if (expected is null) continue;
+                var id = BridgeCodec.RequiredProperty(module, "id").GetString()!;
+                if (!identities.Add(id) || !Modules.TryGetValue(id, out var contract) || expected.Version != contract.Version
+                    || BridgeCodec.RequiredProperty(module, "version").GetString() != expected.Version
+                    || BridgeCodec.RequiredProperty(module, "contract").GetString() != contract.Name)
                     throw new BridgeException("INVALID_RESPONSE");
-                var declared = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var item in module.GetProperty("methods").EnumerateArray())
+                if (!module.TryGetProperty("methods", out var declared) || declared.ValueKind != JsonValueKind.Array)
                 {
-                    var method = item.GetString()!;
-                    if (!declared.Add(method) || !methods.Add(method)) throw new BridgeException("INVALID_RESPONSE");
+                    if (expected.RequiredMethods.Count != 0) throw new BridgeException("INVALID_RESPONSE");
+                    continue;
                 }
-                if (!declared.SetEquals(contract.Operations.Select(operation => contract.Prefix + operation)))
-                    throw new BridgeException("INVALID_RESPONSE");
+                if (expected.RequiredMethods.Count != 0) declared = BridgeCodec.RequiredProperty(module, "methods");
+                foreach (var operation in contract.Operations)
+                {
+                    string method = contract.Prefix + operation;
+                    if (declared.EnumerateArray().Any(item => item.ValueKind == JsonValueKind.String && item.ValueEquals(method)))
+                        methods.Add(method);
+                }
             }
+            if (expectedModules.Any(module => !identities.Contains(module.Id) ||
+                module.RequiredMethods.Any(method => !methods.Contains(method))))
+                throw new BridgeException("INVALID_RESPONSE");
             return methods;
         }
         catch { throw new BridgeException("INVALID_RESPONSE"); }
@@ -184,18 +190,17 @@ public static partial class RuntimeHttpProtocol
         try
         {
             var value = BridgeCodec.ParseJSON(bytes);
-            if (value.ValueKind != JsonValueKind.Object || value.EnumerateObject().Count() != 3)
-                throw new BridgeException("INVALID_RESPONSE");
-            var ok = value.GetProperty("ok").GetBoolean();
-            var actualContract = value.GetProperty("contract").GetString();
+            var ok = BridgeCodec.RequiredProperty(value, "ok").GetBoolean();
+            var actualContract = BridgeCodec.RequiredProperty(value, "contract").GetString();
             if (actualContract == Name && contract != Name)
             {
                 if (ok) throw new BridgeException("INVALID_RESPONSE");
                 codes = PublicCodes;
             }
             else if (actualContract != contract) throw new BridgeException("INVALID_RESPONSE");
-            if (ok) BridgeCodec.ValidateJSONValue(value.GetProperty("value"));
-            else if (!codes.Contains(value.GetProperty("code").GetString()!)) throw new BridgeException("INVALID_RESPONSE");
+            if (ok) BridgeCodec.ValidateJSONValue(BridgeCodec.RequiredProperty(value, "value"));
+            else if (!codes.Contains(BridgeCodec.RequiredProperty(value, "code").GetString()!))
+                throw new BridgeException("INVALID_RESPONSE");
             return value;
         }
         catch { throw new BridgeException("INVALID_RESPONSE"); }

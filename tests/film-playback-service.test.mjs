@@ -1,3 +1,4 @@
+import { stringifyJSONValue, rawJSON } from '@meowfilm/runtime-bridge/json';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
@@ -8,6 +9,7 @@ import { after } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createFilmRulesService } from '../packages/film-playback/src/rules-service.js';
 import { createPlaybackService } from '../packages/film-playback/src/service.js';
+import { createPlaybackLibrary } from '../packages/film-playback/src/library.js';
 import { createPlaybackData } from '../packages/film-playback/src/data.js';
 import { createPlaybackCache } from '../packages/film-playback/src/cache.js';
 import { createFilmCatalog } from '../packages/film-playback/src/catalog.js';
@@ -73,7 +75,7 @@ function fixture(overrides = {}) {
   const metadataValues = new Map();
   const metadataKey = target => JSON.stringify([target.metadataProvider, target.kind, target.metadataId]);
   let sequence = 0, storageError;
-  const library = {
+  const library = overrides.library ?? {
     read: () => structuredClone(document),
     update(mutator) {
       if (storageError) throw error(storageError);
@@ -92,9 +94,10 @@ function fixture(overrides = {}) {
         cache: { status: 'fresh', components: { detail: { status: 'ready', fetchedAt: clock } } } };
     },
     async metadataSources(target) {
+      const value = metadataValues.get(metadataKey(target));
       return [{ provider: target.metadataProvider, metadataId: target.metadataId,
         kind: target.kind, title: target.title,
-        metadata: structuredClone(metadataValues.get(metadataKey(target))) }];
+        ...(value === undefined ? {} : { metadata: structuredClone(value) }) }];
     },
     async seasonMetadata(target, season) { calls.push(['season', season]); return structuredClone(metadata.seasons.find(row => row.season_number === season)); },
     async seasonMetadataEntry(target, season, options) {
@@ -6251,3 +6254,104 @@ for (const secondCount of [7, null]) {
     assert.equal(f.calls.some(row => ['resolve', 'prepare'].includes(row[0])), false);
   });
 }
+
+test('real library edits and playback writes retain corrupt siblings and exact unedited extension materials after restart', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'film-library-service-'));
+  const library = createPlaybackLibrary({ dataRoot: root });
+  const f = fixture({ library });
+  t.after(async () => { await f.service.close(); library.close(); rmSync(root, { recursive: true }); });
+  library.update(document => {
+    document.extension = rawJSON('1e400');
+    document.preferences.extension = rawJSON('9007199254740993');
+    document.manual.push(null, { id: 'bad-sibling', failureCount: 'broken' },
+      { id: 'edited', targetId: 'another-target', sourceKey: 'a', detailId: 'old', failureCount: 0,
+        extension: rawJSON('9007199254740993') });
+    document.history.push(null, { targetId: 'bad-sibling', position: 'broken' });
+    document.blocks.push(null, { targetId: 'unrelated', extension: rawJSON('1e400') });
+  });
+  await f.service.updateManual({ action: 'save', item: { id: 'edited', targetId: 'another-target', sourceKey: 'a', detailId: 'new' } });
+  await f.service.setSettings({ ...defaultPreferences(), iosAutoPrepare: false });
+  const { sessionId } = await f.open({ platform: 'windows' });
+  const playing = await f.current(sessionId);
+  library.update(document => { document.history[0].extension = rawJSON('0.123456789012345678901'); });
+  await f.command(sessionId, 'stop');
+  assert.equal(f.resources.size, 0);
+  const restarted = createPlaybackLibrary({ dataRoot: root });
+  t.after(() => restarted.close());
+  const stored = restarted.read();
+  assert.equal(stringifyJSONValue(stored.extension), '1e400');
+  assert.equal(stringifyJSONValue(stored.preferences.extension), '9007199254740993');
+  assert.equal(stored.preferences.iosAutoPrepare, false);
+  assert.deepEqual(stored.manual.slice(0, 2), [null, { id: 'bad-sibling', failureCount: 'broken' }]);
+  assert.equal(stored.manual[2].detailId, 'new');
+  assert.equal(stringifyJSONValue(stored.manual[2].extension), '9007199254740993');
+  assert.deepEqual(stored.history.slice(1), [null, { targetId: 'bad-sibling', position: 'broken' }]);
+  assert.equal(stored.history[0].playbackTarget.source.candidateId, playing.candidate.id);
+  assert.equal(stringifyJSONValue(stored.history[0].extension), '0.123456789012345678901');
+  assert.equal(stored.blocks[0], null);
+});
+
+for (const item of [
+  { share: { url: 'file:///private/share' } },
+  { share: { url: 'https://name:secret@pan.quark.cn/s/test' } },
+  { share: { url: 'https://pan.quark.cn/s/test', password: false } },
+  { enabled: 'yes' }, { autoDisable: 1 }, { seasonHint: -1 }, { seasonHint: 0.5 },
+]) test(`manual save checks edited operational fields ${stringifyJSONValue(item)}`, async t => {
+  const f = fixture(); t.after(() => f.service.close());
+  await assert.rejects(f.service.updateManual({ action: 'save', item: { id: 'edited', targetId: movie.id,
+    provider: 'quark', share: { url: 'https://pan.quark.cn/s/test' }, ...item } }), { code: 'INVALID_REQUEST' });
+  assert.deepEqual(f.library.read().manual, []);
+  assert.equal(f.calls.length, 0);
+});
+
+test('a corrupt manual failure counter does not block a healthy match or get overwritten', async t => {
+  const f = fixture(); t.after(() => f.service.close());
+  f.library.update(document => { document.manual.push(
+    { id: 'bad', targetId: movie.id, sourceKey: 'a', detailId: 'must-not-fetch', failureCount: 'broken' },
+    { id: 'good', targetId: movie.id, sourceKey: 'a', detailId: 'good', failureCount: 0 }); });
+  const { sessionId } = await f.open({ platform: 'windows', sources: [source('a')] });
+  const attempt = await f.pending(sessionId);
+  assert.equal(attempt.candidate.source.detailId, 'good');
+  assert.deepEqual(f.calls.filter(row => row[0] === 'detail'), [['detail', 'a', 'good']]);
+  assert.equal(f.library.read().manual[0].failureCount, 'broken');
+});
+
+test('ambiguous manual identity cannot silently replace and discard either stored row', async t => {
+  const f = fixture(); t.after(() => f.service.close());
+  const item = { id: 'duplicate', targetId: movie.id, sourceKey: 'a', detailId: 0, failureCount: 0 };
+  f.library.update(document => { document.manual.push({ ...item, extension: 'first' }, { ...item, extension: 'second' }); });
+  const before = f.library.read();
+  await assert.rejects(f.service.updateManual({ action: 'save', item }), { code: 'CORRUPT_STORAGE' });
+  assert.deepEqual(f.library.read(), before);
+});
+
+test('manual save replaces known selection fields while retaining unedited record/share extensions', async t => {
+  const f = fixture(); t.after(() => f.service.close());
+  const share = { id: 'edited', targetId: movie.id, kind: 'share', provider: 'quark',
+    share: { url: 'https://pan.quark.cn/s/test', password: 'synthetic-only', extension: { keep: true } },
+    extension: { keep: true }, seasonHint: 2 };
+  await f.service.updateManual({ action: 'save', item: share });
+  await f.service.updateManual({ action: 'save', item: { id: share.id, targetId: movie.id,
+    provider: 'quark', share: { url: share.share.url } } });
+  assert.deepEqual(f.library.read().manual[0].share, { url: share.share.url, extension: { keep: true } });
+  assert.equal('seasonHint' in f.library.read().manual[0], false);
+  await f.service.updateManual({ action: 'save', item: { id: share.id, targetId: movie.id, sourceKey: 'a', detailId: 'actual' } });
+  const row = f.library.read().manual[0];
+  assert.equal('share' in row, false);
+  assert.equal('provider' in row, false);
+  assert.deepEqual(row.extension, { keep: true });
+  const { sessionId } = await f.open({ platform: 'windows', sources: [source('a')] });
+  assert.equal((await f.pending(sessionId)).candidate.source.detailId, 'actual');
+  assert.equal(f.calls.some(row => row[0] === 'expand'), false);
+});
+
+for (const position of [-1, 'broken']) test(`only a consumed history resume position is checked (${position})`, async t => {
+  const f = fixture(); t.after(() => f.service.close());
+  f.library.update(document => { document.history.push({ targetId: movie.id, position }); });
+  const { sessionId } = await f.open({ platform: 'windows', sources: [source('a')] });
+  await until(() => f.snapshot(sessionId).stage === 'error');
+  assert.equal(f.snapshot(sessionId).error, 'CORRUPT_STORAGE');
+  assert.equal(f.snapshot(sessionId).attempt, null);
+  assert.equal(f.calls.some(row => row[0] === 'prepare'), false);
+  assert.equal(f.library.read().history[0].position, position);
+});

@@ -58,8 +58,7 @@ for (const platform of ['ios', 'windows']) {
       export function reportIOSRuntimeStartFailure() { throw new Error('FIXTURE_START_FAILED'); }
     ` : `
       export async function startWindowsAppRuntime({ createRuntime }) {
-        const runtime = await createRuntime(globalThis.fixtureConfiguration);
-        globalThis.fixtureRuntime = await runtime.start();
+        globalThis.fixtureRuntime = await (await createRuntime(globalThis.fixtureConfiguration)).start();
       }
       export function reportWindowsRuntimeStartFailure() { throw new Error('FIXTURE_START_FAILED'); }
     `;
@@ -186,6 +185,10 @@ for (const platform of ['ios', 'windows']) {
           { ok: false, contract: 'tmdb.data.v1', code: 'PERMISSION_DENIED' });
         assert.deepEqual(await client.call('film.data.metadata', request), changed);
         assert.deepEqual(counts, { A: 1, B: 1, D: 1 }, 'a denied second-owner mutation does not invalidate valid film data');
+        const unchanged = await client.call('tmdb.data.settings.update', { unknown: true });
+        assert.deepEqual(unchanged, { ok: false, contract: 'tmdb.data.v1', code: 'PERMISSION_DENIED' });
+        assert.deepEqual(await client.call('film.data.metadata', request), changed);
+        assert.deepEqual(counts, { A: 1, B: 1, D: 1 }, 'unused fields do not invalidate valid film data');
         const release = await client.call('film.session.media.release', {});
         assert.equal(release.ok, false);
         assert.equal(release.contract, 'film.playback.v1');

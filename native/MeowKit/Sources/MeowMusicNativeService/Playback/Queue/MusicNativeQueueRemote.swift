@@ -135,7 +135,7 @@ extension NativeMusicService: MusicRemoteQueueServing {
                     for i in rows.indices {
                         if let value = references[i].recommendation { live[rows[i]["id"].string] = try MJ.parse(value) }
                     }
-                    if !changingFM { archive(old, into: &d) }
+                    if !changingFM { try archive(old, into: &d) }
                     d.queue["entries"] = .array((changingFM ? old["entries"].array : []) + rows); d.queue["currentId"] = rows[start.index]["id"]
                     for key in ["priority", "history", "failed"] { d.queue[key] = .array([]) }
                     d.queue["source"] = context; d.queue["source"]["title"] = .string(source.context.title)

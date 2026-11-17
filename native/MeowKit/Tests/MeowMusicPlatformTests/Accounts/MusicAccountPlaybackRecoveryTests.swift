@@ -1,8 +1,8 @@
 import Foundation
+import MeowRuntime
 import XCTest
 import MeowAccounts
 import MeowMusicFeature
-import MeowJSON
 @testable import MeowMusicPlatform
 
 // Only synthetic stores/providers. No URLSession, real accounts or playback.
@@ -49,8 +49,8 @@ private actor RecoveryAccountProvider: MusicAccountProvider, MusicAccountSession
     func recommendations(kind: String, page: Int) throws -> MusicAccountRecommendation {
         throw MusicServiceError.unsupported
     }
-    func collectionRows() throws -> [JSONValue] { throw MusicServiceError.unsupported }
-    func tracks(collectionID: String) throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func collectionRows() throws -> [RuntimeValue] { throw MusicServiceError.unsupported }
+    func tracks(collectionID: String) throws -> [RuntimeValue] { throw MusicServiceError.unsupported }
     func capabilities(mid: String) async throws -> [String] {
         calls.append("capabilities:\(mid):\(try nativeID(publishedCredential!))")
         let result = qualities, failure = capabilityError
@@ -58,7 +58,7 @@ private actor RecoveryAccountProvider: MusicAccountProvider, MusicAccountSession
         if let failure { throw failure }
         return result
     }
-    func resolve(mid: String, quality: String) async throws -> JSONValue {
+    func resolve(mid: String, quality: String) async throws -> RuntimeValue {
         calls.append("resolve:\(mid):\(quality):\(try nativeID(publishedCredential!))")
         if let gate = resolveGate { resolveGate = nil; await gate.wait() }
         return .object(["url": .string("https://media.example.invalid/recovered.mp3"),

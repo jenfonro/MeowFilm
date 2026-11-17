@@ -908,9 +908,9 @@ public static partial class MusicSearchTests
     private static async Task InvalidInput()
     {
         await using var f = new Fixture();
-        foreach (var data in new object[] { new { keyword = "", kind = "songs", platforms = Five },
-            new { keyword = "x", kind = "other", platforms = Five }, new { keyword = "x", kind = "songs", platforms = new[] { "evil" } },
-            new { keyword = "x", kind = "songs", platforms = Five, pages = 1, concurrency = 1, cacheMinutes = 60, unexpected = true },
+        foreach (var data in new object[] { new { keyword = "", kind = "songs", platforms = Five, pages = 1, concurrency = 1, cacheMinutes = 60 },
+            new { keyword = "x", kind = "other", platforms = Five, pages = 1, concurrency = 1, cacheMinutes = 60 },
+            new { keyword = "x", kind = "songs", platforms = new[] { "evil" }, pages = 1, concurrency = 1, cacheMinutes = 60 },
             new { keyword = "x", kind = "songs", platforms = Five, pages = 0, concurrency = 1, cacheMinutes = 60 },
             new { keyword = "x", kind = "songs", platforms = Five, pages = 2147483648L, concurrency = 1, cacheMinutes = 60 },
             new { keyword = "x", kind = "songs", platforms = Five, pages = 1, concurrency = 0, cacheMinutes = 60 },
@@ -919,6 +919,14 @@ public static partial class MusicSearchTests
             Code(await f.Search.ExecuteAsync("music.search.start", data), "INVALID_REQUEST");
         using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
         Code(await f.Start(["wy"], token: cancelled.Token), "CANCELLED"); Check(f.Catalog.Calls.IsEmpty);
+        var admitted = await f.Search.ExecuteAsync("music.search.start", new
+            { keyword = "x", kind = "songs", platforms = Five, pages = 1, concurrency = 1, cacheMinutes = 60, unexpected = true });
+        Check(admitted.GetProperty("ok").GetBoolean());
+        var completed = await f.Idle(S(admitted, "id"));
+        Check(completed.GetProperty("items").GetArrayLength() == Five.Length &&
+            f.Catalog.Calls.Select(call => call.Platform).Order(StringComparer.Ordinal).SequenceEqual(Five.Order(StringComparer.Ordinal)) &&
+            f.Catalog.Calls.All(call => call.Keyword == "x" && call.Kind == MusicSearchKind.Songs && call.Page == 1 && call.Pages == 1),
+            "unused admission fields preserve the exact requested platform work");
     }
 
     private sealed class Clock : TimeProvider

@@ -162,10 +162,18 @@ public static partial class MusicNativeCatalogTests
             f.Store.Bytes = JsonSerializer.SerializeToUtf8Bytes(document, LJ.Json);
             var original = f.Store.Bytes.ToArray(); int writes = f.Store.Writes;
             await using var reader = new MusicLibraryOwner(f.Store);
-            var result = await reader.ExecuteAsync("music.library.list");
-            if (defect == "none") Check(N(Ok(result), "total") == 2);
-            else Error(result, "CORRUPT_LIBRARY");
-            Check(f.Store.Writes == writes && f.Store.Bytes.SequenceEqual(original));
+            Check(N(Ok(await reader.ExecuteAsync("music.library.list")), "total") == 2);
+            if (defect == "locator")
+            {
+                try { await reader.ReadLibrarySyncAsync(); throw new InvalidOperationException("Expected CORRUPT_LIBRARY"); }
+                catch (MusicLibraryException error) { Check(error.Code == "CORRUPT_LIBRARY", error.Code); }
+            }
+            else
+            {
+                var restored = (await reader.ReadLibrarySyncAsync()).Library.GetProperty("networkPlaylists")[0];
+                Check(JsonNode.DeepEquals(JsonNode.Parse(restored.GetRawText()), wrapper["library"]!["networkPlaylists"]![0]));
+            }
+            Check(f.Store.Writes == writes && f.Store.Bytes.SequenceEqual(original) && f.Platform.Calls.Length == 0);
         }
     }
     private static async Task NetworkCancellation()

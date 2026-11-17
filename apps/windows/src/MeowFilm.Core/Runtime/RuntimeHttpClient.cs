@@ -189,15 +189,14 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
     {
         var result = await RequestAsync(HttpMethod.Post, "/v1/close", "{}"u8.ToArray(), false,
             RuntimeHttpProtocol.Name, RuntimeHttpProtocol.PublicCodes, cancellationToken).ConfigureAwait(false);
+        if (!result.GetProperty("ok").GetBoolean()) throw new BridgeException(result.GetProperty("code").GetString()!);
         try
         {
-            if (!result.GetProperty("ok").GetBoolean()) throw new BridgeException(result.GetProperty("code").GetString()!);
             var value = result.GetProperty("value");
-            if (value.ValueKind != JsonValueKind.Object || value.EnumerateObject().Count() != 2
-                || !value.GetProperty("closed").GetBoolean() || !value.GetProperty("cleanupComplete").GetBoolean())
+            if (!BridgeCodec.RequiredProperty(value, "closed").GetBoolean()
+                || !BridgeCodec.RequiredProperty(value, "cleanupComplete").GetBoolean())
                 throw new BridgeException("INVALID_RESPONSE");
         }
-        catch (BridgeException) { throw; }
         catch { throw new BridgeException("INVALID_RESPONSE"); }
     }
 

@@ -21,7 +21,7 @@ public static class MusicHomeSnapshotTests
         yield return new("Music home display cache keeps empty results and has no arbitrary page cap", EmptyAndMany);
         yield return new("Music home cache write does not wait for initial read or persistent receipt", SlowDisk);
         yield return new("Music home cache storage failures cannot negate successful pages", StorageFailures);
-        yield return new("Music home cache refuses nested credentials without replacing safe content", Sensitive);
+        yield return new("Music home cache projects display fields and excludes nested credentials", Sensitive);
         yield return new("Music home cancelled saves and reads keep the accepted snapshot", Cancellation);
         yield return new("Music home cancelled cold reads preserve other readers and owner drain", CancelledRead);
         yield return new("Music home cache enforces the document byte boundary without replacing accepted content", SizeBoundary);
@@ -308,23 +308,24 @@ public static class MusicHomeSnapshotTests
             var owner = new MusicHomeSnapshotStore(store);
             await owner.SaveAsync(Snapshot("wy", Page("wy", "safe")));
             await store.DrainAsync();
-            byte[] safe = backing.Data[MusicHomeSnapshotStore.Namespace].ToArray();
-            var page = Page("wy", "unsafe");
+            var page = Page("wy", "projected");
             page["sections"]![0]!["items"]![0]!["action"]![field] = "synthetic";
             // Open action JSON remains valid for display, but cannot carry credentials or execution authority into persistence.
             Check(MusicCatalogDto.Read(JsonSerializer.SerializeToElement(page), "wy", "home", "")
                 .Single().Items.Single().CanOpen);
             await owner.SaveAsync(Snapshot("wy", page));
-            Check(PageId((await owner.ReadAsync(_ => null))!.Pages.Single()) == "safe");
+            Check(PageId((await owner.ReadAsync(_ => null))!.Pages.Single()) == "projected");
             await store.DrainAsync();
-            Check(backing.Data[MusicHomeSnapshotStore.Namespace].SequenceEqual(safe));
+            Check(!Encoding.UTF8.GetString(backing.Data[MusicHomeSnapshotStore.Namespace]).Contains("\"" + field + "\"", StringComparison.Ordinal));
 
             page.Remove("ok");
             backing.Data[MusicHomeSnapshotStore.Namespace] =
                 JsonSerializer.SerializeToUtf8Bytes(new { platform = "wy", pages = new[] { page } });
             await using var maliciousCache = new CacheDocumentStore(backing);
             var restoredOwner = new MusicHomeSnapshotStore(maliciousCache);
-            Check(await restoredOwner.ReadAsync(_ => null) is null);
+            var projected = (await restoredOwner.ReadAsync(_ => null))!;
+            Check(PageId(projected.Pages.Single()) == "projected" &&
+                !projected.Pages.Single().GetRawText().Contains("\"" + field + "\"", StringComparison.Ordinal));
             await restoredOwner.SaveAsync(Snapshot("wy", Page("wy", "repaired")));
             Check(PageId((await restoredOwner.ReadAsync(_ => null))!.Pages.Single()) == "repaired");
             await maliciousCache.DrainAsync();

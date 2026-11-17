@@ -16,6 +16,8 @@ public static class NovelConfigurationTests
         yield return new("novel configuration: slow application cannot block saving and cannot publish an older snapshot", Latest);
         yield return new("novel configuration: a fresh runtime epoch receives the latest native snapshot before invocation", Recovery);
         yield return new("novel configuration: a new draft persists offline without replacing an existing source", Draft);
+        yield return new("novel configuration: edits keep raw siblings and precise extensions without decoding unrelated definitions", RawInputs);
+        yield return new("novel configuration: cold search applies before selecting actions and cancellation drains preparation", SearchPreparation);
         yield return new("novel configuration: malformed current documents fail without publishing or overwriting data", Format);
     }
     private static void Check(bool value, string message = "Native configuration assertion failed")
@@ -140,6 +142,88 @@ public static class NovelConfigurationTests
         }
         finally { await service.PrepareShutdownAsync(); }
     }
+    private static async Task RawInputs()
+    {
+        var runtime = new Probe { Offline = true }; var store = new NovelSourceMemoryStore();
+        var configuration = new NovelSourceConfiguration(store);
+        await configuration.LoadAsync(default);
+        string definition = Definition.Insert(1, "\"future\":9007199254740993,\"future\":1e400,\"unused\":\"\\ud800\",");
+        await configuration.ImportAsync(definition, null, null, default);
+        string raw = System.Text.Encoding.UTF8.GetString(store.Bytes!);
+        raw = raw.Insert(1, "\"future\":9007199254740993,\"future\":1e400,");
+        int at = raw.IndexOf("\"sources\":[{", StringComparison.Ordinal) + "\"sources\":[{".Length;
+        raw = raw.Insert(at, "\"future\":1e400,\"future\":9007199254740993,");
+        using var input = JsonDocument.Parse(raw);
+        var row = input.RootElement.GetProperty("sources")[0];
+        string unused = """{"installationId":"unread","revision":1,"name":"unused","sourceUrl":"https://unread.invalid","group":"","order":1,"enabled":false,"enabledExplore":false,"protocol":"legado","definition":"{","future":1e400}""";
+        string broken = """{"installationId":"broken","revision":"unusable","future":9007199254740993}""";
+        raw = raw.Replace(row.GetRawText(), row.GetRawText() + "," + unused + "," + broken, StringComparison.Ordinal);
+        store.Bytes = System.Text.Encoding.UTF8.GetBytes(raw);
+        var service = new NovelSourceService(runtime, store);
+        try
+        {
+            await service.RefreshAsync();
+            Check(service.Sources.Count == 2, "unexecuted malformed definition does not reject the healthy list");
+            var selected = service.Sources.Single(source => source.SourceUrl == "https://books.invalid");
+            await service.UpdateAsync(selected, new { name = "已修改" });
+            using var saved = JsonDocument.Parse(store.Bytes!);
+            var result = saved.RootElement;
+            Check(result.EnumerateObject().Count(item => item.NameEquals("future")) == 2 &&
+                result.GetProperty("sources")[0].EnumerateObject().Count(item => item.NameEquals("future")) == 2 &&
+                result.GetProperty("sources")[1].GetRawText() == unused && result.GetProperty("sources")[2].GetRawText() == broken,
+                "unrelated source records and duplicate precise extensions survive an ordinary metadata edit");
+            Check(service.Sources.Single(source => source.InstallationId == selected.InstallationId).Revision == 2,
+                "the selected source still advances its revocation revision");
+            using var savedDefinition = JsonDocument.Parse(result.GetProperty("sources")[0].GetProperty("definition").GetString()!);
+            Check(savedDefinition.RootElement.EnumerateObject().Count(item => item.NameEquals("future")) == 2 &&
+                savedDefinition.RootElement.GetProperty("future").GetRawText() == "1e400" &&
+                savedDefinition.RootElement.GetProperty("unused").GetRawText() == "\"\\ud800\"",
+                "import and metadata editing preserve unconsumed raw definition members");
+        }
+        finally { await service.PrepareShutdownAsync(); }
+    }
+
+    private static async Task SearchPreparation()
+    {
+        foreach (bool shutdown in new[] { false, true })
+        {
+            var store = new NovelSourceMemoryStore();
+            await new NovelSourceConfiguration(store).ImportAsync(Definition, null, null, default);
+            var runtime = new Probe { Hold = new(TaskCreationOptions.RunContinuationsAsynchronously), DrainApply = true };
+            var service = new NovelSourceService(runtime, store);
+            await using var rules = new NovelRuleProgram(runtime);
+            var search = new NovelSearch(service, rules);
+            service.Changed += (_, _) => search.SourcesChanged();
+            try
+            {
+                var pending = search.StartAsync("旧词");
+                await runtime.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                Check(search.Loading && search.States.Count == 0 && service.Sources.Single().Actions.Length == 0);
+                Task drain = Task.CompletedTask;
+                if (shutdown) drain = search.PrepareShutdownAsync();
+                else search.Cancel();
+                Check(runtime.ApplicationToken.IsCancellationRequested && !pending.IsCompleted &&
+                    (!shutdown || !drain.IsCompleted), "preparation cannot outlive cancellation or shutdown admission");
+                runtime.Hold.SetResult();
+                try { await pending; throw new InvalidOperationException("Cancelled preparation published"); }
+                catch (OperationCanceledException) { }
+                await drain;
+                Check(search.States.Count == 0 && !runtime.Calls.Contains("source.runtime.library.invoke"));
+                if (!shutdown)
+                {
+                    await search.StartAsync("新词");
+                    Check(search.Query == "新词" && search.States.Single().Status == "无结果" &&
+                        runtime.Calls.IndexOf("source.runtime.library.apply") < runtime.Calls.IndexOf("source.runtime.library.invoke"));
+                }
+            }
+            finally
+            {
+                runtime.Hold.TrySetResult();
+                await search.PrepareShutdownAsync(); await service.PrepareShutdownAsync();
+            }
+        }
+    }
+
     private static async Task Format()
     {
         foreach (string text in new[] { "{", """{"version":2,"revision":1,"sources":[]}""",
@@ -165,6 +249,8 @@ public static class NovelConfigurationTests
     private sealed class Probe : IRuntimeClient
     {
         internal bool Offline;
+        internal bool DrainApply;
+        internal CancellationToken ApplicationToken;
         internal TaskCompletionSource? Hold;
         internal readonly TaskCompletionSource Started = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly List<string> Calls = [];
@@ -180,10 +266,15 @@ public static class NovelConfigurationTests
                     source.EnumerateObject().Select(field => field.Name).Order().SequenceEqual(new[]
                     { "definition", "enabled", "enabledExplore", "group", "installationId", "name", "order", "protocol", "revision", "sourceUrl" })),
                     "The native snapshot must use the exact runtime wire field names.");
-                Started.TrySetResult(); if (Hold is { } hold) await hold.Task.WaitAsync(token);
+                ApplicationToken = token; Started.TrySetResult();
+                if (Hold is { } hold)
+                {
+                    if (DrainApply) await hold.Task;
+                    else await hold.Task.WaitAsync(token);
+                }
                 var sources = NovelJson.Decode<NovelSourceDefinition[]>(input.GetProperty("sources"));
                 var snapshot = new NovelSourceConfigurationSnapshot(1, input.GetProperty("revision").GetInt64(), sources);
-                Applied.Add(snapshot); result = new { revision = snapshot.Revision, sources = sources.Select(item => item.Source()).ToArray() };
+                Applied.Add(snapshot); result = new { revision = snapshot.Revision, sources = sources.Select(item => item.SourceFromDefinition()).ToArray() };
             }
             else result = method == "source.runtime.web.pending" ? new { requests = Array.Empty<object>() } : (object)new { books = Array.Empty<object>() };
             return NovelJson.Value(new { ok = true, contract = "source.runtime.v2", value = result });

@@ -9,7 +9,8 @@ public sealed partial class PanAccounts
     {
         internal readonly PanAccountRow Row = row;
         internal readonly bool Qr = qr;
-        internal readonly long Epoch = epoch, Generation = row.Generation, Revision = row.Revision;
+        internal readonly long Epoch = epoch, Generation = row.Generation;
+        internal readonly long? Revision = row.Revision;
         internal readonly Task Before = before;
         internal readonly CancellationTokenSource Cancellation = new();
         internal Task Start = Task.CompletedTask, Poll = Task.CompletedTask, Save = Task.CompletedTask;
@@ -137,7 +138,7 @@ public sealed partial class PanAccounts
                         if (!Current(session)) return;
                         session.Row.Publish(account);
                         ValidateOnlineAccount(session.Row.Provider, reported, account);
-                        if (account.Revision <= session.Revision)
+                        if (account.Revision is null || session.Revision is null || account.Revision <= session.Revision)
                             throw new BridgeException("INVALID_RESPONSE");
                         session.Confirmed = true;
                         Notify("网盘登录成功");
@@ -188,7 +189,8 @@ public sealed partial class PanAccounts
                 if (!current() || !ReferenceEquals(login, session)) return;
                 var account = await settings.SaveAsync(session.Row.Provider, credentials, request.Token);
                 credentials.Clear();
-                if (account.Revision <= session.Revision) throw new BridgeException("INVALID_RESPONSE");
+                if (account.Revision is null || session.Revision is null || account.Revision <= session.Revision)
+                    throw new BridgeException("INVALID_RESPONSE");
                 if (!current() || !ReferenceEquals(login, session)) return;
                 session.Row.Publish(account);
                 Notify("网盘凭据已保存");

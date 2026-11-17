@@ -49,6 +49,104 @@ final class FilmCatNativeSettingsTests: XCTestCase {
         await reopened.close()
     }
 
+    func testSourceEditKeepsExactExtensionsAndUnusableSiblingWithoutReadingOtherSettings() async throws {
+        let (owner, document, _, base, _) = try fixture()
+        defer { try? FileManager.default.removeItem(at: base) }
+        _ = try await owner.importNetwork(name: "Healthy", sourceURL: "https://example.invalid/a.js", installationId: "a")
+        let opaque = try RuntimeJSON.decode(Data(#"{"n":1234567890123456789012345,"é":1,"e\u0301":2}"#.utf8))
+        let broken: RuntimeValue = .object(["installationId": .string("bad"), "inputRevision": opaque])
+        _ = try document.update { current in
+            var root = try XCTUnwrap(current?.filmObject)
+            var row = try XCTUnwrap(root["scripts"]?.catArray?.first?.filmObject)
+            row["extra"] = opaque; row["localPath"] = opaque; row["localHash"] = opaque
+            root["scripts"] = .array([.object(row), broken])
+            root["port"] = opaque; root["providers"] = opaque; root["mappings"] = opaque
+            root["extra"] = opaque
+            return .object(root)
+        }
+        _ = try await owner.editCat("a", name: "Renamed")
+        let saved = try XCTUnwrap(try document.read())
+        XCTAssertEqual(saved.catField("extra"), opaque)
+        XCTAssertEqual(saved.catField("port"), opaque)
+        let rows = try XCTUnwrap(saved.catField("scripts")?.catArray)
+        XCTAssertTrue(rows.contains(broken))
+        XCTAssertEqual(rows.first { $0.catField("installationId") == .string("a") }?.catField("extra"), opaque)
+        XCTAssertEqual(rows.first { $0.catField("installationId") == .string("a") }?.catField("localHash"), opaque)
+        await owner.close()
+    }
+
+    func testCurrentDisplayCacheIsolatesUnusedRowsAndPreservesRawMaterialOnEdit() throws {
+        let input = CatSourceConfiguration(installationId: "a", name: "A", sourceType: "network",
+            sourceUrl: "https://example.invalid/a.js", localPath: nil, localHash: nil, enabled: true, inputRevision: 1)
+        let site = FilmSourceSite(key: "site", name: "Site", api: "/api", actions: ["search"], methods: [:])
+        let cat = FilmCatSource(installationId: "a", name: "A", sourceType: "network", sites: [site], inputRevision: 1)
+        let video = FilmVideoSource(key: .init(installationId: "a", siteKey: "site"), name: "Site", api: "/api", actions: ["search"], methods: [:])
+        let healthy = FilmSourceDocument(cats: [StoredFilmCat(cat)], videos: [video])
+        var raw = try RuntimeJSON.decode(JSONEncoder().encode(healthy)).filmRequiredObject()
+        let opaque = try RuntimeJSON.decode(Data(#"{"n":1e400,"é":1,"e\u0301":2}"#.utf8))
+        raw["extra"] = opaque
+        var row = try XCTUnwrap(raw["cats"]?.catArray?.first?.filmObject)
+        row["importedAt"] = opaque; row["extra"] = opaque
+        var siteFields = try XCTUnwrap(row["sites"]?.catArray?.first?.filmObject)
+        siteFields["extra"] = opaque
+        row["sites"] = .array([.object(siteFields)])
+        raw["cats"] = .array([.object(row), opaque])
+        var videoFields = try XCTUnwrap(raw["videos"]?.catArray?.first?.filmObject)
+        var keyFields = try XCTUnwrap(videoFields["key"]?.filmObject)
+        keyFields["extra"] = opaque; videoFields["key"] = .object(keyFields); videoFields["extra"] = opaque
+        raw["videos"] = .array([.object(videoFields)])
+        let bytes = try RuntimeJSON.encode(.object(raw))
+        let loaded = try FilmSourceDocument.read(bytes, configured: [input])
+        XCTAssertEqual(loaded.cats.count, 1); XCTAssertNil(loaded.cats.first?.importedAt)
+        XCTAssertEqual(loaded.videos, [video])
+        var changed = loaded; changed.videos[0].order = 10
+        let saved = try RuntimeJSON.decode(changed.encode(replacing: loaded, original: bytes))
+        XCTAssertEqual(saved.catField("extra"), opaque)
+        XCTAssertEqual(saved.catField("cats"), raw["cats"])
+        XCTAssertEqual(saved.catField("videos")?.catArray?.first?.catField("order"), .number(10))
+        XCTAssertEqual(saved.catField("videos")?.catArray?.count, 1)
+        XCTAssertEqual(saved.catField("videos")?.catArray?.first?.catField("extra"), opaque)
+        XCTAssertEqual(saved.catField("videos")?.catArray?.first?.catField("key")?.catField("extra"), opaque)
+        let refreshed = FilmCatSource(installationId: "a", name: "A", sourceType: "network",
+            sites: [.init(key: "site", name: "Renamed", api: "/api", actions: ["search"], methods: [:])], inputRevision: 1)
+        changed.cats = [StoredFilmCat(refreshed)]
+        let probeSaved = try RuntimeJSON.decode(changed.encode(replacing: loaded, original: bytes))
+        let savedSite = probeSaved.catField("cats")?.catArray?.first?.catField("sites")?.catArray?.first
+        XCTAssertEqual(savedSite?.catField("extra"), opaque)
+        XCTAssertEqual(savedSite?.catField("name"), .string("Renamed"))
+    }
+
+    func testSelectedVideoIntentRequiresUsableIdentityAndUnambiguousImageSelection() throws {
+        let input = CatSourceConfiguration(installationId: "a", name: "A", sourceType: "network",
+            sourceUrl: "https://example.invalid/a.js", localPath: nil, localHash: nil, enabled: true, inputRevision: 1)
+        let first = FilmVideoSource(key: .init(installationId: "a", siteKey: "one"), name: "One",
+            api: "/api", actions: [], methods: [:], options: .init(aggregateImages: true))
+        let second = FilmVideoSource(key: .init(installationId: "a", siteKey: "two"), name: "Two",
+            api: "/api", actions: [], methods: [:], options: .init(aggregateImages: true))
+        for videos in [[first, first], [first, second]] {
+            let bytes = try JSONEncoder().encode(FilmSourceDocument(videos: videos))
+            XCTAssertThrowsError(try FilmSourceDocument.read(bytes, configured: [input]))
+        }
+        let healthy = FilmSourceDocument(videos: [first])
+        var raw = try RuntimeJSON.decode(JSONEncoder().encode(healthy)).filmRequiredObject()
+        let broken: RuntimeValue = .object(["key": .object(["installationId": .string("a"), "siteKey": .string("broken")])])
+        raw["videos"] = .array([broken])
+        XCTAssertThrowsError(try FilmSourceDocument.read(RuntimeJSON.encode(.object(raw)), configured: [input]))
+        let good = try RuntimeJSON.decode(JSONEncoder().encode(first))
+        raw["videos"] = .array([good, broken])
+        let bytes = try RuntimeJSON.encode(.object(raw))
+        let loaded = try FilmSourceDocument.read(bytes, configured: [input])
+        XCTAssertEqual(loaded.videos, [first])
+        var edited = loaded; edited.videos[0].order = 4
+        let saved = try RuntimeJSON.decode(edited.encode(replacing: loaded, original: bytes))
+        XCTAssertTrue(saved.catField("videos")?.catArray?.contains(broken) == true)
+        edited.videos.append(.init(key: .init(installationId: "a", siteKey: "broken"),
+            name: "Conflict", api: "/api", actions: [], methods: [:]))
+        XCTAssertThrowsError(try edited.encode(replacing: loaded, original: bytes)) {
+            XCTAssertEqual($0 as? FilmSourceError, .init(code: "STORAGE_CONFLICT"))
+        }
+    }
+
     func testPickerCopyIsConsumedAsCompleteHashInputNotTemporaryPathOrSourceJSON() async throws {
         let (owner, document, _, base, _) = try fixture()
         defer { try? FileManager.default.removeItem(at: base) }

@@ -6,6 +6,7 @@ import http from 'node:http';
 import { once } from 'node:events';
 import { join } from 'node:path';
 import { createNativeSettings, nativeSettingsFrameBytes } from '../apps/runtime/native-settings.mjs';
+import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { parseIOSConfiguration } from '../apps/ios/runtime/bootstrap.mjs';
 import { createTMDBDataModule } from '../apps/runtime/modules/metadata-data.mjs';
 import { defaultPreferences } from '../packages/film-playback/src/policy.js';
@@ -15,11 +16,11 @@ import { connect, okay, root, simulatedIOS, spawnRuntime } from './ios-runtime-s
 const blocks = ['cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences'];
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const fingerprint = document => {
-  const bytes = document === null ? null : Buffer.from(JSON.stringify(document));
+  const bytes = document === null ? null : Buffer.from(stringifyJSONValue(document));
   return { exists: bytes !== null, length: bytes?.length ?? 0, sha256: bytes === null ? null : hash(bytes) };
 };
 const result = (id, document) => ({ kind: 'settings.result', id, ok: true, document, fingerprint: fingerprint(document) });
-const line = value => Buffer.from(JSON.stringify(value) + '\n');
+const line = value => Buffer.from(stringifyJSONValue(value, -2) + '\n');
 const rules = () => ({ episodeCleanRegexRules: [], episodeRules: [], movieRules: [], aggregateRegexRules: [] });
 const tmdb = language => ({ version: 1, settings: { apiBase: 'https://api.themoviedb.org/3',
   imageBase: 'https://image.tmdb.org', apiKey: '', accessToken: '', language, region: 'CN', includeAdult: false } });
@@ -28,7 +29,7 @@ const entry = join(root, 'apps/ios/runtime/entries/aggregate.mjs');
 function pipe(t) {
   const requests = [], stopped = [];
   const settings = createNativeSettings({
-    write(bytes, complete) { requests.push(JSON.parse(bytes)); complete(); },
+    write(bytes, complete) { requests.push(parseJSONText(bytes.toString())); complete(); },
   }, code => stopped.push(code));
   t.after(() => settings.close());
   return { settings, requests, stopped, respond(id, document) { settings.accept(line(result(id, document))); } };
@@ -94,6 +95,40 @@ test('private pan writes use the observed fingerprint and rejected CAS never pub
   await assert.rejects(store.write(next), { code: 'CLOSED' });
 });
 
+test('private settings consume the reply fields without rejecting or changing unused JSON material', async t => {
+  const f = pipe(t);
+  const document = parseJSONText('{"version":1,"accounts":{},"extension":9007199254740993,"é":1,"é":2}');
+  const pending = f.settings.reload('pan.accounts');
+  const reply = result(1, document);
+  reply.extension = 'unused';
+  reply.fingerprint.extension = 1;
+  f.settings.accept(line(reply));
+  await pending;
+  const copy = f.settings.document('pan.accounts').read();
+  assert.equal(stringifyJSONValue(copy), stringifyJSONValue(document));
+  const failure = assert.rejects(f.settings.reload('tmdb'), { code: 'STORAGE_ERROR' });
+  f.settings.accept(line({ kind: 'settings.result', id: 2, ok: false, code: 'STORAGE_ERROR', extension: true }));
+  await failure;
+  assert.deepEqual(f.stopped, []);
+});
+
+test('private settings control frames do not consume the document depth budget', async t => {
+  const f = pipe(t);
+  let nested = null;
+  for (let index = 0; index < 63; index++) nested = [nested];
+  const document = { nested }, pending = f.settings.reload('pan.accounts');
+  f.respond(1, document);
+  assert.deepEqual(await pending, document);
+  const store = f.settings.document('pan.accounts');
+  assert.deepEqual(store.read(), document);
+  const written = store.write(document);
+  assert.deepEqual(f.requests[1].document, document);
+  f.respond(2, document);
+  assert.deepEqual(await written, document);
+  store.close();
+  assert.deepEqual(f.stopped, []);
+});
+
 test('private frame parsing rejects malformed values, fingerprints, unknown codes and invalid UTF-8, draining every exchange',
   async t => {
     for (const reply of [
@@ -101,9 +136,7 @@ test('private frame parsing rejects malformed values, fingerprints, unknown code
       { ...result(1, null), document: [] },
       { ...result(1, null), fingerprint: { exists: false, length: 1, sha256: null } },
       { ...result(1, null), fingerprint: { exists: true, length: 1, sha256: 'not-a-digest' } },
-      { ...result(1, null), extra: 'unexpected' },
       { kind: 'settings.result', id: 1, ok: false, code: 'private-error-message' },
-      { kind: 'settings.result', id: 1, ok: false, code: 'STORAGE_ERROR', message: 'private-error-message' },
       Buffer.from([0xff, 10]),
       Buffer.alloc(nativeSettingsFrameBytes + 1, 32),
     ]) await t.test(Buffer.isBuffer(reply) ? `bytes-${reply.length}` : JSON.stringify(reply), async sub => {
@@ -211,8 +244,7 @@ test('real iOS bootstrap cold-reads all native blocks, applies notifications and
     const { client } = await connect(first);
     t.after(() => client.close());
     assert.deepEqual(first.requests.map(request => request.block), blocks);
-    for (const invalid of [null, [], {}, { block: 1 }, { block: 'tmdb\n' },
-      { block: 'tmdb', document: {} }, { block: 'tmdb', cookie: 'synthetic-not-a-settings-frame' }]) {
+    for (const invalid of [null, [], {}, { block: 1 }, { block: 'tmdb\n' }]) {
       const response = await rawRequest(await first.endpoint, {},
         { path: '/v1/settings/changed', body: JSON.stringify(invalid) }).response;
       assert.equal(response.status, 400);

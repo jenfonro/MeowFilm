@@ -2,7 +2,6 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
@@ -12,10 +11,28 @@ namespace MeowFilm.Capabilities;
 internal sealed record NovelSourceDefinition(string InstallationId, long Revision, string Name, string SourceUrl,
     string Group, long Order, bool Enabled, bool EnabledExplore, string Protocol, string Definition)
 {
-    internal NovelSource Source()
+    internal NovelSource Source() => new(InstallationId, Revision, Name, SourceUrl, Group, Order,
+        Enabled, EnabledExplore, Protocol, []);
+
+    internal NovelSource SourceFromDefinition()
     {
-        var raw = JsonNode.Parse(Definition)!.AsObject();
-        bool Has(string key) => raw[key] is { } value && value.ToJsonString() is not ("null" or "\"\"" or "{}");
+        // Only an explicit import/edit or an applied execution consumes definition
+        // hints. Opening the configuration list never parses source rules.
+        JsonElement raw;
+        try { raw = JsonSerializer.Deserialize<JsonElement>(Definition); }
+        catch (JsonException) { raw = default; }
+        JsonElement Member(string key) => raw.ValueKind == JsonValueKind.Object && raw.TryGetProperty(key, out var value) ? value : default;
+        bool Has(string key)
+        {
+            var value = Member(key);
+            return value.ValueKind switch
+            {
+                JsonValueKind.Undefined or JsonValueKind.Null => false,
+                JsonValueKind.String => value.GetString()!.Length > 0,
+                JsonValueKind.Object => value.EnumerateObject().Any(),
+                _ => true
+            };
+        }
         var actions = new List<string> { "image", "loginStatus" };
         if (Protocol == "qysg") actions.AddRange(["search", "exploreKinds", "explore", "bookInfo", "toc", "content", "login"]);
         else
@@ -27,14 +44,15 @@ internal sealed record NovelSourceDefinition(string InstallationId, long Revisio
             if (Has("ruleContent"))
             {
                 actions.Add("content");
-                JsonObject? content = raw["ruleContent"] as JsonObject;
-                if (content is null)
-                    try { content = JsonNode.Parse(raw["ruleContent"]!.ToString()) as JsonObject; } catch (JsonException) { }
-                if (content?["payAction"]?.ToString() is { Length: > 0 }) actions.Add("payAction");
+                var content = Member("ruleContent");
+                if (content.ValueKind == JsonValueKind.String)
+                    try { content = JsonSerializer.Deserialize<JsonElement>(content.GetString()!); } catch (JsonException) { }
+                if (content.ValueKind == JsonValueKind.Object && content.TryGetProperty("payAction", out var pay) &&
+                    pay.ToString().Length > 0) actions.Add("payAction");
             }
             if (Has("loginUrl") || Has("loginUi")) actions.Add("login");
         }
-        double Number(string key, double fallback = 0) => double.TryParse(raw[key]?.ToString(),
+        double Number(string key, double fallback = 0) => double.TryParse(Member(key).ToString(),
             System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double value) &&
             double.IsFinite(value) ? value : fallback;
         return new(InstallationId, Revision, Name, SourceUrl, Group, Order, Enabled, EnabledExplore, Protocol,
@@ -43,15 +61,16 @@ internal sealed record NovelSourceDefinition(string InstallationId, long Revisio
     }
 }
 
-internal sealed record NovelSourceConfigurationSnapshot(int Version, long Revision, NovelSourceDefinition[] Sources);
+internal sealed record NovelSourceConfigurationSnapshot(int Version, long Revision, NovelSourceDefinition[] Sources)
+{
+    [JsonIgnore] public JsonElement Original { get; init; }
+}
 
 /// <summary>The native configuration owner. Execution and private source state never enter this document.</summary>
 internal sealed class NovelSourceConfiguration(IDocumentStore store)
 {
     internal const string DocumentNamespace = "novel.sources.v1";
     private const long MaximumRevision = 9007199254740991;
-    private static readonly JsonSerializerOptions Options = new(NovelJson.Options)
-    { PropertyNameCaseInsensitive = false, NumberHandling = JsonNumberHandling.Strict };
     private readonly SemaphoreSlim serial = new(1, 1);
     private DocumentFingerprint fingerprint = DocumentFingerprint.Missing;
     private NovelSourceConfigurationSnapshot? saved;
@@ -81,35 +100,44 @@ internal sealed class NovelSourceConfiguration(IDocumentStore store)
     {
         try
         {
-            static bool Complete(JsonElement item, string[] keys) => item.ValueKind == JsonValueKind.Object &&
-                item.EnumerateObject().Count() == keys.Length &&
-                keys.All(key => item.EnumerateObject().Count(p => p.NameEquals(key)) == 1);
-            if (!Complete(value, ["version", "revision", "sources"]) ||
-                value.GetProperty("sources").ValueKind != JsonValueKind.Array ||
-                value.GetProperty("sources").EnumerateArray().Any(item => !Complete(item,
-                    ["installationId", "revision", "name", "sourceUrl", "group", "order", "enabled", "enabledExplore", "protocol", "definition"])))
-                throw new JsonException();
-            var result = value.Deserialize<NovelSourceConfigurationSnapshot>(Options) ?? throw new JsonException();
-            if (result.Version != 1 || result.Revision is < 1 or > MaximumRevision || result.Sources is null ||
-                result.Sources.Select(s => s.InstallationId).Distinct(StringComparer.Ordinal).Count() != result.Sources.Length ||
-                result.Sources.Select(s => s.SourceUrl).Distinct(StringComparer.Ordinal).Count() != result.Sources.Length)
-                throw new JsonException();
-            foreach (var source in result.Sources)
+            int version = BridgeCodec.RequiredProperty(value, "version").GetInt32();
+            long revision = BridgeCodec.RequiredProperty(value, "revision").GetInt64();
+            if (version != 1 || revision is < 1 or > MaximumRevision) throw new JsonException();
+            var rows = BridgeCodec.RequiredProperty(value, "sources").EnumerateArray().ToArray();
+            var ids = rows.SelectMany(row => Ids(row, "installationId")).GroupBy(id => id)
+                .ToDictionary(group => group.Key, group => group.Count());
+            var urls = rows.SelectMany(row => Ids(row, "sourceUrl")).GroupBy(id => id)
+                .ToDictionary(group => group.Key, group => group.Count());
+            var sources = new List<NovelSourceDefinition>();
+            foreach (var row in rows)
             {
-                if (source.InstallationId is not { Length: > 0 and <= 128 } ||
-                    !char.IsAsciiLetterOrDigit(source.InstallationId[0]) ||
-                    source.InstallationId.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not ('.' or '_' or '-')) ||
-                    source.Revision is < 1 or > MaximumRevision || source.Order is < -MaximumRevision or > MaximumRevision ||
-                    string.IsNullOrWhiteSpace(source.Name) || string.IsNullOrWhiteSpace(source.SourceUrl) ||
-                    source.Group is null || source.Protocol is not ("legado" or "qysg") ||
-                    JsonNode.Parse(source.Definition) is not JsonObject)
-                    throw new JsonException();
+                try
+                {
+                    string id = BridgeCodec.RequiredProperty(row, "installationId").GetString()!;
+                    string url = BridgeCodec.RequiredProperty(row, "sourceUrl").GetString()!;
+                    if (id is null || url is null || ids[id] != 1 || urls[url] != 1) continue;
+                    long sourceRevision = BridgeCodec.RequiredProperty(row, "revision").GetInt64();
+                    if (sourceRevision is < 1 or > MaximumRevision) continue;
+                    string Text(string key) => BridgeCodec.RequiredProperty(row, key).GetString() ?? throw new JsonException();
+                    var source = new NovelSourceDefinition(id, sourceRevision, Text("name"), url, Text("group"),
+                        BridgeCodec.RequiredProperty(row, "order").GetInt64(),
+                        BridgeCodec.RequiredProperty(row, "enabled").GetBoolean(), BridgeCodec.RequiredProperty(row, "enabledExplore").GetBoolean(),
+                        Text("protocol"), Text("definition"));
+                    if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(url) || source.Protocol is not ("legado" or "qysg")) continue;
+                    sources.Add(source);
+                }
+                catch (Exception error) when (error is JsonException or BridgeException or InvalidOperationException or FormatException) { }
             }
+            if (rows.Length > 0 && sources.Count == 0) throw new JsonException();
+            var result = new NovelSourceConfigurationSnapshot(version, revision, sources.ToArray()) { Original = value.Clone() };
             return result;
         }
-        catch (Exception error) when (error is JsonException or InvalidDataException or ArgumentException or NullReferenceException)
+        catch (Exception error) when (error is JsonException or InvalidDataException or ArgumentException or NullReferenceException or BridgeException or InvalidOperationException or FormatException)
         { throw new DocumentStoreException(DocumentStoreError.Corrupt); }
     }
+    private static string[] Ids(JsonElement row, string key) => row.ValueKind == JsonValueKind.Object
+        ? row.EnumerateObject().Where(item => item.NameEquals(key) && item.Value.ValueKind == JsonValueKind.String)
+            .Select(item => item.Value.GetString()!).ToArray() : [];
     internal NovelSourceDefinition Require(NovelSource source) =>
         Snapshot.Sources.FirstOrDefault(s => s.InstallationId == source.InstallationId && s.Revision == source.Revision)
             ?? throw new BridgeException("STALE_SOURCE");
@@ -149,7 +177,7 @@ internal sealed class NovelSourceConfiguration(IDocumentStore store)
             }
             return next.ToArray();
         }, token);
-        return NovelJson.Value(new { sources = imported.Select(s => s.Source()), failures });
+        return NovelJson.Value(new { sources = imported.Select(s => s.SourceFromDefinition()), failures });
     }
     internal JsonElement Preview(string text, string? fileName, string? url)
     {
@@ -169,11 +197,11 @@ internal sealed class NovelSourceConfiguration(IDocumentStore store)
     }
     internal Task UpdateAsync(NovelSource source, JsonElement patch, CancellationToken token) => MutateAsync(current =>
     {
-        var old = Require(source); var raw = JsonNode.Parse(old.Definition)!.AsObject();
+        var old = Require(source); var raw = JsonSerializer.Deserialize<JsonElement>(old.Definition);
         foreach (var (key, field) in new[] { ("name", "bookSourceName"), ("group", "bookSourceGroup"), ("order", "customOrder"),
             ("enabled", "enabled"), ("enabledExplore", "enabledExplore") })
-            if (patch.TryGetProperty(key, out var value)) raw[field] = JsonNode.Parse(value.GetRawText());
-        var item = Parse(raw.ToJsonString(), old, current.Sources.Length);
+            if (patch.TryGetProperty(key, out var value)) raw = SettingsDocument.SetMember(raw, field, value);
+        var item = Parse(raw.GetRawText(), old, current.Sources.Length);
         return current.Sources.Select(s => s.InstallationId == item.InstallationId ? item : s).ToArray();
     }, token);
     internal Task RemoveAsync(NovelSource source, CancellationToken token) => MutateAsync(current =>
@@ -190,8 +218,31 @@ internal sealed class NovelSourceConfiguration(IDocumentStore store)
             var values = update(current);
             if (values.SequenceEqual(current.Sources)) return;
             if (current.Revision == MaximumRevision) throw new BridgeException("LIMIT");
-            var next = new NovelSourceConfigurationSnapshot(1, current.Revision + 1, values);
-            var bytes = JsonSerializer.SerializeToUtf8Bytes(next, NovelJson.Options);
+            var original = current.Original.ValueKind == JsonValueKind.Undefined ? NovelJson.Value(current) : current.Original;
+            var rows = original.GetProperty("sources").EnumerateArray().ToArray();
+            foreach (var added in values.Where(item => current.Sources.All(old => old.InstallationId != item.InstallationId)))
+                if (rows.Any(row => Ids(row, "installationId").Contains(added.InstallationId) || Ids(row, "sourceUrl").Contains(added.SourceUrl)))
+                    throw new BridgeException("SOURCE_INTEGRITY");
+            var before = current.Sources.ToDictionary(item => item.InstallationId);
+            var after = values.ToDictionary(item => item.InstallationId);
+            var merged = new List<JsonElement>();
+            foreach (var row in rows)
+            {
+                var identities = Ids(row, "installationId");
+                if (identities.Length != 1 || !before.TryGetValue(identities[0], out var old)) { merged.Add(row); continue; }
+                if (!after.TryGetValue(identities[0], out var changed)) continue;
+                var nextRow = row;
+                var previous = NovelJson.Value(old);
+                foreach (var property in NovelJson.Value(changed).EnumerateObject())
+                    if (!JsonElement.DeepEquals(previous.GetProperty(property.Name), property.Value))
+                        nextRow = SettingsDocument.SetMember(nextRow, property.Name, property.Value);
+                merged.Add(nextRow);
+            }
+            merged.AddRange(values.Where(item => !before.ContainsKey(item.InstallationId)).Select(item => NovelJson.Value(item)));
+            var raw = SettingsDocument.SetMember(original, "revision", NovelJson.Value(current.Revision + 1));
+            raw = SettingsDocument.SetMember(raw, "sources", BridgeCodec.Value(merged));
+            var next = new NovelSourceConfigurationSnapshot(1, current.Revision + 1, values) { Original = raw };
+            var bytes = BridgeCodec.EncodeJSONValue(raw);
             var receipt = await store.WriteAsync(DocumentNamespace, bytes, fingerprint, token);
             fingerprint = receipt; saved = next;
         }
@@ -217,35 +268,41 @@ internal sealed class NovelSourceConfiguration(IDocumentStore store)
     {
         definition = definition.Trim().TrimStart('\uFEFF');
         if (Encoding.UTF8.GetByteCount(definition) > 16 * 1024 * 1024) throw new BridgeException("LIMIT");
-        JsonNode? value = definition.StartsWith('<') ? JsonValue.Create(definition) : JsonNode.Parse(definition);
-        if (value is JsonArray array && array.Count == 1) value = array[0];
-        var raw = value switch
+        var raw = definition.StartsWith('<') ? NovelJson.Value(new { html = definition }) : JsonSerializer.Deserialize<JsonElement>(definition);
+        if (raw.ValueKind == JsonValueKind.Array && raw.GetArrayLength() == 1) raw = raw[0];
+        if (raw.ValueKind == JsonValueKind.String && raw.GetString()!.TrimStart().StartsWith('<'))
+            raw = NovelJson.Value(new { html = raw.GetString() });
+        if (raw.ValueKind != JsonValueKind.Object) throw new InvalidDataException();
+        JsonElement Member(string key) => raw.TryGetProperty(key, out _) ? BridgeCodec.RequiredProperty(raw, key) : default;
+        string Text(string key, string fallback = "") => Member(key) is { ValueKind: JsonValueKind.String } value ? value.GetString()! : fallback;
+        bool Bool(string key, bool fallback)
         {
-            JsonObject obj => (JsonObject)obj.DeepClone(),
-            JsonValue scalar when scalar.TryGetValue<string>(out var html) && html.TrimStart().StartsWith('<') =>
-                new JsonObject { ["html"] = html },
-            _ => throw new InvalidDataException()
-        };
-        string Text(string key, string fallback = "") => raw[key] is JsonValue scalar && scalar.TryGetValue<string>(out var text) ? text : fallback;
-        bool Bool(string key, bool fallback) => raw[key] is null ? fallback :
-            raw[key]!.ToString().Trim().ToLowerInvariant() is not ("false" or "0" or "");
-        string protocol = raw["html"] is JsonValue htmlValue && htmlValue.TryGetValue<string>(out _) ? "qysg" :
-            new[] { "ruleSearch", "ruleBookInfo", "ruleToc", "ruleContent" }.Any(key => raw[key] is not null) ? "legado" :
+            var value = Member(key);
+            return value.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null ? fallback :
+                value.ToString().Trim().ToLowerInvariant() is not ("false" or "0" or "");
+        }
+        string protocol = Member("html").ValueKind == JsonValueKind.String ? "qysg" :
+            new[] { "ruleSearch", "ruleBookInfo", "ruleToc", "ruleContent" }.Any(key =>
+                Member(key).ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null)) ? "legado" :
             throw new BridgeException("UNSUPPORTED_PROTOCOL");
         string sourceUrl = Text("bookSourceUrl", old?.SourceUrl ?? (protocol == "qysg" ?
             origin ?? "qysg:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(definition))) : "")).Trim();
         if (sourceUrl.Length == 0) throw new InvalidDataException("请填写源 URL");
         string name = Text("bookSourceName", old?.Name ?? fileName ?? "").Trim();
         if (name.Length == 0) name = sourceUrl;
-        long customOrder = raw["customOrder"] is null ? old?.Order ?? order :
-            long.TryParse(raw["customOrder"]!.ToString(), out var number) && number is >= -MaximumRevision and <= MaximumRevision
+        long customOrder = Member("customOrder").ValueKind is JsonValueKind.Undefined or JsonValueKind.Null ? old?.Order ?? order :
+            long.TryParse(Member("customOrder").ToString(), out var number) && number is >= -MaximumRevision and <= MaximumRevision
                 ? number : throw new InvalidDataException("排序格式无效");
         if (old?.Revision == MaximumRevision) throw new BridgeException("LIMIT");
         var source = new NovelSourceDefinition(old?.InstallationId ?? Guid.NewGuid().ToString("N"), (old?.Revision ?? 0) + 1,
             name, sourceUrl, Text("bookSourceGroup", old?.Group ?? ""), customOrder, Bool("enabled", old?.Enabled ?? true),
-            Bool("enabledExplore", old?.EnabledExplore ?? (raw["exploreUrl"] is not null || protocol == "qysg")), protocol, "");
-        raw["bookSourceName"] = source.Name; raw["bookSourceUrl"] = source.SourceUrl; raw["bookSourceGroup"] = source.Group;
-        raw["customOrder"] = source.Order; raw["enabled"] = source.Enabled; raw["enabledExplore"] = source.EnabledExplore;
-        return source with { Definition = raw.ToJsonString() };
+            Bool("enabledExplore", old?.EnabledExplore ?? (Member("exploreUrl").ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null) || protocol == "qysg")), protocol, "");
+        raw = SettingsDocument.Patch(raw, new Dictionary<string, JsonElement>
+        {
+            ["bookSourceName"] = NovelJson.Value(source.Name), ["bookSourceUrl"] = NovelJson.Value(source.SourceUrl),
+            ["bookSourceGroup"] = NovelJson.Value(source.Group), ["customOrder"] = NovelJson.Value(source.Order),
+            ["enabled"] = NovelJson.Value(source.Enabled), ["enabledExplore"] = NovelJson.Value(source.EnabledExplore)
+        });
+        return source with { Definition = raw.GetRawText() };
     }
 }

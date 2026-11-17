@@ -1,5 +1,6 @@
 import { fault, requireValue, safeError } from './errors.js';
 import { createNodeNetwork } from './node-network.js';
+import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 const version = 2;
 const obviousPublicCookieDomains = new Set([
   'com', 'net', 'org', 'edu', 'gov', 'mil', 'int',
@@ -115,8 +116,8 @@ class ScopedCookieJar {
       right.path.length - left.path.length || left.sequence - right.sequence)
       .map(cookie => ({
         name: cookie.name, value: cookie.value, domain: cookie.domain, hostOnly: cookie.hostOnly,
-        path: cookie.path, secure: cookie.secure, httpOnly: cookie.httpOnly ?? false,
-        sameSite: cookie.sameSite ?? null, expires: cookie.expires,
+        path: cookie.path, secure: cookie.secure, httpOnly: cookie.httpOnly,
+        sameSite: cookie.sameSite, expires: cookie.expires,
       }));
     if (input) {
       const url = new URL(input);
@@ -237,11 +238,9 @@ class ScopedCookieJar {
   restore(prefix, values) {
     this.release(prefix);
     for (const [suffix, entries] of values) {
-      const map = new Map(structuredClone(entries));
+      const map = new Map(cloneJSONValue(entries));
       this.#profiles.set(prefix + suffix, map);
       for (const cookie of map.values()) {
-        cookie.httpOnly ??= false;
-        cookie.sameSite ??= null;
         this.#sequence = Math.max(this.#sequence, cookie.sequence);
       }
     }
@@ -255,9 +254,9 @@ function memoryStorage() {
     return profiles.get(profile);
   };
   return {
-    get: ({ profile, key }) => structuredClone(map(profile).get(key) ?? null),
+    get: ({ profile, key }) => cloneJSONValue(map(profile).get(key) ?? null),
     set: ({ profile, key, value }) => {
-      map(profile).set(key, structuredClone(value));
+      map(profile).set(key, cloneJSONValue(value));
       return true;
     },
     delete: ({ profile, key }) => map(profile).delete(key),
@@ -265,7 +264,7 @@ function memoryStorage() {
       .map(([name, values]) => [name.slice(prefix.length), [...values]]),
     restore(prefix, values) {
       this.releaseProfiles(prefix);
-      for (const [suffix, entries] of values) profiles.set(prefix + suffix, new Map(structuredClone(entries)));
+      for (const [suffix, entries] of values) profiles.set(prefix + suffix, new Map(cloneJSONValue(entries)));
     },
     releaseProfiles(prefix, except = '') {
       for (const name of profiles.keys()) {
@@ -502,7 +501,7 @@ export function createNodeSourceCapabilities({
           }
           case 'virtual.register': {
             const key = JSON.stringify([input.profile, input.route]);
-            const metadata = structuredClone(input.metadata);
+            const metadata = cloneJSONValue(input.metadata);
             virtual.set(key, { metadata });
             return { url: `meow-source://${encodeURIComponent(input.profile)}/${encodeURIComponent(input.route)}` };
           }
@@ -525,12 +524,12 @@ export function createNodeSourceCapabilities({
     },
     resolveVirtual(profile, route) {
       const value = virtual.get(JSON.stringify([profile, route]));
-      return value === undefined ? null : structuredClone(value.metadata);
+      return value === undefined ? null : cloneJSONValue(value.metadata);
     },
-    snapshotProfiles(prefix) { return structuredClone(capture(prefix)); },
+    snapshotProfiles(prefix) { return cloneJSONValue(capture(prefix)); },
     restoreProfiles(prefix, state) {
       requireValue(typeof storage.restore === 'function', 'CAPABILITY_UNAVAILABLE');
-      restore(prefix, structuredClone(state));
+      restore(prefix, cloneJSONValue(state));
     },
     async releaseProfiles(prefix, except = '') {
       requireValue(typeof prefix === 'string' && prefix.length > 0 &&
