@@ -30,7 +30,9 @@ remain separate when they have no usable matching identity.
 Chapter matching first uses a unique URL, then a unique normalized title, excluding
 volume headers. Chinese chapter numbers and fullwidth/punctuation differences
 normalize, but duplicate or unmatched titles require explicit user selection.
-Chapter indices are array positions. There is no silent same-index fallback.
+Unusable entries are excluded from matching without changing the returned original
+array index. Nonempty lists with no usable identities fail. There is no silent
+same-index fallback.
 
 Replacement fields follow the Reader management model: `pattern`, `replacement`,
 `isRegex`, `isEnabled`, `scopeTitle`, `scopeContent`, `scope`, `excludeScope`,
@@ -43,7 +45,9 @@ exclusion accept comma, semicolon or newline-separated exact source URLs or
 normalized book names. Empty scope means all; exclusion wins. Disabled,
 out-of-scope rules and rules without target text do not compile patterns or
 consume invalid rule materials. A scope mismatch does not read `excludeScope`;
-applicable rules still require usable scope and exclusion strings. Consecutive text
+applicable rules still require usable scope and exclusion strings. Title-only
+replacement preserves unused blocks verbatim; text is checked only when a content
+replacement or character conversion consumes it. Consecutive text
 blocks are paragraphs joined with newlines for replacement, including
 cross-paragraph matches; changed text is split back into paragraphs. Images keep
 their URLs, metadata and relative order unchanged and separate text runs. A rule

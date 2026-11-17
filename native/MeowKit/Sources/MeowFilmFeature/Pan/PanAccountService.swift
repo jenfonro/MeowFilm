@@ -58,6 +58,7 @@ public struct PanLoginReceipt: Sendable {
         }
         sessionID = id; self.progress = progress
         account = try value.panField("account").map(PanAccount.init)
+        if let error = account?.errorCode { throw RuntimeHTTPError.remote(error.rawValue) }
         if progress == .confirmed, account?.status != .signedIn { throw PanAccountError.unconfirmed }
     }
 }

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createNodeSourceCapabilities } from '../src/source-capabilities.js';
 import { createCapabilityClient, hostApiVersion } from '@meowfilm/source-runtime';
+import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 
 const version = hostApiVersion;
 const prefix = 'source:web:1:';
@@ -200,21 +201,28 @@ for (const retire of [false, true]) {
   });
 }
 
-test('private Cookie snapshots restore new attributes and default older records without changing scope', async () => {
+test('private Cookie snapshots preserve current attributes, scope and exact unused extensions', async () => {
   const fixture = setup();
   await fixture.seed(['current=value; Path=/private; Secure; HttpOnly; SameSite=Lax; Expires=Thu, 01 Jan 2099 00:00:00 GMT']);
   const snapshot = fixture.owner.snapshotProfiles(prefix);
+  const extension = '{"integer":9007199254740993,"decimal":1.234567890123456789,"large":1e400,"zero":-0}';
+  snapshot.cookies[0][1][0][1].extension = parseJSONText(extension);
   await fixture.owner.releaseProfiles('source:web:');
   fixture.owner.restoreProfiles(prefix, snapshot);
+  snapshot.cookies[0][1][0][1].extension.integer = 0;
   await fixture.web('browser', { url });
   const current = fixture.requests.at(-1).request.cookies[0];
   assert.equal(current.httpOnly, true);
   assert.equal(current.sameSite, 'Lax');
   assert.equal(current.expires, Date.parse('2099-01-01T00:00:00Z'));
-  delete snapshot.cookies[0][1][0][1].httpOnly;
-  delete snapshot.cookies[0][1][0][1].sameSite;
-  fixture.owner.restoreProfiles(prefix, snapshot);
-  await fixture.web('browser', { url });
-  assert.deepEqual(fixture.requests.at(-1).request.cookies[0],
-    { ...current, httpOnly: false, sameSite: null });
+  assert.equal(await fixture.get(), 'current=value');
+  assert.equal(await fixture.get('https://books.invalid/public'), '');
+  assert.equal(await fixture.get('https://other.invalid/private/page'), '');
+  assert.equal(Object.hasOwn(current, 'extension'), false);
+  await fixture.seed(['unrelated=value; Path=/']);
+  const saved = fixture.owner.snapshotProfiles(prefix);
+  assert.equal(stringifyJSONValue(saved.cookies[0][1][0][1].extension), extension);
+  saved.cookies[0][1][0][1].extension.decimal = 0;
+  assert.equal(stringifyJSONValue(fixture.owner.snapshotProfiles(prefix).cookies[0][1][0][1].extension), extension);
+  await fixture.owner.releaseProfiles('source:web:');
 });

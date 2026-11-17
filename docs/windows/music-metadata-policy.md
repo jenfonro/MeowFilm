@@ -9,7 +9,7 @@
 
 ## 当前文档区域
 
-`music.library.v2` 只接受 `MusicLibraryState.CurrentAreas`；脚本存储不在此文档。未知区域、重复 key、非当前 schema、损坏字段或关系错误使整份文档失败，且不会写回原数据。
+`music.library.v2` 按实际动作选择 area，详见[当前文档](music-native-library.md#唯一当前文档)。未知区域和未消费扩展保留；所选 key 重复、schema／必需字段或真实关系损坏明确失败，不写回修复。脚本存储不在此文档。
 
 元数据相关区域为：
 

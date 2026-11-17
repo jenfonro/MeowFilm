@@ -6,7 +6,6 @@
 //
 
 import AVFoundation
-import AVKit
 #if canImport(UIKit)
 import UIKit
 #else
@@ -15,14 +14,12 @@ import AppKit
 
 public class KSMEPlayer: NSObject {
     private var loopCount = 1
-    private var playerItem: MEPlayerItem
+    private let playerItem: MEPlayerItem
     public let audioOutput: AudioOutput
-    private var options: KSOptions
+    private let options: KSOptions
     private var isShutdown = false
     private var hasFailed = false
     private var seekGeneration = UUID()
-    private var hasTerminatedOutputs = false
-    private var bufferingCountDownTimer: Timer?
     public private(set) var videoOutput: (VideoOutput & UIView)? {
         didSet {
             oldValue?.invalidate()
@@ -41,33 +38,11 @@ public class KSMEPlayer: NSObject {
         }
     }
 
-    @available(tvOS 14.0, *)
-    public var pipController: KSPictureInPictureController? { nil }
-
-    private lazy var _playbackCoordinator: Any? = {
-        if #available(macOS 12.0, iOS 15.0, tvOS 15.0, *) {
-            let coordinator = AVDelegatingPlaybackCoordinator(playbackControlDelegate: self)
-            coordinator.suspensionReasonsThatTriggerWaiting = [.stallRecovery]
-            return coordinator
-        } else {
-            return nil
-        }
-    }()
-
-    @available(macOS 12.0, iOS 15.0, tvOS 15.0, *)
-    public var playbackCoordinator: AVPlaybackCoordinator {
-        // swiftlint:disable force_cast
-        _playbackCoordinator as! AVPlaybackCoordinator
-        // swiftlint:enable force_cast
-    }
-
     public private(set) var playableTime = TimeInterval(0)
     public weak var delegate: MediaPlayerDelegate?
     /// The product PiP owner rebinds when the native output replaces its layer.
     public var onDisplayLayerChanged: ((AVSampleBufferDisplayLayer) -> Void)?
     public private(set) var isReadyToPlay = false
-    public var allowsExternalPlayback: Bool = false
-    public var usesExternalPlaybackWhileExternalScreenIsActive: Bool = false
 
     public var playbackRate: Float = 1 {
         didSet {
@@ -321,31 +296,7 @@ extension KSMEPlayer: MediaPlayerProtocol {
         options.display == .plane ? playerItem.naturalSize : KSOptions.sceneSize
     }
 
-    public var isExternalPlaybackActive: Bool { false }
-
     public var view: UIView? { videoOutput }
-
-    public func replace(url: URL, options: KSOptions) {
-        guard !hasTerminatedOutputs else { return }
-        KSLog("replaceUrl \(self)")
-        shutdown()
-        playerItem.delegate = nil
-        playerItem = MEPlayerItem(url: url, options: options)
-        isShutdown = false
-        hasFailed = false
-        if options.videoDisable {
-            videoOutput = nil
-        } else if videoOutput == nil {
-            videoOutput = KSOptions.videoPlayerType.init(options: options)
-            videoOutput?.displayLayerDelegate = self
-        }
-        self.options = options
-        playerItem.delegate = self
-        audioOutput.flush()
-        audioOutput.renderSource = playerItem
-        videoOutput?.renderSource = playerItem
-        videoOutput?.options = options
-    }
 
     public var currentPlaybackTime: TimeInterval {
         get {
@@ -442,8 +393,6 @@ extension KSMEPlayer: MediaPlayerProtocol {
         playerItem.setPlaybackRate(0)
         audioOutput.pause()
         videoOutput?.pause()
-        bufferingCountDownTimer?.invalidate()
-        bufferingCountDownTimer = nil
         KSLog("shutdown \(self)")
         playbackState = .stopped
         loadState = .idle
@@ -461,16 +410,13 @@ extension KSMEPlayer: MediaPlayerProtocol {
         options.readVideoTime = 0
         options.decodeAudioTime = 0
         options.decodeVideoTime = 0
-        if KSOptions.isClearVideoWhereReplace {
-            videoOutput?.flush()
-        }
+        videoOutput?.flush()
     }
 
     /// Terminal close. No input, decoder, native audio or display-link work
     /// remains when this returns. `shutdown()` alone is not a drain signal.
     @MainActor
     public func shutdownAndWait() async {
-        hasTerminatedOutputs = true
         shutdown()
         let item = playerItem
         let output = audioOutput
@@ -521,10 +467,6 @@ extension KSMEPlayer: MediaPlayerProtocol {
         videoOutput?.pixelBuffer?.cgImage()
     }
 
-    public func enterBackground() {}
-
-    public func enterForeground() {}
-
     public var isMuted: Bool {
         get {
             audioOutput.isMuted
@@ -551,101 +493,6 @@ extension KSMEPlayer: MediaPlayerProtocol {
         if isSeek {
             audioOutput.flush()
             videoOutput?.flush()
-        }
-    }
-}
-
-@available(tvOS 14.0, *)
-extension KSMEPlayer: AVPictureInPictureSampleBufferPlaybackDelegate {
-    public func pictureInPictureController(_: AVPictureInPictureController, setPlaying playing: Bool) {
-        playing ? play() : pause()
-    }
-
-    public func pictureInPictureControllerTimeRangeForPlayback(_: AVPictureInPictureController) -> CMTimeRange {
-        // Handle live streams.
-        if duration == 0 {
-            return CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity)
-        }
-        return CMTimeRange(start: 0, end: duration)
-    }
-
-    public func pictureInPictureControllerIsPlaybackPaused(_: AVPictureInPictureController) -> Bool {
-        !isPlaying
-    }
-
-    public func pictureInPictureController(_: AVPictureInPictureController, didTransitionToRenderSize _: CMVideoDimensions) {}
-    public func pictureInPictureController(_: AVPictureInPictureController, skipByInterval skipInterval: CMTime) async {
-        seek(time: currentPlaybackTime + skipInterval.seconds) { _ in }
-    }
-
-    public func pictureInPictureControllerShouldProhibitBackgroundAudioPlayback(_: AVPictureInPictureController) -> Bool {
-        false
-    }
-}
-
-@available(macOS 12.0, iOS 15.0, tvOS 15.0, *)
-extension KSMEPlayer: AVPlaybackCoordinatorPlaybackControlDelegate {
-    public func playbackCoordinator(_: AVDelegatingPlaybackCoordinator, didIssue playCommand: AVDelegatingPlaybackCoordinatorPlayCommand, completionHandler: @escaping () -> Void) {
-        guard playCommand.expectedCurrentItemIdentifier == (playbackCoordinator as? AVDelegatingPlaybackCoordinator)?.currentItemIdentifier else {
-            completionHandler()
-            return
-        }
-        DispatchQueue.main.async { [weak self] in
-            guard let self else {
-                return
-            }
-            if self.playbackState != .playing {
-                self.play()
-            }
-            completionHandler()
-        }
-    }
-
-    public func playbackCoordinator(_: AVDelegatingPlaybackCoordinator, didIssue pauseCommand: AVDelegatingPlaybackCoordinatorPauseCommand, completionHandler: @escaping () -> Void) {
-        guard pauseCommand.expectedCurrentItemIdentifier == (playbackCoordinator as? AVDelegatingPlaybackCoordinator)?.currentItemIdentifier else {
-            completionHandler()
-            return
-        }
-        DispatchQueue.main.async { [weak self] in
-            guard let self else {
-                return
-            }
-            if self.playbackState != .paused {
-                self.pause()
-            }
-            completionHandler()
-        }
-    }
-
-    public func playbackCoordinator(_: AVDelegatingPlaybackCoordinator, didIssue seekCommand: AVDelegatingPlaybackCoordinatorSeekCommand) async {
-        guard seekCommand.expectedCurrentItemIdentifier == (playbackCoordinator as? AVDelegatingPlaybackCoordinator)?.currentItemIdentifier else {
-            return
-        }
-        let seekTime = fmod(seekCommand.itemTime.seconds, duration)
-        if abs(currentPlaybackTime - seekTime) < CGFLOAT_EPSILON {
-            return
-        }
-        seek(time: seekTime) { _ in }
-    }
-
-    public func playbackCoordinator(_: AVDelegatingPlaybackCoordinator, didIssue bufferingCommand: AVDelegatingPlaybackCoordinatorBufferingCommand, completionHandler: @escaping () -> Void) {
-        guard bufferingCommand.expectedCurrentItemIdentifier == (playbackCoordinator as? AVDelegatingPlaybackCoordinator)?.currentItemIdentifier else {
-            completionHandler()
-            return
-        }
-        DispatchQueue.main.async { [weak self] in
-            guard let self else {
-                return
-            }
-            guard self.loadState != .playable, let countDown = bufferingCommand.completionDueDate?.timeIntervalSinceNow else {
-                completionHandler()
-                return
-            }
-            self.bufferingCountDownTimer?.invalidate()
-            self.bufferingCountDownTimer = nil
-            self.bufferingCountDownTimer = Timer(timeInterval: countDown, repeats: false) { _ in
-                completionHandler()
-            }
         }
     }
 }

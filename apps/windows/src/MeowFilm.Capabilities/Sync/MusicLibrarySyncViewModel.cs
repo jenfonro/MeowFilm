@@ -177,7 +177,7 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
         if (result.TryGetProperty("confirmation", out var confirm) && confirm.ValueKind == JsonValueKind.Object)
         {
             confirmationToken = Text(confirm, "token");
-            long count = confirm.GetProperty("count").GetInt64();
+            long count = MusicDto.Integer(confirm, "count");
             Confirmation = Text(confirm, "code") switch
             {
                 "DELETE_REMOTE_PLAYLIST" => $"删除远端歌单（{count} 首）？",
@@ -187,10 +187,10 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
         }
         Changed(nameof(HasConfirmation));
 
-        if (Okay(result) && result.TryGetProperty("revision", out var version) &&
+        if (Okay(result) && result.TryGetProperty("revision", out _) &&
             result.TryGetProperty("platforms", out var platforms))
         {
-            long observed = version.GetInt64();
+            long observed = MusicDto.Integer(result, "revision");
             if (observed >= revision)
             {
                 var values = Platforms.Select(row =>

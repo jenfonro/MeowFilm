@@ -12,27 +12,37 @@ struct MusicDocument {
     var catalogSource: MJ
     init(_ data: Data?, runID: String) throws {
         envelope = try data.map { try MJ.parse($0) } ?? .obj([("version", .n(1)), ("scope", .string("device")), ("revision", .n(0)), ("records", .obj())])
-        try envelope.requireFields(["version", "scope", "revision", "records"], required: ["version", "scope", "revision", "records"])
         try musicRequire(envelope["version"] == .n(1) && envelope["scope"].string == "device" &&
                          envelope["revision"].isInteger && envelope["records"].isObject, .corruptDocument)
         let records = envelope["records"]
-        let allowed = ["library", "queue", "history", "playback", "catalogSource"]
-        try musicRequire(records.fields.allSatisfy { allowed.map(MusicModel.key).contains($0.0) }, .corruptDocument)
         library = records.contains(MusicModel.key("library")) ? records[MusicModel.key("library")] : MusicModel.library
         queue = records.contains(MusicModel.key("queue")) ? records[MusicModel.key("queue")] : MusicModel.queue
         playback = records.contains(MusicModel.key("playback")) ? records[MusicModel.key("playback")] : MusicModel.playback
         history = records.contains(MusicModel.key("history")) ? records[MusicModel.key("history")] : MusicModel.history
         catalogSource = records.contains(MusicModel.key("catalogSource")) ? records[MusicModel.key("catalogSource")] : MusicModel.catalogSource
-        try validate()
         if queue["runId"].string != runID { queue["history"] = .array([]); queue["failed"] = .array([]) }
         queue["runId"] = .string(runID)
         if playback["position"]["occurrenceId"] != queue["currentId"] { resetPosition() }
     }
     mutating func resetPosition() { playback["position"] = .obj([("occurrenceId", queue["currentId"]), ("seconds", .n(0))]) }
-    func validate() throws {
-        try musicRequire(library["schema"] == .n(2) && library["scope"].string == "device" && library["revision"].isInteger, .corruptDocument)
-        try MusicLibraryValidation.validate(library["library"], owner: "device")
-        _ = try MusicNativeSyncLedger.load(library)
+    func requireRevision(_ area: String) throws {
+        let value: MJ
+        switch area {
+        case "library": value = library
+        case "queue": value = queue
+        case "playback": value = playback
+        case "catalogSource": value = catalogSource
+        case "history": return
+        default: throw MusicServiceError.invalidRequest
+        }
+        try musicRequire(value["revision"].isInteger, .corruptDocument)
+        if area == "library" {
+            try musicRequire(library["schema"] == .n(2) && library["scope"].string == "device" &&
+                library["library"]["version"] == .n(2) && library["library"]["ownerId"].string == "device" &&
+                library["library"]["revision"].isInteger, .corruptDocument)
+        }
+    }
+    func requireQueue() throws {
         try musicRequire(queue["schema"] == .n(1) && queue["revision"].isInteger && queue["serial"].isInteger &&
                          queue["entries"].isArray, .corruptDocument)
         var seen = Set<String>(), serial = queue["serial"].int
@@ -49,60 +59,6 @@ struct MusicDocument {
                 $0.isString && seen.contains($0.string) && (key != "priority" || $0 != queue["currentId"])
             }, .corruptDocument)
         }
-        if queue["similar"] != .null {
-            try MusicNativeSimilarData.validateSession(queue["similar"], serial: queue["serial"].int, songs: library["library"]["songs"])
-        }
-        try musicRequire(playback["schema"] == .n(1) && playback["revision"].isInteger &&
-            playback["mode"].isInteger && MusicPlaybackMode(rawValue: playback["mode"].int) != nil &&
-            playback["lyricsEnabled"].isBool && playback["showTranslation"].isBool &&
-            playback["position"]["seconds"].isNumber && playback["position"]["seconds"].number.isFinite && playback["position"]["seconds"].number >= 0, .corruptDocument)
-        for (key, allowed) in [("qualityEnabled", MusicModel.qualityOrder), ("qualityOrder", MusicModel.qualityOrder),
-                              ("spatialEnabled", MusicModel.spatialOrder), ("spatialOrder", MusicModel.spatialOrder)] {
-            let value = playback["qualitySettings"][key]
-            if value != .null { try musicRequire(value.isArray && Set(value.strings).count == value.array.count && value.strings.allSatisfy(allowed.contains), .corruptDocument) }
-        }
-        if playback.contains("requestQuality") {
-            try musicRequire(MusicSourceQualityPolicy.qualities.contains(playback["requestQuality"].string), .corruptDocument)
-        }
-        if playback.contains("fmSelections") {
-            try musicRequire(playback["fmSelections"].isObject, .corruptDocument)
-            for (scope, value) in playback["fmSelections"].fields {
-                try musicRequire(!scope.isEmpty, .corruptDocument)
-                do {
-                    let action = try JSONDecoder().decode(MusicHomeAction.self, from: value.bytes)
-                    try musicRequire(action.isPersonalFM, .corruptDocument)
-                } catch { throw MusicServiceError.corruptDocument }
-            }
-        }
-        if playback.contains("sourceExclusions") {
-            try musicRequire(playback["sourceExclusions"].isArray, .corruptDocument)
-            for row in playback["sourceExclusions"].array {
-                try row.requireFields(["id", "songID", "title", "artist", "provider", "platform"],
-                                      required: ["id", "songID", "title", "artist", "provider", "platform"])
-                try musicRequire(UUID(uuidString: row["id"].string) != nil && !row["songID"].string.isEmpty &&
-                    !row["provider"].string.isEmpty && MusicModel.sites.contains(row["platform"].string), .corruptDocument)
-            }
-        }
-        if playback.contains("recordingSourceExclusions") {
-            try musicRequire(playback["recordingSourceExclusions"].isArray, .corruptDocument)
-            for row in playback["recordingSourceExclusions"].array {
-                let fields = ["id", "songID", "title", "artist", "platform", "sourceKey"]
-                try row.requireFields(fields, required: fields)
-                try musicRequire(fields.allSatisfy { row[$0].isString } &&
-                    UUID(uuidString: row["id"].string) != nil && !row["songID"].string.isEmpty &&
-                    !row["sourceKey"].string.isEmpty &&
-                    MusicModel.sites.contains(row["platform"].string), .corruptDocument)
-            }
-        }
-        let official = playback["officialSources"]
-        try musicRequire(official.isArray && official.array.allSatisfy(\.isString) &&
-            Set(official.strings).count == official.array.count &&
-            official.strings.allSatisfy { MusicAccountPlatform(rawValue: $0) != nil }, .corruptDocument)
-        try musicRequire(history["schema"] == .n(1) && history["playlists"].isArray && history["playlists"].array.count <= 5 &&
-                         history["days"].isArray && history["days"].array.count <= 7, .corruptDocument)
-        try catalogSource.requireFields(["schema", "revision", "platform"], required: ["schema", "revision", "platform"])
-        try musicRequire(catalogSource["schema"] == .n(1) && catalogSource["revision"].isInteger &&
-            catalogSource["platform"].isString && ["wy", "kg"].contains(catalogSource["platform"].string), .corruptDocument)
     }
     mutating func encode(changed: Set<String>) throws -> Data {
         var records = envelope["records"]
@@ -432,10 +388,11 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         let old: Data?
         do { old = try access.perform { try document.read() } } catch { throw MusicServiceError.sanitized(error) }
         var draft = try documentState(old)
+        for area in areas { try draft.requireRevision(area) }
         let original = draft
         let originalLibrary = draft.library
         let value = try change(&draft)
-        try draft.validate(); try check()
+        try check()
         var changed = areas
         if draft.library != originalLibrary { changed.insert("library") }
         changed = changed.filter { area in
@@ -449,6 +406,8 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
             }
         }
         if changed.isEmpty { return value }
+        for area in changed { try draft.requireRevision(area) }
+        if changed.contains("queue") { try draft.requireQueue() }
         let bytes = try draft.encode(changed: changed)
         do { try access.perform { try document.compareAndSwap(expected: old, replacement: bytes) } }
         catch let e as MusicServiceError { throw e }
@@ -513,7 +472,10 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         switch ref.kind {
         case .library: return try repositorySong(ref.id, state)
         case .queue:
-            guard let row = state.queue["entries"].array.first(where: { $0["id"].string == ref.id }) else { throw MusicServiceError.notFound }
+            try musicRequire(state.queue["entries"].isArray, .corruptDocument)
+            let rows = state.queue["entries"].array.filter { $0["id"].string == ref.id }
+            guard let row = rows.first else { throw MusicServiceError.notFound }
+            try musicRequire(rows.count == 1, .corruptDocument)
             return try entrySong(row, state)
         }
     }

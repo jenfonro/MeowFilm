@@ -12,6 +12,7 @@ final class AetherPlaybackVideoDecoderAdapter: PlaybackVideoDecoding {
     var output: any PlaybackVideoOutput { session }
     var position: Double { session.position }
     var duration: Double? { session.duration }
+    var seekable: Bool { session.seekable }
     var chapters: [PlaybackVideoChapter] {
         session.chapters.map { PlaybackVideoChapter(title: $0.title, start: $0.start, end: $0.end) }
     }

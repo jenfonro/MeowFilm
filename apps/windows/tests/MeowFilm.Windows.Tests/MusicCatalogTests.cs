@@ -174,13 +174,17 @@ public static partial class MusicCatalogTests
         yield return Case("catalog song menu captures its row and keeps section playback and discovery actions", async () =>
         {
             await using var f = await Fixture.Create(); await f.SetupSource();
+            var songs = (await f.Rpc("music.catalog.playlist",
+                new { platform = "wy", id = "500", page = 1, limit = 3 })).GetProperty("items");
+            f.Client.Transform("music.catalog.home", reply => Edit(reply, page =>
+                page["sections"]!.AsArray().Add(JsonSerializer.SerializeToNode(new {
+                    id = "menu-song-section", title = "菜单歌曲栏目", type = "songs", items = songs
+                }))));
             await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization;
             await f.Module.CatalogEntryInitialization;
-            var cards = Enumerable.Range(1001, 3).Select(id => new MusicCatalogCard(id.ToString(), "歌曲" + id,
-                "歌手", "", "song", "wy", SongRow.Read(MusicSongFixture.Element(MusicSongFixture.Online("wy", id.ToString()))),
-                ActionId: id.ToString())).ToArray();
-            f.Module.CatalogSections.Add(new MusicCatalogSection("菜单歌曲栏目", cards, Id: "menu-song-section", Type: "songs"));
-            foreach (var item in cards) f.Module.Songs.Add(item.Song!);
+            var cards = f.Module.CatalogSections.Single(section => section.Id == "menu-song-section").Items.ToArray();
+            Equal(3, cards.Length);
+            True(cards.All(item => item.Song is { Id.Length: > 0 }), "menu songs retain actual repository identities");
             var card = cards[1]; f.Module.SelectedSong = cards[0].Song;
             var view = new MusicCatalogView { DataContext = f.Module };
             var row = (FrameworkElement)((DataTemplate)view.FindResource("Catalog.SongRow")).LoadContent();
@@ -1302,7 +1306,8 @@ public static partial class MusicCatalogTests
             await f.Configure(new { artistPages = 3 });
             await f.Module.NavigateAsync("catalog-channels", default);
             await f.Module.OpenCatalogCardAsync(f.Module.ChannelTabs.Single(card => card.ActionId == "artist"));
-            await f.Module.CatalogTagAsync(f.Module.CatalogTags.Single(tag => tag.Group == "area" && tag.Name == "欧美"));
+            await f.Module.CatalogTagAsync(f.Module.CatalogTags.Single(tag => tag.Group == "area" && tag.Id == "96:-1:-1"));
+            Equal("96:-1:-1", f.Client.Last("music.catalog.channel").GetProperty("tag").GetString());
             await f.Module.CatalogPageAsync(1);
             Equal("第 2 页", f.Module.CatalogPageText);
             Equal(80, f.Module.CatalogSections.Single().Items.Count);
@@ -1972,13 +1977,13 @@ public static partial class MusicCatalogTests
             }
             finally { window.Content = null; window.Close(); }
         });
-        yield return Case("entry presentation DTO is strict while ordinary cards remain static", async () =>
+        yield return Case("entry presentation consumes known values and defaults missing or unknown values", async () =>
         {
             var ordinaryReply = JsonSerializer.SerializeToElement(new { platform = "wy", sections = new[] {
                 new { id = "section", title = "普通栏目", type = "playlists", items = new[] {
                     new { id = "1", name = "普通歌单", kind = "playlist", presentation = "preview",
                         action = new { type = "playlist", id = "1" } } } } } });
-            Equal(MusicCatalogEntryPresentation.Static,
+            Equal(MusicCatalogEntryPresentation.Preview,
                 MusicCatalogDto.Read(ordinaryReply, "wy", "home", "").Single().Items.Single().Presentation);
 
             await using var f = await Fixture.Create();
@@ -1987,20 +1992,16 @@ public static partial class MusicCatalogTests
             Equal(MusicCatalogEntryPresentation.Static, nested.Presentation);
             var song = nested.Song!.Raw;
 
-            void Rejected(JsonElement reply)
-            {
-                try { _ = MusicCatalogDto.Read(reply, "wy", "home", ""); }
-                catch (MusicOperationException error) when (error.Code == "INVALID_RESPONSE") { return; }
-                throw new InvalidOperationException("entry presentation contract accepted an invalid DTO");
-            }
-            Rejected(JsonSerializer.SerializeToElement(new { platform = "wy", entries = new[] {
+            void DefaultPresentation(JsonElement reply) => Equal(MusicCatalogEntryPresentation.Static,
+                MusicCatalogDto.Read(reply, "wy", "home", "").Single().Items.Single().Presentation);
+            DefaultPresentation(JsonSerializer.SerializeToElement(new { platform = "wy", entries = new[] {
                 new { id = "1", name = "缺失展示类型", action = new { type = "playlist", id = "1" } } } }));
-            Rejected(JsonSerializer.SerializeToElement(new { platform = "wy", entries = new[] {
+            DefaultPresentation(JsonSerializer.SerializeToElement(new { platform = "wy", entries = new[] {
                 new { song, presentation = "Preview" } } }));
-            Rejected(JsonSerializer.SerializeToElement(new { platform = "wy", sections = new[] {
+            DefaultPresentation(JsonSerializer.SerializeToElement(new { platform = "wy", sections = new[] {
                 new { id = "entries", type = "entries", items = new[] {
                     new { id = "1", name = "分组缺失展示类型", action = new { type = "playlist", id = "1" } } } } } }));
-            Rejected(JsonSerializer.SerializeToElement(new { platform = "wy", sections = new[] {
+            DefaultPresentation(JsonSerializer.SerializeToElement(new { platform = "wy", sections = new[] {
                 new { id = "entries", type = "entries", items = new[] {
                     new { id = "1", name = "分组展示类型错误", presentation = "Preview",
                         action = new { type = "playlist", id = "1" } } } } } }));
@@ -2012,12 +2013,21 @@ public static partial class MusicCatalogTests
         yield return Case("home nested songs and unavailable actions use actual provider DTO", async () =>
         {
             await using var f = await Fixture.Create();
+            await f.Configure(new { homePages = 1 });
+            f.Client.Transform("music.catalog.home", reply => Edit(reply, page =>
+            {
+                var entries = page["sections"]!.AsArray().Single(section =>
+                    section!["id"]!.GetValue<string>() == "ENTRANCE")!["items"]!.AsArray();
+                entries.Single(entry => entry?["kind"]?.GetValue<string>() == "daily")!["display"] = true;
+            }));
             await f.Module.NavigateAsync("catalog-home", default);
             var cards = f.Module.CatalogSections.SelectMany(s => s.Items).ToArray();
             var song = cards.Single(c => c.Song is not null);
             Equal("1001", MusicSongFixture.NativeId(song.Song!.Raw));
             True(song.Id != song.ActionId && song.ActionId == "1001", "domain identity not upstream locator");
             var daily = cards.Single(c => c.Kind == "daily");
+            True(daily.Display && daily.RequiresAccount && f.Module.HomeSections.SelectMany(section => section.Items)
+                .Any(card => ReferenceEquals(card, daily)), "the unavailable action is part of the actual displayed home");
             True(!daily.CanOpen && !daily.CanPlay, "unavailable content is not fake clickable");
             var count = f.Client.Log.Count;
             var status = f.Module.Status;
@@ -2625,7 +2635,15 @@ public static partial class MusicCatalogTests
             const string publicCover = "https://art.example.test/public-playlist.jpg";
             const string privateCover = "https://art.example.test/private-daily.jpg";
             await using var f = await Fixture.Create();
+            JsonElement reply = default;
+            f.Client.Transform("music.catalog.home", value => { reply = value; return value; });
             await f.Module.NavigateAsync("catalog-home", default);
+            var daily = reply.GetProperty("sections").EnumerateArray()
+                .SelectMany(section => section.GetProperty("items").EnumerateArray())
+                .Single(item => MusicCatalogDto.Text(item, "kind") == "daily");
+            True(daily.GetProperty("requiresAccount").GetBoolean() && !daily.GetProperty("display").GetBoolean() &&
+                !daily.GetProperty("available").GetBoolean() && daily.GetProperty("cover").GetString() == privateCover &&
+                daily.GetProperty("errorCode").GetString() == "AUTH_REQUIRED", "provider account and action denial remain intact");
             var view = new MusicCatalogView { DataContext = f.Module };
             var loader = new CatalogArtworkLoader();
             ArtworkScope.SetLoader(view, loader);
@@ -2638,11 +2656,12 @@ public static partial class MusicCatalogTests
                 var buttons = Descendants<Button>(view).ToArray();
                 True(!buttons.Any(b => b.Tag is MusicCatalogCard { Kind: "daily" }), "login-only entry not rendered");
                 True(!Descendants<TextBlock>(view).Any(t => t.Text == "当前内容需要平台登录"), "no login warning tiles");
-                True(f.Module.CatalogSections.SelectMany(s => s.Items).Any(c =>
-                    c.Kind == "daily" && c.Cover == privateCover && !c.CanOpen), "capability and action denial remain intact");
+                True(!f.Module.CatalogSections.SelectMany(s => s.Items).Any(c => c.Kind == "daily"),
+                    "hidden account entries are not materialized as actionable cards");
                 True(buttons.Any(b => b.Tag is MusicCatalogCard { Song: not null } && b.IsEnabled), "nested song actual WPF card enabled");
                 True(!loader.Addresses.Contains(privateCover), "hidden account artwork is never requested");
                 Equal(0, f.Client.Count("music.catalog.playlist"));
+                Equal(0, f.Client.Count("music.catalog.daily"));
             }
             finally { window.Close(); }
         });
@@ -2728,9 +2747,12 @@ public static partial class MusicCatalogTests
                     }
                 }
             });
-            var action = MusicCatalogDto.Read(reply, "wy", "home", "").Single().Action!;
-            True(action.RequiresAccount && !action.Display && !action.Available &&
-                action.ErrorCode == "AUTH_REQUIRED", "section action display and account admission survive DTO projection");
+            Equal(0, MusicCatalogDto.Read(reply, "wy", "home", "").Count);
+            var visible = Edit(reply, page => page["sections"]![0]!["display"] = true);
+            var action = MusicCatalogDto.Read(visible, "wy", "home", "").Single().Action!;
+            True(action.RequiresAccount && action.Display && !action.Available &&
+                !action.CanOpen && !action.CanPlay && action.ErrorCode == "AUTH_REQUIRED",
+                "section action display and account admission survive DTO projection");
 
         });
     }
@@ -3116,11 +3138,12 @@ public static partial class MusicCatalogTests
             {
                 if (Text("kind") == "playlists")
                 {
-                    int first = (Integer("page", 1) - 1) * Integer("limit", 30), all = Number("searchPlaylistTotal", 1);
-                    int count = Math.Min(Integer("limit", 30), Math.Max(0, all - first));
+                    int current = Integer("page", 1), pages = Integer("pages", 1);
+                    int first = (current - 1) * Integer("limit", 30), all = Number("searchPlaylistTotal", 1);
+                    int count = Math.Min(Integer("limit", 30) * pages, Math.Max(0, all - first));
                     result = new { platform, kind = "playlists", items = Enumerable.Range(500 + first, count)
                         .Select(id => Playlist(platform, id.ToString(), cover: "https://art.example.test/search-playlist.jpg")).ToArray(),
-                        more = first + count < all, continuation = first + count < all ? new { offset = first + count } : null };
+                        more = first + count < all, continuation = first + count < all ? new { page = current + pages } : null };
                 }
                 else result = new { platform, kind = "songs", items = new[] { Track(platform, 1001) }, more = false, continuation = (object?)null };
             }
@@ -3176,10 +3199,16 @@ public static partial class MusicCatalogTests
             }
             else if (operation == "home")
             {
-                if (Number("homeFailure") != 0) throw new MeowFilm.Capabilities.Platforms.MusicPlatformException("UPSTREAM_ERROR");
+                if (Number("homeFailure") != 0) throw new MeowFilm.Capabilities.Platforms.MusicPlatformException(
+                    Number("homeFailure") == 401 ? "AUTH_REQUIRED" : "UPSTREAM_ERROR");
                 int cursor = Cursor("cursor");
                 var entries = new List<object>();
-                if (Number("detailLimit") > 0) entries.Add(Playlist(platform, (600 + cursor).ToString(), "入口歌单"));
+                if (Number("detailLimit") > 0)
+                {
+                    var entry = JsonSerializer.SerializeToNode(Playlist(platform, (600 + cursor).ToString(), "入口歌单"))!.AsObject();
+                    entry["presentation"] = "preview";
+                    entries.Add(entry);
+                }
                 entries.Add(new { id = "daily", name = "每日推荐", kind = "daily", cover = "https://art.example.test/private-daily.jpg",
                     action = new { type = "daily", branch = "default" }, presentation = "preview", requiresAccount = true, display = false, available = false, errorCode = "AUTH_REQUIRED" });
                 entries.Add(new { song = Track(platform, 1001 + cursor), action = new { type = "song", id = (1001 + cursor).ToString() } });

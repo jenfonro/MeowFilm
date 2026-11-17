@@ -3,6 +3,8 @@ import { request as httpsRequest } from 'node:https';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createHash } from 'node:crypto';
+import { stringifyJSONValue, cloneJSONValue } from '@meowfilm/runtime-bridge/json';
+import { decodeJSONValue } from '@meowfilm/runtime-bridge';
 import { isDeepStrictEqual } from 'node:util';
 import { readFileSync, existsSync, mkdirSync, statSync, rmSync } from 'node:fs';
 import { resolve, join, isAbsolute } from 'node:path';
@@ -192,7 +194,7 @@ export class CatRuntime {
       },
       processWorkerResult: (method, value, session) => {
         if (method !== 'invoke' && method !== 'enhanceM3U8') return undefined;
-        const result = clone(value?.result);
+        const result = cloneJSONValue(value?.result);
         if (Array.isArray(value?.newProxies))
           this.registerProxyMappings(session, value.newProxies);
         // The worker's structured boundary cannot carry the ownership Symbol.
@@ -273,15 +275,8 @@ export class CatRuntime {
     mapped.username = url.username; mapped.password = url.password;
     return mapped.href;
   }
-  workerSettings(installationId, next = this.settings.value) {
-    const settings = clone(next), spec = this.candidateSpecs.get(installationId);
-    if (spec) settings.scripts = [...settings.scripts.filter(script =>
-      script.installationId !== installationId), clone(spec)];
-    if (this.configuration) settings.scripts = settings.scripts.map(script => {
-      const { localPath, localHash, inputIdentity, loadedIdentity, inputRevision, ...publicSettings } = script;
-      return publicSettings;
-    });
-    return settings;
+  workerSettings(_installationId, next = this.settings.value) {
+    return cloneJSONValue({ providers: next.providers, mappings: next.mappings });
   }
   publishSettingsSnapshot(next) {
     const aggregate = { port: this.aggregatePort };
@@ -299,6 +294,7 @@ export class CatRuntime {
     return this.limits?.[name] ?? this.host.limits[name];
   }
   sourcePath(sourceHash) {
+    requireValue(typeof sourceHash === 'string' && /^[a-f0-9]{64}$/.test(sourceHash), 'CORRUPT_STORAGE');
     return join(this.sourcesRoot, sourceHash + '.js');
   }
   readSource(sourceHash) {
@@ -326,6 +322,12 @@ export class CatRuntime {
   }
   async apply(next, { background = false, only = null, signal } = {}) {
     requireValue(!signal?.aborted, 'CANCELLED');
+    const identities = new Set();
+    for (const spec of next.scripts) {
+      identifier(spec?.installationId);
+      requireValue(!identities.has(spec.installationId), 'CORRUPT_STORAGE');
+      identities.add(spec.installationId);
+    }
     const previous = this.settings.value.scripts;
     await this.configureGateway();
     requireValue(!this.closed, 'HOST_CLOSED');
@@ -403,6 +405,7 @@ export class CatRuntime {
     this.settled.delete(id);
     this.candidateSpecs.set(id, spec);
     try {
+      requireValue(typeof spec.enabled === 'boolean', 'CORRUPT_STORAGE');
       // Refresh/restart use the current file after the old owner exits. They
       // do not have the source rollback transaction used by an explicit update.
       await this.stopInstance(id);
@@ -437,9 +440,13 @@ export class CatRuntime {
     }
   }
   configuredSource(spec, signal) {
-    if (spec.sourceType === 'network') return this.downloadSource(spec.sourceUrl, signal);
+    requireValue(Number.isSafeInteger(spec.inputRevision) && spec.inputRevision > 0, 'CORRUPT_STORAGE');
+    if (spec.sourceType === 'network') return this.downloadSource(catSourceURL(spec.sourceUrl), signal);
+    requireValue(spec.sourceType === 'local', 'CORRUPT_STORAGE');
+    requireValue(typeof spec.localHash === 'string' && /^[a-f0-9]{64}$/.test(spec.localHash), 'CORRUPT_STORAGE');
     if (spec.localPath === null) return Promise.resolve(this.readSource(spec.localHash));
     try {
+      requireValue(typeof spec.localPath === 'string' && isAbsolute(spec.localPath) && !/[\u0000-\u001f]/.test(spec.localPath), 'CORRUPT_STORAGE');
       const state = statSync(spec.localPath);
       requireValue(state.isFile() && state.size <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
       const bytes = readFileSync(spec.localPath);
@@ -672,7 +679,7 @@ export class CatRuntime {
     requireValue(proposal.version === undefined || typeof proposal.version === 'string' &&
       proposal.version.length > 0 && proposal.version.length <= 128);
     requireValue(proposal.sourceType === undefined || ['local', 'network'].includes(proposal.sourceType));
-    const spec = { installationId: proposal.installationId,
+    const spec = { ...previous, installationId: proposal.installationId,
       config: proposal.config ?? previous?.config ?? {},
       version: proposal.version ?? previous?.version ?? '0.0.0',
       enabled: proposal.enabled ?? previous?.enabled ?? true,
@@ -701,7 +708,8 @@ export class CatRuntime {
     return bytes;
   }
   async install(input, { signal } = {}) {
-    const proposal = clone(input);
+    const proposal = clone({ ...input, config: undefined });
+    if (input.config !== undefined) proposal.config = cloneJSONValue(input.config);
     identifier(proposal.installationId);
     requireValue(typeof proposal.source === 'string');
     requireValue(signal === undefined || signal instanceof AbortSignal);
@@ -715,7 +723,8 @@ export class CatRuntime {
       task => this.replaceSource(proposal, task, { bytes }), 'STALE_SESSION');
   }
   async import(input, { signal } = {}) {
-    const proposal = clone(input);
+    const proposal = clone({ ...input, config: undefined });
+    if (input.config !== undefined) proposal.config = cloneJSONValue(input.config);
     catName(proposal.name); catSourceURL(proposal.sourceUrl);
     requireValue(proposal.enabled === undefined || typeof proposal.enabled === 'boolean');
     return this.manage(proposal.installationId, signal, (task, prepared) => {
@@ -1015,7 +1024,7 @@ export class CatRuntime {
       sourceHash: status === 'starting' ? spec?.sourceHash ?? null
         : state?.contentHash ?? spec?.sourceHash ?? null,
       error: failure ?? state?.lastFailure ?? null,
-      sites: clone(status === 'ready' ? this.hostSites(installationId) : spec?.sites ?? []),
+      sites: cloneJSONValue(status === 'ready' ? this.hostSites(installationId) : spec?.sites ?? []),
       ...(this.configuration ? { inputRevision: spec?.inputRevision ?? 0 } : {}),
       ...(status === 'ready' && snapshot ? {
         ...(snapshot.endpoint ? { managementUrl: snapshot.endpoint.managementUrl } : {}),
@@ -1098,6 +1107,7 @@ export class CatRuntime {
         ...this.replacements])].map(id => this.instance(id)) };
   }
   async listen(port) {
+    requireValue(Number.isInteger(port) && port >= 0 && port <= 65535, 'CORRUPT_STORAGE');
     const ownerRef = new WeakRef(this);
     const server = createServer((request, response) => {
       const owner = ownerRef.deref();
@@ -1181,7 +1191,9 @@ export class CatRuntime {
     if (request.headers['access-control-request-private-network'] === 'true') {
       response.setHeader('Access-Control-Allow-Private-Network', 'true');
     }
-    if (request.method === 'OPTIONS') { response.writeHead(204); response.end(); return; }
+    if (request.method === 'OPTIONS' && request.headers['access-control-request-method']) {
+      response.writeHead(204); response.end(); return;
+    }
     const origin = `http://127.0.0.1:${this.server.address().port}`;
     const url = new URL(request.url, origin), parts = url.pathname.split('/').filter(Boolean);
     if (parts[0] === 'proxy') return this.forwardProxy(request, response, url, parts);
@@ -1212,7 +1224,7 @@ export class CatRuntime {
       try {
         if (chunks.length) {
           combined = Buffer.concat(chunks);
-          payload = JSON.parse(combined);
+          payload = decodeJSONValue(combined);
         } else payload = Object.fromEntries(url.searchParams);
       }
       catch { throw fault('INVALID_JSON'); }
@@ -1222,7 +1234,7 @@ export class CatRuntime {
       }
       const result = await this.invoke({ installationId, siteId, operation, payload }, { signal: scope.signal });
       response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      response.end(typeof result === 'string' ? result : JSON.stringify(result));
+      response.end(typeof result === 'string' ? result : stringifyJSONValue(result));
     } catch (error) { failure = error; }
     for (const chunk of chunks) {
       try { chunk.fill(0); } catch (error) { failure ??= error; }

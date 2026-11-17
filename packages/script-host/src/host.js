@@ -1,5 +1,10 @@
+import { cloneJSONValue as copyJSON } from '@meowfilm/runtime-bridge/json';
 import { createHash } from 'node:crypto';
 import { clone, fault, identifier, requireValue, safeError } from './errors.js';
+
+function cloneJSONValue(value) {
+  try { return copyJSON(value); } catch { throw fault('INVALID_ARGUMENT'); }
+}
 
 /** Source and stack contracts shared by every protocol. */
 export const SCRIPT_LIMITS = Object.freeze({
@@ -53,15 +58,12 @@ function revision(spec, base, maxSourceBytes = SCRIPT_LIMITS.maxSourceBytes) {
   requireValue(Buffer.byteLength(source, 'utf8') <= maxSourceBytes, 'RESOURCE_LIMIT');
   requireValue(typeof version === 'string' && version.length > 0 && version.length <= 128);
   identifier(protocol);
-  const config = clone(spec.config ?? base?.config ?? {});
-  const metadata = clone(spec.metadata ?? base?.metadata ?? {});
-  const protocolOptions = clone(spec.protocolOptions ?? base?.protocolOptions ?? {});
+  const config = cloneJSONValue(spec.config ?? base?.config ?? {});
+  const metadata = cloneJSONValue(spec.metadata ?? base?.metadata ?? {});
+  const protocolOptions = cloneJSONValue(spec.protocolOptions ?? base?.protocolOptions ?? {});
   requireValue(config && typeof config === 'object' && !Array.isArray(config));
   requireValue(metadata && typeof metadata === 'object' && !Array.isArray(metadata));
   requireValue(protocolOptions && typeof protocolOptions === 'object' && !Array.isArray(protocolOptions));
-  // Configuration is a JSON public contract; no functions, cycles or binary handles.
-  let json;
-  try { json = JSON.stringify(config); } catch { throw fault('INVALID_ARGUMENT'); }
   // Trusted composition can reuse the hash already computed for a complete
   // source upload. This field is not accepted by the public HTTP methods.
   requireValue(spec.contentHash === undefined ||
@@ -70,7 +72,7 @@ function revision(spec, base, maxSourceBytes = SCRIPT_LIMITS.maxSourceBytes) {
     source, version, protocol,
     hash: spec.contentHash ?? (source === base?.source ? base.hash
       : createHash('sha256').update(source).digest('hex')),
-    config: JSON.parse(json), metadata, protocolOptions,
+    config, metadata, protocolOptions,
     permissions: permissions(spec.permissions ?? base?.permissions),
   };
 }
@@ -399,7 +401,9 @@ export class ScriptHost {
     requireValue(signal === undefined || signal instanceof AbortSignal);
     requireValue(!signal?.aborted, 'CANCELLED');
     // Capture the proposal at call time, not after another lifecycle operation.
-    const proposal = clone(spec);
+    const proposal = clone({ ...spec, config: undefined, metadata: undefined, protocolOptions: undefined });
+    for (const key of ['config', 'metadata', 'protocolOptions'])
+      if (spec[key] !== undefined) proposal[key] = cloneJSONValue(spec[key]);
     identifier(id);
     const current = this.#records.get(id);
     if (current) {
@@ -479,7 +483,8 @@ export class ScriptHost {
     const release = this.#reserveRequest();
     try {
       return await record.session.invoke({
-        siteId: target.siteId, operation: target.operation, payload: clone(target.payload ?? {}),
+        siteId: target.siteId, operation: target.operation,
+        payload: record.revision.protocol === 'cat' ? cloneJSONValue(target.payload ?? {}) : clone(target.payload ?? {}),
       }, { signal, timeoutMs });
     } finally { release(); }
   }

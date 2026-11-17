@@ -4,6 +4,29 @@ import MeowRuntime
 
 @MainActor
 final class PanAccountsModelTests: XCTestCase {
+    func testCorruptRowHasExplicitStatusWhileHealthySiblingRemainsEditable() throws {
+        let runtime = try PanTestRuntime()
+        try runtime.storage.seed(.baidu, credentials: .object(["cookie": .number(1)]))
+        let model = PanAccountsModel(service: runtime.service)
+        model.start()
+        defer { model.close() }
+        XCTAssertEqual(model.rows.count, 7)
+        XCTAssertEqual(model.rows[0].account?.errorCode, .corruptStorage)
+        XCTAssertEqual(model.rows[0].statusTitle, "账号数据损坏")
+        XCTAssertEqual(model.rows[0].actions, [])
+        XCTAssertNil(model.refresh(.baidu)); XCTAssertNil(model.openLogin(.baidu))
+        XCTAssertNil(model.notice)
+        let login = try XCTUnwrap(model.openLogin(.uc))
+        login.selectMethod(.manual); login.setVisible(true)
+        login.draft = ["cookie": "synthetic-healthy"]
+        login.save()
+        XCTAssertTrue(login.saved)
+        XCTAssertEqual(model.rows[2].statusTitle, "未验证")
+        XCTAssertEqual(model.rows[2].account?.revision, 1)
+        XCTAssertEqual(model.rows[0].account?.errorCode, .corruptStorage)
+        XCTAssertEqual(try runtime.storage.credentials(.baidu), .object(["cookie": .number(1)]))
+    }
+
     func testEntryReadsAllProvidersLocallyWithoutLoadingOrAutomaticValidation() async throws {
         let runtime = try PanTestRuntime()
         try await runtime.setAccount(.baidu, status: .signedIn)
@@ -150,7 +173,7 @@ final class PanAccountsModelTests: XCTestCase {
         owner.logout(.tianyi)
         XCTAssertEqual(owner.rows[3].account?.status, .signedOut)
         XCTAssertEqual(owner.rows[3].account?.revision, 2)
-        XCTAssertFalse(owner.rows[3].account!.configured)
+        XCTAssertEqual(owner.rows[3].account?.configured, false)
         XCTAssertEqual(owner.rows[3].account?.fields, [])
         XCTAssertEqual(try runtime.storage.credentials(.tianyi), .object([:]))
         let next = try XCTUnwrap(owner.openLogin(.tianyi))
@@ -193,7 +216,7 @@ final class PanAccountsModelTests: XCTestCase {
         owner.logout(.tianyi)
         XCTAssertEqual(owner.rows[3].account?.revision, 5)
         XCTAssertEqual(owner.rows[3].account?.status, .unverified)
-        XCTAssertTrue(owner.rows[3].account!.configured)
+        XCTAssertEqual(owner.rows[3].account?.configured, true)
         XCTAssertEqual(owner.notice?.message, "网盘账号保存失败")
         XCTAssertFalse(owner.rows[3].busy)
         runtime.storage.committer.fail(false)

@@ -136,6 +136,19 @@ test('unique chapter URL takes precedence over a renamed title', () => {
   { index: 0, requiresSelection: false });
 });
 
+test('chapter matching isolates unusable entries and keeps original indices and ambiguity', () => {
+  const chapters = [null, {}, false, { name: 'B', chapterUrl: '/b' }, []];
+  assert.deepEqual(process({ operation: 'matchChapter', chapters, anchor: { chapterUrl: '/b' } }),
+    { index: 3, requiresSelection: false });
+  assert.deepEqual(process({ operation: 'matchChapter',
+    chapters: [...chapters, { name: 'B', chapterUrl: '/b' }], anchor: { chapterUrl: '/b', chapterTitle: 'B' } }),
+  { index: null, requiresSelection: true });
+  for (const chapters of [[null], [null, {}, [], false]]) {
+    assert.throws(() => process({ operation: 'matchChapter', chapters, anchor: {} }), /INVALID_CHAPTER/);
+  }
+  assert.throws(() => process({ operation: 'matchChapter', chapters: {}, anchor: {} }), /INVALID_CHAPTERS/);
+});
+
 test('duplicate titles, missing chapter and volume-only match require explicit selection', () => {
   for (const chapters of [
     [{ name: '序章' }, { name: '序章' }], [], [{ name: '序章', isVolume: true }],
@@ -239,6 +252,14 @@ test('invalid enabled rule fails the operation rather than returning a partial c
   assert.throws(() => transform({ rules: [rule({}), rule({ pattern: '[', isRegex: true })] }), /INVALID_RULE/);
 });
 
+test('title-only cleanup preserves unused blocks and actual text consumers still fail', () => {
+  const blocks = [null, { type: 'text', text: { unavailable: true }, extra: 3 }];
+  const titleOnly = rule({ scopeTitle: true, scopeContent: false });
+  assert.deepEqual(transform({ blocks, rules: [titleOnly] }), { title: '·雨夜来信', blocks });
+  assert.deepEqual(transform({ blocks, rules: [rule({ scope: 'other book' })] }).blocks, blocks);
+  assert.throws(() => transform({ blocks, rules: [rule({})] }), /INVALID_BLOCK/);
+  assert.throws(() => transform({ blocks, conversion: 'traditional' }), /INVALID_BLOCK/);
+});
 test('expired rule rejects a late result rather than reporting successful purification', () => {
   let tick = 0;
   assert.throws(() => process({

@@ -42,6 +42,7 @@ public protocol PlaybackVideoDecoding: AnyObject {
     var output: any PlaybackVideoOutput { get }
     var position: Double { get }
     var duration: Double? { get }
+    var seekable: Bool { get }
     var onFailure: (@MainActor (Error) -> Void)? { get set }
     var onProgress: (@MainActor (Double) -> Void)? { get set }
     var onTransportRate: (@MainActor (Float) -> Void)? { get set }

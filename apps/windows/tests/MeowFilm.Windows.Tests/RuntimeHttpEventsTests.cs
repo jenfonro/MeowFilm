@@ -185,6 +185,8 @@ public static class RuntimeHttpEventsTests
             ("missing identity", 200, "text/event-stream", null, FrameWithJson(0, "{}")),
             ("wrong session", 200, "text/event-stream", null, FrameWithJson(0, $"{{\"sessionId\":\"{OtherSession}\",\"sequence\":0}}")),
             ("wrong sequence", 200, "text/event-stream", null, FrameWithJson(1, $"{{\"sessionId\":\"{BusinessSession:D}\",\"sequence\":0}}")),
+            ("rounded sequence", 200, "text/event-stream", null, FrameWithJson(1, $"{{\"sessionId\":\"{BusinessSession:D}\",\"sequence\":1.00000000000000001}}")),
+            ("duplicate sequence", 200, "text/event-stream", null, FrameWithJson(1, $"{{\"sessionId\":\"{BusinessSession:D}\",\"sequence\":0,\"sequence\":1}}")),
             ("invalid JSON", 200, "text/event-stream", null, FrameWithJson(0, "{private-wire}")),
             ("unsafe id", 200, "text/event-stream", null, "id: 9007199254740992\n"u8.ToArray()),
             ("negative id", 200, "text/event-stream", null, "id: -1\n"u8.ToArray()),

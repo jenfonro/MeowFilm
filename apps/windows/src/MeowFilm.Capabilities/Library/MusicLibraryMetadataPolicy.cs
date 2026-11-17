@@ -6,9 +6,15 @@ public sealed partial class MusicLibraryOwner
 {
     private const string MetadataPolicyArea = "native-metadata-policy";
     internal static readonly string[] MetadataPlatforms = ["wy", "tx", "kg", "kw", "mg"];
-    private JsonObject MetadataPolicy(JsonObject doc) => Value(doc, MetadataPolicyArea) as JsonObject ??
+    private JsonObject MetadataPolicy(JsonObject doc)
+    {
+        var value = Area(doc, MetadataPolicyArea) ??
         LJ.Obj(("schema", 1), ("revision", 0), ("platforms", LJ.Arr(MetadataPlatforms)),
             ("enabled", LJ.Arr(MetadataPlatforms)));
+        try { ValidateMetadataPolicy(value); }
+        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
+        return value;
+    }
 
     private static void ValidateMetadataPolicy(JsonObject policy)
     {
@@ -31,7 +37,6 @@ public sealed partial class MusicLibraryOwner
         var policy = MetadataPolicy(doc);
         if (method == "music.metadata.settings.get")
         {
-            LJ.Fields(p, "");
             return (LJ.Obj(("settings", policy)), false);
         }
         LJ.Require(method == "music.metadata.settings.save", "CAPABILITY_UNAVAILABLE");

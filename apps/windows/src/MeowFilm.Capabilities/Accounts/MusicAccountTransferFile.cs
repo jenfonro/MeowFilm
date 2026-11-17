@@ -60,7 +60,7 @@ public sealed class MusicAccountTransferFile : IDisposable
             int offset = bytes.AsSpan().StartsWith(new byte[] { 0xef, 0xbb, 0xbf }) ? 3 : 0;
             using var document = JsonDocument.Parse(bytes.AsMemory(offset));
             var root = document.RootElement;
-            AccountRules.Fields(root, ["format", "version", "accounts"], ["format", "version", "accounts"], "TRANSFER_FORMAT");
+            AccountRules.Required(root, ["format", "version", "accounts"], "TRANSFER_FORMAT");
             AccountRules.Require(root.GetProperty("format").ValueKind == JsonValueKind.String &&
                 root.GetProperty("format").GetString() == "meowfilm.music-accounts" &&
                 root.GetProperty("version").ValueKind == JsonValueKind.Number &&
@@ -71,7 +71,7 @@ public sealed class MusicAccountTransferFile : IDisposable
             var result = new List<TransferEntry>();
             foreach (var row in rows.EnumerateArray())
             {
-                AccountRules.Fields(row, ["platform", "userId", "credentials"], ["platform", "userId", "credentials"], "TRANSFER_FORMAT");
+                AccountRules.Required(row, ["platform", "userId", "credentials"], "TRANSFER_FORMAT");
                 AccountRules.Require(row.GetProperty("platform").ValueKind == JsonValueKind.String &&
                     row.GetProperty("userId").ValueKind == JsonValueKind.String, "TRANSFER_FORMAT");
                 string platform = row.GetProperty("platform").GetString()!;
@@ -80,8 +80,9 @@ public sealed class MusicAccountTransferFile : IDisposable
                 AccountRules.Require(credentials.ValueKind == JsonValueKind.Object, "TRANSFER_FORMAT");
                 var parts = new Dictionary<string, string>(StringComparer.Ordinal);
                 foreach (var field in credentials.EnumerateObject())
-                    AccountRules.Require(field.Value.ValueKind == JsonValueKind.String &&
-                        parts.TryAdd(field.Name, field.Value.GetString()!), "TRANSFER_FORMAT");
+                    if (MusicAccountTransferCredentials.Consumed(platform, field.Name))
+                        AccountRules.Require(field.Value.ValueKind == JsonValueKind.String &&
+                            parts.TryAdd(field.Name, field.Value.GetString()!), "TRANSFER_FORMAT");
                 result.Add(new(platform, row.GetProperty("userId").GetString()!, parts));
             }
             return result.OrderBy(row => Array.IndexOf(AccountRules.Platforms, row.Platform)).ToList();

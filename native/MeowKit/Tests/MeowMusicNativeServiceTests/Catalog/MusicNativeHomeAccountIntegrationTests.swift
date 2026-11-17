@@ -3,7 +3,6 @@ import Combine
 import XCTest
 import MeowAccounts
 import MeowContracts
-import MeowJSON
 import MeowMusicFeature
 import MeowMusicTestSupport
 import MeowRuntime
@@ -294,10 +293,10 @@ private actor HomeAccountIntegrationProvider: MusicAccountProvider, MusicNetease
     func pollQR(id: UUID) throws -> MusicAccountLoginResult { throw MusicServiceError.unsupported }
     func cancelQR(_ id: UUID) {}
     func revoke() {}
-    func collectionRows() throws -> [JSONValue] { throw MusicServiceError.unsupported }
-    func tracks(collectionID: String) throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func collectionRows() throws -> [RuntimeValue] { throw MusicServiceError.unsupported }
+    func tracks(collectionID: String) throws -> [RuntimeValue] { throw MusicServiceError.unsupported }
     func capabilities(mid: String) throws -> [String] { throw MusicServiceError.unsupported }
-    func resolve(mid: String, quality: String) throws -> JSONValue { throw MusicServiceError.unsupported }
+    func resolve(mid: String, quality: String) throws -> RuntimeValue { throw MusicServiceError.unsupported }
 }
 
 private func homeAccountPayload(id: Int) -> Data {

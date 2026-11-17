@@ -14,6 +14,7 @@ public final class VideoSession: MediaPlayerDelegate {
     public var onTransportRate: ((Float) -> Void)?
     public var onBuffering: ((Int) -> Void)?
     private var player: KSMEPlayer?
+    private weak var options: KSOptions?
     private var preparing: CheckedContinuation<Void, Error>?
     private var prepareDeadline: Task<Void, Never>?
     private var progress: Task<Void, Never>?
@@ -42,7 +43,14 @@ public final class VideoSession: MediaPlayerDelegate {
         confirmedPosition = max(0, value)
         return confirmedPosition
     }
-    public var seekable: Bool { player?.seekable == true }
+    public var seekable: Bool {
+        guard !cancelled, failure == nil, let player, player.isReadyToPlay,
+              let duration = info?.duration, duration.isFinite, duration > 0 else { return false }
+        // Finite HLS/DASH timelines seek through the demuxer's timestamp index,
+        // not through byte ranges on the top-level manifest HTTP response.
+        if options?.formatName == "hls" || options?.formatName == "dash" { return true }
+        return player.seekable
+    }
     public var chapters: [VideoChapter] { info?.chapters ?? [] }
     public var tracks: [VideoTrack] {
         guard let player else { return [] }
@@ -59,11 +67,8 @@ public final class VideoSession: MediaPlayerDelegate {
         confirmedPosition = position
         encrypted = !clearKeys.isEmpty
         let options = KSOptions()
-        options.registerRemoteControll = false
-        options.canStartPictureInPictureAutomaticallyFromInline = false
-        options.automaticWindowResize = false
+        self.options = options
         options.isAccurateSeek = true
-        options.isSeekedAutoPlay = false
         options.inputFormat = format
         options.maxBufferDuration = 8
         options.startPlayTime = position
@@ -166,7 +171,7 @@ public final class VideoSession: MediaPlayerDelegate {
 
     private func performSeek(to position: Double, userInitiated: Bool) async throws -> Double {
         try check()
-        guard position.isFinite, position >= 0, let player, player.isReadyToPlay else {
+        guard seekable, position.isFinite, position >= 0, let player, player.isReadyToPlay else {
             throw VideoKernelFailure.seekFailed
         }
         _ = self.position

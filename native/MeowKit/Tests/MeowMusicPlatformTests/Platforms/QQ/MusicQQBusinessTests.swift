@@ -16,7 +16,7 @@ import MeowRuntime
         }
         let client = fixture.makeClient(), provider = MusicNodeAccountProvider(platform: .qq, client: client)
         let result = try await provider.tracks(collectionID: "canonical-alias")
-        XCTAssertEqual(try result.map { try MusicPlatformDTO.runtime($0)[music: "songmid"].musicRequiredText() }, ids)
+        XCTAssertEqual(try result.map { try $0[music: "songmid"].musicRequiredText() }, ids)
         XCTAssertEqual(fixture.requests().map(\.operation), ["playlist.complete"])
         try await client.close(); await fixture.runtime.close()
     }
@@ -30,8 +30,8 @@ import MeowRuntime
         let client = fixture.makeClient(), provider = MusicNodeAccountProvider(platform: .qq, client: client)
         let result = try await provider.tracks(collectionID: "current")
         XCTAssertEqual(result.count, rows.count)
-        XCTAssertTrue(try result.allSatisfy { try MusicPlatformDTO.runtime($0)[music: "songmid"].musicRequiredText() == "repeated" })
-        XCTAssertGreaterThan(try result.reduce(0) { $0 + (try MusicPlatformDTO.runtime($1).musicData()).count }, 4 * 1024 * 1024)
+        XCTAssertTrue(try result.allSatisfy { try $0[music: "songmid"].musicRequiredText() == "repeated" })
+        XCTAssertGreaterThan(try result.reduce(0) { $0 + (try $1.musicData()).count }, 4 * 1024 * 1024)
         XCTAssertEqual(fixture.requests().count, 1)
         try await client.close(); await fixture.runtime.close()
     }
@@ -48,7 +48,7 @@ import MeowRuntime
         for page in [200, 201] {
             let result = try await provider.recommendations(kind: "radar", page: page)
             XCTAssertEqual(result.rows.count, 1); XCTAssertEqual(result.nextPage, page + 1)
-            XCTAssertEqual(try MusicPlatformDTO.runtime(XCTUnwrap(result.rows.first))[music: "songmid"], .string("current-\(page)"))
+            XCTAssertEqual(try XCTUnwrap(result.rows.first)[music: "songmid"], .string("current-\(page)"))
         }
         XCTAssertEqual(fixture.requests().map { $0.parameters[music: "page"] }, [.number(200), .number(201)])
         try await client.close(); await fixture.runtime.close()

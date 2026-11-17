@@ -615,6 +615,6 @@ winpthreads-LICENSE.txt; src/misc.c now additionally credits:
 Copyright (c) 2011-2016, 2026 mingw-w64 project
 The same MIT permission/disclaimer is supplied in winpthreads-LICENSE.txt.
 
-These notices supplement, and do not change, the older VideoKernel toolchain
+These notices supplement, and do not change, the Windows music toolchain
 notices. The actual compiler/runtime versions and included source portions
 must be checked against the final Windows build receipt.

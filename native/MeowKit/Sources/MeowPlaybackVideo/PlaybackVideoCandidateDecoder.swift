@@ -37,6 +37,7 @@ final class PlaybackVideoCandidateDecoder: PlaybackVideoDecoding, PlaybackVideoO
     var chapters: [PlaybackVideoChapter] { decoder.chapters }
     var position: Double { decoder.position }
     var duration: Double? { decoder.duration }
+    var seekable: Bool { !cancelled && decoder.seekable }
     var volume: Float {
         get { decoder.output.volume }
         set { decoder.output.volume = newValue }

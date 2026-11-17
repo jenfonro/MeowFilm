@@ -3,7 +3,7 @@ import { Readable } from 'node:stream';
 import { isUtf8 } from 'node:buffer';
 import { PrivateDocuments, ScriptHostError, SCRIPT_LIMITS } from '@meowfilm/script-host';
 import { normalizeSourceDefinition } from '@meowfilm/source-runtime';
-import { decodeJSONValue, encodeJSONValue } from '@meowfilm/runtime-bridge';
+import { parseJSONText, stringifyJSONValue, cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { InstallationOperations } from './source-candidates.mjs';
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -28,6 +28,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
   const sourceLeases = new Map();
   const operations = new InstallationOperations();
   let privateRecords = new Map(), nativeConfiguration = new Map(), nativeRevision = 0, nativeSnapshotHash;
+  let document = { schema: 1, sources: [] };
   let readFailure;
 
   const require = (value, code = 'INVALID_REQUEST') => { if (!value) throw fail(code); };
@@ -39,11 +40,20 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
     return item;
   }
   function publicRecord(item) {
-    const { installationId, revision, name, sourceUrl, group, order, enabled, enabledExplore,
-      protocol, actions } = item;
+    const { installationId, revision, sourceUrl } = item;
+    const enabled = item.enabled === true, enabledExplore = item.enabledExplore === true;
+    const protocol = typeof item.protocol === 'string' ? item.protocol : '';
+    const name = typeof item.name === 'string' ? item.name : '';
+    const group = typeof item.group === 'string' ? item.group : '';
+    const ordering = isRawJSON(item.order) ? Number(item.order.rawJSON) : item.order;
+    const order = Number.isFinite(ordering) ? ordering : 0;
+    const actions = Array.isArray(item.actions) ? item.actions.filter(action => typeof action === 'string') : [];
     const state = states.get(installationId);
     const raw = definitionObject(item.definition);
-    const number = (key, fallback) => Number.isFinite(Number(raw[key])) ? Number(raw[key]) : fallback;
+    const number = (key, fallback) => {
+      const value = isRawJSON(raw[key]) ? Number(raw[key].rawJSON) : Number(raw[key]);
+      return Number.isFinite(value) ? value : fallback;
+    };
     return { installationId, revision, name, sourceUrl, group, order, enabled, enabledExplore,
       protocol, weight: number('weight', 0), lastUpdateTime: number('lastUpdateTime', 0),
       respondTime: number('respondTime', 180000),
@@ -59,9 +69,18 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       for (const item of next.values()) nextPrivate.set(item.installationId, item.private);
     }
     const name = native ? 'private.json' : 'library.json';
-    const bytes = Buffer.from(JSON.stringify({ schema: 1, sources: native
-      ? [...nextPrivate].map(([installationId, privateState]) => ({ installationId, private: privateState }))
-      : [...next.values()] }));
+    const remaining = new Map(native ? [...nextPrivate].map(([installationId, privateState]) =>
+      [installationId, { installationId, ...(privateState === undefined ? {} : { private: privateState }) }]) : next);
+    const sources = document.sources.flatMap(item => {
+      if (!object(item) || !installationId(item.installationId)) return [item];
+      const updated = remaining.get(item.installationId);
+      remaining.delete(item.installationId);
+      return updated ? [{ ...item, ...updated }]
+        : !records.has(item.installationId) && !removed.includes(item.installationId) ? [item] : [];
+    });
+    sources.push(...remaining.values());
+    const nextDocument = { ...document, sources };
+    const bytes = Buffer.from(stringifyJSONValue(nextDocument));
     let previous, readComplete = false;
     try {
       if (disk) {
@@ -83,6 +102,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       throw fail('STORAGE_ERROR');
     }
     if (native) privateRecords = nextPrivate;
+    document = nextDocument;
   }
   function parseDefinition(definition) {
     require(typeof definition === 'string' && definition.trim().length > 0);
@@ -91,22 +111,23 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
     require(['legado', 'qysg'].includes(normalized.protocol), 'UNSUPPORTED_PROTOCOL');
     return normalized;
   }
-  function definitionObject(definition) {
+  function definitionObject(definition, required = false) {
     let value;
-    try { value = JSON.parse(definition); } catch { value = definition; }
+    try { value = parseJSONText(definition); } catch (error) {
+      if (required && !definition.trimStart().startsWith('<')) throw error;
+      value = definition;
+    }
     if (Array.isArray(value)) [value] = value;
     return object(value) ? value : { html: value };
   }
   function managedDefinition(item) {
-    return { ...definitionObject(item.definition), bookSourceName: item.name,
+    return { ...definitionObject(item.definition, true), bookSourceName: item.name,
       bookSourceUrl: item.sourceUrl, bookSourceGroup: item.group, customOrder: item.order,
       enabled: item.enabled, enabledExplore: item.enabledExplore };
   }
   function runtimeDefinition(item) {
     const normalized = parseDefinition(item.definition);
-    Object.assign(normalized.source, { bookSourceName: item.name, bookSourceUrl: item.sourceUrl,
-      bookSourceGroup: item.group, customOrder: item.order, enabled: item.enabled,
-      enabledExplore: item.enabledExplore });
+    normalized.source = managedDefinition(item);
     return normalized;
   }
   function build(definition, old, fallbackName = '', origin = '') {
@@ -116,84 +137,46 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
     const sourceUrl = String(source.bookSourceUrl ?? old?.sourceUrl ??
       (normalized.protocol === 'qysg' ? origin || `qysg:${fallbackName || hash(definition)}` : '')).trim();
     require(sourceUrl.length > 0);
-    const order = raw.customOrder ?? old?.order ?? source.customOrder ?? records.size;
-    require(Number.isSafeInteger(Number(order)));
+    const inputOrder = raw.customOrder ?? old?.order ?? source.customOrder ?? records.size;
+    const order = Number(isRawJSON(inputOrder) ? inputOrder.rawJSON : inputOrder);
+    require(Number.isFinite(order));
     return {
+      ...old,
       installationId: old?.installationId ?? randomUUID(), revision: (old?.revision ?? 0) + 1,
-      name: String(source.bookSourceName ?? old?.name ?? fallbackName).trim() || sourceUrl,
+      name: String(source.bookSourceName ?? old?.name ?? (fallbackName || sourceUrl)),
       sourceUrl, group: String(source.bookSourceGroup ?? old?.group ?? ''),
-      order: Number(order), enabled: bool(raw.enabled,
+      order, enabled: bool(raw.enabled,
         old?.enabled ?? bool(source.enabled, true)),
       enabledExplore: bool(raw.enabledExplore, old?.enabledExplore ??
         Boolean(source.enabledExplore ?? source.exploreUrl)),
       protocol: normalized.importedProtocol, actions: old?.actions ?? [],
-      definition, private: structuredClone(old?.private ?? emptyPrivate()),
+      definition, ...(old ? {} : { private: emptyPrivate() }),
     };
-  }
-  function validatePrivate(value) {
-    require(object(value) && Array.isArray(value.cookies) && Array.isArray(value.storage), 'CORRUPT_STORAGE');
-    for (const kind of ['cookies', 'storage']) {
-      for (const entry of value[kind]) {
-        require(Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string' &&
-          /^:[A-Za-z0-9._-]+$/.test(`:${entry[0]}`) && Array.isArray(entry[1]), 'CORRUPT_STORAGE');
-        for (const pair of entry[1]) {
-          require(Array.isArray(pair) && pair.length === 2 && typeof pair[0] === 'string', 'CORRUPT_STORAGE');
-          if (kind === 'cookies') {
-            const cookie = pair[1];
-            require(object(cookie) && ['name', 'value', 'domain', 'path'].every(key =>
-              typeof cookie[key] === 'string') && typeof cookie.hostOnly === 'boolean' &&
-              typeof cookie.secure === 'boolean' && Number.isSafeInteger(cookie.sequence) &&
-              (cookie.httpOnly === undefined || typeof cookie.httpOnly === 'boolean') &&
-              (cookie.sameSite === undefined || [null, 'Lax', 'Strict', 'None'].includes(cookie.sameSite)) &&
-              (cookie.expires === null || Number.isFinite(cookie.expires)), 'CORRUPT_STORAGE');
-          }
-        }
-      }
-    }
   }
   function validateStored(value) {
     require(object(value) && value.schema === 1 && Array.isArray(value.sources), 'CORRUPT_STORAGE');
+    const ids = new Set(), urls = new Set();
     for (const item of value.sources) {
-      require(object(item) && typeof item.installationId === 'string' &&
-        /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(item.installationId) &&
-        !records.has(item.installationId) &&
-        ![...records.values()].some(other => other.sourceUrl === item.sourceUrl) &&
-        Number.isSafeInteger(item.revision) && item.revision > 0 &&
-        ['name', 'sourceUrl', 'group', 'protocol', 'definition'].every(key => typeof item[key] === 'string') &&
-        item.sourceUrl.trim().length > 0 &&
-        Number.isSafeInteger(item.order) && typeof item.enabled === 'boolean' &&
-        typeof item.enabledExplore === 'boolean' && Array.isArray(item.actions) &&
-        item.actions.every(action => typeof action === 'string') &&
-        object(item.private) && Array.isArray(item.private.cookies) && Array.isArray(item.private.storage),
-      'CORRUPT_STORAGE');
-      try {
-        const normalized = parseDefinition(item.definition);
-        require(normalized.importedProtocol === item.protocol, 'CORRUPT_STORAGE');
-        validatePrivate(item.private);
-      } catch { throw fail('CORRUPT_STORAGE'); }
-      records.set(item.installationId, item);
+      if (!object(item) || !installationId(item.installationId)) continue;
+      require(!ids.has(item.installationId), 'CORRUPT_STORAGE');
+      ids.add(item.installationId);
+      if (native) privateRecords.set(item.installationId, item.private);
+      else {
+        if (typeof item.sourceUrl !== 'string' || !item.sourceUrl.trim() ||
+            !Number.isSafeInteger(item.revision) || item.revision <= 0) continue;
+        require(!urls.has(item.sourceUrl), 'CORRUPT_STORAGE');
+        urls.add(item.sourceUrl);
+        records.set(item.installationId, item);
+      }
     }
+    require(!value.sources.length || (native ? privateRecords.size : records.size), 'CORRUPT_STORAGE');
+    document = value;
   }
   try {
-    if (native) {
-      const bytes = disk?.read('private.json');
-      if (bytes) {
-        const value = decodeJSONValue(bytes), ids = new Set();
-        require(object(value) && value.schema === 1 && Array.isArray(value.sources), 'CORRUPT_STORAGE');
-        for (const item of value.sources) {
-          require(object(item) && installationId(item.installationId) && !ids.has(item.installationId),
-            'CORRUPT_STORAGE');
-          validatePrivate(item.private);
-          ids.add(item.installationId);
-          privateRecords.set(item.installationId, item.private);
-        }
-      }
-    } else {
-      const bytes = disk?.read('library.json');
-      if (bytes) {
-        require(isUtf8(bytes), 'CORRUPT_STORAGE');
-        validateStored(JSON.parse(bytes.toString('utf8')));
-      }
+    const bytes = disk?.read(native ? 'private.json' : 'library.json');
+    if (bytes) {
+      require(isUtf8(bytes), 'CORRUPT_STORAGE');
+      validateStored(parseJSONText(bytes.toString('utf8')));
     }
   } catch (error) {
     records.clear();
@@ -223,19 +206,21 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
   function stage(item) {
     retire(item.installationId);
     const state = { controller: new AbortController(), accepting: false, trial: true,
-      generation: undefined, private: structuredClone(item.private) };
+      generation: undefined, private: item.private === undefined ? undefined : cloneJSONValue(item.private) };
     states.set(item.installationId, state);
     return state;
   }
   function seed(id, generation, state) {
     if (state.generation === generation) return;
     require(state.generation === undefined, 'STALE_SOURCE');
+    require(object(state.private), 'CORRUPT_STORAGE');
+    owner.restoreProfiles(profile(id, generation), { cookies: state.private.cookies, storage: state.private.storage });
     state.generation = generation;
-    owner.restoreProfiles(profile(id, generation), state.private);
   }
   async function execute(item, state, signal) {
     const normalized = runtimeDefinition(item);
-    const source = JSON.stringify(normalized.source);
+    require(normalized.importedProtocol === item.protocol, 'SOURCE_INTEGRITY');
+    const source = stringifyJSONValue(normalized.source);
     const spec = { installationId: item.installationId, protocol: normalized.protocol,
       source, contentHash: hash(source), version: '1.0.0',
       metadata: { importedProtocol: normalized.importedProtocol, persistentSource: true },
@@ -253,7 +238,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
     require(!host.stats().cleanupIssues.some(issue => issue.installationId === item.installationId) &&
       host.cleanupPending(item.installationId) === 0, 'SOURCE_CLEANUP');
     item.actions = [...(current.capabilities?.source?.actions ?? [])];
-    item.private = owner.snapshotProfiles(profile(item.installationId, current.generation));
+    item.private = { ...item.private, ...owner.snapshotProfiles(profile(item.installationId, current.generation)) };
     if (!item.enabled) {
       state.controller.abort();
       await host.uninstall(item.installationId);
@@ -283,11 +268,11 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
         // rolled back by the host, without importing a second repository.
         const current = live(id);
         const normalized = runtimeDefinition(old);
-        if (current?.state === 'ready' && current.contentHash === hash(JSON.stringify(normalized.source))) {
+        if (current?.state === 'ready' && current.contentHash === hash(stringifyJSONValue(normalized.source))) {
           seed(id, current.generation, state);
         } else {
           if (current) await host.uninstall(id);
-          await execute(structuredClone(old), state, lifetime.signal);
+          await execute(cloneJSONValue(old), state, lifetime.signal);
         }
       }
       state.trial = false;
@@ -327,10 +312,11 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
     if (readFailure || native) return;
     for (const saved of records.values()) {
       guard(lifetime.signal);
-      const item = structuredClone(saved);
+      const item = cloneJSONValue(saved);
       const state = stage(item);
-      if (!item.enabled) { state.trial = false; continue; }
+      if (item.enabled === false) { state.trial = false; continue; }
       try {
+        require(item.enabled === true, 'CORRUPT_STORAGE');
         await execute(item, state, lifetime.signal);
         persist(new Map(records).set(item.installationId, item));
         records.set(item.installationId, item);
@@ -353,28 +339,22 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
   function validateNativeSnapshot(params) {
     require(native, 'PERMISSION_DENIED');
     require(Number.isSafeInteger(params.revision) && params.revision > 0 && Array.isArray(params.sources));
-    require(encodeJSONValue(params).length <= SCRIPT_LIMITS.maxSourceBytes, 'LIMIT');
     const next = new Map(), urls = new Set(), liveIds = new Set(host.list().map(item => item.installationId));
     for (const item of params.sources) {
-      require(object(item) && Object.keys(item).length === configurationKeys.length &&
-        configurationKeys.every(key => Object.hasOwn(item, key)) && installationId(item.installationId) &&
+      const order = isRawJSON(item?.order) ? Number(item.order.rawJSON) : item?.order;
+      require(object(item) && installationId(item.installationId) &&
         Number.isSafeInteger(item.revision) && item.revision > 0 &&
         ['name', 'sourceUrl', 'group', 'protocol', 'definition'].every(key => typeof item[key] === 'string') &&
-        item.name.trim().length > 0 && item.sourceUrl.trim().length > 0 &&
-        item.sourceUrl === item.sourceUrl.trim() && Number.isSafeInteger(item.order) &&
+        item.sourceUrl.trim().length > 0 &&
+        item.sourceUrl === item.sourceUrl.trim() && Number.isFinite(order) &&
         typeof item.enabled === 'boolean' && typeof item.enabledExplore === 'boolean');
       require(!next.has(item.installationId) && !urls.has(item.sourceUrl), 'SOURCE_INTEGRITY');
       require(['legado', 'qysg'].includes(item.protocol), 'UNSUPPORTED_PROTOCOL');
-      if (!item.definition.replace(/^\uFEFF/, '').trimStart().startsWith('<')) {
-        decodeJSONValue(Buffer.from(item.definition));
-      }
-      const normalized = runtimeDefinition(item);
-      require(normalized.importedProtocol === item.protocol, 'SOURCE_INTEGRITY');
-      require(encodeJSONValue(normalized.source).length <= SCRIPT_LIMITS.maxSourceBytes, 'LIMIT');
+      require(Buffer.byteLength(item.definition) <= SCRIPT_LIMITS.maxSourceBytes, 'LIMIT');
       require(!externalInstallation(item.installationId), 'STALE_SOURCE');
       require(!liveIds.has(item.installationId) || records.has(item.installationId) ||
         states.has(item.installationId), 'STALE_SOURCE');
-      next.set(item.installationId, item);
+      next.set(item.installationId, { ...Object.fromEntries(configurationKeys.map(key => [key, item[key]])), order });
       urls.add(item.sourceUrl);
     }
     return next;
@@ -394,7 +374,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
           current.generation === previous.generation : !current)) return;
     const reuse = item.enabled && sameConfiguration(item, old, false) && !previous?.errorCode &&
       current?.state === 'ready' && current.generation === previous?.generation;
-    const savedPrivate = structuredClone(item.private), state = stage(item);
+    const savedPrivate = item.private === undefined ? undefined : cloneJSONValue(item.private), state = stage(item);
     try {
       if (reuse) {
         seed(id, current.generation, state);
@@ -427,7 +407,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
   function applyNative(params, signal) {
     assertOpen(signal);
     const next = validateNativeSnapshot(params);
-    const signature = hash(JSON.stringify(params.sources.map(item =>
+    const signature = hash(JSON.stringify([...next.values()].map(item =>
       configurationKeys.map(key => item[key]))));
     require(params.revision >= nativeRevision, 'STALE_SOURCE');
     require(params.revision !== nativeRevision || signature === nativeSnapshotHash, 'SOURCE_INTEGRITY');
@@ -455,9 +435,10 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       records.clear();
       for (const [id, input] of next) {
         const prior = old.get(id);
+        const privateState = prior ? prior.private : privateRecords.has(id) ? privateRecords.get(id) : emptyPrivate();
         records.set(id, sameConfiguration(input, prior) ? prior : { ...input,
           actions: sameConfiguration(input, prior, false) ? [...prior.actions] : [],
-          private: structuredClone(prior?.private ?? privateRecords.get(id) ?? emptyPrivate()) });
+          private: privateState === undefined ? undefined : cloneJSONValue(privateState) });
       }
       const removed = [];
       for (const [id, state] of states) {
@@ -512,7 +493,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       const validateURL = value => {
         let target;
         try { target = new URL(value); } catch { throw new ScriptHostError('INVALID_ARGUMENT'); }
-        if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password)
+        if (!['http:', 'https:'].includes(target.protocol))
           throw new ScriptHostError('INVALID_ARGUMENT');
         return target.href;
       };
@@ -548,30 +529,30 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       }
       return [parsed];
     };
-    try { return entriesOf(JSON.parse(input)); }
+    try { return entriesOf(parseJSONText(input)); }
     catch {
       // HTML is a complete QYSG definition, not a line-delimited document.
       if (input.trimStart().startsWith('<')) return [input];
       const lines = input.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-      try { return lines.flatMap(line => entriesOf(JSON.parse(line))); }
+      try { return lines.flatMap(line => entriesOf(parseJSONText(line))); }
       catch { return [input]; }
     }
   }
   function importCandidate(entry, params) {
-    const definition = typeof entry === 'string' ? entry : JSON.stringify(entry);
+    const definition = typeof entry === 'string' ? entry : stringifyJSONValue(entry);
     return build(definition, undefined, params.fileName, params.url);
   }
   const methods = {
     'library.apply': applyNative,
     async 'library.list'(_params, signal) {
       await access(signal);
-      return { sources: [...records.values()].sort((a, b) => a.order - b.order ||
-        a.name.localeCompare(b.name) || a.installationId.localeCompare(b.installationId)).map(publicRecord) };
+      return { sources: [...records.values()].map(publicRecord).sort((a, b) => a.order - b.order ||
+        a.name.localeCompare(b.name) || a.installationId.localeCompare(b.installationId)) };
     },
     async 'library.get'(params, signal) {
       await access(signal);
       const item = record(params.installationId);
-      return { source: publicRecord(item), definition: JSON.stringify(managedDefinition(item)) };
+      return { source: publicRecord(item), definition: stringifyJSONValue(managedDefinition(item)) };
     },
     'library.previewImport': (params, signal) => operations.run(Symbol('preview'), async () => {
       await access(signal);
@@ -584,7 +565,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
           items.push({ index, name: item.name, sourceUrl: item.sourceUrl, group: item.group,
             protocol: item.protocol, exists: existing.has(item.sourceUrl),
             // Canonical metadata makes a later text import retain HTML's URL/file identity.
-            definition: JSON.stringify(managedDefinition(item)) });
+            definition: stringifyJSONValue(managedDefinition(item)) });
         } catch (error) {
           failures.push({ index, name: String(object(entry) ? entry.bookSourceName ?? '' : params.fileName ?? ''),
             code: errorCode(error) });
@@ -598,7 +579,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       const imported = [], failures = [];
       for (const [index, entry] of entries.entries()) {
         guard(signal);
-        const definition = typeof entry === 'string' ? entry : JSON.stringify(entry);
+        const definition = typeof entry === 'string' ? entry : stringifyJSONValue(entry);
         try {
           const candidate = importCandidate(entry, params);
           const old = [...records.values()].find(value => value.sourceUrl === candidate.sourceUrl);
@@ -623,8 +604,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       const old = record(params.installationId, params.expectedRevision);
       const patch = Object.fromEntries(['name', 'group', 'enabled', 'enabledExplore', 'order']
         .filter(key => Object.hasOwn(params.patch, key)).map(key => [key, params.patch[key]]));
-      const item = { ...structuredClone(old), ...patch, revision: old.revision + 1 };
-      item.definition = JSON.stringify(managedDefinition(item));
+      const item = { ...cloneJSONValue(old), ...patch, revision: old.revision + 1 };
       if (patch.enabled === true && (!old.enabled || !states.get(old.installationId)?.accepting)) {
         return replace(item, old, signal);
       }
@@ -670,7 +650,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
     }),
     async 'library.export'(params, signal) {
       await access(signal);
-      return { text: JSON.stringify(params.installationIds.map(id => managedDefinition(record(id))), null, 2) };
+      return { text: stringifyJSONValue(params.installationIds.map(id => managedDefinition(record(id)))) };
     },
     'library.invoke': invoke,
     async 'library.image'(params, signal) {
@@ -739,7 +719,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
         !lifetime.signal.aborted, 'STALE_SOURCE');
       if (state.trial) return;
       const item = record(match[1]);
-      const nextItem = { ...item, private: owner.snapshotProfiles(prefix) };
+      const nextItem = { ...item, private: { ...item.private, ...owner.snapshotProfiles(prefix) } };
       const next = new Map(records).set(item.installationId, nextItem);
       persist(next);
       // Keep admitted calls' record identity stable during private writes.

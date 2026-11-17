@@ -478,6 +478,39 @@ import MeowMusicTestSupport
         XCTAssertEqual(value.fences.first?.mutation.before?.members.last?.occurrenceID, "o-20000")
     }
 
+    func testLedgerMutationPreservesOpaqueExtensionsAndRetainedFenceIdentity() throws {
+        let extra = try MJ.parse(Data(#"{"decimal":1.234567890123456789,"huge":1e999,"integer":9007199254740993,"é":1,"e\u0301":2}"#.utf8))
+        var ledger = MusicNativeSyncLedger()
+        ledger.scopes["wy"] = "synthetic-install:local-account"
+        ledger.selections = [.init(platform: .netease, playlists: true)]
+        ledger.automatic.selections = ledger.selections
+        ledger.fences = [validFence(members: [NativeSyncFixture.member("101")]),
+                         validFence(members: [NativeSyncFixture.member("102")])]
+        var wrapper = try libraryWrapper(ledger: ledger)
+        wrapper["sync"]["extra"] = extra
+        wrapper["sync"]["automatic"]["extra"] = extra
+        var selections = wrapper["sync"]["selections"].array
+        selections[0]["extra"] = extra
+        wrapper["sync"]["selections"] = .array(selections)
+        wrapper["sync"]["automatic"]["selections"] = .array(selections)
+        var fences = wrapper["sync"]["fences"].array
+        fences[0]["extra"] = .string("retired")
+        fences[1]["extra"] = extra
+        wrapper["sync"]["fences"] = .array(fences)
+        var loaded = try MusicNativeSyncLedger.load(wrapper)
+        loaded.phase = .pulling; loaded.automatic.revision += 1
+        loaded.fences.removeFirst()
+        let saved = try loaded.json()
+        XCTAssertEqual(saved["extra"].stable, extra.stable)
+        XCTAssertEqual(saved["automatic"]["extra"].stable, extra.stable)
+        XCTAssertEqual(saved["selections"].array[0]["extra"].stable, extra.stable)
+        XCTAssertEqual(saved["automatic"]["selections"].array[0]["extra"].stable, extra.stable)
+        XCTAssertEqual(saved["fences"].array.count, 1)
+        XCTAssertEqual(saved["fences"].array[0]["extra"].stable, extra.stable)
+        XCTAssertEqual(saved["phase"].string, "pulling")
+        XCTAssertEqual(saved["automatic"]["revision"].int, 1)
+    }
+
     func testFenceMembersAndBeforeBeyondRealBudgetStillFail() throws {
         let padding = String(repeating: "o", count: 8192)
         let members = (0..<350).map {
@@ -709,20 +742,22 @@ import MeowMusicTestSupport
         XCTAssertEqual(counts.0, 0); XCTAssertEqual(counts.1, 0); XCTAssertTrue(calls.isEmpty)
     }
 
-    func testUnknownCollectionFieldIsRejectedWithoutRemoteCallsOrDocumentWrites() async throws {
+    func testSyncPreservesUnknownSelectedCollectionFields() async throws {
         let valid = try NativeSyncFixture.store()
         for extra in [MJ.obj(), .obj([("value", .string("extra"))])] {
             var document = try NativeSyncFixture.document(valid)
             var collections = document.library["library"]["collections"].array
             collections[0]["extra"] = extra
-            document.library["library"]["collections"] = .array(collections)
+            let unselected = try MJ.parse(Data(#"{"id":"unselected","kind":"playlist","order":{},"bindings":"unused","extra":1e999}"#.utf8))
+            let unknown = try MJ.parse(Data(#"{"id":"future","kind":"future","order":false,"extra":1.234567890123456789}"#.utf8))
+            document.library["library"]["collections"] = .array(collections + [unselected, unknown])
             let bytes = try document.encode(changed: ["library"]), store = NativeMusicMemoryDocument(bytes)
             let peer = NativeSyncPeer(), service = try await NativeMusicFixture.service(store, accounts: peer)
-            do { _ = try await service.synchronizeLibrary(NativeSyncFixture.request()); XCTFail("Unknown collection field was accepted") }
-            catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
-            XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
-            let counts = await peer.counts(), calls = await peer.calls()
-            XCTAssertEqual(counts.0, 0); XCTAssertEqual(counts.1, 0); XCTAssertTrue(calls.isEmpty)
+            _ = try await service.synchronizeLibrary(NativeSyncFixture.request(favorites: true, playlists: false))
+            let saved = try NativeSyncFixture.document(store)
+            let selected = try XCTUnwrap(saved.library["library"]["collections"].array.first { $0["id"] == collections[0]["id"] })
+            XCTAssertEqual(selected["extra"], extra)
+            XCTAssertEqual(Array(saved.library["library"]["collections"].array.suffix(2)), [unselected, unknown])
             await service.close()
         }
     }

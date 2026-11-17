@@ -16,6 +16,7 @@ final class PlaybackVideoTransport {
     private(set) var attempt: PlayAttempt?
     var position: Double { kernel.position }
     var duration: Double? { kernel.duration }
+    var seekable: Bool { kernel.seekable }
     private var pictureInPicture: (any PlaybackVideoPictureInPictureControlling)?
 
     init(media: PlaybackVideoMediaLease, input: PlaybackVideoInput, decoder: any PlaybackVideoDecoding,

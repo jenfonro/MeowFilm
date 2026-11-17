@@ -64,7 +64,7 @@ extension NativeMusicService {
                         rows[i]["context"]["recommendation"] = value
                     }
                 }
-                archive(old, into: &d)
+                try archive(old, into: &d)
                 d.queue["entries"] = .array(rows)
                 let selected: MJ
                 if let candidateIndex {
@@ -131,7 +131,7 @@ extension NativeMusicService {
                     select(current["id"].string, queue: &d.queue, remember: false)
                 }
                 let keep = d.queue["currentId"] == old["currentId"]
-                archive(old, into: &d)
+                try archive(old, into: &d)
                 d.queue["similar"] = .null
                 d.queue["revision"] = .n(d.queue["revision"].int + 1)
                 if !keep { d.resetPosition() }

@@ -16,7 +16,7 @@ using MeowFilm.Capabilities.PlaybackCache;
 using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
 using MeowFilm.SystemMedia;
-using static MeowFilm.Windows.Tests.AdaptiveMediaTests;
+using static MeowFilm.Windows.Tests.NativeMediaFixtures;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -41,6 +41,27 @@ public static partial class PlaybackRecoveryTests
             Check(native.LastErrorCode == PlaybackError.HttpUnauthorized &&
                 origin.Requests.Count == 1 && !origin.Requests.Single().AnyCallerHeader,
                 "anonymous direct stream still has typed authorization failure");
+        });
+        yield return Test("representation change refreshes the same recording without losing pause or occurrence", async () =>
+        {
+            await using var f = await ControlledMusicFixture.Create();
+            await f.Play();
+            await Until(() => f.App.HistoryWrites == 1 && f.App.ConfirmWrites == 1,
+                "initial source before representation change");
+            string identity = f.Output.Identity!;
+            int resolutions = f.App.Resolutions.Count;
+            await f.Module.SeekAsync(37);
+            await f.Module.TogglePlaybackAsync();
+            f.Output.Plan(startBeforeCompletion: true);
+            f.Output.Fail(PlaybackError.HttpRepresentationChanged);
+            await Until(() => f.Output.Reopens == 1 && f.Module.CanSwitchSource &&
+                f.App.ConfirmWrites == 2, "changed representation refreshed");
+            Check(f.App.Resolutions.Count == resolutions + 1 &&
+                f.Module.CurrentSource == "网易云音乐" && f.Output.Identity == identity &&
+                f.Output.PositionSeconds == 37 && f.Output.PauseRequested && !f.Output.IsPlaying &&
+                f.App.HistoryWrites == 1 && f.App.FeedbackProbe.Starts == 1 &&
+                f.App.FeedbackProbe.Finishes.Count == 0,
+                "one exact refresh preserves current source, position, pause and listening occurrence");
         });
         yield return Test("native authorized cache lease can continue online without losing pause position or leaking handle", async () =>
         {
@@ -545,7 +566,7 @@ public static partial class PlaybackRecoveryTests
             await native.ReopenAsync(point, origin.Uri("new.wav"), origin.Headers);
             Check(native.OwnerId == "music" && native.Identity == "entry", "identity retained");
             Check(native.PauseRequested && !native.IsPlaying, "no autoplay while paused");
-            Check(point.ReopenedScope?.Generation > point.Scope.Generation, "new fenced native generation");
+            Check((await native.ReadRateAsync())?.Scope.Generation > point.Scope.Generation, "new fenced native generation");
             Check(Field(old, "release") is Task { IsCompletedSuccessfully: true }, "old audio renderer and decoder really released");
             await native.ResumeAsync(); await Decoded(native);
             await Until(() => native.PositionSeconds >= 29, "continued position");

@@ -17,6 +17,7 @@ private final class VideoHTTPPeer: @unchecked Sendable {
     private let referencePrefix: String?
     private let requiredHeaders: [String: [String: String]]
     private let setsResponseCookies: Bool
+    private let manifestRanges: Bool
     private let syntheticAESKey = Data((0..<16).map(UInt8.init))
     private var connections: [UUID: NWConnection] = [:]
     private var requests: [String: Int] = [:]
@@ -32,10 +33,11 @@ private final class VideoHTTPPeer: @unchecked Sendable {
 
     init(files: URL, fault: SegmentFault? = nil, resourceID: String = "issued",
          referencePrefix: String? = nil, requiredHeaders: [String: [String: String]] = [:],
-         setsResponseCookies: Bool = false) throws {
+         setsResponseCookies: Bool = false, manifestRanges: Bool = true) throws {
         self.files = files; self.fault = fault; self.resourceID = resourceID
         self.referencePrefix = referencePrefix
         self.setsResponseCookies = setsResponseCookies
+        self.manifestRanges = manifestRanges
         self.requiredHeaders = requiredHeaders.mapValues { fields in
             Dictionary(uniqueKeysWithValues: fields.map { ($0.key.lowercased(), $0.value) })
         }
@@ -203,8 +205,9 @@ private final class VideoHTTPPeer: @unchecked Sendable {
             }
             if name.hasSuffix(".m3u8") { type = "application/vnd.apple.mpegurl" }
             if name.hasSuffix(".mpd") { type = "application/dash+xml" }
+            let supportsRanges = manifestRanges || !(name.hasSuffix(".m3u8") || name.hasSuffix(".mpd"))
             var rangeStart: Int?
-            if status == "200 OK",
+            if supportsRanges, status == "200 OK",
                let range = text.components(separatedBy: "\r\n").first(where: { $0.lowercased().hasPrefix("range: bytes=") }),
                let start = Int(range.components(separatedBy: "=").last?.split(separator: "-").first ?? ""),
                start < body.count {
@@ -223,8 +226,9 @@ private final class VideoHTTPPeer: @unchecked Sendable {
                 extra += "Set-Cookie: synthetic_session=response-\(mediaID); \(scope)\r\n" +
                     "Set-Cookie: synthetic_response=\(mediaID); \(scope)\r\n"
             }
+            if supportsRanges { extra += "Accept-Ranges: bytes\r\n" }
             let response = Data(("HTTP/1.1 \(status)\r\nContent-Length: \(length)\r\n" +
-                "Content-Type: \(type)\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\(extra)\r\n").utf8) + body
+                "Content-Type: \(type)\r\nConnection: close\r\n\(extra)\r\n").utf8) + body
             let send = { [self] in
                 connection.send(content: response, completion: .contentProcessed { [self] error in
                     if error == nil && (name == "hls-0.ts" || name == "chunk-stream0-00001.m4s") {
@@ -250,10 +254,11 @@ final class VideoHTTPTests: XCTestCase {
     private func peer(fault: SegmentFault? = nil, resourceID: String = "issued",
                       referencePrefix: String? = nil,
                       requiredHeaders: [String: [String: String]] = [:],
-                      setsResponseCookies: Bool = false) async throws -> VideoHTTPPeer {
+                      setsResponseCookies: Bool = false, manifestRanges: Bool = true) async throws -> VideoHTTPPeer {
         let files = try XCTUnwrap(Bundle.module.url(forResource: "Fixtures", withExtension: nil))
         let peer = try VideoHTTPPeer(files: files, fault: fault, resourceID: resourceID,
-            referencePrefix: referencePrefix, requiredHeaders: requiredHeaders, setsResponseCookies: setsResponseCookies)
+            referencePrefix: referencePrefix, requiredHeaders: requiredHeaders,
+            setsResponseCookies: setsResponseCookies, manifestRanges: manifestRanges)
         try await peer.start()
         return peer
     }
@@ -334,6 +339,27 @@ final class VideoHTTPTests: XCTestCase {
                      "init-stream0.m4s", "init-stream1.m4s", "chunk-stream0-00003.m4s", "chunk-stream1-00004.m4s"] {
             XCTAssertGreaterThan(peer.count("/media/issued/" + name), 0)
         }
+    }
+
+    func testFiniteHLSAndDASHTimelineRemainsSeekableWithoutManifestByteRanges() async throws {
+        let peer = try await peer(manifestRanges: false); defer { peer.stop() }
+        for (name, format) in [("master.m3u8", "hls"), ("ordinary.mpd", "dash")] {
+            for hint: String? in [format, nil] {
+                let session = try await prepared(URL(string: peer.prefix + name)!, format: hint)
+                XCTAssertEqual(try XCTUnwrap(session.info?.duration), 3, accuracy: 0.1)
+                XCTAssertTrue(session.seekable, "Time seek is independent of manifest byte ranges and format hints")
+                let position = try await session.seek(to: 1.5)
+                XCTAssertEqual(position, 1.5, accuracy: 0.15)
+                XCTAssertTrue(session.output.hasPresentedFrame)
+                XCTAssertNotNil(decodedLuma(session))
+                await session.close()
+                XCTAssertFalse(session.seekable)
+            }
+            XCTAssertGreaterThan(peer.count("/media/issued/" + name), 0)
+            XCTAssertEqual(peer.count("/media/issued/" + name, rangeStart: 0), 0)
+        }
+        XCTAssertGreaterThan(peer.count("/media/issued/variant.m3u8"), 0)
+        XCTAssertEqual(peer.count("/media/issued/variant.m3u8", rangeStart: 0), 0)
     }
 
     func testAbsoluteManifestReferencesAndRedirectCarryHeadersAndCookieAcrossOriginsAndSeek() async throws {

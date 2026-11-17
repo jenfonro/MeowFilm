@@ -406,8 +406,9 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 let content: MeowfilmSidebarContent
                 switch main.selectedPage {
                 case .film: content = .film(home: filmHome, settings: self.assembly.filmSettings)
-                case .novel: content = .novel(home: { [weak self] in self?.novelHome?.showHome() },
-                                            shelf: { [weak self] in self?.novelHome?.showShelf() })
+                case .novel:
+                    guard let novel = self.assembly.novel else { return }
+                    content = .novel(feature: novel, home: { [weak self] in self?.novelHome?.showHome() })
                 default: content = .music(source: MusicHomeSourceSettingsModel(model: model), selectedPage: main.selectedPage)
                 }
                 self.root.showSidebar(content: content)

@@ -1,4 +1,5 @@
 import { createClientContexts } from './clients.mjs';
+import { cloneJSONValue, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { createMusicTransport } from './transport.mjs';
 import { fail, errorCode, MusicPlatformError, musicPlatformCodes } from './errors.mjs';
 import { input, object, protocolInteger, publicText, required, rows, scalar } from './model.mjs';
@@ -189,15 +190,15 @@ export function createMusicPlatform({ documents, transport = createMusicTranspor
         }
       },
       async cached(parts, action, ttl = 600000) {
-        const key = JSON.stringify([platform, entry.account?.scope ?? entry.account?.cookie ?? 'anonymous',
+        const key = stringifyJSONValue([platform, entry.account?.scope ?? entry.account?.cookie ?? 'anonymous',
           entry.account?.generation ?? 0, parts]);
         assertCurrent();
         const old = cache.get(key);
-        if (!params.refresh && old?.expires > clock()) return structuredClone(old.value);
+        if (!params.refresh && old?.expires > clock()) return cloneJSONValue(old.value);
         if (old) erase(key);
         const shared = flights.get(key);
         if (shared) {
-          const result = await shared.work; assertCurrent(); return structuredClone(result);
+          const result = await shared.work; assertCurrent(); return cloneJSONValue(result);
         }
         const work = Promise.resolve().then(action);
         const flight = { platform, work }; flights.set(key, flight);
@@ -206,11 +207,11 @@ export function createMusicPlatform({ documents, transport = createMusicTranspor
           assertCurrent();
           // Only public reads and the existing private directory/daily cache are retained.
           if (!entry.account || ['daily', 'channels', 'channel-directory'].includes(parts[0])) {
-            const bytes = Buffer.byteLength(JSON.stringify(result));
+            const bytes = Buffer.byteLength(stringifyJSONValue(result));
             if (bytes <= 2 * 1024 * 1024 && flights.get(key) === flight) {
               erase(key);
               while (cache.size >= 64 || cacheBytes + bytes > 2 * 1024 * 1024) erase(cache.keys().next().value);
-              cache.set(key, { platform, bytes, value: structuredClone(result), expires: Math.min(clock() + ttl, result.expiresAt ?? Infinity) });
+              cache.set(key, { platform, bytes, value: cloneJSONValue(result), expires: Math.min(clock() + ttl, result.expiresAt ?? Infinity) });
               cacheBytes += bytes;
             }
           }

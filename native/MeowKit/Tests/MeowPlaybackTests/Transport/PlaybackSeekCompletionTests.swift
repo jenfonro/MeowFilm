@@ -77,6 +77,31 @@ final class PlaybackSeekCompletionTests: XCTestCase {
         }
     }
 
+    func testQueuedSeekFailsOnceWhenDecoderReadinessDisallowsSeeking() async throws {
+        let media = try resource()
+        try await MainActor.run {
+            let h = SeekHarness()
+            let attempt = h.play(media)
+            var results: [PlaybackSeekResult] = []
+            XCTAssertTrue(h.request(30, attempt: attempt) { results.append($0) })
+            let pending = try XCTUnwrap(h.state.pendingSeek)
+            h.state.ready(generation: attempt.id, duration: 120, seekable: false)
+            XCTAssertNil(h.state.takeSeekIfPossible())
+            h.publish()
+            XCTAssertEqual(results.map(\.outcome), [.failed])
+            XCTAssertNil(results.first?.actualPosition)
+            XCTAssertEqual(h.state.error as? NativePlaybackError, .seekFailed)
+            XCTAssertEqual(h.callbacks.seeks.registrationCount, 0)
+            h.complete(pending, finished: true, actual: 30)
+            h.state.seekTimedOut(generation: attempt.id, id: pending.id)
+            h.publish()
+            XCTAssertEqual(results.count, 1)
+            XCTAssertEqual(h.state.snapshot.phase, .failed)
+            XCTAssertEqual(h.state.error as? NativePlaybackError, .seekFailed)
+            XCTAssertFalse(h.state.shouldPlay)
+        }
+    }
+
     func testInvalidNewSeekDoesNotSupersedeValidAcceptedSeek() async throws {
         let media = try resource()
         try await MainActor.run {
@@ -219,7 +244,7 @@ final class PlaybackSeekCompletionTests: XCTestCase {
         try await MainActor.run {
             let h = SeekHarness()
             let attempt = h.play(media)
-            h.state.ready(generation: attempt.id, duration: nil, ranges: [])
+            h.state.ready(generation: attempt.id, duration: nil)
             h.publish()
             var results: [PlaybackSeekResult] = []
             XCTAssertTrue(h.request(15, attempt: attempt) { results.append($0) })
@@ -566,7 +591,7 @@ private final class SeekHarness {
     }
 
     func ready(_ attempt: PlayAttempt) {
-        state.ready(generation: attempt.id, duration: 120, ranges: [])
+        state.ready(generation: attempt.id, duration: 120)
         publish()
     }
 

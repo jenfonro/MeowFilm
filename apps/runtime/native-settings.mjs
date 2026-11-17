@@ -1,12 +1,13 @@
 import { isUtf8 } from 'node:buffer';
 import { BridgeError } from '@meowfilm/runtime-bridge';
+import { parseJSONText, stringifyJSONValue, cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 
 const blocks = new Set(['cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences']);
 export const nativeSettingsFrameBytes = 8 * 1024 * 1024;
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const codes = new Set(['INVALID_REQUEST', 'PERMISSION_DENIED', 'CLOSED', 'CANCELLED', 'TIMEOUT',
   'STORAGE_ERROR', 'CORRUPT_STORAGE', 'STORAGE_CONFLICT', 'COMMIT_UNKNOWN']);
-const fingerprint = value => object(value) && Object.keys(value).length === 3 &&
+const fingerprint = value => object(value) &&
   typeof value.exists === 'boolean' && Number.isSafeInteger(value.length) && value.length >= 0 &&
   (value.exists ? typeof value.sha256 === 'string' && /^[a-f0-9]{64}$(?![\s\S])/.test(value.sha256)
     : value.length === 0 && value.sha256 === null);
@@ -34,7 +35,7 @@ export function createNativeSettings(stream, stop) {
     if (!blocks.has(block) || !Number.isSafeInteger(sequence + 1))
       return Promise.reject(new BridgeError('INVALID_REQUEST'));
     const id = ++sequence;
-    const line = JSON.stringify({ kind, id, block, ...extra }) + '\n';
+    const line = stringifyJSONValue({ kind, id, block, ...extra }, -2) + '\n';
     if (Buffer.byteLength(line) - 1 > nativeSettingsFrameBytes)
       return Promise.reject(new BridgeError('INVALID_REQUEST'));
     return new Promise((resolve, reject) => {
@@ -66,14 +67,14 @@ export function createNativeSettings(stream, stop) {
         try {
           const frame = Buffer.concat(chunks, length);
           if (!isUtf8(frame)) throw new BridgeError('INVALID_RESPONSE');
-          reply = JSON.parse(frame.toString('utf8'));
+          reply = parseJSONText(frame.toString('utf8'));
         } catch { fail('INVALID_RESPONSE'); return; }
         chunks = []; length = 0;
         const exchange = pending.get(reply?.id);
         if (!object(reply) || reply.kind !== 'settings.result' || !exchange || typeof reply.ok !== 'boolean' ||
-            reply.ok && (Object.keys(reply).length !== 5 || !(reply.document === null || object(reply.document)) ||
+            reply.ok && (!(reply.document === null || object(reply.document)) ||
               !fingerprint(reply.fingerprint)) ||
-            !reply.ok && (Object.keys(reply).length !== 4 || !codes.has(reply.code))) {
+            !reply.ok && !codes.has(reply.code)) {
           fail('INVALID_RESPONSE'); return;
         }
         clearTimeout(exchange.timer);
@@ -81,8 +82,8 @@ export function createNativeSettings(stream, stop) {
         if (!reply.ok) exchange.reject(Object.assign(new Error(reply.code), { code: reply.code }));
         else {
           const value = { document: reply.document, fingerprint: reply.fingerprint };
-          snapshots.set(exchange.block, structuredClone(value));
-          exchange.resolve(structuredClone(value));
+          snapshots.set(exchange.block, cloneJSONValue(value, -2));
+          exchange.resolve(cloneJSONValue(value, -2));
         }
       }
     },
@@ -91,27 +92,27 @@ export function createNativeSettings(stream, stop) {
     read(block) {
       if (closed) throw new BridgeError('CLOSED');
       if (!snapshots.has(block)) throw new BridgeError('INVALID_REQUEST');
-      return structuredClone(snapshots.get(block).document);
+      return cloneJSONValue(snapshots.get(block).document);
     },
     write,
     document(block) {
       if (closed) throw new BridgeError('CLOSED');
       if (block !== 'pan.accounts' || !snapshots.has(block)) throw new BridgeError('INVALID_REQUEST');
-      let current = structuredClone(snapshots.get(block));
+      let current = cloneJSONValue(snapshots.get(block), -2);
       const open = () => { if (current === null || closed) throw new BridgeError('CLOSED'); };
       return {
-        read() { open(); return structuredClone(current.document); },
+        read() { open(); return cloneJSONValue(current.document); },
         async reload() {
           open();
           const value = await request('settings.read', block);
           open(); current = value;
-          return structuredClone(current.document);
+          return cloneJSONValue(current.document);
         },
         async write(document) {
           open();
           const value = await write(block, document, current.fingerprint);
           open(); current = value;
-          return structuredClone(current.document);
+          return cloneJSONValue(current.document);
         },
         close() { current = null; },
       };

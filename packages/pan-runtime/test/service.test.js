@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseJSONText, stringifyJSONValue, rawJSON } from '@meowfilm/runtime-bridge/json';
 import { createPanService } from '../src/index.js';
 
 const area = fileURLToPath(new URL('../../../tmp/test-results/pan-runtime/', import.meta.url));
@@ -66,6 +67,7 @@ test('invalid credentials, unsupported operations and stale references reject be
   for (const input of [
     { provider: 'unknown', credentials: {} },
     { provider: 'baidu', credentials: null },
+    { provider: 'baidu', credentials: rawJSON('9007199254740993') },
     { provider: 'baidu', credentials: { cookie: 42 } },
     { provider: 'quark', credentials: { cookie: 'x\r\nInjected: yes' } },
     { provider: 'uc_tv', credentials: { expiresAt: -1 } },
@@ -146,10 +148,47 @@ test('failed atomic configuration write does not publish new account state; dama
   assert.equal((await service.invoke('settings.get')).accounts.find(item => item.provider === 'baidu').revision, 1);
   rmSync(path, { recursive: true }); renameSync(backup, path);
   await service.close();
-  writeFileSync(path, '{"version":1,"accounts":{"baidu":{"revision":0,"credentials":{}}}}');
+  writeFileSync(path, '{"version":1,"accounts":[]}');
   const before = readFileSync(path);
   assert.throws(() => createPanService({ dataRoot: root }), { code: 'CORRUPT_STORAGE' });
   assert.deepEqual(readFileSync(path), before);
+});
+
+test('file store preserves exact numeric extensions and bad siblings across token writes and restart', async t => {
+  const { service, root, transport } = setup(t, () => response({
+    code: 200, data: { access_token: 'synthetic-rotated', refresh_token: 'synthetic-new-refresh', expires_in: 3600 },
+  }));
+  const material = '{"large":9007199254740993,"decimal":1.00000000000000001,"tiny":1e-400,"huge":1e400,"zero":-0}';
+  const source = `{"version":1,"extra":${material},"accounts":{
+    "baidu":{"revision":7,"credentials":{"cookie":2},"extra":${material}},
+    "future":{"data":${material}},
+    "quark_tv":{"revision":1,"extra":${material},"credentials":{
+      "refreshToken":"synthetic-refresh","deviceId":"synthetic-device","extra":${material}
+    }}}}`;
+  mkdirSync(join(root, 'pan'));
+  const path = join(root, 'pan/accounts.json');
+  writeFileSync(path, source);
+  await service.settingsChanged();
+  const result = await service.invoke('refresh', { provider: 'quark_tv' });
+  assert.equal(result.account.status, 'signedIn');
+  const written = readFileSync(path, 'utf8'), saved = parseJSONText(written), original = parseJSONText(source);
+  for (const value of [saved.extra, saved.accounts.quark_tv.extra, saved.accounts.quark_tv.credentials.extra])
+    assert.equal(stringifyJSONValue(value), material);
+  assert.equal(stringifyJSONValue(saved.accounts.baidu), stringifyJSONValue(original.accounts.baidu));
+  assert.equal(stringifyJSONValue(saved.accounts.future), stringifyJSONValue(original.accounts.future));
+  assert.equal(saved.accounts.quark_tv.credentials.accessToken, 'synthetic-rotated');
+  await service.close();
+  const restarted = createPanService({ dataRoot: root, transport });
+  try {
+    const accounts = (await restarted.invoke('settings.get')).accounts;
+    assert.deepEqual(accounts.find(item => item.provider === 'baidu'),
+      { provider: 'baidu', errorCode: 'CORRUPT_STORAGE' });
+    assert.equal(accounts.find(item => item.provider === 'quark_tv').revision, 1);
+    await restarted.invoke('settings.clear', { provider: 'uc' });
+    const next = parseJSONText(readFileSync(path, 'utf8'));
+    assert.equal(stringifyJSONValue(next.extra), material);
+    assert.equal(stringifyJSONValue(next.accounts.quark_tv), stringifyJSONValue(saved.accounts.quark_tv));
+  } finally { await restarted.close(); }
 });
 
 test('parallel token refreshes share one upstream request and persist rotation before reporting completion', async t => {

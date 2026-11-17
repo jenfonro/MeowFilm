@@ -35,6 +35,7 @@ private final class PlaybackVideoDecoderAdapter: PlaybackVideoDecoding {
     var chapters: [PlaybackVideoChapter] {
         session.chapters.map { PlaybackVideoChapter(title: $0.title, start: $0.start, end: $0.end) }
     }
+    var seekable: Bool { session.seekable }
     var onFailure: (@MainActor (Error) -> Void)?
     var onProgress: (@MainActor (Double) -> Void)? {
         didSet { session.onProgress = onProgress }

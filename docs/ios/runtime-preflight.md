@@ -13,9 +13,9 @@ python3 -I -B scripts/ios-node-preflight.py --simulator <UDID>
 
 预检工具先分别调用准备工具，为本机构建架构的 simulator 和 device arm64 准备输入，再构建诊断 App；准备失败即停止，不用旧载荷继续构建。准备工具复用已校验的 NodeMobile archive／解包缓存，按明确的 iOS SDK 和架构准备原生引擎及载荷。device arm64 与 simulator arm64／x86_64 是不同目标，不能把 macOS arm64 二进制或另一种 iOS variant 改清单后使用；缓存按实际目标复用，不按测试轮次新建。
 
-`common-native` 公共闭包含业务模块、规则 SDK 和锁定依赖。通用默认入口仍为 music／cat／source；iOS 实际 entry 增加 pan、tmdb、douban，由 `connectFilmPlayback` 复用这些 provider 装配 film 和变更撤权 hook，再追加 netease 和借用其 token 的 music-platform。manifest 为 `platform: ios`、`transport: runtime.http.v1`、精确 `modules: ["music","cat","source","pan","tmdb","douban","film","netease","music-platform"]`，入口为 `app/ios/entries/aggregate.mjs`。App 发布连接前按序严格校验九模块身份，版本／契约见[运行器契约](../runtime/runtime-bridge.md)。TMDB、netease 与 music-platform 还核对完整方法清单；token 仅有 `netease.token.get`，音乐平台为 `request/session.update/cache.clear/describe` 四方法。旧帧协议、分片、asm.js／WASM 后端及“iOS 不装 source”的例外不保留。
+`common-native` 公共闭包含业务模块、规则 SDK 和锁定依赖。通用默认入口仍为 music／cat／source；iOS 实际 entry 增加 pan、tmdb、douban，由 `connectFilmPlayback` 复用这些 provider 装配 film 和变更撤权 hook，再追加 netease 和借用其 token 的 music-platform。manifest 为 `platform: ios`、`transport: runtime.http.v1`、精确 `modules: ["music","cat","source","pan","tmdb","douban","film","netease","music-platform"]`，入口为 `app/ios/entries/aggregate.mjs`。App 发布连接前按实际依赖匹配九模块身份，版本／契约见[运行器契约](../runtime/runtime-bridge.md)。TMDB、netease 与 music-platform 还核对实际需要的方法存在；额外模块、方法或排列差异不拒绝连接，同一依赖模块身份歧义仍失败。旧帧协议、分片、asm.js／WASM 后端及“iOS 不装 source”的例外不保留。
 
-精确 describe 不获取网易 token，也不下载或执行 Watchman。共同音乐模块仅在实际网易关系写准备时借用 token owner，原生等待 `sync.prepare` 的预算承接 Worker 的 45s 总预算，token 不交给原生。启动／脚本管理／普通账号业务不因该能力而依赖 SDK 网络。合成 SDK 与真实 jsdom Worker 在正式 NodeMobile 中运行才能证明嵌入承载；真实无账号 token 探测仅按显式选择执行，不作为默认联网门禁，结果只记录结构。Linux Node 24 结果不能作为 NodeMobile 18.20.4 的证明。
+describe 不获取网易 token，也不下载或执行 Watchman。共同音乐模块仅在实际网易关系写准备时借用 token owner，原生等待 `sync.prepare` 的预算承接 Worker 的 45s 总预算，token 不交给原生。启动／脚本管理／普通账号业务不因该能力而依赖 SDK 网络。合成 SDK 与真实 jsdom Worker 在正式 NodeMobile 中运行才能证明嵌入承载；真实无账号 token 探测仅按显式选择执行，不作为默认联网门禁，结果只记录结构。Linux Node 24 结果不能作为 NodeMobile 18.20.4 的证明。
 
 仅验证网易 token 的离线嵌入承载时，显式选择既有预检用例：
 
@@ -57,7 +57,7 @@ NodeMobile 18 的内置 `Request` 等 getter 会加载依赖 WASM 的 Undici 网
 | Swift → Node 成功 | `{kind:"settings.result",id,ok:true,document,fingerprint}` |
 | Swift → Node 失败 | `{kind:"settings.result",id,ok:false,code}` |
 
-`id` 为本连接递增正安全整数；不存在的文档用 `null` 表示。`fingerprint`／写入 `expected` 为 `{exists,length,sha256}`，绑定**原生明文字节**的存在性、长度及 SHA-256；缺失为 `false/0/null`。CAS 在原生 owner 内重读并核对内容身份，敏感块仅在同一 owner 内解密／加密，Node 不读取 Keychain 或密文文件。冲突返回 `STORAGE_CONFLICT`，存储错误返回 `STORAGE_ERROR`，不回传路径或异常正文。
+帧仅消费各动作需要的字段，extra 不阻断 ready/read/write，不增加写入权限。`id` 为本连接递增正安全整数；不存在的文档用 `null` 表示。`fingerprint`／写入 `expected` 为 `{exists,length,sha256}`，绑定**原生明文字节**的存在性、长度及 SHA-256；缺失为 `false/0/null`。CAS 在原生 owner 内重读并核对内容身份，敏感块仅在同一 owner 内解密／加密，Node 不读取 Keychain 或密文文件。冲突返回 `STORAGE_CONFLICT`，存储错误返回 `STORAGE_ERROR`，不回传路径或异常正文。
 
 Node 设置交换的等待为 5 秒；超时、非法帧及断连终止本次通道并清理所有 pending，运行器按既有关闭路径排空。Swift 保留唯一 reader 到 EOF，关闭后不接纳设置请求，不在阻塞读取期间另关／复用 descriptor。它是受信能力通道，不是公开反向脚本存储 RPC。
 
@@ -67,7 +67,7 @@ Node 设置交换的等待为 5 秒；超时、非法帧及断连终止本次通
 
 独立预检的检查项包括实际 Node／N-API／目标身份、正式 framework 加载、异步原生回调、typed bytes、明确脚本算法、线程取消及真实退出；同时保留有用途的文件、Node crypto、HTTP 和 Worker 能力检查。正式 App 宿主的用例范围包括：
 
-- 当前 App 九模块按序精确 describe（不获取 token）；LX 导入、启用、取链、请求私有 KV、歌词、停用、删除；music-platform 的结构与关闭不等于真实账号业务已通过。
+- 当前 App 九模块依赖 describe（不获取 token）；LX 导入、启用、取链、请求私有 KV、歌词、停用、删除；music-platform 的结构与关闭不等于真实账号业务已通过。
 - Cat 实际 HTTP 五阶段请求、私有卷、客户端选项、删除标记及结果返回后管理换代。
 - source 的实际原生装载、调用、卸载，以及 Reader 的统一结果；[小说](novel.md)另由正式 App 装配永久仓库、原生阅读／Web 消费者和两进程冷启动验证，不把独立预检当产品 UI 验收。
 - TMDB 真实模块经可控 HTTP 上游验证设置／实际 Film adapter 搜索与详情／受信二进制图片／实际 Artwork 消费者，精确选择见[影视搜索](film-search.md#真实-tmdb-宿主)。合成上游不是公网账号验证。

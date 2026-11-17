@@ -269,9 +269,11 @@ extension NativeMusicService {
                 let date = formatter.string(from: now())
                 let item = MJ.obj([("songId", entry["songId"]), ("context", entry["context"]),
                     ("at", .number(now().timeIntervalSince1970 * 1000))])
+                try musicRequire(d.history["days"].isArray, .corruptDocument)
                 var days = d.history["days"].array
                 let index = days.firstIndex { $0["date"].string == date }
                 var day = index.map { days[$0] } ?? .obj([("date", .string(date)), ("songs", .array([]))])
+                try musicRequire(day["songs"].isArray, .corruptDocument)
                 day["songs"] = .array([item] + day["songs"].array.filter { $0["songId"] != item["songId"] })
                 if let index { days[index] = day } else { days.append(day) }
                 d.history["days"] = .array(Array(days.sorted { $0["date"].string > $1["date"].string }.prefix(7)))

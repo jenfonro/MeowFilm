@@ -19,8 +19,6 @@ async function handshake(device, { transport, clock, signal }) {
   if (keyReply.code != null && required(keyReply.code) !== '200') fail('UPSTREAM_ERROR');
   const data = object(keyReply.data);
   const serverTime = required(data.timestamp);
-  // This is the authenticated millisecond input, not an ordinary platform ID.
-  if (!/^[1-9]\d*$/.test(serverTime) || !Number.isSafeInteger(Number(serverTime))) fail('INVALID_RESPONSE');
   const signature = Buffer.from(required(data.signature), 'base64');
   const expected = hmac(signKey, serverTime + nonce);
   if (signature.length !== expected.length || !timingSafeEqual(signature, expected)) fail('INVALID_RESPONSE');

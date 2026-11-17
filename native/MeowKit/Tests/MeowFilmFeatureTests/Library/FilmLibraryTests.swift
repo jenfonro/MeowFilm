@@ -1,21 +1,19 @@
 import Foundation
 import XCTest
+import MeowRuntime
 @testable import MeowFilmFeature
 
 @MainActor
 final class FilmLibraryTests: XCTestCase {
-    func testFavoritesSaveTheSuppliedTargetAndRecognizeExistingLegacyRecords() throws {
+    func testFavoritesSaveAndRestoreTheSuppliedTarget() throws {
         let suite = "MeowFilmFeatureTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        defaults.set(Data(#"[{"sourceID":"tmdb","itemID":"19","kind":"tv"}]"#.utf8),
-                     forKey: FilmLibrary.storageKey)
         let target = FilmPlaybackTarget(id: "node-content", kind: .tv, title: "影片", metadataProvider: .tmdb, metadataID: "19")
         let item = FilmItem(sourceID: "tmdb", id: "19", title: "影片", kind: .tv,
                             businessID: "node-content", playbackTarget: target)
         let library = FilmLibrary(defaults: defaults)
-        XCTAssertTrue(library.contains(item))
-        XCTAssertFalse(try library.toggle(item))
+        XCTAssertFalse(library.contains(item))
         XCTAssertTrue(try library.toggle(item))
         let restored = FilmLibrary(defaults: defaults)
         let record = try XCTUnwrap(restored.favorites.first)
@@ -28,8 +26,8 @@ final class FilmLibraryTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         defaults.set("preserved", forKey: "unrelated-setting")
-        let first = FilmItem(sourceID: "first", id: "100", title: "第一来源")
-        let second = FilmItem(sourceID: "second", id: "100", title: "第二来源")
+        let first = item(sourceID: "first", id: "100", title: "第一来源")
+        let second = item(sourceID: "second", id: "100", title: "第二来源")
         let library = FilmLibrary(defaults: defaults)
         XCTAssertFalse(library.contains(first))
         XCTAssertTrue(try library.toggle(first))
@@ -47,8 +45,8 @@ final class FilmLibraryTests: XCTestCase {
         XCTAssertTrue(rebuilt.contains(second))
         XCTAssertEqual(defaults.string(forKey: "unrelated-setting"), "preserved")
 
-        let delimitedSource = FilmItem(sourceID: "a:b", id: "c", title: "不同身份一")
-        let delimitedItem = FilmItem(sourceID: "a", id: "b:c", title: "不同身份二")
+        let delimitedSource = item(sourceID: "a:b", id: "c", title: "不同身份一")
+        let delimitedItem = item(sourceID: "a", id: "b:c", title: "不同身份二")
         XCTAssertTrue(try rebuilt.toggle(delimitedSource))
         XCTAssertFalse(rebuilt.contains(delimitedItem))
         XCTAssertTrue(try rebuilt.toggle(delimitedItem))
@@ -89,7 +87,7 @@ final class FilmLibraryTests: XCTestCase {
         XCTAssertTrue(library.favorites.isEmpty)
         XCTAssertNil(library.loadError)
         XCTAssertNil(defaults.object(forKey: FilmLibrary.storageKey))
-        let item = FilmItem(sourceID: "douban", id: "19", title: "影片", kind: .movie)
+        let item = item(sourceID: "douban", id: "19", title: "影片", kind: .movie)
         XCTAssertTrue(try library.toggle(item))
         let restored = FilmLibrary(defaults: defaults)
         XCTAssertNil(restored.loadError)
@@ -119,8 +117,8 @@ final class FilmLibraryTests: XCTestCase {
         let suite = "MeowFilmFeatureTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let movie = FilmItem(sourceID: "tmdb", id: "19", title: "电影", kind: .movie)
-        let tv = FilmItem(sourceID: "tmdb", id: "19", title: "剧集", kind: .tv)
+        let movie = item(sourceID: "tmdb", id: "19", title: "电影", kind: .movie)
+        let tv = item(sourceID: "tmdb", id: "19", title: "剧集", kind: .tv)
         let library = FilmLibrary(defaults: defaults)
         XCTAssertTrue(try library.toggle(movie))
         XCTAssertTrue(library.contains(movie))
@@ -139,39 +137,6 @@ final class FilmLibraryTests: XCTestCase {
         XCTAssertTrue(FilmLibrary(defaults: defaults).favorites.isEmpty)
     }
 
-    func testLegacyDoubanMatchesButUntypedTMDBIsNotGuessedOrMigrated() throws {
-        let suite = "MeowFilmFeatureTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let bytes = Data(#"[{"sourceID":"douban","itemID":"19"},{"sourceID":"tmdb","itemID":"19"}]"#.utf8)
-        defaults.set(bytes, forKey: FilmLibrary.storageKey)
-        let library = FilmLibrary(defaults: defaults)
-        let legacy = FilmItem(sourceID: "tmdb", id: "19", title: "旧收藏")
-        let movie = FilmItem(sourceID: "tmdb", id: "19", title: "电影", kind: .movie)
-        let tv = FilmItem(sourceID: "tmdb", id: "19", title: "剧集", kind: .tv)
-        let douban = FilmItem(sourceID: "douban", id: "19", title: "旧豆瓣", kind: .tv)
-        XCTAssertNil(library.loadError)
-        XCTAssertEqual(library.favorites.count, 2)
-        XCTAssertTrue(library.contains(douban))
-        XCTAssertTrue(library.contains(legacy))
-        XCTAssertFalse(library.contains(movie))
-        XCTAssertFalse(library.contains(tv))
-        XCTAssertThrowsError(try library.toggle(legacy)) { error in
-            XCTAssertEqual(error as? FilmLibraryError, .missingKind)
-        }
-        XCTAssertEqual(defaults.data(forKey: FilmLibrary.storageKey), bytes)
-        XCTAssertTrue(try library.toggle(movie))
-        XCTAssertTrue(try library.toggle(tv))
-        let restored = FilmLibrary(defaults: defaults)
-        XCTAssertNil(restored.loadError)
-        XCTAssertEqual(restored.favorites, [legacy.identity, movie.identity, tv.identity, douban.identity])
-        XCTAssertFalse(try restored.toggle(movie))
-        XCTAssertFalse(try restored.toggle(douban))
-        let rebuilt = FilmLibrary(defaults: defaults)
-        XCTAssertEqual(rebuilt.favorites, [legacy.identity, tv.identity])
-        XCTAssertFalse(rebuilt.contains(movie))
-    }
-
     func testNewUntypedTMDBFavoriteFailsWithoutWritingOrClaimingSuccess() throws {
         let suite = "MeowFilmFeatureTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -186,4 +151,40 @@ final class FilmLibraryTests: XCTestCase {
         XCTAssertTrue(library.favorites.isEmpty)
         XCTAssertNil(defaults.object(forKey: FilmLibrary.storageKey))
     }
+
+    func testFavoriteActionRequiresTheSuppliedTargetToMatchItsBusinessIdentity() throws {
+        let suite = "MeowFilmFeatureTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let library = FilmLibrary(defaults: defaults)
+        for target: FilmPlaybackTarget? in [nil, .init(id: "other", kind: .movie, title: "影片")] {
+            let item = FilmItem(sourceID: "douban", id: "19", title: "影片", businessID: "selected", playbackTarget: target)
+            XCTAssertThrowsError(try library.toggle(item)) { XCTAssertEqual($0 as? FilmLibraryError, .missingTarget) }
+        }
+        XCTAssertNil(defaults.object(forKey: FilmLibrary.storageKey))
+        XCTAssertTrue(library.favorites.isEmpty)
+    }
+
+    private func item(sourceID: String, id: String, title: String, kind: FilmItemKind? = nil) -> FilmItem {
+        let businessID = sourceID + ":" + (kind?.rawValue ?? "") + ":" + id
+        let target = FilmPlaybackTarget(id: businessID, kind: kind == .tv ? .tv : .movie, title: title)
+        return FilmItem(sourceID: sourceID, id: id, title: title, kind: kind, businessID: businessID, playbackTarget: target)
+    }
+
+    func testHealthyFavoritesSurviveUnreadableSiblingAndKeepExactMaterialWhenToggled() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString))
+        defer { defaults.removeObject(forKey: FilmLibrary.storageKey) }
+        let a = item(sourceID: "a", id: "1", title: "A"), b = item(sourceID: "b", id: "2", title: "B")
+        let opaque = try RuntimeJSON.decode(Data(#"{"broken":true,"n":123456789012345678901234567890,"é":1,"e\u0301":2}"#.utf8))
+        let healthy = try RuntimeJSON.decode(JSONEncoder().encode(a.identity))
+        defaults.set(try RuntimeJSON.encode(.array([opaque, healthy])), forKey: FilmLibrary.storageKey)
+        let library = FilmLibrary(defaults: defaults)
+        XCTAssertNil(library.loadError); XCTAssertTrue(library.contains(a))
+        XCTAssertTrue(try library.toggle(b)); XCTAssertFalse(try library.toggle(a))
+        let raw = try RuntimeJSON.decode(XCTUnwrap(defaults.data(forKey: FilmLibrary.storageKey)))
+        guard case .array(let rows) = raw else { return XCTFail("array") }
+        XCTAssertEqual(rows.first, opaque)
+        XCTAssertTrue(FilmLibrary(defaults: defaults).contains(b))
+    }
+
 }

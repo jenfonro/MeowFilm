@@ -1,6 +1,6 @@
 using System.Collections.ObjectModel;
-using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Feedback;
@@ -16,6 +16,7 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
     private readonly SemaphoreSlim lane = new(1, 1);
     private readonly object sync = new();
     private MusicFeedbackSettings current = new(0, Array.Empty<string>());
+    private JsonObject document = new();
     private DocumentFingerprint fingerprint = DocumentFingerprint.Missing;
     private bool loaded, uncertain, closed, preservesWyConsent;
     public event Action? Changed;
@@ -57,13 +58,13 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
                 }
             }
             var saved = await store.ReadAsync(DocumentNamespace, token).ConfigureAwait(false);
-            var decoded = Decode(saved);
+            var decoded = Decode(saved, out var raw);
             lock (sync)
             {
                 if (closed) throw Error("CLOSED");
                 preservesWyConsent = loaded && !uncertain && current.Revision == decoded.Revision &&
                     current.Enabled.Contains("wy") && decoded.Enabled.Contains("wy");
-                current = decoded; fingerprint = saved.Fingerprint; loaded = true; uncertain = false;
+                current = decoded; document = raw; fingerprint = saved.Fingerprint; loaded = true; uncertain = false;
             }
             Notify(); return decoded;
         }
@@ -88,6 +89,8 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
         try
         {
             MusicFeedbackSettings next;
+            JsonObject nextDocument;
+            byte[] data;
             lock (sync)
             {
                 if (closed) throw Error("CLOSED");
@@ -95,20 +98,24 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
                 if (current.Revision != expectedRevision) throw Error("REVISION_CONFLICT");
                 token.ThrowIfCancellationRequested();
                 next = new(expectedRevision + 1, new ReadOnlyCollection<string>(targets));
+                nextDocument = document.DeepClone().AsObject();
+                nextDocument["version"] = 1; nextDocument["revision"] = next.Revision;
+                nextDocument["enabled"] = JsonSerializer.SerializeToNode(targets);
+                data = JsonSerializer.SerializeToUtf8Bytes(nextDocument);
+                if (data.Length > 1024) throw Error("LIMIT");
                 preservesWyConsent = current.Enabled.Contains("wy") && targets.Contains("wy");
                 // Fence all reporting BEFORE admitting a settings mutation. A lost
                 // acknowledgment must not leave the old enabled policy operational.
                 uncertain = true;
             }
             Notify();
-            byte[] data = JsonSerializer.SerializeToUtf8Bytes(new { version = 1, revision = next.Revision, enabled = targets });
             try
             {
                 var expected = DocumentFingerprint.FromBytes(data);
                 // A final CAS admission cannot be undone by UI cancellation.
                 var actual = await store.WriteAsync(DocumentNamespace, data, fingerprint, CancellationToken.None).ConfigureAwait(false);
                 if (actual != expected) throw Error("COMMIT_UNKNOWN");
-                lock (sync) { current = next; fingerprint = actual; uncertain = false; }
+                lock (sync) { current = next; document = nextDocument; fingerprint = actual; uncertain = false; }
                 Notify(); return next;
             }
             catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Conflict)
@@ -125,12 +132,12 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
         finally { lane.Release(); }
     }
 
-    private static MusicFeedbackSettings Decode(DocumentSnapshot saved)
+    private static MusicFeedbackSettings Decode(DocumentSnapshot saved, out JsonObject raw)
     {
         if (saved.Data is null)
         {
             if (saved.Fingerprint != DocumentFingerprint.Missing) throw Error("CORRUPT_STORAGE");
-            return new(0, Array.Empty<string>());
+            raw = new(); return new(0, Array.Empty<string>());
         }
         try
         {
@@ -140,12 +147,11 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object) throw Error("CORRUPT_STORAGE");
             var keys = root.EnumerateObject().Select(p => p.Name).ToArray();
-            if (keys.Length != 3 || keys.Distinct(StringComparer.Ordinal).Count() != 3 ||
-                keys.Any(k => k is not ("version" or "revision" or "enabled")) ||
+            if (keys.Distinct(StringComparer.Ordinal).Count() != keys.Length ||
                 root.GetProperty("enabled").ValueKind != JsonValueKind.Array) throw Error("CORRUPT_STORAGE");
-            if (CanonicalInteger(root.GetProperty("version"), 1) != 1)
+            if (Integer(root.GetProperty("version"), 1) != 1)
                 throw Error("CORRUPT_STORAGE");
-            long revision = CanonicalInteger(root.GetProperty("revision"), MaximumRevision);
+            long revision = Integer(root.GetProperty("revision"), MaximumRevision);
             var enabled = root.GetProperty("enabled").EnumerateArray().Select(value =>
             {
                 if (value.ValueKind != JsonValueKind.String || value.GetString() is not { } platform)
@@ -153,24 +159,22 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
                 return platform;
             }).ToArray();
             if (enabled.Length > 3 || enabled.Distinct(StringComparer.Ordinal).Count() != enabled.Length ||
-                enabled.Any(v => v is not ("wy" or "tx" or "kg")) ||
-                !enabled.SequenceEqual(enabled.OrderBy(value => value, StringComparer.Ordinal), StringComparer.Ordinal))
+                enabled.Any(v => v is not ("wy" or "tx" or "kg")))
                 throw Error("CORRUPT_STORAGE");
+            Array.Sort(enabled, StringComparer.Ordinal);
+            raw = JsonNode.Parse(saved.Data)!.AsObject();
             return new(revision, new ReadOnlyCollection<string>(enabled));
         }
         catch (MusicFeedbackException) { throw; }
         catch { throw Error("CORRUPT_STORAGE"); }
     }
 
-    private static long CanonicalInteger(JsonElement value, long maximum)
+    private static long Integer(JsonElement value, long maximum)
     {
-        string raw = value.ValueKind == JsonValueKind.Number ? value.GetRawText() : "";
-        if (raw.Length is < 1 or > 16 || raw.Length > 1 && raw[0] == '0' ||
-            raw.Any(character => character is < '0' or > '9') ||
-            !long.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out long result) ||
-            result > maximum)
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetDecimal(out decimal result) ||
+            result < 0 || result > maximum || decimal.Truncate(result) != result)
             throw Error("CORRUPT_STORAGE");
-        return result;
+        return (long)result;
     }
 
     private void Notify() => Changed?.Invoke();

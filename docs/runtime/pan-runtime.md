@@ -35,16 +35,20 @@ await runtime.close();
 | operation | 请求 | 成功 value |
 | --- | --- | --- |
 | `providers` | `{}` | `{providers:[{provider,credentialFields,list,prepare,modes,login,refresh}]}` |
-| `settings.get` | `{}` | `{accounts:[{provider,revision,configured,fields,status}]}` |
+| `settings.get` | `{}` | `{accounts:[账号状态或{provider,errorCode:"CORRUPT_STORAGE"}]}` |
 | `settings.set` | `{provider,credentials:{...}}` | 对应账号状态 |
 | `settings.clear` | `{provider}` | 新 revision 的空账号状态 |
-| `refresh` | `{provider}` | `{refreshed:true,account:账号状态}` |
+| `refresh` | `{provider}` | `{refreshed:true,account:账号状态或单项错误}` |
 
 每个 provider 只有一份当前账号。`settings.set` **整份替换**该账号配置，不是合并；clear 删除凭据但保留递增 revision。`configured/fields` 只说明哪些字段非空，不证明账号有效或具备会员资格。普通配置读取、刷新及登录结果不回传原始秘密；不存在“读取 Cookie”接口。不同 provider 不互相读写凭据。
 
-普通操作忽略未消费参数，不按字段白名单拒绝请求。`settings.set` 只提取所选 provider 定义的凭据字段，其他字段不会进入持久配置、认证或网络；已定义的字段仍按实际凭据类型及 HTTP 头要求处理。只含未知凭据字段的请求投影为空配置，仍遵循整份替换语义。顶层附加的 `method/url/headers` 等不能改变实际操作或目标，clear 也不会消费附带的 credentials。此处只规定请求投影，不改变本地账号文档的恢复、格式或持久化组织。
+普通操作忽略未消费参数，不按字段白名单拒绝请求。`settings.set` 只提取所选 provider 定义的凭据字段，其他字段不会进入持久配置、认证或网络；已定义的字段仍按实际凭据类型及 HTTP 头要求处理。只含未知凭据字段的请求投影为空配置，仍遵循整份替换语义。顶层附加的 `method/url/headers` 等不能改变实际操作或目标，clear 也不会消费附带的 credentials。
 
-运行器账号状态中的 `status` 为 `signedIn/expired/signedOut`。无凭据为 `signedOut`；已有凭据且本进程未收到明确账号认证失败时为 `signedIn`，不是永久有效性保证。`refresh` 成功后为 `signedIn`，明确账号认证失败后为 `expired`；网络、超时、上游格式等错误不改变此前状态，也不删除凭据。此观察状态不另建持久库，配置读取本身不执行验证；原生离线配置投影与显式验证见[设置页](#设置页)。分享密码错误不作为账号失效依据。
+加载配置只检查文档根、version 与 accounts 容器，不对全部账号或凭据做预检。provider 只能取得自己声明的字段，并在实际读取该字段时检查类型及头值约束；例如天翼使用健康 Cookie 列分享时，不预检未用的密码。持久凭据中的未知字段不参与 configured/fields，也不会成为 HTTP 头或取得认证权限。选定账号的 revision 必须有效，不能给坏记录补造身份。
+
+健康账号状态仍为 `{provider,revision,configured,fields,status}`。`settings.get` 为每个已知 provider 返回一项；无法投影的账号返回 `{provider,errorCode:"CORRUPT_STORAGE"}`，不附造 revision、fields 或 signedOut，不回填此前成功状态。一个坏账号不会阻断其他账号的读取、请求或变更；它的原始记录继续保留。未知 provider 记录保留在文档中，但不注册能力或授予权限。坏根／存储读取失败仍使配置读取与依赖配置的操作整体失败，不将其报告为空配置。原生 store 返回 null 表示尚无文档；文件内的 JSON null 是坏根。
+
+可投影账号状态中的 `status` 为 `signedIn/expired/signedOut`。无凭据为 `signedOut`；已有凭据且本进程未收到明确账号认证失败时为 `signedIn`，不是永久有效性保证。`refresh` 成功后为 `signedIn`，明确账号认证失败后为 `expired`；网络、超时、上游格式等错误不改变此前状态，也不删除凭据。刷新只证明实际使用的凭据路径；未用字段仍损坏时，刷新可以成功，但 account 仍返回上述显式单项错误，不把坏材料投影成健康配置。此观察状态不另建持久库，配置读取本身不执行在线验证；原生离线配置投影与显式验证见[设置页](#设置页)。分享密码错误不作为账号失效依据。
 
 七个 provider 均支持 `refresh`。Cookie-only 账号使用只读账号接口检测，不列分享、不转存；支持密码或 token 的账号按其协议刷新。天翼只有 Cookie 时也可检测；用户名与密码仍用于普通登录，不绕过验证码。本地保存凭据不等于验证成功；需要验证时显式刷新，只有真实在线回执才报告已验证。
 
@@ -58,11 +62,15 @@ await runtime.close();
 
 写入先同步暂存文件，再以原子 rename 为提交点；成功后的磁盘与内存配置一致，不承诺断电时目录项的额外耐久性保证。
 
+默认文件 store 使用公共 `@meowfilm/runtime-bridge/json` 解析／写入，克隆保留精确 JSON 数字材料；不将未消费的大整数改成字符串或把精确小数舍入。写回保留未编辑的根／账号记录／凭据扩展和坏兄弟记录，不按完整 schema 重建文档。自动刷新仅合并本次已声明凭据 patch；显式 set、clear 或登录确认整份替换目标 credentials（包括移除此前凭据扩展），仍保留根和 record 扩展。上游网盘响应的数字 ID 解析契约不随持久解析改变。
+
 手动换号／clear 撤销旧代次的进行中网络、登录和文件引用，旧结果不得覆盖新配置。自动刷新只 patch 当前代次，轮换凭据持久化成功后才报告成功。
 
 ### 原生凭据 store
 
 `createPanService`／`createPanRuntimeModule` 可接收受信 `store`，提供 `read/write/close` 和可选 `reload`；文档仍为上述 v1 格式。注入后不创建第二份 `accounts.json`。`settingsChanged()` 通过串行变更边界重读同一原生 owner，撤销旧账号代次的请求、登录及引用。
+
+重读时仅撤销 revision 或凭据材料发生变化的账号，不因坏兄弟中止健康账号；坏根／读取失败则撤销依赖该文档的进行中操作，并等待后续有效通知恢复。CAS 冲突仍重读最新文档、向原请求返回 `STALE_ACCOUNT`，不自动重试覆盖。原生 store 传递精确 JSON 材料时不能用 `structuredClone` 拆坏 `JSON.rawJSON`，应沿公共 JSON helper 克隆；比较材料时数字原文与普通 `rawJSON` 字段对象是不同身份。
 
 `settings.set/clear` HTTP 接口仍保留，但实际写入也必须经过 supplied store；它们不绕过原生 CAS。iOS／Windows 普通页面直接调用原生 owner，运行器通过私密 `pan.accounts` 内容 CAS 写回扫码及刷新所得凭据。新凭据持久化成功才发布 confirmed／refreshed；手动换号、清除或其他块内容变化导致旧 fingerprint 冲突时，旧请求不能覆盖新值。共同规则见[原生设置契约](../common/settings-storage.md#在线取得凭据的安全回写)，iOS 私密能力见[运行底座](../ios/runtime-preflight.md#原生设置私密通道)，Windows 接线见[原生设置](../windows/native-settings.md#网盘凭据回写)。
 

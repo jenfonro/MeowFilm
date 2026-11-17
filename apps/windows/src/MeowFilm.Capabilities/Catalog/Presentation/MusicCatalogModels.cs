@@ -163,11 +163,7 @@ public static class MusicCatalogDto
     public static MusicCatalogCard[] SearchResults(JsonElement items, string kind)
     {
         MusicDto.Require(kind is "songs" or "playlists" && items.ValueKind == JsonValueKind.Array);
-        var cards = new MusicCatalogCard[items.GetArrayLength()];
-        int index = 0;
-        foreach (var item in items.EnumerateArray())
-            cards[index++] = SearchResult(item, kind);
-        return cards;
+        return ReadItems(items, item => SearchResult(item, kind));
     }
     internal static MusicCatalogCard SearchResult(JsonElement item, string kind)
     {
@@ -181,30 +177,55 @@ public static class MusicCatalogDto
         string title, string searchKind = "songs")
     {
         var sections = new List<MusicCatalogSection>();
-        if (reply.TryGetProperty("sections", out var groups))
+        MusicDto.Require(reply.ValueKind == JsonValueKind.Object);
+        bool content = false, valid = false;
+        if (reply.TryGetProperty("sections", out var groups) && groups.ValueKind == JsonValueKind.Array)
         {
+            content = true;
+            if (groups.GetArrayLength() == 0) valid = true;
             foreach (var group in groups.EnumerateArray())
             {
-                var heading = Text(group, "title");
-                MusicCatalogCard? action = null;
-                if (group.TryGetProperty("action", out var a) && a.ValueKind == JsonValueKind.Object)
-                    action = Card(SectionActionItem(group, heading, a), platform, "resource");
-                var type = Text(group, "type");
-                sections.Add(new(heading, Cards(group.GetProperty("items"), platform, "resource"),
-                    MusicDto.Text(group, "id"), type, action, Text(group, "layout")));
+                try
+                {
+                    MusicDto.Require(group.ValueKind == JsonValueKind.Object);
+                    if (!Boolean(group, "display", true)) { valid = true; continue; }
+                    var heading = Text(group, "title");
+                    MusicCatalogCard? action = null;
+                    if (group.TryGetProperty("action", out var a) && a.ValueKind == JsonValueKind.Object)
+                        try { action = Card(SectionActionItem(group, heading, a), platform, "resource"); }
+                        catch (Exception error) when (IsItemFailure(error)) { }
+                    var type = Text(group, "type");
+                    sections.Add(new(heading, Cards(group.GetProperty("items"), platform, "resource"),
+                        MusicDto.Text(group, "id"), type, action, Text(group, "layout")));
+                    valid = true;
+                }
+                catch (Exception error) when (IsItemFailure(error)) { }
             }
         }
         if (reply.TryGetProperty("entries", out var entries))
         {
-            var cards = Cards(entries, platform, "resource");
-            if (cards.Length > 0) sections.Insert(0, new("", cards, "entries", "entries"));
+            content = true;
+            try
+            {
+                var cards = Cards(entries, platform, "resource");
+                if (cards.Length > 0) sections.Insert(0, new("", cards, "entries", "entries"));
+                valid = true;
+            }
+            catch (Exception error) when (IsItemFailure(error)) { }
         }
         if (reply.TryGetProperty("items", out var items))
         {
-            var cards = Cards(items, platform, operation == "channels" ? "descriptor" :
-                operation == "personalPlaylists" || operation == "search" && searchKind == "playlists" ? "playlist" : "song");
-            sections.Add(new(title, cards, "items", operation));
+            content = true;
+            try
+            {
+                var cards = Cards(items, platform, operation == "channels" ? "descriptor" :
+                    operation == "personalPlaylists" || operation == "search" && searchKind == "playlists" ? "playlist" : "song");
+                sections.Add(new(title, cards, "items", operation));
+                valid = true;
+            }
+            catch (Exception error) when (IsItemFailure(error)) { }
         }
+        MusicDto.Require(content && valid);
         return sections;
     }
     private static JsonElement SectionActionItem(JsonElement group, string heading, JsonElement action)
@@ -245,8 +266,28 @@ public static class MusicCatalogDto
         if (reply.TryGetProperty("feed", out var feed) && feed.ValueKind == JsonValueKind.Object) Add(feed, rootSelection);
         return tags;
     }
+    private static bool IsItemFailure(Exception error) => error is MusicOperationException or JsonException or
+        InvalidOperationException or KeyNotFoundException or FormatException or OverflowException;
     private static MusicCatalogCard[] Cards(JsonElement items, string platform, string fallback) =>
-        items.EnumerateArray().Select(item => Card(item, platform, fallback)).ToArray();
+        ReadItems(items, item => Card(item, platform, fallback));
+    private static MusicCatalogCard[] ReadItems(JsonElement items, Func<JsonElement, MusicCatalogCard> read)
+    {
+        MusicDto.Require(items.ValueKind == JsonValueKind.Array);
+        var cards = new List<MusicCatalogCard>();
+        int hidden = 0;
+        foreach (var item in items.EnumerateArray())
+        {
+            try
+            {
+                MusicDto.Require(item.ValueKind == JsonValueKind.Object);
+                if (!Boolean(item, "display", true)) { hidden++; continue; }
+                cards.Add(read(item));
+            }
+            catch (Exception error) when (IsItemFailure(error)) { }
+        }
+        MusicDto.Require(items.GetArrayLength() == hidden || cards.Count > 0);
+        return cards.ToArray();
+    }
     private static MusicCatalogCard Card(JsonElement item, string platform, string fallback)
     {
         MusicDto.Require(item.ValueKind == JsonValueKind.Object);
@@ -322,8 +363,9 @@ public static class MusicCatalogDto
     private static int? CalendarDay(JsonElement item)
     {
         if (!item.TryGetProperty("dayOfMonth", out var day) || day.ValueKind == JsonValueKind.Null) return null;
-        MusicDto.Require(day.ValueKind == JsonValueKind.Number && day.TryGetInt32(out var value) && value is >= 1 and <= 31);
-        return day.GetInt32();
+        long value = MusicDto.Integer(item, "dayOfMonth");
+        MusicDto.Require(value is >= 1 and <= 31);
+        return (int)value;
     }
     private static MusicCatalogEntryPresentation EntryPresentation(JsonElement item) =>
         Text(item, "presentation") switch

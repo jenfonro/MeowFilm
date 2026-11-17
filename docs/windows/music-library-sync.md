@@ -40,7 +40,7 @@ accountId
 
 ## 当前状态格式
 
-`library-sync` 严格包含：
+`library-sync` 消费以下状态：
 
 ```text
 schema
@@ -51,6 +51,8 @@ confirmation
 approved
 status
 ```
+
+未消费扩展随当前事务保留。同步读取才核对实际整库引用、账号绑定和 pending／confirmation 关系；无关队列或设置不参与该校验。
 
 当前 schema 为 `2`，同步 contract 为 `1.1.0`。旧 schema 拒绝；本端不建立迁移分支。
 

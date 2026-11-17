@@ -78,20 +78,42 @@ final class ProgressiveMediaLoaderTests: XCTestCase {
         XCTAssertEqual(sink.result.information?.length, 9300)
     }
 
-    func testMetadataRequestDoesNotDownloadWholeFile() async throws {
+    func testBoundedReadObtainsInformationWithoutDownloadingWholeFile() async throws {
         let fixture = PlaybackHTTPFixture(body: Data(repeating: 1, count: 20000))
         defer { fixture.close() }
-        let finished = expectation(description: "metadata")
-        let sink = TestProgressiveSink(range: nil, finished: finished)
+        let finished = expectation(description: "bounded read")
+        let sink = TestProgressiveSink(range: try .init(requestedOffset: 0, currentOffset: 0,
+                                                        requestedLength: 1, toEnd: false), finished: finished)
         let loader = ProgressiveMediaLoader(plan: try plan(fixture.url), budget: PlaybackNetworkBudget(),
                                             configuration: configuration()) { _ in XCTFail("unexpected failure") }
         defer { loader.invalidate() }
         loader.enqueue(sink)
         await fulfillment(of: [finished], timeout: 5)
         XCTAssertEqual(sink.result.information?.length, 20000)
-        XCTAssertTrue(sink.result.bytes.isEmpty)
+        XCTAssertEqual(sink.result.bytes, Data([1]))
         XCTAssertEqual(fixture.requests.count, 1)
-        XCTAssertEqual(fixture.requests.first?.value(forHTTPHeaderField: "Range"), "bytes=0-1")
+        XCTAssertEqual(fixture.requests.first?.value(forHTTPHeaderField: "Range"), "bytes=0-0")
+    }
+
+    func testRangeAtEOFFinishesWithoutBytesAndCloseDrainsTask() async throws {
+        let fixture = PlaybackHTTPFixture(body: Data(repeating: 1, count: 1000))
+        defer { fixture.close() }
+        let finished = expectation(description: "EOF range")
+        let sink = TestProgressiveSink(range: try .init(requestedOffset: 1000, currentOffset: 1000,
+                                                        requestedLength: 100, toEnd: false), finished: finished)
+        let budget = PlaybackNetworkBudget()
+        let loader = ProgressiveMediaLoader(plan: try plan(fixture.url), budget: budget,
+                                            configuration: configuration()) { _ in XCTFail("EOF is not a failure") }
+        defer { loader.invalidate() }
+        loader.enqueue(sink)
+        await fulfillment(of: [finished], timeout: 5)
+        XCTAssertNil(sink.result.error)
+        XCTAssertTrue(sink.result.bytes.isEmpty)
+        XCTAssertEqual(sink.result.finishes, 1)
+        XCTAssertEqual(sink.result.information?.length, 1000)
+        XCTAssertEqual(fixture.requests.map { $0.value(forHTTPHeaderField: "Range") }, ["bytes=1000-1099"])
+        await loader.close()
+        XCTAssertEqual(budget.usage, .init(activeTasks: 0, reservedPayloadBytes: 0))
     }
 
     func testParallelNativeRangeRequestsSharePayloadBudgetAndCancelTogether() async throws {
@@ -274,13 +296,13 @@ private final class TestProgressiveSink: ProgressiveMediaSink, @unchecked Sendab
         var deliveries = 0
         var largestChunk = 0
     }
-    let range: ProgressiveReadRange?
+    let range: ProgressiveReadRange
     var onData: (() -> Void)?
     private let lock = NSLock()
     private var state = Result()
     private let finished: XCTestExpectation?
     var result: Result { lock.lock(); defer { lock.unlock() }; return state }
-    init(range: ProgressiveReadRange?, finished: XCTestExpectation?) { self.range = range; self.finished = finished }
+    init(range: ProgressiveReadRange, finished: XCTestExpectation?) { self.range = range; self.finished = finished }
     func receive(_ information: ProgressiveContentInformation) {
         lock.lock(); state.information = information; lock.unlock()
     }
@@ -325,8 +347,16 @@ private final class PlaybackHTTPFixture: @unchecked Sendable {
             protocolInstance.client?.urlProtocol(protocolInstance, didFailWithError: URLError(.badServerResponse)); return
         }
         let parts = raw.dropFirst(6).split(separator: "-")
-        guard parts.count == 2, let start = Int(parts[0]), let requestedEnd = Int(parts[1]), start < body.count else {
+        guard parts.count == 2, let start = Int(parts[0]), let requestedEnd = Int(parts[1]) else {
             protocolInstance.client?.urlProtocol(protocolInstance, didFailWithError: URLError(.badServerResponse)); return
+        }
+        if start >= body.count {
+            let response = HTTPURLResponse(url: url, statusCode: 416, httpVersion: "HTTP/1.1", headerFields: [
+                "Content-Range": "bytes */\(body.count)", "Content-Length": "0"
+            ])!
+            protocolInstance.client?.urlProtocol(protocolInstance, didReceive: response, cacheStoragePolicy: .notAllowed)
+            protocolInstance.client?.urlProtocolDidFinishLoading(protocolInstance)
+            return
         }
         let end = min(requestedEnd, body.count - 1)
         let response = HTTPURLResponse(url: url, statusCode: 206, httpVersion: "HTTP/1.1", headerFields: [

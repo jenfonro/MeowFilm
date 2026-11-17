@@ -65,8 +65,14 @@ public final class FilmSearchContext {
     public var detail: FilmDetail {
         let current = card
         let payload = metadataDetail
-        return FilmDetail(item: current.filmItem(imageURL: session.imageURL),
-            backdropURL: session.imageURL(current.text("backdrop")),
+        let cardItem = current.filmItem(imageURL: session.imageURL)
+        let poster = payload?.catField("poster_path")?.catText.flatMap(session.imageURL)
+        let item = FilmItem(sourceID: cardItem.sourceID, id: cardItem.id, title: cardItem.title, kind: cardItem.kind,
+            posterURL: poster ?? cardItem.posterURL, largePosterURL: poster ?? cardItem.largePosterURL,
+            score: cardItem.score, subtitle: cardItem.subtitle, metadataSeed: cardItem.metadataSeed,
+            businessID: cardItem.businessID, playbackTarget: cardItem.playbackTarget)
+        return FilmDetail(item: item,
+            backdropURL: payload?.catField("backdrop_path")?.catText.flatMap(session.imageURL) ?? session.imageURL(current.text("backdrop")),
             summary: payload?.catField("overview")?.catText ?? "",
             releaseDate: payload?.catField(current.tmdbType == "movie" ? "release_date" : "first_air_date")?.catText,
             seasonCount: payload?.catField("number_of_seasons")?.catInteger,

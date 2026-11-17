@@ -49,6 +49,9 @@ public final class AetherVideoSession {
     public var duration: Double? {
         engine.duration.isFinite && engine.duration > 0 ? engine.duration : nil
     }
+    public var seekable: Bool {
+        !cancelled && failure == nil && engine.canSeek
+    }
     public var chapters: [AetherVideoChapter] {
         engine.mediaChapters.prefix(256).compactMap {
             let end = $0.startSeconds + $0.durationSeconds
@@ -128,7 +131,10 @@ public final class AetherVideoSession {
         }
     }
 
-    public func align(to position: Double) async throws { _ = try await seek(to: position) }
+    public func align(to position: Double) async throws {
+        if !seekable { try await renderFirstVideoFrame() }
+        _ = try await seek(to: position)
+    }
 
     public func renderFirstVideoFrame() async throws {
         try check()
@@ -191,7 +197,7 @@ public final class AetherVideoSession {
 
     public func seek(to position: Double) async throws -> Double {
         try check()
-        guard engine.canSeek, position.isFinite, position >= 0 else { throw AetherVideoFailure.seekFailed }
+        guard seekable, position.isFinite, position >= 0 else { throw AetherVideoFailure.seekFailed }
         let revision = UUID(); seekRevision = revision
         presented = false
         renderings.values.forEach { $0.cancel() }

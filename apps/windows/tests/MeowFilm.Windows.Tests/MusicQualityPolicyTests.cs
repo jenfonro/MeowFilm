@@ -96,10 +96,13 @@ public static class MusicQualityPolicyTests
         policy["qualityEnabled"] = new JsonArray();
         policy["spatialEnabled"] = new JsonArray();
         store.Put(MusicLibraryOwner.DocumentNamespace, document);
+        byte[] original = store.Data[MusicLibraryOwner.DocumentNamespace].ToArray();
         int writes = store.Writes;
         await using var f = new QualityFixture(store);
+        await f.Ok("music.library.list");
         await f.Error("music.quality.settings.get", null, "CORRUPT_STORAGE");
-        Check(store.Writes == writes, "invalid current data must not be repaired or rewritten");
+        Check(store.Writes == writes && store.Data[MusicLibraryOwner.DocumentNamespace].SequenceEqual(original) &&
+            f.Runtime.Calls.Count == 0, "invalid current data must not be repaired, rewritten or sent to Node");
     }
     private static async Task IndependentOwners()
     {
@@ -312,6 +315,19 @@ public static class MusicQualityPolicyTests
     private static async Task WyCatalogUnknown()
     {
         var store = new QualityFixture.DocumentStore();
+        var prior = MusicSongFixture.Online("wy", "11", "合成歌曲", "合成艺人", "合成专辑", 120,
+            native: new JsonObject { ["artistNames"] = new JsonArray("合成艺人"), ["qualityKnown"] = true,
+                ["types"] = new JsonArray(new JsonObject { ["type"] = "128k" }) });
+        await using (var seed = new MusicLibraryOwner(store))
+            await MusicSongFixture.AdoptAsync(seed, prior);
+        var document = JsonNode.Parse(store.Data[MusicLibraryOwner.DocumentNamespace])!.AsObject();
+        var stored = document["entries"]!.AsArray().Select(entry => entry!["value"]).OfType<JsonObject>()
+            .Single(value => value.ContainsKey("library"))["library"]!["songs"]!.AsObject().Single().Value!.AsObject();
+        var extension = JsonNode.Parse("""{"integer":900719925474099312345,"fraction":0.12345678901234567890123456789}""")!;
+        stored["future"] = extension.DeepClone();
+        stored["sources"]![0]!["future"] = extension.DeepClone();
+        MusicSongFixture.Info(stored)["future"] = extension.DeepClone();
+        store.Put(MusicLibraryOwner.DocumentNamespace, document);
         await using var runtime = new NativeMusicScriptTestRuntime();
         int catalogCalls = 0;
         bool qualityKnown = false;
@@ -334,7 +350,10 @@ public static class MusicQualityPolicyTests
         }
         var page = await Call("music.catalog.search", new { platform = "wy", keyword = "合成歌曲", limit = 1 });
         var song = page.GetProperty("items")[0].Clone();
-        Check(catalogCalls == 1 && !MusicSongFixture.Info(song).TryGetProperty("types", out _));
+        Check(catalogCalls == 1 && song.GetProperty("songId").GetString() == stored["songId"]!.GetValue<string>() &&
+            !MusicSongFixture.Info(song).TryGetProperty("types", out _) &&
+            !MusicSongFixture.Info(song).TryGetProperty("qualityKnown", out _) &&
+            !MusicSongFixture.Info(song).TryGetProperty("artistNames", out _) && !song.TryGetProperty("artistNames", out _));
         Check(!runtime.HasStarted, "ordinary catalog must not start the authored-script runtime");
         const string source = """
             let calls=0;
@@ -384,6 +403,19 @@ public static class MusicQualityPolicyTests
             "explicit resolver miss must not retry or downgrade");
         Check(catalogCalls == 3 && runtime.Calls.All(method => method.StartsWith("music.script.", StringComparison.Ordinal)),
             "only the three explicit catalog observations may read metadata; resolves never add a search");
+        document = JsonNode.Parse(store.Data[MusicLibraryOwner.DocumentNamespace])!.AsObject();
+        stored = document["entries"]!.AsArray().Select(entry => entry!["value"]).OfType<JsonObject>()
+            .Single(value => value.ContainsKey("library"))["library"]!["songs"]![song.GetProperty("songId").GetString()!]!.AsObject();
+        Check(JsonNode.DeepEquals(stored["future"], extension) &&
+            JsonNode.DeepEquals(stored["sources"]![0]!["future"], extension) &&
+            JsonNode.DeepEquals(MusicSongFixture.Info(stored)["future"], extension) &&
+            !MusicSongFixture.Info(stored).ContainsKey("types") && !MusicSongFixture.Info(stored).ContainsKey("qualityKnown") &&
+            !MusicSongFixture.Info(stored).ContainsKey("artistNames") && !stored.ContainsKey("artistNames"),
+            "current metadata omissions stay absent while unconsumed durable extensions remain exact");
+        string durable = Encoding.UTF8.GetString(store.Data[MusicLibraryOwner.DocumentNamespace]);
+        Check(durable.Contains("900719925474099312345", StringComparison.Ordinal) &&
+            durable.Contains("0.12345678901234567890123456789", StringComparison.Ordinal),
+            "unconsumed numeric extensions must not be rounded during metadata replacement");
     }
 }
 

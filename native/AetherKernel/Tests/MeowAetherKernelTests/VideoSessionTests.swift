@@ -210,6 +210,7 @@ final class VideoSessionTests: XCTestCase {
             }
         }
         let session = try await makeSession()
+        XCTAssertFalse(session.seekable)
         try await Self.bounded("Prepare synthetic \(name)") {
             try await session.prepare(url: source.url, format: source.format, clearKeys: [:], position: 0, headers: [:])
         }
@@ -227,6 +228,7 @@ final class VideoSessionTests: XCTestCase {
         }
         try await Self.bounded("Display synthetic \(name)") { try await session.renderFirstVideoFrame() }
         try session.validateForCommit()
+        XCTAssertTrue(session.seekable, "The ready finite native/software timeline exposes real seek capability")
         let image = try await displayedBytes(session)
         XCTAssertGreaterThan(image.count, 0)
         if let peer = source.peer {
@@ -413,6 +415,30 @@ final class VideoSessionTests: XCTestCase {
         try await checkRates("software-mpeg4-video.mkv", route: .software, rates: [1.5])
     }
 
+    func testCandidateAlignmentBeforeFirstFrameUsesTheRealReadyTimelineBothRoutes() async throws {
+        for name in ["rate-video-only.m3u8", "software-mpeg4-video.mkv"] {
+            let source = try await input(name)
+            let session = try await makeSession()
+            try await Self.bounded("Prepare unpresented candidate") {
+                try await session.prepare(url: source.url, format: source.format, clearKeys: [:],
+                                          position: 0, headers: [:])
+            }
+            try await Self.bounded("Align before first-frame admission") {
+                try await session.align(to: 2)
+            }
+            try await session.renderFirstVideoFrame()
+            try session.validateForCommit()
+            XCTAssertTrue(session.seekable)
+            XCTAssertEqual(session.position, 2, accuracy: 0.25)
+            XCTAssertEqual(session.rate, 0)
+            let picture = try await displayedBytes(session)
+            XCTAssertFalse(picture.isEmpty)
+            if let peer = source.peer { XCTAssertEqual(peer.rejectedRequestCount, 0) }
+            try await Self.bounded("Drain aligned candidate", timeout: 10) { await session.close() }
+            XCTAssertFalse(session.seekable)
+        }
+    }
+
     func testSeekChangesTheRealPausedPictureAndResumesBothRoutes() async throws {
         for (name, route) in [("rate-audio-video.m3u8", Route.native), ("software-mpeg4-video.mkv", .software)] {
             let session = try await prepared(name, route: route)
@@ -495,6 +521,7 @@ final class VideoSessionTests: XCTestCase {
             let events = log.events
             session.cancel()
             session.cancel()
+            XCTAssertFalse(session.seekable)
             try await assertNoLateCallbacks(session, log: log)
             XCTAssertEqual(log.events, events)
             if let player { XCTAssertEqual(player.rate, 0) }

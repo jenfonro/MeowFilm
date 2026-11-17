@@ -167,11 +167,26 @@ async function evidenceFixture(t, source, sites) {
   assert.deepEqual(requests(), [], 'discovery must not request an action');
   return {
     installed, requests,
+    origin: (await runtime.status()).aggregate.origin,
     invoke: (operation, payload) => runtime.invoke({
       installationId: 'method-evidence', siteId: 'a', operation, payload,
     }),
   };
 }
+
+test('Cat aggregate and Worker requests retain unconsumed numeric JSON material', async t => {
+  const echoRaw = source.replace(
+    "body: chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : null,",
+    "body: chunks.length ? Buffer.concat(chunks).toString() : null,");
+  const fixture = await evidenceFixture(t, echoRaw, [site('a', true)]);
+  const body = '{"page":2,"extra":9007199254740993,"fraction":1.234567890123456789,"extension":1e400}';
+  const reply = await fetch(fixture.origin + '/cat/method-evidence/a/customPost', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body,
+  });
+  assert.equal(reply.status, 200);
+  assert.equal((await reply.json()).body, body);
+  assert.equal(fixture.requests()[0].body, body);
+});
 
 for (const declared of [false, true]) {
   for (const placement of ['path first', 'path last', 'loaded path', 'loaded method']) {

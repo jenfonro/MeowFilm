@@ -24,8 +24,7 @@ function fixture(t) {
     writeFileSync(path, '<Project><Import Project="common.props"/></Project>');
   }
   const contexts = [];
-  const properties = { Configuration: 'Debug', RuntimeIdentifier: 'win-x64', SelfContained: 'false',
-    VlcWindowsX64Enabled: 'true' };
+  const properties = { Configuration: 'Debug', RuntimeIdentifier: 'win-x64', SelfContained: 'false' };
   const verify = () => verifyWindowsProjects(root, { properties, evaluate: (path, properties) => {
     contexts.push(properties); return entries.get(path);
   } });
@@ -54,26 +53,28 @@ test('rejects duplicate evaluated project references', t => {
   assert.throws(f.verify, /duplicate project reference/);
 });
 
-test('independent audio core rejects video project and transitive VLC dependencies', t => {
+test('independent audio and film cores use only neutral Core project inputs', t => {
   const f = fixture(t);
-  const audio = join(dirname(dirname(f.app)), 'src/MeowFilm.Audio/MeowFilm.Audio.csproj');
-  mkdirSync(dirname(audio), { recursive: true });
-  writeFileSync(audio, '<Project/>');
-  const entry = {
-    Properties: { MSBuildProjectName: 'MeowFilm.Audio', AssemblyName: 'MeowFilm.Audio' },
-    Items: {
-      ProjectReference: [{ FullPath: f.core }],
-      PackageReference: [{ Identity: 'NAudio.Wasapi' }],
-    },
-  };
-  f.entries.set(audio, entry);
-  f.entries.get(f.app).Items.ProjectReference.push({ FullPath: audio });
-  assert.ok(f.verify().application.projects.includes('MeowFilm.Audio'));
-  entry.Items.ProjectReference.push({ FullPath: f.feature });
-  assert.throws(f.verify, /shared project depends|audio core depends/);
-  entry.Items.ProjectReference.pop();
-  f.entries.get(f.core).Items.PackageReference = [{ Identity: 'LibVLCSharp' }];
-  assert.throws(f.verify, /audio core depends on a video engine/);
+  const projects = ['MeowFilm.Audio', 'MeowFilm.Media'].map(name => {
+    const project = join(dirname(dirname(f.app)), 'src', name, name + '.csproj');
+    mkdirSync(dirname(project), { recursive: true });
+    writeFileSync(project, '<Project/>');
+    f.entries.set(project, {
+      Properties: { MSBuildProjectName: name, AssemblyName: name },
+      Items: { ProjectReference: [{ FullPath: f.core }] },
+    });
+    f.entries.get(f.app).Items.ProjectReference.push({ FullPath: project });
+    return project;
+  });
+  const policy = f.verify();
+  assert.ok(policy.application.projects.includes('MeowFilm.Audio'));
+  assert.ok(policy.application.projects.includes('MeowFilm.Media'));
+  for (const [owner, other] of [projects, projects.toReversed()]) {
+    const references = f.entries.get(owner).Items.ProjectReference;
+    references.push({ FullPath: other });
+    assert.throws(f.verify, /native playback core depends beyond its neutral input boundary/);
+    references.pop();
+  }
 });
 
 test('published output matches evaluated projects and managed runtime assets', t => {

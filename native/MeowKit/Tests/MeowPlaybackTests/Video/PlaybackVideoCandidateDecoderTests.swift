@@ -66,6 +66,23 @@ final class PlaybackVideoCandidateDecoderTests: XCTestCase {
         await candidate.close()
     }
 
+    func testSeekabilityFollowsTheActualDecoderAndIsRevokedOnCancellation() async throws {
+        let first = CandidateTestDecoder(engine: .aether)
+        let second = CandidateTestDecoder(engine: .ksPlayer)
+        first.seekable = false
+        first.prepareError = PlaybackVideoError.unsupportedFormat
+        let candidate = PlaybackVideoCandidateDecoder(decoder: first) { second }
+        XCTAssertFalse(candidate.seekable)
+        try await prepare(candidate)
+        XCTAssertTrue(candidate.seekable)
+        second.seekable = false
+        XCTAssertFalse(candidate.seekable)
+        second.seekable = true
+        candidate.cancel()
+        XCTAssertFalse(candidate.seekable)
+        await candidate.close()
+    }
+
     func testInputFailureAndCancellationNeverSelectFallback() async throws {
         for error in [PlaybackVideoError.inputFailed, .cancelled, .timedOut] {
             let first = CandidateTestDecoder(engine: .aether)
@@ -276,6 +293,7 @@ private final class CandidateTestDecoder: PlaybackVideoDecoding {
     var output: any PlaybackVideoOutput { display }
     var position: Double = 0
     var duration: Double? { 90 }
+    var seekable = true
     var onFailure: (@MainActor (Error) -> Void)?
     var onProgress: (@MainActor (Double) -> Void)?
     var onTransportRate: (@MainActor (Float) -> Void)?

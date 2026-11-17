@@ -399,7 +399,7 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
         try
         {
             if (value.PreserveFrom is { } donor && donor != Scope)
-                throw new FilmPlaybackException(PlaybackError.Superseded);
+                throw new PlaybackException(PlaybackError.Superseded);
             if (Preparing is { } prepare) await prepare(token);
             token.ThrowIfCancellationRequested();
         }
@@ -414,8 +414,8 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
         Action committed, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        var value = intent ?? throw new InvalidOperationException("No synthetic input");
-        if (!ReferenceEquals(value, expected)) throw new FilmPlaybackException(PlaybackError.Superseded);
+        var value = intent ?? throw new PlaybackException(PlaybackError.Superseded);
+        if (!ReferenceEquals(value, expected)) throw new PlaybackException(PlaybackError.Superseded);
         var old = AcceptedLease;
         var donorScope = preparedFrom;
         var preparedLease = PendingLease;
@@ -424,7 +424,7 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
             token.ThrowIfCancellationRequested();
             if (!ReferenceEquals(intent, expected) || !ReferenceEquals(PendingLease, preparedLease) ||
                 Scope != donorScope || donorScope is not null && !HasOutput)
-                throw new FilmPlaybackException(PlaybackError.Superseded);
+                throw new PlaybackException(PlaybackError.Superseded);
             if (preparedLease?.Revoked.IsCancellationRequested == true ||
                 old?.Revoked.IsCancellationRequested == true)
                 throw new FilmPlaybackException(PlaybackError.ResourceRevoked);
@@ -435,7 +435,7 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
         if (Committing is { } committing) await committing(token);
         CheckPrepared();
         if (!canCommit()) return false;
-        if (!value.PreserveCurrent) { Position = value.Position; Paused = value.Paused; }
+        if (value.PreserveFrom is null) { Position = value.Position; Paused = value.Paused; }
         AcceptedLease = PendingLease; PendingLease = null; intent = null;
         Identity = value.Identity; Scope = new("film", value.Identity, ++generation); HasOutput = true; Commits++;
         SetBuffering(false);
@@ -477,18 +477,20 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
         if (terminalGeneration != generation) return;
         if (ended) Ended?.Invoke(this, EventArgs.Empty); else Failed?.Invoke(this, EventArgs.Empty);
     }
-    internal async Task TakeMusicAsync()
+    internal async Task RetireScopeAsync()
     {
         if (AcceptedLease is { } lease) { AcceptedLease = null; await lease.DisposeAsync(); }
         Identity = null; Scope = null; HasOutput = false;
         SetBuffering(false);
-        Pulse("OwnerId");
+        Pulse(nameof(Scope));
+        Pulse(nameof(Identity));
+        Pulse(nameof(HasOutput));
     }
     internal void SetBuffering(bool value)
     {
         if (Buffering == value) return;
         Buffering = value;
-        Pulse(nameof(NativePlayback.IsBuffering));
+        Pulse(nameof(FilmPlayback.IsBuffering));
     }
     internal void Pulse(string property) => PropertyChanged?.Invoke(this, new(property));
     private void Require(NativePlaybackScope scope) { if (Scope != scope) throw new FilmPlaybackException("STALE_SESSION"); }

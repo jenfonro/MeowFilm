@@ -42,11 +42,6 @@ public final class PlaybackController: ObservableObject {
     // to main when the final reference is released from another executor.
     private nonisolated let lifetime: PlaybackControllerLifetime
 
-    /// The decoder consumes this device's owned bytes or scoped HLS route.
-    /// This is not a claim about AirPlay audio,
-    /// Bluetooth, mirroring, PiP or background compatibility.
-    @Published public private(set) var requiresLocalMediaFetch = false
-
     private var state: PlaybackStateMachine {
         _read { yield lifetime.state }
         _modify { yield &lifetime.state }
@@ -83,10 +78,6 @@ public final class PlaybackController: ObservableObject {
         set { lifetime.audioSeekTask = newValue }
     }
     private let videoDecoderFactory: PlaybackVideoDecoderFactory?
-    private var localMediaFetch: Bool {
-        get { lifetime.localMediaFetch }
-        set { lifetime.localMediaFetch = newValue }
-    }
     private var videoTransport: PlaybackVideoTransport? {
         get { lifetime.videoTransport }
         set { lifetime.videoTransport = newValue }
@@ -292,7 +283,6 @@ public final class PlaybackController: ObservableObject {
         guard state.accepts(token) else { return attempt }
         let media = PlaybackAudioMedia(resource: resource, options: network, budget: networkBudget)
         audioMedia = media
-        localMediaFetch = resource.byteSource != nil || (try? PlaybackNetworkPlan(resource: resource, options: network).route) == .scopedHLS
         media.onFailure = { [weak self, weak media] error in
             guard let self, let media, self.audioMedia === media else { return }
             self.fail(self.audioFailure(error), generation: token)
@@ -308,9 +298,8 @@ public final class PlaybackController: ObservableObject {
                 #endif
                 guard !Task.isCancelled, let self, self.audioMedia === media, self.state.accepts(token) else { return }
                 self.audioPreparation = nil
-                self.localMediaFetch = media.localMediaFetch
                 self.installAudioCallbacks(media, generation: token)
-                self.state.ready(generation: token, duration: media.duration, ranges: [], seekable: media.session?.information?.seekable == true)
+                self.state.ready(generation: token, duration: media.duration, seekable: media.session?.information?.seekable == true)
                 self.state.progress(generation: token, position: media.position)
                 self.drivePlayback()
             } catch {
@@ -477,14 +466,13 @@ public final class PlaybackController: ObservableObject {
         guard state.accepts(token) else { throw NativePlaybackError.preparationFailed }
         prepared.committed = true
         lifetime.preparedAudio[ObjectIdentifier(prepared.media)] = nil
-        prepared.failures.receive = { [weak self] in self?.fail($0, generation: token) }
-        audioMedia = prepared.media; localMediaFetch = prepared.media.localMediaFetch
+        audioMedia = prepared.media
         prepared.media.onFailure = { [weak self] in self?.fail(self?.audioFailure($0) ?? $0, generation: token) }
         installAudioCallbacks(prepared.media, generation: token)
         #if os(iOS)
         establishSystemSession(generation: token)
         #endif
-        state.ready(generation: token, duration: prepared.duration, ranges: [], seekable: prepared.media.session?.information?.seekable == true)
+        state.ready(generation: token, duration: prepared.duration, seekable: prepared.media.session?.information?.seekable == true)
         state.progress(generation: token, position: position)
         drivePlayback()
         return attempt
@@ -602,7 +590,7 @@ public final class PlaybackController: ObservableObject {
         controlsRate = rate
         guard state.accepts(token) else { throw PlaybackVideoError.staleAttempt }
         nowPlayingVisible = transport.showsNowPlaying
-        videoTransport = transport; videoLease = lease; localMediaFetch = true
+        videoTransport = transport; videoLease = lease
         lease.activate(transport)
         transport.kernel.onFailure = { [weak self, weak transport] error in
             guard let self, let transport, self.videoTransport === transport else { return }
@@ -637,7 +625,7 @@ public final class PlaybackController: ObservableObject {
             #endif
             self.publish()
         }
-        state.ready(generation: token, duration: transport.duration, ranges: [])
+        state.ready(generation: token, duration: transport.duration, seekable: transport.seekable)
         state.progress(generation: token, position: transport.position)
         transport.commit(attempt: attempt, rate: 0, volume: Float(volume))
         #if os(iOS)
@@ -858,6 +846,7 @@ public final class PlaybackController: ObservableObject {
             publish(); return
         }
         if state.isReady, let outstanding = state.outstandingSeek { armSeekDeadline(outstanding) }
+        let autoplay = state.wantsPlayback
         if let seek = state.takeSeekIfPossible() {
             audioSeekTask?.cancel()
             session.pause()
@@ -878,6 +867,10 @@ public final class PlaybackController: ObservableObject {
                     self.fail(self.audioFailure(error), generation: generation)
                 }
             }
+        }
+        if state.snapshot.phase == .failed {
+            failedReplacementAutoplay = autoplay
+            finishFailure(); return
         }
         #if os(iOS)
         if state.requestsAudioAdmission, state.isReady, state.outstandingSeek == nil {
@@ -949,6 +942,7 @@ public final class PlaybackController: ObservableObject {
     private func driveVideo(_ transport: PlaybackVideoTransport) {
         guard let generation = state.generation, state.isPlayable else { publish(); return }
         if state.isReady, let outstanding = state.outstandingSeek { armSeekDeadline(outstanding) }
+        let autoplay = state.wantsPlayback
         if let seek = state.takeSeekIfPossible() {
             videoSeekTask?.cancel()
             transport.setRate(0)
@@ -968,6 +962,10 @@ public final class PlaybackController: ObservableObject {
                     self.fail(PlaybackVideoLease.error(error), generation: generation)
                 }
             }
+        }
+        if state.snapshot.phase == .failed {
+            failedReplacementAutoplay = autoplay
+            finishFailure(); return
         }
         #if os(iOS)
         if state.requestsAudioAdmission, state.isReady, state.outstandingSeek == nil {
@@ -1066,8 +1064,6 @@ public final class PlaybackController: ObservableObject {
             if needsPublication { continue }
             if title != state.title { title = state.title }
             if needsPublication { continue }
-            if needsPublication { continue }
-            if requiresLocalMediaFetch != localMediaFetch { requiresLocalMediaFetch = localMediaFetch }
             if needsPublication { continue }
             // Preserve the sanitized error type, not just its UI string.
             if lastError?.localizedDescription != currentError?.localizedDescription {
@@ -1261,7 +1257,6 @@ private final class PlaybackControllerLifetime {
     var preparedAudio: [ObjectIdentifier: PlaybackAudioMedia] = [:]
     var retiredAudio: [ObjectIdentifier: Task<Void, Error>] = [:]
     var retiredAudioFailure: Error?
-    var localMediaFetch = false
     var videoTransport: PlaybackVideoTransport?
     weak var videoLease: PlaybackVideoLease?
     var videoAdmission = UUID()
@@ -1363,7 +1358,6 @@ private final class PlaybackControllerLifetime {
             audioMedia = nil
             _ = retireAudio(media)
         }
-        localMediaFetch = false
         #if os(iOS)
         if endingSystemSession, let release = systemSession?.endSession() {
             retiringLease?.recordSystemRelease(release)

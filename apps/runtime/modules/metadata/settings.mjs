@@ -1,6 +1,7 @@
 import { PrivateDocuments } from '@meowfilm/script-host';
 import { isUtf8 } from 'node:buffer';
 import { createHash } from 'node:crypto';
+import { parseJSONText, stringifyJSONValue, cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 
 export const metadataFailure = code => Object.assign(new Error(code), { code });
 export const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -10,66 +11,29 @@ const defaults = {
   douban: { apiBase: 'https://m.douban.com', searchBase: 'https://search.douban.com',
     imageBase: 'https://img3.doubanio.com', apiProxy: '', imageProxy: '', cookie: '' },
 };
-const textFields = { tmdb: ['apiKey', 'accessToken', 'language', 'region'], douban: ['cookie'] };
-
-function endpoint(value, template = false) {
-  if (template && value === '') return value;
-  if (typeof value !== 'string' || !/^https?:\/\//i.test(value) || value !== value.trim() ||
-      /[\u0000-\u0020\u007f\\#]/.test(value) || !template && value.includes('?')) {
-    throw metadataFailure('INVALID_REQUEST');
-  }
-  const slots = value.match(/\{(?:url|encodedUrl)\}/g) ?? [];
-  if (template ? slots.length > 1 : slots.length !== 0) throw metadataFailure('INVALID_REQUEST');
-  const substituted = slots.length ? value.replace(slots[0], 'https%3A%2F%2Fexample.invalid%2F') : value;
-  let url;
-  try { url = new URL(substituted); } catch { throw metadataFailure('INVALID_REQUEST'); }
-  if (!['http:', 'https:'].includes(url.protocol) || url.hash ||
-      (!template && url.search) || /[{}]/.test(substituted) ||
-      slots.length && !value.slice(value.indexOf('://') + 3).match(/^[^/?#{}]+[/?]/)) {
-    throw metadataFailure('INVALID_REQUEST');
-  }
-  return template ? value.replace(/^https?:\/\//i, scheme => scheme.toLowerCase()) : url.href.replace(/\/+$/, '');
-}
-
-function validate(id, value) {
-  if (!object(value) || Object.keys(value).some(key => !Object.hasOwn(defaults[id], key))) {
-    throw metadataFailure('INVALID_REQUEST');
-  }
-  const result = {};
-  for (const [key, item] of Object.entries({ ...defaults[id], ...value })) {
-    if (key === 'includeAdult') {
-      if (typeof item !== 'boolean') throw metadataFailure('INVALID_REQUEST');
-      result[key] = item;
-    } else if (textFields[id].includes(key)) {
-      if (typeof item !== 'string' || /[\u0000-\u001f\u007f]/.test(item)) throw metadataFailure('INVALID_REQUEST');
-      result[key] = item.trim();
-    } else result[key] = endpoint(id === 'tmdb' && item === '' ? defaults[id][key] : item, key.endsWith('Proxy'));
-  }
-  return result;
-}
-
 /** Native assembly supplies a read capability; standalone assembly owns its
  * document. PrivateDocuments is atomic storage, not encryption. */
 export function createMetadataSettings(dataRoot, id, nativeSettings) {
   const documents = nativeSettings ? null : new PrivateDocuments(dataRoot, id);
-  let snapshot, reload = false;
-  const revision = value => createHash('sha256').update(JSON.stringify([id,
+  let snapshot, document, reload = false;
+  const revision = value => createHash('sha256').update(stringifyJSONValue([id,
     Object.keys(defaults[id]).map(key => [key, value[key]])])).digest('hex');
-  const same = (left, right) => Object.keys(defaults[id]).every(key => left[key] === right[key]);
+  const same = (left, right) => stringifyJSONValue(left) === stringifyJSONValue(right);
   function load() {
     try {
-      if (nativeSettings) return validate(id, nativeSettings.read(id)?.settings ?? defaults[id]);
-      const bytes = documents.read('settings.json');
-      if (bytes === null) return { ...defaults[id] };
-      // NodeMobile omits ICU, which fatal TextDecoder requires. Validate bytes
-      // independently, retaining strict UTF-8 and the decoder's BOM handling.
-      if (!isUtf8(bytes)) throw metadataFailure('CORRUPT_STORAGE');
-      const document = JSON.parse(new TextDecoder('utf-8').decode(bytes));
-      if (!object(document) || document.version !== 1 ||
-          Object.keys(document).length !== 2 || !Object.hasOwn(document, 'settings')) {
-        throw metadataFailure('CORRUPT_STORAGE');
+      if (nativeSettings) document = nativeSettings.read(id);
+      else {
+        const bytes = documents.read('settings.json');
+        if (bytes === null) document = null;
+        else {
+          if (!isUtf8(bytes)) throw metadataFailure('CORRUPT_STORAGE');
+          document = parseJSONText(new TextDecoder('utf-8').decode(bytes));
+        }
       }
-      return validate(id, document.settings);
+      if (document === null) return { ...defaults[id] };
+      if (!object(document) || document.version !== 1 || !object(document.settings) || isRawJSON(document.settings))
+        throw metadataFailure('CORRUPT_STORAGE');
+      return { ...defaults[id], ...document.settings };
     } catch (error) {
       throw metadataFailure(error?.code === 'STORAGE_ERROR' || error?.code === 'PERMISSION_DENIED'
         ? 'STORAGE_ERROR' : 'CORRUPT_STORAGE');
@@ -91,14 +55,17 @@ export function createMetadataSettings(dataRoot, id, nativeSettings) {
     get: () => visible(read()),
     update(patch) {
       if (nativeSettings) throw metadataFailure('PERMISSION_DENIED');
-      if (!object(patch) || Object.keys(patch).some(key => !Object.hasOwn(defaults[id], key))) {
+      if (!object(patch)) {
         throw metadataFailure('INVALID_REQUEST');
       }
       const current = read();
-      const value = validate(id, { ...current, ...patch });
+      const value = cloneJSONValue({ ...current, ...Object.fromEntries(Object.keys(defaults[id])
+        .filter(key => Object.hasOwn(patch, key)).map(key => [key,
+          id === 'tmdb' && ['apiBase', 'imageBase'].includes(key) && patch[key] === ''
+            ? defaults[id][key] : patch[key]])) });
       if (same(current, value)) return visible(current);
       try {
-        documents.write('settings.json', Buffer.from(JSON.stringify({ version: 1, settings: value }) + '\n'));
+        documents.write('settings.json', Buffer.from(stringifyJSONValue({ ...document, version: 1, settings: value }) + '\n'));
       } catch {
         // rename may have committed before directory synchronization failed.
         // Reload the authoritative file next time instead of claiming rollback.

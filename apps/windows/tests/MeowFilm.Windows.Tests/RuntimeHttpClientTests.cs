@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using MeowFilm.AppHost;
 using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Windows.Tests;
@@ -82,7 +83,7 @@ public static class RuntimeHttpClientTests
                 BridgeTests.Equal("POST", exchange.Method);
                 BridgeTests.Equal("/v1/close", exchange.Path);
                 BridgeTests.Equal("{}", Encoding.UTF8.GetString(exchange.Body));
-                await exchange.ReplyAsync(Success(new { closed = true, cleanupComplete = true }, RuntimeHttpProtocol.Name));
+                await exchange.ReplyAsync(Success(new { closed = true, cleanupComplete = true, future = true }, RuntimeHttpProtocol.Name));
             }
             await close;
         });
@@ -277,53 +278,15 @@ public static class RuntimeHttpClientTests
         foreach (var (name, mutate) in new (string, Action<JsonObject>)[]
         {
             ("wrong product", root => root["product"] = "other"),
+            ("wrong protocol", root => root["protocol"] = "other"),
             ("old version", root => root["modules"]![1]!["version"] = "0.1.0"),
             ("wrong contract", root => root["modules"]![1]!["contract"] = "wrong"),
-            ("duplicate module", root => root["modules"]![1] = root["modules"]![0]!.DeepClone()),
-            ("unknown module", root => root["modules"]![1]!["id"] = "unknown"),
-            ("reordered modules", root =>
-            {
-                var modules = root["modules"]!.AsArray();
-                var first = modules[0]!.DeepClone();
-                modules[0] = modules[1]!.DeepClone(); modules[1] = first;
-            }),
-            ("missing method", root => root["modules"]![0]!["methods"]!.AsArray().RemoveAt(0)),
-            ("duplicate method", root => root["modules"]![0]!["methods"]!.AsArray().Add("music.script.invoke")),
-            ("unknown method", root => root["modules"]![0]!["methods"]!.AsArray().Add("music.script.unknown")),
-            ("missing TMDB module", root => root["modules"]!.AsArray().RemoveAt(4)),
             ("TMDB old version", root => root["modules"]![4]!["version"] = "0.0.1"),
             ("TMDB wrong contract", root => root["modules"]![4]!["contract"] = "douban.data.v1"),
-            ("TMDB missing operation", root => root["modules"]![4]!["methods"]!.AsArray().RemoveAt(2)),
-            ("missing film module", root => root["modules"]!.AsArray().RemoveAt(6)),
-            ("missing pan module", root => root["modules"]!.AsArray().RemoveAt(3)),
-            ("missing Douban module", root => root["modules"]!.AsArray().RemoveAt(5)),
-            ("old seven-module description", root => root["modules"]!.AsArray().RemoveAt(7)),
-            ("old five-module description", root =>
-            {
-                var modules = root["modules"]!.AsArray();
-                modules.RemoveAt(6); modules.RemoveAt(5); modules.RemoveAt(3);
-            }),
-            ("old four-module description", root =>
-            {
-                var modules = root["modules"]!.AsArray();
-                modules.RemoveAt(7); modules.RemoveAt(6); modules.RemoveAt(5); modules.RemoveAt(3);
-            }),
-            ("formal three-module assembly", root =>
-            {
-                var modules = root["modules"]!.AsArray();
-                while (modules.Count > 3) modules.RemoveAt(modules.Count - 1);
-            }),
-            ("new module version", root => root["modules"]![6]!["version"] = "0.2.0"),
-            ("missing film media release", root => root["modules"]![6]!["methods"]!.AsArray().RemoveAt(5)),
-            ("missing film target resolution", root => root["modules"]![6]!["methods"]!.AsArray().RemoveAt(11)),
-            ("duplicate film method", root => root["modules"]![6]!["methods"]!.AsArray().Add("film.library.get")),
-            ("unknown film method", root => root["modules"]![6]!["methods"]!.AsArray().Add("film.session.unknown")),
-            ("unknown metadata method", root => root["modules"]![4]!["methods"]!.AsArray().Add("tmdb.data.unknown")),
             ("NetEase old version", root => root["modules"]![7]!["version"] = "0.0.1"),
             ("NetEase wrong contract", root => root["modules"]![7]!["contract"] = "music.script.v3"),
-            ("NetEase missing operation", root => root["modules"]![7]!["methods"]!.AsArray().Clear()),
-            ("NetEase extra operation", root => root["modules"]![7]!["methods"]!.AsArray().Add("netease.token.close")),
-            ("extra description field", root => root["extra"] = true),
+            ("duplicate module identity", root => root["modules"]!.AsArray().Add(root["modules"]![0]!.DeepClone())),
+            ("new module version", root => root["modules"]![6]!["version"] = "0.2.0")
         })
             yield return new("runtime-http: description rejects " + name, () =>
             {
@@ -332,6 +295,88 @@ public static class RuntimeHttpClientTests
                 BridgeTests.Throws("INVALID_RESPONSE", () =>
                     RuntimeHttpProtocol.ValidateDescription(BridgeCodec.Value(description), "aggregate", Modules));
                 return Task.CompletedTask;
+            });
+        foreach (var expected in Modules)
+            yield return new("runtime-http: description requires app module identity and consumed methods " + expected.Id, () =>
+            {
+                Reject((modules, module) => modules.Remove(module));
+                Reject((modules, module) => modules.Add(module.DeepClone()));
+                Reject((_, module) => module["version"] = "other");
+                Reject((_, module) => module["contract"] = "other");
+                if (expected.RequiredMethods.Count != 0)
+                {
+                    Reject((_, module) => module.AsObject().Remove("methods"));
+                    Reject((_, module) => module["methods"] = new JsonObject { ["unused"] = true });
+                    foreach (var method in expected.RequiredMethods)
+                        Reject((_, module) =>
+                        {
+                            var methods = module["methods"]!.AsArray();
+                            methods.Remove(methods.Single(value => value!.GetValue<string>() == method));
+                        });
+                }
+                return Task.CompletedTask;
+
+                void Reject(Action<JsonArray, JsonNode> mutate)
+                {
+                    var description = JsonSerializer.SerializeToNode(Description())!.AsObject();
+                    var modules = description["modules"]!.AsArray();
+                    mutate(modules, modules.Single(module => module!["id"]!.GetValue<string>() == expected.Id)!);
+                    BridgeTests.Throws("INVALID_RESPONSE", () =>
+                        RuntimeHttpProtocol.ValidateDescription(BridgeCodec.Value(description), "aggregate", Modules));
+                }
+            });
+        yield return new("runtime-http: description accepts required subsets reordered with unused modules methods and members", () =>
+        {
+            var description = JsonSerializer.SerializeToNode(Description())!.AsObject();
+            description["future"] = true;
+            var modules = description["modules"]!.AsArray();
+            var required = modules.Reverse().Select(module => module!.DeepClone()).ToArray();
+            modules.Clear();
+            modules.Add(new JsonObject { ["id"] = "future", ["unused"] = true });
+            foreach (var module in required)
+            {
+                var expected = Modules.Single(item => item.Id == module["id"]!.GetValue<string>());
+                module["future"] = 1;
+                if (expected.RequiredMethods.Count == 0) module.AsObject().Remove("methods");
+                else
+                {
+                    var methods = new JsonArray();
+                    foreach (var method in expected.RequiredMethods.Reverse()) methods.Add(method);
+                    methods.Add(expected.RequiredMethods[0]);
+                    methods.Add("future.method");
+                    methods.Add(new JsonObject { ["unused"] = true });
+                    module["methods"] = methods;
+                }
+                modules.Add(module);
+            }
+            var declared = RuntimeHttpProtocol.ValidateDescription(BridgeCodec.Value(description), "aggregate", Modules);
+            BridgeTests.Equal(true, declared.SetEquals(Modules.SelectMany(module => module.RequiredMethods)));
+            // A known but unrequested module does not impose its version or method contract.
+            modules.Single(module => module!["id"]!.GetValue<string>() == "cat")!["version"] = "future";
+            var music = Modules.Single(module => module.Id == "music");
+            BridgeTests.Equal(true, RuntimeHttpProtocol.ValidateDescription(BridgeCodec.Value(description),
+                "aggregate", [music]).SetEquals(music.RequiredMethods));
+            modules.Clear();
+            BridgeTests.Throws("INVALID_RESPONSE", () =>
+                RuntimeHttpProtocol.ValidateDescription(BridgeCodec.Value(description), "aggregate", Modules));
+            return Task.CompletedTask;
+        });
+        foreach (var json in new[]
+        {
+            """{"ok":true,"contract":"music.script.v3","value":{"future":9007199254740993,"future":1e400,"unread":"\ud800","\udfff":true},"extra":true}""",
+            """{"ok":false,"contract":"music.script.v3","code":"SCRIPT_FAILURE","message":"synthetic-private"}"""
+        })
+            yield return new("runtime-http: unused envelope members and exact business extensions survive " + (json.Contains("SCRIPT_FAILURE") ? "failure" : "success"), async () =>
+            {
+                await using var server = new Server();
+                await using var client = new RuntimeHttpClient(server.BaseUrl);
+                var outgoing = client.CallAsync("music.script.invoke");
+                await using var exchange = await server.AcceptAsync();
+                await exchange.ReplyAsync(Encoding.UTF8.GetBytes(json));
+                var result = await outgoing;
+                BridgeTests.Equal(json, result.GetRawText());
+                if (!result.GetProperty("ok").GetBoolean())
+                    BridgeTests.Equal("SCRIPT_FAILURE", result.GetProperty("code").GetString());
             });
         foreach (var (name, bytes, status, id, contentType) in new (string, byte[], int, string?, string)[]
         {
@@ -346,10 +391,7 @@ public static class RuntimeHttpClientTests
             ("invalid ok type", """{"ok":"true","contract":"music.script.v3","value":1}"""u8.ToArray(), 200, null, "application/json"),
             ("duplicate envelope field", """{"ok":true,"ok":true,"contract":"music.script.v3","value":1}"""u8.ToArray(), 200, null, "application/json"),
             ("missing error code", """{"ok":false,"contract":"music.script.v3","value":null}"""u8.ToArray(), 200, null, "application/json"),
-            ("extra error field", """{"ok":false,"contract":"music.script.v3","code":"SCRIPT_FAILURE","message":"synthetic-private"}"""u8.ToArray(), 200, null, "application/json"),
-            ("duplicate escaped key", """{"ok":true,"contract":"music.script.v3","value":{"x":1,"\u0078":2}}"""u8.ToArray(), 200, null, "application/json"),
-            ("unsafe integer", """{"ok":true,"contract":"music.script.v3","value":9007199254740992}"""u8.ToArray(), 200, null, "application/json"),
-            ("unpaired surrogate", """{"ok":true,"contract":"music.script.v3","value":"\ud800"}"""u8.ToArray(), 200, null, "application/json"),
+            ("undecodable contract", """{"ok":true,"contract":"\ud800","value":1}"""u8.ToArray(), 200, null, "application/json"),
             ("bad UTF8", [0xff], 200, null, "application/json"),
             ("bad JSON", "{"u8.ToArray(), 200, null, "application/json"),
             ("non-200 success", Success(1), 401, null, "application/json"),
@@ -553,12 +595,20 @@ public static class RuntimeHttpClientTests
         {
             await using var server = new Server();
             await using var client = new RuntimeHttpClient(server.BaseUrl);
-            foreach (var value in new object[] { new { closed = true }, new { closed = true, cleanupComplete = false } })
+            foreach (var value in new object[] { new { closed = true }, new { closed = true, cleanupComplete = false },
+                new { closed = false, cleanupComplete = true }, new { closed = true, cleanupComplete = "true" } })
             {
                 var close = client.ShutdownAsync();
                 await using var exchange = await server.AcceptAsync();
                 await exchange.ReplyAsync(Success(value, RuntimeHttpProtocol.Name));
                 await BridgeTests.Expect("INVALID_RESPONSE", () => close);
+            }
+            foreach (string code in new[] { "CLOSED", "CANCELLED", "TIMEOUT", "PERMISSION_DENIED" })
+            {
+                var close = client.ShutdownAsync();
+                await using var exchange = await server.AcceptAsync();
+                await exchange.ReplyAsync(Failure(code, RuntimeHttpProtocol.Name));
+                await BridgeTests.Expect(code, () => close);
             }
         });
         yield return new("runtime-http: malformed endpoint components are rejected before connecting", () =>
@@ -630,9 +680,7 @@ public static class RuntimeHttpClientTests
         });
     }
 
-    internal static RuntimeModule[] Modules => [new("music", "0.8.0"), new("cat", "0.2.0"), new("source", "0.3.0"),
-        new("pan", "0.1.0"), new("tmdb", "0.1.0"), new("douban", "0.1.0"), new("film", "0.1.0"),
-        new("netease", "0.1.0"), new("music-platform", "0.1.0")];
+    internal static RuntimeModule[] Modules => AppIdentity.ScriptModules.ToArray();
     internal static object Description() => new
     {
         protocol = "runtime.http.v1", product = "aggregate", modules = new[]

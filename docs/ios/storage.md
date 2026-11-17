@@ -84,7 +84,7 @@
 
 `NativeMusicScriptService` 仅适配 `music.script.v3`，不维护原生脚本 `DocumentStore`、下载器或反向 storage RPC。旧原生脚本数据不读取、迁移、双写或主动删除；用户明确清除本机数据时仍按整个应用数据根清理。
 
-Cat 安装事实、源码与私有卷继续使用 `meowfilm/script-runtime/cat`，可编辑来源意图迁入下述原生设置块；客户端视频选项、排序、检测与删除记录仍属于 `film.video-sources.v1`。不把公共独立入口的默认根目录套到旧安装上，再用空 status 清掉客户端记录；除下述已知设置迁移外，不扫描／清理旧安装。
+Cat 安装事实、源码与私有卷继续使用 `meowfilm/script-runtime/cat`，可编辑来源意图属于下述原生设置块；客户端视频选项、排序、检测与删除记录仍属于 `film.video-sources.v1`。不把公共独立入口的默认根目录套到旧安装上，再用空 status 清掉客户端记录；不扫描、采用或清理旧安装。
 
 内置官方源开关属于 `music.library.v3` 的 playback 记录 `officialSources`，值为 `wy`／`tx`／`kg` 的无重复数组；新建文档显式写入全部启用，当前格式文档必须包含该数组，空数组全部关闭，不接受缺失、null 或未知平台。写入使用既有 settingsRevision／文档 CAS，不创建第二份设置事实来源。
 
@@ -113,20 +113,12 @@ Cat 安装事实、源码与私有卷继续使用 `meowfilm/script-runtime/cat`�
 
 敏感块在上述 `protected-settings` 根下使用 AES-GCM；Keychain service 为 `dev.meowfilm.aggregate.film.settings.keys.v1`，每 namespace 一把 32 字节 key，沿用本页保护与失败规则。`snapshot()` 提供内容 fingerprint，受信 `compareAndSwap(expected:document:)` 只由 App 装配授予 pan 在线凭据回写，不反向通知同一运行器；私密帧见[运行底座](runtime-preflight.md#原生设置私密通道)。
 
-`film.video-sources.v1/catalog` 仍由 DocumentStore CAS 保存客户端视频映射、排序、四选项、检测结果、只读安装／站点展示元数据及 tombstone。新写内容为 v2，不保存来源的 name／sourceType／sourceUrl／enabled／localPath／localHash，也不存脚本源码、运行端口或 generation；可编辑字段只从 `.catSources` 投影。已有 v1 目录保留视频、检测、选项与墓碑，首次成功提交才去掉旧来源字段，不把只读投影当作已完成落盘。它不是来源意图或安装事实源，状态观察及串行边界见[影视设置](film-settings.md#猫源与公共宿主)。
+`film.video-sources.v1/catalog` 仍由 DocumentStore CAS 保存客户端视频映射、排序、四选项、检测结果、只读安装／站点展示元数据及 tombstone。新写内容为 v2，不保存来源的 name／sourceType／sourceUrl／enabled／localPath／localHash，也不存脚本源码、运行端口或 generation；可编辑字段只从 `.catSources` 投影。仅消费当前 v2 目录，不补全旧版本或缺失的 inputRevision。当前来源按身份采用可用缓存，坏缓存不影响其他来源；未采用的行与扩展在无关提交中保留，状态不能冒充 ready。它不是来源意图或安装事实源，状态观察及串行边界见[影视设置](film-settings.md#猫源与公共宿主)。
 
-### 已知 Node 设置的单向迁移
+### 当前文档消费
 
-`MeowfilmNativeSettings.init` 在装配业务消费者／RuntimeSession 前执行 `FilmSettingsMigration.apply(runtimeRoot:documents:)`。下表路径相对同一 `meowfilm/script-runtime`，只读取这些已知输入，不搜索其他目录：
+启动只读取原生设置，不探测、采用、重写或删除 Node 旧设置。当前 owner、Keychain 保护、明文字节 CAS 与通知保持不变；真实文档解码、身份、资源和存储失败仍明确报告。
 
-| 块 | 旧路径 | 原生采用及旧资料处理 |
-| --- | --- | --- |
-| 猫源 | `cat/settings.json` v1 | 来源意图转入原生；原文件改为 v2 安装事实，保留源码引用、实际配置、sites 与更新时间 |
-| 网盘 | `pan/accounts.json` | 采用原凭据／revision 到加密文档，满足退役条件后移除旧文件 |
-| TMDB／豆瓣 | `{tmdb,douban}/settings.json` | 采用完整设置到对应加密文档，满足退役条件后移除旧文件 |
-| 四组规则 | `film-rules/rules.json` | 加入 v1 envelope，满足退役条件后移除旧文件 |
-| 智能偏好 | `film-playback/library.json` 的 `preferences` | 拆入独立原生文档；旧库只移除此字段，历史／人工匹配／屏蔽／点映资料原样保留 |
+原生设置使用 `RuntimeJSON` 保留未知数字和 UTF-8 不同键。设置更新只替换实际编辑字段，未知 patch 不入文档；原文档扩展与其他条目保持精确值。Cat 列表不预检未消费的端口、网盘映射或 providers；无法消费及歧义身份条目不进入列表，修改健康条目保留这些原始行。Pan 手动输入先投影本平台凭据，整份替换选中凭据；其他账号、根及记录扩展不被覆盖。实际凭据类型、revision、签名和确认回执仍在消费处检查。
 
-已有原生文档优先，不用旧值覆盖；损坏原生或旧文档明确失败，不静默重置。旧输入须为受限普通文件、大小有效、结构合法且退役前内容仍与读取时一致；一般只有已采用值仍等于当前原生值才退役。猫源在原生值已存在时仍可把旧混合文件收敛为安装事实，但不重建或覆盖原生意图；已有 v2 事实而缺失原生意图为错误。未满足条件保留旧输入，注入模式仍只消费原生配置，不恢复双写。
-
-迁移可在中断后重入，不删除真实安装源码／私有卷或业务历史；原生设置密钥缺失、认证失败与格式错误不能触发旧文件回退。清除全部用户数据继续使用既有冷启动重置流程，不在当前进程热重建 Node。
+`PanSettingsStore.accounts()` 将损坏的平台记录投影为该 provider 的 `CORRUPT_STORAGE`，没有有效 revision 或账号状态；同时丢弃该平台先前的内存在线观察，不影响健康兄弟。替换或清空坏账号仍因无法取得真实 revision 而失败，不补零、不绕过 CAS；错误投影只用于显示，不写回文档。根包装、解密和真实存储失败不降级为某个账号的可用状态。

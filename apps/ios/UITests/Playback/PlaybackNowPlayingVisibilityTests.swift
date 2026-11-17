@@ -154,6 +154,7 @@ private final class VisibilityVideoDecoder: PlaybackVideoDecoding {
     var output: any PlaybackVideoOutput { display }
     var position: Double = 0
     var duration: Double? { 120 }
+    var seekable = true
     var onFailure: (@MainActor (Error) -> Void)?
     var onProgress: (@MainActor (Double) -> Void)?
     var onTransportRate: (@MainActor (Float) -> Void)?

@@ -3,6 +3,7 @@ import { identity, object, text } from './identity.js';
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const STABLE = 14 * DAY;
+const fields = (value, keys) => Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
 export const cnDay = at => Math.floor((at + 8 * HOUR) / DAY) * DAY - 8 * HOUR;
 
 export function cnDate(value) {
@@ -53,14 +54,10 @@ export function parentSignature(parent, season) {
   if (!parent) return null;
   const value = parent.value;
   const row = value.seasons?.find(row => row.season_number === season);
-  const episode = row => row?.season_number === season ? {
-    episode_number: row.episode_number, air_date: row.air_date,
-  } : null;
+  const episode = row => row?.season_number === season ? fields(row, ['episode_number', 'air_date']) : null;
   return identity({
-    declared: Array.isArray(value.seasons), season: row ? {
-      episode_count: row.episode_count, air_date: row.air_date,
-    } : null,
-    status: value.status, next: episode(value.next_episode_to_air),
+    declared: Array.isArray(value.seasons), season: row ? fields(row, ['episode_count', 'air_date']) : null,
+    ...fields(value, ['status']), next: episode(value.next_episode_to_air),
     last: episode(value.last_episode_to_air),
   });
 }

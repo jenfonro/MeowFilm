@@ -33,7 +33,7 @@ test('pan module forwards trusted native-store reload, exposes no credentials an
   await assert.rejects(read(), { code: 'CLOSED' });
 });
 
-test('pan module reads and validates the native document on each change without replacing its authority', async t => {
+test('pan module reports bad native accounts individually without replacing their authority', async t => {
   let saved = null;
   const module = createPanRuntimeModule({ store: {
     read: () => saved,
@@ -52,6 +52,12 @@ test('pan module reads and validates the native document on each change without 
   assert.equal(result.value.accounts.find(item => item.provider === 'baidu').revision, 1);
   assert.equal(JSON.stringify(result).includes('synthetic-native-private'), false);
   saved = { version: 1, accounts: { baidu: { revision: 0, credentials: {} } } };
+  await module.settingsChanged();
+  const changed = await module.methods['pan.settings.get']({}, {});
+  assert.deepEqual(changed.value.accounts.find(item => item.provider === 'baidu'),
+    { provider: 'baidu', errorCode: 'CORRUPT_STORAGE' });
+  assert.equal(changed.value.accounts.find(item => item.provider === 'uc').status, 'signedOut');
+  saved = { version: 1, accounts: [] };
   await assert.rejects(module.settingsChanged(), { code: 'CORRUPT_STORAGE' });
-  assert.deepEqual(await module.methods['pan.settings.get']({}, {}), result);
+  await assert.rejects(module.methods['pan.settings.get']({}, {}), { code: 'CORRUPT_STORAGE' });
 });

@@ -36,8 +36,11 @@ public sealed partial class MusicLibraryOwner
         return LJ.Obj(("schema", 2), ("revision", 0), ("platforms", platforms), ("pending", null),
             ("confirmation", null), ("approved", null), ("status", LJ.Obj(("phase", "idle"), ("code", ""), ("at", 0), ("issues", new JsonArray()))));
     }
-    private JsonObject LibrarySync(JsonObject doc) => HasValue(doc, LibrarySyncArea)
-        ? LJ.Object(Value(doc, LibrarySyncArea), "CORRUPT_SYNC") : EmptyLibrarySync();
+    private JsonObject LibrarySync(JsonObject doc)
+    {
+        try { return Area(doc, LibrarySyncArea) ?? EmptyLibrarySync(); }
+        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_SYNC"); }
+    }
     private static void ValidateLibrarySync(JsonObject s)
     {
         try
@@ -60,8 +63,7 @@ public sealed partial class MusicLibraryOwner
                 string operation = LJ.S(w["operation"]);
                 if (operation is "subscribe" or "unsubscribe")
                 {
-                    LJ.Fields(w, "platform accountId collectionId remoteId operation beforePresent desiredPresent locator name",
-                        "platform accountId collectionId remoteId operation beforePresent desiredPresent locator name");
+                    LJ.Fields(w, "platform accountId collectionId remoteId operation beforePresent desiredPresent locator name", "platform accountId collectionId remoteId operation beforePresent desiredPresent locator name");
                     LJ.Require(LJ.IsBool(w["beforePresent"]) && LJ.IsBool(w["desiredPresent"]) &&
                         LJ.B(w["beforePresent"]) != LJ.B(w["desiredPresent"]) && LJ.B(w["desiredPresent"]) == (operation == "subscribe") &&
                         LJ.S(w["collectionId"]) == NetworkPlaylistId(LJ.S(w["platform"]), LJ.S(w["remoteId"])));
@@ -70,8 +72,7 @@ public sealed partial class MusicLibraryOwner
                 }
                 else
                 {
-                    LJ.Fields(w, "platform accountId collectionId remoteId operation before desired ids name directory",
-                        "platform accountId collectionId remoteId operation before desired ids name directory");
+                    LJ.Fields(w, "platform accountId collectionId remoteId operation before desired ids name directory", "platform accountId collectionId remoteId operation before desired ids name directory");
                     LJ.Require(LJ.Id(LJ.S(w["collectionId"])) && LJ.Id(LJ.S(w["name"]), 200));
                     LJ.Require(operation is "create" or "delete" or "add" or "remove" or "order");
                     foreach (string field in new[] { "before", "desired", "ids", "directory" })
@@ -189,7 +190,10 @@ public sealed partial class MusicLibraryOwner
             LJ.Require(!closed && !preparing, "CLOSED"); LJ.Require(pending is null, pending?.Code ?? "PENDING_WRITE");
             await LoadAsync(cancellationToken).ConfigureAwait(false);
             var state = LibrarySync(document!); ValidateLibrarySync(state);
-            return new(this, LJ.Object(LibraryState(document!)["library"]), state, BeginSongObservation());
+            LJ.Require(!HasValue(document!, LibrarySyncArea) || HasValue(document!, "library"), "CORRUPT_SYNC");
+            var library = ValidateLibrary(LJ.Object(LibraryState(document!)["library"]), scope);
+            ValidateLibrarySyncRelations(state, library);
+            return new(this, library, state, BeginSongObservation());
         }
         finally { gate.Release(); }
     }
@@ -238,10 +242,11 @@ public sealed partial class MusicLibraryOwner
         {
             CheckLibrarySyncLocked(expected);
             nextLibrary = ValidateLibrary(nextLibrary, scope); ValidateLibrarySync(nextState);
-            LJ.Require(Revision(nextLibrary) == expected.Library.GetProperty("revision").GetInt64() &&
-                Revision(nextState) == expected.State.GetProperty("revision").GetInt64(), "SYNC_SUPERSEDED");
-            var candidate = (JsonObject)document!.DeepClone(); var wrapper = (JsonObject)LibraryState(candidate).DeepClone();
             var previousLibrary = JsonNode.Parse(expected.Library.GetRawText())!.AsObject();
+            var previousState = JsonNode.Parse(expected.State.GetRawText())!.AsObject();
+            LJ.Require(Revision(nextLibrary) == Revision(previousLibrary) &&
+                Revision(nextState) == Revision(previousState), "SYNC_SUPERSEDED");
+            var candidate = (JsonObject)document!.DeepClone(); var wrapper = (JsonObject)LibraryState(candidate).DeepClone();
             var previousSongs = LJ.Object(previousLibrary["songs"]);
             var changedSongs = LJ.Object(nextLibrary["songs"]).Where(pair =>
                 !JsonNode.DeepEquals(pair.Value, previousSongs[pair.Key])).ToArray();

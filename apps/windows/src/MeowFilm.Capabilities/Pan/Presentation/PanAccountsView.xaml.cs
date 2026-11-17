@@ -15,7 +15,7 @@ public partial class PanAccountsView : UserControl
     private PanAccountRow? formRow;
     private bool formQr;
     private Button? loginAnchor;
-    private (PanAccountRow Row, long Revision)? logout;
+    private (PanAccountRow Row, long? Revision)? logout;
     private PanAccounts? Owner => DataContext as PanAccounts;
     private bool Active => IsLoaded && IsVisible && window?.WindowState != WindowState.Minimized;
 

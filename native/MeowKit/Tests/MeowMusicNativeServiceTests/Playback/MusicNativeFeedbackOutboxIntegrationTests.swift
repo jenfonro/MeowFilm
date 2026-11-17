@@ -4,7 +4,6 @@ import MeowAccounts
 import MeowContracts
 import MeowMusicFeature
 import MeowMusicTestSupport
-import MeowJSON
 import MeowRuntime
 import MeowStorage
 @testable import MeowMusicNativeService
@@ -223,8 +222,8 @@ private struct NativeFeedbackHeldUploadProvider: MusicAccountFeedbackProvider,
     func recommendations(kind: String, page: Int) async throws -> MusicAccountRecommendation {
         try await node.recommendations(kind: kind, page: page)
     }
-    func collectionRows() async throws -> [JSONValue] { try await node.collectionRows() }
-    func tracks(collectionID: String) async throws -> [JSONValue] { try await node.tracks(collectionID: collectionID) }
+    func collectionRows() async throws -> [RuntimeValue] { try await node.collectionRows() }
+    func tracks(collectionID: String) async throws -> [RuntimeValue] { try await node.tracks(collectionID: collectionID) }
     func capabilities(mid: String) async throws -> [String] { try await node.capabilities(mid: mid) }
-    func resolve(mid: String, quality: String) async throws -> JSONValue { try await node.resolve(mid: mid, quality: quality) }
+    func resolve(mid: String, quality: String) async throws -> RuntimeValue { try await node.resolve(mid: mid, quality: quality) }
 }

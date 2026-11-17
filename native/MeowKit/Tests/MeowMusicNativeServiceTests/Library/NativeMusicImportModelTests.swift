@@ -81,7 +81,8 @@ final class NativeMusicImportModelTests: XCTestCase {
             var library = current; library["songs"]["20000000-0000-4000-8000-000000000002"] = song
             let bytes = stored(library)
             let store = NativeMusicMemoryDocument(bytes), service = try await NativeMusicFixture.service(store)
-            do { _ = try await service.collections(); XCTFail("Stored song accepted: \(label)") }
+            let collections = try await service.collections()
+            do { _ = try await service.tracks(in: collections[1]); XCTFail("Stored song accepted: \(label)") }
             catch { XCTAssertEqual(error as? MusicServiceError, expected, label) }
             XCTAssertEqual(store.snapshot().0, bytes, label); XCTAssertEqual(store.snapshot().2, 0, label)
             await service.close()
@@ -152,9 +153,7 @@ final class NativeMusicImportModelTests: XCTestCase {
         let source = try XCTUnwrap(song["sources"].array.first)
         var duplicate = song
         duplicate["sources"] = .array([source, source])
-        var library = MusicModel.emptyLibrary
-        library["songs"][song["songId"].string] = duplicate
-        XCTAssertThrowsError(try MusicLibraryValidation.validate(library, owner: "device")) {
+        XCTAssertThrowsError(try MusicModel.sources(duplicate)) {
             XCTAssertEqual($0 as? MusicServiceError, .nativeIDConflict)
         }
     }

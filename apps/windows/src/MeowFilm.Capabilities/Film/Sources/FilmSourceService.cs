@@ -159,7 +159,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         string? sourceUrl, string? localPath, CancellationToken cancellationToken = default)
     {
         CatSourceSettings.ValidateSource(name, sourceType, sourceType == "network" ? sourceUrl : null);
-        (string Path, string Hash)? input = localPath is null ? null :
+        (string Path, string Hash)? input = sourceType != "local" || localPath is null ? null :
             await CatSourceSettings.SelectLocalAsync(localPath, cancellationToken).ConfigureAwait(false);
         return await SaveCatConfigurationAsync(installationId, configured => configured.Select(cat =>
         {

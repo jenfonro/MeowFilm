@@ -1,10 +1,27 @@
 import Foundation
 import XCTest
 import MeowStorage
+import MeowRuntime
 @testable import MeowNovelFeature
 
 final class NovelLibraryTests: XCTestCase {
     private func store(_ root: URL) throws -> DocumentStore { try DocumentStore(baseURL: root, namespace: NovelLibrary.namespace) }
+    func testBookRuntimeMaterialSurvivesShelfMutationAndReopenExactly() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let material = try RuntimeJSON.decode(Data(#"{"n":0.12345678901234567890123456789,"large":1e400,"é":1,"e\u0301":2}"#.utf8))
+        let library = NovelLibrary(store: try store(root))
+        let found = NovelBook(installationId: "source", bookUrl: "https://fixture.invalid/book", name: "书", variable: material)
+        let retained = try await library.retain(found, identity: "book", shelf: true)
+        try await library.pin(retained.id)
+        await library.close()
+        let reopened = NovelLibrary(store: try store(root))
+        let saved = try await reopened.snapshot()
+        XCTAssertEqual(saved.entries.first?.book.variable, material)
+        await reopened.close()
+    }
+
     func testShelfHistoryAreIndependentAndIdentitySurvivesEnrichmentAndSwitch() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

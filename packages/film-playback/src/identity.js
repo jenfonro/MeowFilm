@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
+import { cloneJSONValue, parseJSONText, stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 
 export const fail = code => Object.assign(new Error(code), { code });
 export const requireValue = (value, code = 'INVALID_REQUEST') => { if (!value) throw fail(code); };
 export const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 export const text = value => typeof value === 'string' ? value.trim() : '';
 export const isIdentifier = value => !!text(value) || Number.isSafeInteger(value);
-export const clone = value => structuredClone(value);
+export const clone = value => value === undefined ? undefined : cloneJSONValue(value);
 // Only the shared site's explicit projection has an opaque UI id. A provider's
 // unknown raw field is still part of its original row, not a projection marker.
 export const isSearchProjection = value => value?.vod_id == null &&
@@ -15,10 +16,13 @@ export const resultDetailId = value => value?.vod_id ??
 
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
-  if (object(value)) return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
+  if (object(value) && !isRawJSON(value) &&
+      [Object.prototype, null].includes(Object.getPrototypeOf(value)))
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
   return value;
 }
-export const identity = (...parts) => createHash('sha256').update(JSON.stringify(canonical(parts))).digest('hex');
+export const identity = (...parts) => createHash('sha256')
+  .update(stringifyJSONValue(canonical(parts.map(part => part === undefined ? null : part)))).digest('hex');
 export const variantParentId = id => typeof id === 'string' && /^[a-f0-9]{64}:[a-f0-9]{64}$/.test(id)
   ? id.slice(0, 64) : null;
 export const sourceIdentity = source => identity(source.engine ?? 'cat', source.installationId, source.siteId);
@@ -111,7 +115,7 @@ export function checkTarget(target) {
 
 export function parseSourceValue(value) {
   if (typeof value === 'string') {
-    try { value = JSON.parse(value); } catch { throw fail('UPSTREAM_FORMAT'); }
+    try { value = parseJSONText(value); } catch { throw fail('UPSTREAM_FORMAT'); }
   }
   requireValue(object(value), 'UPSTREAM_FORMAT');
   return value;

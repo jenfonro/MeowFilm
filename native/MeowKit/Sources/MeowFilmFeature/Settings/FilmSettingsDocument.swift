@@ -86,7 +86,8 @@ public final class FilmSettingsDocument: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let before = try readBytes()
         _ = try decode(before)
-        guard Self.fingerprint(before) == expected else { throw FilmSettingsStorageError.conflict }
+        guard case .object(let supplied) = expected, case .object(let actual) = Self.fingerprint(before),
+              ["exists", "length", "sha256"].allSatisfy({ supplied[$0] == actual[$0] }) else { throw FilmSettingsStorageError.conflict }
         let bytes = try encode(document)
         try swap(expected: before, replacement: bytes)
         return .init(document: document, fingerprint: Self.fingerprint(bytes))

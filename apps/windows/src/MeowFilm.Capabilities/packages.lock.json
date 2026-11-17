@@ -25,19 +25,6 @@
         "resolved": "9.0.1.1",
         "contentHash": "+BLh0C8VET4aMUorxr/LMZAgmKl2PYSoY7Qm4PJ4eePx/LT2gIHkxOUnlGM91QETgfsnSZajHx9rK0d67ilpgw=="
       },
-      "LibVLCSharp": {
-        "type": "Transitive",
-        "resolved": "3.10.2",
-        "contentHash": "WNLHBIK5QcOH0kNGBGupKC9Ds3hksPthHyp6ueE8zG5Hy/6EBwAU0BbMqukBCdLatCOY+V9DYHDwSVSXSmPGSA=="
-      },
-      "LibVLCSharp.WPF": {
-        "type": "Transitive",
-        "resolved": "3.10.2",
-        "contentHash": "jV7ThQIwaQxuLPLNWb1z7+qOGh6ctg/lBF5hVPfu+s+xI5HvtFEvCiYb8a88rEEd/g5WI/Llhy7ipeicAL5gsw==",
-        "dependencies": {
-          "LibVLCSharp": "3.10.2"
-        }
-      },
       "NAudio.Core": {
         "type": "Transitive",
         "resolved": "3.3.0",
@@ -78,11 +65,6 @@
         "resolved": "9.0.0",
         "contentHash": "hyJB4UlpAi19Xr9AXzu2NuagKC4lPfHObNMEAA0HmqFz2rX7wKgzeYzO/jM/eBHDhnUGFFEjk5cOoJaxqg5J4A=="
       },
-      "VideoLAN.LibVLC.Windows": {
-        "type": "Transitive",
-        "resolved": "3.0.24",
-        "contentHash": "U8SHuJr8eAC3x4+gEtOJD2heReo0tTWP3v21NunYNTzjmHpVp7qELs8phohqazxHMkaSIN8LufdIpAhldiLL/A=="
-      },
       "meowfilm.audio": {
         "type": "Project",
         "dependencies": {
@@ -106,10 +88,7 @@
       "meowfilm.media": {
         "type": "Project",
         "dependencies": {
-          "LibVLCSharp": "[3.10.2, 3.10.2]",
-          "LibVLCSharp.WPF": "[3.10.2, 3.10.2]",
-          "MeowFilm.Core": "[1.0.0, )",
-          "VideoLAN.LibVLC.Windows": "[3.0.24, 3.0.24]"
+          "MeowFilm.Core": "[1.0.0, )"
         }
       },
       "meowfilm.platform": {

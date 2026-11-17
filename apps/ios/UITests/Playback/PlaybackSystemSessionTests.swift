@@ -31,7 +31,7 @@ final class PlaybackSystemSessionTests: XCTestCase {
             url: URL(string: "https://unused.invalid/never-requested.wav")!, title: "Bytes", byteSource: source), owner: "music")
         _ = controller.setVolume(0, attempt: attempt)
         await fulfillment(of: [played], timeout: 5)
-        XCTAssertTrue(controller.requiresLocalMediaFetch)
+        XCTAssertTrue(controller.hasActiveMusicInput)
         XCTAssertTrue(controller.hasMusicOutput)
         _ = controller.pause(attempt: attempt)
         _ = controller.seek(to: 20, attempt: attempt)

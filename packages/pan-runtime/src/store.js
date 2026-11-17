@@ -1,8 +1,10 @@
 import * as fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { isUtf8 } from 'node:buffer';
 import { isAbsolute, join, resolve } from 'node:path';
+import { parseJSONText, stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { PanError, requireValue } from './errors.js';
-import { object, parseJSON } from './values.js';
+import { object } from './values.js';
 
 const empty = () => ({ version: 1, accounts: {} });
 
@@ -12,7 +14,7 @@ function state(path) {
 }
 
 function document(value, code) {
-  requireValue(object(value) && value.version === 1 && object(value.accounts), code);
+  requireValue(object(value) && value.version === 1 && object(value.accounts) && !isRawJSON(value.accounts), code);
   return value;
 }
 
@@ -46,7 +48,10 @@ export class PanStore {
       fs.fchmodSync(fd, 0o600);
       const bytes = fs.readFileSync(fd);
       let value;
-      try { value = parseJSON(bytes); }
+      try {
+        requireValue(isUtf8(bytes), 'CORRUPT_STORAGE');
+        value = parseJSONText(bytes.toString('utf8'));
+      }
       catch { throw new PanError('CORRUPT_STORAGE'); }
       return document(value, 'CORRUPT_STORAGE');
     } catch (error) { throw failure(error); }
@@ -61,7 +66,7 @@ export class PanStore {
     let fd, temporary, error;
     try {
       document(value, 'STORAGE_ERROR');
-      const bytes = Buffer.from(JSON.stringify(value));
+      const bytes = Buffer.from(stringifyJSONValue(value));
       this.read();
       fs.mkdirSync(this.#root, { recursive: true, mode: 0o700 });
       fs.chmodSync(this.#root, 0o700);
