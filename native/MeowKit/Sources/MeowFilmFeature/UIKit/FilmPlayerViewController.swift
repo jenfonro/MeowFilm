@@ -1,5 +1,6 @@
 #if os(iOS)
 import UIKit
+import Combine
 import MeowUI
 
 @MainActor
@@ -9,7 +10,7 @@ public protocol FilmPlaybackPage: AnyObject {
 
 /// Passive controls over the App's one native video surface.
 @MainActor
-public final class FilmPlayerViewController: PageViewController, FilmPlaybackPage {
+public final class FilmPlayerViewController: PageViewController, FilmPlaybackPage, UIGestureRecognizerDelegate {
     private let presentationOwner = UUID()
     public var filmPlaybackModel: FilmPlaybackModel? { model }
     public var onDismiss: (() -> Void)?
@@ -24,6 +25,7 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
     private let position = UILabel(), duration = UILabel()
     private let pip = FilmPlayerButton(type: .system), settings = FilmPlayerButton(type: .system), shortVideo = FilmPlayerButton(type: .system)
     private let sound = FilmPlayerButton(type: .system)
+    private let skipChapter = FilmPlayerButton(type: .system)
     private let rate = FilmPlayerMenuButton(type: .system), scale = FilmPlayerMenuButton(type: .system)
     private let pan = FilmPlayerMenuButton(type: .system), quality = FilmPlayerMenuButton(type: .system)
     private let change = FilmPlayerButton(type: .system), block = FilmPlayerButton(type: .system)
@@ -34,10 +36,22 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
     private var scrubbing = false
     private var scaleMode: FilmVideoScale = .fit
     private var controlsRequested = true
+    private var controlsHiddenByTap = false
     private var openMenus = Set<ObjectIdentifier>()
     private var hideTask: Task<Void, Never>?
     private var shownError: FilmPlaybackError?
-    private var swipeUp: UISwipeGestureRecognizer!, swipeDown: UISwipeGestureRecognizer!
+    private var singleTap: UITapGestureRecognizer!, doubleTap: UITapGestureRecognizer!
+    private var videoPan: UIPanGestureRecognizer!, hold: UILongPressGestureRecognizer!
+    private var panInteraction: FilmPlayerPanInteraction?
+    private var holdToken: UUID?
+    private var gestureIdentity: FilmPlayerControlIdentity?
+    private var gesturePreferences: FilmPlayerPreferences?
+    private var sliderIdentity: FilmPlayerControlIdentity?
+    private var brightnessScreen: UIScreen?
+    private var originalBrightness: CGFloat?
+    private var inactiveObservation: AnyCancellable?
+    private var cancellingVideoGestures = false
+    private let feedback = UISelectionFeedbackGenerator()
     private var returnOrientation: UIInterfaceOrientation?
     private var dismissing = false
     private var didNotifyDismiss = false
@@ -71,6 +85,7 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         model.setPresentationVisible(true, owner: presentationOwner)
         model.open()
         controlsRequested = true
+        controlsHiddenByTap = false
         render()
     }
 
@@ -81,6 +96,8 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
 
     public override func pageDidBecomeHidden() {
         model.setPresentationVisible(false, owner: presentationOwner)
+        cancelVideoGestures()
+        restoreBrightness()
         cancelAutoHide()
         settingsPanel.isHidden = true
         settings.isSelected = false
@@ -113,14 +130,12 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         configureTransport()
         configureBottom()
         configureSettings()
-        let tap = UITapGestureRecognizer(target: self, action: #selector(toggleControls))
-        video.addGestureRecognizer(tap)
-        swipeUp = UISwipeGestureRecognizer(target: self, action: #selector(moveEpisode(_:)))
-        swipeUp.direction = .up
-        swipeDown = UISwipeGestureRecognizer(target: self, action: #selector(moveEpisode(_:)))
-        swipeDown.direction = .down
-        video.addGestureRecognizer(swipeUp); video.addGestureRecognizer(swipeDown)
-        tap.require(toFail: swipeUp); tap.require(toFail: swipeDown)
+        configureVideoGestures()
+        inactiveObservation = NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)
+            .sink { [weak self] _ in
+                self?.cancelVideoGestures()
+                self?.restoreBrightness()
+            }
         observe(model) { [weak self] in self?.render() }
         render()
     }
@@ -189,14 +204,18 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         seek.setThumbImage(thumb, for: .normal)
         seek.heightAnchor.constraint(equalToConstant: 44).isActive = true
         seek.addAction(UIAction { [weak self] _ in
-            self?.scrubbing = true; self?.showControls()
+            guard let self else { return }
+            sliderIdentity = model.controlIdentity
+            scrubbing = sliderIdentity != nil; showControls()
         }, for: .touchDown)
         seek.addAction(UIAction { [weak self] _ in
             guard let self else { return }
-            scrubbing = false; model.seek(to: Double(seek.value)); showControls()
+            scrubbing = false
+            if sliderIdentity == model.controlIdentity, sliderIdentity != nil { model.seek(to: Double(seek.value)) }
+            sliderIdentity = nil; showControls()
         }, for: [.touchUpInside, .touchUpOutside])
         seek.addAction(UIAction { [weak self] _ in
-            self?.scrubbing = false; self?.showControls()
+            self?.sliderIdentity = nil; self?.scrubbing = false; self?.showControls()
         }, for: .touchCancel)
         configure(pan, title: "网盘", id: "pan", symbol: nil) {}
         pan.widthAnchor.constraint(lessThanOrEqualToConstant: 110).isActive = true
@@ -212,6 +231,8 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         })
         configure(change, title: "换源", id: "switch", symbol: nil) { [weak model] in model?.send("switch") }
         configure(block, title: "片源错误", id: "block", symbol: nil) { [weak self] in self?.confirmBlock() }
+        configure(skipChapter, title: "跳过片头", id: "skip-chapter", symbol: nil) { [weak model] in model?.skipChapter() }
+        skipChapter.isHidden = true
         configure(pip, title: "画中画", id: "pip", symbol: "pip") { [weak model] in
             guard let model else { return }
             if model.mediaState.pictureInPicture { model.stopPictureInPicture() }
@@ -233,10 +254,15 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         bottom.accessibilityIdentifier = "film.player.bottom-controls"
         bottom.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(bottom)
+        skipChapter.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(skipChapter)
         NSLayoutConstraint.activate([
             bottom.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
             bottom.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
             bottom.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
+            skipChapter.trailingAnchor.constraint(equalTo: bottom.trailingAnchor),
+            skipChapter.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -8),
+            skipChapter.topAnchor.constraint(greaterThanOrEqualTo: top.bottomAnchor, constant: 8),
         ])
     }
 
@@ -254,9 +280,7 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
 
     private func configureSettings() {
         configure(rate, title: "1×", id: "rate", symbol: nil) {}
-        rate.menu = UIMenu(title: "倍速", children: [0.5, 0.75, 1, 1.25, 1.5, 2, 3].map { value in
-            UIAction(title: "\(value)×", identifier: .init(String(value))) { [weak model] _ in model?.setRate(value) }
-        })
+        updateRateMenu()
         configure(scale, title: "比例", id: "scale", symbol: nil) {}
         scale.menu = UIMenu(title: "比例", children: FilmVideoScale.allCases.map { mode in
             UIAction(title: mode.title, identifier: .init(mode.rawValue)) { [weak self] _ in
@@ -324,6 +348,11 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
 
     private func render() {
         guard isViewLoaded else { return }
+        if gestureIdentity != model.controlIdentity || gesturePreferences != model.playerPreferences {
+            gestureIdentity = model.controlIdentity
+            gesturePreferences = model.playerPreferences
+            cancelVideoGestures()
+        }
         if videoSession != model.sessionID, let surface = model.makeVideoView() {
             videoView?.removeFromSuperview(); videoView = surface; videoSession = model.sessionID
             video.insertSubview(surface, at: 0); surface.pinEdges(to: video)
@@ -339,18 +368,22 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         let paused = !playing || state.paused
         play.configuration?.image = UIImage(systemName: paused ? "play.fill" : "pause.fill")
         play.accessibilityLabel = paused ? "播放" : "暂停"
-        if !scrubbing {
+        if let preview = panInteraction?.previewPosition {
+            seek.maximumValue = Float(state.duration)
+            seek.value = Float(preview)
+        } else if !scrubbing {
             seek.maximumValue = Float(state.duration)
             seek.value = Float(state.position)
         }
         seek.isEnabled = playing && state.duration > 0
-        position.text = time(state.position); duration.text = time(state.duration)
+        position.text = time(panInteraction?.previewPosition ?? state.position); duration.text = time(state.duration)
         volume.value = Float(state.volume); volume.isEnabled = playing
         sound.isEnabled = playing
         sound.configuration?.image = UIImage(systemName: state.volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
         sound.accessibilityValue = "\(Int(state.volume * 100))%"
         rate.configuration?.title = "\(state.rate)×"; rate.isEnabled = playing
         rate.accessibilityValue = "\(state.rate)×"
+        updateRateMenu()
         selectMenu(rate, value: String(state.rate))
         scale.configuration?.title = scaleMode.title; selectMenu(scale, value: scaleMode.rawValue)
         pip.isEnabled = state.pictureInPicture || playing && state.pictureInPictureAvailable
@@ -361,8 +394,11 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         shortVideo.isSelected = snapshot?.shortVideo == true
         shortVideo.configuration?.title = shortVideo.isSelected ? "短视频：开" : "短视频"
         shortVideo.isEnabled = model.executionStage != nil && kind != .movie && model.playbackStatus != .unavailable
-        swipeUp.isEnabled = shortVideo.isSelected && previous.isEnabled
-        swipeDown.isEnabled = shortVideo.isSelected && nextButton.isEnabled
+        if let segment = model.skipSegment {
+            skipChapter.configuration?.title = segment.kind == .intro ? "跳过片头" : "跳过片尾"
+            skipChapter.accessibilityLabel = skipChapter.configuration?.title
+            skipChapter.isHidden = false
+        } else { skipChapter.isHidden = true }
         let selected = model.executionStage != nil && candidate != nil
         pan.isEnabled = selected; quality.isEnabled = selected
         change.isEnabled = selected; block.isEnabled = selected
@@ -394,26 +430,29 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
             }
             if presented { shownError = error }
         }
-        if keepsControlsVisible { controlsRequested = true }
+        if keepsControlsVisible && !controlsHiddenByTap { controlsRequested = true }
         updateControls()
     }
 
     private var keepsControlsVisible: Bool {
         model.mediaState.paused || activity.isAnimating || model.mediaState.attemptID == nil ||
-            scrubbing || !settingsPanel.isHidden || !openMenus.isEmpty || presentedViewController != nil ||
+            scrubbing || panInteraction != nil || holdToken != nil ||
+            !settingsPanel.isHidden || !openMenus.isEmpty || presentedViewController != nil ||
             model.actionError != nil || model.observationError != nil || model.snapshot?.error != nil ||
             UIAccessibility.isVoiceOverRunning
     }
 
     private func showControls() {
         controlsRequested = true
+        controlsHiddenByTap = false
         cancelAutoHide()
         updateControls()
     }
 
     private func updateControls() {
-        let visible = controlsRequested || keepsControlsVisible
-        for overlay in [top, bottom] {
+        let visible = !controlsHiddenByTap && (controlsRequested || keepsControlsVisible)
+        skipChapter.isHidden = model.skipSegment == nil || !settingsPanel.isHidden
+        for overlay in [top, bottom, skipChapter] {
             overlay.alpha = visible ? 1 : 0
             overlay.isUserInteractionEnabled = visible
             overlay.accessibilityElementsHidden = !visible
@@ -440,26 +479,217 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
             settingsPanel.isHidden = true; settings.isSelected = false
             showControls()
         } else {
-            controlsRequested = top.alpha == 0
+            controlsHiddenByTap = top.alpha != 0
+            controlsRequested = !controlsHiddenByTap
             cancelAutoHide(); updateControls()
         }
     }
 
-    @objc private func moveEpisode(_ gesture: UISwipeGestureRecognizer) {
-        guard model.snapshot?.shortVideo == true else { return }
-        model.send(gesture.direction == .up ? "next" : "previous")
-        showControls()
+    private func updateRateMenu() {
+        let values = model.availableRates
+        let current = rate.menu?.children.compactMap { ($0 as? UIAction)?.identifier.rawValue } ?? []
+        guard current != values.map({ String($0) }) else { return }
+        rate.menu = UIMenu(title: "倍速", children: values.map { value in
+            UIAction(title: "\(value)×", identifier: .init(String(value))) { [weak model] _ in model?.setRate(value) }
+        })
+    }
+
+    private func configureVideoGestures() {
+        singleTap = UITapGestureRecognizer(target: self, action: #selector(tapVideo(_:)))
+        doubleTap = UITapGestureRecognizer(target: self, action: #selector(tapVideo(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        videoPan = UIPanGestureRecognizer(target: self, action: #selector(panVideo(_:)))
+        videoPan.maximumNumberOfTouches = 1
+        hold = UILongPressGestureRecognizer(target: self, action: #selector(holdVideo(_:)))
+        hold.minimumPressDuration = 0.4
+        singleTap.require(toFail: doubleTap)
+        for tap in [singleTap!, doubleTap!] {
+            tap.require(toFail: videoPan)
+            tap.require(toFail: hold)
+        }
+        for gesture in [singleTap!, doubleTap!, videoPan!, hold!] as [UIGestureRecognizer] {
+            gesture.delegate = self
+            video.addGestureRecognizer(gesture)
+        }
+    }
+
+    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard canUseVideoGestures else { return false }
+        let point = touch.location(in: video)
+        // Leave screen edges to the system; reject overlay/control hit bounds,
+        // rather than only rejecting the UILabel or image that received a touch.
+        let horizontalInset = max(20, max(video.safeAreaInsets.left, video.safeAreaInsets.right))
+        guard point.x > horizontalInset, point.x < video.bounds.width - horizontalInset,
+              point.y > 20, point.y < video.bounds.height - 20 else { return false }
+        if let hit = view.hitTest(touch.location(in: view), with: nil) {
+            guard hit === video || hit.isDescendant(of: video) else { return false }
+            var ancestor: UIView? = hit
+            while let current = ancestor, current !== video {
+                if current is UIControl { return false }
+                ancestor = current.superview
+            }
+        }
+        return true
+    }
+
+    public func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard canUseVideoGestures else { return false }
+        if !settingsPanel.isHidden { return gestureRecognizer === singleTap }
+        if gestureRecognizer === hold || gestureRecognizer === videoPan {
+            guard model.controlIdentity != nil else { return false }
+        }
+        if gestureRecognizer === videoPan {
+            let preferences = model.playerPreferences
+            return preferences.swipeSeek || preferences.swipeBrightness || preferences.swipeVolume ||
+                preferences.swipeEpisodes && model.snapshot?.shortVideo == true
+        }
+        return true
+    }
+
+    private var canUseVideoGestures: Bool {
+        isPageVisible && UIApplication.shared.applicationState == .active && !dismissing &&
+            openMenus.isEmpty && presentedViewController == nil
+    }
+
+    @objc private func tapVideo(_ gesture: UITapGestureRecognizer) {
+        guard gesture.state == .ended, canUseVideoGestures else { return }
+        if !settingsPanel.isHidden { toggleControls(); return }
+        let region = FilmPlayerScreenRegion(x: Double(gesture.location(in: video).x), width: Double(video.bounds.width))
+        let preferences = model.playerPreferences
+        let isDouble = gesture === doubleTap
+        let action: FilmPlayerTapAction
+        if isDouble { action = region == .center ? preferences.doubleTapCenter : preferences.doubleTapSides }
+        else { action = region == .center ? preferences.singleTapCenter : preferences.singleTapSides }
+        switch action {
+        case .none: break
+        case .toggleControls: if !isDouble { toggleControls() }
+        case .playPause: model.pauseOrResume(); showControls()
+        case .seek:
+            guard region != .center else { return }
+            model.seekByStep(forward: region == .right); showControls()
+        }
+    }
+
+    @objc private func holdVideo(_ gesture: UILongPressGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            guard canUseVideoGestures, settingsPanel.isHidden else { return }
+            holdToken = model.beginTemporaryRate()
+            if holdToken != nil, model.playerPreferences.hapticHold { feedback.selectionChanged() }
+            showControls()
+        case .ended, .cancelled, .failed:
+            if let holdToken { model.endTemporaryRate(holdToken) }
+            holdToken = nil
+            render()
+        default: break
+        }
+    }
+
+    @objc private func panVideo(_ gesture: UIPanGestureRecognizer) {
+        let translation = gesture.translation(in: video)
+        switch gesture.state {
+        case .began:
+            guard canUseVideoGestures, settingsPanel.isHidden, let identity = model.controlIdentity,
+                  let screen = view.window?.screen else { return }
+            let state = model.mediaState
+            panInteraction = FilmPlayerPanInteraction(identity: identity, preferences: model.playerPreferences,
+                region: .init(x: Double(gesture.location(in: video).x - translation.x), width: Double(video.bounds.width)),
+                shortVideo: model.snapshot?.shortVideo == true,
+                initialPosition: state.position, duration: state.duration,
+                initialVolume: state.volume, initialBrightness: Double(screen.brightness))
+            updatePan(translation: translation)
+            showControls()
+        case .changed:
+            guard canUseVideoGestures, settingsPanel.isHidden, panInteraction?.identity == model.controlIdentity else {
+                cancelVideoGestures(); return
+            }
+            updatePan(translation: translation)
+        case .ended:
+            updatePan(translation: translation)
+            guard var interaction = panInteraction else { return }
+            panInteraction = nil
+            switch interaction.finish(cancelled: !canUseVideoGestures || !settingsPanel.isHidden, current: model.controlIdentity) {
+            case .seek(let position): model.seek(to: position)
+            case .episode(let next):
+                if model.snapshot?.shortVideo == true, model.playerPreferences.swipeEpisodes {
+                    model.send(next ? "next" : "previous")
+                }
+            case nil: break
+            }
+            render()
+        case .cancelled, .failed:
+            panInteraction = nil
+            render()
+        default: break
+        }
+    }
+
+    private func updatePan(translation: CGPoint) {
+        guard var interaction = panInteraction, interaction.identity == model.controlIdentity else { return }
+        let previousMode = interaction.mode
+        let change = interaction.update(x: Double(translation.x), y: Double(translation.y),
+                                        width: Double(video.bounds.width), height: Double(video.bounds.height))
+        // Publish the locked operation before native volume emits a state update.
+        panInteraction = interaction
+        if previousMode == nil {
+            let preferences = interaction.preferences
+            let haptic: Bool
+            switch interaction.mode {
+            case .seek: haptic = preferences.hapticSeek
+            case .volume: haptic = preferences.hapticVolume
+            case .brightness: haptic = preferences.hapticBrightness
+            default: haptic = false
+            }
+            if haptic { feedback.selectionChanged() }
+        }
+        switch change {
+        case .seek:
+            render()
+        case .volume(let volume):
+            model.setVolume(volume)
+        case .brightness(let brightness):
+            guard let screen = view.window?.screen else { return }
+            if brightnessScreen !== screen {
+                restoreBrightness()
+                brightnessScreen = screen
+                originalBrightness = screen.brightness
+            }
+            screen.brightness = CGFloat(brightness)
+        case nil: break
+        }
+    }
+
+    private func cancelVideoGestures() {
+        guard !cancellingVideoGestures else { return }
+        cancellingVideoGestures = true
+        defer { cancellingVideoGestures = false }
+        holdToken = nil; panInteraction = nil; sliderIdentity = nil; scrubbing = false
+        model.cancelTemporaryRate()
+        for gesture in [singleTap, doubleTap, videoPan, hold] as [UIGestureRecognizer?] {
+            guard let gesture else { continue }
+            gesture.isEnabled = false
+            gesture.isEnabled = true
+        }
+    }
+
+    private func restoreBrightness() {
+        if let brightnessScreen, let originalBrightness { brightnessScreen.brightness = originalBrightness }
+        brightnessScreen = nil; originalBrightness = nil
     }
 
     public override func present(_ viewControllerToPresent: UIViewController, animated flag: Bool, completion: (() -> Void)? = nil) {
+        cancelVideoGestures()
         cancelAutoHide()
         controlsRequested = true
+        controlsHiddenByTap = false
         super.present(viewControllerToPresent, animated: flag, completion: completion)
         updateControls()
     }
 
     private func dismissPlayer() {
         guard !dismissing else { return }
+        cancelVideoGestures()
+        restoreBrightness()
         dismissing = true; cancelAutoHide()
         Task { [weak self] in
             guard let self else { return }
@@ -488,6 +718,8 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
     }
 
     public override func pageDidBecomeInactive() {
+        cancelVideoGestures()
+        restoreBrightness()
         cancelAutoHide()
         guard !dismissing else { return }
         Task { [self] in

@@ -21,6 +21,7 @@ public protocol VideoOutput: FrameOutput {
     var options: KSOptions { get set }
     var displayLayer: AVSampleBufferDisplayLayer { get }
     var pixelBuffer: PixelBufferProtocol? { get }
+    var playbackRate: Float { get set }
     init(options: KSOptions)
     func invalidate()
     func fail()
@@ -78,6 +79,13 @@ public final class MetalPlayView: UIView, VideoOutput {
     private var displayLink: CADisplayLink!
 //    private let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
     public var options: KSOptions
+    public var playbackRate: Float = 1 {
+        didSet {
+            if let timebase = displayLayer.controlTimebase, !displayLink.isPaused {
+                CMTimebaseSetRate(timebase, rate: Double(playbackRate))
+            }
+        }
+    }
     public weak var renderSource: OutputRenderSourceDelegate?
     // AVSampleBufferAudioRenderer AVSampleBufferRenderSynchronizer AVSampleBufferDisplayLayer
     var displayView = AVSampleBufferDisplayView() {
@@ -100,7 +108,7 @@ public final class MetalPlayView: UIView, VideoOutput {
     }
 
     public func play() {
-        if let timebase = displayLayer.controlTimebase { CMTimebaseSetRate(timebase, rate: 1) }
+        if let timebase = displayLayer.controlTimebase { CMTimebaseSetRate(timebase, rate: Double(playbackRate)) }
         displayLink.isPaused = false
     }
 
@@ -363,7 +371,7 @@ extension MetalPlayView {
         guard let formatDescription else { return false }
         if let timebase = displayLayer.controlTimebase {
             CMTimebaseSetTime(timebase, time: time)
-            CMTimebaseSetRate(timebase, rate: displayLink.isPaused ? 0 : 1)
+            CMTimebaseSetRate(timebase, rate: displayLink.isPaused ? 0 : Double(playbackRate))
         }
         return displayView.enqueue(imageBuffer: pixelBuffer, formatDescription: formatDescription, time: time)
     }

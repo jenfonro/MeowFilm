@@ -51,6 +51,7 @@ public final class VideoSession: MediaPlayerDelegate {
         if options?.formatName == "hls" || options?.formatName == "dash" { return true }
         return player.seekable
     }
+    public var chapters: [VideoChapter] { info?.chapters ?? [] }
     public var tracks: [VideoTrack] {
         guard let player else { return [] }
         return [AVMediaType.video, .audio, .subtitle].flatMap { type in

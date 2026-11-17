@@ -5,6 +5,7 @@
 | 数据 | 存储 | 位置 |
 | --- | --- | --- |
 | 通用／音乐外观、音乐搜索偏好、播放音量 | 原生 UserDefaults | 当前 App domain，不经运行器 |
+| 影视默认内核与17项播放器控制（`film.player.preferences.v1`） | 原生 UserDefaults 的 JSON Data | 当前 App domain，不经运行器 |
 | 永久歌曲仓库、引用队列、历史、设置（`music.library.v3`） | 普通文档 | Application Support 下 `meowfilm/documents`，参与备份 |
 | 小说书架／历史、阅读排版与净化规则（`novel.library.v1`） | 普通文档 | `meowfilm/documents/novel.library.v1/library.json`，参与备份 |
 | 影视规则、智能播放偏好 | 普通文档 | `meowfilm/documents/{film.rules.v1,film.preferences.v1}/settings.json`，参与备份 |
@@ -88,6 +89,14 @@ Cat 安装事实、源码与私有卷继续使用 `meowfilm/script-runtime/cat`�
 内置官方源开关属于 `music.library.v3` 的 playback 记录 `officialSources`，值为 `wy`／`tx`／`kg` 的无重复数组；新建文档显式写入全部启用，当前格式文档必须包含该数组，空数组全部关闭，不接受缺失、null 或未知平台。写入使用既有 settingsRevision／文档 CAS，不创建第二份设置事实来源。
 
 ## 影视设置
+
+### 播放器偏好
+
+`FilmPlayerPreferencesStore` 是本端播放器偏好的 App 共享 owner，使用当前 UserDefaults domain 的 `film.player.preferences.v1` key 保存 `FilmPlayerPreferences` JSON Data。它不是下述六块 `FilmSettingsDocument`，不写入 Node 智能匹配偏好、不发运行器设置通知。字段、默认值和生效时机见[播放器设置](film-settings.md#播放器设置)。
+
+缺少记录时使用出厂默认，不在读取时写盘；已保存记录先解码和校验产品枚举，再按首选内核校正超限倍率，只有需要校正时才保存归一值。修改单字段前重新读取当前记录，保留其他字段；成功编码并调用 UserDefaults 保存后发布新偏好。读取或格式错误保留原记录并报告 `persistenceError`，设置页通过统一错误浮层提示，不静默覆盖损坏内容；不把此 API 当作文件 fsync 或跨进程事务回执。
+
+### 运行器消费的原生配置
 
 唯一 owner、离线提交、通知及在线回写语义只在[共同契约](../common/settings-storage.md)维护。iOS 的 `MeowfilmNativeSettings` 构造并共享六个 `FilmSettingsDocument`，页面与私密通道使用同一实例；不依赖 RuntimeSession 连接读取或保存。通知器弱引用既有会话，避免文档与受信读取能力反向延长会话生命周期；会话释放后仍可本地保存，不创建替代运行器。
 

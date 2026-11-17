@@ -1,0 +1,388 @@
+--- a/AetherEngine/AetherEngine.swift
++++ b/AetherEngine/AetherEngine.swift
+@@ -2419,7 +2419,18 @@
+     static let nativeSeekProgressIslandFloorSeconds: Double = 1.0
+
+     /// Native AVPlayer + AVPlayerLayer host. Non-nil between load and stop.
+-    var nativeHost: NativeAVPlayerHost?
++    public var onExternalPlaybackIntent: ((Bool) -> Void)?
++    var nativeHost: NativeAVPlayerHost? {
++        didSet {
++            oldValue?.onExternalPlaybackIntent = nil
++            let host = nativeHost
++            host?.onExternalPlaybackIntent = { [weak self, weak host] playing in
++                guard let self, let host, self.nativeHost === host,
++                      self.hostManagedLifecycle, self.pictureInPictureActive else { return }
++                self.onExternalPlaybackIntent?(playing)
++            }
++        }
++    }
+
+     /// Controlled host I/O boundary for integration witnesses. Production reads only the
+     /// existing KVO mirror, never AVPlayerItem's synchronous seekableTimeRanges getter.
+@@ -4545,7 +4556,11 @@
+     #endif
+     #endif
+
+-    public init() throws {
++    private let hostManagedLifecycle: Bool
++    private var pendingHostDrains: [Task<Void, Never>] = []
++
++    public init(hostManagedLifecycle: Bool = false) throws {
++        self.hostManagedLifecycle = hostManagedLifecycle
+         // Route av_log into EngineLog before any libav* entry point so probe/load diagnostics are captured.
+         FFmpegLogBridge.install()
+         // Which FFmpeg answers is decided by the host's link, not by the package graph (AE#396).
+@@ -4554,7 +4569,7 @@
+         // The category is declared off-main at the first load, once per process (#114), and the session
+         // is never activated here: AVKit owns native playback activation (#24).
+
+-        setupLifecycleObservers()
++        if !hostManagedLifecycle { setupLifecycleObservers() }
+     }
+
+     /// Declare the process-wide category before a load can activate the session (#114, off-main).
+@@ -4562,6 +4577,7 @@
+     /// category again: a host that switches the mode afterwards (music playback setting `.default`)
+     /// keeps it, as it did when the declaration ran once at init. A failed attempt is retried.
+     func awaitAudioSessionCategoryConfigured() async {
++        guard !hostManagedLifecycle else { return }
+         #if os(iOS) || os(tvOS)
+         await SharedOutputCoordinator.shared.configureAudioSessionCategory {
+             Self.configureAudioSessionCategory()
+@@ -5385,6 +5401,21 @@
+             sourceVideoHeight = probedGeometry.height
+             if let pixelAspect = probedGeometry.pixelAspect { sourceVideoPixelAspectRatio = pixelAspect }
+             lastDetectedVideoCodec = detectedCodecID
++        }
++
++        // A rejected HTTP probe or DASH opening already established the source's
++        // failure. Reopening on a codec-NONE route loses that typed cause.
++        let httpRejected: Bool
++        if let failure = probeFailure as? AVIOReaderError, case .httpStatus = failure {
++            httpRejected = true
++        } else {
++            httpRejected = false
++        }
++        if let failure = probeFailure, failure is DASHSourceError || httpRejected {
++            probe.markClosed()
++            await BlockingWork.detached { [probe] in probe.close() }.value
++            publishLoadFailure(failure, isLiveStart: options.isLive)
++            throw failure
+         }
+
+         // Custom sources have no URL to reopen from: a failed probe is fatal.
+@@ -7721,6 +7752,22 @@
+         nextLoadRequestsInPlaceItemHandover = true
+     }
+
++    /// The embedding application's media receipt stays alive until these real workers exit.
++    public func stopAndDrain() async {
++        stop()
++        while !pendingHostDrains.isEmpty {
++            let drains = pendingHostDrains
++            pendingHostDrains.removeAll()
++            for drain in drains { await drain.value }
++        }
++    }
++
++    public var outputRate: Float {
++        if let nativeHost { return nativeHost.rate }
++        if let softwareHost { return softwareHost.rate }
++        return 0
++    }
++
+     public func stop(resetDisplayCriteria: Bool = true, finalTeardown: Bool? = nil) {
+         cancelPendingAudioSelection()
+         releaseHeldPicture(reason: "stop")
+@@ -9042,7 +9089,10 @@
+             diagnostics.sessionCacheStatus = .inactive
+         }
+         stopDualLayerOutputRoute()
+-        nativeVideoSession?.stop(reason: cacheCleanupReason)
++        if let session = nativeVideoSession {
++            session.stop(reason: cacheCleanupReason)
++            pendingHostDrains.append(Task { await session.waitForDrain() })
++        }
+         nativeVideoSession = nil
+         nativeSubtitleRenditionsServed = false
+         dolbyVisionConversion = nil
+@@ -9078,7 +9128,7 @@
+         let scrubThumbs = scrubThumbnailExtractors
+         scrubThumbnailExtractors.removeAll()
+         for entry in scrubThumbs {
+-            Task { await entry.extractor.shutdown() }
++            pendingHostDrains.append(Task { await entry.extractor.shutdown() })
+         }
+
+         softwareCancellables.removeAll()
+@@ -9103,7 +9153,10 @@
+             isResettingPictureInPictureForStop = false
+         }
+         softwareHost?.setVideoFrameTimeObserver(nil)
+-        softwareHost?.stop()
++        if let host = softwareHost {
++            host.stop()
++            pendingHostDrains.append(Task { await host.waitForDrain() })
++        }
+         softwarePiPSource = nil
+         softwareHost = nil
+
+@@ -9799,3 +9852,36 @@
+         }
+     }
+ }
++
++public extension AetherEngine {
++    static func mediaCapabilityUnsupported(_ error: Error) -> Bool {
++        if let error = error as? VideoDecoderError {
++            if case .unsupportedCodec = error { return true }
++        }
++        if let error = error as? DASHSourceError {
++            switch error {
++            case .liveManifest, .periodCount, .noPlayableRepresentation, .tooManySubsegments: return true
++            default: return false
++            }
++        }
++        if let error = error as? HLSVideoEngine.HLSVideoEngineError {
++            switch error {
++            case .unsupportedCodec, .unsupportedDVProfile, .noVideoStream: return true
++            default: return false
++            }
++        }
++        if let error = error as? AetherEngineError {
++            switch error {
++            case .noVideoStream, .dolbyVisionUnplayableOnSoftwarePath, .hlsPlaylistOnRawLivePath: return true
++            default: return false
++            }
++        }
++        if let error = error as? VideoDecoderError {
++            switch error {
++            case .unsupportedCodec, .unsupportedConfiguration: return true
++            default: return false
++            }
++        }
++        return false
++    }
++}
+--- a/AetherEngine/Video/HLSVideoEngine.swift
++++ b/AetherEngine/Video/HLSVideoEngine.swift
+@@ -10,6 +10,14 @@
+ /// AVPlayer by a local HTTP server that blocks on a condvar until the requested
+ /// segment is muxed.
+ public final class HLSVideoEngine: @unchecked Sendable {
++
++    private let hostDrainLock = NSLock()
++    private var hostDrains: [Task<Void, Never>] = []
++
++    func waitForDrain() async {
++        let drains = hostDrainLock.withLock { hostDrains }
++        for drain in drains { await drain.value }
++    }
+
+     // MARK: - Errors
+
+@@ -3657,13 +3665,14 @@
+
+         // Detached cleanup: producer waitForFinish must precede demuxer/cache/server close
+         // (pump accesses them during unwind). ownedParams released last (pump read them).
+-        BlockingWork.detached {
++        let drain = BlockingWork.detached {
+             iFrames?.shutdown()
+             previewFrames?.shutdown()
+             previewBuilder?.close()
+             ladder?.keyframes.shutdown()
+             ladder?.builder.close()
+-            _ = p?.waitForFinish(timeout: 3.0)
++            // Cancellation has interrupted the demuxer. A timeout is not a resource drain.
++            while let p, !p.waitForFinish(timeout: 3.0) {}
+             s?.stop()
+             if let c {
+                 _ = c.close(reason: reason)
+@@ -3681,6 +3690,7 @@
+             preopened?.close()
+             _ = ownedParams
+         }
++        hostDrainLock.withLock { hostDrains.append(drain) }
+     }
+
+     deinit {
+--- a/AetherEngine/AetherEngine+Loading.swift
++++ b/AetherEngine/AetherEngine+Loading.swift
+@@ -1371,7 +1371,7 @@
+             // read before that and is not what routes this session.
+             try await BlockingWork.detached(priority: .userInitiated) { [session] in
+                 do { try session.prepare() }
+-                catch { session.stop(reason: .loadFailed); throw error }
++                catch { session.stop(reason: .loadFailed); await session.waitForDrain(); throw error }
+             }.value
+             let routesAsHDRPanel: Bool
+             do {
+@@ -1382,16 +1382,17 @@
+                 }
+             } catch {
+                 session.stop(reason: .loadFailed)
++                await session.waitForDrain()
+                 throw error
+             }
+             playbackURL = try await BlockingWork.detached(priority: .userInitiated) { [session] in
+                 do { return try session.serve(panelIsInHDRMode: routesAsHDRPanel) }
+-                catch { session.stop(reason: .loadFailed); throw error }
++                catch { session.stop(reason: .loadFailed); await session.waitForDrain(); throw error }
+             }.value
+         } else {
+             playbackURL = try await BlockingWork.detached(priority: .userInitiated) { [session] in
+                 do { return try session.start() }
+-                catch { session.stop(reason: .loadFailed); throw error }
++                catch { session.stop(reason: .loadFailed); await session.waitForDrain(); throw error }
+             }.value
+         }
+         // AirPlay (#86): while external playback is active, serve the loopback over the device's LAN IP so
+@@ -1403,6 +1404,7 @@
+         // Superseded while starting: stop and unwind before touching shared state.
+         if loadGeneration != generation {
+             session.stop(reason: .sourceChanged)
++            await session.waitForDrain()
+             try checkLoadCurrent(generation)
+         }
+         self.nativeVideoSession = session
+--- a/AetherEngine/Native/SoftwarePacketReadAhead.swift
++++ b/AetherEngine/Native/SoftwarePacketReadAhead.swift
+@@ -171,10 +171,19 @@
+         self.readSource = readSource
+     }
+
++    private let hostDrain = DispatchGroup()
++
++    func waitForDrain() async {
++        await withCheckedContinuation { continuation in
++            hostDrain.notify(queue: .global(qos: .utility)) { continuation.resume() }
++        }
++    }
++
+     func start() {
+         condition.lock()
+         guard !started, !closed else { condition.unlock(); return }
+         started = true
++        hostDrain.enter()
+         condition.unlock()
+         // AE#519: a thread we own rather than a DispatchQueue, because a queue's QoS is fixed at
+         // creation and this producer's urgency changes INSIDE one long-running loop: elective while
+@@ -182,7 +191,7 @@
+         // blocks on `condition` whenever the store runs dry and `NSCondition` donates no priority,
+         // so a permanently demoted producer is an inversion dispatch cannot see, and one that was
+         // measured failing to drain the link it had been given.
+-        let thread = Thread { self.produce() }
++        let thread = Thread { defer { self.hostDrain.leave() }; self.produce() }
+         thread.name = "AetherEngine.SoftwarePacketReadAhead.producer"
+         thread.stackSize = 1 << 20
+         thread.qualityOfService = .userInitiated
+@@ -438,9 +447,15 @@
+         sourceEpoch &+= 1
+         clearSourceMetadataLocked()
+         let needsCleanup = !started
++        if needsCleanup { hostDrain.enter() }
+         condition.broadcast()
+         condition.unlock()
+-        if needsCleanup { DispatchQueue.global(qos: .utility).async { try? self.fifo.close() } }
++        if needsCleanup {
++            DispatchQueue.global(qos: .utility).async {
++                defer { self.hostDrain.leave() }
++                try? self.fifo.close()
++            }
++        }
+     }
+
+     /// Consumes one packet on the consumer thread; only source EOF returns nil.
+--- a/AetherEngine/Native/NativeAVPlayerHost.swift
++++ b/AetherEngine/Native/NativeAVPlayerHost.swift
+@@ -351,6 +351,7 @@
+     private var didSampleSettledRoute = false
+     /// Latched transport intent; the readyToPlay observer re-asserts it if play() was swallowed during a replaceCurrentItem swap (keepNativeHost reload: AVPlayer drops rate to 0 and parks at readyToPlay+paused forever).
+     private var playIntent = false
++    var onExternalPlaybackIntent: ((Bool) -> Void)?
+     private var rateObservation: NSKeyValueObservation?
+     private var timeControlObservation: NSKeyValueObservation?
+     /// AE#440: the waiting REASON changes without `timeControlStatus` changing. A live join goes
+@@ -1046,6 +1047,9 @@
+                     category: .engine
+                 )
+                 self.playIntent = intent
++                // Host commands set playIntent before writing rate; only an explicit
++                // external AVKit command changes it here. Stalls and EOF keep the intent.
++                if intent != old { self.onExternalPlaybackIntent?(intent) }
+             }
+         }
+         notificationObservers.append(rateObs)
+--- a/AetherEngine/Native/SoftwarePlaybackHost.swift
++++ b/AetherEngine/Native/SoftwarePlaybackHost.swift
+@@ -2894,7 +2894,12 @@
+         return false
+     }
+
++    private var hostDrain: Task<Void, Never>?
++
++    func waitForDrain() async { await hostDrain?.value }
++
+     func stop() {
++        guard hostDrain == nil else { return }
+         stopRequested = true
+         pausedBeforeFirstFrame = false
+         isPlaying = false
+@@ -2907,10 +2912,11 @@
+         timeTimer = nil
+         residentRangePublication.invalidate()
+         residentRanges = []
+-        vodPacketReadAhead?.close()
+-        vodPacketReadAhead = nil
+-        directLiveReadAhead?.close()
+-        directLiveReadAhead = nil
++        let packets = vodPacketReadAhead
++        let livePackets = directLiveReadAhead?.packets
++        packets?.close(); livePackets?.close()
++        vodPacketReadAhead = nil; directLiveReadAhead = nil
++        demuxer?.markClosed()
+         renderer.subtitleCompositor.reset()
+
+         if let extractor = stillExtractorSlot.reset() {
+@@ -2933,12 +2939,22 @@
+             aOut.detachVideoLayer(renderer.displayLayer)
+         }
+         audioOutput = nil
+-        audioDecoder?.close()
+-        audioDecoder = nil
+-        videoDecoder.close()
++        let audioDecoder = audioDecoder, demuxer = demuxer
++        self.audioDecoder = nil; self.demuxer = nil
+         renderer.flush()
+-        demuxer?.close()
+-        demuxer = nil
++        hostDrain = Task { [self] in
++            for queue in [demuxQueue, feedQueue, seekQueue, stillQueue] {
++                await withCheckedContinuation { continuation in
++                    queue.async { continuation.resume() }
++                }
++            }
++            await packets?.waitForDrain()
++            await livePackets?.waitForDrain()
++            audioDecoder?.close()
++            videoDecoder.close()
++            demuxer?.close()
++            renderer.flush()
++        }
+
+         isReady = false
+         // #315: the session's picture goes with the session. `flush()` above already removed it.
+--- a/AetherEngine/Diagnostics/EngineLog.swift
++++ b/AetherEngine/Diagnostics/EngineLog.swift
+@@ -108,7 +108,10 @@
+     /// without its author knowing the redactor exists, and it covers OSLog as well as the host handler:
+     /// `.public` privacy means a Console.app capture or a sysdiagnose would otherwise carry the token
+     /// in clear text even for a host that scrubs its own log.
++    public static let diagnosticsEnabled = false
++
+     private static func deliver(_ line: String, category: Category, level: Level) {
++        guard diagnosticsEnabled else { return }
+         switch level {
+         case .info:
+             let line = LogRedaction.redact(line)

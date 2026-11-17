@@ -11,8 +11,8 @@
     "Sources/FFmpegKit/include/avutil_shim.h": "4320f02abf87bacf85a492c32f08eb9408c8128bb041379a8cfe0e9fded79a02",
     "Sources/FFmpegKit/include/swresample_shim.h": "f2de03b7796b7f3be01b9cd0afb5c2edc805fb0ca10f0c3db2f3a1ca5ddbcaf9",
     "Sources/FFmpegKit/include/swscale_shim.h": "eb3882e0b151afebffc7c87b1d9005b0d8468c27ca2010c694fd250526738933",
-    "Sources/KSPlayer/AVPlayer/KSOptions.swift": "f22e62072e1e25b489e6ff3cc12877bd48fe31ede53e87f5a5a08aebb1a4ae63",
-    "Sources/KSPlayer/AVPlayer/MediaPlayerProtocol.swift": "80394432f5e38fb08284d5e4dc7f4e324f25c8741cc87a7583e6542b2b1fe672",
+    "Sources/KSPlayer/AVPlayer/KSOptions.swift": "6d495f3fd373fdc1f65efce8e1bd2d6780119eeb627d4fb6421a68ed480e73df",
+    "Sources/KSPlayer/AVPlayer/MediaPlayerProtocol.swift": "3185f434d8dbb4cd20f8c472e6ed320a86c696aa0f29e47aa1a6a246bf956078",
     "Sources/KSPlayer/AVPlayer/PlayerDefines.swift": "668fad615b97b31a04afa5493e20626e7534dd47bfb02e97bfa07b9950f094ff",
     "Sources/KSPlayer/Core/AppKitExtend.swift": "bb1f426179a357a6cdc46e38f1c3ed82c20fb6e4ac0845dd13523a09554d64a5",
     "Sources/KSPlayer/Core/UXKit.swift": "7437ea4f06ae9da47dda09b2c02f1d05d13414f1996e522a44e2965a0bc37930",
@@ -29,10 +29,10 @@
     "Sources/KSPlayer/MEPlayer/FFmpegAssetTrack.swift": "bd062178e703af017f8f267013b25258bac6cdc3d3f47037d5fa09e53cd8f254",
     "Sources/KSPlayer/MEPlayer/FFmpegDecode.swift": "4f9e32fe611e9d3179af1a03804564dea9c01a0c3130e5a7a8ee531390afacf8",
     "Sources/KSPlayer/MEPlayer/Filter.swift": "349d1dfffab84a0df1d1bcd56f65192eabe1398bcd158e957173842aa03867bf",
-    "Sources/KSPlayer/MEPlayer/KSMEPlayer.swift": "0d18b07f593d58f3856e468abe01e7106d8b03e0295ef45ea47d1dd2a6b08f28",
-    "Sources/KSPlayer/MEPlayer/MEPlayerItem.swift": "1ebe88ca6532125eaa9c424accdcb5a3f9a89728f9e532172854cdeae31c3844",
+    "Sources/KSPlayer/MEPlayer/KSMEPlayer.swift": "327a23a60379d3c73b8074782e328c9af97ffd41cd3d3bf51d1f9305394a48db",
+    "Sources/KSPlayer/MEPlayer/MEPlayerItem.swift": "4a7f5019cb548b49daec574591676c964ec616ef65ccd480579dcfba33a2ad7e",
     "Sources/KSPlayer/MEPlayer/MEPlayerItemTrack.swift": "29d645ff28bed2fefbec33ad51990a12762bf648be7cb117e684a1335668bfdd",
-    "Sources/KSPlayer/MEPlayer/MetalPlayView.swift": "f077eee09806ca6e2d3dca07c521b1e09836137fc2cbd0251bfa2c35118e897a",
+    "Sources/KSPlayer/MEPlayer/MetalPlayView.swift": "d46bef329a44a4b12cc9de03a61dfb066a7a56f68985c6cab2101bc45e877bee",
     "Sources/KSPlayer/MEPlayer/Model.swift": "9b810647d10ed928b83f859d50e5d95908f2bed32f8488d4594dc5f4ad311716",
     "Sources/KSPlayer/MEPlayer/Resample.swift": "01665cac435055f0c5dd3b26c0824960b044fdf771b1df30adbb793aa7f56612",
     "Sources/KSPlayer/MEPlayer/SubtitleDecode.swift": "9a1109549a5bad37d3a059dc58c6e90b613198d55361a6e68ba757f9bdaa836f",
@@ -60,7 +60,8 @@
     "Sources/Libswscale/include/Libswscale.h": "b2ed112b35adfdc69f4d89bcb18036d2aadc8a10b7af0c2ae28f9fe3bc0a06cf",
     "Sources/Libswscale/module.c": "9b673219c5255b0e2acc09d9a2c58d5224e1dbd903ff7a27d655f98962959308",
     "Tests/KSPlayerTests/DolbyVisionCoreTests.swift": "88cd4b0566f7ecf9534e9bbfb7d11df3e054839e07de513ea9591d262b82ff21",
-    "Tests/KSPlayerTests/HDRMetadataCoreTests.swift": "9518fb774ff39d0e53fd3af217725f955b5d319e45f9e4c4a460eb02e59ff474"
+    "Tests/KSPlayerTests/HDRMetadataCoreTests.swift": "9518fb774ff39d0e53fd3af217725f955b5d319e45f9e4c4a460eb02e59ff474",
+    "Tests/KSPlayerTests/VideoClockCoreTests.swift": "bcc61f8974db906f874d8771ea5af000949bf7bcc42a57b1c3cc87fdcf076c3e"
   },
   "origins": {
     "Package.swift": {

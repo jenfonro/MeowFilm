@@ -28,15 +28,21 @@ final class PlaybackVideoPictureInPicture: NSObject, AVPictureInPictureControlle
 
     private func bind(transport: PlaybackVideoTransport) {
         guard AVPictureInPictureController.isPictureInPictureSupported(),
-              let displayLayer = transport.output.displayLayer else { return }
-        let content = AVPictureInPictureController.ContentSource(
-            sampleBufferDisplayLayer: displayLayer, playbackDelegate: source)
+              let content = contentSource(transport) else { return }
         let pip = AVPictureInPictureController(contentSource: content)
         self.controller = pip; pip.delegate = self
         pip.canStartPictureInPictureAutomaticallyFromInline = false
         observation = pip.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in self?.publishActualState() }
         }
+    }
+
+    private func contentSource(_ transport: PlaybackVideoTransport) -> AVPictureInPictureController.ContentSource? {
+        if let playerLayer = transport.output.playerLayer { return .init(playerLayer: playerLayer) }
+        if let displayLayer = transport.output.displayLayer {
+            return .init(sampleBufferDisplayLayer: displayLayer, playbackDelegate: source)
+        }
+        return nil
     }
 
     private var isCurrent: Bool { !invalidated && source.isCurrent }
@@ -56,14 +62,14 @@ final class PlaybackVideoPictureInPicture: NSObject, AVPictureInPictureControlle
     /// removed from old retirement. Never copy the preceding `.active` state.
     func rebind(transport: PlaybackVideoTransport, lease: PlaybackVideoLease,
                 controller: PlaybackController, attempt: PlayAttempt) {
-        guard let displayLayer = transport.output.displayLayer else { return }
         let owned = hasSystemOwner
+        source.transport?.output.setPictureInPictureActive(false)
         source = .init(transport: transport, lease: lease, playback: controller, attempt: attempt)
+        guard let content = contentSource(transport) else { return }
         if owned { systemOwnerAttempt = attempt }
         rebinding = true
         if let pictureInPicture = self.controller {
-            pictureInPicture.contentSource = .init(
-                sampleBufferDisplayLayer: displayLayer, playbackDelegate: source)
+            pictureInPicture.contentSource = content
         } else {
             bind(transport: transport)
         }
@@ -98,6 +104,7 @@ final class PlaybackVideoPictureInPicture: NSObject, AVPictureInPictureControlle
             }
         }
         controller?.delegate = nil; controller?.contentSource = nil; controller = nil
+        source.transport?.output.setPictureInPictureActive(false)
         systemOwnerAttempt = nil
     }
 
@@ -106,6 +113,7 @@ final class PlaybackVideoPictureInPicture: NSObject, AVPictureInPictureControlle
     }
     private func publish(_ state: PlaybackVideoPictureInPictureState) {
         guard !rebinding, isCurrent, let transport = source.transport else { return }
+        transport.output.setPictureInPictureActive(state == .active || state == .starting)
         let ended = systemOwnerAttempt != nil &&
             [.possible, .unavailable, .failed].contains(state)
         if state == .active { systemOwnerAttempt = source.attempt }

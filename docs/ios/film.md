@@ -31,9 +31,9 @@
 以 `resumeTarget` 携带当前准确 `source`／坐标；不限豆瓣入口。搜索入口已可用卡片固定目标，
 reference 只复用活跃事实；原本没有元数据的 source／group 不补造元数据 provenance。
 
-`FilmPlaybackModel`／`MeowfilmFilmMedia` 的媒体接缝把真实 attempt 交给共享 MeowPlayback 的两阶段 prepare／commit；播放状态来自实际内核输出，不用本地计时模拟。MeowVideoKernel 适配固定源码 KSMEPlayer 的真实解码／原生输出，保留完整渲染视图及实际首帧确认；核心关闭等待真实输入、解码、轨道、音频与渲染工作退出后才释放媒体 receipt。直连输入的 HTTP headers／Cookie 通过每实例 KSOptions 注入，运行器 receipt 保持空原生上下文。Node 仍拥有业务会话及媒体资源授权，见[共同原生播放契约](../common/film/playback.md)。影片收藏继续由稳定 `FilmLibrary` 持有，用原 namespace `meowfilm.film.library.v1` 保存身份记录，记录包含当前 `businessID/playbackTarget`；收藏与重开直接消费稳定目标，不提供旧收藏双身份匹配或缺字段补全。读取隔离不可用及歧义身份条目，无关增删保留原始坏行和精确扩展；坏根或非空全坏明确失败。它不复制进 Node v2 历史／人工匹配／屏蔽／偏好／聚合注册库，也不写音乐曲库。
+`FilmPlaybackModel`／`MeowfilmFilmMedia` 的媒体接缝把真实 attempt 交给共享 MeowPlayback 的两阶段 prepare／commit；播放状态来自实际内核输出，不用本地计时模拟。默认 MeowVideoKernel 适配固定源码 KSMEPlayer，新增可选 MeowAetherKernel 保留相同的 prepare、实际首帧、命令及关闭协议，具体选择与回退见下文。核心关闭等待真实输入、解码、轨道、音频与渲染工作退出后才释放媒体 receipt。直连输入的 HTTP headers／Cookie 通过每实例内核选项注入，运行器 receipt 保持空原生上下文。Node 仍拥有业务会话及媒体资源授权，见[共同原生播放契约](../common/film/playback.md)。影片收藏继续由稳定 `FilmLibrary` 持有，用原 namespace `meowfilm.film.library.v1` 保存身份记录，记录包含当前 `businessID/playbackTarget`；收藏与重开直接消费稳定目标，不提供旧收藏双身份匹配或缺字段补全。读取隔离不可用及歧义身份条目，无关增删保留原始坏行和精确扩展；坏根或非空全坏明确失败。它不复制进 Node v2 历史／人工匹配／屏蔽／偏好／聚合注册库，也不写音乐曲库。
 
-视频定位能力由 `VideoSession → PlaybackVideoDecoding → PlaybackController` 透传：准备后的有限 HLS／DASH 时间线使用实际探测到的 demuxer 时间定位能力，不要求主清单支持 HTTP Range；普通 progressive 输入使用核心的字节定位能力。未准备、失败或已撤销的 session 不接受 seek，已知时长不等于可定位。不按 URL 后缀或调用方 format hint 推断能力，也不新增 live／DVR 时间线支持。
+视频定位能力由对应 session 经 `PlaybackVideoDecoding → PlaybackController` 透传：KS 准备后的有限 HLS／DASH 时间线使用实际探测到的 demuxer 时间定位能力，不要求主清单支持 HTTP Range；普通 progressive 输入使用核心的字节定位能力。Aether 使用真实引擎的 `canSeek`，候选回退后改为透传实际 KS 能力。未准备、失败或已撤销的 session 不接受 seek，已知时长不等于可定位。不按 URL 后缀或调用方 format hint 推断能力，也不新增 live／DVR 时间线支持。
 
 媒体准备或真实播放失败的 `media.failed` 回执携带已有原生适配器的有限 `code`，不发送异常正文、URL 或凭据。运行器区分取回执、准备和播放阶段，保留真实原生失败原因；候选续选的过程错误不重复弹出最终错误。客户端沿用准确 attempt、取消、资源释放与系统 owner 边界，不因错误码扩展改变手动准确播放或自动准备策略。
 
@@ -65,6 +65,26 @@ iOS 影视只使用共享原生媒体 owner，不提供外部播放器入口、U
 本节描述当前 iOS 消费者实现；本轮本地只完成语法／差异检查，Swift 环境不可执行，尚未确认包类型检查、UIKit／App 编译、测试或真实 App 验收；
 恢复晚到更新的公共限制见[读取恢复](../runtime/film-playback.md#读取恢复)，不能把接线完成视为整端验收。
 
+## 内核选择与候选回退
+
+先由 Node 返回播放地址与媒体 receipt，再在原生候选内部使用内核；不让用户退出播放页或重新匹配取址。首选 KSPlayer／AetherEngine 的选择、生效时机与倍率校正见[播放器设置](film-settings.md#播放器设置)。`PlaybackVideoEvent` 携带实际 `engine` 和 `chapters`，`MeowfilmFilmMedia` 投影为 `FilmMediaState`，播放页据此显示实际能力。
+
+`makePlaybackVideoDecoder(engine:)` 在 Aether 首选下构造 `PlaybackVideoCandidateDecoder`，稳定容器承载内部输出。当前源码仅允许未提交阶段的 `.unsupportedFormat` 一次 Aether→KS 回退：覆盖 prepare、提交位置对齐或首帧渲染阶段；先取消并等待 Aether `close()`，再创建 KS，并复用候选保存的 URL、format、headers、ClearKey 与最新对齐位置。该替换不更改业务 session／attempt 或媒体 receipt，不执行第二次取址、提前 `media.failed`／release，也不在回退过程中提交 started。
+
+网络／输入失败、超时、普通输出失败、seek 失败及取消不作为能力回退理由；KS 失败也不再回退。首帧及最终准入检查成功并提交后，候选丢弃回退入口和准备参数，不为高倍速或播放中错误换核。取消期间不创建替代，旧输出的排空仍属于原候选释放路径；这些语义须由真实取消／排空与同 receipt 回归确认，不能只凭状态标记证明。
+
+Aether 7.68.0 的 DASH 路径仅覆盖未加密 static、单 Period、SegmentBase／sidx 的有限结构，不提供 SegmentTemplate、SegmentList 或加密 DASH 能力；本地 wrapper 对非空 ClearKey 明确返回不支持。运行器受控流解决网络输入和请求上下文归属，不补清单解析、转码或解密能力。上游有限 typed 能力错误经宿主补丁分类，是否在实际清单／错误包装路径到达 `.unsupportedFormat` 仍须实测，不承诺任意失败都自动回退。
+
+运行器 receipt 保持空原生请求上下文，来源凭据留在[Node 媒体流](../runtime/film-playback.md#停止撤权与本地流)。可信原生直连输入在 KS 使用逐实例 KSOptions，在 Aether 使用本次 `LoadOptions.httpHeaders`，不新增共享 Cookie owner。Aether 上游跨域头传播与共同输入契约不能仅靠属性注入视为一致，根／子清单、分片、重定向、Range／seek 与关闭仍待实际网络回归。
+
+Aether 候选配置 autoplay=false、静音并关闭上游系统 owner；原生路径读取 `AVPlayerLayer.displayedPixelBuffer()`，软件路径读取 `sampleBufferRenderer.displayedPixelBuffer()` 作为首帧检查，不把 ready 当作首帧。15秒等待截止归类超时，不触发能力回退。关闭先取消准备／渲染／进度任务，再等待上游 `stopAndDrain()`；依赖隔离及宿主补丁见[Aether 构建边界](../../native/AetherKernel/README.md)。Apple 编译、首帧／seek／排空及回退须分别核对真实结果；HDR／Dolby Vision 标签和配置不证明显示效果或 profile7／FEL 支持。
+
+## 真实章节与跳过
+
+KS 和 Aether 将容器真实章节映射为零基时间轴上的 `PlaybackVideoChapter(title,start,end)`；不按影片名、固定秒数或无标记音视频猜测片头片尾。`FilmPlaybackChapterModel` 通过当前 session／attempt／resource 的 `media.chapters` 借用 Node 识别明确完整标签，准确授权、输入范围和响应语义只见[运行器章节识别契约](../runtime/film-playback.md)。
+
+「自动识别片头片尾」默认开启，但识别本身不自动 seek。播放位置落入有效识别区间时提供「跳过片头」或「跳过片尾」，用户操作经当前原生媒体 seek 到区间终点，不伪造 ended。关闭开关、换资源／attempt、取消或关闭使旧识别结果失效；无真实标记不展示跳过。实际章节读取、识别接线与 seek 完成须分别验证。
+
 ## 布局和交互
 
 首页竖海报为 2:3，一屏三张完整卡片及第四张边缘；宽度按当前安全区视口计算。卡片只显示海报与标题，不显示评分（评分在详情元信息中）。卡片使用 `pic.normal`；同一条目规范化后的 `pic.large` 作为 `FilmItem.largePosterURL`，供详情顶部大图使用。详情按详情背景图、`largePosterURL`、卡片海报的顺序读取，大图失败时回退到下一项。顶部大海报放在固定裁剪的图片框中，透明度渐变遮罩挂在图片框上，在其下缘衔接页面背景；标题、元信息与播放、收藏位于图片框下方，不叠在海报或渐变上。海报静止时略微放大，上滑时图片框与正文同速上移，框内图片随标题接近页头缩回原尺寸，始终铺满图片框，两侧不露空白，渐变固定在图片框下缘。页头背景在海报位于其下方时保持透明，标题接近页头下缘时淡入，到达时不透明并显示片名，因此滑动时页头下缘不出现色带；下拉回弹时图片框保持在顶部。海报可见且页头未过半显现时，状态栏和返回键为浅色，并配随页头显现淡出的顶部暗色渐变；之后或没有海报时恢复页面默认样式。减少动态效果时取消缩放。
@@ -87,4 +107,8 @@ iOS 影视只使用共享原生媒体 owner，不提供外部播放器入口、U
 
 控制层采用服务器 `ArtPlayer.vue` 的双层胶囊样式：深色半透明外壳包裹整组，内层图标按钮为圆形、文字按钮为细描边短胶囊，点击区域至少 44pt。顶部保留返回与片名／来源；进度条下方两组分别为播放／暂停、上下集、音量和时间，以及网盘、画质、换源、片源错误、PiP 和设置。组宽不足时分行，不拉伸为整屏裸文字按钮；仍需收缩时优先截断可变来源／画质名称，保留固定操作名。音量入口打开设置中的音量滑块；倍速、画面比例、短视频和地址重试仍在设置内。网盘与画质显示当前候选，不从线路标签猜测标准网盘身份。片源错误仍先确认再提交捕获的准确 attempt。
 
-轻触空白画面切换控制层，不改变播放状态。正常播放空闲 2.2 秒隐藏；暂停、缓冲、未起播、错误、设置／原生菜单、拖动进度及 VoiceOver 期间保留控制，交互结束后重新计时。拖动取消不跳转；短视频上下滑沿用相邻集命令。离开可见生命周期停止隐藏计时，普通关闭等待原生媒体与会话排空，真实 PiP 则沿用系统 owner 生命周期。
+画面按触摸起点左／中／右等分，单击等待双击识别失败，按[播放器偏好](film-settings.md#播放器设置)执行；默认单击显隐播放栏、双击播放／暂停，两边选择快进／快退时分别后退／前进指定步长。手势不接管控件或系统边缘返回区域；长按使用绑定准确 session／attempt 的临时倍率。
+
+一次 pan 在开始移动时锁定方向及操作：横向调进度，左侧纵向调亮度，右侧纵向调音量，中区纵向仅在短视频模式与切集开关同时开启时进入相邻集流程。禁用的操作不转成另一种手势；进度拖动只预览，正常结束且身份仍有效才提交一次 seek，取消不跳转。亮度调整在隐藏、后台或离开时归还原屏幕值；长按、亮度、音量、进度分别受对应触觉开关控制。
+
+正常播放空闲2.2秒隐藏控制；暂停、缓冲、未起播、错误、设置／原生菜单、拖动进度、长按及 VoiceOver 期间暂停自动隐藏，手动显隐仍由点按动作控制。交互结束后重新计时，离开可见生命周期停止计时并取消进行中的手势。普通关闭等待原生媒体与会话排空，真实 PiP 则沿用[系统 owner 生命周期](system-media.md#影视卡片与内核边界)。本轮新增手势和 PiP 接缝未因文档更新获得实机通过结论。

@@ -1,4 +1,5 @@
 import Foundation
+import MeowContracts
 #if os(iOS)
 import UIKit
 #endif
@@ -17,6 +18,9 @@ public enum FilmVideoScale: String, CaseIterable, Sendable {
 public struct FilmMediaState: Equatable, Sendable {
     public var sessionID: UUID?
     public var attemptID: String?
+    public var resourceID: String?
+    public var engine: PlaybackVideoEngine = .ksPlayer
+    public var chapters: [PlaybackVideoChapter] = []
     public var position: Double = 0
     public var duration: Double = 0
     public var paused = true
@@ -61,6 +65,9 @@ public protocol FilmPlaybackMediaControlling: AnyObject {
     func resume(sessionID: UUID, attemptID: String, userInitiated: Bool)
     func seek(sessionID: UUID, to position: Double)
     func setRate(sessionID: UUID, rate: Double)
+    /// Temporary video speed never replaces the session's preferred base rate.
+    /// nil restores that base only if this exact attempt still owns the output.
+    func setTemporaryRate(sessionID: UUID, attemptID: String, rate: Double?)
     func setVolume(sessionID: UUID, volume: Double)
     func startPictureInPicture(sessionID: UUID)
     func stopPictureInPicture(sessionID: UUID)
@@ -70,4 +77,9 @@ public protocol FilmPlaybackMediaControlling: AnyObject {
     func makeVideoView(sessionID: UUID) -> UIView
     func setVideoScale(sessionID: UUID, scale: FilmVideoScale)
     #endif
+}
+
+public extension FilmPlaybackMediaControlling {
+    /// Older adapters without a temporary channel do not mutate the base rate.
+    func setTemporaryRate(sessionID: UUID, attemptID: String, rate: Double?) {}
 }

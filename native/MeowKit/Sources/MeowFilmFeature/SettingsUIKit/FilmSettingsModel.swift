@@ -11,6 +11,7 @@ public final class FilmSettingsModel: ObservableObject {
     public let douban: FilmDoubanSettingsModel
     public let pan: PanAccountsModel
     public let playback: FilmPlaybackSettingsModel?
+    public let player: FilmPlayerPreferencesStore
     @Published public private(set) var snapshot: FilmSourceSnapshot?
     @Published public private(set) var loadError: String?
     @Published public private(set) var rulesError: String?
@@ -21,9 +22,10 @@ public final class FilmSettingsModel: ObservableObject {
 
     public init(rules: FilmRuleService, sources: FilmSourceService, tmdb: FilmTMDBSettingsModel,
                 douban: FilmDoubanSettingsModel, pan: PanAccountsModel,
-                playback: FilmPlaybackSettingsModel? = nil) {
+                playback: FilmPlaybackSettingsModel? = nil, player: FilmPlayerPreferencesStore? = nil) {
         self.rules = FilmRulesDraft(service: rules); self.sources = sources
         self.tmdb = tmdb; self.douban = douban; self.pan = pan; self.playback = playback
+        self.player = player ?? FilmPlayerPreferencesStore()
     }
     public func start(loadError: String? = nil) {
         close()

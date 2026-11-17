@@ -1,7 +1,10 @@
 """Only the new CI packaging contract; no Xcode, network or app execution."""
 import importlib.util
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("beta_package", ROOT / "scripts/package-beta-ios.py")
@@ -30,6 +33,129 @@ class BetaPackageTests(unittest.TestCase):
         info["DTPlatformName"] = "iphonesimulator"
         with self.assertRaises(ValueError):
             package.validate_info(info)
+
+    def app(self):
+        (ROOT / "tmp").mkdir(exist_ok=True)
+        temporary = tempfile.TemporaryDirectory(dir=ROOT / "tmp")
+        self.addCleanup(temporary.cleanup)
+        app = Path(temporary.name) / "Meowfilm.app"
+        app.mkdir()
+        return app
+
+    def test_bundle_metadata_is_removed_after_macho_signatures(self):
+        app = self.app()
+        framework = app / "Frameworks" / "Example.framework"
+        framework.mkdir(parents=True)
+        executables = [app / "Meowfilm", framework / "Example", framework / "Extra.dylib"]
+        for path in executables:
+            path.write_bytes(b"\xcf\xfa\xed\xfe" + b"fixture")
+        signatures = [bundle / "_CodeSignature" for bundle in (app, framework)]
+        for path in signatures:
+            path.mkdir()
+            (path / "CodeResources").write_bytes(b"signature metadata")
+        resource = framework / "resource.txt"
+        resource.write_bytes(b"preserved resource")
+        signed = {str(path) for path in executables[:2]}
+
+        def codesign(command, **kwargs):
+            path = command[-1]
+            if command[1] == "--remove-signature":
+                self.assertTrue(all(signature.is_dir() for signature in signatures))
+                signed.remove(path)
+                return subprocess.CompletedProcess(command, 0)
+            self.assertEqual(command[1], "-d")
+            return subprocess.CompletedProcess(command, 0 if path in signed else 1,
+                                               stderr="" if path in signed else "code object is not signed at all")
+
+        with mock.patch.object(package.subprocess, "run", side_effect=codesign) as run:
+            package.strip_signatures(app)
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertCountEqual([command[-1] for command in commands if command[1] == "--remove-signature"],
+                              [str(path) for path in executables[:2]])
+        for path in executables:
+            self.assertEqual(commands.count(["/usr/bin/codesign", "-d", str(path)]), 2)
+            self.assertTrue(path.is_file())
+        self.assertFalse(signed)
+        self.assertFalse(list(app.rglob("_CodeSignature")))
+        self.assertEqual(resource.read_bytes(), b"preserved resource")
+
+    def test_provisioning_profile_is_rejected_before_cleanup(self):
+        app = self.app()
+        framework = app / "Frameworks" / "Example.framework"
+        framework.mkdir(parents=True)
+        profile = framework / "embedded.mobileprovision"
+        profile.write_bytes(b"fixture")
+        with mock.patch.object(package.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "must not embed provisioning profiles"):
+                package.strip_signatures(app)
+        run.assert_not_called()
+        self.assertTrue(profile.is_file())
+
+    def test_signed_or_unverifiable_macho_is_rejected(self):
+        for returncode, stderr in ((0, ""), (1, "unable to read code object")):
+            with self.subTest(returncode=returncode):
+                app = self.app()
+                (app / "Meowfilm").write_bytes(b"\xcf\xfa\xed\xfe")
+                signature = app / "_CodeSignature"
+                signature.mkdir()
+                probe = subprocess.CompletedProcess([], returncode, stderr=stderr)
+                with mock.patch.object(package.subprocess, "run", return_value=probe):
+                    with self.assertRaisesRegex(ValueError, "Unable to verify an unsigned Mach-O"):
+                        package.strip_signatures(app)
+                self.assertTrue(signature.is_dir())
+
+    def test_signature_removal_failure_is_not_ignored(self):
+        app = self.app()
+        (app / "Meowfilm").write_bytes(b"\xcf\xfa\xed\xfe")
+        signature = app / "_CodeSignature"
+        signature.mkdir()
+        failure = subprocess.CalledProcessError(1, ["/usr/bin/codesign", "--remove-signature"])
+        with mock.patch.object(package.subprocess, "run",
+                               side_effect=[subprocess.CompletedProcess([], 0), failure]):
+            with self.assertRaises(subprocess.CalledProcessError):
+                package.strip_signatures(app)
+        self.assertTrue(signature.is_dir())
+
+    def test_bundle_cleanup_failure_is_not_ignored(self):
+        app = self.app()
+        signature = app / "_CodeSignature"
+        signature.mkdir()
+        with mock.patch.object(package.shutil, "rmtree", side_effect=OSError("cleanup failed")):
+            with self.assertRaisesRegex(OSError, "cleanup failed"):
+                package.strip_signatures(app)
+        self.assertTrue(signature.is_dir())
+
+    def test_unexpected_signature_file_or_symlink_is_rejected(self):
+        for symlink in (False, True):
+            with self.subTest(symlink=symlink):
+                app = self.app()
+                external = app.parent / "external-signature"
+                external.mkdir()
+                resource = external / "CodeResources"
+                resource.write_bytes(b"must not be deleted")
+                signature = app / "_CodeSignature"
+                if symlink:
+                    signature.symlink_to(external, target_is_directory=True)
+                else:
+                    signature.write_bytes(b"unexpected file")
+                with self.assertRaisesRegex(ValueError, "Unexpected bundle signature"):
+                    package.strip_signatures(app)
+                self.assertTrue(signature.exists())
+                self.assertEqual(resource.read_bytes(), b"must not be deleted")
+
+    def test_extensions_and_nested_apps_are_rejected_before_stripping(self):
+        for name in ("NewIdentity.appex", "Nested.app"):
+            with self.subTest(name=name):
+                app = self.app()
+                (app / "PlugIns" / name).mkdir(parents=True)
+                staging = app.parent / "staging"
+                staging.mkdir()
+                with mock.patch.dict(package.os.environ, {"GITHUB_SHA": "fixture-commit"}), \
+                     mock.patch.object(package, "output", side_effect=["fixture-commit", ""]), \
+                     mock.patch.object(package, "strip_signatures") as strip:
+                    with self.assertRaisesRegex(ValueError, "New app identities/extensions"):
+                        package.main(app, staging)
+                strip.assert_not_called()
 
     def test_build_versions_are_monotonic_and_bounded(self):
         numbers = [1, 2, 99, 100, 9999, 10000, 99_989_999]

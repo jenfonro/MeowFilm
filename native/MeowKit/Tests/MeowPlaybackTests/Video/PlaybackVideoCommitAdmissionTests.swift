@@ -304,7 +304,7 @@ final class PlaybackVideoCommitAdmissionTests: XCTestCase {
                                                    decoder: makePlaybackVideoDecoder(session: native))
         try await candidate.prepare()
         #if os(iOS)
-        film.surface.stage(candidate.output.presentationView)
+        film.surface.stage(candidate.output)
         #else
         let window = try PlaybackVideoTestWindow()
         window.stage(candidate)

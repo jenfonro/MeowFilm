@@ -1,0 +1,37 @@
+AetherEngine dependency notices (iOS)
+===================================
+
+LibDovi 2.2.0
+-------------
+Copyright (c) 2026 Vincent Herbst (packaging, build scripts)
+MIT License. The standard MIT permission and disclaimer are reproduced in
+libxml2-MIT.txt; they apply with the copyright notice above.
+
+Dovi.xcframework contains dolby_vision (libdovi) 3.4.0 from dovi_tool,
+revision d1abe0e27ff2c7ab3339614d06db9f8a058af6b2.
+Copyright (c) 2026 quietvoid
+The MIT alternative is selected. The same standard MIT permission and
+disclaimer in libxml2-MIT.txt apply with this copyright notice.
+
+FFmpegBuild 3.15.0
+------------------
+FFmpeg 8.1.3 is LGPL-2.1-or-later. libzvbi 0.2.46's library is
+LGPL-2.0-or-later, conveyed under LGPL-2.1. Those terms are supplied once in
+LGPL-2.1-only.txt. libzvbi's distinct Unicode matcher notice is preserved in
+Aether-libzvbi-ure-MIT.txt.
+
+dav1d 1.5.4
+Copyright © 2018-2019, VideoLAN and dav1d authors
+All rights reserved.
+FFmpegBuild's shipped license notice names this copyright range.
+BSD-2-Clause. The complete permission, conditions and disclaimer are supplied
+by the existing dav1d BSD-2-Clause section in FilmKernel-THIRD-PARTY-NOTICES.txt,
+with the copyright notice above applying to this copy. Reusing that text does
+not link the Windows film kernel or its other dependencies into the iOS App.
+
+zimg 3.0.6 is distributed under WTFPL version 2; its license is reproduced in
+WTFPL-2.0.txt.
+
+These notices identify terms and sources, not a claim of patent permissions,
+Dolby certification or fulfillment of all corresponding-source/relinking
+obligations for a final distribution.

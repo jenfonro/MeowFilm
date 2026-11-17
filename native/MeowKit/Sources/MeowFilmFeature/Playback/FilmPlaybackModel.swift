@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import MeowContracts
 import MeowRuntime
 #if os(iOS)
 import UIKit
@@ -37,7 +38,14 @@ public final class FilmPlaybackModel: ObservableObject {
     /// Independent close failures; media.stop includes its media-receipt drain.
     @Published public private(set) var mediaStopError: FilmPlaybackError?
     @Published public private(set) var sessionReleaseError: FilmPlaybackError?
-    @Published public private(set) var mediaState = FilmMediaState()
+    @Published public private(set) var mediaState = FilmMediaState() {
+        didSet {
+            if let heldRate, heldRate.identity != controlIdentity || oldValue.engine != mediaState.engine {
+                cancelTemporaryRate()
+            }
+            updateChapters()
+        }
+    }
     @Published private var nativeStatus: FilmPlaybackStatus?
     public var playbackStatus: FilmPlaybackStatus {
         if let nativeStatus { return nativeStatus }
@@ -77,6 +85,15 @@ public final class FilmPlaybackModel: ObservableObject {
         return presentation.stage == "unavailable" ||
             presentation.searchComplete && presentation.sources.isEmpty && presentation.candidates.isEmpty
     }
+    public var playerPreferences: FilmPlayerPreferences { preferencesStore.preferences }
+    public var actualEngine: PlaybackVideoEngine { mediaState.engine }
+    public var availableRates: [Double] {
+        [0.5, 0.75] + FilmPlayerPreferences.defaultRates(for: actualEngine)
+    }
+    public var skipSegment: FilmPlaybackSegment? {
+        guard controlIdentity != nil else { return nil }
+        return chapterModel.segments.first { mediaState.position >= $0.start && mediaState.position < $0.end }
+    }
     public var sessionID: UUID? { allocatedSessionID }
     var restoringRead: Bool { restorePresentation != nil }
     public var executionStage: String? {
@@ -109,6 +126,12 @@ public final class FilmPlaybackModel: ObservableObject {
     private var reentryTarget: FilmPlaybackTarget?
     private var reentryError: String?
     private let media: any FilmPlaybackMediaControlling
+    private let preferencesStore: FilmPlayerPreferencesStore
+    private let chapterModel: FilmPlaybackChapterModel
+    private var preferencesObservation: AnyCancellable?
+    private var chaptersObservation: AnyCancellable?
+    private var chapterErrorObservation: AnyCancellable?
+    private var heldRate: (token: UUID, identity: FilmPlayerControlIdentity)?
     private var allocatedSessionID: UUID?
     private var openingTask: Task<Void, Never>?
     private var observationTask: Task<Void, Never>?
@@ -197,9 +220,24 @@ public final class FilmPlaybackModel: ObservableObject {
     }
     public init(transport: FilmPlaybackTransport, media: any FilmPlaybackMediaControlling,
                 searchContext: FilmSearchContext? = nil,
+                playerPreferences: FilmPlayerPreferencesStore? = nil,
                 request: @escaping @Sendable () async throws -> FilmPlaybackRequest) {
         self.transport = transport; self.media = media; makeRequest = request
         self.searchContext = searchContext
+        preferencesStore = playerPreferences ?? FilmPlayerPreferencesStore()
+        chapterModel = FilmPlaybackChapterModel(transport: transport)
+        preferencesObservation = preferencesStore.$preferences.dropFirst().sink { [weak self] value in
+            guard let self else { return }
+            cancelTemporaryRate()
+            updateChapters(enabled: value.recognizesChapters)
+            objectWillChange.send()
+        }
+        chaptersObservation = chapterModel.$segments.dropFirst().sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        chapterErrorObservation = chapterModel.$error.compactMap { $0 }.sink { [weak self] error in
+            self?.actionError = error
+        }
     }
 
     @discardableResult
@@ -314,6 +352,7 @@ public final class FilmPlaybackModel: ObservableObject {
     public func setPresentationVisible(_ visible: Bool, owner: UUID) {
         if visible { presentationOwners.insert(owner) }
         else { presentationOwners.remove(owner) }
+        if presentationOwners.isEmpty { cancelTemporaryRate() }
     }
 
     /// App runtime availability, not a replay of a playback intent. Hidden
@@ -437,6 +476,7 @@ public final class FilmPlaybackModel: ObservableObject {
         reentryTarget = value.target
         reentryError = value.error
         if reconcileMedia { reconcilePreparation() }
+        updateChapters()
     }
 
     private func publishDirectory(_ value: FilmPlaybackSnapshot) {
@@ -565,6 +605,7 @@ public final class FilmPlaybackModel: ObservableObject {
     /// keeps only its latest queued value. Actual start/terminal facts stay ordered.
     @discardableResult
     public func send(_ action: String, parameters: RuntimeObject = [:]) -> Task<Void, Never>? {
+        if Self.mediaActions.contains(action) { cancelTemporaryRate() }
         if action == "stop", closed || closingTask != nil || openingTask != nil || reopeningTask != nil {
             let admission = UUID(); commandAdmission = admission
             let generation = generation
@@ -942,6 +983,8 @@ public final class FilmPlaybackModel: ObservableObject {
         switch event {
         case .state(let state):
             guard state.sessionID == sessionID, state.attemptID == request.attempt.id else { return }
+            var state = state
+            state.resourceID = request.resourceID
             request.state = state
             guard request.didCommit else { return }
             if committed === request, !request.retired { mediaState = state }
@@ -951,6 +994,7 @@ public final class FilmPlaybackModel: ObservableObject {
             if request.started && !request.terminal { queueProgress(state) }
         case .started(let id):
             guard id == request.attempt.id, admits(request), !request.started else { return }
+            cancelTemporaryRate()
             // The shared owner's started callback is synchronous with its final
             // cancelled-task fence and real output commit. No second commit shim.
             committed = request; request.didCommit = true; request.started = true
@@ -964,12 +1008,14 @@ public final class FilmPlaybackModel: ObservableObject {
             actionError = error
             if request.started, let state = request.state { queueProgress(state) }
             request.terminal = true
+            cancelTemporaryRate(); updateChapters()
             if committed == nil || committed === request { nativeStatus = .failed }
             feedback("media.failed", attemptID: id, code: error.code)
         case .ended(let id):
             guard id == request.attempt.id, request.didCommit, !request.terminal else { return }
             if request.started, let state = request.state { queueProgress(state) }
             request.terminal = true
+            cancelTemporaryRate(); updateChapters()
             if committed === request { nativeStatus = .ended }
             feedback("media.ended", attemptID: id)
         case .ownerEnded(let id):
@@ -1022,9 +1068,62 @@ public final class FilmPlaybackModel: ObservableObject {
         if mediaState.paused { media.resume(sessionID: current.sessionID, attemptID: current.attempt.id, userInitiated: true) }
         else { _ = media.pause(sessionID: current.sessionID, attemptID: current.attempt.id) }
     }
-    public func seek(to value: Double) { if !runtimeClosed, let sessionID { media.seek(sessionID: sessionID, to: value) } }
-    public func setRate(_ value: Double) { if !runtimeClosed, let sessionID { media.setRate(sessionID: sessionID, rate: value) } }
-    public func setVolume(_ value: Double) { if !runtimeClosed, let sessionID { media.setVolume(sessionID: sessionID, volume: value) } }
+    var controlIdentity: FilmPlayerControlIdentity? {
+        guard !closed, !runtimeClosed, let committed, committed.started, !committed.retired, !committed.terminal,
+              media.isCurrent(sessionID: committed.sessionID, attemptID: committed.attempt.id),
+              mediaState.sessionID == committed.sessionID, mediaState.attemptID == committed.attempt.id else { return nil }
+        return .init(sessionID: committed.sessionID, attemptID: committed.attempt.id)
+    }
+
+    public func seek(to value: Double) {
+        guard value.isFinite, let identity = controlIdentity, mediaState.duration > 0 else { return }
+        media.seek(sessionID: identity.sessionID, to: min(mediaState.duration, max(0, value)))
+    }
+    public func seekByStep(forward: Bool) {
+        seek(to: mediaState.position + (forward ? 1 : -1) * playerPreferences.seekStep)
+    }
+    public func setRate(_ value: Double) {
+        guard value.isFinite, (0.5...3).contains(value), let identity = controlIdentity else { return }
+        cancelTemporaryRate()
+        guard identity == controlIdentity else { return }
+        media.setRate(sessionID: identity.sessionID, rate: min(value, actualEngine.maximumRate))
+    }
+    public func setVolume(_ value: Double) {
+        guard value.isFinite, let identity = controlIdentity else { return }
+        media.setVolume(sessionID: identity.sessionID, volume: min(1, max(0, value)))
+    }
+
+    @discardableResult
+    public func beginTemporaryRate() -> UUID? {
+        cancelTemporaryRate()
+        guard let identity = controlIdentity else { return nil }
+        let token = UUID()
+        heldRate = (token, identity)
+        media.setTemporaryRate(sessionID: identity.sessionID, attemptID: identity.attemptID,
+                               rate: min(playerPreferences.holdRate, actualEngine.maximumRate))
+        return token
+    }
+    public func endTemporaryRate(_ token: UUID) {
+        guard heldRate?.token == token else { return }
+        cancelTemporaryRate()
+    }
+    public func cancelTemporaryRate() {
+        guard let heldRate else { return }
+        self.heldRate = nil
+        guard media.isCurrent(sessionID: heldRate.identity.sessionID, attemptID: heldRate.identity.attemptID) else { return }
+        media.setTemporaryRate(sessionID: heldRate.identity.sessionID, attemptID: heldRate.identity.attemptID, rate: nil)
+    }
+
+    public func skipChapter() {
+        if let skipSegment { seek(to: skipSegment.end) }
+    }
+    private func updateChapters(enabled: Bool? = nil) {
+        let current = controlIdentity
+        chapterModel.update(sessionID: current?.sessionID, attemptID: current?.attemptID,
+                            resourceID: current == nil ? nil : mediaState.resourceID,
+                            chapters: current == nil ? [] : mediaState.chapters,
+                            enabled: enabled ?? playerPreferences.recognizesChapters)
+    }
     public func startPictureInPicture() { if !runtimeClosed, let sessionID { media.startPictureInPicture(sessionID: sessionID) } }
     public func stopPictureInPicture() { if let sessionID { media.stopPictureInPicture(sessionID: sessionID) } }
     public var hasSystemOwner: Bool {
@@ -1044,6 +1143,8 @@ public final class FilmPlaybackModel: ObservableObject {
     #endif
 
     public func close(allowSystemOwner: Bool = false) async {
+        cancelTemporaryRate()
+        chapterModel.update(sessionID: nil, attemptID: nil, resourceID: nil, chapters: [], enabled: false)
         recoveryTask?.cancel()
         reopeningTask?.cancel()
         reopeningTask = nil; reopeningAdmission = UUID()

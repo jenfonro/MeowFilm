@@ -1284,7 +1284,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         await model.waitForPendingWork()
         let page = FilmPlayerViewController(model: model, themeProvider: FilmPlaybackUIKitTheme())
         let window = try mount(page)
-        defer { unmount(page, window) }
+        addTeardownBlock { await self.unmountPlayer(page, window, model: model) }
         try await visible(page)
         let top = try XCTUnwrap(view("film.player.top-controls", page.view))
         try button("film.player.settings", page.view).sendActions(for: .touchUpInside)
@@ -1295,7 +1295,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         invoke(try menuAction("1.5×", button("film.player.rate", page.view).menu))
         await settle()
         XCTAssertEqual(try menuAction("1.5×", button("film.player.rate", page.view).menu).state, .on)
-        try await tapVideo()
+        try await tapVideo(in: page)
+        try await waitFor("A real tap outside settings closes the panel") { panel.isHidden }
         XCTAssertTrue(panel.isHidden)
         let seek = try XCTUnwrap(view("film.player.seek", page.view) as? UISlider)
         seek.sendActions(for: .touchDown)
@@ -1304,7 +1305,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         seek.sendActions(for: .touchCancel)
         XCTAssertTrue(media.seeks.isEmpty, "Cancelled scrubbing does not seek")
         try await waitFor("Controls hide after scrubbing ends") { top.alpha == 0 }
-        try await tapVideo()
+        try await tapVideo(in: page)
+        try await waitFor("A real video tap reveals the native menu controls") { top.alpha == 1 }
         try await runnerAction { $0.buttons["film.player.pan"].tap() }
         try await Task.sleep(for: .milliseconds(2400))
         XCTAssertEqual(top.alpha, 1, "A real native menu suspends idle hiding")
@@ -1315,6 +1317,13 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(calls.last?.input.filmObject?["provider"], .string("baidu"))
         XCTAssertEqual(media.paused, 0, "Menus must not toggle video playback")
         try await waitFor("Dismissing the native menu resumes idle hiding") { top.alpha == 0 }
+        await unmountPlayer(page, window, model: model)
+        XCTAssertTrue(model.canLeave); XCTAssertTrue(model.isReleased)
+        XCTAssertTrue(media.isLocallyDrained(sessionID: FilmUIKitPlaybackFixture.sessionID))
+        XCTAssertEqual(media.stops, 1)
+        let closedCalls = await server.calls()
+        XCTAssertEqual(closedCalls.filter { $0.operation == "session.media.release" }.count, 1)
+        XCTAssertEqual(closedCalls.filter { $0.operation == "session.release" }.count, 1)
     }
 
     func testPlayerControlsRemainInTheVideoSafeAreaAcrossBothLandscapeLayouts() async throws {
@@ -1382,33 +1391,58 @@ final class FilmPlaybackUIKitTests: XCTestCase {
     }
 
     func testShortVideoSwipesUseAdjacentEpisodeCommandsOnlyWhenEnabled() async throws {
-        let server = FilmUIKitPlaybackServer(FilmUIKitPlaybackFixture.snapshot(attemptID: "swipe")), media = FilmUIKitPlaybackMedia()
-        let model = makeModel(server, media)
+        let suite = "FilmPlaybackUIKitTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        let preferences = FilmPlayerPreferencesStore(defaults: defaults)
+        XCTAssertTrue(preferences.preferences.swipeEpisodes)
+        let attemptID = "short-video-pan"
+        let server = FilmUIKitPlaybackServer(FilmUIKitPlaybackFixture.snapshot(attemptID: attemptID))
+        let media = FilmUIKitPlaybackMedia()
+        let model = FilmPlaybackModel(transport: server.transport, media: media, playerPreferences: preferences,
+            request: { FilmUIKitPlaybackFixture.request() })
+        addTeardownBlock { await model.close() }
         await model.open()?.value
         await model.waitForPendingWork()
         await server.awaitObservation()
+        XCTAssertEqual(model.snapshot?.current?.attemptID, attemptID)
+        XCTAssertEqual(model.mediaState.sessionID, FilmUIKitPlaybackFixture.sessionID)
+        XCTAssertEqual(model.mediaState.attemptID, attemptID)
+        XCTAssertTrue(media.isCurrent(sessionID: FilmUIKitPlaybackFixture.sessionID, attemptID: attemptID))
+        XCTAssertEqual(media.inputs.count, 1)
         let page = FilmPlayerViewController(model: model, themeProvider: FilmPlaybackUIKitTheme())
         let window = try mount(page)
-        defer { unmount(page, window) }
+        addTeardownBlock { await self.unmountPlayer(page, window, model: model) }
         try await visible(page)
-        let video = try XCTUnwrap(view("film.player.video", page.view))
-        let up = try XCTUnwrap(video.gestureRecognizers?.compactMap { $0 as? UISwipeGestureRecognizer }.first {
-            $0.direction == .up
-        })
-        let down = try XCTUnwrap(video.gestureRecognizers?.compactMap { $0 as? UISwipeGestureRecognizer }.first {
-            $0.direction == .down
-        })
-        XCTAssertFalse(up.isEnabled); XCTAssertFalse(down.isEnabled)
         let before = await server.calls().count
+        XCTAssertFalse(try XCTUnwrap(model.snapshot).shortVideo)
         try await swipeVideo(up: true, in: page)
+        try await swipeVideo(up: false, in: page)
+        await model.waitForPendingWork()
         var calls = await server.calls()
-        XCTAssertEqual(calls.dropFirst(before).compactMap(\.action), [])
-        var enabled = try await server.snapshotValue().filmRequiredObject()
-        enabled["sequence"] = .number(Double(try XCTUnwrap(model.snapshot).sequence) + 1)
-        enabled["shortVideo"] = .bool(true)
-        try await server.publish(.object(enabled))
-        await settle()
-        XCTAssertTrue(up.isEnabled); XCTAssertTrue(down.isEnabled)
+        XCTAssertEqual(calls.dropFirst(before).compactMap(\.action), [],
+                       "The episode preference alone cannot enable short-video switching")
+
+        var fields = try await server.snapshotValue().filmRequiredObject()
+        fields["sequence"] = .number(Double(try XCTUnwrap(model.snapshot).sequence) + 1)
+        fields["shortVideo"] = .bool(true)
+        try await server.publish(.object(fields))
+        XCTAssertTrue(preferences.set(\.swipeEpisodes, false))
+        try await waitFor("Short-video mode keeps the committed media while the episode preference is disabled") {
+            model.snapshot?.shortVideo == true && !model.playerPreferences.swipeEpisodes &&
+                model.snapshot?.current?.attemptID == attemptID && model.mediaState.attemptID == attemptID
+        }
+        try await swipeVideo(up: true, in: page)
+        try await swipeVideo(up: false, in: page)
+        await model.waitForPendingWork()
+        calls = await server.calls()
+        XCTAssertEqual(calls.dropFirst(before).compactMap(\.action), [],
+                       "Short-video mode cannot override a disabled episode preference")
+
+        XCTAssertTrue(preferences.set(\.swipeEpisodes, true))
+        try await waitFor("The episode preference is enabled for the same committed media") {
+            model.playerPreferences.swipeEpisodes && model.mediaState.attemptID == attemptID
+        }
         try await swipeVideo(up: true, in: page)
         await model.waitForPendingWork()
         calls = await server.calls()
@@ -1417,7 +1451,32 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         await model.waitForPendingWork()
         calls = await server.calls()
         XCTAssertEqual(calls.dropFirst(before).compactMap(\.action), ["next", "previous"])
-        XCTAssertEqual(media.inputs.count, 1, "A swipe submits one business intent, not a parallel native prefetch")
+
+        XCTAssertTrue(preferences.set(\.swipeEpisodes, false))
+        try await waitFor("Disabling the episode preference takes effect without replacing the player") {
+            !model.playerPreferences.swipeEpisodes
+        }
+        try await swipeVideo(up: true, in: page)
+        try await swipeVideo(up: false, in: page)
+        await model.waitForPendingWork()
+        calls = await server.calls()
+        XCTAssertEqual(calls.dropFirst(before).compactMap(\.action), ["next", "previous"])
+        XCTAssertEqual(calls.filter { $0.operation == "session.attempt" }.count, 1)
+        XCTAssertEqual(calls.filter { $0.action == "media.started" }.count, 1)
+        XCTAssertFalse(calls.contains { $0.operation == "session.media.release" })
+        XCTAssertEqual(model.snapshot?.current?.attemptID, attemptID)
+        XCTAssertEqual(media.inputs.map(\.attemptID), [attemptID],
+                       "A pan submits one business intent, not a parallel native prefetch")
+        XCTAssertTrue(media.seeks.isEmpty)
+        XCTAssertTrue(media.volumes.isEmpty, "A center vertical pan must not become a side-volume operation")
+        XCTAssertEqual(media.paused, 0); XCTAssertEqual(media.resumed, 0)
+        await unmountPlayer(page, window, model: model)
+        XCTAssertTrue(model.canLeave); XCTAssertTrue(model.isReleased)
+        XCTAssertTrue(media.isLocallyDrained(sessionID: FilmUIKitPlaybackFixture.sessionID))
+        XCTAssertEqual(media.stops, 1)
+        let closedCalls = await server.calls()
+        XCTAssertEqual(closedCalls.filter { $0.operation == "session.media.release" }.count, 1)
+        XCTAssertEqual(closedCalls.filter { $0.operation == "session.release" }.count, 1)
     }
 
     func testPlayerPresentsAnExistingFailureAfterTheModalTransitionFinishes() async throws {
@@ -1875,9 +1934,13 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let window = UIWindow(windowScene: scene)
         window.frame = scene.coordinateSpace.bounds
         mountedWindows.append((page, window, previous))
-        let host = page is FilmPlayerViewController ? UIViewController() : page
+        let host: UIViewController
+        if let player = page as? FilmPlayerViewController {
+            let playerHost = FilmUIKitPlayerHost()
+            playerHost.player = player
+            host = playerHost
+        } else { host = page }
         window.rootViewController = host; window.makeKeyAndVisible(); window.layoutIfNeeded()
-        if let player = page as? FilmPlayerViewController { player.present(from: host, animated: false) }
         page.view.layoutIfNeeded()
         return window
     }
@@ -1955,16 +2018,28 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let top = try XCTUnwrap(view("film.player.top-controls", page.view))
         let bottom = try XCTUnwrap(view("film.player.bottom-controls", page.view))
         let window = try XCTUnwrap(video.window)
+        if top.alpha != 0 || bottom.alpha != 0 { try await tapVideo(in: page) }
+        try await waitFor("A real video tap hides both control groups before the center pan") {
+            top.alpha == 0 && bottom.alpha == 0 &&
+                !top.isUserInteractionEnabled && !bottom.isUserInteractionEnabled
+        }
+        let identifier = try XCTUnwrap(Bundle.main.bundleIdentifier)
+        let app = XCUIApplication(bundleIdentifier: identifier)
         var upper = CGPoint.zero, lower = CGPoint.zero
-        try await waitFor("The swipe uses uncovered video between the actual control groups") {
+        try await waitFor("The center pan uses uncovered video and exceeds the episode-switch threshold") {
             page.view.layoutIfNeeded()
-            let start = top.convert(top.bounds, to: video).maxY
-            let end = bottom.convert(bottom.bounds, to: video).minY
-            let length = end - start
-            guard length > 44 else { return false }
-            upper = CGPoint(x: video.bounds.width * 0.2, y: start + length * 0.1)
-            lower = CGPoint(x: upper.x, y: start + length * 0.9)
-            return [upper, lower].allSatisfy { point in
+            let inset = max(20, max(video.safeAreaInsets.left, video.safeAreaInsets.right)) + 1
+            let safe = video.bounds.insetBy(dx: inset, dy: 21)
+            guard safe.width > 0, safe.height > 0 else { return false }
+            upper = CGPoint(x: video.bounds.midX, y: safe.minY + safe.height * 0.15)
+            lower = CGPoint(x: upper.x, y: safe.maxY - safe.height * 0.15)
+            guard lower.y - upper.y >= max(44, video.bounds.height * 0.2) + 8 else { return false }
+            let element = app.otherElements["film.player.video"]
+            let frame = element.frame
+            guard element.exists, frame.width > 0, frame.height > 0,
+                  abs(frame.width / frame.height - video.bounds.width / video.bounds.height) < 0.01 else { return false }
+            return (0...8).allSatisfy { step in
+                let point = CGPoint(x: upper.x, y: upper.y + (lower.y - upper.y) * CGFloat(step) / 8)
                 let hit = window.hitTest(video.convert(point, to: window), with: nil)
                 return hit === video || hit?.isDescendant(of: video) == true
             }
@@ -1984,6 +2059,52 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             app.otherElements["film.player.video"]
                 .coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.4)).tap()
         }
+    }
+    private func tapVideo(in page: FilmPlayerViewController) async throws {
+        let video = try XCTUnwrap(view("film.player.video", page.view))
+        let window = try XCTUnwrap(video.window)
+        let identifier = try XCTUnwrap(Bundle.main.bundleIdentifier)
+        let app = XCUIApplication(bundleIdentifier: identifier)
+        var offset = CGVector.zero
+        try await waitFor("The real XCUI video geometry has an uncovered, gesture-safe tap point") {
+            page.view.layoutIfNeeded()
+            let element = app.otherElements["film.player.video"]
+            let frame = element.frame
+            guard element.exists, frame.width > 0, frame.height > 0,
+                  abs(frame.width / frame.height - video.bounds.width / video.bounds.height) < 0.01 else { return false }
+            let inset = max(20, max(video.safeAreaInsets.left, video.safeAreaInsets.right))
+            for x in [CGFloat(0.2), 0.5, 0.8] {
+                for y in [CGFloat(0.4), 0.3, 0.5, 0.6, 0.7, 0.2, 0.8] {
+                    let point = CGPoint(x: video.bounds.width * x, y: video.bounds.height * y)
+                    guard point.x > inset, point.x < video.bounds.width - inset,
+                          point.y > 20, point.y < video.bounds.height - 20,
+                          let hit = window.hitTest(video.convert(point, to: window), with: nil),
+                          hit === video || hit.isDescendant(of: video) else { continue }
+                    var ancestor: UIView? = hit
+                    while let current = ancestor, current !== video, !(current is UIControl) {
+                        ancestor = current.superview
+                    }
+                    guard ancestor === video else { continue }
+                    offset = CGVector(dx: x, dy: y)
+                    return true
+                }
+            }
+            return false
+        }
+        try await runnerAction { app in
+            app.otherElements["film.player.video"].coordinate(withNormalizedOffset: offset).tap()
+        }
+    }
+    private func unmountPlayer(_ page: FilmPlayerViewController, _ window: UIWindow, model: FilmPlaybackModel) async {
+        guard mountedWindows.contains(where: { $0.window === window }) else { return }
+        (window.rootViewController as? FilmUIKitPlayerHost)?.player = nil
+        await model.close()
+        if let presenter = page.presentingViewController {
+            await withCheckedContinuation { continuation in
+                presenter.dismiss(animated: false) { continuation.resume() }
+            }
+        }
+        unmount(page, window)
     }
     private enum FixtureFailure: Error { case prerequisite(String) }
     private func waitFor(_ description: String = "UIKit prerequisite", file: StaticString = #filePath, line: UInt = #line,
