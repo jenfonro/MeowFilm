@@ -60,8 +60,8 @@ function fixture(t, { maximumBytes, dataRoot } = {}) {
   const observed = [];
   const instances = new Map([[source.key, { ...source, state: 'ready', enabled: true, sites: [{ key: source.siteId }] }],
     [portable.key, { ...portable, state: 'ready', protocol: 'cat', capabilities: ['search', 'detail', 'play', 'report'] }]]);
-  const accountRows = ['baidu', 'quark', 'uc', 'tianyi', 'yidong', 'quark_tv', 'uc_tv'].map(provider =>
-    ({ provider, revision: 2, configured: !provider.endsWith('_tv'), fields: [] }));
+  const accountRows = ['baidu', 'quark', 'uc', 'tianyi', 'yidong'].map(provider =>
+    ({ provider, revision: 2, configured: true, fields: [] }));
   const revisions = { tmdb: 'opaque-config-a', douban: 'opaque-douban-a' };
   const invoke = params => success(params.operation === 'search' || params.action === 'search'
     ? { list: [{ vod_id: 'detail-a', vod_name: '真实电影' }], pagecount: 1 }
@@ -76,8 +76,6 @@ function fixture(t, { maximumBytes, dataRoot } = {}) {
       list: ({ provider }) => success({ share: { id: 'shareABCD' }, files: [{ name: 'S01E01.mkv',
         path: '/原始目录/第1季/S01E01.mkv', size: '9007199254740992', file: ref(provider) }] }),
       prepare: ({ file }) => success({ file: { ...file, kind: 'stored', fileId: 'stored-' + file.fileId } }),
-      'account.match': ({ provider, revision, baseRevision }) => success({ provider, revision, baseRevision,
-        baseProvider: provider.replace(/_tv$/, ''), sameAccount: true }),
       play: ({ provider, mode, file }) => success({ url: `https://media.invalid/${provider}/${mode}/${file.fileId}?issued=${at}`,
         headers: { Referer: 'https://example.invalid/' }, mode, file }),
     },
@@ -133,6 +131,45 @@ test('E08 Cat search keeps raw pagination and typed detail/flag/play IDs, withou
   assert.equal(descriptor.scope.sourceEngine, 'cat');
   assert.equal(descriptor.scope.sourceInstallationId, source.installationId);
   assert.equal(descriptor.scope.sourceRevision, sourceRevision(source));
+});
+
+test('E11 explicitly empty playback fields are cached as a successful detail without lines or candidates', async t => {
+  for (const selectedSource of [source, portable]) await t.test(selectedSource.engine, async t => {
+    const f = fixture(t), engine = selectedSource.engine;
+    const raw = detailValue(0, { vod_play_from: '', vod_play_url: '' });
+    f.handlers[engine].invoke = () => success(JSON.stringify(raw));
+    const value = await f.data.detail(selectedSource, 0);
+    assert.equal(value.detailId, 0);
+    assert.deepEqual(value.lines, []);
+    assert.deepEqual(value.raw, raw);
+    assert.deepEqual(await recognizeCandidates(value, { source: selectedSource, target: movieTarget }), []);
+    assert.deepEqual((await f.data.detail(selectedSource, 0)).lines, []);
+    assert.equal(f.calls(engine, 'invoke').length, 1);
+    assert.equal(f.calls('pan', 'settings.get').length, 0);
+    assert.equal(f.calls('pan', 'list').length, 0);
+    assert.equal(f.calls('pan', 'play').length, 0);
+    assert.deepEqual((await f.data.detail(selectedSource, 0, { refresh: true })).lines, []);
+    assert.equal(f.calls(engine, 'invoke').length, 2);
+  });
+});
+
+test('E11 malformed playback fields remain upstream failures and are never retained as empty details', async t => {
+  for (const fields of [
+    { vod_play_from: '', vod_play_url: '正片$opaque' },
+    { vod_play_from: 'one$$$two', vod_play_url: '正片$opaque' },
+    { vod_play_from: 'one$$$', vod_play_url: '正片$opaque$$$' },
+    { vod_play_from: '', vod_play_url: null },
+    { vod_play_from: undefined, vod_play_url: '' },
+    { vod_play_from: [], vod_play_url: '' },
+  ]) await t.test(JSON.stringify(fields), async t => {
+    const f = fixture(t);
+    f.handlers.cat.invoke = () => success(detailValue(0, fields));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(f.data.detail(source, 0), { code: 'UPSTREAM_FORMAT' });
+    }
+    assert.equal(f.calls('cat', 'invoke').length, 2);
+    assert.equal(f.calls('pan', 'list').length, 0);
+  });
 });
 
 test('E08 portable Spider uses keyword/action/revision rather than Cat wd/operation', async t => {
@@ -679,48 +716,66 @@ test('CR-06 E23/E29 an old-account refresh cannot revoke the same file in the cu
   assert.equal(result.value.url, 'https://media.invalid/current-account.mp4');
 });
 
-test('E28 valid same-account proof enables TV first for exactly the requested mode and ordinary fallback', async t => {
+test('E28 pan play uses the file owner and exact requested mode without another account fallback', async t => {
   const f = fixture(t);
-  f.accountRows.find(row => row.provider === 'quark_tv').configured = true;
   const descriptor = await f.data.resolve(candidate(), { mode: 'download' });
-  assert.equal(f.calls('pan', 'account.match').length, 1);
-  assert.deepEqual(f.calls('pan', 'account.match')[0].params, { provider: 'quark_tv', revision: 2, baseRevision: 2 });
-  assert.equal(descriptor.scope.accountProvider, 'quark_tv');
+  assert.equal(descriptor.scope.accountProvider, 'quark');
+  assert.equal(descriptor.scope.accountRevision, 2);
   assert.equal(descriptor.scope.fileProvider, 'quark');
-  assert.deepEqual(f.calls('pan', 'play').map(row => [row.params.provider, row.params.mode]), [['quark_tv', 'download']]);
-  f.handlers.pan.play = params => params.provider === 'quark_tv' ? failure('UPSTREAM_HTTP')
-    : success({ url: 'https://media.invalid/ordinary.mp4', headers: {}, mode: params.mode, file: params.file });
-  await f.data.refresh(candidate(), { mode: 'streaming' });
-  assert.deepEqual(f.calls('pan', 'play').slice(-2).map(row => [row.params.provider, row.params.mode]),
-    [['quark_tv', 'streaming'], ['quark', 'streaming']]);
+  assert.deepEqual(f.calls('pan', 'play').map(row => [row.params.provider, row.params.mode]), [['quark', 'download']]);
+  f.handlers.pan.play = () => failure('UPSTREAM_HTTP');
+  await assert.rejects(f.data.refresh(candidate(), { mode: 'streaming' }), { code: 'UPSTREAM_HTTP' });
+  assert.deepEqual(f.calls('pan', 'play').map(row => [row.params.provider, row.params.mode]),
+    [['quark', 'download'], ['quark', 'streaming']]);
   assert.equal(f.calls('pan', 'prepare').length, 1);
 });
 
-test('E28 configured TV is not identity proof; mismatched/failed proof never invokes it', async t => {
-  const f = fixture(t);
-  f.accountRows.find(row => row.provider === 'uc_tv').configured = true;
-  f.handlers.pan['account.match'] = ({ provider, revision, baseRevision }) => success({ provider, revision,
-    baseRevision, baseProvider: 'uc', sameAccount: false });
-  await f.data.resolve(candidate(ref('uc')));
-  assert.deepEqual(f.calls('pan', 'play').map(row => row.params.provider), ['uc']);
-  await f.data.invalidate('uc_tv');
-  f.handlers.pan['account.match'] = () => failure('AUTH_FAILED');
-  await f.data.refresh(candidate(ref('uc')));
-  assert.equal(f.calls('pan', 'play').every(row => row.params.provider === 'uc'), true);
-  await f.data.invalidate('uc_tv');
-  f.handlers.pan['account.match'] = params => success({ ...params, baseProvider: 'uc', sameAccount: true, revision: 999 });
-  await f.data.refresh(candidate(ref('uc')));
-  assert.equal(f.calls('pan', 'play').every(row => row.params.provider === 'uc'), true);
+test('E28 each supported pan provider keeps its own share preparation, account and default mode', async t => {
+  for (const provider of ['baidu', 'quark', 'uc', 'tianyi', 'yidong']) await t.test(provider, async t => {
+    const f = fixture(t);
+    const descriptor = await f.data.resolve(candidate(ref(provider)));
+    const prepares = ['baidu', 'quark', 'uc'].includes(provider) ? 1 : 0;
+    assert.equal(f.calls('pan', 'prepare').length, prepares);
+    assert.equal(descriptor.resolvedFile.kind, prepares ? 'stored' : 'share');
+    assert.equal(descriptor.scope.accountProvider, provider);
+    assert.equal(descriptor.scope.fileProvider, provider);
+    assert.deepEqual(f.calls('pan', 'play').map(row => [row.params.provider, row.params.mode]),
+      [[provider, provider === 'yidong' ? 'download' : 'streaming']]);
+  });
 });
 
-test('E28 direct TV-owned stored files do not prepare or borrow ordinary files; yidong defaults to download only', async t => {
+test('E28 pan accounts and file providers reject malformed or mismatched current identities', async t => {
   const f = fixture(t);
-  f.accountRows.find(row => row.provider === 'quark_tv').configured = true;
-  await f.data.resolve(candidate(ref('quark_tv', 'owned', { kind: 'stored' })));
-  assert.equal(f.calls('pan', 'account.match').length, 0); assert.equal(f.calls('pan', 'prepare').length, 0);
+  assert.deepEqual((await f.data.accounts()).map(row => row.provider), ['baidu', 'quark', 'uc', 'tianyi', 'yidong']);
+  await assert.rejects(f.data.resolve(candidate(ref(), { provider: 'uc' })), { code: 'INVALID_REQUEST' });
+  await assert.rejects(f.data.resolve(candidate(ref('unknown-provider'))), { code: 'INVALID_REQUEST' });
+  await assert.rejects(f.data.expand(source, { id: 'share', episodes: [{ share: share('unknown-provider',
+    { url: 'https://example.invalid/share' }) }] }), { code: 'INVALID_REQUEST' });
+  assert.equal(f.calls('pan', 'prepare').length, 0);
+  assert.equal(f.calls('pan', 'play').length, 0);
+  assert.equal(f.calls('pan', 'list').length, 0);
+  const row = f.accountRows[0];
+  for (const [accounts, code] of [
+    [[{ ...row, provider: 'unknown-provider' }], 'STALE_ACCOUNT'],
+    [[row, row], 'UPSTREAM_FORMAT'],
+    [[{ ...row, revision: -1 }], 'UPSTREAM_FORMAT'],
+    [[{ ...row, configured: 'true' }], 'UPSTREAM_FORMAT'],
+  ]) {
+    f.handlers.pan['settings.get'] = () => success({ accounts });
+    assert.deepEqual(await f.data.accounts(), accounts);
+    await assert.rejects(f.data.resolve(candidate(ref(row.provider))), { code });
+  }
+  assert.equal(f.calls('pan', 'prepare').length, 0);
+  assert.equal(f.calls('pan', 'play').length, 0);
+});
+
+test('E28 stored files do not prepare or borrow other accounts; yidong defaults to download only', async t => {
+  const f = fixture(t);
+  await f.data.resolve(candidate(ref('quark', 'owned', { kind: 'stored' })));
+  assert.equal(f.calls('pan', 'prepare').length, 0);
   await f.data.resolve(candidate(ref('yidong', 'moving', { contentId: 'moving', coID: 'coid' })));
   assert.deepEqual(f.calls('pan', 'play').map(row => [row.params.provider, row.params.mode]),
-    [['quark_tv', 'streaming'], ['yidong', 'download']]);
+    [['quark', 'streaming'], ['yidong', 'download']]);
   await assert.rejects(async () => f.data.resolve(candidate(), { mode: 'invented' }), { code: 'INVALID_REQUEST' });
   assert.equal(f.calls('pan', 'prepare').length, 0);
 });
@@ -1486,7 +1541,6 @@ test('DT-01 E22 stopping or cancelling during account lookup prevents prepare/pl
       assert.equal(signal.aborted, false);
       gate.resolve(); await rejected; await tick();
       assert.equal(f.calls('pan', 'prepare').length, 0);
-      assert.equal(f.calls('pan', 'account.match').length, 0);
       assert.equal(f.calls('pan', 'play').length, 0);
       assert.equal(f.calls('pan', 'list').length, 0);
     });
@@ -1600,42 +1654,24 @@ test('DT-01 E22 stopping cross-provider pagination prevents the next page or ass
   });
 });
 
-test('DT-01 E22 stopping an accepted ordinary/TV proof prevents both TV play and ordinary fallback', async t => {
-  for (const matched of [true, false]) await t.test(matched ? 'proof succeeds' : 'proof fails', async t => {
-    const entered = deferred(), gate = deferred();
+test('DT-01 E22 an accepted pan play failure never starts another account request after stop or cancellation', async t => {
+  for (const stop of ['callback', 'signal']) await t.test(stop, async t => {
+    const entered = deferred(), gate = deferred(), consumer = new AbortController();
     t.after(() => gate.resolve());
-    const f = fixture(t), match = f.handlers.pan['account.match'];
+    const f = fixture(t);
     let active = true;
-    f.accountRows.find(row => row.provider === 'quark_tv').configured = true;
-    f.handlers.pan['account.match'] = async (params, signal) => {
-      entered.resolve(signal); await gate.promise; return matched ? match(params) : failure('AUTH_FAILED');
+    f.handlers.pan.play = async (_params, signal) => {
+      entered.resolve(signal); await gate.promise; return failure('UPSTREAM_HTTP');
     };
-    const rejected = assert.rejects(f.data.resolve(candidate(ref('quark', 'stored', { kind: 'stored' })),
-      { canSchedule: () => active }), { code: 'CANCELLED' });
+    const options = stop === 'signal' ? { signal: consumer.signal } : { canSchedule: () => active };
+    const rejected = assert.rejects(f.data.resolve(candidate(ref('quark', 'stored', { kind: 'stored' })), options),
+      { code: stop === 'signal' ? 'CANCELLED' : 'UPSTREAM_HTTP' });
     const signal = await entered.promise;
-    active = false; gate.resolve(); await rejected;
+    if (stop === 'signal') consumer.abort(); else active = false;
+    gate.resolve(); await rejected; await tick();
     assert.equal(signal.aborted, false);
-    assert.equal(f.calls('pan', 'prepare').length, 0);
-    assert.equal(f.calls('pan', 'play').length, 0);
+    assert.deepEqual(f.calls('pan', 'play').map(row => row.params.provider), ['quark']);
   });
-});
-
-test('DT-01 E22 stopping while TV play is pending prevents a new ordinary play on failure', async t => {
-  const entered = deferred(), gate = deferred();
-  t.after(() => gate.resolve());
-  const f = fixture(t), play = f.handlers.pan.play;
-  let active = true;
-  f.accountRows.find(row => row.provider === 'quark_tv').configured = true;
-  f.handlers.pan.play = async (params, signal) => {
-    if (params.provider !== 'quark_tv') return play(params);
-    entered.resolve(signal); await gate.promise; return failure('UPSTREAM_HTTP');
-  };
-  const rejected = assert.rejects(f.data.resolve(candidate(ref('quark', 'stored', { kind: 'stored' })),
-    { canSchedule: () => active }), { code: 'CANCELLED' });
-  const signal = await entered.promise;
-  active = false; gate.resolve(); await rejected;
-  assert.equal(signal.aborted, false);
-  assert.deepEqual(f.calls('pan', 'play').map(row => row.params.provider), ['quark_tv']);
 });
 
 test('DT-01 E22 refresh checks scheduling after address invalidation has physically drained', async t => {
@@ -1830,13 +1866,12 @@ test('F1/F4 Cat home/category/search/detail share process ownership and refresh 
   await assert.rejects(f.data.catalog(source, 'play', {}), { code: 'INVALID_REQUEST' });
 });
 
-test('F1 Cat and pan response/prepare/account-match/address caches never persist across data-owner restarts', async t => {
+test('F1 Cat and pan response/prepare/address caches never persist across data-owner restarts', async t => {
   const dataRoot = mkdtempSync(join(tmpdir(), 'film-process-cache-'));
   t.after(() => rmSync(dataRoot, { recursive: true, force: true }));
   const line = { id: 'share-line', episodes: [{ id: 0, share: share() }] };
   for (let restart = 0; restart < 2; restart++) {
     const f = fixture(t, { dataRoot });
-    f.accountRows.find(row => row.provider === 'quark_tv').configured = true;
     await f.data.catalog(source, 'home');
     await f.data.search(source, '相同查询');
     await f.data.detail(source, 0);
@@ -1855,7 +1890,6 @@ test('F1 Cat and pan response/prepare/account-match/address caches never persist
     assert.equal(f.calls('source', 'invoke').length, 1);
     assert.equal(f.calls('pan', 'list').length, 1);
     assert.equal(f.calls('pan', 'prepare').length, 1);
-    assert.equal(f.calls('pan', 'account.match').length, 1);
     assert.equal(f.calls('pan', 'play').length, 1);
     await f.data.close();
   }
@@ -2038,10 +2072,10 @@ test('configured TMDB query is shared by reads and handoff keys without exportin
   assert.equal(await f.data.seed(entry), undefined, 'the earlier settings receipt cannot seed the new preference identity');
 });
 
-test('Pan healthy provider lists and plays despite corrupt ordinary/TV siblings without inventing their status', async t => {
+test('Pan healthy provider lists and plays despite corrupt siblings without inventing their status', async t => {
   const f = fixture(t);
   f.accountRows.splice(0, f.accountRows.length, null, { provider: 'uc', errorCode: 'CORRUPT_STORAGE' },
-    { provider: 'quark_tv', errorCode: 'CORRUPT_STORAGE' }, { provider: 'quark', revision: 2, configured: true });
+    { provider: 'baidu', errorCode: 'CORRUPT_STORAGE' }, { provider: 'quark', revision: 2, configured: true });
   assert.deepEqual(await f.data.accounts(), f.accountRows);
   const line = await f.data.expand(source, { id: 0, episodes: [{ id: 0, share: share() }] });
   assert.equal(line.episodes.length, 1);
@@ -2050,7 +2084,6 @@ test('Pan healthy provider lists and plays despite corrupt ordinary/TV siblings 
   assert.equal(f.calls('pan', 'list').length, 1);
   assert.equal(f.calls('pan', 'prepare').length, 1);
   assert.deepEqual(f.calls('pan', 'play').map(row => row.params.provider), ['quark']);
-  assert.equal(f.calls('pan', 'account.match').length, 0);
 });
 
 for (const [name, accounts, code] of [

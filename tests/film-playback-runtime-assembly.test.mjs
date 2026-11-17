@@ -46,10 +46,13 @@ for (const platform of ['ios', 'windows']) {
     // this does not claim Windows pipes or an iOS NodeMobile executor was run.
     const startup = platform === 'ios' ? `
       import { createAppRuntime } from ${JSON.stringify(sharedBootstrap)};
-      export async function startIOSAppRuntime({ product, assemble }) {
+      export async function startIOSAppRuntime({ product, assemble, settingsChanged }) {
+        const { settings, ...configuration } = globalThis.fixtureConfiguration;
+        await settings.initialize();
         globalThis.fixtureRuntime = await createAppRuntime({
-          ...globalThis.fixtureConfiguration, product,
-          assemble: () => assemble({ dataRoot: globalThis.fixtureConfiguration.dataRoot }),
+          ...configuration, product,
+          assemble: () => assemble({ dataRoot: configuration.dataRoot, settings }),
+          settingsChanged: block => settingsChanged(block, { settings }),
         }).start();
       }
       export function reportIOSRuntimeStartFailure() { throw new Error('FIXTURE_START_FAILED'); }
@@ -87,8 +90,29 @@ for (const platform of ['ios', 'windows']) {
         return { server, url: 'http://127.0.0.1:' + server.address().port };
       }
       const first = await upstream('A'), second = await upstream('B'), unrelated = await upstream('D');
+      const documents = new Map(['cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences']
+        .map(block => [block, null]));
+      const snapshots = new Map();
+      const settings = {
+        async initialize() { for (const block of documents.keys()) await this.reload(block); },
+        async reload(block) {
+          assert.equal(documents.has(block), true);
+          snapshots.set(block, structuredClone(documents.get(block)));
+        },
+        read(block) {
+          assert.equal(snapshots.has(block), true);
+          return structuredClone(snapshots.get(block));
+        },
+        document(block) {
+          assert.equal(block, 'pan.accounts');
+          return { read: () => settings.read(block),
+            async reload() { await settings.reload(block); return settings.read(block); },
+            write() { assert.fail('assembly reads must not write native accounts'); },
+            close() {} };
+        },
+      };
       const configuration = { sessionId: randomUUID(),
-        dataRoot: ${JSON.stringify(dataRoot)} };
+        dataRoot: ${JSON.stringify(dataRoot)}, settings };
       globalThis.fixtureConfiguration = configuration;
       registerHooks({ load(url, context, next) {
         if (url === ${JSON.stringify(bootstrap)})
@@ -131,11 +155,16 @@ for (const platform of ['ios', 'windows']) {
         assert.match(external.headers.get('x-meow-request-id'), /^[0-9a-f-]{36}$/);
         assert.deepEqual(await external.json(), await client.call('film.library.get'));
         const request = { provider: 'tmdb', path: '/3/movie/42', query: { language: 'zh-CN' } };
-        const settings = await client.call('tmdb.data.settings.update', {
-          apiBase: first.url, accessToken: 'fixture-only-token',
-        });
-        assert.equal(settings.ok, true, JSON.stringify(settings));
-        assert.equal((await client.call('douban.data.settings.update', { apiBase: unrelated.url })).ok, true);
+        async function notify(block) {
+          const reply = await fetch(runtime.baseUrl + '/v1/settings/changed', { method: 'POST',
+            body: JSON.stringify({ block }), headers: { 'Content-Type': 'application/json' } });
+          assert.equal(reply.status, 200);
+          assert.deepEqual(await reply.json(), { ok: true, contract: 'runtime.http.v1', value: { notified: true } });
+        }
+        documents.set('tmdb', { version: 1, settings: { apiBase: first.url, accessToken: 'fixture-only-token' } });
+        documents.set('douban', { version: 1, settings: { apiBase: unrelated.url } });
+        await notify('tmdb');
+        await notify('douban');
         const otherRequest = { provider: 'douban', path: '/rexxar/api/v2/movie/43', query: {} };
         const other = await client.call('film.data.metadata', otherRequest);
         assert.equal(other.ok, true, JSON.stringify(other));
@@ -145,14 +174,19 @@ for (const platform of ['ios', 'windows']) {
         assert.equal(loaded.value.title, 'metadata-A');
         assert.deepEqual(await client.call('film.data.metadata', request), loaded);
         assert.deepEqual(counts, { A: 1, B: 0, D: 1 }, 'film reuses its cache and the assembled providers');
-        assert.equal((await client.call('tmdb.data.settings.update', { apiBase: second.url })).ok, true);
+        documents.set('tmdb', { version: 1, settings: { apiBase: second.url, accessToken: 'fixture-only-token' } });
+        await notify('tmdb');
         const changed = await client.call('film.data.metadata', request);
         assert.equal(changed.ok, true, JSON.stringify(changed));
         assert.equal(changed.value.title, 'metadata-B', 'provider mutation must revoke the old film cache');
         assert.deepEqual(await client.call('film.data.metadata', otherRequest), other);
         assert.deepEqual(counts, { A: 1, B: 1, D: 1 }, 'TMDB mutation preserves unrelated Douban cache');
+        assert.deepEqual(await client.call('tmdb.data.settings.update', { apiBase: first.url }),
+          { ok: false, contract: 'tmdb.data.v1', code: 'PERMISSION_DENIED' });
+        assert.deepEqual(await client.call('film.data.metadata', request), changed);
+        assert.deepEqual(counts, { A: 1, B: 1, D: 1 }, 'a denied second-owner mutation does not invalidate valid film data');
         const unchanged = await client.call('tmdb.data.settings.update', { unknown: true });
-        assert.equal(unchanged.ok, true);
+        assert.deepEqual(unchanged, { ok: false, contract: 'tmdb.data.v1', code: 'PERMISSION_DENIED' });
         assert.deepEqual(await client.call('film.data.metadata', request), changed);
         assert.deepEqual(counts, { A: 1, B: 1, D: 1 }, 'unused fields do not invalidate valid film data');
         const release = await client.call('film.session.media.release', {});
@@ -163,7 +197,7 @@ for (const platform of ['ios', 'windows']) {
         assert.equal(unknown.ok, false);
         assert.equal(unknown.code, 'METHOD_NOT_FOUND');
         assert.equal((await client.shutdown()).ok, true);
-        console.log('APP_ASSEMBLY_OK ' + JSON.stringify({ platform: ${JSON.stringify(platform)}, modules: 8, counts }));
+        console.log('APP_ASSEMBLY_OK ' + JSON.stringify({ platform: ${JSON.stringify(platform)}, modules: 9, counts }));
       } finally {
         await client?.close();
         await globalThis.fixtureRuntime?.close();

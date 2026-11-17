@@ -64,7 +64,7 @@ public static class PanAccountsPresentationTests
             header.Children.OfType<TextBlock>().Select(text => text.Text).SequenceEqual(["平台", "状态", "操作"]),
             "table has exactly platform/status/action columns");
         var cells = Visuals(scene.View).OfType<Grid>().Where(grid => grid.Name == "AccountCells").ToArray();
-        Check(cells.Length == 7 && cells.All(grid => grid.ColumnDefinitions.Count == 3), "all seven rows share the three-column contract");
+        Check(cells.Length == 5 && cells.All(grid => grid.ColumnDefinitions.Count == 3), "all five rows share the three-column contract");
         Check(VisibleActions(scene.View, scene.Model.Rows[0]).SequenceEqual(["编辑", "退出登录"]), "signed-in row actions bind");
         Check(VisibleActions(scene.View, scene.Model.Rows[1]).SequenceEqual(["重新登录", "退出登录"]), "expired row actions bind");
         Check(VisibleActions(scene.View, scene.Model.Rows[2]).SequenceEqual(["登录"]), "signed-out row action binds");
@@ -217,7 +217,7 @@ public static class PanAccountsPresentationTests
             window.Show(); await Drain();
             var pan = (PanAccountsView)view.FindName("PanPage");
             var model = (PanAccounts)pan.DataContext;
-            await Until(() => model.Rows.Count == 7 && !model.IsLoading);
+            await Until(() => model.Rows.Count == 5 && !model.IsLoading);
             Check(pan.IsVisible && !((Grid)view.FindName("BusinessPage")).IsVisible &&
                 runtime.Calls.All(call => !call.Method.StartsWith("pan.")), "film settings reads pan settings without its existing runtime");
             Click(Action(pan, model.Rows[0], "登录"));
@@ -299,7 +299,7 @@ public static class PanAccountsPresentationTests
             try
             {
                 scene.Window.Show();
-                await Until(() => scene.Model.Rows.Count == 7 && !scene.Model.IsLoading);
+                await Until(() => scene.Model.Rows.Count == 5 && !scene.Model.IsLoading);
                 return scene;
             }
             catch { await scene.DisposeAsync(); throw; }

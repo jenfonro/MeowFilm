@@ -42,6 +42,8 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 
 普通更新、重新保存来源、重启、同步、App 重建均不恢复用户删除项。同步仅采用与当前原生 `inputRevision` 匹配的 ready 状态；失败、starting、迟到旧输入都不能抹掉新删除或发布旧来源目录。同步失败不把空清单当成功，未 ready 的猫源保留已知清单。
 
+来源展示目录仅消费当前 `version:2`，每个猫源必须携带 `inputRevision`；不接纳旧格式或补写缺失版本信息。新目录保留只读站点资料、视频选项和删除记录，来源可编辑字段仍只取原生意图。
+
 检测沿参考流程：home → category，必要时 detail／play，条件 search；从真实响应取得后续 ID、线路和 URL，保留 Unicode 与标点参数。播放候选与导航去重按原始内容精确区分，不合并 Unicode 规范等价但码点不同的线路、ID 或导航参数；`$$$`、`|||`、`#`、`$` 按字面协议分隔，不因相邻组合字符漏切；真正重复的候选、循环和重复页仍按参考流程处理。逐阶段区分 unsupported、empty、failed，导航循环／重复页明确失败；“有效”仅代表接口与播放地址解析，不代表媒体已播放。generation、停用、删除、页面隐藏取消或 owner 关闭后不发布迟到结果。
 
 检测按实际返回分支取列表和播放地址，不把业务 JSON 中的 `statusCode/ok/success/error` 或未采用的 `data` 当成通用失败信封。真实 transport／Spider 调用失败、JSON 解析失败仍记 failed；未取得有效列表或地址仍记 empty，不因删掉预检就视为已解析成功。
@@ -68,6 +70,8 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 
 列表保留平台、状态、操作三列，适配窄屏；登录沿用音乐账号浮层、输入和按钮的共享视觉组件，不依赖音乐账号服务或存储。刷新、整份替换、退出与二维码取消以[网盘公共契约](../runtime/pan-runtime.md#设置页)为唯一来源。
 
+原生 `PanProviderID` 只声明百度、普通夸克、普通 UC、天翼、移动五个平台；登录表单直接按各平台现行凭证字段生成。`PanAccountService` 只消费所选平台的真实 revision 和已知凭据，手动输入先投影本平台凭据，再整份替换所选已知凭据。其他账号及原文档的未知平台／字段材料原样保留，不注册能力、不转为请求凭据，也不作为旧数据兼容。
+
 `PanAccountsModel.start()` 同步读取原生 providers／accounts，无配置读取进度，不连接运行器或自动刷新账号。`PanAccountService(document:request:)`／`PanAccountService(document:connection:)` 的 replace／clear 直接提交同一加密文档；仅有配置时显示「未验证」，真实在线观察才可显示已登录／失效，且绑定当前 revision、字段及凭据内容身份。
 
 单个账号记录损坏时，`PanAccount` 与运行器 `settings.get` 的 `{provider,errorCode:"CORRUPT_STORAGE"}` 对齐；不伪造 revision、configured、fields 或 status。该行显示「账号数据损坏」、不提供账号操作，健康兄弟仍可读取、保存和验证。文档根或解密失败仍整体报错；坏账号不自动重置，不覆盖原始记录。错误快照不能成为扫码确认或刷新成功回执，原 provider／session 身份、凭据签名及提交 CAS 约束不变。
@@ -83,12 +87,12 @@ App 关闭先停止接纳并排空规则执行／来源任务；规则适配的 
 下列为验证入口及职责，不代表本轮已经执行；编译、传输替身与真实 App 业务须分别记录。
 
 - Swift 规则精确 filter：`FilmRuleLifecycleTests|FilmRulePersistenceTests|FilmRuleReferenceTests|FilmRuleTextTests`，覆盖原生分组 CAS／回执／失败、离线默认及文本规范化、预览取消和物理排空、UTF16 每码元往返；传输替身不代表真实 Node。
-- `FilmSettingsDocumentTests` 覆盖文档 CAS、按块通知及精确 JSON 扩展保留；领域测试 `FilmCatNativeSettingsTests`、`PanAccountServiceTests|PanAccountsModelTests|PanLoginModelTests`、`FilmTMDBServiceTests`、`FilmPlaybackSettingsModelTests` 分别核对原生保存和在线业务边界。
+- `FilmSettingsDocumentTests` 覆盖文档 CAS、按块通知、保护存储失败及精确 JSON 扩展保留；领域测试 `FilmCatNativeSettingsTests`、`PanAccountServiceTests|PanAccountsModelTests|PanLoginModelTests`、`FilmTMDBServiceTests`、`FilmPlaybackSettingsModelTests` 分别核对原生保存和在线业务边界。
 - `MeowfilmNativeSettingsHostTests/testNativeSettingsPreserveExactJSONThroughNodeMobile` 在真实 App 内先读取 Node 设置快照，再原生提交普通 TMDB 设置及 synthetic 高精度小数、大整数、溢出指数和不同 UTF-8 键的扩展；经实际通知、私密设置读取及 HTTP `settings.get` 返回后由 `RuntimeJSON` 比较精确材料。拒绝非空账号凭据基线，teardown 恢复原设置并等待运行器应用；主机测试或编译不能替代此 NodeMobile 链验证。
 - `MeowfilmRuntimeTests/FilmSettingsPlatformTests`：真实前台 UIKit 草稿、导航生命周期、控件、失败／重试、确认、取消、窄／宽视口和大字体截图。普通规则配置使用独立原生文档，规则执行才走 NodeMobile；来源状态／调用仍有协议夹具，不能替代实际脚本装载验收。
 - `MeowfilmFilmSettingsHostTests`：原生规则保存／草稿一致性与真实 Node 预览，固定共享 reference cases 每例两次、Unicode 属性／前后瞻／捕获／g-y／孤立码元，以及正则取消／截止／长编译／全局删除后的恢复；固定 JSON 以内嵌 Swift 常量进入宿主测试，不依赖产品载荷包含 test 目录。Node 宿主的 `native-json` 用例另保留通用无 I/O、内存失败、循环、排队／关闭与真实 C 入口不可捕获中断覆盖。Cat HTTP 五阶段与原生来源／客户端目录持久化、落盘前换代拒旧检测、前台确认／失败弹窗仍保留。显式重启不是实际内存超限实验；后台快照不能替代前台系统弹窗。`MeowfilmRuntimeHostTests` 在同一个 NodeMobile 中并发调用 source 与影视规则，验证共享载体但 Runtime／Context 独立，不另启运行器。
 
-规则迁移的精确 `MeowfilmAcceptance` 选择如下；每项须实际执行，编译或跳过不算规则载体通过：
+规则载体的精确 `MeowfilmAcceptance` 选择如下；每项须实际执行，编译或跳过不算规则载体通过：
 
 ```text
 -only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testGroupDraftSurvivesNavigationAndRestoreAndSeparateTestNeverSave
@@ -128,7 +132,7 @@ xcodebuild test-without-building \
   -resultBundlePath "$IOS_TMDB_COLD_RESULT"
 ```
 
-每次调用现场生成全新 UUID；不要复用旧 UUID 或配置自动失败重试。首轮仍只接受默认基址且无凭据的目录，成功保存两供应商合成设置后才在 `Library/Application Support/TMDBColdStartTests/<UUID>.json` 记录 prepare。第二轮读取同一记录，先验证 runID、App 身份、不同 PID、相同数据容器和 App bundle 路径，写入 restoring 防止重复进入，再执行恢复及字段读回断言；原生存储迁移后须同时核对读取未改写原生配置、Node 未另建设置副本，不能以旧“原生目录为空”的断言代替。restore 的 teardown 清除合成凭据、恢复默认基址之后，且本轮没有失败，才记录 restore 完成。无效 UUID、损坏记录、身份或路径不符、同进程重入、restoring／已完成记录都失败；失败不靠删除标记伪造完成。记录按 UUID 保留，旧未清夹具仍受原默认设置 guard 拦截；不读取真实秘密。
+每次调用现场生成全新 UUID；不要复用旧 UUID 或配置自动失败重试。首轮仍只接受默认基址且无凭据的目录，成功保存两供应商合成设置后才在 `Library/Application Support/TMDBColdStartTests/<UUID>.json` 记录 prepare。第二轮读取同一记录，先验证 runID、App 身份、不同 PID、相同数据容器和 App bundle 路径，写入 restoring 防止重复进入，再执行恢复及字段读回断言；同时核对读取未改写原生配置、Node 未另建设置副本。restore 的 teardown 清除合成凭据、恢复默认基址之后，且本轮没有失败，才记录 restore 完成。无效 UUID、损坏记录、身份或路径不符、同进程重入、restoring／已完成记录都失败；失败不靠删除标记伪造完成。记录按 UUID 保留，旧未清夹具仍受原默认设置 guard 拦截；不读取真实秘密。
 
 每轮保留 `tmdb-cold-<UUID>-<phase>.json` XCTest 附件，字段为 `runID`、`phase`、`processID`、`dataContainerPath`、`appBundlePath`、`appBundleIdentifier`、`succeeded`，不包含设置值或凭据。用 `xcrun xcresulttool get test-results summary --path "$IOS_TMDB_COLD_RESULT"`、`get test-results tests --path "$IOS_TMDB_COLD_RESULT"` 及 `xcrun xcresulttool export attachments --path "$IOS_TMDB_COLD_RESULT" --output-path "$IOS_TMDB_COLD_ATTACHMENTS"` 核对本次真实结果：所选方法恰好执行两轮、均通过且无 skip，附件恰好为同一 runID 的 prepare、restore 各一次且 `succeeded=true`，PID 不同、数据容器及 App bundle 身份／路径一致，并核对日志中阶段间没有安装／重装或清数据。单轮通过、第二轮仍是 prepare、缺少附件、清理失败或任何条件不符均不能算冷启动验收通过，源码编排本身不证明免重装。
 

@@ -75,8 +75,6 @@ export function createRecognitionRules(rules) {
 
 export function providerFamily(provider) {
   switch (provider) {
-    case 'quark_tv': return 'quark';
-    case 'uc_tv': return 'uc';
     case 'yidong':
     case 'tianyi':
     case 'quark':

@@ -91,7 +91,7 @@ final class MeowfilmFilmShutdownHostTests: XCTestCase {
         let next = try XCTUnwrap(model.snapshot?.candidates.first {
             $0.lineLabel == "备用原始线路" && $0.position.episode == 1
         })
-        model.selectCandidate(next.id)
+        model.selectTarget(next.playbackTarget, metadataSourceID: model.presentation?.metadataSourceID)
         try await lifecycleWait {
             model.snapshot?.attempt?.candidate.id == next.id &&
                 model.snapshot?.attempt?.prepareOnly == false && upstream.heldGETs > 0

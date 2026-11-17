@@ -11,7 +11,7 @@ public sealed partial class FilmPlaybackPage
     private bool IsMetadataPlayback => ActiveTarget.Kind is "movie" or "tv" &&
         ActiveTarget.MetadataProvider is "tmdb" or "douban";
     private string PlayerStage => HasExecution ? FilmJson.Text(session?.SnapshotFor(this)?.Raw ?? default, "stage") : "idle";
-    private JsonElement PlayerCandidate => FilmJson.Member(snapshot?.Current ?? default, "candidate") is
+    private JsonElement PlayerCandidate => !HasExecution ? default : FilmJson.Member(snapshot?.Current ?? default, "candidate") is
         { ValueKind: JsonValueKind.Object } current ? current : FilmJson.Member(snapshot?.Attempt ?? default, "candidate");
     private string PlayerPanValue => PlayerProviderFamily(FilmJson.Text(PlayerCandidate, "provider"));
     private string PlayerQualityValue => FilmJson.Text(PlayerCandidate, "quality");
@@ -24,9 +24,7 @@ public sealed partial class FilmPlaybackPage
         get
         {
             IEnumerable<string> providers = IsMetadataPlayback ? PlayerProviders :
-                FilmJson.Array(snapshot?.Browsing ?? default, "lines")
-                    .Select(line => PlayerProviderFamily(FilmJson.Text(line, "provider")))
-                    .Where(provider => provider.Length > 0).Distinct(StringComparer.Ordinal);
+                PlayerPanValue.Length > 0 ? [PlayerPanValue] : [];
             return providers
                 .Select(provider => new FilmPlayerOption(provider, PlayerPanName(provider), provider == PlayerPanValue)).ToArray();
         }
@@ -44,19 +42,19 @@ public sealed partial class FilmPlaybackPage
     }
     public bool ShowPlayerSwitchActions => IsMetadataPlayback && HasCurrent;
     public FilmPlayerOption? SelectedPanOption => PlayerPanOptions.FirstOrDefault(option => option.IsSelected);
-    public bool PlayerBusy => HasExecution && !ConnectionFailed && (snapshot is null ||
+    public bool PlayerBusy => !ConnectionFailed && (snapshot is null || HasExecution &&
         PlayerStage is "loading" or "searching" or "history" or "manual" or "cached" or "resolving" or "pending");
-    public bool PlayerBuffering => HasOutput && IsPlaying && session?.IsBuffering == true;
+    public bool PlayerBuffering => HasOutput && session?.IsBuffering == true;
     public string MetadataAssociationErrorMessage => MetadataAssociationFailed ? "关联资料加载失败" : "";
     public bool PlayerStatusVisible => PlayerStatusText.Length > 0 &&
         (PlayerBusy || !HasOutput || ConnectionFailed || PlayerStage is "error" or "unavailable");
-    public string PlayerStatusText => ConnectionFailed ? StatusText : PlayerStage switch
+    public string PlayerStatusText => ConnectionFailed ? StatusText : snapshot is null ? "加载中..." : PlayerStage switch
         {
             "loading" => "加载中...",
             "searching" or "history" or "manual" or "cached" => "正在搜索片源...",
             "resolving" => "正在获取播放地址...",
             "pending" => "正在准备媒体...",
-            "unavailable" => FilmPlaybackError.Message(FilmJson.Text(session?.SnapshotFor(this)?.Raw ?? snapshot?.Raw ?? default, "error"), "暂无可用片源"),
+            "unavailable" => FilmPlaybackError.Message(FilmJson.Text(session?.SnapshotFor(this)?.Raw ?? snapshot?.Raw ?? default, "error"), "无可用视频源"),
             "idle" => "待播放",
             _ => snapshot is null ? "加载中..." : StatusText
         };
@@ -82,13 +80,12 @@ public sealed partial class FilmPlaybackPage
 
     private static string PlayerProviderFamily(string provider) => provider switch
     {
-        "quark_tv" => "quark", "uc_tv" => "uc",
         "yidong" or "tianyi" or "quark" or "uc" or "baidu" => provider, _ => ""
     };
     private static string PlayerPanName(string provider) => provider switch
     {
-        "yidong" => "移动云盘", "tianyi" => "天翼云盘", "quark" or "quark_tv" => "夸克",
-        "uc" or "uc_tv" => "UC", "baidu" => "百度网盘", "" => "未知", _ => provider
+        "yidong" => "移动云盘", "tianyi" => "天翼云盘", "quark" => "夸克",
+        "uc" => "UC", "baidu" => "百度网盘", "" => "未知", _ => provider
     };
     private static string PlayerQualityName(string quality) => quality switch
     {

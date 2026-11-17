@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createPanRuntime, createRuntimeClient } from '../apps/runtime/pan-entry.mjs';
@@ -24,7 +24,7 @@ async function connect(t, handler = () => assert.fail('unexpected upstream I/O')
   await runtime.start();
   const client = createRuntimeClient({ baseUrl: runtime.baseUrl });
   t.after(async () => { await client.close(); await runtime.close(); });
-  return { client, runtime, identity: { sessionId }, get closes() { return closes; } };
+  return { client, runtime, dataRoot, identity: { sessionId }, get closes() { return closes; } };
 }
 
 test('pan-only HTTP describes exact methods, rejects upload and accepts external configuration writes without credentials', async t => {
@@ -36,7 +36,7 @@ test('pan-only HTTP describes exact methods, rejects upload and accepts external
   const providers = await client.call('pan.providers');
   assert.equal(providers.ok, true);
   assert.equal(providers.contract, 'pan.runtime.v1');
-  assert.equal(providers.value.providers.length, 7);
+  assert.equal(providers.value.providers.length, 5);
   const external = await rawRequest(runtime.baseUrl, {},
     { path: '/v1/pan/settings.set', headers: { host: 'external.example.invalid',
       origin: 'https://browser.example.invalid', 'x-meow-request-id': undefined },
@@ -60,29 +60,22 @@ test('pan-only HTTP describes exact methods, rejects upload and accepts external
   assert.equal(upload.value.code, 'METHOD_NOT_FOUND');
   assert.deepEqual(await client.call('pan.unknown'),
     { ok: false, contract: 'runtime.http.v1', code: 'METHOD_NOT_FOUND' });
-  assert.deepEqual(await client.call('pan.list', { provider: 'quark_tv', share: { url: 'https://pan.quark.cn/s/fake' } }),
-    { ok: false, contract: 'pan.runtime.v1', code: 'UNSUPPORTED_OPERATION' });
+  assert.deepEqual(await client.call('pan.list', { provider: 'unknown', share: { url: 'https://pan.quark.cn/s/fake' } }),
+    { ok: false, contract: 'pan.runtime.v1', code: 'INVALID_REQUEST' });
 });
 
-test('pan HTTP keeps ordinary direct-link parsing separate from explicit TV methods', async t => {
+test('pan HTTP resolves both ordinary modes through the selected provider direct-link API', async t => {
   const requests = [];
   const { client } = await connect(t, async input => {
     const url = new URL(input.url);
     requests.push(url);
-    const ordinary = url.pathname === '/1/clouddrive/file/download';
-    const value = ordinary
-      ? { code: 0, data: [{ fid: 'stored-file', download_url: 'https://media.example/original' }] }
-      : { errno: 0, data: url.searchParams.get('method') === 'streaming'
-        ? { video_info: [{ url: 'https://media.example/tv-stream' }] }
-        : { download_url: 'https://media.example/tv-download' } };
+    assert.equal(url.pathname, '/1/clouddrive/file/download');
+    const value = { code: 0, data: [{ fid: 'stored-file', download_url: 'https://media.example/original' }] };
     return { url: input.url, status: 200, headers: {}, body: Buffer.from(JSON.stringify(value)) };
   });
   for (const provider of ['quark', 'uc']) {
     assert.equal((await client.call('pan.settings.set', {
       provider, credentials: { cookie: 'session=synthetic-cookie' },
-    })).ok, true);
-    assert.equal((await client.call('pan.settings.set', {
-      provider: `${provider}_tv`, credentials: { accessToken: 'synthetic-access', deviceId: 'synthetic-device' },
     })).ok, true);
     const file = { provider, kind: 'stored', accountRevision: 1, fileId: 'stored-file' };
     for (const mode of ['streaming', 'download']) {
@@ -91,21 +84,13 @@ test('pan HTTP keeps ordinary direct-link parsing separate from explicit TV meth
       assert.equal(direct.value.url, 'https://media.example/original');
       assert.equal(direct.value.mode, mode);
       assert.equal(direct.value.headers.Cookie, 'session=synthetic-cookie');
-      const tv = await client.call('pan.play', { provider: `${provider}_tv`, file, mode });
-      assert.equal(tv.ok, true);
-      assert.equal(tv.value.url, `https://media.example/tv-${mode === 'streaming' ? 'stream' : 'download'}`);
-      assert.deepEqual(tv.value.headers, {});
     }
   }
   assert.deepEqual(requests.map(url => [url.hostname, url.pathname, url.searchParams.get('method')]), [
     ['drive.quark.cn', '/1/clouddrive/file/download', null],
-    ['open-api-drive.quark.cn', '/file', 'streaming'],
     ['drive.quark.cn', '/1/clouddrive/file/download', null],
-    ['open-api-drive.quark.cn', '/file', 'download'],
     ['pc-api.uc.cn', '/1/clouddrive/file/download', null],
-    ['open-api-drive.uc.cn', '/file', 'streaming'],
     ['pc-api.uc.cn', '/1/clouddrive/file/download', null],
-    ['open-api-drive.uc.cn', '/file', 'download'],
   ]);
 });
 
@@ -116,13 +101,14 @@ test('HTTP shutdown cancels and physically drains upstream work without publishi
     signal = input.signal;
     entered.resolve();
     await release.promise;
-    return { url: input.url, status: 200, headers: {},
-      body: Buffer.from(JSON.stringify({ code: 200, data: { access_token: 'synthetic-late', expires_in: 60 } })) };
+    return { url: input.url, status: 200, headers: { 'set-cookie': ['session=synthetic-late; Path=/'] },
+      body: Buffer.from(JSON.stringify({ code: 'OK', success: true, data: { nickname: 'synthetic-late' } })) };
   });
   const { client } = fixture;
-  assert.equal((await client.call('pan.settings.set', { provider: 'quark_tv',
-    credentials: { refreshToken: 'synthetic-refresh', deviceId: 'synthetic-device' } })).ok, true);
-  const pending = assert.rejects(client.call('pan.refresh', { provider: 'quark_tv' }), { code: 'CLOSED' });
+  assert.equal((await client.call('pan.settings.set', { provider: 'quark',
+    credentials: { cookie: 'session=synthetic-account' } })).ok, true);
+  const path = join(fixture.dataRoot, 'pan/accounts.json'), saved = readFileSync(path);
+  const pending = assert.rejects(client.call('pan.refresh', { provider: 'quark' }), { code: 'CLOSED' });
   await entered.promise;
   let completed = false;
   const close = client.shutdown().then(result => { completed = true; return result; });
@@ -135,6 +121,7 @@ test('HTTP shutdown cancels and physically drains upstream work without publishi
     value: { closed: true, cleanupComplete: true } });
   await pending;
   assert.equal(fixture.closes, 1);
+  assert.deepEqual(readFileSync(path), saved, 'shutdown must not persist the late Cookie rotation');
 });
 
 test('default aggregate stays three modules and explicit pan shares that same HTTP owner', async t => {
@@ -151,7 +138,7 @@ test('default aggregate stays three modules and explicit pan shares that same HT
         pan === undefined ? ['music', 'cat', 'source'] : ['music', 'cat', 'source', 'pan']);
       if (pan === undefined) assert.deepEqual(await client.call('pan.providers'),
         { ok: false, contract: 'runtime.http.v1', code: 'METHOD_NOT_FOUND' });
-      else assert.equal((await client.call('pan.providers')).value.providers.length, 7);
+      else assert.equal((await client.call('pan.providers')).value.providers.length, 5);
     } finally { await client.close(); await runtime.close(); }
   }
 });

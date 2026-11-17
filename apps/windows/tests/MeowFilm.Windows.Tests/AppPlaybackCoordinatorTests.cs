@@ -28,7 +28,7 @@ public static class AppPlaybackCoordinatorTests
         await Until(() =>
         {
             if (film.LastErrorCode is { } error) throw new InvalidOperationException(error);
-            return film.Output is { SubmittedPictures: > 0 } && !film.PauseRequested && film.PositionSeconds > 0;
+            return film.Output is { SubmittedPictures: > 0 } && !film.IsPaused && film.PositionSeconds > 0;
         }, "actual Film owner movie render");
     }
 
@@ -53,7 +53,7 @@ public static class AppPlaybackCoordinatorTests
             "music admission waits for the actual film owner to stop and release");
         await StartFilm(film, secondFilm, "next-film");
         song.AssertReleased();
-        Check(coordinator.ActiveOwner == "film" && film.HasOutput && !film.PauseRequested && !music.HasMedia && !music.IsPlaying,
+        Check(coordinator.ActiveOwner == "film" && film.HasOutput && !film.IsPaused && !music.HasMedia && !music.IsPlaying,
             "film admission waits for the actual music owner to stop and release");
         await film.StopAsync(); secondFilm.AssertReleased();
     }
@@ -81,7 +81,7 @@ public static class AppPlaybackCoordinatorTests
             song.Stream.UnblockReads();
             await opening.WaitAsync(TimeSpan.FromSeconds(4));
             await music.SeekAsync(1);
-            Check(coordinator.ActiveOwner == "film" && film.HasOutput && !film.PauseRequested && scene.DisposeCalls == 0 &&
+            Check(coordinator.ActiveOwner == "film" && film.HasOutput && !film.IsPaused && scene.DisposeCalls == 0 &&
                 music.HasMedia && music.PauseRequested && !music.IsPlaying,
                 "inaudible music preparation and seek never acquire or steal film output");
             await music.ResumeAsync().WaitAsync(TimeSpan.FromSeconds(4));

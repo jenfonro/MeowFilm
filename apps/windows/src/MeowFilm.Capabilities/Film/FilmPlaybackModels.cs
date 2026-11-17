@@ -279,6 +279,7 @@ internal sealed class FilmPlaybackSnapshot
         ContentKind = contentKind is "movie" or "tv" ? contentKind : Target.Kind;
         MetadataCache = FilmMetadataCache.Read(FilmJson.Member(Raw, "metadataCache"));
         MetadataSupplement = FilmMetadataSupplement.Read(FilmJson.Member(Raw, "metadataSupplement"));
+        WorkInfo = FilmWorkInfo.Read(FilmJson.Member(Raw, "workInfo"));
     }
     internal JsonElement Raw { get; }
     internal Guid SessionId { get; }
@@ -290,12 +291,38 @@ internal sealed class FilmPlaybackSnapshot
     internal string EntrySurface => FilmJson.Text(Raw, "entrySurface");
     internal FilmMetadataCache? MetadataCache { get; }
     internal FilmMetadataSupplement? MetadataSupplement { get; }
+    internal FilmWorkInfo? WorkInfo { get; }
     internal JsonElement Metadata => FilmJson.Member(Raw, "metadata");
     internal JsonElement Browsing => FilmJson.Member(Raw, "browsing");
     internal JsonElement Attempt => FilmJson.Member(Raw, "attempt");
     internal JsonElement Current => FilmJson.Member(Raw, "current");
     internal string AttemptId => FilmJson.Text(Attempt, "id");
     internal string CurrentId => FilmJson.Text(Current, "attemptId");
+}
+
+internal sealed record FilmWorkInfo(string Provider, string MetadataId, string Kind, string Title,
+    string Summary, int? SeasonCount, int? EpisodeCount)
+{
+    internal static FilmWorkInfo? Read(JsonElement value)
+    {
+        if (value.ValueKind == JsonValueKind.Null) return null;
+        if (value.ValueKind != JsonValueKind.Object ||
+            FilmJson.RequiredText(value, "provider") is not ("tmdb" or "douban") ||
+            FilmJson.RequiredText(value, "kind") is not ("movie" or "tv") ||
+            FilmJson.Member(value, "summary").ValueKind != JsonValueKind.String)
+            throw new FilmPlaybackException("INVALID_RESPONSE");
+        int? Count(string name)
+        {
+            var count = FilmJson.Member(value, name);
+            if (count.ValueKind == JsonValueKind.Null) return null;
+            if (count.ValueKind != JsonValueKind.Number || !count.TryGetInt32(out int number) || number < 0)
+                throw new FilmPlaybackException("INVALID_RESPONSE");
+            return number;
+        }
+        return new(FilmJson.RequiredText(value, "provider"), FilmJson.RequiredText(value, "metadataId"),
+            FilmJson.RequiredText(value, "kind"), FilmJson.RequiredText(value, "title"),
+            FilmJson.Text(value, "summary"), Count("seasonCount"), Count("episodeCount"));
+    }
 }
 
 public sealed record FilmSelection(string? Id, string Label, int? Season = null, JsonElement? WireId = null,

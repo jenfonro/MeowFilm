@@ -907,10 +907,11 @@ public static partial class MusicCatalogTests
                 var search = (TextBox)shell.FindName("SearchBox");
                 var searchPeer = UIElementAutomationPeer.CreatePeerForElement(search)!;
                 var value = (IValueProvider)searchPeer.GetPattern(PatternInterface.Value);
-                var searchButton = (Button)shell.FindName("SearchButton");
+                void SubmitSearch() => search.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, Key.Enter)
+                { RoutedEvent = Keyboard.KeyDownEvent });
                 var back = (Button)shell.FindName("BackButton");
                 var player = f.Module.PlayerView;
-                value.SetValue("   "); Invoke(searchButton); await Drain();
+                value.SetValue("   "); SubmitSearch(); await Drain();
                 Equal(0, f.Client.Count("music.search.start"));
                 var refresh = Descendants<Button>(catalog).First(button =>
                     button.IsVisible && AutomationProperties.GetName(button) == "刷新推荐");
@@ -940,7 +941,7 @@ public static partial class MusicCatalogTests
                 True(f.Module.IsCatalogHome, "the entry play action does not navigate");
                 entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseLeaveEvent });
                 CardMotion.Transition(surface, false, false);
-                value.SetValue("  云歌单  "); Invoke(searchButton);
+                value.SetValue("  云歌单  "); SubmitSearch();
                 await Until(() => f.Client.Count("music.search.start") == 2 && f.Module.IsSearchPage,
                     "headless search did not settle");
                 await WaitForSearch(f.Module); Layout();
@@ -977,9 +978,9 @@ public static partial class MusicCatalogTests
                     var footer = (Border)shell.FindName("PlayerFrame");
                     True(content.TranslatePoint(new Point(0, content.ActualHeight), root).Y <=
                         footer.TranslatePoint(new Point(), root).Y + .5, "the footer does not cover the content");
-                    var hit = root.InputHitTest(searchButton.TranslatePoint(new Point(16, 16), root));
-                    True(hit is DependencyObject target && Descendants<DependencyObject>(searchButton).Contains(target),
-                        "the search icon occupies its actual input hit target");
+                    var hit = root.InputHitTest(search.TranslatePoint(new Point(search.Padding.Left + 16, 16), root));
+                    True(hit is DependencyObject target && Descendants<DependencyObject>(search).Contains(target),
+                        "the search text occupies its actual input hit target");
                     var bitmap = new RenderTargetBitmap((int)size.Width, (int)size.Height, 96, 96, PixelFormats.Pbgra32);
                     bitmap.Render(root);
                     var pixels = new byte[(int)size.Width * (int)size.Height * 4];

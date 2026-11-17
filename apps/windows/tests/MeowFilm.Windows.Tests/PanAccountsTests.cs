@@ -34,17 +34,22 @@ public static class PanAccountsTests
     private static async Task Offline()
     {
         var fixture = new PanAccountFixture { Offline = true };
-        fixture.Account("baidu", 1, "signedIn", "cookie");
         await using var model = new PanAccounts(fixture, fixture);
         await model.ActivateAsync();
-        Check(model.Rows.Select(row => row.Provider).SequenceEqual(Providers.Select(item => item.Id)) &&
-            model.Rows.All(row => row.HasSnapshot) && fixture.Calls.Count == 0, "page reads only native settings");
+        Check(model.Rows.Select(row => row.Provider).SequenceEqual(["baidu", "quark", "uc", "tianyi", "yidong"]) &&
+            model.Rows.All(row => row.HasSnapshot && !row.Configured && row.Revision == 0) && fixture.Calls.Count == 0,
+            "empty native settings expose exactly five unconfigured providers without runtime calls");
+        Check(model.Rows.All(row => row.CredentialFields.Select(field => field.Id)
+                .SequenceEqual(Providers.Single(provider => provider.Id == row.Provider).Fields)) &&
+            model.Rows.Where(row => row.SupportsQr).Select(row => row.Provider).SequenceEqual(["baidu", "quark", "uc"]) &&
+            model.Rows.All(row => row.SupportsRefresh), "current providers retain exact manual fields, QR and refresh capabilities");
         var cases = new (string Provider, Dictionary<string, string> Draft)[]
         {
+            ("baidu", new() { ["cookie"] = "synthetic-baidu-cookie" }),
+            ("quark", new() { ["cookie"] = "synthetic-quark-cookie" }),
+            ("uc", new() { ["cookie"] = "synthetic-uc-cookie" }),
             ("tianyi", new() { ["username"] = "synthetic-user", ["password"] = "  synthetic password  " }),
-            ("yidong", new() { ["authorization"] = "synthetic-auth", ["refreshedAt"] = "1730000000000" }),
-            ("quark_tv", new() { ["refreshToken"] = "synthetic-refresh", ["deviceId"] = "synthetic-device" }),
-            ("uc_tv", new() { ["accessToken"] = "synthetic-access", ["expiresAt"] = "1730000000000" })
+            ("yidong", new() { ["authorization"] = "synthetic-auth", ["refreshedAt"] = "1730000000000" })
         };
         foreach (var (provider, draft) in cases)
         {
@@ -55,7 +60,7 @@ public static class PanAccountsTests
             Check(credentials.EnumerateObject().Select(field => field.Name).SequenceEqual(draft.Keys),
                 "only the supplied whole replacement is saved");
             if (draft.ContainsKey("password")) Check(credentials.GetProperty("password").GetString() == draft["password"], "password spaces remain exact");
-            foreach (var field in draft.Keys.Where(field => field is "refreshedAt" or "expiresAt"))
+            foreach (var field in draft.Keys.Where(field => field is "refreshedAt"))
                 Check(credentials.GetProperty(field).ValueKind == JsonValueKind.Number, "timestamps are numbers");
             Check(!model.LoginOpen && row.Configured && row.Revision == 1, "native commit closes the editor without online verification");
             await model.LogoutAsync(row);
@@ -66,7 +71,7 @@ public static class PanAccountsTests
         var baidu = model.Rows[0];
         await model.OpenCredentialsAsync(baidu);
         await model.SaveAsync(new Dictionary<string, string> { ["cookie"] = "synthetic-new-cookie" });
-        Check(!model.LoginOpen && baidu.Revision == 2 && model.Notice == "网盘凭据已保存",
+        Check(!model.LoginOpen && baidu.Revision == 3 && model.Notice == "网盘凭据已保存",
             "notification failure cannot turn a durable commit into a failed save");
     }
 
@@ -90,8 +95,8 @@ public static class PanAccountsTests
         foreach (var (provider, credentials) in new (string, Dictionary<string, object>)[]
         {
             ("unknown", new()), ("baidu", new() { ["cookie"] = 1L }),
-            ("yidong", new() { ["refreshedAt"] = "1" }), ("uc_tv", new() { ["expiresAt"] = -1L }),
-            ("uc_tv", new() { ["expiresAt"] = 9007199254740992L }),
+            ("yidong", new() { ["refreshedAt"] = "1" }), ("yidong", new() { ["refreshedAt"] = -1L }),
+            ("yidong", new() { ["refreshedAt"] = 9007199254740992L }),
             ("tianyi", new() { ["cookie"] = "synthetic\r\nheader" }),
             ("tianyi", new() { ["password"] = "synthetic\0password" }),
             ("baidu", new() { ["cookie"] = true })
@@ -239,6 +244,8 @@ public static class PanAccountsTests
         await model.ActivateAsync();
         var row = model.Rows.Single(row => row.Provider == "yidong");
         await model.OpenCredentialsAsync(row);
+        await model.SaveAsync(new Dictionary<string, string> { ["authorization"] = "synthetic-auth", ["unknown"] = "synthetic" });
+        Check(fixture.Writes.Count == 0 && model.CanSave && !row.Configured, "unknown draft fields are rejected rather than silently discarded");
         foreach (string number in new[] { "-1", "1.5", "9007199254740992", "not-a-number" })
             await model.SaveAsync(new Dictionary<string, string> { ["refreshedAt"] = number });
         Check(fixture.Writes.Count == 0 && model.CanSave, "invalid manual numbers leave the editor usable");

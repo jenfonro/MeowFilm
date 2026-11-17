@@ -191,7 +191,7 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
         {
             sessionId = owner.Id, attemptId = attempt, evidence = "d3d11-present-submissions",
             submittedPictures = evidence.Pictures, position = Native.PositionSeconds,
-            paused = Native.PauseRequested, coreIdentity = FilmKernelBuild.Identity
+            paused = Native.IsPaused, coreIdentity = FilmKernelBuild.Identity
         });
         return attempt;
     }

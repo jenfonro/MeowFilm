@@ -86,7 +86,7 @@ public sealed partial class ShellWindow
 
         var searchAvailable = !current.IsSettingsOpen && _searchOwnerSession is not null;
         SearchInput.Visibility = searchAvailable ? Visibility.Visible : Visibility.Collapsed;
-        SearchBox.IsEnabled = SearchButton.IsEnabled = SearchTargetPicker.IsEnabled = searchAvailable;
+        SearchBox.IsEnabled = SearchTargetPicker.IsEnabled = searchAvailable;
         var title = string.IsNullOrWhiteSpace(contribution.Title) ? current.Module.Title : contribution.Title;
         System.Windows.Automation.AutomationProperties.SetName(ContentDeck, title);
         Title = string.IsNullOrWhiteSpace(title) ? "meowfilm" : $"meowfilm · {title}";

@@ -94,7 +94,7 @@ final class FilmPlaybackModelTests: XCTestCase {
     }
 
     func testOrdinaryCloseDrainsAcceptedUICommandsWithoutPublishingTheirLateSuccessOrFailure() async throws {
-        for action in ["browse", "play", "select.episode"] {
+        for action in ["browse", "play", "select.target"] {
             for fails in [false, true] {
                 let original = FilmPlaybackFixture.snapshot()
                 let server = FilmPlaybackWireServer(original)
@@ -103,7 +103,7 @@ final class FilmPlaybackModelTests: XCTestCase {
                 await server.beforeAction { requested in
                     if requested == action { await entered.release(); await response.wait() }
                 }
-                let episode = action == "select.episode" ? 2 : 1
+                let episode = action == "select.target" ? 2 : 1
                 let lateTarget = FilmPlaybackTarget(id: "tmdb:tv:19", kind: .tv, title: "星河",
                     metadataProvider: .tmdb, metadataID: "19",
                     position: .init(season: 1, episode: episode, globalEpisode: episode))
@@ -129,7 +129,7 @@ final class FilmPlaybackModelTests: XCTestCase {
                 let before = try XCTUnwrap(model.snapshot)
                 let parameters: RuntimeObject
                 if action == "browse" { parameters = ["sourceId": .string("result-a")] }
-                else if action == "select.episode" { parameters = ["episode": .object(lateTarget.position.value)] }
+                else if action == "select.target" { parameters = ["target": .object(lateTarget.value)] }
                 else { parameters = [:] }
                 let command = model.send(action, parameters: parameters)
                 await entered.wait()
@@ -533,7 +533,7 @@ final class FilmPlaybackModelTests: XCTestCase {
         XCTAssertEqual(media.prepared.map(\.attemptID), ["transport-current"])
         XCTAssertEqual(model.mediaState.attemptID, "transport-current")
         let calls = await server.calls()
-        XCTAssertEqual(actions(calls).filter { ["browse", "play", "select.candidate", "select.episode"].contains($0) }, ["browse"])
+        XCTAssertEqual(actions(calls).filter { ["browse", "play", "select.target"].contains($0) }, ["browse"])
         XCTAssertTrue(media.stopped.isEmpty)
         await model.close()
     }
@@ -587,6 +587,9 @@ final class FilmPlaybackModelTests: XCTestCase {
         for kind in [FilmPlaybackKind.movie, .tv] {
             let metadataSource: RuntimeValue = .object(["id": .string("confirmed"), "provider": .string("tmdb"),
                 "metadataId": .number(19), "kind": .string(kind.rawValue), "title": .string("可靠作品")])
+            let workInfo: RuntimeValue = .object(["provider": .string("tmdb"), "metadataId": .number(19),
+                "kind": .string(kind.rawValue), "title": .string("可靠作品"), "summary": .string(""),
+                "seasonCount": .null, "episodeCount": .null])
             func candidate(_ id: String) -> RuntimeValue {
                 .object(["businessId": .string(id), "playbackTarget": .object(target(id).value),
                     "id": .string(id), "source": FilmPlaybackFixture.source, "lineId": .number(0),
@@ -600,7 +603,7 @@ final class FilmPlaybackModelTests: XCTestCase {
             let first = candidate("first-file"), replacement = candidate("replacement-file")
             let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
                 attempt: FilmPlaybackFixture.attempt("first", candidate: first), target: .object(target("first-file").value),
-                metadataSources: [metadataSource], metadataSourceID: "confirmed"))
+                metadataSources: [metadataSource], metadataSourceID: "confirmed", workInfo: workInfo))
             let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
             await model.open()?.value
             await server.awaitObservation()
@@ -614,7 +617,7 @@ final class FilmPlaybackModelTests: XCTestCase {
             try await server.publish(FilmPlaybackFixture.snapshot(Int(try XCTUnwrap(model.snapshot).sequence) + 1,
                 stage: "pending", attempt: FilmPlaybackFixture.attempt("replacement", candidate: replacement),
                 current: current, target: .object(target("replacement-file").value),
-                metadataSources: [metadataSource], metadataSourceID: "confirmed"))
+                metadataSources: [metadataSource], metadataSourceID: "confirmed", workInfo: workInfo))
             await model.waitForPendingWork()
             XCTAssertEqual(model.snapshot?.target.kind, .source)
             XCTAssertEqual(media.preservedPosition, [false, kind == .movie])
@@ -863,8 +866,8 @@ final class FilmPlaybackModelTests: XCTestCase {
             XCTAssertEqual(model.snapshot?.target, entry)
             var selected = initial
             selected["sequence"] = .number(10); selected["target"] = .object(exact.value)
-            await server.reply(to: "select.candidate", with: .object(selected))
-            model.selectCandidate("opaque-selected")
+            await server.reply(to: "select.target", with: .object(selected))
+            model.selectTarget(exact, metadataSourceID: "confirmed-tmdb")
             await model.waitForPendingWork()
             XCTAssertEqual(model.snapshot?.target, exact)
             await model.close()
@@ -886,7 +889,7 @@ final class FilmPlaybackModelTests: XCTestCase {
             XCTAssertEqual(model.snapshot?.target, exact)
             XCTAssertEqual(model.snapshot?.metadataSourceID, "confirmed-tmdb")
             XCTAssertEqual(model.snapshot?.metadataSources.first?.kind, kind)
-            XCTAssertEqual(actions(calls), ["select.candidate"])
+            XCTAssertEqual(actions(calls), ["select.target"])
             XCTAssertTrue(media.prepared.isEmpty)
             XCTAssertNil(model.mediaState.attemptID); XCTAssertNil(model.actionError)
             await model.close()
@@ -918,8 +921,9 @@ final class FilmPlaybackModelTests: XCTestCase {
 
     func testExactCandidateAndEpisodeSelectionsReopenAfterBackgroundWithoutFallingBackToPlay() async throws {
         let selections: [(String, RuntimeObject)] = [
-            ("select.candidate", ["candidateId": .string("exact-b")]),
-            ("select.episode", ["episode": .object(["season": .number(2), "episode": .number(3)])]),
+            ("select.target", ["target": FilmPlaybackFixture.sourceTarget(candidateID: "exact-b")]),
+            ("select.target", ["target": .object(FilmPlaybackTarget(id: "tmdb:tv:19", kind: .tv, title: "星河",
+                metadataProvider: .tmdb, metadataID: "19", position: .init(season: 2, episode: 3)).value)]),
         ]
         for (action, fields) in selections {
             let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
@@ -960,16 +964,17 @@ final class FilmPlaybackModelTests: XCTestCase {
         }
         let background = Task { await model.applicationDidEnterBackground() }
         await releaseEntered.wait()
-        await server.reply(to: "select.episode", with: FilmPlaybackFixture.snapshot(100, stage: "pending",
+        await server.reply(to: "select.target", with: FilmPlaybackFixture.snapshot(100, stage: "pending",
             attempt: FilmPlaybackFixture.attempt("c")))
         await server.beforeAction { action in
-            if action == "select.episode" {
+            if action == "select.target" {
                 await selectionEntered.release(); await selectionResult.wait()
             }
         }
-        let older = model.send("select.candidate", parameters: ["candidateId": .string("exact-b")])
-        let episode: RuntimeValue = .object(["season": .number(2), "episode": .number(3)])
-        let latest = model.send("select.episode", parameters: ["episode": episode])
+        let older = model.send("select.target", parameters: ["target": FilmPlaybackFixture.sourceTarget(candidateID: "exact-b")])
+        let target: RuntimeValue = .object(FilmPlaybackTarget(id: "tmdb:tv:19", kind: .tv, title: "星河",
+            metadataProvider: .tmdb, metadataID: "19", position: .init(season: 2, episode: 3)).value)
+        let latest = model.send("select.target", parameters: ["target": target])
         await releaseResult.release()
         await selectionEntered.wait()
         XCTAssertEqual(media.prepared.map(\.attemptID), ["a"],
@@ -981,10 +986,10 @@ final class FilmPlaybackModelTests: XCTestCase {
         XCTAssertEqual(media.resumes, 0)
         XCTAssertNil(model.actionError)
         let calls = await server.calls()
-        XCTAssertFalse(actions(calls).contains("select.candidate") || actions(calls).contains("play"))
-        let selections = calls.filter { $0.1.filmObject?["action"] == .string("select.episode") }
+        XCTAssertFalse(actions(calls).contains("play"))
+        let selections = calls.filter { $0.1.filmObject?["action"] == .string("select.target") }
         XCTAssertEqual(selections.count, 1)
-        XCTAssertEqual(selections.first?.1.filmObject?["episode"], episode)
+        XCTAssertEqual(selections.first?.1.filmObject?["target"], target)
         XCTAssertEqual(mediaReleases(calls), [releasePayload("a")])
         XCTAssertEqual(sessionReleases(calls), [.bool(false)])
         await model.close()
@@ -1007,7 +1012,7 @@ final class FilmPlaybackModelTests: XCTestCase {
         await model.open()?.value; await model.waitForPendingWork()
         await model.applicationDidEnterBackground()
         await gate.arm()
-        let selection = model.send("select.candidate", parameters: ["candidateId": .string("exact-b")])
+        let selection = model.send("select.target", parameters: ["target": FilmPlaybackFixture.sourceTarget(candidateID: "exact-b")])
         await entered.wait()
         XCTAssertNil(model.sessionID, "The new open is admitted but its session identity has not returned")
         let stop = model.send("stop")
@@ -1018,7 +1023,7 @@ final class FilmPlaybackModelTests: XCTestCase {
         XCTAssertNil(model.mediaState.attemptID)
         XCTAssertEqual(media.prepared.map(\.attemptID), ["a"])
         let calls = await server.calls()
-        XCTAssertFalse(actions(calls).contains("select.candidate") || actions(calls).contains("play"))
+        XCTAssertFalse(actions(calls).contains("select.target") || actions(calls).contains("play"))
         XCTAssertEqual(calls.filter { $0.0 == "session.open" }.count, 2)
         XCTAssertEqual(mediaReleases(calls), [releasePayload("a")])
         XCTAssertEqual(sessionReleases(calls), [.bool(false), .bool(false)])

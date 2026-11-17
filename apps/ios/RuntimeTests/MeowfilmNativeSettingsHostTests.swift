@@ -592,7 +592,8 @@ private extension XCTestCase {
             let actual = try rows.map(PanAccount.init)
             // Runtime status is not proof of upstream validation. Compare only
             // the native configuration projection; never call refresh here.
-            if actual.count == 7, expected.count == 7, zip(actual, expected).allSatisfy({ pair in
+            if actual.map(\.provider) == PanProviderID.allCases, expected.map(\.provider) == PanProviderID.allCases,
+               zip(actual, expected).allSatisfy({ pair in
                 let (actual, expected) = pair
                 return actual.provider == expected.provider && actual.revision == expected.revision &&
                     actual.errorCode == expected.errorCode && actual.configured == expected.configured &&

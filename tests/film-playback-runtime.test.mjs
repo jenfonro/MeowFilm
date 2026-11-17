@@ -10,7 +10,7 @@ import { connectFilmPlayback, createAppRuntime, createRuntimeClient,
   createCatScriptModule, createNeteaseTokenModule } from '../apps/runtime/entry.mjs';
 import { identity, sourceIdentity } from '../packages/film-playback/src/identity.js';
 
-const root = fileURLToPath(new URL('../tmp/test-results/film-playback/http/', import.meta.url));
+const root = fileURLToPath(new URL('../tmp/test-results/film-playback-page-corrections/node-consumers/http/', import.meta.url));
 const deferred = () => {
   let resolve, reject;
   const promise = new Promise((a, b) => { resolve = a; reject = b; });
@@ -33,7 +33,7 @@ const movie = { id: 'tmdb:movie:17', kind: 'movie', title: 'Fixture Film',
 const rawTarget = detailId => ({ id: `source:${identity(sourceIdentity(source), detailId)}`,
   kind: 'source', title: movie.title, source: { key: source.key, engine: source.engine,
     installationId: source.installationId, siteId: source.siteId, detailId } });
-async function setup(t, { invoke, tokenProvider, metadata } = {}) {
+async function setup(t, { invoke, tokenProvider, metadata, doubanMetadata } = {}) {
   mkdirSync(root, { recursive: true });
   const directory = mkdtempSync(join(root, 'case-'));
   const identity = { sessionId: randomUUID() };
@@ -81,6 +81,14 @@ async function setup(t, { invoke, tokenProvider, metadata } = {}) {
     'tmdb.data.request': async input => {
       metadataCalls.push(structuredClone(input));
       return { ok: true, contract: 'tmdb.data.v1', value: await metadata(input) };
+    },
+  }, async close() {} });
+  if (doubanMetadata) modules.push({ id: 'douban', version: '0.1.0', contract: 'douban.data.v1', methods: {
+    'douban.data.settings.get': async () => ({ ok: true, contract: 'douban.data.v1',
+      value: { revision: 'film-fixture-douban' } }),
+    'douban.data.request': async ({ path }) => {
+      assert.equal(path, '/rexxar/api/v2/movie/51');
+      return { ok: true, contract: 'douban.data.v1', value: structuredClone(doubanMetadata) };
     },
   }, async close() {} });
   const film = connectFilmPlayback(modules, { dataRoot: directory });
@@ -146,7 +154,7 @@ test('film HTTP snapshots omit absent entrySurface and preserve supplied entry p
     assert.equal(Object.hasOwn(value, 'entrySurface'), entrySurface !== undefined);
     if (entrySurface !== undefined) assert.equal(value.entrySurface, entrySurface);
   }
-  assert.deepEqual(f.calls, []);
+  assert.deepEqual(f.calls.map(row => row.operation), ['detail']);
   assert.deepEqual(f.reads, []);
 });
 
@@ -190,17 +198,19 @@ test('film HTTP cold source reentry projects seeded TMDB identities in the first
     assert.equal(episode.businessId, `${target.id}:season:1:episode:${index + 1}`);
     assert.deepEqual(episode.playbackTarget, { ...target, metadataId: '19', season: 1, episode: index + 1 });
   }
-  assert.deepEqual(first.episodes.map(row => row.businessId),
-    [`${target.id}:season:1:episode:1`, `${target.id}:season:1:episode:2`]);
+  assert.equal(first.browsing.loading, true);
+  assert.deepEqual(first.episodes, []);
+  assert.deepEqual(first.browsing.episodes, []);
   assert.equal(f.calls.some(row => row.operation === 'play'), false);
   assert.deepEqual(f.reads, []);
   okay(await f.rpc('session.release', { sessionId: first.sessionId }));
 });
 
 test('film HTTP keeps a discovered seed group revoked across source replacement and metadata refresh', async t => {
-  const f = await setup(t, { metadata: ({ path }) => {
-    assert.equal(path, '/3/search/multi'); return { results: [] };
-  } });
+  const f = await setup(t, { doubanMetadata: { id: '51', title: 'Fixture Film', poster_path: '/fixture-poster.jpg' },
+    metadata: ({ path }) => {
+      assert.equal(path, '/3/search/multi'); return { results: [] };
+    } });
   const seed = { id: 'douban:movie:51', kind: 'movie', title: movie.title, metadataProvider: 'douban', metadataId: '51' };
   const id = await f.open({ target: seed });
   await f.command(id, 'search.more');
@@ -216,7 +226,13 @@ test('film HTTP keeps a discovered seed group revoked across source replacement 
   const reply = await f.rpc('session.command', { sessionId: id, action: 'search.more' });
   assert.equal(reply.ok, false);
   assert.equal(reply.code, 'SOURCE_NOT_FOUND');
-  assert.deepEqual(await f.snapshot(id), revoked);
+  const refreshed = await f.snapshot(id);
+  assert.deepEqual(refreshed.target, revoked.target);
+  assert.deepEqual(refreshed.sources, revoked.sources);
+  assert.deepEqual(refreshed.attempt, revoked.attempt);
+  assert.deepEqual(refreshed.current, revoked.current);
+  assert.equal(refreshed.stage, 'unavailable');
+  assert.equal(refreshed.error, 'SOURCE_NOT_FOUND');
   assert.deepEqual(f.metadataCalls.map(row => row.path), ['/3/search/multi']);
   assert.deepEqual(f.calls.map(row => row.operation), ['search']);
   assert.deepEqual(f.reads, []);
@@ -260,21 +276,23 @@ test('film HTTP seed reentry preserves provenance and restores exact TMDB coordi
 });
 
 test('film HTTP no-match seed reentry restores exact group and hints without repeating search or reading video', async t => {
-  const f = await setup(t, { metadata: ({ path }) => {
-    assert.equal(path, '/3/search/multi'); return { results: [] };
-  } });
+  const f = await setup(t, { doubanMetadata: { id: '51', title: 'Fixture Film', poster_path: '/fixture-poster.jpg' },
+    metadata: ({ path }) => {
+      assert.equal(path, '/3/search/multi'); return { results: [] };
+    } });
   const seed = { id: 'douban:movie:51', kind: 'movie', title: 'Fixture Film', metadataProvider: 'douban', metadataId: '51' };
   const seedMetadata = { id: '51', title: 'Fixture Film', poster_path: '/fixture-poster.jpg' };
   const first = await f.open({ platform: 'ios', target: seed, metadata: seedMetadata });
   assert.equal((await f.snapshot(first)).entryResolution, 'unmatched');
-  assert.deepEqual((await f.snapshot(first)).metadata, seedMetadata);
+  assert.equal((await f.snapshot(first)).metadata.businessId, seed.id);
+  assert.equal((await f.snapshot(first)).metadata.poster_path, seedMetadata.poster_path);
   await f.command(first, 'search.more');
   await until(async () => (await f.snapshot(first)).sources.length === 1);
   const row = (await f.snapshot(first)).sources[0];
   await f.command(first, 'browse', { sourceId: row.id });
   await until(async () => (await f.snapshot(first)).browsing.episodes.length === 1);
   const episode = (await f.snapshot(first)).browsing.episodes[0];
-  await f.command(first, 'select.candidate', { candidateId: episode.candidateId });
+  await f.command(first, 'select.target', { target: episode.playbackTarget });
   const attempt = await f.pending(first), saved = await f.snapshot(first);
   const resumeTarget = okay(await f.rpc('data.target', { target: saved.target, sources: [source] }));
   okay(await f.rpc('session.release', { sessionId: first }));
@@ -285,7 +303,8 @@ test('film HTTP no-match seed reentry restores exact group and hints without rep
   assert.deepEqual(restored.entryTarget, seed);
   assert.deepEqual(restored.target, resumeTarget);
   assert.equal(restored.entryResolution, 'unmatched');
-  assert.deepEqual(restored.metadata, seedMetadata);
+  assert.equal(restored.metadata.businessId, seed.id);
+  assert.equal(restored.metadata.poster_path, seedMetadata.poster_path);
   assert.deepEqual(restored.sources.map(value => value.source), [row.source]);
   assert.equal(restored.attempt, null);
   assert.equal(f.calls.length, before);
@@ -300,16 +319,17 @@ test('film HTTP no-match seed reentry restores exact group and hints without rep
 
 test('film HTTP source discovery, exact list selection, private first-read routing and real watch events', async t => {
   const f = await setup(t), id = await f.open();
-  assert.equal(f.calls.length, 0);
+  await until(async () => !(await f.snapshot(id)).browsing.loading);
+  assert.deepEqual(f.calls.map(row => row.operation), ['detail']);
   await f.command(id, 'search.more');
   await until(async () => (await f.snapshot(id)).searchComplete);
-  assert.deepEqual(f.calls.map(value => value.operation), ['search']);
+  assert.deepEqual(f.calls.map(value => value.operation), ['detail', 'search']);
   const result = (await f.snapshot(id)).sources[0];
   await f.command(id, 'browse', { sourceId: result.id });
   await until(async () => (await f.snapshot(id)).browsing.episodes.length === 1);
-  assert.deepEqual(f.calls.map(value => value.operation), ['search', 'detail']);
-  assert.equal(f.calls[1].payload.id, 0);
-  await f.command(id, 'play');
+  assert.deepEqual(f.calls.map(value => value.operation), ['detail', 'search']);
+  assert.equal(f.calls[0].payload.id, 0);
+  await f.command(id, 'select.target', { target: (await f.snapshot(id)).browsing.episodes[0].playbackTarget });
   const attempt = await f.pending(id);
   const receipt = okay(await f.rpc('session.attempt', { sessionId: id, attemptId: attempt.id }));
   assert.equal(f.reads.length, 0, 'address preparation must not read media');
@@ -1096,7 +1116,7 @@ test('real Cat Worker prepared HLS/DASH receipts validate original UTF-8 without
     }
   });
 
-test('M3 real Cat HTTP and SSE select the observed HLS variant with existing candidateId only',
+test('M3 real Cat HTTP and SSE select the observed HLS variant with its complete emitted playbackTarget',
   { timeout: 30000 }, async t => {
     const path = '/proxy/show/master.m3u8';
     const highPath = '/proxy/show/high/index.m3u8?part=1', lowPath = '/proxy/low.m3u8';
@@ -1125,7 +1145,7 @@ test('M3 real Cat HTTP and SSE select the observed HLS variant with existing can
     assert.equal(first.status, 200);
     assert.ok((await first.text()).includes('#EXTINF:3,'));
     assert.deepEqual((await f.readState()).reads.map(read => read.url), [path, highPath]);
-    okay(await f.rpc('session.command', { sessionId: f.id, action: 'select.candidate', candidateId: low.id }));
+    okay(await f.rpc('session.command', { sessionId: f.id, action: 'select.target', target: low.playbackTarget }));
     do { snapshot = await f.events.next(); } while (snapshot.attempt?.candidate.id !== low.id);
     const selected = okay(await f.rpc('session.attempt', { sessionId: f.id, attemptId: snapshot.attempt.id }));
     assert.equal(selected.format, 'hls');

@@ -74,11 +74,11 @@ enum FilmPlaybackFixture {
                          episodes: [RuntimeValue] = [], target: RuntimeValue = target,
                          metadataSources: [RuntimeValue]? = nil, metadataSourceID: String? = nil,
                          metadataError: String? = nil, metadataCache: RuntimeValue = .null,
-                         metadataSupplement: RuntimeValue = .null) -> RuntimeValue {
+                         metadataSupplement: RuntimeValue = .null, workInfo: RuntimeValue = .null) -> RuntimeValue {
         var fields: RuntimeObject = [
             "sessionId": .string(sessionID.uuidString.lowercased()), "sequence": .number(Double(sequence)),
             "target": target, "stage": .string(stage), "error": .null, "metadata": metadata,
-            "metadataCache": metadataCache, "metadataSupplement": metadataSupplement,
+            "workInfo": workInfo, "metadataCache": metadataCache, "metadataSupplement": metadataSupplement,
             "sources": .array([.object(["businessId": .string("source-fixture"), "playbackTarget": sourceTarget(),
                                          "id": .string("result-a"), "title": .string("星河"), "source": source,
                                          "state": .string("ready"), "error": .null])]),
