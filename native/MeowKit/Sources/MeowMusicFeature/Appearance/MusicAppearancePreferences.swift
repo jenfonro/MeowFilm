@@ -297,7 +297,7 @@ import Combine
 
     @discardableResult
     func applyDisplayedArtwork(_ data: Data, ticket: MusicDisplayedArtworkTicket) -> Bool {
-        guard acceptsDisplayedArtwork(ticket), !data.isEmpty, data.count <= 2 * 1_024 * 1_024 else { return false }
+        guard acceptsDisplayedArtwork(ticket), !data.isEmpty else { return false }
         if displayedArtwork?.ticket != ticket || displayedArtwork?.data != data {
             displayedArtwork = .init(ticket: ticket, data: data)
         }

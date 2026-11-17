@@ -55,7 +55,7 @@ public sealed partial class MusicLibraryOwner
     {
         LJ.Require(value is JsonValue v && v.TryGetValue<string>(out _));
         string text = LJ.S(value).Trim();
-        LJ.Require(text.Length is > 0 and <= 200 && !text.Any(char.IsControl));
+        LJ.Require(text.Length > 0 && !text.Any(char.IsControl));
         for (int i = 0; i < text.Length; i++)
         {
             if (char.IsHighSurrogate(text[i]))
@@ -98,7 +98,6 @@ public sealed partial class MusicLibraryOwner
         LJ.Require(LJ.I(value["schema"]) == 2);
         _ = Revision(value);
         var items = LJ.Array(value["items"]);
-        LJ.Require(items.Count <= 60);
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var raw in items)
         {
@@ -148,7 +147,6 @@ public sealed partial class MusicLibraryOwner
             foreach (var old in entries.OfType<JsonObject>().Where(n => LJ.S(n["text"]) == text).ToArray())
                 entries.Remove(old);
             entries.Insert(0, next);
-            while (entries.Count > 60) entries.RemoveAt(entries.Count - 1);
         }
         else
         {

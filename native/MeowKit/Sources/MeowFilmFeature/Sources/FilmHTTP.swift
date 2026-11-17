@@ -20,7 +20,6 @@ public final class FilmHTTP: Sendable {
 }
 
 private final class FilmHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    private static let maximumBytes = 4 * 1_024 * 1_024
     private let session: URLSession
     private let lock = NSLock()
 
@@ -94,9 +93,7 @@ private final class FilmHTTPTransport: NSObject, URLSessionDataDelegate, @unchec
             completionHandler(.cancel)
             return
         }
-        if response.expectedContentLength > Self.maximumBytes {
-            flight.failure = .responseTooLarge
-        } else if let response = response as? HTTPURLResponse {
+        if let response = response as? HTTPURLResponse {
             if response.statusCode != 200 {
                 flight.failure = .upstream(statusCode: response.statusCode)
             } else if response.expectedContentLength == 0 {
@@ -111,7 +108,6 @@ private final class FilmHTTPTransport: NSObject, URLSessionDataDelegate, @unchec
             return
         }
         flight.acceptedResponse = true
-        flight.bytes.reserveCapacity(Int(max(0, response.expectedContentLength)))
         lock.unlock()
         completionHandler(.allow)
     }
@@ -120,12 +116,6 @@ private final class FilmHTTPTransport: NSObject, URLSessionDataDelegate, @unchec
         lock.lock()
         guard let flight = flights[dataTask.taskIdentifier], !flight.cancelled, flight.failure == nil else {
             lock.unlock()
-            return
-        }
-        guard data.count <= Self.maximumBytes - flight.bytes.count else {
-            flight.failure = .responseTooLarge
-            lock.unlock()
-            dataTask.cancel()
             return
         }
         flight.bytes.append(data)

@@ -39,7 +39,6 @@ public sealed partial class MusicNativeApplication
         try
         {
             var input = JsonSerializer.SerializeToNode(parameters) as JsonObject ?? throw new MusicLibraryException("INVALID_REQUEST");
-            LJ.Require(LJ.Bytes(input).Length <= 512 * 1024, "LIMIT");
             LJ.Fields(input, "song platforms contentFailed", "song platforms");
             var platforms = LJ.Array(input["platforms"]).Select(value => LJ.Text(value)).Distinct(StringComparer.Ordinal).ToArray();
             LJ.Require(platforms.Length is > 0 and <= 5 && platforms.All(NativeMusicSong.Platforms.Contains));

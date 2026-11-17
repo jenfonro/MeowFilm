@@ -1,6 +1,5 @@
 import { BridgeError, HTTP_PROTOCOL, createHttpServer, validateSession } from '@meowfilm/runtime-bridge';
 import { contracts } from './contracts.mjs';
-import { sourceByteLimit } from './modules/source-candidates.mjs';
 
 const invalid = () => { throw new BridgeError('INVALID_REQUEST'); };
 const publicCodes = new Set(['INVALID_REQUEST', 'METHOD_NOT_FOUND', 'PERMISSION_DENIED',
@@ -122,8 +121,7 @@ export function createAppRuntime({ sessionId,
       } catch { invalid(); }
       if (!/^[1-9][0-9]*$(?![\s\S])/.test(parts[5]) || !Number.isSafeInteger(Number(parts[5]))) invalid();
       return { contract: module.contract, codes: contract.codes, contentType: 'application/octet-stream',
-        maximumBytes: sourceByteLimit, limitCode: module.id === 'cat' ? 'RESOURCE_LIMIT' : 'LIMIT',
-        status: reply => reply.ok ? 200 : ['LIMIT', 'RESOURCE_LIMIT'].includes(reply.code) ? 413 : 400,
+        status: reply => reply.ok ? 200 : 400,
         handler: (bytes, context) => module.upload({ installationId, sourceRevision: Number(parts[5]),
           ...(basename === undefined ? {} : { basename }) }, bytes, context) };
     }

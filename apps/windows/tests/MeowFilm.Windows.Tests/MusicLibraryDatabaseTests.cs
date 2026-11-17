@@ -20,6 +20,7 @@ public static class MusicLibraryDatabaseTests
     {
         yield return new("Music SQLite explicit memory store reads empty controls and indexed records", MemoryRecords);
         yield return new("Music SQLite lazy file construction and owned records reopen durably", Reopen);
+        yield return new("Music SQLite records beyond sixteen MiB and two hundred fifty thousand JSON nodes reopen completely", LargeRecords);
         yield return new("Music SQLite missing root is created only on first read", MissingRoot);
         yield return new("Music SQLite exact generations and receipts reject stale commits", Generations);
         yield return new("Music SQLite source conflict atomically rolls back songs controls and receipt", AtomicSourceConflict);
@@ -142,6 +143,26 @@ public static class MusicLibraryDatabaseTests
         snapshot.Areas["control"]!["selected"] = "caller";
         Check((await reopened.ReadAsync(Scope)).Areas["control"]!["selected"]!.GetValue<string>() == Id(song));
         Check(new FileInfo(folder.Database + "-journal").Exists);
+    }
+
+    private static async Task LargeRecords()
+    {
+        using var folder = new Folder();
+        string text = new('x', 16 * 1024 * 1024 + 1);
+        var song = Song("wy", "large");
+        song["extra"] = text;
+        var control = new JsonObject { ["text"] = text,
+            ["nodes"] = JsonSerializer.SerializeToNode(Enumerable.Range(0, 250001).ToArray()) };
+        var revision = Next(MusicLibraryRevision.Empty);
+        await using (var database = new MusicLibraryDatabase(folder.Root))
+        {
+            await database.ReadAsync(Scope);
+            await database.CommitAsync(Scope, MusicLibraryRevision.Empty, revision, Changes([song], control));
+        }
+        await using var reopened = new MusicLibraryDatabase(folder.Root);
+        var saved = await reopened.ReadAsync(Scope);
+        Check(saved.Revision == revision && JsonNode.DeepEquals(saved.Areas["control"], control));
+        Check(JsonNode.DeepEquals(reopened.ReadSong(Id(song)), song));
     }
 
     private static async Task Generations()

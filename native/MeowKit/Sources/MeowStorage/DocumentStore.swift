@@ -22,11 +22,11 @@ public enum DocumentStoreError: Error, Equatable, Sendable {
 /// Same-process malicious filesystem mutation is not a security boundary.
 public final class DocumentStore: @unchecked Sendable {
     private let files: OrdinaryFileDirectory
-    private let maximumDocumentBytes: Int
+    private let maximumDocumentBytes: Int?
     private let lock = NSLock()
 
     /// Passive: validates the namespace and URL, never creates a directory.
-    public init(baseURL: URL, namespace: String, maximumDocumentBytes: Int = 8 * 1_024 * 1_024) throws {
+    public init(baseURL: URL, namespace: String, maximumDocumentBytes: Int? = nil) throws {
         files = try OrdinaryFileDirectory(baseURL: baseURL, namespace: namespace)
         self.maximumDocumentBytes = maximumDocumentBytes
     }
@@ -42,7 +42,7 @@ public final class DocumentStore: @unchecked Sendable {
 
     public func write(_ data: Data, key: String) throws {
         let name = try fileName(key)
-        guard data.count <= maximumDocumentBytes else { throw DocumentStoreError.documentTooLarge }
+        if let maximumDocumentBytes, data.count > maximumDocumentBytes { throw DocumentStoreError.documentTooLarge }
         lock.lock(); defer { lock.unlock() }
         guard let directory = try files.openDirectory(creating: true) else { throw DocumentStoreError.storageFailure }
         defer { Darwin.close(directory) }
@@ -53,7 +53,7 @@ public final class DocumentStore: @unchecked Sendable {
     /// absent). This is a content comparison, not a monotonic revision.
     public func compareAndSwap(key: String, expected: Data?, replacement: Data) throws {
         let name = try fileName(key)
-        guard replacement.count <= maximumDocumentBytes else { throw DocumentStoreError.documentTooLarge }
+        if let maximumDocumentBytes, replacement.count > maximumDocumentBytes { throw DocumentStoreError.documentTooLarge }
         lock.lock(); defer { lock.unlock() }
         guard let directory = try files.openDirectory(creating: expected == nil) else {
             throw DocumentStoreError.revisionConflict

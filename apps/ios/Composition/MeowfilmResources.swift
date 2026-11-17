@@ -59,7 +59,7 @@ struct MeowfilmResources: Sendable {
             base: cacheRoot, namespace: MusicNativePersistentSourceDiscoveryCache.namespace,
             maximumDocumentBytes: 4 * 1024 * 1024))
         musicHomeSnapshot = MusicNativeHomeSnapshotDocument(storeFactory: Self.documentFactory(
-            base: cacheRoot, namespace: MusicNativeHomeSnapshotDocument.namespace))
+            base: cacheRoot, namespace: MusicNativeHomeSnapshotDocument.namespace, maximumDocumentBytes: 8 * 1024 * 1024))
         let filmSettings = try MeowfilmNativeSettings(documentsRoot: libraryRoot)
         self.filmSettings = filmSettings
         let scriptSession = RuntimeSession(launcher: MeowfilmScriptRuntime.launcher(settings: filmSettings.access))
@@ -84,7 +84,7 @@ struct MeowfilmResources: Sendable {
             observeConnection: { await scriptSession.connectionIfStarted() })
         musicAccountGate = try? MusicAccountAccessGate(
             bundleIdentifier: MeowfilmIdentity.bundleIdentifier,
-            urlCacheStore: try? Self.documentFactory(base: cacheRoot, namespace: "music.platform.audio-locators.v1")(),
+            urlCacheStore: try? Self.documentFactory(base: cacheRoot, namespace: "music.platform.audio-locators.v1", maximumDocumentBytes: 8 * 1024 * 1024)(),
             feedbackOutboxStoreFactory: Self.documentFactory(
                 base: libraryRoot, namespace: "music.platform.feedback-events.v1"),
             audioCache: musicAudioCache,
@@ -96,7 +96,7 @@ struct MeowfilmResources: Sendable {
     /// Ordinary document namespace. A missing Caches directory is a store failure,
     /// which each cache consumer treats as a miss.
     private static func documentFactory(base: URL?, namespace: String,
-                                        maximumDocumentBytes: Int = 8 * 1024 * 1024)
+                                        maximumDocumentBytes: Int? = nil)
         -> @Sendable () throws -> DocumentStore {
         return {
             guard let base else { throw DocumentStoreError.storageFailure }

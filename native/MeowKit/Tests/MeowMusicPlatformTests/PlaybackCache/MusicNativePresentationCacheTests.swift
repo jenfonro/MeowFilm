@@ -207,6 +207,18 @@ final class MusicNativePresentationCacheTests: XCTestCase {
         let coldMiss = await cache.read(imageURL); XCTAssertNil(coldMiss)
     }
 
+    func testImageBeyondSingleItemBudgetIsNotPersisted() async throws {
+        let (root, _, cache, _) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var image = try artwork()
+        image.append(Data(repeating: 0, count: 4 * 1024 * 1024 + 1 - image.count))
+        let saved = await cache.store(image, for: imageURL, revision: cache.revision)
+        let read = await cache.read(imageURL)
+        XCTAssertNil(saved); XCTAssertNil(read)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(
+            MusicNativePresentationCache.namespace).path))
+    }
+
     func testImagesAndLyricsShareTheExistingRawResourceDiskBudget() async throws {
         let (root, _, cache, clock) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

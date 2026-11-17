@@ -13,6 +13,7 @@ public static class GrantedMediaFilesTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("current-format-roundtrip-restart-and-resolve", Roundtrip);
+        yield return Case("large-inventory-and-selection-preserve-all-grants", LargeInventory);
         yield return Case("every-non-current-document-is-rejected-without-write", NonCurrentDocuments);
         yield return Case("CAS-conflict-is-not-retried-or-overwritten", CasConflict);
         yield return Case("wrong-write-receipt-is-explicitly-uncertain", WrongReceipt);
@@ -104,6 +105,27 @@ public static class GrantedMediaFilesTests
                 "invalid document was written or replaced");
             CryptographicOperations.ZeroMemory(original);
         }
+    }
+
+    private static async Task LargeInventory()
+    {
+        using var file = new Fixture();
+        string[] paths = Enumerable.Range(0, 100_001)
+            .Select(index => Path.Combine(file.Root, "generated-" + index + ".wav")).ToArray();
+        await using var store = new MemoryStore
+        {
+            Data = Encoding.UTF8.GetBytes("""{"Schema":1,"Items":[""" +
+                string.Join(",", paths.Select(CurrentItem)) + "]}")
+        };
+        Check(store.Data.Length > 8 * 1024 * 1024);
+        var owner = Owner(store);
+        Check((await owner.ListAsync()).Select(item => item.Path).SequenceEqual(paths));
+        var granted = await owner.GrantAsync(Enumerable.Repeat(file.MediaPath, 1001));
+        Check(granted.Count == 1 && store.Writes == 1);
+        var reopened = await Owner(store).ListAsync();
+        Check(reopened.Count == paths.Length + 1 &&
+            reopened.Take(paths.Length).Select(item => item.Path).SequenceEqual(paths) &&
+            reopened[^1] == granted[0]);
     }
 
     private static async Task CasConflict()

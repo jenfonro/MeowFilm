@@ -10,7 +10,7 @@ import shutil
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 class PrepareRecipeTests(unittest.TestCase):
@@ -53,6 +53,46 @@ class PrepareRecipeTests(unittest.TestCase):
 
     def testCurrentRecipeAndArtifactsAreAccepted(self):
         self.prepare.verify_packaged(self.receipt, self.lock)
+
+    def testLargeDownloadPreservesBytesAndRejectsHashMismatch(self):
+        chunks = [b'a' * (1024 * 1024)] * 64 + [b'tail']
+        digest = hashlib.sha256()
+        for chunk in chunks:
+            digest.update(chunk)
+        checksum = digest.hexdigest()
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.side_effect = [*chunks, b""]
+        with patch.object(self.prepare, "SHARED_CACHE", self.root / "shared"), \
+                patch.object(self.prepare.urllib.request, "build_opener") as opener:
+            opener.return_value.open.return_value = response
+            url = "https://invalid.example/source.tar.gz"
+            archive = self.prepare.source_download("ffmpeg", url, checksum, ".tar.gz")
+            self.assertEqual(archive.stat().st_size, sum(map(len, chunks)))
+            self.assertEqual(self.prepare.digest(archive), checksum)
+            response.read.side_effect = [b"changed", b""]
+            with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                self.prepare.source_download("ffmpeg", url, "0" * 64, ".tar.gz")
+            rejected = self.root / "shared/downloads" / ("0" * 64 + ".tar.gz")
+            self.assertFalse(rejected.exists())
+            self.assertFalse(rejected.with_suffix(".partial").exists())
+
+    def testFailedOrInterruptedDownloadRemovesPartialArchive(self):
+        for error in (OSError("connection closed"), KeyboardInterrupt()):
+            with self.subTest(error=type(error).__name__), \
+                    patch.object(self.prepare, "SHARED_CACHE", self.root / "shared"), \
+                    patch.object(self.prepare.urllib.request, "build_opener") as opener:
+                response = MagicMock()
+                response.__enter__.return_value = response
+                response.read.side_effect = [b"partial", error, b"partial", error]
+                opener.return_value.open.return_value = response
+                with self.assertRaises(type(error)):
+                    self.prepare.source_download("ffmpeg", "https://invalid.example/source.tar.gz",
+                                                 "0" * 64, ".tar.gz")
+                rejected = self.root / "shared/downloads" / ("0" * 64 + ".tar.gz")
+                self.assertFalse(rejected.exists())
+                self.assertFalse(rejected.with_suffix(".partial").exists())
+                response.__exit__.assert_called()
 
     def testPublicBufferFiltersAreRequiredRegistryEntriesNotConfigMacros(self):
         build = self.root / "configured"

@@ -3,6 +3,20 @@ import MeowMusicFeature
 @testable import MeowMusicNativeService
 
 final class MusicNativeLibraryTests: XCTestCase {
+    func testLongPlaylistNamesRoundTripThroughTheLibrary() async throws {
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
+        let name = String(repeating: "曲", count: 3000)
+        let created = try await service.createPlaylist(name: name, refs: [])
+        XCTAssertEqual(created.title, name)
+        let renamed = try await service.editPlaylist(created, name: name + "改", refs: nil, order: nil)
+        XCTAssertEqual(renamed.title, name + "改")
+        await service.close()
+        let reopened = try await NativeMusicFixture.service(store)
+        let collections = try await reopened.collections()
+        XCTAssertEqual(collections.first { $0.id == created.id }?.title, name + "改")
+        await reopened.close()
+    }
+
     func testUnboundMemberCancellationKeepsOnlyRetainedFavoritesAcrossColdOpen() async throws {
         let a = NativeSyncFixture.member("101"), b = NativeSyncFixture.member("102")
         let store = try NativeSyncFixture.store([a, b]), service = try await NativeMusicFixture.service(store)

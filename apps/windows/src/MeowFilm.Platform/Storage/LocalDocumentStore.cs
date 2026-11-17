@@ -18,8 +18,6 @@ namespace MeowFilm.Platform.Storage;
 /// </summary>
 public sealed class LocalDocumentStore : IDocumentStore
 {
-    public const int MaximumDocumentBytes = DocumentRules.MaximumDocumentBytes;
-    public const int MaximumSourceBytes = DocumentRules.MaximumSourceBytes;
     private const string DocumentName = "document.mfdp";
     private const int EnvelopeHeaderBytes = 13, PlaintextHeaderBytes = 44;
     private readonly WindowsDocumentFiles.Root root;
@@ -62,7 +60,8 @@ public sealed class LocalDocumentStore : IDocumentStore
         {
             using var folder = WindowsDocumentFiles.OpenDirectory(location.Directory, true);
             return folder is null ? new DocumentSnapshot(null, DocumentFingerprint.Missing) :
-                ReadDocument(Path.Combine(location.Directory, location.FileName), location, operation.Cancellation);
+                ReadDocument(Path.Combine(location.Directory, location.FileName), location, operation.Cancellation,
+                    CacheDocumentStore.MaximumDocumentBytes);
         }, cancellationToken);
     }
 
@@ -70,8 +69,7 @@ public sealed class LocalDocumentStore : IDocumentStore
         DocumentFingerprint expected, CancellationToken cancellationToken = default)
     {
         var location = Locate(documentNamespace);
-        if (data.Length > location.MaximumBytes) throw new DocumentStoreException(DocumentStoreError.Limit);
-        if (expected is null || !expected.IsValidFor(location.MaximumBytes))
+        if (expected is null || !expected.IsValid)
             throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         // Take an immediate owned snapshot before waiting for the serial writer.
         return RunAsync(location, data, operation => WriteLocked(location, expected, operation.Data!), cancellationToken);
@@ -82,7 +80,7 @@ public sealed class LocalDocumentStore : IDocumentStore
     internal Task<DocumentFingerprint> ReplaceCacheAsync(string documentNamespace, ReadOnlyMemory<byte> data)
     {
         var location = Locate(documentNamespace);
-        if (data.Length > location.MaximumBytes) throw new DocumentStoreException(DocumentStoreError.Limit);
+        if (data.Length > CacheDocumentStore.MaximumDocumentBytes) throw new DocumentStoreException(DocumentStoreError.Limit);
         return RunAsync(location, data, operation =>
         {
             using var folder = WindowsDocumentFiles.OpenDirectory(location.Directory, true) ??
@@ -96,8 +94,7 @@ public sealed class LocalDocumentStore : IDocumentStore
         }, CancellationToken.None);
     }
 
-    private sealed record DocumentLocation(string Namespace, string Directory, string FileName,
-        bool Protected, int MaximumBytes);
+    private sealed record DocumentLocation(string Namespace, string Directory, string FileName, bool Protected);
     private sealed record Operation(CancellationToken Cancellation, byte[]? Data);
 
     private Task<T> RunAsync<T>(DocumentLocation location, ReadOnlyMemory<byte>? data, Func<Operation, T> operation,
@@ -146,17 +143,17 @@ public sealed class LocalDocumentStore : IDocumentStore
         {
             bool protect = protectedNamespaces.Contains(ns);
             string directory = Path.Combine(root.Path, protect ? "n-" + NamespaceHash(ns) : "n-" + ns + "-" + NamespaceHash(ns));
-            return new(ns, directory, protect ? DocumentName : "document.json", protect, MaximumDocumentBytes);
+            return new(ns, directory, protect ? DocumentName : "document.json", protect);
         }
         // Collection access is trusted-native only. The bridge retains its exact
-        // namespace grants and 8 MiB document/transfer contract.
+        // namespace grants.
         foreach (string collection in collections)
         {
             if (!ns.StartsWith(collection + ".", StringComparison.Ordinal)) continue;
             string hash = ns[(collection.Length + 1)..];
             if (DocumentRules.ValidHash(hash))
                 return new(ns, Path.Combine(root.Path, "c-" + collection + "-" + NamespaceHash(collection)),
-                    hash + ".js", false, MaximumSourceBytes);
+                    hash + ".js", false);
         }
         throw new DocumentStoreException(DocumentStoreError.Unavailable);
     }
@@ -220,7 +217,8 @@ public sealed class LocalDocumentStore : IDocumentStore
         return ReadDocument(Path.Combine(directory, location.FileName), location, operation.Cancellation);
     }
 
-    private DocumentSnapshot ReadDocument(string path, DocumentLocation location, CancellationToken cancellation)
+    private DocumentSnapshot ReadDocument(string path, DocumentLocation location, CancellationToken cancellation,
+        int? maximumBytes = null)
     {
         using var handle = WindowsDocumentFiles.OpenFile(path, WindowsDocumentFiles.Read,
             WindowsDocumentFiles.ShareRead, WindowsDocumentFiles.OpenExisting, allowMissing: true);
@@ -228,8 +226,8 @@ public sealed class LocalDocumentStore : IDocumentStore
         long length = WindowsDocumentFiles.FileLength(handle);
         if (!location.Protected)
         {
-            if (length > location.MaximumBytes) throw new DocumentStoreException(DocumentStoreError.Limit);
-            var data = new byte[(int)length];
+            if (maximumBytes is { } limit && length > limit) throw new DocumentStoreException(DocumentStoreError.Limit);
+            var data = new byte[checked((int)length)];
             using (var file = new FileStream(handle, FileAccess.Read))
             {
                 file.ReadExactly(data);
@@ -239,9 +237,9 @@ public sealed class LocalDocumentStore : IDocumentStore
             return new DocumentSnapshot(data, DocumentFingerprint.FromBytes(data));
         }
         if (length < EnvelopeHeaderBytes) throw new DocumentStoreException(DocumentStoreError.Corrupt);
-        if (length > CurrentUserDpapi.MaximumCiphertextBytes + EnvelopeHeaderBytes)
+        if (maximumBytes is { } encryptedLimit && length > (long)encryptedLimit + 64 * 1024 + EnvelopeHeaderBytes)
             throw new DocumentStoreException(DocumentStoreError.Limit);
-        var encrypted = new byte[(int)length];
+        var encrypted = new byte[checked((int)length)];
         using (var file = new FileStream(handle, FileAccess.Read))
         {
             file.ReadExactly(encrypted);
@@ -260,9 +258,11 @@ public sealed class LocalDocumentStore : IDocumentStore
             if (plain.Length < PlaintextHeaderBytes || !plain.AsSpan(0, 8).SequenceEqual("MFDPDOC1"u8))
                 throw new DocumentStoreException(DocumentStoreError.Corrupt);
             int count = BinaryPrimitives.ReadInt32LittleEndian(plain.AsSpan(8, 4));
-            if (count < 0 || count > MaximumDocumentBytes || count != plain.Length - PlaintextHeaderBytes ||
+            if (count < 0 || count != plain.Length - PlaintextHeaderBytes ||
                 !CryptographicOperations.FixedTimeEquals(plain.AsSpan(12, 32), SHA256.HashData(plain.AsSpan(PlaintextHeaderBytes))))
                 throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            if (maximumBytes is { } plainLimit && count > plainLimit)
+                throw new DocumentStoreException(DocumentStoreError.Limit);
             byte[] data = plain[PlaintextHeaderBytes..];
             return new DocumentSnapshot(data, DocumentFingerprint.FromBytes(data));
         }
@@ -320,7 +320,7 @@ public sealed class LocalDocumentStore : IDocumentStore
 
     private byte[] Protect(byte[] data, string ns)
     {
-        byte[] plain = new byte[PlaintextHeaderBytes + data.Length];
+        byte[] plain = new byte[checked(PlaintextHeaderBytes + data.Length)];
         try
         {
             "MFDPDOC1"u8.CopyTo(plain);

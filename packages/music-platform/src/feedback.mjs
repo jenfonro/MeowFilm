@@ -36,12 +36,11 @@ function records(p) {
   if (target.origin?.kind === 'heartbeat') fields.play_scene = 'heartbeat';
   if (!start) { fields.end = input(p.reason); fields.play_speed = number(p.rate, 1, 'INVALID_REQUEST'); }
   const json = encodeProtocolJSON(fields);
-  if (Buffer.byteLength(json) > 16384) fail('LIMIT'); // Existing per-record file-channel byte budget.
   return Buffer.from(`${Math.floor(at / 1000)}\x01${start ? '_plv' : '_pld'}\x01${json}\n`);
 }
 async function cscc(c, path, data, body, callbacks) {
   const response = await c.response({ url: 'http://d.kugou.com' + path + '?' + form(data),
-    method: body ? 'POST' : 'GET', body, maximumBytes: 65536, headers: {
+    method: body ? 'POST' : 'GET', body, headers: {
       'Cache-Control': 'no-store', ...(body ? { 'Content-Type': 'application/octet-stream' } : {}),
       ...(path === '/v3/qrydid' ? {} : { 'KG-Rec': '1', 'User-Agent':
         'Android9-1070-10597-18-0-Cscc' + (path === '/v2/post' ? 'Post' : 'Gen') + '-wifi' }) } }, callbacks);
@@ -142,7 +141,7 @@ export function createFeedbackOperations() {
       let response;
       try {
         response = await c.response({ url: 'https://clientlog3.music.163.com/api/clientlog/encrypt/upload?multiupload=true',
-          method: 'POST', maximumBytes: 65536, headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary,
+          method: 'POST', headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary,
             'Cache-Control': 'no-store', Cookie: cookieHeader(cookies), 'User-Agent': 'Meowfilm' }, body }, callbacks);
       } catch (error) {
         if (error.beforeSend) callbacks.notSent();
@@ -158,7 +157,7 @@ export function createFeedbackOperations() {
   const operations = {
     async 'feedback.qualify'(c) {
       if (c.platform !== 'wy') fail('UNSUPPORTED');
-      const account = c.accountRequired(), raw = await c.wy('/api/w/nuser/account/get', {}, true, { maximumBytes: 65536 });
+      const account = c.accountRequired(), raw = await c.wy('/api/w/nuser/account/get', {}, true);
       if (raw.profile === null) fail('AUTH_EXPIRED');
       if (required(raw.profile?.userId) !== account.userId) fail('INVALID_CREDENTIALS');
       return { qualified: true };
@@ -206,9 +205,8 @@ export function createFeedbackOperations() {
             Object.keys(comm).sort().map(key => `    <${key}>${xml(comm[key])}</${key}>\r\n`).join('') +
             '    <cid>228</cid>\r\n    <item ' + Object.keys(attributes).sort().map(key => `${key}="${xml(attributes[key])}"`).join(' ') + '/>\r\n</root>';
           const bytes = Buffer.from(document);
-          if (bytes.length > 128 * 1024) fail('LIMIT');
           const response = await c.response({ url: 'https://stat6.y.qq.com/android/fcgi-bin/imusic_tj',
-            method: 'POST', json: false, maximumBytes: 65536, body: gzipSync(bytes), headers: {
+            method: 'POST', json: false, body: gzipSync(bytes), headers: {
               'Content-Encoding': 'gzip', 'Content-Type': 'application/octet-stream', 'User-Agent': 'QQMusic 20090008(android 15)',
               Referer: 'https://y.qq.com/', Cookie: cookieHeader({ uin: account.userId, qqmusic_uin: account.userId,
                 qm_keyst: cookies.musickey, qqmusic_key: cookies.musickey }) } }, callbacks);
@@ -216,7 +214,7 @@ export function createFeedbackOperations() {
           let raw;
           try {
             const stream = response.value.subarray(5);
-            const inflated = inflateSync(stream, { maxOutputLength: 65536, info: true });
+            const inflated = inflateSync(stream, { info: true });
             if (inflated.engine.bytesWritten !== stream.length) fail('INVALID_RESPONSE');
             raw = decodeJSON(inflated.buffer);
           }

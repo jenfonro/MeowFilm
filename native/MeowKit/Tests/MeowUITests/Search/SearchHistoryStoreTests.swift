@@ -8,15 +8,15 @@ import XCTest
         defer { defaults.removePersistentDomain(forName: name) }
         try body(defaults)
     }
-    func testExactKeywordMovesToFrontCapsAtSixtyAndSurvivesReopen() {
+    func testExactKeywordMovesToFrontAndAllKeywordsSurviveReopen() {
         isolated { defaults in
             let store = SearchHistoryStore(defaults: defaults)
             for index in 0..<65 { store.record("词\(index)") }
             store.record("  词20 \n"); store.record("   ")
-            XCTAssertEqual(store.entries.count, 60)
+            XCTAssertEqual(store.entries.count, 65)
             XCTAssertEqual(store.entries.first?.text, "词20")
             XCTAssertEqual(store.entries.filter { $0.text == "词20" }.count, 1)
-            XCTAssertFalse(store.entries.contains { $0.text == "词0" })
+            XCTAssertTrue(store.entries.contains { $0.text == "词0" })
             XCTAssertEqual(SearchHistoryStore(defaults: defaults).entries, store.entries)
         }
     }

@@ -64,18 +64,25 @@ final class PlaybackNetworkPolicyTests: XCTestCase {
         }
     }
 
-    func testReservedMalformedDuplicateAndOversizedHeadersFailClosed() throws {
+    func testReservedMalformedAndDuplicateHeadersFailClosed() throws {
         for headers in [
             ["Range": "bytes=0-"], ["Host": "evil.invalid"], ["Accept-Encoding": "gzip"],
             ["Proxy-Authorization": "synthetic"], ["If-Range": "\"invented\""],
             ["Cookie": "sid=synthetic\r\nX: bad"], ["Bad Key": "value"],
-            ["User-Agent": "a", "user-agent": "b"],
-            ["X-Big": String(repeating: "x", count: 16 * 1024)]
+            ["User-Agent": "a", "user-agent": "b"]
         ] {
             XCTAssertThrowsError(try plan(headers: headers)) {
                 XCTAssertEqual($0 as? PlaybackNetworkError, .invalidHeaders)
             }
         }
+    }
+
+    func testLargeHeadersAndManyFieldsArePreserved() throws {
+        var headers = Dictionary(uniqueKeysWithValues: (0..<100).map { ("x-field-\($0)", "value") })
+        headers["x-large"] = String(repeating: "x", count: 20 * 1024)
+        let policy = PlaybackHTTPRequestPolicy(plan: try plan(headers: headers))
+        let request = try policy.request(start: 0, end: 99, validator: nil)
+        for (name, value) in headers { XCTAssertEqual(request.value(forHTTPHeaderField: name), value) }
     }
 
     func testHLSDoesNotSilentlyDropHeadersOrUseCustomScheme() throws {

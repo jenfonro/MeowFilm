@@ -19,7 +19,6 @@ internal sealed class SelectedSnapshotCases(bool script)
 {
     private string Extension => script ? ".js" : ".json";
     private string Prefix => script ? "selected-script." : "selected-json.";
-    private int MaximumBytes => script ? SelectedScriptSnapshot.MaximumBytes : SelectedJsonSnapshot.MaximumBytes;
     private static Type SharedType => typeof(SelectedJsonSnapshot).Assembly.GetType("MeowFilm.Platform.Files.SelectedFileSnapshot", throwOnError: true)!;
     private sealed record Data(byte[] Bytes, string Basename);
     private async Task<Data> ReadAsync(string path, CancellationToken token = default)
@@ -109,11 +108,11 @@ internal sealed class SelectedSnapshotCases(bool script)
         yield return new(Prefix + "contract.dto-and-fixed-errors", Contract);
         yield return new(Prefix + (script ? "exact-bytes-basename-owned" : "exact-bytes-sha-basename-owned"), Exact);
         yield return new(Prefix + "empty-and-invalid-content-remain-bytes", OpaqueBytes);
-        yield return new(Prefix + (script ? "maximum-sixteen-mib" : "maximum-eight-mib"), Maximum);
+        yield return new(Prefix + "large-complete-snapshot", Large);
         yield return new(Prefix + "extension-policies-do-not-overlap", ExtensionPolicy);
         yield return new(Prefix + "no-ui-synchronization-context-capture", UiContext);
         yield return new(Prefix + "raw-script-is-not-executed", ScriptNotExecuted);
-        yield return new(Prefix + "oversize-rejected-source-unchanged", Oversize);
+        yield return new(Prefix + "large-source-unchanged", LargeSourceUnchanged);
         yield return new(Prefix + "missing-source-and-parent", Missing);
         yield return new(Prefix + "existing-writer-rejected", ExistingWriter);
         yield return new(Prefix + "metadata-change-rejected", MetadataChange);
@@ -123,11 +122,6 @@ internal sealed class SelectedSnapshotCases(bool script)
 
     private Task Contract()
     {
-        if (script)
-            Equal(16 * 1024 * 1024,
-                (int)typeof(SelectedScriptSnapshot).GetField("MaximumBytes",
-                    BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!);
-        else Equal(8 * 1024 * 1024, MaximumBytes);
         string[] properties = (script ? typeof(SelectedScriptSnapshotData) : typeof(SelectedJsonSnapshotData)).GetProperties().Select(property => property.Name).Order().ToArray();
         Assert(properties.SequenceEqual(script ? new[] { "Basename", "Bytes" } : new[] { "Basename", "Bytes", "Sha256" }),
             "Snapshot exposes an unexpected property.");
@@ -238,10 +232,10 @@ internal sealed class SelectedSnapshotCases(bool script)
         }
     }
 
-    private async Task Maximum()
+    private async Task Large()
     {
         using var fixture = new Temp(Extension);
-        int length = MaximumBytes;
+        int length = 16 * 1024 * 1024 + 1;
         byte[] data = new byte[length];
         for (int i = 0; i < data.Length; i++) data[i] = (byte)(i * 31 + 7);
         string path = fixture.Write("maximum" + Extension, data);
@@ -251,20 +245,21 @@ internal sealed class SelectedSnapshotCases(bool script)
         fixture.AssertReleased(path);
     }
 
-    private async Task Oversize()
+    private async Task LargeSourceUnchanged()
     {
         using var fixture = new Temp(Extension);
         string path = Path.Combine(fixture.Root, "oversize" + Extension);
         using (var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write))
         {
-            file.SetLength(MaximumBytes + 1);
+            file.SetLength(20 * 1024 * 1024 + 1);
             file.Position = 0;
             file.Write([17, 42]);
         }
         string before = HashFile(path);
         var writeTime = File.GetLastWriteTimeUtc(path);
-        await Error(() => ReadAsync(path), SelectedJsonSnapshotError.TooLarge);
-        Equal(MaximumBytes + 1L, new FileInfo(path).Length);
+        var snapshot = await ReadAsync(path);
+        Equal(20 * 1024 * 1024 + 1, snapshot.Bytes.Length);
+        Equal(before, Hash(snapshot.Bytes));
         Equal(before, HashFile(path));
         Equal(writeTime, File.GetLastWriteTimeUtc(path));
         fixture.AssertReleased(path);
@@ -752,13 +747,13 @@ internal sealed class SelectedSnapshotCases(bool script)
 
     private IDisposable OpenLease(string path) => (IDisposable)Invoke(
         SharedType.GetMethod("OpenSnapshot", BindingFlags.Static | BindingFlags.NonPublic)!,
-        null, path, MaximumBytes, CancellationToken.None, Array.Empty<string>())!;
+        null, path, CancellationToken.None, Array.Empty<string>())!;
     private Data LeaseRead(IDisposable lease, CancellationToken token = default) =>
         ToData(Invoke(lease.GetType().GetMethod("Read", BindingFlags.Instance | BindingFlags.NonPublic)!,
             lease, token)!);
     private byte[] ReadFixed(Stream stream, int length, CancellationToken token = default) => (byte[])Invoke(
         SharedType.GetMethod("ReadFixed", BindingFlags.Static | BindingFlags.NonPublic)!,
-        null, stream, length, MaximumBytes, token)!;
+        null, stream, length, token)!;
     private static object? Invoke(MethodInfo method, object? target, params object[] arguments)
     {
         try { return method.Invoke(target, arguments); }

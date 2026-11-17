@@ -8,9 +8,6 @@ import { compileDASHTemplate, dashPrefetchPlan, decodeManifest, hlsPrefetchPlan,
 import { cacheCoverage, cacheGaps, createMediaCachePool, firstDASHRange, progressivePrefetchBytes } from './media-cache.js';
 
 // Resource budgets bound this local transport, not movie length or business result counts.
-const registryBudget = 16 * 1024 * 1024;
-const manifestBudget = 8 * 1024 * 1024;
-const pendingManifestBudget = 64 * 1024 * 1024;
 const maximumActiveRequests = 64;
 const maximumRedirects = 10;
 const responseHeaders = [
@@ -138,7 +135,7 @@ function rangeFor(value, length) {
 export function createMediaService() {
   const owners = new Map(), operations = new Set(), inboundSockets = new Map();
   const cachePool = createMediaCachePool();
-  let server, starting, closing, closed = false, baseUrl, registryBytes = 0, pendingManifestBytes = 0;
+  let server, starting, closing, closed = false, baseUrl;
 
   function socketDrain(socket, collection) {
     if (collection.has(socket)) return collection.get(socket);
@@ -172,11 +169,6 @@ export function createMediaService() {
     if (closed) throw failure('MEDIA_CLOSED');
   }
 
-  function reserve(bytes) {
-    if (registryBytes + bytes > registryBudget) throw failure('MEDIA_RESOURCE_LIMIT');
-    registryBytes += bytes;
-  }
-
   function register(owner, specification, added) {
     if (owner.revoked) throw failure('MEDIA_CANCELLED');
     if (specification.format === undefined) {
@@ -192,14 +184,12 @@ export function createMediaService() {
       if (routes.has(resource.path)) throw failure('MEDIA_MANIFEST_INVALID');
       routes.set(resource.path, resource);
     }
-    const bytes = 512 + Buffer.byteLength(key) * 2 + (specification.resources?.length ?? 0) * 512;
     const token = randomBytes(24).toString('base64url');
-    const record = { token, bytes, key, specification, routes, group,
+    const record = { token, key, specification, routes, group,
       url: `${baseUrl}/media/${owner.id}/${token}${group ? '/' : ''}` };
     if (group) record.templates = specification.resources.filter(resource => resource.template).map(resource => ({
       resolve: compileDASHTemplate(resource.url, resource.path), resource,
     }));
-    reserve(bytes);
     owner.keys.set(key, record);
     owner.tokens.set(token, record);
     added?.push(record);
@@ -209,7 +199,6 @@ export function createMediaService() {
   function forget(owner, record) {
     owner.keys.delete(record.key);
     owner.tokens.delete(record.token);
-    registryBytes -= record.bytes;
   }
 
   function resolveResource(owner, token, suffix) {
@@ -230,7 +219,7 @@ export function createMediaService() {
     if (owner.revoked) throw failure('MEDIA_CANCELLED');
     const streams = new Map(), controller = new AbortController();
     let finish;
-    const task = { controller, response, done: new Promise(resolve => { finish = resolve; }), streams, controlBytes: 0,
+    const task = { controller, response, done: new Promise(resolve => { finish = resolve; }), streams,
       track(stream) {
         socketDrain(stream, streams);
         stream.on('error', () => {}); // Only closed error codes escape the transport.
@@ -248,7 +237,6 @@ export function createMediaService() {
       async finish() {
         for (const stream of streams.keys()) if (stream !== response) stream.destroy();
         while (streams.size) await Promise.all([...streams.values()]);
-        pendingManifestBytes -= task.controlBytes;
         response?.removeListener('close', disconnected);
         operations.delete(task);
         owner.operations.delete(task);
@@ -342,13 +330,7 @@ export function createMediaService() {
       incoming.pipe(stream);
     }
     for await (const chunk of stream) {
-      const charge = chunk.length * 3; // Binary input plus its UTF-16 parse text.
-      if (bytes + chunk.length > manifestBudget || pendingManifestBytes + charge > pendingManifestBudget) {
-        throw failure('MEDIA_MANIFEST_LIMIT');
-      }
       bytes += chunk.length;
-      pendingManifestBytes += charge;
-      task.controlBytes += charge;
       chunks.push(chunk);
     }
     if (!incoming.complete) throw failure('MEDIA_UPSTREAM_ERROR');
@@ -409,11 +391,6 @@ export function createMediaService() {
       const rewritten = (format === 'hls' ? rewriteHLS : rewriteDASH)(text, url,
         specification => register(owner, specification, added), resource.hlsVariables);
       const body = Buffer.from(rewritten);
-      if (body.length > manifestBudget * 4 || pendingManifestBytes + body.length > pendingManifestBudget) {
-        throw failure('MEDIA_MANIFEST_LIMIT');
-      }
-      pendingManifestBytes += body.length;
-      task.controlBytes += body.length;
       if (task.controller.signal.aborted || owner.revoked) throw task.controller.signal.reason ?? failure('MEDIA_CANCELLED');
       return body;
     } catch (error) {
@@ -819,7 +796,6 @@ export function createMediaService() {
         if (owner.prefetchJob) await owner.prefetchJob.promise.catch(() => {});
         await owner.cache?.close();
         owners.delete(owner.id);
-        registryBytes -= owner.bytes;
       })();
     }
     await owner.revoking;
@@ -836,12 +812,7 @@ export function createMediaService() {
       if (useStream) await start();
       if (closed) throw failure('MEDIA_CLOSED');
       const id = randomBytes(24).toString('base64url');
-      const bytes = 1024 + Buffer.byteLength(stringifyJSONValue({
-        url: input.url, headers: input.headers, scope: input.scope,
-        ...(input.drm === undefined ? {} : { drm: input.drm }),
-      })) * 2;
-      reserve(bytes);
-      const owner = { ...input, id, bytes, keys: new Map(), tokens: new Map(), operations: new Set(), revoked: false,
+      const owner = { ...input, id, keys: new Map(), tokens: new Map(), operations: new Set(), revoked: false,
         root: { url: input.url, format: input.format }, cache: cache ? cachePool.create() : undefined };
       owners.set(id, owner);
       try {

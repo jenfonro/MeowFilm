@@ -5,7 +5,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { once } from 'node:events';
 import { join } from 'node:path';
-import { createNativeSettings, nativeSettingsFrameBytes } from '../apps/runtime/native-settings.mjs';
+import { createNativeSettings } from '../apps/runtime/native-settings.mjs';
 import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { parseIOSConfiguration } from '../apps/ios/runtime/bootstrap.mjs';
 import { createTMDBDataModule } from '../apps/runtime/modules/metadata-data.mjs';
@@ -138,7 +138,6 @@ test('private frame parsing rejects malformed values, fingerprints, unknown code
       { ...result(1, null), fingerprint: { exists: true, length: 1, sha256: 'not-a-digest' } },
       { kind: 'settings.result', id: 1, ok: false, code: 'private-error-message' },
       Buffer.from([0xff, 10]),
-      Buffer.alloc(nativeSettingsFrameBytes + 1, 32),
     ]) await t.test(Buffer.isBuffer(reply) ? `bytes-${reply.length}` : JSON.stringify(reply), async sub => {
       const f = pipe(sub), first = assert.rejects(f.settings.reload('tmdb'), { code: 'CLOSED' }),
         second = assert.rejects(f.settings.reload('douban'), { code: 'CLOSED' });
@@ -149,14 +148,20 @@ test('private frame parsing rejects malformed values, fingerprints, unknown code
     });
   });
 
-test('private frames accept multiple replies per chunk but bound outgoing writes and release pending work on close', async t => {
+test('private frames accept multiple replies, large documents and release pending work on close', async t => {
   const f = pipe(t), a = f.settings.reload('tmdb'), b = f.settings.reload('douban');
   f.settings.accept(Buffer.concat([line(result(1, null)), line(result(2, { version: 1 }))]));
   assert.equal(await a, null);
   assert.deepEqual(await b, { version: 1 });
-  await assert.rejects(f.settings.write('pan.accounts', { oversized: 'x'.repeat(nativeSettingsFrameBytes) }, fingerprint(null)),
-    { code: 'INVALID_REQUEST' });
-  assert.equal(f.requests.length, 2);
+  const document = { large: 'x'.repeat(8 * 1024 * 1024 + 1) };
+  const written = f.settings.write('pan.accounts', document, fingerprint(null));
+  assert.deepEqual(f.requests[2].document, document);
+  const reply = line(result(3, document));
+  f.settings.accept(reply.subarray(0, 8 * 1024 * 1024));
+  f.settings.accept(reply.subarray(8 * 1024 * 1024));
+  assert.deepEqual((await written).document, document);
+  assert.deepEqual(f.settings.read('pan.accounts'), document);
+  assert.equal(f.requests.length, 3);
   const waiting = assert.rejects(f.settings.reload('cat.sources'), { code: 'CLOSED' });
   f.settings.close();
   await waiting;

@@ -55,7 +55,6 @@ public sealed partial class MusicCapability
         MusicDto.Require(uri.Scheme is "http" or "https" && uri.UserInfo.Length == 0);
         var headers = response.GetProperty("headers").EnumerateObject()
             .ToDictionary(h => h.Name, h => h.Value.GetString()!, StringComparer.OrdinalIgnoreCase);
-        MusicDto.Require(headers.Count <= 32);
         long? expires = response.TryGetProperty("expiresAt", out var at) && at.ValueKind == JsonValueKind.Number ? at.GetInt64() : null;
         MusicDto.Require(expires is null || expires > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         return new(uri, headers, target with

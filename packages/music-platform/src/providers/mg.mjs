@@ -136,8 +136,8 @@ export const mgProvider = {
   },
   async lyrics(c, { id, musicInfo = {} }) {
     id = input(first(id, musicInfo.songmid));
-    const data = await read(c, { ...request('https://c.musicapp.migu.cn/MIGUM2.0/v1.0/content/resourceinfo.do',
-      { resourceType: 2 }, false, { resourceId: id }), maximumBytes: 512 * 1024 });
+    const data = await read(c, request('https://c.musicapp.migu.cn/MIGUM2.0/v1.0/content/resourceinfo.do',
+      { resourceType: 2 }, false, { resourceId: id }));
     const resource = rows(data.resource)[0], main = first(resource.mrcUrl, resource.mrcurl, resource.lrcUrl);
     if (!main) return { text: '', translation: '', romanization: '' };
     const file = async address => {
@@ -145,7 +145,7 @@ export const mgProvider = {
       // Dynamic files come only from this response; no credentials follow them.
       if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) fail('INVALID_RESPONSE');
       url.protocol = 'https:';
-      return c.read({ url: url.href, json: false, maximumBytes: 512 * 1024,
+      return c.read({ url: url.href, json: false,
         headers: { Referer: 'https://app.c.nf.migu.cn/', channel: '0146921', 'User-Agent': mobileAgent } });
     };
     const bytes = await file(main), text = resource.mrcUrl || resource.mrcurl ? await miguLyrics(bytes, c.signal) :

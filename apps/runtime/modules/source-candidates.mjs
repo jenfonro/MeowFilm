@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isUtf8 } from 'node:buffer';
 
-export const sourceByteLimit = 16 * 1024 * 1024;
 const identifier = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$(?![\s\S])/;
 
 /** Complete management inputs only; no upload sessions, history or timers. */
@@ -13,9 +12,9 @@ export class SourceCandidates {
   constructor({ module, fail }) { this.module = module; this.fail = fail; }
   #require(value, code = 'INVALID_REQUEST') { if (!value) throw this.fail(code); }
   #code(kind) {
-    return ({ music: { missing: 'SOURCE_NOT_FOUND', integrity: 'SCRIPT_INTEGRITY', encoding: 'SCRIPT_ENCODING', limit: 'LIMIT' },
-      source: { missing: 'SOURCE_NOT_FOUND', integrity: 'SOURCE_INTEGRITY', encoding: 'SOURCE_ENCODING', limit: 'LIMIT' },
-      cat: { missing: 'NOT_FOUND', integrity: 'INVALID_ARGUMENT', encoding: 'SCRIPT_PROTOCOL_ERROR', limit: 'RESOURCE_LIMIT' } })[this.module][kind];
+    return ({ music: { missing: 'SOURCE_NOT_FOUND', integrity: 'SCRIPT_INTEGRITY', encoding: 'SCRIPT_ENCODING' },
+      source: { missing: 'SOURCE_NOT_FOUND', integrity: 'SOURCE_INTEGRITY', encoding: 'SOURCE_ENCODING' },
+      cat: { missing: 'NOT_FOUND', integrity: 'INVALID_ARGUMENT', encoding: 'SCRIPT_PROTOCOL_ERROR' } })[this.module][kind];
   }
   validate({ installationId, sourceRevision, basename }) {
     this.#require(!this.#closed, this.module === 'cat' ? 'HOST_CLOSED' : 'CLOSED');
@@ -31,7 +30,6 @@ export class SourceCandidates {
     this.validate(input);
     this.#require(!signal?.aborted, 'CANCELLED');
     this.#require(bytes instanceof Uint8Array, this.#code('encoding'));
-    this.#require(bytes.length <= sourceByteLimit, this.#code('limit'));
     this.#require(bytes.length > 0 && isUtf8(bytes), this.#code('encoding'));
     const source = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('utf8');
     this.#require(source.trim().length > 0 && (this.module !== 'cat' || !source.startsWith('\uFEFF')), this.#code('encoding'));

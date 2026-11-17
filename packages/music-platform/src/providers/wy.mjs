@@ -299,7 +299,7 @@ export const wyProvider = {
   },
   async chorus(c, { id, musicInfo = {} }) {
     id = input(first(id, musicInfo.songmid));
-    const data = await c.wy('/api/song/chorus', { ids: JSON.stringify([id]) }, false, { maximumBytes: 65536 });
+    const data = await c.wy('/api/song/chorus', { ids: JSON.stringify([id]) }, false);
     const list = first(data.chorus, data.data);
     const row = list == null ? null : rows(list)[0];
     const start = optionalNumber(row?.startTime), end = optionalNumber(row?.endTime);
@@ -308,7 +308,7 @@ export const wyProvider = {
   },
   async lyrics(c, { id, musicInfo = {} }) {
     const data = await c.wy('/api/song/lyric/v1', { id: input(first(id, musicInfo.songmid)), cp: false,
-      tv: 0, lv: 0, rv: 0, kv: 0, yv: 0, ytv: 0, yrv: 0 }, false, { maximumBytes: 512 * 1024 });
+      tv: 0, lv: 0, rv: 0, kv: 0, yv: 0, ytv: 0, yrv: 0 }, false);
     const yrc = text(data.yrc?.lyric), timed = /\[\d+,\d+\]/.test(yrc);
     return { text: timed ? yrc : text(data.lrc?.lyric),
       translation: timed && /\[\d+,\d+\]/.test(text(data.ytlrc?.lyric)) ? data.ytlrc.lyric : text(data.tlyric?.lyric),

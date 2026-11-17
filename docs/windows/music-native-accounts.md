@@ -53,6 +53,8 @@
 
 显式导入／验证、扫码和短信登录先完成 Node 的真实认证及资料读取，再由唯一原生 owner 对凭据执行 CAS，成功保存后才成为当前授权。展示详情独立发布到可选缓存，缓存落盘失败不逆转凭据提交。短期二维码、候选凭据和 handoff 不等于已保存账号。
 
+二维码 PNG 不设 Base64 字符、编码字节或 chunk 数量配额；原生解码前仍验证 PNG 结构、CRC、允许的 chunk 类型、1024×1024 尺寸及像素对应的解压预算。发布纯像素，不保留元数据或网络地址。显式保存完整编码 PNG，不设文件字节配额；确认、有效代次、新建文件及安全路径限制保持不变。
+
 ## 会话与消费者
 
 - `AcquireAsync` 只从保护存储观察当前账号并签发带平台、用户、scope 和 generation 的会话。
@@ -122,7 +124,7 @@ Task<MusicAccountDetails> RefreshDetailsAsync(
 
 ## 账号文件传输
 
-文件与批次行为以[共同账号文件契约](../common/music/account-transfer.md)为准。Windows 使用独立的 `IMusicAccountTransferSource` 原生接口，不新增 JSON／Node 命令；`MusicAccountTransferFile` 持有显式用户文件的有界字节，`MusicAccountTransferPlan` 持有 owner 捕获的完整账号值 fingerprint 与授权 epoch，普通序列化和调试字符串不包含凭据。界面只能取得平台冲突摘要及最终逐平台结果。
+文件与批次行为以[共同账号文件契约](../common/music/account-transfer.md)为准。Windows 使用独立的 `IMusicAccountTransferSource` 原生接口，不新增 JSON／Node 命令；`MusicAccountTransferFile` 持有显式用户文件的完整字节，读写和解码不设文件大小配额，使用后清零。`MusicAccountTransferPlan` 持有 owner 捕获的完整账号值 fingerprint 与授权 epoch，普通序列化和调试字符串不包含凭据。界面只能取得平台冲突摘要及最终逐平台结果。
 
 - 准备先完整检查文件结构，再在账号磁盘队列中捕获各平台基线。跳过平台不调用网络、不写账号；计划只能消费一次，策略不跨批次保存。
 - 候选通过 `MusicAccountProtocol.ValidateTransferAsync` 进入共同 Node 认证，不先发布为当前账号；失败候选不替换已保存授权，不恢复原生设备 writer。

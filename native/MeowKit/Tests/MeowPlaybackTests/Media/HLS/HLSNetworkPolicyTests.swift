@@ -29,7 +29,7 @@ final class HLSNetworkPolicyTests: XCTestCase {
         }
     }
 
-    func testUnknownURLsHostsBodiesSmugglingAndOversizedHeadersCannotAuthorizeFetch() throws {
+    func testUnknownURLsHostsBodiesAndSmugglingCannotAuthorizeFetch() throws {
         let registry = try HLSResourceRegistry(url: hlsPlan().url), path = registry.path(registry.root)
         let bad = [
             "GET https://other.invalid/ HTTP/1.1\r\nHost: 127.0.0.1:32123\r\n\r\n",
@@ -40,11 +40,24 @@ final class HLSNetworkPolicyTests: XCTestCase {
             "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1:32123\r\nContent-Length: 1\r\n\r\n",
             "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1:32123\r\nTransfer-Encoding: chunked\r\n\r\n",
             "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1:32123\r\nOrigin: https://other.invalid\r\n\r\n",
-            String(repeating: "a", count: HLSClientRequest.maximumHeaderBytes + 1)
+            "malformed"
         ]
         for value in bad { XCTAssertThrowsError(try HLSClientRequest(Data(value.utf8), port: 32123)) }
         XCTAssertNil(registry.lookup(path: "/unknown/resource.bin"))
         XCTAssertNil(registry.lookup(path: path + "?extra"))
+    }
+
+    func testLargeHeadersAndStreamLengthsKeepTheirActualValues() throws {
+        let plan = try hlsPlan(), registry = try HLSResourceRegistry(url: plan.url)
+        let fields = (0..<100).map { "X-Field-\($0): value\r\n" }.joined()
+        let header = "GET \(registry.path(registry.root)) HTTP/1.1\r\nHost: 127.0.0.1:32123\r\n" + fields +
+            "X-Large: " + String(repeating: "x", count: 20 * 1024) + "\r\n\r\n"
+        let request = try HLSClientRequest(Data(header.utf8), port: 32123)
+        let length: Int64 = 2 * 1024 * 1024 * 1024 * 1024
+        let response = HTTPURLResponse(url: plan.url, statusCode: 200, httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Length": String(length), "Content-Type": "application/octet-stream"])!
+        XCTAssertEqual(try HLSUpstreamResponse.parse(response, kind: .media, request: request).length, length)
+        XCTAssertEqual(try HLSUpstreamResponse.parse(response, kind: .metadata, request: request).length, length)
     }
 
     func testResourceAndRedirectScopesDoNotRestoreHeadersOnABAReturnOrForeignPlaylist() throws {

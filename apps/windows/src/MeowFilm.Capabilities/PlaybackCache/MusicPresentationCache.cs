@@ -12,7 +12,7 @@ internal sealed class MusicPresentationCache(string? directory = null, TimeProvi
     internal const string DirectoryName = "music-presentation-v2";
     internal const long Ttl = 30L * 86400000;
     private readonly FileResourceCache resources = new(directory, 8L * 1024 * 1024,
-        ArtworkService.MaximumBytes, TimeSpan.FromMilliseconds(Ttl), time);
+        ArtworkService.MaximumCacheEntryBytes, TimeSpan.FromMilliseconds(Ttl), time);
     private long lyricVersion;
     public long Epoch => resources.Epoch("image");
     public TimeSpan Lifetime => TimeSpan.FromMilliseconds(Ttl);

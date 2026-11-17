@@ -32,6 +32,18 @@ final class FilmSettingsDocumentTests: XCTestCase {
         return root
     }
 
+    func testLargeSettingsRoundTripWithContentCAS() throws {
+        let root = try directory()
+        let store = try DocumentStore(baseURL: root, namespace: FilmSettingsBlock.rules.namespace)
+        let document = FilmSettingsDocument(block: .rules, storage: .plain { store })
+        let value: RuntimeValue = .object(["rules": .string(String(repeating: "x", count: 8 * 1024 * 1024 + 1))])
+        let missing = try document.snapshot()
+        _ = try document.compareAndSwap(expected: missing.fingerprint, document: value)
+        XCTAssertEqual(try document.read(), value)
+        let reopened = FilmSettingsDocument(block: .rules, storage: .plain { store })
+        XCTAssertEqual(try reopened.read(), value)
+    }
+
     func testProtectedCASUsesPlaintextFingerprintAndNotifiesOnlyCommittedChanges() throws {
         let root = try directory(), changes = FilmSettingsTestChanges(), keys = FilmSettingsTestKeys()
         let store = try EncryptedDocumentStore(baseURL: root, namespace: FilmSettingsBlock.panAccounts.namespace, keyProvider: keys)

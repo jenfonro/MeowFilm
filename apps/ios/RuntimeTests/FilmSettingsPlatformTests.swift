@@ -340,12 +340,10 @@ final class FilmSettingsPlatformTests: XCTestCase {
             catch {}
         }
         let oversized = base.appendingPathComponent("large.js")
-        FileManager.default.createFile(atPath: oversized.path, contents: nil)
-        let handle = try FileHandle(forWritingTo: oversized)
-        try handle.truncate(atOffset: UInt64(ImportedFileReader.maximumSupportedBytes + 1))
-        try handle.close()
-        do { _ = try await FilmScriptFileSnapshot.read(oversized); XCTFail("File read resource boundary") }
-        catch { XCTAssertEqual(error as? ImportedFileError, .tooLarge) }
+        let largeSource = "//" + String(repeating: "x", count: 32 * 1024 * 1024 + 1)
+        try Data(largeSource.utf8).write(to: oversized)
+        let largeSnapshot = try await FilmScriptFileSnapshot.read(oversized)
+        XCTAssertEqual(largeSnapshot.source, largeSource)
     }
 
     func testVideoOptionsAreDurableExclusiveOrderedAndFailedSaveDoesNotPublish() async throws {

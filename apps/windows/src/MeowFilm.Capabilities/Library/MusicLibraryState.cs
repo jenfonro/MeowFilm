@@ -66,7 +66,7 @@ public sealed partial class MusicLibraryOwner
             foreach (var n in collections)
             {
                 var c = LJ.Object(n); LJ.Fields(c, "id kind name order revision manualOrder bindings intents deleted locallyCreated", "id kind name order revision manualOrder bindings intents");
-                string id = LJ.Text(c["id"]), kind = LJ.S(c["kind"]); _ = LJ.Text(c["name"], 200); _ = Revision(c);
+                string id = LJ.Text(c["id"]), kind = LJ.S(c["kind"]); _ = LJ.Text(c["name"], null); _ = Revision(c);
                 var order = LJ.Array(c["order"]); var binds = LJ.Array(c["bindings"]); var intents = LJ.Object(c["intents"]);
                 LJ.Require(ids.Add(id) && kind is "favorites" or "playlist" && LJ.IsBool(c["manualOrder"]) &&
                     order.All(value => value is JsonValue scalar && scalar.TryGetValue<string>(out string? songId) && containsSong(songId)) &&

@@ -151,13 +151,13 @@ final class MusicNativeQueueReferenceCacheTests: XCTestCase {
         await filtered.close(); await source.close(); await service.close()
     }
 
-    func testPublicReferenceSnapshotsKeepTheActualAggregateByteBudgetUntilEachSourceCloses() async throws {
+    func testPublicReferenceSnapshotsRemainCompleteBeyondFormerAggregateBudget() async throws {
         var info = try MJ.parse(track(title: "Budget").data)
         info["unconsumed"] = .string(String(repeating: "x", count: 64 * 1024))
         let row = MusicNativeTrackData(platform: "tx", data: info.bytes)
-        let count = MusicRemoteQueueSource.maximumBytes / row.data.count
+        let count = 6 * 1024 * 1024 / row.data.count + 1
         let bytes = count * row.data.count
-        XCTAssertLessThanOrEqual(bytes, MusicRemoteQueueSource.maximumBytes)
+        XCTAssertGreaterThan(bytes, 6 * 1024 * 1024)
         XCTAssertGreaterThan(bytes * 3, 12 * 1024 * 1024)
         var page = try MusicPlatformFixture.page(Array(repeating: row, count: count), platform: "tx")
         guard case .object(var fields) = page else { return XCTFail("canonical page") }
@@ -170,9 +170,10 @@ final class MusicNativeQueueReferenceCacheTests: XCTestCase {
         let second = try await service.openPublicQueue(request)
         let current = try await first.collectionTracks(intent: .init())
         XCTAssertEqual(current.count, count)
-        XCTAssertTrue(current.allSatisfy { $0.data.count < row.data.count })
-        do { _ = try await service.openPublicQueue(request); XCTFail("References must not turn the aggregate byte budget into a row-count budget") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .limit) }
+        XCTAssertTrue(try current.allSatisfy { try MJ.parse($0.data)["unconsumed"] == info["unconsumed"] })
+        let third = try await service.openPublicQueue(request)
+        let thirdTracks = try await third.collectionTracks(intent: .init())
+        XCTAssertEqual(thirdTracks.count, count)
         await first.close()
         let replacement = try await service.openPublicQueue(request)
         let after = try await replacement.collectionTracks(intent: .init())
@@ -180,6 +181,6 @@ final class MusicNativeQueueReferenceCacheTests: XCTestCase {
         let queue = try await service.queue(), calls = await peer.calls()
         XCTAssertTrue(queue.entries.isEmpty); XCTAssertEqual(queue.revision, 0)
         XCTAssertEqual(calls.map(\.operation), Array(repeating: "playlist.complete", count: 4))
-        await replacement.close(); await second.close(); await service.close()
+        await replacement.close(); await third.close(); await second.close(); await service.close()
     }
 }

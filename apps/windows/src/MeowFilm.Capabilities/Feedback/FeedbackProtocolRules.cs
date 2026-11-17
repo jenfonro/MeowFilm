@@ -40,7 +40,7 @@ internal static class FeedbackProtocolRules
                 double.IsFinite(value.Rate) && value.Rate > 0);
             Require(value.PlaybackId != Guid.Empty && value.StartedAt >= DateTimeOffset.UnixEpoch &&
                 value.AdmittedAt >= DateTimeOffset.UnixEpoch);
-            // Preserve Unicode scalars; the outbox owns the serialized byte budget.
+            // Preserve Unicode scalars in the persisted playback facts.
             Require(Text(value.Source, true) && Text(value.SourceId, true) && Text(value.Algorithm, true));
             return value;
         }

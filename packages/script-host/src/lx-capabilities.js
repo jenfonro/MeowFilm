@@ -6,16 +6,16 @@ export function lxCapabilities(data) {
   const valid = (value) => requireValue(value, 'SCRIPT_PROTOCOL_ERROR');
   valid(data && typeof data === 'object' && data.status !== false);
   valid(data.sources && typeof data.sources === 'object' && !Array.isArray(data.sources));
-  valid(Object.keys(data.sources).length > 0 && Object.keys(data.sources).length <= 32);
+  valid(Object.keys(data.sources).length > 0);
   const result = Object.create(null);
   for (const key of Object.keys(data.sources)) {
     identifier(key);
     const item = data.sources[key];
     valid(item && typeof item === 'object');
     if (item.type !== 'music') continue;
-    valid(Array.isArray(item.actions) && item.actions.length <= 32);
-    valid(Array.isArray(item.qualitys) && item.qualitys.length <= 32);
-    valid(item.name === undefined || (typeof item.name === 'string' && item.name.length <= 256));
+    valid(Array.isArray(item.actions));
+    valid(Array.isArray(item.qualitys));
+    valid(item.name === undefined || typeof item.name === 'string');
     valid(item.actions.every(action => typeof action === 'string' && identifier(action)));
     const declaredQualities = item.qualitys.map(quality => typeof quality === 'object' && quality !== null ? quality.type : quality);
     valid(declaredQualities.every(quality => typeof quality === 'string' && quality.length > 0 &&

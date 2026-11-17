@@ -75,11 +75,7 @@ def archive_for(source):
                         request = urllib.request.Request(source["url"], headers={"User-Agent": "Meowfilm-Aether-prepare"})
                         opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
                         with opener.open(request, timeout=10 if index == 0 else 120) as response, partial.open("wb") as stream:
-                            length = 0
                             for block in iter(lambda: response.read(1024 * 1024), b""):
-                                length += len(block)
-                                if length > 256 * 1024 * 1024:
-                                    raise ValueError("Aether archive exceeds download boundary")
                                 stream.write(block)
                         break
                     except OSError:

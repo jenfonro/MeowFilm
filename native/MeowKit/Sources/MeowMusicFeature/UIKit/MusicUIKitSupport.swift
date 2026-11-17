@@ -20,7 +20,7 @@ public final class MusicArtworkImages {
     private var selector: (any MusicArtworkSelecting)?
 
     init(http: MusicArtworkHTTP = MusicArtworkHTTP()) {
-        images = ArtworkImages(maximumBytes: MusicArtworkHTTP.maximumBytes) { try await http.read($0) }
+        images = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024) { try await http.read($0) }
     }
 
     func cached(_ url: URL) -> UIImage? { images.cached(url) }
@@ -30,14 +30,8 @@ public final class MusicArtworkImages {
         images.setByteCache(cache); self.selector = selector
     }
     func read(_ url: URL) async throws -> (UIImage, Data?, URL) {
-        do {
-            let value = try await images.read(url)
-            return (value.0, value.1, url)
-        } catch let error as URLError where error.code == .dataLengthExceedsMaximum {
-            guard let rendition = MusicArtworkHTTP.boundedNeteaseRendition(url) else { throw error }
-            let value = try await images.read(rendition)
-            return (value.0, value.1, rendition)
-        }
+        let value = try await images.read(url)
+        return (value.0, value.1, url)
     }
     func failed(songID: String, url: URL, attempted: Set<URL>) async throws -> URL? {
         try await selector?.failedArtwork(songID: songID, url: url, attempted: attempted)
@@ -105,13 +99,6 @@ final class MusicArtworkView: ArtworkView {
         super.didFailImage(url)
     }
     override func didFailImage(_ url: URL, error: Error) {
-        if (error as? URLError)?.code == .dataLengthExceedsMaximum,
-           let rendition = MusicArtworkHTTP.boundedNeteaseRendition(url) {
-            attempted.insert(url); requestedURL = rendition
-            if let songID = representedSongID { loadSelected(rendition, songID: songID) }
-            else { super.load(rendition) }
-            return
-        }
         didFailImage(url)
     }
     private func loadSelected(_ url: URL?, songID: String) { super.load(url, displayIdentity: songID) }

@@ -29,7 +29,7 @@ node scripts/accept-sources.mjs --kind source --scripts <文件或目录绝对�
 - 不制造其他平台的 ID，不以网络歌曲替代 `local` 输入，不将缺少输入写成已执行。特殊平台／扩展动作需要调用方提供其实际协议数据。
 - `--probe-media` 对 LX `musicUrl` 或 Cat `play` 返回的 HTTP(S) URL 发起有界字节探测；它不下载完整媒体，不证明整首播放或所有画质可用。
 - `--output` 必须是仓库 `tmp/` 内的绝对路径；默认报告为 `tmp/test-results/script-sources/acceptance.json`，运行中滚动替换。
-- 音乐/Cat 每份脚本使用独立临时 dataRoot；关闭运行器后递归清理。源码一次 raw PUT 登记完整候选，再以 sourceRevision 一次 JSON POST 导入/安装；源码仍为 1 至 16 MiB。调用和结果均直接 JSON/value，无大小分流、分片、Base64、TTL 或普通字节配额。中断上传不替换完整候选，前置字段/身份失败不消费，取入操作失败释放；原始源码和 source 规范化执行内容的身份不混淆。
+- 音乐/Cat 每份脚本使用独立临时 dataRoot；关闭运行器后递归清理。源码一次 raw PUT 登记完整候选，再以 sourceRevision 一次 JSON POST 导入/安装；源码必须非空，不设人为字节上限。调用和结果均直接 JSON/value，无大小分流、分片、Base64、TTL 或普通字节配额。中断上传不替换完整候选，前置字段/身份失败不消费，取入操作失败释放；原始源码和 source 规范化执行内容的身份不混淆。
 
 ## Reader 与 portable CatVod
 

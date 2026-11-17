@@ -41,7 +41,7 @@ struct OrdinaryFileDirectory: Sendable {
         code == ELOOP || code == ENOTDIR ? .unsafePath : .storageFailure
     }
 
-    func contents(_ name: String, in directory: Int32, maximumBytes: Int) throws -> Data? {
+    func contents(_ name: String, in directory: Int32, maximumBytes: Int?) throws -> Data? {
         let fd = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else {
             if errno == ENOENT { return nil }
@@ -54,9 +54,9 @@ struct OrdinaryFileDirectory: Sendable {
         guard info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), info.st_nlink == 1 else {
             throw DocumentStoreError.unsafePath
         }
-        guard info.st_size <= off_t(maximumBytes) else { throw DocumentStoreError.documentTooLarge }
-        // Bound the allocation before reading; reject short reads and growth.
-        let count = Int(info.st_size)
+        guard let count = Int(exactly: info.st_size), count >= 0 else { throw DocumentStoreError.storageFailure }
+        if let maximumBytes, count > maximumBytes { throw DocumentStoreError.documentTooLarge }
+        // Allocate the actual file size; reject short reads and growth.
         var bytes = Data(count: count)
         var offset = 0
         while offset < count {

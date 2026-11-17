@@ -14,8 +14,6 @@ public sealed class SelectedLyricSnapshotException(SelectedLyricSnapshotError er
 /// <summary>Explicit, read-only local timed-text selection. No directory discovery, path grant or script execution.</summary>
 public static class SelectedLyricSnapshot
 {
-    public const int MaximumBytes = 256 * 1024;
-    public const int MaximumCharacters = 65536;
     public static async Task<SelectedLyricSnapshotData> ReadAsync(string selectedPath, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -27,7 +25,7 @@ public static class SelectedLyricSnapshot
         SelectedFileSnapshotData? snapshot = null;
         try
         {
-            snapshot = await SelectedFileSnapshot.ReadAsync(selectedPath, extension, MaximumBytes, cancellationToken).ConfigureAwait(false);
+            snapshot = await SelectedFileSnapshot.ReadAsync(selectedPath, extension, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             var bytes = snapshot.Bytes.AsSpan();
             string text;
@@ -40,7 +38,6 @@ public static class SelectedLyricSnapshot
             else if (bytes.StartsWith(new byte[] { 0xfe, 0xff }))
                 text = new UnicodeEncoding(true, false, true).GetString(bytes[2..]);
             else text = new UTF8Encoding(false, true).GetString(bytes);
-            if (text.Length > MaximumCharacters) throw new SelectedLyricSnapshotException(SelectedLyricSnapshotError.TooLarge);
             if (text.Length == 0 || text.Any(c => c < 32 && c is not ('\r' or '\n' or '\t')))
                 throw new SelectedLyricSnapshotException(SelectedLyricSnapshotError.InvalidEncoding);
             string sha256;

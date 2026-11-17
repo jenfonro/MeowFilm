@@ -5,7 +5,7 @@ namespace MeowFilm.Desktop.Artwork;
 internal sealed class ArtworkDiskCache(string directory) : IDisposable
 {
     private const string Group = "artwork";
-    private readonly FileResourceCache cache = new(directory, 256L * 1024 * 1024, ArtworkService.MaximumBytes);
+    private readonly FileResourceCache cache = new(directory, 256L * 1024 * 1024, ArtworkService.MaximumCacheEntryBytes);
 
     internal async Task<byte[]?> ReadAsync(string key, CancellationToken token) =>
         (await cache.ReadAsync(Group, key, token).ConfigureAwait(false))?.Content;

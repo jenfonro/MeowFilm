@@ -459,10 +459,9 @@ private final class RuntimeHTTPState: @unchecked Sendable {
     }
 }
 
-/// A task delegate on the same owner session: budget and failure stop the read,
+/// A task delegate on the same owner session: cancellation and failure stop the read,
 /// but its continuation settles only in didComplete, never at cancel().
 private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    private static let maximumMetadataBytes = 4 * 1_024 * 1_024
     private let lock = NSLock()
     private let requestID: String
     private let provider: RuntimeModule
@@ -506,9 +505,7 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
            response.value(forHTTPHeaderField: "X-Meow-Request-Id") == requestID {
             self.response = response
             let type = response.mimeType?.lowercased() ?? ""
-            if provider != .source, response.expectedContentLength > Self.maximumMetadataBytes {
-                failure = URLError(.dataLengthExceedsMaximum)
-            } else if response.statusCode == 200 && type.hasPrefix("image/") {
+            if response.statusCode == 200 && type.hasPrefix("image/") {
                 // Native ImageIO still validates and decodes the complete image.
             } else if type != "application/json" || response.statusCode == 200 {
                 failure = RuntimeHTTPError.invalidResponse
@@ -521,10 +518,6 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         lock.lock()
         guard !cancelled, failure == nil else { lock.unlock(); return }
-        if provider != .source, data.count > Self.maximumMetadataBytes - bytes.count {
-            failure = URLError(.dataLengthExceedsMaximum)
-            lock.unlock(); dataTask.cancel(); return
-        }
         bytes.append(data)
         lock.unlock()
     }

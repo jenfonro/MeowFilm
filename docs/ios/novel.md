@@ -35,7 +35,7 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
   原生可选投影不改变运行器保存的定义或来源退休／租约边界。
 - `NovelLibrary` 使用 `novel.library.v1` 原子文档，保存本地 UUID、书架／历史、
   锚点、排版和净化规则。decode 后先校验语义；写入使用 CAS，失败不发布内存快照、
-  不覆盖旧字节。沿用文档层 8 MiB 资源边界，不限制书籍、来源或搜索结果数量。
+  不覆盖旧字节。文档层不设业务字节配额，不限制书籍、来源或搜索结果数量。
   原始源定义仅在运行器，原生编辑器临时取回定义，不维护第二安装仓库。
   已有书籍按本地 ID 优先、来源 locator 次之确认成员，加入／移出书架直接本地持久化，
   不改书籍元数据、identity 或锚点；只有新书的身份归并调用 Node。
@@ -89,7 +89,7 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
   `@MainActor @Sendable` 关闭动作并异步等待，不跨 actor 读取 `@Published novel`。
   保留 `$novel` 消费者与错误／排空路径，不依赖 isolated deinit 或假定析构线程。
 - `NovelRuntime` 借用 App 唯一 HTTP client。正文图片只走受信 opaque reference，
-  不套公共卡片缩略图的 4 MiB 限制；ImageIO 解码原尺寸，离开视口取消并释放。
+  图片传输不设总字节配额；区别于公共卡片的缩略图，ImageIO 解码原尺寸，离开视口取消并释放。
   HTTP 成功获取收据不因晚取消被丢弃；消费者与 owner close 共用实际释放收据，
   释放失败可观测，关闭等待真实完成。
 - 每次受控 Web 使用全新 nonpersistent `WKWebsiteDataStore`，以 owner 的 cookies

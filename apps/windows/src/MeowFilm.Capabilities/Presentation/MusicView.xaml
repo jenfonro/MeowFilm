@@ -502,7 +502,7 @@
              Click="ClosePlaylistDialog_Click"
              AutomationProperties.Name="关闭创建歌单"/>
      <Grid Grid.Row="1" Margin="0,24,0,0">
-      <TextBox x:Name="PlaylistNameInput" Height="82" MaxLength="200"
+      <TextBox x:Name="PlaylistNameInput" Height="82"
                Style="{StaticResource Playlist.DialogTextBox}"
                Padding="14,12,14,28" VerticalContentAlignment="Top"
                TextChanged="PlaylistName_Changed"
@@ -511,7 +511,7 @@
                  Margin="15,12,15,0" VerticalAlignment="Top"
                  Foreground="{DynamicResource MeowFilm.Brush.Muted}"
                  IsHitTestVisible="False"/>
-      <TextBlock x:Name="PlaylistNameCount" Text="0 / 200"
+      <TextBlock x:Name="PlaylistNameCount" Text="0"
                  Margin="15,0,15,10" HorizontalAlignment="Left" VerticalAlignment="Bottom"
                  FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Foreground="{DynamicResource MeowFilm.Brush.Muted}"
                  IsHitTestVisible="False"/>

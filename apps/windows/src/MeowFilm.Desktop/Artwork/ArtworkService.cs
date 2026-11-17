@@ -34,11 +34,11 @@ public sealed class ArtworkException(string code) : Exception(code)
 /// <summary>One App cache; public URLs and host-injected trusted relative resources share pixel ownership.</summary>
 public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
 {
-    public const int MaximumBytes = 4 * 1024 * 1024, CacheBytes = 32 * 1024 * 1024;
+    public const int MaximumCacheEntryBytes = 4 * 1024 * 1024, CacheBytes = 32 * 1024 * 1024;
     private readonly object gate = new();
     private readonly ArtworkHttp http;
     private readonly ArtworkDiskCache? disk;
-    private readonly Func<string, int, CancellationToken, Task<byte[]>>? readTrusted;
+    private readonly Func<string, CancellationToken, Task<byte[]>>? readTrusted;
     private readonly IArtworkByteCache? byteCache;
     private readonly Func<string, bool, Task>? loadCompleted;
     private readonly TimeProvider time;
@@ -79,7 +79,7 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
         }
     }
     public ArtworkService(HttpMessageHandler? handler = null,
-        Func<string, int, CancellationToken, Task<byte[]>>? readTrusted = null,
+        Func<string, CancellationToken, Task<byte[]>>? readTrusted = null,
         IArtworkByteCache? byteCache = null, TimeProvider? time = null,
         Func<string, bool, Task>? loadCompleted = null, string? cacheDirectory = null)
     {
@@ -227,7 +227,11 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
             else if (disk is not null) encoded = await disk.ReadAsync(key, request.Token).ConfigureAwait(false);
             if (encoded is not null)
             {
-                try { image = await Decode(encoded, request.Token).ConfigureAwait(false); }
+                try
+                {
+                    if (encoded.Length > MaximumCacheEntryBytes) throw new ArtworkException("ARTWORK_LIMIT");
+                    image = await Decode(encoded, request.Token).ConfigureAwait(false);
+                }
                 catch (OperationCanceledException) { throw; }
                 catch
                 {
@@ -243,14 +247,18 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
             }
             if (image is null)
             {
-                encoded = uri is null ? await readTrusted!(key, MaximumBytes, request.Token).ConfigureAwait(false)
+                encoded = uri is null ? await readTrusted!(key, request.Token).ConfigureAwait(false)
                     : await http.ReadAsync(uri, request.Token).ConfigureAwait(false);
                 image = await Decode(encoded, request.Token).ConfigureAwait(false);
                 request.Token.ThrowIfCancellationRequested();
                 if (byteCache is not null)
                 {
                     expiresAt = time.GetUtcNow() + byteCache.Lifetime;
-                    try { await byteCache.WriteAsync(key, encoded, flight.DiskEpoch, request.Token).ConfigureAwait(false); }
+                    try
+                    {
+                        if (encoded.Length <= MaximumCacheEntryBytes)
+                            await byteCache.WriteAsync(key, encoded, flight.DiskEpoch, request.Token).ConfigureAwait(false);
+                    }
                     catch (OperationCanceledException) when (request.IsCancellationRequested) { throw; }
                     catch { /* Decoded pixels remain usable even when persistence is unavailable. */ }
                 }
@@ -303,7 +311,6 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
 
     private static Task<BitmapSource> Decode(byte[] bytes, CancellationToken token)
     {
-        if (bytes.Length > MaximumBytes) throw new ArtworkException("ARTWORK_LIMIT");
         return Task.Run(() => ArtworkRaster.Decode(bytes), token);
     }
     /// <summary>Visible leases survive explicit clearing; old work cannot refill memory.</summary>

@@ -3,7 +3,7 @@ import Foundation
 /// Shared by display adapters, persistence and the credential-free image loader.
 public enum MusicArtworkURL {
     public static func normalized(_ text: String) -> URL? {
-        guard !text.isEmpty, text.utf8.count <= 8192,
+        guard !text.isEmpty,
               !text.utf8.contains(where: { $0 <= 32 || $0 == 127 || $0 == 92 }),
               var parts = URLComponents(string: text.replacingOccurrences(of: "{size}", with: "480")),
               let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),

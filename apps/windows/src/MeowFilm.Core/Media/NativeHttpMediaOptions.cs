@@ -53,7 +53,6 @@ public sealed class NativeHttpMediaOptions
             Credentials = null,
             PreAuthenticate = false,
             AutomaticDecompression = DecompressionMethods.None,
-            MaxResponseHeadersLength = 32,
             MaxResponseDrainSize = 0,
             ConnectTimeout = RequestTimeout,
             PooledConnectionLifetime = TimeSpan.FromMinutes(2)

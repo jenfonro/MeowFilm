@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location('prepare_ios_audio_kernel', ROOT / 'scripts/prepare-ios-audio-kernel.py')
@@ -107,6 +107,46 @@ class AudioKernelPrepareTests(unittest.TestCase):
             archive.write_bytes(b'changed')
             with self.assertRaises(ValueError):
                 PREPARE.archive_for(source)
+
+    def test_large_download_preserves_bytes_and_rejects_hash_mismatch(self):
+        chunks = [b'a' * (1024 * 1024)] * 64 + [b'tail']
+        digest = hashlib.sha256()
+        for chunk in chunks:
+            digest.update(chunk)
+        source = {'sha256': digest.hexdigest(), 'url': 'https://invalid.example/source.tar.xz'}
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.side_effect = [*chunks, b'']
+        with patch.object(PREPARE, 'SHARED', self.root), \
+                patch.object(PREPARE.urllib.request, 'build_opener') as opener:
+            opener.return_value.open.return_value = response
+            archive = PREPARE.archive_for(source)
+            self.assertEqual(archive.stat().st_size, sum(map(len, chunks)))
+            self.assertEqual(PREPARE.digest(archive), source['sha256'])
+            response.read.side_effect = [b'changed', b'']
+            source['sha256'] = '0' * 64
+            with self.assertRaisesRegex(ValueError, 'hash mismatch'):
+                PREPARE.archive_for(source)
+            rejected = self.root / 'downloads' / (source['sha256'] + '.tar.xz')
+            self.assertFalse(rejected.exists())
+            self.assertFalse(rejected.with_suffix('.partial').exists())
+
+    def test_failed_or_interrupted_download_removes_partial_archive(self):
+        source = {'sha256': '0' * 64, 'url': 'https://invalid.example/source.tar.xz'}
+        for error in (OSError('connection closed'), KeyboardInterrupt()):
+            with self.subTest(error=type(error).__name__), \
+                    patch.object(PREPARE, 'SHARED', self.root), \
+                    patch.object(PREPARE.urllib.request, 'build_opener') as opener:
+                response = MagicMock()
+                response.__enter__.return_value = response
+                response.read.side_effect = [b'partial', error, b'partial', error]
+                opener.return_value.open.return_value = response
+                with self.assertRaises(type(error)):
+                    PREPARE.archive_for(source)
+                rejected = self.root / 'downloads' / (source['sha256'] + '.tar.xz')
+                self.assertFalse(rejected.exists())
+                self.assertFalse(rejected.with_suffix('.partial').exists())
+                response.__exit__.assert_called()
 
     def test_sdk_flags_and_version_comparison(self):
         target = self.lock['targets']['ios-simulator-arm64']

@@ -41,7 +41,7 @@ private actor MusicQueueReferenceFixture {
             let id = UUID().uuidString
             songs[id] = row
             return .init(songID: id, occurrenceID: UUID().uuidString, platform: row.platform,
-                sourceKey: id, sourcePosition: row.sourcePosition, byteCount: row.data.count)
+                sourceKey: id, sourcePosition: row.sourcePosition)
         }
     }
     func project(_ rows: [MusicQueueTrackReference]) throws -> [MusicNativeTrackData] {
@@ -307,7 +307,7 @@ final class MusicAccountQueueSourceTests: XCTestCase {
         await source.close()
     }
 
-    func testCursorCycleStillFailsAndByteBudgetStillLimits() async throws {
+    func testCursorCycleStillFailsAndLargePageIsComplete() async throws {
         let cycle = await makeQueueSource(context: .init(kind: .playlist, id: "cycle", title: "Cycle", platform: "wy"),
             loadPage: { _ in .init(items: [.init(platform: "wy", data: Data([1]))], total: 1, cursor: "next") })
         do { _ = try await cycle.completeTracks(intent: .init()); XCTFail("cursor cycle") }
@@ -317,12 +317,13 @@ final class MusicAccountQueueSourceTests: XCTestCase {
         let row = MusicNativeTrackData(platform: "wy", data: Data(repeating: 1, count: 64 * 1024))
         let oversized = await makeQueueSource(context: .init(kind: .playlist, id: "bytes", title: "Bytes", platform: "wy"),
             loadPage: { _ in .init(items: Array(repeating: row, count: 100), total: 100) })
-        do { _ = try await oversized.completeTracks(intent: .init()); XCTFail("byte budget") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .limit) }
+        let complete = try await oversized.completeTracks(intent: .init())
+        XCTAssertEqual(complete.count, 100)
+        XCTAssertEqual(complete.last?.data, row.data)
         await oversized.close()
     }
 
-    func testLongCursorCycleAndCumulativeBytesStillFailWithoutCachingRejectedPage() async throws {
+    func testLongCursorCycleFailsAndLargeMultiPageReadIsComplete() async throws {
         let row = MusicNativeTrackData(platform: "wy", data: Data([1]))
         let cycle = await makeQueueSource(context: .init(kind: .playlist, id: "cycle", title: "Cycle", platform: "wy"),
             loadPage: { cursor in
@@ -341,11 +342,12 @@ final class MusicAccountQueueSourceTests: XCTestCase {
         let source = await makeQueueSource(context: .init(kind: .playlist, id: "bytes", title: "Bytes", platform: "wy"),
             loadPage: { try await fixture.read($0) })
         for _ in 0..<2 {
-            do { _ = try await source.completeTracks(intent: .init()); XCTFail("cumulative byte budget") }
-            catch { XCTAssertEqual(error as? MusicServiceError, .limit) }
+            let complete = try await source.completeTracks(intent: .init())
+            XCTAssertEqual(complete.count, 120)
+            XCTAssertEqual(complete.last?.data, large.data)
         }
         let calls = await fixture.calls
-        XCTAssertEqual(calls, [nil, "1", "2", "2"])
+        XCTAssertEqual(calls, [nil, "1", "2"])
         await source.close()
     }
 
@@ -371,7 +373,7 @@ final class MusicAccountQueueSourceTests: XCTestCase {
         await source.close()
     }
 
-    func testFMBatchStillRejectsCursorCyclesAndCumulativeByteOverflow() async throws {
+    func testFMBatchRejectsCursorCyclesAndPreservesLargeInput() async throws {
         let small = MusicNativeTrackData(platform: "wy", data: Data([1]))
         let cycle = await makeQueueSource(context: .init(kind: .fm, id: "cycle", title: "FM", platform: "wy"),
             loadPage: { cursor in
@@ -386,8 +388,9 @@ final class MusicAccountQueueSourceTests: XCTestCase {
             loadPage: { cursor in
                 .init(items: Array(repeating: large, count: 60), cursor: cursor == nil ? "next" : nil)
             })
-        do { _ = try await oversized.nextFMBatch(intent: .init()); XCTFail("FM byte budget") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .limit) }
+        let rows = try await oversized.nextFMBatch(intent: .init())
+        XCTAssertEqual(rows.count, 120)
+        XCTAssertEqual(rows.last?.data, large.data)
         await oversized.close()
     }
 }

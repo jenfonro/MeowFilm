@@ -84,6 +84,18 @@ final class DocumentStoreTests: XCTestCase {
         XCTAssertEqual(try store.read(key: "state"), Data(#"{"a":3}"#.utf8))
     }
 
+    func testDefaultStoreWritesReopensAndReplacesLargeDocuments() throws {
+        let base = try temporaryRoot()
+        let store = try DocumentStore(baseURL: base, namespace: namespace)
+        let bytes = Data(repeating: 1, count: 8 * 1024 * 1024 + 1)
+        try store.write(bytes, key: "large")
+        let reopened = try DocumentStore(baseURL: base, namespace: namespace)
+        XCTAssertEqual(try reopened.read(key: "large"), bytes)
+        var replacement = bytes; replacement.append(2)
+        try reopened.compareAndSwap(key: "large", expected: bytes, replacement: replacement)
+        XCTAssertEqual(try reopened.read(key: "large"), replacement)
+    }
+
     func testSingleDocumentBoundRejectsWritesAndOversizedFilesWithoutChangingThem() throws {
         let base = try temporaryRoot()
         let store = try DocumentStore(baseURL: base, namespace: namespace, maximumDocumentBytes: 8)

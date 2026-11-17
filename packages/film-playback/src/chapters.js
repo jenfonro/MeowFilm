@@ -5,10 +5,10 @@ const label = /^(?:(?:chapter\s+|章节\s*)?\d{1,3}\s*[.:\-、：]\s*)?(片头|�
 const intro = /^(?:片头|片头曲|opening(?:\s+credits)?|intro|op)$/i;
 
 export function recognizeChapters(chapters) {
-  requireValue(Array.isArray(chapters) && chapters.length <= 256);
+  requireValue(Array.isArray(chapters));
   const segments = [];
   for (const chapter of chapters) {
-    requireValue(object(chapter) && typeof chapter.title === 'string' && chapter.title.length <= 256 &&
+    requireValue(object(chapter) && typeof chapter.title === 'string' &&
       Number.isFinite(chapter.start) && chapter.start >= 0 &&
       Number.isFinite(chapter.end) && chapter.end > chapter.start);
     const match = label.exec(chapter.title.trim());

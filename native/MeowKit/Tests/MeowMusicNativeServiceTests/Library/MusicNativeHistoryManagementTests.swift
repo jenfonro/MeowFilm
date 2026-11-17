@@ -292,7 +292,7 @@ final class MusicNativeHistoryManagementTests: XCTestCase {
         }
     }
 
-    func testUnrelatedHistoryChangeDoesNotInvalidateExactSnapshotAndArchiveKeepsLatestFive() async throws {
+    func testUnrelatedHistoryChangeDoesNotInvalidateExactSnapshotOrDiscardOtherArchives() async throws {
         var snapshots: [MJ] = []
         for i in 0..<5 { snapshots.append(try MusicHistoryFixture.snapshot(id: "archive-\(i)")) }
         let store = NativeMusicTestLibrary(try MusicHistoryFixture.document(snapshots))
@@ -300,11 +300,11 @@ final class MusicNativeHistoryManagementTests: XCTestCase {
         let detail = try await service.historyDetail(id: "archive-4")
         try MusicHistoryFixture.rewrite(store) { $0["areas"]["history"]["days"] = .array([]) }
         let state = try await service.restoreHistory(detail: detail, startIndex: 2, expectedRevision: 7)
-        XCTAssertEqual(state.currentId, "entry-102", "capture the selected snapshot before archive evicts the oldest")
+        XCTAssertEqual(state.currentId, "entry-102")
         let history = try MusicHistoryFixture.saved(store)["areas"]["history"]
-        XCTAssertEqual(history["playlists"].array.count, 5)
+        XCTAssertEqual(history["playlists"].array.count, 6)
         XCTAssertEqual(history["playlists"].array.first?["title"].string, "Current playlist")
-        XCTAssertEqual(history["playlists"].array.dropFirst().map { $0["id"].string }, Array((0..<4).map { "archive-\($0)" }))
+        XCTAssertEqual(history["playlists"].array.dropFirst().map { $0["id"].string }, Array((0..<5).map { "archive-\($0)" }))
         XCTAssertEqual(history["days"], .array([]))
     }
 

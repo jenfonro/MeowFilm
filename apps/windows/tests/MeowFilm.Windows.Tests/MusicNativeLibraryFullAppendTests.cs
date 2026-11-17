@@ -7,6 +7,26 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music full next append preserves order occurrences current mode and one CAS", FullAppend);
         yield return new("Native music full next append stale version and cancellation cannot write", FullAppendRejected);
         yield return new("Native music public and full next append complete collections and select the first occurrence in an empty queue", FullAppendEmpty);
+        yield return new("Native music public and full queue input beyond sixteen MiB preserve response and control data", LargeQueueInput);
+    }
+
+    private static async Task LargeQueueInput()
+    {
+        string text = new('x', 16 * 1024 * 1024 + 1);
+        foreach (bool full in new[] { false, true })
+        {
+            await using var f = new Fixture(); var owner = f.Owner();
+            var songs = new[] { E(Song("large")) };
+            var context = E(new { sourceTitle = text });
+            var result = full ? await owner.AppendQueueAsync(songs, context, 0)
+                : await Ok(owner, "music.queue.append", new { songs, context });
+            Check(result.GetProperty("ok").GetBoolean());
+            Check(f.Store.Writes == 1 && f.Store.Bytes!.Length > 16 * 1024 * 1024);
+            await owner.DisposeAsync();
+            var queue = await Ok(f.Owner(), "music.queue.get");
+            Check(queue.GetProperty("total").GetInt32() == 1 &&
+                queue.GetProperty("current").GetProperty("context").GetProperty("sourceTitle").GetString() == text);
+        }
     }
 
     private static async Task FullAppend()

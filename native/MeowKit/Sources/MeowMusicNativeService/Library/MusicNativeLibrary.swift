@@ -71,7 +71,7 @@ extension NativeMusicService: MusicCollectionMembershipServing {
         return try ids.map { try MusicModel.track(repositorySong($0, d), .init(kind: .library, id: $0)) }
     }
     public func createPlaylist(name: String, refs: [MusicReference]) async throws -> MusicCollection {
-        _ = try musicText(name, maximum: 600); try musicRequire(name.utf16.count <= 200)
+        _ = try musicText(name)
         let result = try transaction(["library"]) { d in
             var lib = d.library["library"]
             try musicRequire(lib["nextId"].isInteger && lib["nextId"].int > 0 && lib["collections"].isArray, .corruptDocument)
@@ -156,7 +156,7 @@ extension NativeMusicService: MusicCollectionMembershipServing {
         let previous = c["order"].strings
         if let name {
             try musicRequire(c["kind"].string != "favorites", .favoritesProtected)
-            _ = try musicText(name, maximum: 600); try musicRequire(name.utf16.count <= 200)
+            _ = try musicText(name)
             c["name"] = .string(name)
         }
         let before = Set(previous.map { Data($0.utf8) }), after = Set(next.map { Data($0.utf8) })

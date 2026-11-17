@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { zstdDecompressSync } from 'node:zlib';
 import { syncBuiltinESMExports } from 'node:module';
 import { fixture, response, seedClients, gate, now, nativeHTTP } from './support.mjs';
 import { createMusicPlatform } from '../src/index.mjs';
@@ -60,9 +61,9 @@ function inspect(bytes, key) {
   assert.equal(bytes.readUInt32LE(66), frames.reduce((sum, value) => sum + value + 6, 0));
   const raw = Buffer.concat(decoded);
   assert.equal(raw.readUInt32LE(), 0xfd2fb528); assert.equal(raw[4], 0xa0);
-  assert.equal(raw.readUInt32LE(5), raw.length - 12);
-  assert.equal(raw.readUIntLE(9, 3), ((raw.length - 12) << 3) | 1);
-  return { metadata, records: raw.subarray(12), frames };
+  const records = zstdDecompressSync(raw);
+  assert.equal(raw.readUInt32LE(5), records.length);
+  return { metadata, records, frames };
 }
 const base = { event: 'start', occurredAt: now / 1000 + 0.125, target: { nativeId: '101' } };
 function expectedRecord(event) {
@@ -140,7 +141,7 @@ test('NCBL public semantic upload retains original milliseconds, separate media/
   assert.ok(!f.files.get('clients.json').toString().includes('never-imported-response')); await f.close();
 });
 
-test('NCBL frames preserve exact full public record boundaries and reject oversized records or metadata without dispatch', async t => {
+test('NCBL frames preserve records and metadata above former byte quotas across Zstandard blocks', async t => {
   let draws;
   const files = [];
   const f = fixture(request => {
@@ -162,18 +163,24 @@ test('NCBL frames preserve exact full public record boundaries and reject oversi
     [65524, [32768, 32768]],
     [65525, [32768, 32768, 1]],
     [65536, [32768, 32768, 12]],
+    [65537, [32768, 32768, 13]],
+    [131073, [32768, 32768, 32768, 32768, 16]],
   ]) {
     expectedLength = length; expectedFrames = frames; events = sizedRecords(length);
     assert.equal((await f.request('wy', 'feedback.upload', { events })).status, 'confirmed');
     assert.equal(files.at(-1).readUInt16LE(8), 8266);
   }
-  const count = f.requests.length;
-  assert.deepEqual(await f.request('wy', 'feedback.upload', { events: sizedRecords(65537) }),
-    { status: 'notSent', errorCode: 'LIMIT' });
-  assert.deepEqual(await f.request('wy', 'feedback.upload', { events: [{ ...base, target: { nativeId: '101', algorithm: 'x'.repeat(16385) } }] }),
-    { status: 'notSent', errorCode: 'LIMIT' });
+  events = [{ ...base, target: { nativeId: '101', algorithm: 'x'.repeat(16385) } }];
+  expectedLength = Buffer.concat(events.map(expectedRecord)).length;
+  expectedFrames = [expectedLength + 12];
+  assert.equal((await f.request('wy', 'feedback.upload', { events })).status, 'confirmed');
   await f.session('wy', '42', 'MUSIC_U=' + 'x'.repeat(8179));
-  assert.deepEqual(await f.request('wy', 'feedback.upload', { events: [] }), { status: 'notSent', errorCode: 'LIMIT' });
+  events = []; expectedLength = 0; expectedFrames = [12];
+  assert.equal((await f.request('wy', 'feedback.upload', { events })).status, 'confirmed');
+  assert.equal(files.at(-1).readUInt16LE(8), 8267);
+  const count = f.requests.length;
+  await f.session('wy', '42', 'MUSIC_U=' + 'x'.repeat(65536));
+  assert.deepEqual(await f.request('wy', 'feedback.upload', { events }), { status: 'notSent', errorCode: 'INVALID_REQUEST' });
   assert.equal(f.requests.length, count); await f.close();
 });
 

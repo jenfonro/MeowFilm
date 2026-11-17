@@ -34,7 +34,7 @@ final class HLSResourceRegistry {
     }
 
     static func validateURL(_ value: URL) throws -> URL {
-        guard value.absoluteString.utf8.count <= 8192, value.fragment == nil,
+        guard value.fragment == nil,
               !value.absoluteString.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 })
         else { throw PlaybackNetworkError.invalidURL }
         let origin = try PlaybackHTTPOrigin(value)
@@ -59,7 +59,7 @@ final class HLSResourceRegistry {
     }
 
     func register(reference: String, base: URL, kind: HLSResourceKind, inheritsHeaders: Bool) throws -> HLSResource {
-        guard !reference.isEmpty, reference.utf8.count <= 8192, !reference.contains("{$"),
+        guard !reference.isEmpty, !reference.contains("{$"),
               !reference.contains(where: \.isWhitespace), !reference.contains("\\"),
               let url = URL(string: reference, relativeTo: base)?.absoluteURL else {
             throw PlaybackNetworkError.hlsUnsupportedFeature

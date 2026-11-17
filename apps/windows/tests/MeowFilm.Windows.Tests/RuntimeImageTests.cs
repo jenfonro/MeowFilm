@@ -59,7 +59,7 @@ public static class RuntimeImageTests
             var ids = new HashSet<string>();
             foreach (string reference in new[] { Reference, "/v1/tmdb/images/w300/poster.jpg" })
             {
-                var read = client.ReadImageAsync(reference, ArtworkService.MaximumBytes);
+                var read = client.ReadImageAsync(reference);
                 await using var exchange = await server.AcceptAsync();
                 BridgeTests.Equal("GET", exchange.Method);
                 BridgeTests.Equal(reference, exchange.Path);
@@ -80,7 +80,7 @@ public static class RuntimeImageTests
             foreach (string reference in new[] { DoubanReference, "/v1/douban/images/poster.jpg",
                 "/v1/douban/images/~/.poster/.../p-1_2.jpg" })
             {
-                var read = client.ReadImageAsync(reference, ArtworkService.MaximumBytes);
+                var read = client.ReadImageAsync(reference);
                 await using var exchange = await server.AcceptAsync();
                 BridgeTests.Equal("GET", exchange.Method);
                 BridgeTests.Equal(reference, exchange.Path);
@@ -109,7 +109,7 @@ public static class RuntimeImageTests
                 (DoubanReference, "runtime.http.v1", "UPSTREAM_HTTP", 502, "INVALID_RESPONSE")
             })
             {
-                var read = client.ReadImageAsync(reference, ArtworkService.MaximumBytes);
+                var read = client.ReadImageAsync(reference);
                 await using var exchange = await server.AcceptAsync();
                 BridgeTests.Equal(reference, exchange.Path);
                 BridgeTests.Equal(false, exchange.Headers.ContainsKey("Authorization"));
@@ -126,7 +126,7 @@ public static class RuntimeImageTests
                 "//example.test/a", "/v1/tmdb/images/w500/../poster.jpg", "/v1/tmdb/images/w500/%2e%2e.jpg",
                 Reference + "?key=fixture", Reference + "#fragment", "/v1/douban/images/../poster.jpg",
                 "/v1/tmdb/images/w0/poster.jpg", "/v1/tmdb/images/w500/a\\poster.jpg", Reference + "\n" })
-                await BridgeTests.Expect("INVALID_REQUEST", () => client.ReadImageAsync(reference, ArtworkService.MaximumBytes));
+                await BridgeTests.Expect("INVALID_REQUEST", () => client.ReadImageAsync(reference));
             foreach (string reference in new[] { "/v1/douban/images", "/v1/douban/images/", "/v1/douban/images//a.jpg",
                 "/v1/douban/images/a/", "/v1/douban/images/a//b.jpg", "/v1/douban/images/./a.jpg",
                 "/v1/douban/images/a/../b.jpg", "/v1/douban/images/.", "/v1/douban/images/..",
@@ -135,7 +135,7 @@ public static class RuntimeImageTests
                 "/v1/douban/images/a b.jpg", "/v1/douban/images/中文.jpg", "/v1/douban/images/a.jpg\n",
                 "//127.0.0.1/v1/douban/images/a.jpg", server.BaseUrl + DoubanReference,
                 "https://example.invalid" + DoubanReference })
-                await BridgeTests.Expect("INVALID_REQUEST", () => client.ReadImageAsync(reference, ArtworkService.MaximumBytes));
+                await BridgeTests.Expect("INVALID_REQUEST", () => client.ReadImageAsync(reference));
             BridgeTests.Equal(false, server.HasConnection);
         });
         yield return new("runtime-image: ordinary JSON rejects 502 while image failures preserve safe codes", async () =>
@@ -149,7 +149,7 @@ public static class RuntimeImageTests
                 ("image", "runtime.http.v1", "PERMISSION_DENIED", 403)
             })
             {
-                Task operation = method == "image" ? client.ReadImageAsync(Reference, ArtworkService.MaximumBytes) :
+                Task operation = method == "image" ? client.ReadImageAsync(Reference) :
                     ReadJsonFailure();
                 await using var exchange = await server.AcceptAsync();
                 await exchange.ReplyAsync(JsonSerializer.SerializeToUtf8Bytes(new { ok = false, contract, code }), status);
@@ -175,35 +175,43 @@ public static class RuntimeImageTests
                 (200, (string?)null, "application/json", "")
             })
             {
-                var read = client.ReadImageAsync(Reference, ArtworkService.MaximumBytes);
+                var read = client.ReadImageAsync(Reference);
                 await using var exchange = await server.AcceptAsync();
                 await exchange.ReplyAsync(Png, status, requestId, mime, extra);
                 await BridgeTests.Expect("INVALID_RESPONSE", () => read);
                 BridgeTests.Equal(false, target.HasConnection);
             }
         });
-        yield return new("runtime-image: content length and chunked reads enforce the existing four MiB boundary", async () =>
+        yield return new("runtime-image: complete metadata images beyond four MiB read and decode with declared and chunked bodies", () =>
+            ArtworkTests.Sta(async () =>
         {
             await using var server = new RuntimeHttpClientTests.Server();
             await using var client = Client(server);
+            byte[] png = ArtworkTests.LargePng();
             foreach (string reference in new[] { Reference, DoubanReference })
             {
-                var declared = client.ReadImageAsync(reference, ArtworkService.MaximumBytes);
-                await using (var exchange = await server.AcceptAsync())
-                    await exchange.BeginImageAsync(ArtworkService.MaximumBytes + 1);
-                await BridgeTests.Expect("RESOURCE_LIMIT", () => declared);
-                var streamed = client.ReadImageAsync(reference, ArtworkService.MaximumBytes);
-                await using (var exchange = await server.AcceptAsync())
+                foreach (bool chunked in new[] { false, true })
                 {
-                    // The server may see a reset as soon as the bounded reader rejects the body.
-                    try { await exchange.ReplyChunkedAsync(new byte[ArtworkService.MaximumBytes + 1]); }
-                    catch (System.IO.IOException) { }
+                    await using var artwork = new ArtworkService(readTrusted: async (path, token) =>
+                    {
+                        byte[] bytes = await client.ReadImageAsync(path, token);
+                        BridgeTests.Equal(true, bytes.SequenceEqual(png));
+                        return bytes;
+                    });
+                    var read = artwork.AcquireAsync(reference);
+                    await using (var exchange = await server.AcceptAsync())
+                    {
+                        if (chunked) await exchange.ReplyChunkedAsync(png);
+                        else await exchange.ReplyAsync(png, contentType: "image/png");
+                    }
+                    using var image = await read;
+                    BridgeTests.Equal(512, image.Image.PixelWidth);
+                    BridgeTests.Equal(true, image.Image.IsFrozen);
                 }
-                await BridgeTests.Expect("RESOURCE_LIMIT", () => streamed);
             }
-        });
+        }));
         yield return new("runtime-image: truncated bytes fail without retry or successful artwork caching", () =>
-            MusicQualityConsumerTests.Sta(async () =>
+            ArtworkTests.Sta(async () =>
         {
             await using var server = new RuntimeHttpClientTests.Server();
             await using var client = Client(server);
@@ -219,7 +227,7 @@ public static class RuntimeImageTests
             BridgeTests.Equal(false, server.HasConnection);
         }));
         yield return new("runtime-image: artwork rejects invalid response IDs and nonimages without poisoning cache", () =>
-            MusicQualityConsumerTests.Sta(async () =>
+            ArtworkTests.Sta(async () =>
         {
             await using var server = new RuntimeHttpClientTests.Server();
             await using var client = Client(server);
@@ -244,13 +252,13 @@ public static class RuntimeImageTests
             BridgeTests.Equal(false, server.HasConnection);
         }));
         yield return new("runtime-image: complete HTTP images missing format terminators fail artwork and explicit same-reference retry succeeds", () =>
-            MusicQualityConsumerTests.Sta(async () =>
+            ArtworkTests.Sta(async () =>
         {
             await using var server = new RuntimeHttpClientTests.Server();
             await using var client = Client(server);
             int reads = 0;
-            await using var artwork = new ArtworkService(readTrusted: (reference, budget, token) =>
-            { reads++; return client.ReadImageAsync(reference, budget, token); });
+            await using var artwork = new ArtworkService(readTrusted: (reference, token) =>
+            { reads++; return client.ReadImageAsync(reference, token); });
             foreach (var (format, trailer) in new[] { ("png", 12), ("jpeg", 2), ("gif", 1) })
             {
                 byte[] complete = format == "png" ? Png : ArtworkTests.Encode(format, 32, 48);
@@ -284,7 +292,7 @@ public static class RuntimeImageTests
             }
         }));
         yield return new("runtime-image: stable artwork cache survives endpoint changes without authenticating public URLs", () =>
-            MusicQualityConsumerTests.Sta(async () =>
+            ArtworkTests.Sta(async () =>
         {
             await using var first = new RuntimeHttpClientTests.Server();
             await using var second = new RuntimeHttpClientTests.Server();
@@ -302,7 +310,7 @@ public static class RuntimeImageTests
                 publicCalls++;
             });
             await using var artwork = new ArtworkService(handler,
-                (reference, budget, token) => current.ReadImageAsync(reference, budget, token));
+                (reference, token) => current.ReadImageAsync(reference, token));
             var read = artwork.AcquireAsync(Reference);
             await using (var exchange = await first.AcceptAsync()) await exchange.ReplyAsync(Png, contentType: "image/png");
             using var initial = await read;
@@ -345,14 +353,14 @@ public static class RuntimeImageTests
             await using var server = new RuntimeHttpClientTests.Server();
             await using var client = Client(server);
             using var cancellation = new CancellationTokenSource();
-            var first = client.ReadImageAsync(Reference, ArtworkService.MaximumBytes, cancellation.Token);
+            var first = client.ReadImageAsync(Reference, cancellation.Token);
             await using var exchange = await server.AcceptAsync();
             await exchange.BeginImageAsync(100);
             cancellation.Cancel();
             try { await first; throw new InvalidOperationException("Expected cancellation"); }
             catch (OperationCanceledException) { }
             await exchange.AssertDisconnectedAsync();
-            var second = client.ReadImageAsync(Reference, ArtworkService.MaximumBytes);
+            var second = client.ReadImageAsync(Reference);
             await using var pending = await server.AcceptAsync();
             await pending.BeginImageAsync(100);
             await client.DisposeAsync();
@@ -360,13 +368,13 @@ public static class RuntimeImageTests
             await pending.AssertDisconnectedAsync();
         });
         yield return new("runtime-image: artwork close cancels its trusted reader and waits for physical settlement", () =>
-            MusicQualityConsumerTests.Sta(async () =>
+            ArtworkTests.Sta(async () =>
         {
             var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var release = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
             byte[] bytes = Png;
-            var artwork = new ArtworkService(readTrusted: async (_, _, token) =>
+            var artwork = new ArtworkService(readTrusted: async (_, token) =>
             {
                 using var registration = token.Register(() => cancelled.TrySetResult());
                 entered.SetResult();

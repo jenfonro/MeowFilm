@@ -218,15 +218,6 @@
      av_dict_copy(&tmp, *opts, 0);
      av_dict_copy(&tmp, opts2, 0);
      ret = s->io_open(s, pb, url, AVIO_FLAG_READ, &tmp);
-@@ -1268,7 +1270,7 @@
- 
-     av_bprint_init(&buf, 0, INT_MAX); // xmlReadMemory uses integer bufsize
- 
--    if ((ret = avio_read_to_bprint(in, &buf, SIZE_MAX)) < 0 ||
-+    if ((ret = avio_read_to_bprint(in, &buf, 8 * 1024 * 1024)) < 0 ||
-         !avio_feof(in)) {
-         av_log(s, AV_LOG_ERROR, "Unable to read to manifest '%s'\n", url);
-         if (ret == 0)
 @@ -1276,7 +1278,8 @@
      } else {
          LIBXML_TEST_VERSION

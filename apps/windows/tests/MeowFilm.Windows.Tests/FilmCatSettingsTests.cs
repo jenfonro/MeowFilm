@@ -450,8 +450,6 @@ public static class FilmCatSettingsTests
         public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
             ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("Native saves must not upload source text.");
-        public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default) =>
-            throw new InvalidOperationException("No image calls in native settings.");
         public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("No image calls in native settings.");
         public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }

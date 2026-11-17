@@ -12,7 +12,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -124,6 +124,46 @@ class AetherPrepareTests(unittest.TestCase):
             file.write_bytes(b"tampered")
             with self.assertRaisesRegex(ValueError, "hash mismatch"):
                 prepare.archive_for(source)
+
+    def test_large_download_preserves_bytes_and_rejects_hash_mismatch(self):
+        chunks = [b'a' * (1024 * 1024)] * 256 + [b'tail']
+        digest = hashlib.sha256()
+        for chunk in chunks:
+            digest.update(chunk)
+        source = {"sha256": digest.hexdigest(), "url": "https://invalid.example/source.tar.gz"}
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.side_effect = [*chunks, b""]
+        with patch.object(prepare, "SHARED", self.root), \
+                patch.object(prepare.urllib.request, "build_opener") as opener:
+            opener.return_value.open.return_value = response
+            archive = prepare.archive_for(source)
+            self.assertEqual(archive.stat().st_size, sum(map(len, chunks)))
+            self.assertEqual(prepare.digest(archive), source["sha256"])
+            response.read.side_effect = [b"changed", b""]
+            source["sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                prepare.archive_for(source)
+            rejected = self.root / "downloads" / (source["sha256"] + ".tar.gz")
+            self.assertFalse(rejected.exists())
+            self.assertFalse(rejected.with_suffix(".partial").exists())
+
+    def test_failed_or_interrupted_download_removes_partial_archive(self):
+        source = {"sha256": "0" * 64, "url": "https://invalid.example/source.tar.gz"}
+        for error in (OSError("connection closed"), KeyboardInterrupt()):
+            with self.subTest(error=type(error).__name__), \
+                    patch.object(prepare, "SHARED", self.root), \
+                    patch.object(prepare.urllib.request, "build_opener") as opener:
+                response = MagicMock()
+                response.__enter__.return_value = response
+                response.read.side_effect = [b"partial", error, b"partial", error]
+                opener.return_value.open.return_value = response
+                with self.assertRaises(type(error)):
+                    prepare.archive_for(source)
+                rejected = self.root / "downloads" / (source["sha256"] + ".tar.gz")
+                self.assertFalse(rejected.exists())
+                self.assertFalse(rejected.with_suffix(".partial").exists())
+                response.__exit__.assert_called()
 
     def test_archive_path_and_symlink_cannot_escape_selected_inputs(self):
         for filename, link in (("repo/../../escape", None),

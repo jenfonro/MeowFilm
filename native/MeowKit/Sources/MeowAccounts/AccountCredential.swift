@@ -42,11 +42,10 @@ public enum CredentialStoreError: Error, Equatable, LocalizedError, Sendable {
 /// is for the adapter only. Data is copy-on-write; this does not promise memory zeroization.
 public struct AccountCredential: Equatable, Sendable, CustomStringConvertible,
                                  CustomDebugStringConvertible, CustomReflectable {
-    public static let maximumByteCount = 256 * 1024
     private let bytes: Data
 
     public init(data: Data) throws {
-        guard !data.isEmpty, data.count <= Self.maximumByteCount else {
+        guard !data.isEmpty else {
             throw CredentialStoreError.invalidCredential
         }
         bytes = data
@@ -90,7 +89,6 @@ enum CredentialRecordCodec {
 
     static func decode(_ data: Data) throws -> CredentialRecord {
         guard data.count > headerByteCount,
-              data.count <= headerByteCount + AccountCredential.maximumByteCount,
               data.prefix(4) == prefix,
               let revisionText = String(data: data.dropFirst(4).prefix(36), encoding: .utf8),
               let revision = UUID(uuidString: revisionText) else {

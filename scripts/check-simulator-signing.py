@@ -7,7 +7,6 @@ import struct
 import subprocess
 
 BUNDLE = "dev.meowfilm.aggregate"
-MAX_EXECUTABLE = 64 * 1024 * 1024
 
 
 def simulator_entitlements(binary):
@@ -17,13 +16,13 @@ def simulator_entitlements(binary):
     entitlements in __TEXT,__entitlements. Current builds explicitly select one
     64-bit Simulator architecture; fat/device/other binaries fail closed.
     """
-    if not 32 <= len(binary) <= MAX_EXECUTABLE:
+    if len(binary) < 32:
         raise ValueError("Invalid Simulator executable size")
     magic, cpu, _, kind, count, size, _, _ = struct.unpack_from("<8I", binary)
     end = 32 + size
     if magic != 0xFEEDFACF or cpu not in (0x01000007, 0x0100000C) or kind != 2:
         raise ValueError("Expected a thin 64-bit Simulator executable")
-    if not 0 < count <= 4096 or size > 1024 * 1024 or end > len(binary):
+    if not 0 < count <= size // 8 or end > len(binary):
         raise ValueError("Invalid Mach-O load commands")
     offset, payload, platforms = 32, None, []
     for _ in range(count):
@@ -54,7 +53,7 @@ def simulator_entitlements(binary):
                 if payload is not None or binary[offset + 8:offset + 24].rstrip(b"\0") != b"__TEXT":
                     raise ValueError("Ambiguous Simulator entitlement section")
                 _, byte_count, start = struct.unpack_from("<QQI", binary, section + 32)
-                if not 0 < byte_count <= 65536 or start < end or start + byte_count > len(binary):
+                if byte_count == 0 or start < end or start + byte_count > len(binary):
                     raise ValueError("Invalid Simulator entitlement range")
                 payload = binary[start:start + byte_count].rstrip(b"\0")
         offset += length
@@ -110,8 +109,8 @@ def main():
     display = command("codesign", "-d", "--verbose=4", str(app))
     host = command("codesign", "-d", "--entitlements", ":-", str(app))
     executable = (app / info["CFBundleExecutable"]).resolve(strict=True)
-    if executable.parent != app or not executable.is_file() or executable.stat().st_size > MAX_EXECUTABLE:
-        raise ValueError("Invalid Simulator executable path or size")
+    if executable.parent != app or not executable.is_file():
+        raise ValueError("Invalid Simulator executable path")
     entitlements = simulator_entitlements(executable.read_bytes())
     validate(info, entitlements, display.stderr.decode("utf-8"),
              has_profile=(app / "embedded.mobileprovision").exists(),

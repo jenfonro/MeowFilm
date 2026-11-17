@@ -8,7 +8,7 @@
 
 App 通过已验证的管道发送一行 UTF-8 JSON `{sessionId,dataRoot,nativeSettings:true}`，Node 读取原生设置并启动公共监听器后回复一行 `{protocol:"runtime.http.v1",baseUrl:"http://127.0.0.1:<port>"}`。未装配原生设置的独立运行器会话仍发送 `{sessionId,dataRoot}`。普通配置及 ready 扩展不阻断启动，也不授予设置能力；只有 `nativeSettings:true` 选择该能力。`dataRoot` 由原生 `AppDataPaths.ScriptRuntime` 决定，是本机绝对目录。HTTP 不使用启动访问密钥；子进程清空非必要继承环境。
 
-原生发送的启动配置行最多 64 KiB，管道接收帧上限为 8 MiB，连接及握手有期限；这些边界不限制业务 HTTP body。装配原生设置时，管道另外承载按块读取及网盘凭据 CAS 回写，协议与范围见[原生设置](native-settings.md#私密配置能力)；它不是通用 RPC、业务文件访问或心跳通道。未装配该能力时收到任意额外字节即关闭会话，不等待完整 JSON 行；坏帧、EOF、error 或 close 都关闭实际公共运行器。普通 HTTP keepalive 连接结束不代表会话退出。
+启动控制行不设置应用字节配额，连接及握手有期限；管道的 64 KiB 缓冲不限制消息总长度。装配原生设置时，管道另外承载按块读取及网盘凭据 CAS 回写，协议与范围见[原生设置](native-settings.md#私密配置能力)；它不是通用 RPC、业务文件访问或心跳通道。未装配该能力时收到任意额外字节即关闭会话，不等待完整 JSON 行；坏帧、EOF、error 或 close 都关闭实际公共运行器。普通 HTTP keepalive 连接结束不代表会话退出。
 
 ## 完整 HTTP 请求
 
@@ -18,11 +18,11 @@ App 通过已验证的管道发送一行 UTF-8 JSON `{sessionId,dataRoot,nativeS
 - Windows 按契约 prefix 选择 owner 并验证 operation 语法，不维护业务操作批准表。公共注册将同 owner 的合法可调用 handler 登记到真实 methods Map，拒绝重复 owner、冲突、非法名称及不可用资源能力；描述不会凭空生成 handler。合法但未登记的方法发到实际路由后返回 `METHOD_NOT_FOUND`，不会改派其他 owner。
 - 普通调用为 `POST /v1/{module}/{operation}`，参数直接是 JSON，成功信封为 `{ok:true,contract,value}`，失败为 `{ok:false,contract,code}`；结果不再是 JSON 字符串。
 - 源码经 `UploadSourceAsync` 完整 raw PUT，由 installationId 与明确 sourceRevision 绑定。异步上传借用调用方字节直到实际发送任务结束，包括取消；业务层不管理 begin/chunk/read/release。
-- `ReadImageAsync` 只接受运行器相对图片引用，经同一客户端携带请求 ID；成功读二进制、错误解包 `502` 所属模块信封，取消等待物理响应释放。元数据消费者保留其图片预算，小说完整正文图片使用无额度重载；图片契约见[元数据运行器](../runtime/metadata-data.md)与[书源仓库](../runtime/source-library.md)。
+- `ReadImageAsync` 只接受运行器相对图片引用，经同一客户端携带请求 ID；成功读二进制、错误解包 `502` 所属模块信封，取消等待物理响应释放。元数据与小说消费者统一使用 `ReadImageAsync(reference, cancellationToken)` 完整读取，不传入图片字节配额；编码缓存的单项准入和原生解码像素预算由图片消费者分别管理；图片契约见[元数据运行器](../runtime/metadata-data.md)与[书源仓库](../runtime/source-library.md)。
 - 单请求取消终止其 HTTP 交换，不撤销其他请求或共同启动。App 的 epoch fence 拒绝旧代次迟到结果；恢复不会重放业务。
 - 小说纯规则只走 `source.runtime.rules.process`／`POST /v1/source/rules.process`。一次 transform 发送完整 rules 与 conversion，Node 按规则逐条计时；该路由不使用短固定 HTTP 批次总时限，由调用 owner 或连接取消并等待实际交换结束。其他 source 方法仍保持默认 30 秒，网易 token 保持 60 秒。
 
-业务 JSON 保留 64 层、严格 UTF-8 与 JSON 语法，不加总大小配额。`System.Text.Json` 保留原始数字与扩展，不将全树数字转成 double，不拒绝普通重复未知键，也不提前解码全树字符串或未知 Unicode 键；字符串在实际取用时由 `System.Text.Json` 解码。所消费的 ok／contract／value 或 code、描述身份及关闭回执要求唯一成员；SSE sessionId／sequence、上传 sourceRevision、设置请求 id 等实际身份和关联数字在消费处精确取整并核对范围，避免浮点舍入冒充关联成功。外层扩展不参与成员数门禁，错误呈现仍只使用有限 code，不呈现附带私密正文。源码的 16 MiB 是公共输入契约。没有通用反向文档 RPC；只有上述私密设置能力向受信 Node owner 提供指定设置块及所需凭据，不向用户脚本提供原生存储入口。
+业务 JSON 保留 64 层、严格 UTF-8 与 JSON 语法，不加总大小配额。`System.Text.Json` 保留原始数字与扩展，不将全树数字转成 double，不拒绝普通重复未知键，也不提前解码全树字符串或未知 Unicode 键；字符串在实际取用时由 `System.Text.Json` 解码。所消费的 ok／contract／value 或 code、描述身份及关闭回执要求唯一成员；SSE sessionId／sequence、上传 sourceRevision、设置请求 id 等实际身份和关联数字在消费处精确取整并核对范围，避免浮点舍入冒充关联成功。外层扩展不参与成员数门禁，错误呈现仍只使用有限 code，不呈现附带私密正文。源码上传不另设字节配额。没有通用反向文档 RPC；只有上述私密设置能力向受信 Node owner 提供指定设置块及所需凭据，不向用户脚本提供原生存储入口。
 
 ## 所有权与关闭
 

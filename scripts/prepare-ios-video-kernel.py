@@ -73,11 +73,7 @@ def download_source(url, partial):
     for index, opener in enumerate(openers):
         try:
             with opener() as response, partial.open("wb") as output:
-                length = 0
                 for block in iter(lambda: response.read(1024 * 1024), b""):
-                    length += len(block)
-                    if length > 64 * 1024 * 1024:
-                        raise ValueError("source download exceeds the download boundary")
                     output.write(block)
             return
         except OSError:

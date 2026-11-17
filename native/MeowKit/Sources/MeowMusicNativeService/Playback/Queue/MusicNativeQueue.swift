@@ -96,12 +96,12 @@ extension NativeMusicService {
         let context = queue["entries"].array.first?["context"] ?? .obj()
         let title = MusicModel.firstText(queue["source"]["title"], context["sourceTitle"], context["playlist"])
         item["title"] = .string(title.isEmpty ? "播放列表" : title)
-        d.history["playlists"] = .array(Array(([item] + d.history["playlists"].array).prefix(5)))
+        d.history["playlists"] = .array([item] + d.history["playlists"].array)
     }
     func select(_ id: String, queue: inout MJ, remember: Bool = true) {
         let current = queue["currentId"].string
         if remember && !current.isEmpty && current != id {
-            queue["history"] = .strings(Array((queue["history"].strings + [current]).suffix(100)))
+            queue["history"] = .strings(queue["history"].strings + [current])
         }
         queue["currentId"] = .string(id); queue["priority"] = .strings(queue["priority"].strings.filter { $0 != id })
     }

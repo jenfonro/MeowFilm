@@ -130,7 +130,7 @@ final class MusicLiveAcceptanceTests: XCTestCase {
                     // The supported reader and owner codec validate the original
                     // file. No JSON rewriting, credential extraction or session injection.
                     let bytes = try await ImportedFileReader.read(
-                        accountFile, maximumBytes: MusicAccountFilePayload.maximumBytes)
+                        accountFile)
                     let plan = try await context.accounts.prepareAccountImport(
                         MusicAccountFilePayload(fileData: bytes))
                     guard plan.conflicts.isEmpty else {
