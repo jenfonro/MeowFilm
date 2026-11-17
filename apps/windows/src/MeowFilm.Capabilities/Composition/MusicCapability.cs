@@ -42,8 +42,9 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private string? openedEntry;
 
     public MusicCapability(IRuntimeClient runtime, IDocumentStore store, IMusicLibraryStore libraryStore, NativeAudioPlayback playback, string? playbackCacheRoot = null,
-        CacheDocumentStore? cacheStore = null)
-        : this(cacheStore is null ? new MusicNativeApplication(store, libraryStore, runtime) : new MusicNativeApplication(store, libraryStore, runtime, cacheStore),
+        CacheDocumentStore? cacheStore = null, string? presentationCacheRoot = null)
+        : this(new MusicNativeApplication(store, libraryStore, runtime, null, null,
+                cacheStore: cacheStore, presentationCacheRoot: presentationCacheRoot),
             store, new NativeMusicPlayback(playback), playbackCacheRoot: playbackCacheRoot, cacheStore: cacheStore) { }
 
     public MusicCapability(IMusicApplication application, IDocumentStore store, NativeAudioPlayback playback,
@@ -66,7 +67,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         this.playback = playback; this.dialogs = dialogs ?? new MusicDialogs();
         this.cacheStore = cacheStore ?? new CacheDocumentStore();
         ownsCacheStore = cacheStore is null;
-        presentationCache = application is MusicNativeApplication native ? native.PresentationCache : new(this.cacheStore);
+        presentationCache = application is MusicNativeApplication native ? native.PresentationCache : new();
         ArtworkLoader = new(byteCache: presentationCache, loadCompleted:
             application is MusicNativeApplication artworkOwner ? artworkOwner.ArtworkLoadCompletedAsync : null);
         if (application is MusicNativeApplication repositoryOwner)
@@ -1127,6 +1128,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         if (application is MusicNativeApplication repositoryOwner)
             repositoryOwner.SongMetadataChanged -= RepositorySongsChanged;
         try { await ArtworkLoader.DisposeAsync(); } catch (Exception error) { failure ??= error; }
+        if (application is not MusicNativeApplication)
+            try { await presentationCache.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         if (ownsCacheStore) await cacheStore.DisposeAsync();
         UnsubscribeSearch();
         UnsubscribeDiscovery();
@@ -1163,6 +1166,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
                 repositoryOwner.SongMetadataChanged -= RepositorySongsChanged;
             try { await ArtworkLoader.DisposeAsync(); }
             catch (Exception error) { failure ??= error; }
+            if (application is not MusicNativeApplication)
+                try { await presentationCache.DisposeAsync(); } catch (Exception error) { failure ??= error; }
             if (ownsCacheStore) await cacheStore.DisposeAsync();
             // The capability owns its application. Runtime, store and playback remain App-owned.
         }

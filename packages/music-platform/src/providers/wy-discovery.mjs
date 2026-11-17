@@ -245,7 +245,7 @@ function contentPage(raw, target, c, cursor = '') {
   });
   result.more = Boolean(data.hasMore);
   result.continuation = result.more ? { cursor: required(data.cursor),
-    blockCodeOrderList: first(data.blockCodeOrderList, ''),
+    blockCodeOrderList: data.blockCodeOrderList ?? '',
     loadedPositionCodes: JSON.stringify(blocks.map(row => text(row.positionCode)).filter(Boolean)) } : null;
   if (result.more && scalar(data.cursor) === cursor) fail('INVALID_RESPONSE');
   return resources.finish(result);

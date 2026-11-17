@@ -38,6 +38,7 @@ public final class ArtworkImages {
     }
     private var flights: [URL: Flight] = [:]
     private var producers: [UUID: Flight] = [:]
+    private var pending: [(url: URL, flight: Flight)] = []
 
     public var revision: UUID { byteCache?.revision ?? loaderRevision }
 
@@ -63,6 +64,12 @@ public final class ArtworkImages {
     }
     private func invalidate() {
         loaderRevision = UUID(); cache.removeAllObjects()
+        let waiting = pending
+        pending.removeAll()
+        for (url, flight) in waiting {
+            flight.abandoned = true
+            complete(flight, for: url, with: .failure(CancellationError()))
+        }
         for flight in producers.values {
             flight.abandoned = true; flight.task?.cancel()
         }
@@ -80,8 +87,7 @@ public final class ArtworkImages {
         // the same resource while that producer is still physically draining.
         while let previous = flights[url],
               previous.abandoned || previous.byteRevision != byteCache?.revision {
-            previous.abandoned = true
-            previous.task?.cancel()
+            abandon(previous, for: url)
             await previous.task?.value
             try Task.checkCancellation()
             guard !closed else { throw CancellationError() }
@@ -101,30 +107,46 @@ public final class ArtworkImages {
                     flight.consumers[consumerID] = continuation
                     return
                 }
-                let byteCache = self.byteCache
                 let flight = Flight(cachedData: cachedData, loaderRevision: loaderRevision,
                                     byteRevision: byteCache?.revision)
                 flight.consumers[consumerID] = continuation
                 flights[url] = flight
-                producers[flight.id] = flight
-                flight.task = Task {
-                    do {
-                        let (image, data, expiresAt) = try await Self.readBytes(
-                            url, cachedData: flight.cachedData, maximumBytes: self.maximumBytes,
-                            byteCache: byteCache, revision: flight.byteRevision, loadData: self.loadData
-                        )
-                        try Task.checkCancellation()
-                        self.complete(flight, for: url, with: .success((image, data, expiresAt)))
-                    } catch {
-                        self.complete(flight, for: url, with: .failure(error))
-                    }
-                }
+                pending.append((url, flight))
+                startPending()
             }
         } onCancel: {
             Task { @MainActor in self.cancel(consumerID, for: url) }
         }
         try Task.checkCancellation()
         return result
+    }
+
+    private func startPending() {
+        // Waiting flights contain only demand; the slot covers the whole byte
+        // read, decode and save, including an uncooperative cancelled producer.
+        while !closed, producers.count < 4, !pending.isEmpty {
+            let (url, flight) = pending.removeFirst()
+            guard !flight.abandoned, flight.loaderRevision == loaderRevision,
+                  flight.byteRevision == byteCache?.revision else {
+                complete(flight, for: url, with: .failure(CancellationError()))
+                continue
+            }
+            let byteCache = self.byteCache
+            producers[flight.id] = flight
+            flight.task = Task {
+                do {
+                    let (image, data, expiresAt) = try await Self.readBytes(
+                        url, cachedData: flight.cachedData, maximumBytes: self.maximumBytes,
+                        byteCache: byteCache, revision: flight.byteRevision, loadData: self.loadData
+                    )
+                    try Task.checkCancellation()
+                    self.complete(flight, for: url, with: .success((image, data, expiresAt)))
+                } catch {
+                    self.complete(flight, for: url, with: .failure(error))
+                }
+                self.startPending()
+            }
+        }
     }
 
     private func store(_ image: UIImage, for url: URL, expiresAt: Date?, revision: UUID?) {
@@ -159,10 +181,20 @@ public final class ArtworkImages {
             continuation.resume(throwing: CancellationError())
             return
         }
-        // The last consumer settles only when the physical read has stopped.
+        // An active last consumer settles only after the physical read stops.
+        // Queued demand has no byte work to drain.
         flight.consumers[consumerID] = continuation
+        abandon(flight, for: url)
+    }
+
+    private func abandon(_ flight: Flight, for url: URL) {
         flight.abandoned = true
-        flight.task?.cancel()
+        if let task = flight.task {
+            task.cancel()
+        } else {
+            pending.removeAll { $0.flight === flight }
+            complete(flight, for: url, with: .failure(CancellationError()))
+        }
     }
 
     /// Cancellation follows the physical read; decoding stays off the UI actor.
@@ -179,13 +211,20 @@ public final class ArtworkImages {
             try Task.checkCancellation()
             return (value, cachedData, nil)
         }
-        if let byteCache, let saved = await byteCache.read(url), saved.expiresAt > Date(),
-           saved.data.count <= maximumBytes, let value = decode(saved.data) {
+        if let byteCache {
+            let saved = await byteCache.read(url)
             try Task.checkCancellation()
-            return (value, saved.data, saved.expiresAt)
+            guard byteCache.revision == revision else { throw CancellationError() }
+            if let saved, saved.expiresAt > Date(), saved.data.count <= maximumBytes,
+               let value = decode(saved.data) {
+                try Task.checkCancellation()
+                return (value, saved.data, saved.expiresAt)
+            }
         }
+        try Task.checkCancellation()
         let data = try await loadData(url)
         try Task.checkCancellation()
+        if let byteCache, byteCache.revision != revision { throw CancellationError() }
         guard data.count <= maximumBytes else { throw URLError(.dataLengthExceedsMaximum) }
         guard let value = decode(data) else { throw URLError(.cannotDecodeContentData) }
         try Task.checkCancellation()

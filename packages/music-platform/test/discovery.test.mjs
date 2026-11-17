@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { fixture, response, rpc, eapi, weapi, qq, kg, seedClients, fixedEntropy, xeapi, wySong, txSong, kgSong,
   kgHash, idOf, gate } from './support.mjs';
 
@@ -174,6 +175,29 @@ test('WY home continuation follows real cursor and carries only actual protocol 
   assert.equal(second.more, false); assert.equal(f.requests.length, 2); await f.close();
   const stalled = fixture(() => response({ code: 200, data: { blocks: [], hasMore: true, cursor: '0' } }));
   await assert.rejects(stalled.request('wy', 'home'), { code: 'INVALID_RESPONSE' }); await stalled.close();
+});
+
+test('WY home and playlist channel continuations remain wire JSON without optional block order', async t => {
+  fixedEntropy(t);
+  for (const operation of ['home', 'channel']) {
+    const f = fixture(request => {
+      const data = operation === 'home' ? eapi(request).data : weapi(request);
+      const next = String(data.cursor) === '7';
+      assert.equal(data.blockCodeOrderList, undefined);
+      return response({ code: 200, data: { blocks: [{ positionCode: 'playlists', creatives: [
+        { resources: [{ resourceType: 'playlist', resourceId: '1', name: 'Current playlist' }] },
+      ] }], hasMore: !next, cursor: '7' } });
+    });
+    t.after(() => f.close());
+    const params = operation === 'channel' ? { id: 'playlist' } : {};
+    const page = await f.request('wy', operation, params);
+    assert.equal(page.continuation.blockCodeOrderList, '');
+    assert.deepEqual(JSON.parse(stringifyJSONValue(page)), page);
+    const next = await f.request('wy', operation, { ...params, continuation: page.continuation });
+    assert.equal(next.more, false);
+    assert.deepEqual(JSON.parse(stringifyJSONValue(next)), next);
+    assert.equal(f.requests.length, 2);
+  }
 });
 
 test('WY malformed optional URI actions leave actual resource locators and healthy sibling actions usable', async t => {

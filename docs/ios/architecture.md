@@ -185,13 +185,14 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 | --- | --- |
 | `dev.meowfilm.aggregate` | 固定产品身份；安装宿主改写安装标识时，内部存储身份不变 |
 | Application Support 下 `meowfilm/documents` | 原生业务数据根目录 |
-| Caches 下 `meowfilm/documents` | 普通缓存文档根目录 |
+| Caches 下 `meowfilm/documents` | 普通缓存文档和逐资源原始字节文件根目录 |
 | Application Support 下 `meowfilm/script-runtime/music-platform` | Node 唯一维护的匿名协议状态 |
 | `music-library-v1/music-library-v1.sqlite3` | 系统 SQLite 永久歌曲仓库、来源索引、引用队列、历史和播放记录 |
 | `dev.meowfilm.aggregate.music.platform.accounts.v1` | 三平台 Keychain 账号凭据与固定账号槽 |
 | `music.platform.audio-locators.v1` | 账号作用域下的官方音频定位缓存 |
 | `meowfilm.music.audio-resources.v1` | 实际播放后的完整音频缓存 |
-| `music.presentation-resources.v1`、`music.home.display.v1`、`music.source-checks.v1` | 共享图片／歌词资源、首页展示快照和来源发现观察 |
+| `music.presentation-resources.v2` | 共享图片／歌词原始字节叶子，首用文件 metadata 仅保留在内存 |
+| `music.home.display.v1`、`music.source-checks.v1` | 首页展示快照和来源发现观察 |
 | `music.ui.appearance.v1`、`music.ui.songColors.v1`、`music.ui.lastChannel` | 音乐外观偏好、歌曲取色缓存和频道恢复 |
 | `playback.volume`、播放所有者 `music`／`film` | 共享播放音量与当前播放业务所有者 |
 | `meowfilm.film.library.v1` | 影视收藏身份，保留原来源／影片字段及可选 Node `businessID/playbackTarget`，见[影视收藏](film.md#详情和收藏) |

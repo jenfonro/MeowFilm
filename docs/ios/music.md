@@ -141,7 +141,7 @@
 
 控制状态加载只核对数据库结构与提交身份，不验证未消费 area。实际集合、队列、同步及设置读取／操作在对应边界校验；普通事务只对新增关系查询真实歌曲，保留未消费字段。数据库确认已提交但回调丢失时，先结算本地事实、会话位置与歌曲通知，再报告 `commitUnconfirmed`；无法核对的提交保留精确前后身份，读取对账，不重放原 mutation。
 
-仅保存公开图片 URL 与来源选择信息，图片字节／解码资源仍由独立 URL 图片缓存拥有，不写入歌曲数据库。本阶段不替换图片／歌词持久缓存。新库只接受当前 SQLite schema，未知／损坏库失败，旧 JSON 不探测、读取、转换、回退或自动删除。
+仅保存公开图片 URL 与来源选择信息，图片字节／解码资源仍由独立 URL 图片缓存拥有，不写入歌曲数据库。新库只接受当前 SQLite schema，未知／损坏库失败，旧 JSON 不探测、读取、转换、回退或自动删除。
 
 冷读不遍历证明所有歌曲源、队列、同步 fence、历史和设置；局部写入保留未消费记录及扩展字段。集合列表按可展示的独立行读取；真正打开或编辑时核对所选唯一身份、revision、歌曲引用和排序成员集。歌曲登记对实际采用的来源确认唯一永久 owner，不能由重复 sourceKey 选首项覆盖。UI 不重复校验整批数量或 count 镜像，页面绑定、编辑 ticket 和实际提交回执继续约束迟到结果。局部集合编辑只更新自动同步意图所需字段，不解码或重写无关 fence。
 
@@ -207,7 +207,13 @@ Node 保管匿名设备及 prepare；Swift 账号 owner 保留 Keychain、安全
 
 ## 缓存
 
-共同归属、清理和换图规则见[共享图片与展示资源](../common/music/presentation-resources.md)。iOS 当前音乐 `ArtworkImages` 借用 `MusicNativePresentationCache` 的图片字节 port，namespace 为 `music.presentation-resources.v1`。图片原网络字节与 songID／sourceKey 关联的歌词共用 256 MiB／30 天预算；内存沿 24 MiB／128 项，单图网络 4 MiB，ImageIO 缩略及现有解码限制保留。播放器独占图片持久副本已删除；影视／小说入口不使用这个音乐磁盘 port。
+共同归属、清理和换图规则见[共享图片与展示资源](../common/music/presentation-resources.md)。iOS 音乐 `ArtworkImages` 借用 `MusicNativePresentationCache` 的图片字节 port，使用 Caches 下 `meowfilm/documents/music.presentation-resources.v2`。`ResourceFileStore` 保存 `image-<SHA256(完整 URL)>.bytes` 原网络字节及 `lyrics-<SHA256(songID)>.bytes` 的现行 `MusicLyricDisplaySnapshot` JSON 字节；歌词保留 sourceKey，不包含图片。只消费新路径，不探测、迁移或自动删除旧缓存；影视／小说入口不使用这个音乐磁盘 port。
+
+首用成功时只枚举一次普通文件 metadata，不读取资源内容；之后 owner 在内存维护逐资源大小、mtime 和可读资格，不保存或重写共享索引。读取只打开目标叶子；30 天期限来自 mtime，普通显示读取不续期，实际播放只 touch 当前歌曲歌词和当前完整图片 URL，同值或更早的播放时间不写盘。单条丢失／损坏是本条未命中，临时存储失败仍可恢复；图片写盘失败不逆转已成功解码的网络结果。
+
+图片与歌词共用原有 256 MiB 原始资源预算，写入先为同目录 stage 预留空间，旧叶子至 rename 后才释放记账；未发布 stage 和失败删除的叶子继续计费。图片单条 4 MiB、歌词单条 1 MiB；图片内存仍为 24 MiB／128 项，ImageIO 缩略及现有解码限制不变。定向清理在等待 actor I/O 前撤销对应 revision，rename／touch 再核对资格；未成功删除的资源在当前 owner 中不可读取，首次清理失败后恢复枚举也不重新采用旧叶子。歌词实际读取和写入受 `MusicQueueAuthorization.perform` 保护。普通业务文档的 CAS／fsync 不因此改变。
+
+共享 `ArtworkImages` 最多同时执行 4 项实际字节读取、解码及保存，等待中的 URL 不提前发起字节工作。同 URL 的消费者共享执行并独立取消；排队的最后需求取消后直接移除，已执行的最后需求取消及关闭须等真实 producer 完成才归还槽。同键继任不与退役执行重叠，已显示图片与页面内容数量不受执行槽限制。
 
 `MusicNativeAccountURLCache` 是可重建的地址缓存：单条不可解码或过期只导致该项未命中，健康兄弟继续可读；坏文档不把后续健康写入永久禁用。磁盘读写失败仍不冒充持久成功，缓存内当前可用地址可继续服务播放。账号 scope、实际媒体 URL、期限与迟到失败不能淘汰新地址的判断保持在各自消费处。
 
@@ -217,7 +223,7 @@ Node 保管匿名设备及 prepare；Swift 账号 owner 保留 Keychain、安全
 
 生产音频缓存直接打开系统提供的 Caches 基目录，再逐级以 `openat`／`O_NOFOLLOW` 打开本应用缓存子目录，不逐个读取沙盒外的祖先目录。目录打开不提供 `/` 默认值，测试也必须显式传入已存在的私有基目录。重开时沿同一基目录核对目录身份，保留私有权限、独占锁和真机 Data Protection 校验。
 
-清理先撤销资源 revision／ready，晚在途不回填；正常重绑不续期。当前 loader 的冷读、取消、预算、磁盘失败、清理及系统媒体接线尚未取得本轮测试结果，静态描述不作为完成证明。
+清理先撤销资源 revision／ready，晚在途不回填；正常重绑不续期。
 
 ## 搜索发现
 

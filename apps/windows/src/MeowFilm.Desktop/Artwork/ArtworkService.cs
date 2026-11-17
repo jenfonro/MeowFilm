@@ -1,4 +1,3 @@
-using System.IO;
 using System.Net.Http;
 using System.Windows.Media.Imaging;
 
@@ -44,8 +43,8 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
     private readonly Func<string, bool, Task>? loadCompleted;
     private readonly TimeProvider time;
     private readonly CancellationTokenSource lifetime = new();
+    private readonly SemaphoreSlim execution = new(4, 4);
     private readonly Dictionary<string, Flight> flights = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, Task> writes = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Entry> cache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Entry> leased = new(StringComparer.Ordinal);
     private TaskCompletionSource drained = Completed(), released = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -177,6 +176,8 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
 
     private async Task<Entry> LoadAsync(string key, Uri? uri, Flight flight)
     {
+        // Waiting owns no image bytes and does not consume the request timeout.
+        await execution.WaitAsync(flight.Cancellation.Token).ConfigureAwait(false);
         try
         {
             var result = await LoadCoreAsync(key, uri, flight).ConfigureAwait(false);
@@ -188,6 +189,7 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
             await CompleteAsync(false).ConfigureAwait(false);
             throw;
         }
+        finally { execution.Release(); }
         async Task CompleteAsync(bool succeeded)
         {
             if (loadCompleted is null) return;
@@ -209,9 +211,6 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
         try
         {
             request.Token.ThrowIfCancellationRequested();
-            Task? writing;
-            lock (gate) writes.TryGetValue(key, out writing);
-            if (writing is not null) await writing.WaitAsync(request.Token).ConfigureAwait(false);
             BitmapSource? image = null;
             DateTimeOffset? expiresAt = null;
             if (byteCache is not null)
@@ -222,7 +221,7 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
                     encoded = stored?.Content;
                     expiresAt = stored?.ExpiresAt;
                 }
-                catch (OperationCanceledException) { throw; }
+                catch (OperationCanceledException) when (request.IsCancellationRequested) { throw; }
                 catch { /* Recoverable persistence miss; HTTP still owns the real load failure. */ }
             }
             else if (disk is not null) encoded = await disk.ReadAsync(key, request.Token).ConfigureAwait(false);
@@ -237,13 +236,12 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
                         if (byteCache is not null) await byteCache.RemoveAsync(key, flight.DiskEpoch, request.Token).ConfigureAwait(false);
                         else if (disk is not null) await disk.RemoveAsync(key, request.Token).ConfigureAwait(false);
                     }
-                    catch (OperationCanceledException) { throw; }
+                    catch (OperationCanceledException) when (request.IsCancellationRequested) { throw; }
                     catch { }
                 }
                 finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(encoded); encoded = null; }
             }
-            bool downloaded = image is null;
-            if (downloaded)
+            if (image is null)
             {
                 encoded = uri is null ? await readTrusted!(key, MaximumBytes, request.Token).ConfigureAwait(false)
                     : await http.ReadAsync(uri, request.Token).ConfigureAwait(false);
@@ -253,8 +251,19 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
                 {
                     expiresAt = time.GetUtcNow() + byteCache.Lifetime;
                     try { await byteCache.WriteAsync(key, encoded, flight.DiskEpoch, request.Token).ConfigureAwait(false); }
-                    catch (OperationCanceledException) { throw; }
+                    catch (OperationCanceledException) when (request.IsCancellationRequested) { throw; }
                     catch { /* Decoded pixels remain usable even when persistence is unavailable. */ }
+                }
+                else if (disk is not null)
+                {
+                    bool persist;
+                    lock (gate) persist = !closed && flight.Epoch == epoch && flight.Readers > 0;
+                    if (persist)
+                    {
+                        try { await disk.WriteAsync(key, encoded, request.Token).ConfigureAwait(false); }
+                        catch (OperationCanceledException) when (request.IsCancellationRequested) { throw; }
+                        catch { /* Decoded pixels remain usable even when persistence is unavailable. */ }
+                    }
                 }
             }
             request.Token.ThrowIfCancellationRequested();
@@ -277,46 +286,19 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
                         }
                     }
                     if (cost <= CacheBytes) { cache.Add(key, entry); bytes += cost; }
-                    if (downloaded && disk is not null)
-                    {
-                        Persist(key, encoded!);
-                        encoded = null; // The writer now owns and clears these bytes.
-                    }
                 }
                 return entry;
             }
         }
-        catch (OperationCanceledException) when (!lifetime.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
-            lock (gate) if (flight.Readers == 0) throw;
-            throw new ArtworkException("ARTWORK_TIMEOUT");
+            // Retirement is recorded before cancellation callbacks run.
+            lock (gate) if (closed || flight.Readers == 0) throw;
+            throw new ArtworkException(request.IsCancellationRequested ? "ARTWORK_TIMEOUT" : "ARTWORK_FAILED");
         }
         catch (ArtworkException) { throw; }
-        catch (OperationCanceledException) { throw; }
         catch { throw new ArtworkException("ARTWORK_FAILED"); }
         finally { if (encoded is not null) System.Security.Cryptography.CryptographicOperations.ZeroMemory(encoded); }
-    }
-
-    // Registered under gate before publishing the image. Persistence holds only
-    // encoded bytes, so queued I/O cannot pin evicted decoded images.
-    private void Persist(string key, byte[] encoded)
-    {
-        pending++;
-        var work = Task.Run(async () =>
-        {
-            try { await disk!.WriteAsync(key, encoded, lifetime.Token).ConfigureAwait(false); }
-            finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(encoded); }
-        });
-        writes[key] = work;
-        _ = work.ContinueWith(t =>
-        {
-            _ = t.Exception;
-            lock (gate)
-            {
-                if (writes.TryGetValue(key, out var current) && ReferenceEquals(current, work)) writes.Remove(key);
-                if (--pending == 0) drained.TrySetResult();
-            }
-        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     private static Task<BitmapSource> Decode(byte[] bytes, CancellationToken token)
@@ -369,6 +351,7 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
             await drain.ConfigureAwait(false);
             http.Dispose();
             disk?.Dispose();
+            execution.Dispose();
             lock (gate) { cache.Clear(); leased.Clear(); bytes = 0; }
             lifetime.Dispose();
             released.TrySetResult();

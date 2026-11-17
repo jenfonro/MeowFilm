@@ -1,6 +1,8 @@
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.Json;
 using MeowFilm.Capabilities.Library;
@@ -199,7 +201,7 @@ public static partial class MusicOfficialPlaybackScopeTests
         internal string DiscoveryArtwork = "", Title = "", Artist = "";
         internal JsonElement? ChorusResult;
         internal bool HoldDiscovery;
-        private ArtworkScene()
+        internal ArtworkScene(string? presentationCacheRoot = null)
         {
             Cache = new(CacheBacking);
             Runtime.OnRequest = Read;
@@ -207,19 +209,23 @@ public static partial class MusicOfficialPlaybackScopeTests
                 ? Task.FromResult(MusicPlatformRuntimeFixture.Json(new { ok = true, contract = "music.script.v3",
                     value = new { items = Array.Empty<object>() } }))
                 : throw new InvalidOperationException("unexpected script operation: " + call.Method);
-            App = new(Store, MusicTestStores.For(Store), Runtime, Cache);
+            App = new(Store, MusicTestStores.For(Store), Runtime, Cache, presentationCacheRoot);
             Module = new(App, Store, Output, new Dialogs(), cacheStore: Cache);
         }
-        internal static async Task<ArtworkScene> Create()
+        internal static async Task<ArtworkScene> Create(string? presentationCacheRoot = null)
         {
-            var result = new ArtworkScene();
-            await result.Module.InitializeAsync(default);
-            await result.Ok("music.accounts.import",
-                new { platform = "tx", cookie = "musicid=123; musickey=synthetic; encrypt_uin=FixtureEUIN" });
-            await result.Ok("music.settings.save", new { ifRevision = 0, lyrics = false });
-            await result.SetQuality("128k");
-            await Until(() => !result.Module.Busy);
+            var result = new ArtworkScene(presentationCacheRoot);
+            await result.Initialize();
             return result;
+        }
+        internal async Task Initialize()
+        {
+            await Module.InitializeAsync(default);
+            await Ok("music.accounts.import",
+                new { platform = "tx", cookie = "musicid=123; musickey=synthetic; encrypt_uin=FixtureEUIN" });
+            await Ok("music.settings.save", new { ifRevision = 0, lyrics = false });
+            await SetQuality("128k");
+            await Until(() => !Module.Busy);
         }
         private async Task<JsonElement> Read(MusicPlatformRuntimeFixture.Call call, CancellationToken token)
         {
@@ -333,12 +339,15 @@ public static partial class MusicOfficialPlaybackScopeTests
         internal bool Disposed;
         public void Dispose() => Disposed = true;
     }
-    private static BitmapSource ArtworkPixels()
+    private static BitmapSource ArtworkPixels(int size = 1)
     {
-        var image = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgra32, null, new byte[] { 60, 120, 180, 255 }, 4);
+        var pixels = new byte[size * size * 4];
+        for (int i = 0; i < pixels.Length; i += 4)
+        { pixels[i] = 60; pixels[i + 1] = 120; pixels[i + 2] = 180; pixels[i + 3] = 255; }
+        var image = BitmapSource.Create(size, size, 96, 96, PixelFormats.Bgra32, null, pixels, size * 4);
         image.Freeze(); return image;
     }
-    private sealed class ArtworkHttpProbe : HttpMessageHandler
+    private sealed class ArtworkHttpProbe(int size = 1) : HttpMessageHandler
     {
         internal readonly List<string> Addresses = [];
         internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -347,10 +356,10 @@ public static partial class MusicOfficialPlaybackScopeTests
         internal string? HeldAddress;
         internal readonly HashSet<string> Failures = new(StringComparer.Ordinal);
         internal readonly System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource> Gates = new(StringComparer.Ordinal);
-        private readonly byte[] bytes = Encode();
-        internal static byte[] Encode()
+        private readonly byte[] bytes = Encode(size);
+        internal static byte[] Encode(int size = 1)
         {
-            var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(ArtworkPixels()));
+            var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(ArtworkPixels(size)));
             using var stream = new MemoryStream(); encoder.Save(stream); return stream.ToArray();
         }
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -369,49 +378,66 @@ public static partial class MusicOfficialPlaybackScopeTests
     private static async Task SharedArtworkCold()
     {
         const string original = "https://images.example.test/shared.png?size=128&tokenless=1";
+        const string alias = "HTTPS://IMAGES.EXAMPLE.TEST:443/shared.png?size=128&tokenless=1";
         const string variant = "https://images.example.test/shared.png?size=256&tokenless=1";
-        await using var backing = new MusicOfficialAudioTests.MemoryStore();
-        await using (var documents = new CacheDocumentStore(backing))
-        await using (var loader = new ArtworkService(new ArtworkHttpProbe(), byteCache: new MusicPresentationCache(documents)))
+        string directory = NewArtworkResourceRoot();
+        await using (var cache = new MusicPresentationCache(directory))
+        await using (var loader = new ArtworkService(new ArtworkHttpProbe(), byteCache: cache))
         {
             using var first = await loader.AcquireAsync(original);
-            using var second = await loader.AcquireAsync(original);
+            using var second = await loader.AcquireAsync(alias);
             Check(ReferenceEquals(first.Image, second.Image), "memory decoded pixels are shared independently of song or display size");
-            await documents.DrainAsync();
+            await cache.DrainAsync();
         }
-        await using var coldDocuments = new CacheDocumentStore(backing);
+        Check(File.ReadAllBytes(ArtworkResourceFile(directory, "image", original)).SequenceEqual(ArtworkHttpProbe.Encode()),
+            "the independent image leaf contains original compressed bytes");
+        await using var coldCache = new MusicPresentationCache(directory);
         var http = new ArtworkHttpProbe();
-        await using var cold = new ArtworkService(http, byteCache: new MusicPresentationCache(coldDocuments));
-        using var restored = await cold.AcquireAsync(original);
+        await using var cold = new ArtworkService(http, byteCache: coldCache);
+        using var restored = await cold.AcquireAsync(alias);
         Check(http.Addresses.Count == 0 && restored.Image.PixelWidth == 1, "cold loader must decode disk before issuing image HTTP");
         using var otherSize = await cold.AcquireAsync(variant);
         Check(http.Addresses.SequenceEqual([variant]), "real URL query variants remain separate resources");
-        var entries = JsonNode.Parse(coldDocuments.ReadMemory(MusicPresentationCache.Namespace).Data!)!["entries"]!.AsObject();
-        Check(entries.Count == 2 && entries.All(pair => pair.Value!["kind"]!.GetValue<string>() == "image"));
+        await coldCache.DrainAsync();
+        Check(Directory.EnumerateFiles(directory, "*.resource").Count() == 2 &&
+            File.Exists(ArtworkResourceFile(directory, "image", variant)));
     }
 
     private static async Task SharedArtworkFailures()
     {
         const string address = "https://images.example.test/corrupt.png";
-        await using var backing = new MusicOfficialAudioTests.MemoryStore();
-        await using var documents = new CacheDocumentStore(backing);
-        var cache = new MusicPresentationCache(documents);
-        await cache.WriteAsync(address, new byte[] { 1, 2, 3 }, cache.Epoch, default);
+        const string healthy = "https://images.example.test/healthy.png";
+        string directory = NewArtworkResourceRoot(), songId = Guid.NewGuid().ToString("D");
+        await using (var seeded = new MusicPresentationCache(directory))
+        {
+            await seeded.WriteAsync(address, new byte[] { 1, 2, 3 }, seeded.Epoch, default);
+            await seeded.WriteAsync(healthy, ArtworkHttpProbe.Encode(), seeded.Epoch, default);
+            await seeded.SaveLyricsAsync(songId, "source", new JsonArray(new JsonObject { ["time"] = 0, ["text"] = "healthy" }),
+                seeded.LyricEpoch, default);
+        }
+        await using var cache = new MusicPresentationCache(directory);
         var http = new ArtworkHttpProbe();
         await using (var loader = new ArtworkService(http, byteCache: cache))
         {
             using var repaired = await loader.AcquireAsync(address);
             Check(http.Addresses.SequenceEqual([address]) && repaired.Image.PixelWidth == 1,
                 "a corrupt disk resource misses and repairs only its own image");
+            using var intact = await loader.AcquireAsync(healthy);
+            Check(http.Addresses.SequenceEqual([address]) && intact.Image.PixelWidth == 1);
+            Check((await cache.ReadLyricsAsync(songId, default))!["lines"]![0]!["text"]!.GetValue<string>() == "healthy");
         }
-        var failedDisk = new ArtworkWriteFailure(cache);
+        Check(File.ReadAllBytes(ArtworkResourceFile(directory, "image", address)).SequenceEqual(ArtworkHttpProbe.Encode()));
+        string blocked = Path.Combine(NewArtworkResourceRoot(), "not-a-directory");
+        await File.WriteAllBytesAsync(blocked, new byte[] { 0 });
+        await using var failedDisk = new MusicPresentationCache(blocked);
         var fallbackHttp = new ArtworkHttpProbe();
         await using var fallback = new ArtworkService(fallbackHttp, byteCache: failedDisk);
         using var decoded = await fallback.AcquireAsync(address + "?new=1");
-        Check(decoded.Image.PixelWidth == 1 && failedDisk.Writes == 1,
+        Check(decoded.Image.PixelWidth == 1 && await failedDisk.ReadAsync(address + "?new=1", default) is null,
             "failed persistence cannot turn successful decoding into a failed image");
         using var reused = await fallback.AcquireAsync(address + "?new=1");
-        Check(ReferenceEquals(decoded.Image, reused.Image) && fallbackHttp.Addresses.Count == 1);
+        Check(ReferenceEquals(decoded.Image, reused.Image) && fallbackHttp.Addresses.Count == 1 &&
+            File.ReadAllBytes(blocked).SequenceEqual(new byte[] { 0 }));
     }
 
     private static async Task SharedArtworkCancellation()
@@ -458,9 +484,7 @@ public static partial class MusicOfficialPlaybackScopeTests
         const string address = "https://images.example.test/retired.png";
         foreach (bool clear in new[] { false, true })
         {
-            await using var backing = new MusicOfficialAudioTests.MemoryStore();
-            await using var documents = new CacheDocumentStore(backing);
-            var cache = new MusicPresentationCache(documents);
+            await using var cache = new MusicPresentationCache(NewArtworkResourceRoot());
             var http = new ArtworkHttpProbe { Hold = true };
             await using var loader = new ArtworkService(http, byteCache: cache);
             using var departed = new CancellationTokenSource();
@@ -516,11 +540,9 @@ public static partial class MusicOfficialPlaybackScopeTests
     private static async Task SharedArtworkClear()
     {
         const string address = "https://images.example.test/late.png";
-        await using var backing = new MusicOfficialAudioTests.MemoryStore();
-        await using var documents = new CacheDocumentStore(backing);
-        var cache = new MusicPresentationCache(documents);
+        await using var cache = new MusicPresentationCache(NewArtworkResourceRoot());
         string songId = Guid.NewGuid().ToString("D");
-        await cache.SaveLyricsAsync(songId, "source", new JsonArray(new JsonObject { ["text"] = "healthy" }), cache.LyricEpoch, default);
+        await cache.SaveLyricsAsync(songId, "source", new JsonArray(new JsonObject { ["time"] = 0, ["text"] = "healthy" }), cache.LyricEpoch, default);
         var http = new ArtworkHttpProbe { Hold = true };
         await using var loader = new ArtworkService(http, byteCache: cache);
         var pending = loader.AcquireAsync(address);
@@ -533,7 +555,7 @@ public static partial class MusicOfficialPlaybackScopeTests
             using var visible = await pending;
             Check(visible.Image.PixelWidth == 1 && await cache.ReadAsync(address, default) is null,
                 "an old image may finish for its subscriber but cannot refill cleared resources");
-            Check(cache.ReadLyricsMemory(songId)!["lines"]![0]!["text"]!.GetValue<string>() == "healthy");
+            Check((await cache.ReadLyricsAsync(songId, default))!["lines"]![0]!["text"]!.GetValue<string>() == "healthy");
             loader.ClearMemory();
             Check(visible.Image.PixelWidth == 1, "cache clear does not revoke an already displayed lease");
             using var fresh = await loader.AcquireAsync(address);
@@ -757,84 +779,99 @@ public static partial class MusicOfficialPlaybackScopeTests
     {
         const string displayed = "https://images.example.test/displayed.png";
         var http = new ArtworkHttpProbe();
-        await using var backing = new MusicOfficialAudioTests.MemoryStore();
-        await using var documents = new CacheDocumentStore(backing);
+        string directory = NewArtworkResourceRoot();
         var clock = new MusicOfficialAudioTests.Clock();
-        var cache = new MusicPresentationCache(documents, clock);
+        await using var cache = new MusicPresentationCache(directory, clock);
         await using var loader = new ArtworkService(http, byteCache: cache, time: clock);
         using var visible = await loader.AcquireAsync(displayed);
         var pixels = visible.Image;
         clock.Now++;
         string songId = Guid.NewGuid().ToString("D");
-        await cache.SaveLyricsAsync(songId, "source",
-            new JsonArray(new JsonObject { ["text"] = new string('l', 4 * 1024 * 1024) }), cache.LyricEpoch, default);
-        clock.Now++;
-        await cache.WriteAsync(displayed + "?large=1", new byte[3 * 1024 * 1024], cache.Epoch, default);
-        byte[] actual = documents.ReadMemory(MusicPresentationCache.Namespace).Data!;
-        Check(actual.Length <= LocalDocumentStore.MaximumDocumentBytes &&
-            await cache.ReadAsync(displayed, default) is null && cache.ReadLyricsMemory(songId) is null,
-            "images and lyrics compete in the original 8 MiB serialized budget, not two independent allocations");
+        var lines = new JsonArray();
+        for (int i = 0; i < 4; i++)
+            lines.Add(new JsonObject { ["time"] = i, ["text"] = new string('l', 60 * 1024) });
+        await cache.SaveLyricsAsync(songId, "source", lines, cache.LyricEpoch, default);
+        Check(JsonNode.DeepEquals((await cache.ReadLyricsAsync(songId, default))!["lines"], lines),
+            "the budget fixture starts with valid lyrics below the 512 KiB resource limit");
+        byte[] imageBytes = new byte[2 * 1024 * 1024];
+        for (int i = 0; i < 4; i++)
+        {
+            clock.Now++;
+            await cache.WriteAsync(displayed + "?large=" + i, imageBytes, cache.Epoch, default);
+        }
+        await cache.DrainAsync();
+        long actual = Directory.EnumerateFiles(directory).Sum(path => new FileInfo(path).Length);
+        Check(actual <= 8L * 1024 * 1024 &&
+            await cache.ReadAsync(displayed, default) is null && await cache.ReadLyricsAsync(songId, default) is null,
+            "images and lyrics compete in the original 8 MiB raw-resource budget, not two independent allocations");
+        for (int i = 0; i < 4; i++)
+            Check((await cache.ReadAsync(displayed + "?large=" + i, default))!.Content.Length == imageBytes.Length);
         Check(ReferenceEquals(visible.Image, pixels), "disk eviction cannot revoke displayed pixels");
 
-        await using var memory = new ArtworkService(new ArtworkHttpProbe());
-        var held = await memory.AcquireAsync(displayed);
+        var memoryHttp = new ArtworkHttpProbe(size: 512);
+        await using var memory = new ArtworkService(memoryHttp);
+        using var held = await memory.AcquireAsync(displayed);
         var heldPixels = held.Image;
+        Check(heldPixels.PixelWidth == 512 && heldPixels.PixelHeight == 512);
         for (int i = 0; i < 65; i++)
         { using var item = await memory.AcquireAsync(displayed + "?item=" + i); }
         using (var stillVisible = await memory.AcquireAsync(displayed))
-            Check(ReferenceEquals(stillVisible.Image, heldPixels), "a display lease survives the existing 64-item cache eviction");
+            Check(ReferenceEquals(stillVisible.Image, heldPixels), "a display lease survives the existing 32 MiB decoded-pixel budget eviction");
         held.Dispose();
         using var reloaded = await memory.AcquireAsync(displayed);
-        Check(!ReferenceEquals(reloaded.Image, heldPixels), "released evicted resources are recoverable misses");
+        Check(!ReferenceEquals(reloaded.Image, heldPixels) && memoryHttp.Addresses.Count == 67,
+            "released evicted resources are recoverable misses");
     }
 
     private static async Task SharedArtworkLifetime()
     {
         const string address = "https://images.example.test/lifetime.png";
         var clock = new MusicOfficialAudioTests.Clock();
-        await using var backing = new MusicOfficialAudioTests.MemoryStore();
-        await using var documents = new CacheDocumentStore(backing);
-        var cache = new MusicPresentationCache(documents, clock);
+        string directory = NewArtworkResourceRoot();
+        await using var cache = new MusicPresentationCache(directory, clock);
         var http = new ArtworkHttpProbe();
         await using var loader = new ArtworkService(http, byteCache: cache, time: clock);
         string songId = Guid.NewGuid().ToString("D");
         using var original = await loader.AcquireAsync(address);
-        await cache.SaveLyricsAsync(songId, "source", new JsonArray(new JsonObject { ["text"] = "line" }), cache.LyricEpoch, default);
+        await cache.SaveLyricsAsync(songId, "source", new JsonArray(new JsonObject { ["time"] = 0, ["text"] = "line" }), cache.LyricEpoch, default);
         clock.Now += 29L * 86400000;
         using (var rebound = await loader.AcquireAsync(address))
             Check(ReferenceEquals(rebound.Image, original.Image));
         clock.Now += 86400000;
-        Check(await cache.ReadAsync(address, default) is null && cache.ReadLyricsMemory(songId) is null,
+        Check(await cache.ReadAsync(address, default) is null && await cache.ReadLyricsAsync(songId, default) is null,
             "UI binding alone cannot extend either resource's thirty-day life");
         using var replaced = await loader.AcquireAsync(address);
         Check(http.Addresses.Count == 2 && !ReferenceEquals(original.Image, replaced.Image));
 
-        await using var scene = await ArtworkScene.Create();
+        string playedDirectory = NewArtworkResourceRoot();
+        await using var scene = new ArtworkScene(playedDirectory);
         var old = new MusicOfficialAudioTests.Clock { Now = DateTimeOffset.UtcNow.AddDays(-29).ToUnixTimeMilliseconds() };
-        var seeded = new MusicPresentationCache(scene.Cache, old);
         var played = await MusicSongFixture.AdoptAsync(scene.App, ArtworkSong("wy", "played", address));
         string playedId = played["songId"]!.GetValue<string>();
-        await seeded.WriteAsync(address, ArtworkHttpProbe.Encode(), seeded.Epoch, default);
-        await seeded.SaveLyricsAsync(playedId, "source", new JsonArray(new JsonObject { ["text"] = "played line" }), seeded.LyricEpoch, default);
+        await using (var seeded = new MusicPresentationCache(playedDirectory, old))
+        {
+            await seeded.WriteAsync(address, ArtworkHttpProbe.Encode(), seeded.Epoch, default);
+            await seeded.SaveLyricsAsync(playedId, "source", new JsonArray(new JsonObject { ["time"] = 0, ["text"] = "played line" }),
+                seeded.LyricEpoch, default);
+        }
+        await scene.Initialize();
         await scene.Play(played);
         var queue = await scene.Ok("music.queue.get");
         Check(queue.GetProperty("current").GetProperty("song").GetProperty("songId").GetString() == playedId);
         await scene.Replay();
         await scene.Module.PrepareShutdownAsync();
-        await scene.Cache.DrainAsync();
-        var entries = JsonNode.Parse(scene.Cache.ReadMemory(MusicPresentationCache.Namespace).Data!)!["entries"]!.AsObject();
-        Check(entries.Count == 2 && entries.All(pair => pair.Value!["updatedAt"]!.GetValue<long>() > old.Now + 28L * 86400000),
+        await scene.App.PresentationCache.DrainAsync();
+        var entries = Directory.EnumerateFiles(playedDirectory, "*.resource").ToArray();
+        Check(entries.Length == 2 && entries.All(path =>
+            new DateTimeOffset(File.GetLastWriteTimeUtc(path)).ToUnixTimeMilliseconds() > old.Now + 28L * 86400000),
             "the real Started playback consumer renews shared image and lyric resources");
     }
 
-    private sealed class ArtworkWriteFailure(MusicPresentationCache cache) : IArtworkByteCache
+    private static string NewArtworkResourceRoot()
     {
-        internal int Writes;
-        public long Epoch => cache.Epoch;
-        public TimeSpan Lifetime => cache.Lifetime;
-        public Task<ArtworkBytes?> ReadAsync(string address, CancellationToken token) => cache.ReadAsync(address, token);
-        public Task RemoveAsync(string address, long epoch, CancellationToken token) => cache.RemoveAsync(address, epoch, token);
-        public Task WriteAsync(string address, ReadOnlyMemory<byte> bytes, long epoch, CancellationToken token)
-        { Writes++; throw new DocumentStoreException(DocumentStoreError.Storage); }
+        string path = TestWorkspace.DataPath("music-artwork-" + Guid.NewGuid().ToString("N"), MusicPresentationCache.DirectoryName);
+        Directory.CreateDirectory(path); return path;
     }
+    private static string ArtworkResourceFile(string directory, string group, string resource) =>
+        Path.Combine(directory, "r-" + group + "-" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(resource))) + ".resource");
 }
