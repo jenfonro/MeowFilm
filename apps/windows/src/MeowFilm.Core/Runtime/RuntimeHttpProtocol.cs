@@ -7,8 +7,7 @@ namespace MeowFilm.Core.Runtime;
 public static partial class RuntimeHttpProtocol
 {
     public const string Name = "runtime.http.v1";
-    internal sealed record ModuleContract(string Version, string Name, string Prefix,
-        string[] Operations, HashSet<string> Codes);
+    internal sealed record ModuleContract(string Version, string Name, string Prefix, HashSet<string> Codes);
     internal static readonly HashSet<string> PublicCodes = new(StringComparer.Ordinal)
     {
         "INVALID_REQUEST", "METHOD_NOT_FOUND", "PERMISSION_DENIED", "CLOSED", "CANCELLED", "TIMEOUT", "INVALID_RESPONSE"
@@ -17,7 +16,6 @@ public static partial class RuntimeHttpProtocol
         new Dictionary<string, ModuleContract>(StringComparer.Ordinal)
     {
         ["music-platform"] = new("0.1.0", "music.platform.v1", "music.platform.",
-            ["request", "session.update", "cache.clear", "describe"],
             new(StringComparer.Ordinal) {
                 "INVALID_REQUEST", "UNSUPPORTED", "CLOSED", "CANCELLED", "TIMEOUT", "LIMIT",
                 "NETWORK_ERROR", "UPSTREAM_HTTP", "UPSTREAM_ERROR", "INVALID_RESPONSE",
@@ -28,18 +26,12 @@ public static partial class RuntimeHttpProtocol
                 "CREDENTIALS_UNAVAILABLE", "STORAGE_CONFLICT", "REDIRECT_DENIED", "BUSY", "QR_EXPIRED",
                 "SMS_SEND_UNCONFIRMED", "DEVICE_LIMIT", "INVALID_CODE", "INVALID_PHONE", "ACCOUNT_SELECTION_REQUIRED" }),
         ["netease"] = new("0.1.0", "netease.token.v1", "netease.token.",
-            ["get"],
             new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "TIMEOUT", "NETWORK_ERROR",
                 "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "SDK_FAILURE", "SDK_CLEANUP" }),
         ["tmdb"] = new("0.1.0", "tmdb.data.v1", "tmdb.data.",
-            ["settings.get", "settings.update", "request"],
             new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "NETWORK_ERROR",
                 "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "WEB_INTERACTION_REQUIRED", "STORAGE_ERROR", "CORRUPT_STORAGE", "PERMISSION_DENIED" }),
         ["music"] = new("0.8.0", "music.script.v3", "music.script.",
-            ["sources.list", "sources.detail", "sources.add", "sources.download",
-                "sources.edit", "sources.update", "sources.rollback", "sources.enable",
-                "sources.disable", "sources.remove", "sources.check", "resolve",
-                "invoke", "close"],
             new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "LIMIT",
                 "SCRIPT_INTEGRITY", "SCRIPT_ENCODING", "STALE_SOURCE", "SOURCE_NOT_FOUND",
                 "SOURCE_DISABLED", "CAPABILITY_UNAVAILABLE", "PERMISSION_DENIED", "TIMEOUT",
@@ -49,10 +41,6 @@ public static partial class RuntimeHttpProtocol
                 "MEDIA_UNAVAILABLE", "INVALID_MEDIA_CANDIDATE", "EXPIRED_MEDIA_CANDIDATE", "MEDIA_HEADERS_UNSUPPORTED",
                 "TARGET_CHANGED", "RECORDING_MISMATCH" }),
         ["source"] = new("0.3.0", "source.runtime.v2", "source.runtime.",
-            ["load", "unload", "invoke", "status",
-                "library.list", "library.get", "library.apply", "library.previewImport", "library.import", "library.save", "library.update", "library.remove",
-                "library.export", "library.invoke", "library.image", "library.releaseImage", "web.pending", "web.respond",
-                "rules.process", "close"],
             new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "LIMIT",
                 "SOURCE_INTEGRITY", "SOURCE_ENCODING", "STALE_SOURCE", "SOURCE_NOT_FOUND",
                 "SOURCE_DISABLED", "UNSUPPORTED_PROTOCOL", "UNSUPPORTED_ACTION", "UNSUPPORTED_RULE",
@@ -60,10 +48,6 @@ public static partial class RuntimeHttpProtocol
                 "TIMEOUT", "SOURCE_CLEANUP", "SOURCE_FAILURE", "NETWORK_ERROR",
                 "HTTP_ERROR", "INVALID_RESPONSE", "STORAGE_ERROR", "CORRUPT_STORAGE", "VIRTUAL_ROUTE_NOT_FOUND" }),
         ["cat"] = new("0.2.0", "cat.script.v2", "cat.script.",
-            ["start", "status", "refresh", "install",
-                "import", "edit", "update", "restart",
-                "enable", "uninstall", "invoke", "management.describe",
-                "management.sync"],
             new(StringComparer.Ordinal) { "INVALID_ARGUMENT", "HOST_CLOSED", "CANCELLED", "RESOURCE_LIMIT",
                 "SCRIPT_PROTOCOL_ERROR", "STALE_SESSION", "NOT_FOUND", "DISABLED",
                 "ALREADY_EXISTS", "SCRIPT_EXCEPTION", "STARTING", "CORRUPT_STORAGE",
@@ -75,24 +59,14 @@ public static partial class RuntimeHttpProtocol
                 "HTTP_ERROR", "INVALID_RESPONSE", "UNSUPPORTED_OPTION", "UNSUPPORTED_CRYPTO",
                 "WEB_INTERACTION_REQUIRED", "VIRTUAL_ROUTE_NOT_FOUND", "UNMAPPED_LOCAL_URL" }),
         ["pan"] = new("0.1.0", "pan.runtime.v1", "pan.",
-            ["providers", "settings.get", "settings.set", "settings.clear", "login.start",
-                "login.poll", "login.cancel", "list", "prepare", "play", "refresh"],
             new(StringComparer.Ordinal) { "INVALID_REQUEST", "UNSUPPORTED_OPERATION", "NOT_CONFIGURED",
                 "AUTH_REQUIRED", "AUTH_FAILED", "CHALLENGE_REQUIRED", "NOT_FOUND", "UPSTREAM_HTTP",
                 "UPSTREAM_FORMAT", "UPSTREAM_ERROR", "NETWORK_ERROR", "TIMEOUT", "CANCELLED", "CLOSED",
                 "STALE_ACCOUNT", "STORAGE_ERROR", "CORRUPT_STORAGE", "LOGIN_EXPIRED", "PAN_FAILURE" }),
         ["douban"] = new("0.1.0", "douban.data.v1", "douban.data.",
-            ["settings.get", "settings.update", "request", "search"],
             new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "NETWORK_ERROR",
                 "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "WEB_INTERACTION_REQUIRED", "STORAGE_ERROR", "CORRUPT_STORAGE", "PERMISSION_DENIED" }),
         ["film"] = new("0.1.0", "film.playback.v1", "film.",
-            ["session.open", "session.command", "session.snapshot", "session.release",
-                "session.attempt", "session.media.release", "settings.get", "settings.set",
-                "library.get", "library.remove", "manual.update", "data.search", "data.detail",
-                "data.target", "data.catalog", "data.metadata", "data.metadata.entry", "data.cache.entry", "data.invalidate",
-                "rules.get", "rules.set", "rules.group.set", "rules.group.defaults", "rules.group.preview",
-                "rules.restore", "rules.preview", "rules.normalize", "rules.clear",
-                "search.open", "search.snapshot", "search.command", "search.release", "search.handoff"],
             new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "RESOURCE_LIMIT", "NOT_FOUND", "NO_MATCH",
                 "SOURCE_NOT_FOUND", "SOURCE_DISABLED", "STALE_SOURCE", "STALE_SESSION", "STALE_ACCOUNT", "STALE_METADATA",
                 "NOT_CONFIGURED", "AUTH_REQUIRED", "AUTH_FAILED", "CHALLENGE_REQUIRED",
@@ -113,6 +87,8 @@ public static partial class RuntimeHttpProtocol
 
     [GeneratedRegex(@"\A[a-zA-Z][a-zA-Z0-9_.-]{0,127}\z", RegexOptions.CultureInvariant)]
     private static partial Regex MethodPattern();
+    [GeneratedRegex(@"\A[a-z]+(?:\.[a-z][a-zA-Z]*)*\z", RegexOptions.CultureInvariant)]
+    private static partial Regex OperationPattern();
     [GeneratedRegex(@"\A/v1/tmdb/images/(?:original|[wh][1-9][0-9]*)/[A-Za-z0-9_-]+\.[A-Za-z0-9]+\z",
         RegexOptions.CultureInvariant)]
     private static partial Regex ImagePattern();
@@ -130,6 +106,7 @@ public static partial class RuntimeHttpProtocol
         SourceImagePattern().IsMatch(reference) ? "source" : null;
 
     public static bool ValidMethod(string? method) => method is not null && MethodPattern().IsMatch(method);
+    internal static bool ValidOperation(string operation) => OperationPattern().IsMatch(operation);
 
     public static Uri ValidateEndpoint(string baseUrl)
     {
@@ -142,7 +119,7 @@ public static partial class RuntimeHttpProtocol
         return endpoint;
     }
 
-    public static HashSet<string> ValidateDescription(JsonElement description, string product,
+    public static void ValidateDescription(JsonElement description, string product,
         IReadOnlyList<RuntimeModule> expectedModules)
     {
         try
@@ -152,7 +129,6 @@ public static partial class RuntimeHttpProtocol
                 throw new BridgeException("INVALID_RESPONSE");
             var declaredModules = BridgeCodec.RequiredProperty(description, "modules");
             var identities = new HashSet<string>(StringComparer.Ordinal);
-            var methods = new HashSet<string>(StringComparer.Ordinal);
             foreach (var module in declaredModules.EnumerateArray())
             {
                 if (module.ValueKind != JsonValueKind.Object) continue;
@@ -164,23 +140,9 @@ public static partial class RuntimeHttpProtocol
                     || BridgeCodec.RequiredProperty(module, "version").GetString() != expected.Version
                     || BridgeCodec.RequiredProperty(module, "contract").GetString() != contract.Name)
                     throw new BridgeException("INVALID_RESPONSE");
-                if (!module.TryGetProperty("methods", out var declared) || declared.ValueKind != JsonValueKind.Array)
-                {
-                    if (expected.RequiredMethods.Count != 0) throw new BridgeException("INVALID_RESPONSE");
-                    continue;
-                }
-                if (expected.RequiredMethods.Count != 0) declared = BridgeCodec.RequiredProperty(module, "methods");
-                foreach (var operation in contract.Operations)
-                {
-                    string method = contract.Prefix + operation;
-                    if (declared.EnumerateArray().Any(item => item.ValueKind == JsonValueKind.String && item.ValueEquals(method)))
-                        methods.Add(method);
-                }
             }
-            if (expectedModules.Any(module => !identities.Contains(module.Id) ||
-                module.RequiredMethods.Any(method => !methods.Contains(method))))
+            if (expectedModules.Any(module => !identities.Contains(module.Id)))
                 throw new BridgeException("INVALID_RESPONSE");
-            return methods;
         }
         catch { throw new BridgeException("INVALID_RESPONSE"); }
     }

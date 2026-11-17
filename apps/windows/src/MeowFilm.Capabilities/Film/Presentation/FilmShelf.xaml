@@ -14,7 +14,7 @@
                NavigationButtonStyle="{StaticResource Film.ShelfArrow}"
                Visibility="{Binding HasItems,Converter={StaticResource MeowFilm.BoolToVisibility}}">
    <local:Shelf.CardTemplate><DataTemplate>
-    <local:FilmCard Margin="0,0,16,0" Activated="Card_Activated"/>
+    <local:FilmCard MaxWidth="176" Margin="0,0,16,0" Activated="Card_Activated"/>
    </DataTemplate></local:Shelf.CardTemplate>
   </local:Shelf>
   <StackPanel MinHeight="294" HorizontalAlignment="Center" VerticalAlignment="Center"

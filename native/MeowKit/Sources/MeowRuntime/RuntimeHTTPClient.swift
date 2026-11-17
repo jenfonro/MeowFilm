@@ -95,19 +95,6 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
                   fields["contract"] == .string(module.contract) else {
                 throw RuntimeHTTPError.invalidResponse
             }
-            let required: Set<String>
-            switch module {
-            case .tmdb: required = ["tmdb.data.request"]
-            case .netease: required = ["netease.token.get"]
-            case .musicPlatform: required = ["music.platform.cache.clear", "music.platform.describe",
-                "music.platform.request", "music.platform.session.update"]
-            default: required = []
-            }
-            if !required.isEmpty {
-                guard case .array(let methods)? = fields["methods"], required.isSubset(of: Set(methods.compactMap {
-                    if case .string(let method) = $0 { return method }; return nil
-                })) else { throw RuntimeHTTPError.invalidResponse }
-            }
         }
     }
 

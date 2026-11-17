@@ -8,7 +8,7 @@
 
 类别文字保持系统 Regular，选中态在文字下方显示独立居中的短横线，不以按钮圆角边框充当高亮。搜索卡片沿用服务器版媒体卡展示：备注／年份／更新进度为海报右上角橙色圆角角标，标题下方的电影／剧集／聚合／站点名为居中浅底描边标签；长文本单行省略，空值不显示。搜索不显示评分，首页仍保留评分角标；数据文字直接消费 Node 快照，不在客户端重新推导进度。
 
-影视搜索海报以176×264 DIP为最大基准，宽度可缩至144 DIP，按实际视口重排完整列；能在下限内多放一列时缩小，否则减少列数并保留必要余量，末行与少量结果不放大。复用首页、资料列表的原生卡片模板与尺寸计算，搜索专属 `FilmSearchVirtualizingPanel` 通过 `IScrollInfo` 只实现视口及邻接行并回收容器；状态／更多计入同一滚动范围但不是卡片。标题、来源标签和角标保留既定系统字体与语义字号，不用整卡变换缩放正文。
+影视搜索复用 Meowfilm 前端搜索网格的桌面尺寸：最小列宽180 DIP，横纵间距36 DIP，各列等分可用宽度，海报保持2:3比例；不足一列时收缩到视口，末行沿用完整网格列宽。搜索继续复用 `FilmCard`，仅搜索解除首页176 DIP的卡宽上限。搜索专属 `FilmSearchVirtualizingPanel` 通过 `IScrollInfo` 只实现视口及邻接行并回收容器；状态／更多计入同一滚动范围但不是卡片。标题、来源标签和角标保留系统常规字重，文字不整体缩放；进度角标为12 DIP、18 DIP行高，独立于海报悬停变换，徽标不再将文字与阴影合成到同一效果表面。
 
 ## 类型与装配
 
@@ -17,7 +17,7 @@
 - `FilmSearchService` 固定借用一个 `RuntimeConnection`，通过 `film.playback.v1` 调用 `film.search.open/snapshot/command/release/handoff`，以 `film` 事件通道订阅 `/v1/film/events/{sessionId}`。同一快照同时提供完整 `cards/rawCards` 与通道状态。
 - Node 唯一执行规则、识别、相关度、分页、聚合与排序，持有来源原始响应和规则快照。客户端只显示选定数组并转发动作，不再直接发搜索内容请求、执行 JS、排序或从卡片生成缓存 seed。
 - Capabilities 无规则／搜索 JS 内嵌资源；Platform 不再构建或复制独立规则 DLL。实际执行由运行器载荷的公共 script-host addon 提供，缺失运行器或方法时显示真实错误，无原生回退。
-- 正式 entry、manifest 与原生 describe 精确装配 `music,cat,source,pan,tmdb,douban,film,netease,music-platform` 九模块。通用默认三模块不变；加入豆瓣模块不扩展搜索范围。运行器装配与依赖分别见[平台接入](app-runtime.md)、[打包](runtime-packaging.md)。
+- 正式 entry 装配 `music,cat,source,pan,tmdb,douban,film,netease,music-platform` 九模块；manifest 记录交付描述，原生 live describe 核对所需模块身份、唯一性及契约，不以静态数组镜像预检数量、顺序或业务方法。通用默认三模块不变；加入豆瓣模块不扩展搜索范围。运行器装配与依赖分别见[平台接入](app-runtime.md)、[打包](runtime-packaging.md)。
 - `FilmMetadataService` 直接读写 TMDB／豆瓣[原生唯一设置文档](native-settings.md)，提交运行器清缓存动作并维护这些操作的关闭排空；`ResolveImage` 保留供装配使用的原引用投影。搜索与详情内容由 Node 搜索／播放会话提供，图片经 `IRuntimeImageClient` 和 `ArtworkService` 消费。有效配置消费、内容缓存、完整度与同 key producer 合并归 [Node 数据 owner](../runtime/film-playback.md)；原生图片缓存与解码预算不等于搜索结果条数限制。原生保存回执与 Node 实际应用分开确认。
 
 ## 搜索生命周期

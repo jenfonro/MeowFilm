@@ -432,7 +432,7 @@ internal sealed class NativeMusicScriptTestRuntime : IRuntimeClient, IAsyncDispo
         RuntimeModule[] modules = RuntimeHttpClientTests.Modules;
         Directory.CreateDirectory(dataRoot);
         return await NodeRuntime.StartAsync(node,
-            RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules),
+            RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate"),
             modules, dataRoot, token).ConfigureAwait(false);
     }
     public async ValueTask DisposeAsync()

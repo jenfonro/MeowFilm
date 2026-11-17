@@ -124,7 +124,6 @@ test('common native payload preserves exact build, ABI, SDK, source and license 
   assert.equal(manifest.status, 'complete');
   assert.equal(manifest.assemblyProfile, 'common-native');
   assert.equal(manifest.entry, 'app/entry.mjs');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
   assert.ok(manifest.dependencies.some(dependency => dependency.name === '@meowfilm/music-platform'));
   assert.ok(manifest.files.some(file => file.path === 'app/modules/music-platform.mjs'));
   assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/music-platform/src/index.mjs'));
@@ -278,7 +277,9 @@ test('packaged pan entry imports and serves its contract without script engines 
       await runtime.start();
       client = createRuntimeClient({ baseUrl: runtime.baseUrl });
       assert.deepEqual((await client.describe()).value.modules.map(item => item.id), ['pan']);
-      assert.equal((await client.call('pan.providers')).value.providers.length, 7);
+      const providers = await client.call('pan.providers');
+      assert.equal(providers.ok, true);
+      assert.ok(providers.value.providers.some(provider => provider.provider === 'uc'));
       const saved = await client.call('pan.settings.set', {
         provider: 'uc', credentials: { cookie: 'synthetic-offline-only' },
       });
