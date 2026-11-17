@@ -28,7 +28,7 @@ const line = (id, episodes) => ({ id, label: id, episodes });
 const detail = (episodes, lineId = 'line') => ({ lines: [line(lineId, episodes)] });
 const result = id => ({ vod_id: id, vod_name: 'Film' });
 const history = (detailId, sourceKey = 'a') => ({ targetId: movie.id, title: movie.title, sourceKey,
-  candidateId: 'previous-owner-candidate', detailId, lineId: 'line', episode: {},
+  candidateId: 'previous-owner-candidate', detailId, lineId: 'line', episode: {}, playbackTarget: movie,
   position: 31, duration: 120, paused: false, updatedAt: 1 });
 const manualSite = detailId => ({ id: `site-${detailId}`, targetId: movie.id, kind: 'site',
   sourceKey: 'a', detailId, enabled: true, autoDisable: false });
@@ -52,8 +52,8 @@ async function until(predicate) {
 const coordinates = value => [value.season, value.episode, value.globalEpisode];
 
 function fixture({ details = {}, pages = {}, shares = {}, metadata, onResolve } = {}) {
-  let document = { version: 1, preferences: defaultPreferences(), history: [], manual: [],
-    blocks: [], previewTargets: [] };
+  let document = { version: 2, preferences: defaultPreferences(), history: [], manual: [],
+    blocks: [], previewTargets: [], groups: [] };
   let resourceSequence = 0;
   const calls = [], resources = new Map(), addresses = new Map();
   const detailCache = createPlaybackCache();
@@ -84,7 +84,7 @@ function fixture({ details = {}, pages = {}, shares = {}, metadata, onResolve } 
     async seasonMetadata(target, season) {
       calls.push({ type: 'season', season });
       const row = metadata.seasons.find(value => value.season_number === season);
-      assert.ok(row, `Unexpected season request: ${season}`);
+      if (!row) throw error('NOT_FOUND');
       return structuredClone(row);
     },
     async seasonMetadataEntry(target, season, options) {
@@ -267,9 +267,9 @@ test('F04 media failures traverse known history manual unresolved results and in
   await browseKnown(f, sessionId, 'known');
   await playMetadata(f, sessionId);
   const stages = [
-    ['known', ['history', 'manual', 'deferred', 'searched']],
     ['history', ['manual', 'deferred', 'searched']],
     ['manual', ['deferred', 'searched']],
+    ['known', ['deferred', 'searched']],
     ['deferred', ['searched']],
     ['searched-high', []],
     ['searched-low', []],
@@ -286,7 +286,7 @@ test('F04 media failures traverse known history manual unresolved results and in
     else assert.deepEqual(f.trace('search').map(call => [call.sourceKey, call.page]), [['a', 2]]);
     if (index < stages.length - 1) await f.command(sessionId, 'media.failed', { attemptId: attempt.id });
   }
-  assert.deepEqual(resolvedFiles(f), ['known', 'history', 'manual', 'deferred', 'searched-high', 'searched-low']);
+  assert.deepEqual(resolvedFiles(f), ['history', 'manual', 'known', 'deferred', 'searched-high', 'searched-low']);
   assert.deepEqual([...new Set(f.trace('detail').map(call => call.detailId))],
     ['known', 'history', 'manual', 'deferred', 'searched']);
   assert.deepEqual(f.snapshot(sessionId).search.map(({ sourceKey, page, completed }) => [sourceKey, page, completed]),
@@ -308,10 +308,10 @@ async function seedConstrainedStages(f) {
   (await f.service.updateManual({ action: 'save', item: manualSite('manual') }));
   (await f.service.updateManual({ action: 'save', item: manualShare('share', 'uc') }));
 }
-function assertAllConstraintStagesVisited(f, sessionId, historyDetail = 'history') {
+function assertAllConstraintStagesVisited(f, sessionId, historyDetail = 'history', manualReads = 1) {
   assert.deepEqual([...new Set(f.trace('detail').map(call => call.detailId))],
     [...new Set(['known', historyDetail, 'manual', 'deferred', 'searched'])]);
-  assert.deepEqual(f.trace('expand').map(call => call.sourceKey), ['a', 'manual:share']);
+  assert.deepEqual(f.trace('expand').map(call => call.sourceKey), ['a', ...Array(manualReads).fill('manual:share')]);
   assert.deepEqual(f.trace('search').map(call => [call.sourceKey, call.page]), [['a', 1], ['b', 1]]);
   assert.equal(f.snapshot(sessionId).sources.every(row => row.state === 'ready' && row.error === null), true,
     'Unavailable must come from the hard constraint, not from a failed fixture boundary');
@@ -327,7 +327,7 @@ test('F05 fixed pan survives a pending media failure and rejects every other-pan
   await f.command(sessionId, 'pan', { provider: 'quark' });
   const first = await f.pending(sessionId);
   assert.equal(first.candidate.provider, 'quark');
-  assertNoLaterWork(f, ['history', 'manual', 'deferred', 'searched']);
+  assert.deepEqual(resolvedFiles(f), ['chosen-pan']);
   await f.command(sessionId, 'media.failed', { attemptId: first.id });
   await until(() => f.snapshot(sessionId).stage === 'unavailable');
   assert.equal(f.snapshot(sessionId).attempt, null);
@@ -335,18 +335,18 @@ test('F05 fixed pan survives a pending media failure and rejects every other-pan
   assert.deepEqual(f.snapshot(sessionId).constraint, { action: 'pan', provider: 'quark' });
   assert.deepEqual(resolvedFiles(f), ['chosen-pan']);
   assert.equal(f.trace('resolve').every(call => call.provider === 'quark'), true);
-  assertAllConstraintStagesVisited(f, sessionId);
+  assertAllConstraintStagesVisited(f, sessionId, 'history', 2);
 });
 
 test('F06 fixed quality survives a failed replacement without degrading or destroying the old output', async t => {
   const f = constrainedFixture([file('old-output', '1080p', 'quark'), file('chosen-quality', '4k_hdr', 'quark')]);
   t.after(() => f.service.close());
-  seedConstrainedStages(f);
   const { sessionId } = (await f.open({ results: [{ sourceKey: 'a', items: [result('known'), result('deferred')] }] }));
   await browseKnown(f, sessionId, 'known');
   await f.command(sessionId, 'quality', { quality: '1080p' });
   const old = await f.commit(sessionId);
   assert.equal(old.candidate.name, 'Film.old-output.1080p');
+  await seedConstrainedStages(f);
   const receipt = f.service.attempt({ sessionId, attemptId: old.id });
   await f.command(sessionId, 'media.progress', { attemptId: old.id, position: 47, duration: 120, paused: true });
   assert.equal(f.library.read().history[0].detailId, 'known');
@@ -533,16 +533,16 @@ test('F11 a missing season has no selectable coordinates or invented global offs
   t.after(() => f.service.close());
   const { sessionId, current } = await playSeries(f, { season: 1, episode: 2, globalEpisode: 2 });
   const beforeInvalidSelection = requests(f);
-  await assert.rejects(f.command(sessionId, 'select.episode', { episode: { season: 2, episode: 1 } }), { code: 'NO_MATCH' });
+  await assert.rejects(f.command(sessionId, 'select.target', { target: { ...f.snapshot(sessionId).metadataSources[0].playbackTarget, season: 2, episode: 1 } }), { code: 'NOT_FOUND' });
   await assert.rejects(f.command(sessionId, 'browse.season', { season: 2 }), { code: 'NOT_FOUND' });
-  assert.deepEqual(requests(f).slice(beforeInvalidSelection.length).map(call => call.type), ['metadata', 'metadata']);
+  assert.deepEqual(requests(f).slice(beforeInvalidSelection.length).map(call => call.type), ['season', 'metadata']);
   assert.equal(f.snapshot(sessionId).current.attemptId, current.id);
   await f.command(sessionId, 'media.ended', { attemptId: current.id });
   const next = await f.pending(sessionId);
   assert.deepEqual(coordinates(next.candidate), [3, 1, undefined]);
   assert.deepEqual(coordinates(f.snapshot(sessionId).target), [3, 1, undefined]);
   assert.equal(next.position, 0);
-  assert.equal(f.trace('season').some(call => call.season === 2), false);
+  assert.equal(f.trace('season').filter(call => call.season === 2).length, 1);
   assert.deepEqual(f.trace('resolve').map(coordinates), [[1, 2, 2], [3, 1, undefined]]);
   assert.deepEqual(f.trace('search'), []);
 });
@@ -610,11 +610,13 @@ test('F13b rapid selections fence a late cross-season neighbor and only the late
   const { sessionId, current } = await playSeries(f, { season: 1, episode: 2, globalEpisode: 2 });
   await f.command(sessionId, 'shortvideo', { enabled: true });
   await until(() => f.trace('resolve').some(call => call.season === 2 && call.episode === 1));
-  await f.command(sessionId, 'select.episode', { episode: { season: 2, episode: 2 } });
+  await f.command(sessionId, 'select.target', { target: f.snapshot(sessionId).metadata.seasons.find(row => row.season_number === 2)
+    .episodes.find(row => row.episode_number === 2).playbackTarget });
   const superseded = await f.pending(sessionId);
   assert.deepEqual(coordinates(superseded.candidate), [2, 2, 4]);
   const supersededReceipt = f.service.attempt({ sessionId, attemptId: superseded.id });
-  await f.command(sessionId, 'select.episode', { episode: { season: 2, episode: 3 } });
+  await f.command(sessionId, 'select.target', { target: f.snapshot(sessionId).metadata.seasons.find(row => row.season_number === 2)
+    .episodes.find(row => row.episode_number === 3).playbackTarget });
   const latest = await f.pending(sessionId);
   assert.deepEqual(coordinates(latest.candidate), [2, 3, 5]);
   assert.equal(latest.position, 0);

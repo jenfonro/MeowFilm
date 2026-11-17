@@ -11,9 +11,7 @@ internal sealed class PanAccountFixture : IRuntimeClient, IDocumentStore, IRunti
     internal static readonly (string Id, string[] Fields)[] Providers =
     [
         ("baidu", ["cookie"]), ("quark", ["cookie"]), ("uc", ["cookie"]),
-        ("tianyi", ["cookie", "username", "password"]), ("yidong", ["authorization", "refreshedAt"]),
-        ("quark_tv", ["refreshToken", "deviceId", "accessToken", "expiresAt"]),
-        ("uc_tv", ["refreshToken", "deviceId", "accessToken", "expiresAt"])
+        ("tianyi", ["cookie", "username", "password"]), ("yidong", ["authorization", "refreshedAt"])
     ];
     internal readonly Dictionary<string, PanAccountSnapshot> Accounts = Providers.ToDictionary(
         item => item.Id, item => new PanAccountSnapshot(item.Id, 0, false, "signedOut", []));
@@ -38,7 +36,7 @@ internal sealed class PanAccountFixture : IRuntimeClient, IDocumentStore, IRunti
         root[provider] = JsonSerializer.SerializeToElement(new
         {
             revision, credentials = fields.ToDictionary(field => field, field =>
-                field is "refreshedAt" or "expiresAt" ? (object)1730000000000L : "synthetic-" + field)
+                field is "refreshedAt" ? (object)1730000000000L : "synthetic-" + field)
         }, Json);
         document = JsonSerializer.SerializeToUtf8Bytes(new { version = 1, accounts = root }, Json);
     }

@@ -305,6 +305,70 @@ final class FilmCatNativeSettingsTests: XCTestCase {
         await owner.close()
     }
 
+    func testCurrentCatalogPreservesReadOnlyMetadataAndVideoChoicesAcrossOfflineSaveAndReopen() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
+        let document = try sourceTestSettings(base)
+        let runtime = SourcesRuntimeFixture()
+        let initialOwner = FilmSourceService(transport: runtime.transport, storeFactory: { store },
+            settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
+        try await initialOwner.refresh()
+        let visible = FilmSourceKey(installationId: "a", siteKey: "same")
+        let deleted = FilmSourceKey(installationId: "b", siteKey: "same")
+        let detection = FilmSourceDetection(result: "valid", checkedAt: 123, playbackResolved: true,
+            steps: [.init("search", "success")])
+        let video = FilmVideoSource(key: visible, name: "站点", api: "/api/a", actions: ["search"], methods: [:],
+            options: .init(enabled: false, homeVisible: false, searchEnabled: true, aggregateImages: true),
+            order: 9, detection: detection)
+        try await initialOwner.deleteVideo(deleted)
+        try await initialOwner.saveVideoOptions(visible, options: video.options, order: video.order)
+        let initialDocument = try RuntimeJSON.decode(XCTUnwrap(store.read(key: FilmSourceService.documentKey)))
+        guard case .object(var initialFields) = initialDocument else { throw FilmSourceError(code: "INVALID_DOCUMENT") }
+        initialFields["videos"] = .array([try RuntimeJSON.decode(JSONEncoder().encode(video))])
+        let bytes = try RuntimeJSON.encode(.object(initialFields))
+        try store.write(bytes, key: FilmSourceService.documentKey)
+        await initialOwner.close()
+        let owner = FilmSourceService(transport: unavailableCatTransport("UNEXPECTED_RUNTIME"), storeFactory: { store },
+            settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
+        try await owner.initialize()
+        let initial = await owner.snapshot
+        XCTAssertEqual(initial.cats.map(\.name), ["A", "B"])
+        XCTAssertEqual(initial.cats.first?.sourceUrl, "https://example.invalid/a.js")
+        XCTAssertEqual(initial.cats.first?.sites.count, 1)
+        XCTAssertEqual(initial.videos, [video])
+        XCTAssertEqual(try store.read(key: FilmSourceService.documentKey), bytes, "Reading does not write a new receipt")
+        try await owner.saveVideoOptions(visible, options: video.options, order: 10)
+        let saved = try RuntimeJSON.decode(XCTUnwrap(store.read(key: FilmSourceService.documentKey)))
+        XCTAssertEqual(saved.catField("version"), .number(2))
+        let cats = try XCTUnwrap(saved.catField("cats")?.catArray)
+        XCTAssertEqual(cats.count, 2)
+        for cat in cats {
+            for field in ["name", "sourceType", "sourceUrl", "enabled", "localPath", "localHash"] {
+                XCTAssertNil(cat.catField(field), "No editable or sensitive input in the display cache")
+            }
+            XCTAssertEqual(cat.catField("sites")?.catArray?.count, 1)
+            XCTAssertEqual(cat.catField("inputRevision"), .number(1))
+        }
+        XCTAssertEqual(saved.catField("deleted"), initialDocument.catField("deleted"))
+        await owner.close()
+        let reopened = FilmSourceService(transport: runtime.transport, storeFactory: { store },
+            settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
+        try await reopened.initialize()
+        let restored = await reopened.snapshot
+        XCTAssertEqual(restored.videos.first?.detection, detection)
+        XCTAssertEqual(restored.videos.first?.options, video.options)
+        XCTAssertEqual(restored.videos.first?.order, 10)
+        XCTAssertEqual(restored.cats.map { $0.sites.count }, [1, 1])
+        try await reopened.refresh()
+        let synchronized = await reopened.snapshot
+        XCTAssertEqual(synchronized.videos.map(\.key), [visible], "The saved deletion excludes the other parent's site")
+        XCTAssertEqual(synchronized.videos.first?.detection, detection)
+        XCTAssertEqual(synchronized.videos.first?.options, video.options)
+        await reopened.close()
+    }
+
     func testLateAndMissingStatusCannotDeleteIntentOrRestoreDeletedParentOrVideo() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)

@@ -30,6 +30,7 @@ function fixture(t, { releaseGate } = {}) {
   });
   const data = {
     async handoff() { return { accepted: 0, ignored: 0 }; },
+    async targetMetadataEntry() { return null; },
     async metadataSources() { return []; },
     async detail() {
       return { lines: [{ id: 'line', label: 'Line', episodes: [
@@ -166,7 +167,8 @@ test('replaced, stopped and released sessions cannot reuse old chapter receipts'
   await f.command(value.sessionId, 'media.started', { attemptId: value.receipt.attemptId });
   const next = f.state(value.sessionId).candidates.find(row =>
     row.id !== f.state(value.sessionId).current.candidate.id);
-  await f.command(value.sessionId, 'select.candidate', { candidateId: next.id });
+  assert.ok(next?.playbackTarget);
+  await f.command(value.sessionId, 'select.target', { target: next.playbackTarget, metadataSourceId: null });
   const receipt = await f.pending(value.sessionId);
   assert.notEqual(receipt.attemptId, value.receipt.attemptId);
   assert.deepEqual(await f.recognize(value), { segments: expected }, 'old committed receipt is still active before swap');

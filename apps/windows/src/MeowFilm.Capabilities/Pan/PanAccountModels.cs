@@ -17,12 +17,10 @@ public sealed record PanCredentialField(string Id)
     {
         "cookie" => "Cookie", "username" => "用户名", "password" => "密码",
         "authorization" => "Authorization", "refreshedAt" => "刷新时间（毫秒）",
-        "refreshToken" => "Refresh Token", "deviceId" => "设备 ID",
-        "accessToken" => "Access Token", "expiresAt" => "过期时间（毫秒）",
         _ => throw new BridgeException("INVALID_RESPONSE")
     };
-    public bool IsNumber => Id is "refreshedAt" or "expiresAt";
-    public bool IsSecret => Id is "cookie" or "password" or "authorization" or "refreshToken" or "accessToken";
+    public bool IsNumber => Id is "refreshedAt";
+    public bool IsSecret => Id is "cookie" or "password" or "authorization";
 
     internal object Parse(string text)
     {
@@ -95,7 +93,6 @@ public sealed class PanAccountRow : INotifyPropertyChanged
         {
             "baidu" => "百度网盘", "quark" => "夸克网盘", "uc" => "UC 网盘",
             "tianyi" => "天翼云盘", "yidong" => "移动云盘",
-            "quark_tv" => "夸克 TV", "uc_tv" => "UC TV",
             _ => throw new BridgeException("INVALID_RESPONSE")
         };
         CredentialFields = provider.GetProperty("credentialFields").EnumerateArray()

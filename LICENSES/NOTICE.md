@@ -302,10 +302,6 @@ contract, after consulting `jenfonro/meowfilm-server` snapshot
   the existing `catpawrunner-MIT.txt` attribution applies to those adapted portions.
   The snapshot above identifies the reference aggregation repository, not an
   independently verified CatPawRunner upstream commit.
-- The consulted `panUc.js` attributes its TV configuration to OpenList
-  `drivers/quark_uc_tv`; that secondary source revision and license chain were not
-  verified here. No OpenList library or source file is bundled, and this notice
-  does not relabel that reference as MIT.
 - Provider endpoint paths, client/device constants, request/response fields, QR
   authentication sequences, necessary selected-file transfers and playback mappings
   follow those references. Mobile AES-CBC framing, the MD5 request-signing formula
@@ -334,13 +330,8 @@ This records the actual protocol references, not a completed redistribution audi
 The pan runtime adds no npm or native dependency and does not alter the licensing
 of existing components.
 
-Quark TV and UC TV token refresh intentionally uses the reference third-party
-`http://api.extscreen.com/{quarkdrive,ucdrive}/token` service. Long-lived credentials
-are sent to that service over cleartext HTTP; the official file APIs use HTTPS.
-This is an explicitly selected interoperability path, not an endorsement of the
-third party or a claim of secure credential transport. Local account files are
-also intentionally plaintext. See `docs/runtime/pan-runtime.md` for the complete
-operational and verification boundaries.
+Local account files are intentionally plaintext. See `docs/runtime/pan-runtime.md`
+for the complete operational and verification boundaries.
 
 ## Node.js
 

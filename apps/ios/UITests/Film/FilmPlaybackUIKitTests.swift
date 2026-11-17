@@ -53,7 +53,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             XCTAssertTrue(try XCTUnwrap(model.snapshot).sources.isEmpty)
             XCTAssertFalse(source.isEnabled, "An entry provider and menu commands are not a confirmed selection")
             XCTAssertEqual(source.title(for: .normal), "加载中...")
-            XCTAssertTrue(try button("film.detail.line", page.view).isHidden)
+            XCTAssertFalse(try button("film.detail.line", page.view).isHidden)
+            XCTAssertFalse(try button("film.detail.line", page.view).isEnabled)
 
             let sequence = Int(try XCTUnwrap(model.snapshot).sequence) + 1
             var ready = try FilmUIKitPlaybackFixture.snapshot(sequence, provider: provider).filmRequiredObject()
@@ -147,15 +148,21 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertTrue(try button("film.detail.play", page.view).isEnabled,
                       "Association failure must not block the primary playback chain")
         let metadataAlert = try await presentedAlert(page, title: "错误", style: .alert)
-        XCTAssertEqual(metadataAlert.message, "UPSTREAM_HTTP")
+        XCTAssertEqual(metadataAlert.message, FilmPlaybackError(code: "UPSTREAM_HTTP").localizedDescription)
         try await runnerAction { $0.alerts.buttons["确定"].tap() }
         try await waitFor { page.presentedViewController == nil && page.canPresentPageAlert }
         await server.reply(to: "browse.metadata", with: FilmUIKitPlaybackFixture.snapshot(provider: .douban,
-            browsing: FilmUIKitPlaybackFixture.browsing(sourceID: "result-a", files: files, original: files),
+            browsing: FilmUIKitPlaybackFixture.browsing(),
             metadataSources: associated))
         invoke(try menuAction("豆瓣 · 星海航线", source.menu))
         await model.waitForPendingWork()
         await settle()
+        XCTAssertFalse(try hasDirectory(page))
+        await server.reply(to: "browse", with: FilmUIKitPlaybackFixture.snapshot(provider: .douban,
+            browsing: FilmUIKitPlaybackFixture.browsing(sourceID: "result-a", files: files, original: files),
+            metadataSources: associated))
+        invoke(try menuAction("测试站 · 星海航线", source.menu))
+        await model.waitForPendingWork(); await settle()
         XCTAssertTrue(try hasDirectory(page))
         XCTAssertEqual(try button("film.detail.line", page.view).title(for: .normal), "未知原标签")
         let season = try button("film.detail.season", page.view)
@@ -163,9 +170,9 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         invoke(try menuAction("TMDB · 星海航线", mapping))
         await model.waitForPendingWork()
         let commands = await server.calls().filter { $0.operation == "session.command" }
-        XCTAssertEqual(commands.map(\.action), ["browse.metadata", "browse.metadata"])
+        XCTAssertEqual(commands.map(\.action), ["browse.metadata", "browse", "browse.metadata"])
         XCTAssertNil(commands[0].input.filmObject?["keepSource"])
-        XCTAssertEqual(commands[1].input.filmObject?["keepSource"], .bool(true))
+        XCTAssertEqual(commands[2].input.filmObject?["keepSource"], .bool(true))
         XCTAssertTrue(media.inputs.isEmpty)
     }
 
@@ -190,10 +197,11 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         invoke(try menuAction("测试站 · 失败站点", button("film.detail.source", page.view).menu))
         await model.waitForPendingWork()
         await settle()
-        XCTAssertNil(view("film.file.file-first", page.view))
+        XCTAssertTrue(try XCTUnwrap(view("film.detail.episode-cards", page.view)).isHidden)
+        XCTAssertTrue(model.presentation?.browsing.files.isEmpty == true)
         XCTAssertNil((view("film.detail.episodes-state", page.view) as? UILabel)?.text)
         let error = try await presentedAlert(page, title: "错误", style: .alert)
-        XCTAssertEqual(error.message, "UPSTREAM_HTTP")
+        XCTAssertEqual(error.message, FilmPlaybackError(code: "UPSTREAM_HTTP").localizedDescription)
         XCTAssertEqual(error.actions.map(\.title), ["确定", "重试"])
         XCTAssertFalse(try button("film.detail.play", page.view).isEnabled)
         XCTAssertTrue(try button("film.detail.source", page.view).isEnabled)
@@ -208,7 +216,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertNotNil(view("film.file.file-first", page.view))
         XCTAssertTrue(try button("film.detail.play", page.view).isEnabled)
         let calls = await server.calls()
-        XCTAssertEqual(calls.compactMap(\.action), ["browse", "browse"])
+        XCTAssertEqual(calls.compactMap(\.action), ["browse"], "The successful A directory is restored locally")
         XCTAssertTrue(media.inputs.isEmpty)
     }
 
@@ -230,6 +238,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             let rowID = sourceID == nil
                 ? "film.episode.\(try XCTUnwrap(old.episodes.first).displayID)" : "film.file.file-first"
             let oldRow = try button(rowID, page.view)
+            model.browse(sourceID: sourceID, lineID: old.browsing.lineID)
+            await model.waitForPendingWork()
             browsing["loading"] = .bool(true); browsing["refreshing"] = .bool(true)
             fields["browsing"] = .object(browsing)
             fields["sequence"] = .number(Double(old.sequence) + 1)
@@ -248,14 +258,15 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             try button("film.detail.play", page.view).sendActions(for: .touchUpInside)
             await model.waitForPendingWork()
             let actions = await server.calls().dropFirst(before).compactMap(\.action)
-            XCTAssertEqual(actions, sourceID == nil ? ["select.episode", "play"] : ["select.candidate", "select.candidate"])
+            XCTAssertEqual(actions, ["select.target", "select.target"])
             fields["sequence"] = .number(Double(try XCTUnwrap(model.snapshot).sequence) + 1)
             browsing["refreshing"] = nil
             fields["browsing"] = .object(browsing)
             try await server.publish(.object(fields))
-            try await waitFor { !oldRow.isEnabled }
+            await settle()
+            XCTAssertTrue(oldRow.isEnabled, "A loaded exact target remains selectable during unrelated execution reads")
             XCTAssertTrue(view(rowID, page.view) === oldRow)
-            XCTAssertFalse(try button("film.detail.play", page.view).isEnabled)
+            XCTAssertTrue(try button("film.detail.play", page.view).isEnabled)
             XCTAssertTrue(try XCTUnwrap(view("film.detail.episodes-state", page.view)).isHidden)
             XCTAssertTrue(media.inputs.isEmpty)
             unmount(page, window)
@@ -263,7 +274,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         }
     }
 
-    func testFailureKeepsLoadedRowsAndBrowsingFailureRevokesPlayback() async throws {
+    func testFailureKeepsLoadedRowsButSourceInvalidationRevokesItsDirectory() async throws {
         let file = FilmUIKitPlaybackFixture.file("first", name: "旧成功文件")
         var browsing = try FilmUIKitPlaybackFixture.browsing(sourceID: "result-a",
             files: [file], original: [file]).filmRequiredObject()
@@ -295,10 +306,11 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await server.publish(.object(fields))
         try await waitFor { !loadedRow.isEnabled }
         XCTAssertTrue(view("film.file.file-first", page.view) === loadedRow)
+        XCTAssertTrue(try XCTUnwrap(view("film.detail.episode-cards", page.view)).isHidden)
         XCTAssertFalse(try button("film.detail.play", page.view).isEnabled)
-        XCTAssertTrue(try hasDirectory(page))
+        XCTAssertFalse(try hasDirectory(page))
         XCTAssertTrue(try XCTUnwrap(model.snapshot).browsing.originalFiles.isEmpty)
-        XCTAssertEqual(model.presentation?.browsing.originalFiles.count, 1)
+        XCTAssertTrue(model.presentation?.browsing.originalFiles.isEmpty == true)
         let browsingAlert = try await presentedAlert(page, title: "错误", style: .alert, after: alert)
         XCTAssertEqual(browsingAlert.message, FilmPlaybackError(code: "STALE_SOURCE").localizedDescription)
         XCTAssertTrue(media.inputs.isEmpty)
@@ -322,7 +334,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             let checks = await server.calls().filter { $0.action == "browse.refresh" }
             XCTAssertEqual(checks.count, 1)
             XCTAssertNil(checks[0].input.filmObject?["refresh"])
-            XCTAssertNil(checks[0].input.filmObject?["sourceId"], "The owner locates the current browse identity.")
+            XCTAssertEqual(checks[0].input.filmObject?["sourceId"], sourceID.map(RuntimeValue.string) ?? .null)
+            XCTAssertEqual(checks[0].input.filmObject?["metadataSourceId"], .string("confirmed-douban"))
             XCTAssertTrue(media.inputs.isEmpty)
             unmount(page, window)
             await model.close()
@@ -341,13 +354,15 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let retries = await server.calls().filter { $0.action == "media.retry" }
         XCTAssertEqual(retries.count, 1)
         XCTAssertEqual(retries[0].input.filmObject?["attemptId"], .string("different-pending"))
-        XCTAssertFalse(retries.contains { $0.input.filmObject?["candidateId"] != nil })
+        XCTAssertFalse(retries.contains { $0.input.filmObject?["target"]?.filmObject?["source"]?.filmObject?["candidateId"] != nil })
         XCTAssertTrue(media.inputs.isEmpty)
     }
 
     func testStaleMetadataFailureUsesExistingRetryAlertAndRefreshDoesNotClearVisibleContent() async throws {
         var fields = try FilmUIKitPlaybackFixture.snapshot().filmRequiredObject()
         fields["metadata"] = .object(["name": .string("旧资料标题"), "overview": .string("保留的旧简介")])
+        fields["workInfo"] = .object(["provider": .string("tmdb"), "metadataId": .number(19), "kind": .string("tv"),
+            "title": .string("旧资料标题"), "summary": .string("保留的旧简介"), "seasonCount": .null, "episodeCount": .null])
         fields["metadataCache"] = .object([
             "status": .string("stale"), "error": .object(["code": .string("UPSTREAM_HTTP")]),
             "components": .object(["detail": .object(["status": .string("failed")])])
@@ -360,7 +375,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         defer { unmount(page, window) }
         try await visible(page)
         let alert = try await presentedAlert(page, title: "错误", style: .alert)
-        XCTAssertEqual(alert.message, "UPSTREAM_HTTP")
+        XCTAssertEqual(alert.message, FilmPlaybackError(code: "UPSTREAM_HTTP").localizedDescription)
         XCTAssertEqual(alert.actions.map(\.title), ["确定", "重试"])
         XCTAssertEqual(page.pageTitle, "旧资料标题")
         XCTAssertTrue(descendants(page.view).compactMap { $0 as? UILabel }.contains { $0.text == "保留的旧简介" })
@@ -382,6 +397,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
     func testCacheOnlySuccessReprojectsDeletedFieldsAndLaterFailureDoesNotReviveThem() async throws {
         var fields = try FilmUIKitPlaybackFixture.snapshot().filmRequiredObject()
         fields["metadata"] = .object(["name": .string("星海航线")])
+        fields["workInfo"] = .object(["provider": .string("tmdb"), "metadataId": .number(19), "kind": .string("tv"),
+            "title": .string("星海航线"), "summary": .string("卡片旧简介"), "seasonCount": .null, "episodeCount": .null])
         fields["metadataCache"] = .object(["status": .string("stale"), "components": .object([
             "detail": .object(["status": .string("failed")])
         ])])
@@ -402,6 +419,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         ] {
             fields["sequence"] = .number(Double(try XCTUnwrap(model.snapshot).sequence) + 1)
             fields["metadataCache"] = .object(["status": .string("stale"), "components": .object(["detail": component])])
+            fields["workInfo"] = .null
             try await server.publish(.object(fields))
             await settle()
             try await waitFor {
@@ -457,6 +475,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let model = makeModel(server, FilmUIKitPlaybackMedia())
         await model.open()?.value
         let page = FilmDirectoryViewController(model: model, sourceID: "result-a", lineID: .number(0),
+                                               metadataSourceID: "confirmed-douban", season: 2,
                                                themeProvider: FilmPlaybackUIKitTheme())
         var presentations = 0
         page.onPresentPlayback = { presentations += 1 }
@@ -499,8 +518,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try select("film.directory.file.file-first", season)
         await model.waitForPendingWork()
         let calls = await server.calls()
-        XCTAssertEqual(calls.compactMap(\.action), ["select.candidate"])
-        XCTAssertEqual(calls.last?.input.filmObject?["candidateId"], .string("candidate-first"))
+        XCTAssertEqual(calls.compactMap(\.action), ["select.target"])
+        XCTAssertEqual(calls.last?.input.filmObject?["target"]?.filmObject?["source"]?.filmObject?["candidateId"], .string("candidate-first"))
         XCTAssertEqual(presentations, 1)
         navigation.popViewController(animated: false)
         XCTAssertTrue(navigation.topViewController === directory)
@@ -523,8 +542,9 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let model = FilmPlaybackModel(transport: server.transport, media: media, request: { request })
         addTeardownBlock { await model.close() }
         await model.open()?.value
-        let page = try detailPage(model), window = try mount(page)
-        defer { unmount(page, window) }
+        let page = try detailPage(model)
+        let (presenter, window) = try await presentReady(page)
+        defer { PageViewController.invalidatePages(in: page); unmount(presenter, window) }
         try await visible(page)
         await model.waitForPendingWork()
         let initial = await server.calls()
@@ -537,7 +557,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(model.snapshot?.entryTarget, request.target)
         XCTAssertEqual(model.snapshot?.target.kind, .group)
         XCTAssertNil(model.snapshot?.target.metadataProvider)
-        XCTAssertEqual(try button("film.detail.source", page.view).title(for: .normal), "加载中...")
+        XCTAssertEqual(try button("film.detail.source", page.view).title(for: .normal), "无可用视频源")
         XCTAssertFalse(try button("film.detail.source", page.view).isEnabled)
         XCTAssertTrue(try button("film.detail.line", page.view).isHidden)
         XCTAssertFalse(try button("film.detail.play", page.view).isEnabled)
@@ -547,7 +567,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertFalse(try button("film.detail.source", page.view).menu?.children.compactMap { $0 as? UIAction }
             .contains { $0.title == "加载更多来源" } == true)
         await model.close()
-        XCTAssertTrue(model.isReleased)
+        let closedCalls = await server.calls()
+        XCTAssertTrue(model.isReleased, "action=\(String(describing: model.actionError)), media=\(String(describing: model.mediaStopError)), release=\(String(describing: model.sessionReleaseError)), stage=\(String(describing: model.executionStage)), stops=\(media.stops), calls=\(closedCalls)")
         await model.open()?.value
         await model.waitForPendingWork()
         let reentry = await server.calls()
@@ -566,9 +587,13 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertFalse(manualSearch.isHidden)
         XCTAssertFalse(reentry.contains { $0.action == "search.more" })
         XCTAssertTrue(media.inputs.isEmpty)
-        fields["sources"] = .array([.object(["id": .string("found-site"), "title": .string("星海航线"),
+        fields["sources"] = .array([.object(["businessId": .string("source-found"),
+            "playbackTarget": FilmUIKitPlaybackFixture.sourceTarget(),
+            "id": .string("found-site"), "title": .string("星海航线"),
             "source": FilmUIKitPlaybackFixture.source, "state": .string("found"), "error": .null])])
-        fields["browsing"] = FilmUIKitPlaybackFixture.browsing(sourceID: "found-site")
+        var reading = try FilmUIKitPlaybackFixture.browsing(sourceID: "found-site").filmRequiredObject()
+        reading["loading"] = .bool(true)
+        fields["browsing"] = .object(reading)
         await server.reply(to: "search.more", with: .object(fields))
         manualSearch.sendActions(for: .touchUpInside)
         await model.waitForPendingWork()
@@ -576,14 +601,16 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(searched.compactMap(\.action), ["search.more"])
         XCTAssertEqual(searched.last?.input.filmObject?["sessionId"],
                        .string(FilmUIKitPlaybackFixture.sessionID.uuidString.lowercased()))
-        XCTAssertNil(searched.last?.input.filmObject?["candidateId"])
+        XCTAssertNil(searched.last?.input.filmObject?["target"]?.filmObject?["source"]?.filmObject?["candidateId"])
         XCTAssertTrue(manualSearch.isHidden, "Once sites exist, source selection owns the next action")
         XCTAssertTrue(try button("film.detail.source", page.view).isEnabled)
         XCTAssertEqual(try button("film.detail.source", page.view).title(for: .normal), "测试站 · 星海航线")
-        XCTAssertNil((view("film.detail.episodes-state", page.view) as? UILabel)?.text)
+        XCTAssertEqual((view("film.detail.episodes-state", page.view) as? UILabel)?.text, "加载中")
         let file = FilmUIKitPlaybackFixture.file("first", name: "原始文件")
         fields["browsing"] = FilmUIKitPlaybackFixture.browsing(sourceID: "found-site", files: [file], original: [file])
-        await server.reply(to: "browse", with: .object(fields))
+        await server.awaitObservation()
+        fields["sequence"] = .number(Double(try XCTUnwrap(model.snapshot).sequence) + 1)
+        try await server.publish(.object(fields))
         invoke(try menuAction("测试站 · 星海航线", button("film.detail.source", page.view).menu))
         await model.waitForPendingWork()
         XCTAssertEqual(try button("film.detail.source", page.view).title(for: .normal), "测试站 · 星海航线")
@@ -593,8 +620,8 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertTrue(try hasDirectory(page))
         XCTAssertTrue(try button("film.detail.search", page.view).isHidden)
         let calls = await server.calls()
-        XCTAssertEqual(calls.compactMap(\.action), ["search.more", "browse"])
-        XCTAssertEqual(calls.last?.input.filmObject?["sourceId"], .string("found-site"))
+        XCTAssertEqual(calls.compactMap(\.action), ["search.more"], "The selected directory completes through its existing observation")
+        XCTAssertEqual(model.presentation?.browsing.sourceID, "found-site")
         XCTAssertNil(calls.last?.input.filmObject?["lineId"])
         XCTAssertTrue(media.inputs.isEmpty)
     }
@@ -619,7 +646,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let page = try detailPage(model), window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor { model.snapshot!.sequence > 1 }
+        XCTAssertEqual(model.snapshot?.sequence, 1, "Mounting a loaded page does not issue a browse RPC")
         await model.waitForPendingWork()
         let search = try button("film.detail.search", page.view)
         XCTAssertTrue(search.isHidden)
@@ -778,21 +805,71 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         }
     }
 
+    func testLoadedSourceReturnReusesButtonsLayoutAndPositionWithoutBrowsingRPC() async throws {
+        let files = (0..<8).map { FilmUIKitPlaybackFixture.file("a-\($0)", name: "目录 A \($0)") }
+        let server = FilmUIKitPlaybackServer(FilmUIKitPlaybackFixture.snapshot(browsing:
+            FilmUIKitPlaybackFixture.browsing(sourceID: "result-a", files: files, original: files)))
+        let media = FilmUIKitPlaybackMedia(), model = makeModel(server, media)
+        await model.open()?.value
+        let page = try detailPage(model), window = try mount(page)
+        defer { unmount(page, window) }
+        try await visible(page); await model.waitForPendingWork()
+        let original = try button("film.file.file-a-0", page.view)
+        let rail = try XCTUnwrap(view("film.detail.episode-cards", page.view) as? UIScrollView)
+        rail.layoutIfNeeded()
+        rail.setContentOffset(CGPoint(x: 180, y: 0), animated: false)
+        let position = rail.contentOffset
+        let more = try button("film.detail.episodes-more", page.view)
+        invoke(try menuAction("列表视图", more.menu))
+        var source = try FilmUIKitPlaybackFixture.source.filmRequiredObject()
+        source["detailId"] = .string("0")
+        var other = try FilmUIKitPlaybackFixture.file("b", name: "目录 B").filmRequiredObject()
+        other["playbackTarget"] = FilmUIKitPlaybackFixture.sourceTarget(source: .object(source), candidateID: "candidate-b")
+        let directory: [RuntimeValue] = [.object(other)]
+        await server.reply(to: "browse", with: FilmUIKitPlaybackFixture.snapshot(10, browsing:
+            FilmUIKitPlaybackFixture.browsing(sourceID: "result-b", files: directory, original: directory)))
+        invoke(try menuAction("测试站 · 失败站点", button("film.detail.source", page.view).menu))
+        await model.waitForPendingWork(); await settle()
+        XCTAssertFalse(rail.isHidden)
+        XCTAssertEqual(try menuAction("卡片视图", more.menu).state, .on)
+        let before = await server.calls().count
+        invoke(try menuAction("测试站 · 星海航线", button("film.detail.source", page.view).menu))
+        await model.waitForPendingWork(); await settle()
+        XCTAssertTrue(view("film.file.file-a-0", page.view) === original)
+        XCTAssertEqual(try menuAction("列表视图", more.menu).state, .on)
+        XCTAssertTrue(rail.isHidden)
+        let after = await server.calls().count
+        XCTAssertEqual(after, before)
+        invoke(try menuAction("卡片视图", more.menu))
+        XCTAssertEqual(rail.contentOffset, position)
+        let calls = await server.calls()
+        XCTAssertEqual(calls.compactMap(\.action), ["browse"])
+        XCTAssertTrue(media.inputs.isEmpty)
+        XCTAssertEqual(model.snapshot?.browsing.sourceID, "result-b")
+        XCTAssertEqual(model.presentation?.browsing.sourceID, "result-a")
+    }
+
     func testEpisodeImagesSummaryAndViewMenusReuseTheSameMetadataWithoutRequests() async throws {
         let still = URL(string: "/v1/tmdb/images/original/still.png")!
         let seasonPoster = URL(string: "/v1/tmdb/images/original/season.png")!
         let poster = URL(string: "/v1/tmdb/images/original/poster.png")!
         var fields = try FilmUIKitPlaybackFixture.snapshot().filmRequiredObject()
+        fields["workInfo"] = .object(["provider": .string("tmdb"), "metadataId": .number(19), "kind": .string("tv"),
+            "title": .string("星海航线"), "summary": .string("第一行简介。第二行简介。第三行简介。"),
+            "seasonCount": .null, "episodeCount": .null])
         fields["metadata"] = .object(["name": .string("星海航线"), "overview": .string("第一行简介。第二行简介。第三行简介。"),
             "poster_path": .string(poster.absoluteString), "seasons": .array([.object([
+                "businessId": .string("fixture-season-1"), "playbackTarget": FilmUIKitPlaybackFixture.target(),
                 "id": .number(1), "season_number": .number(1), "name": .string("第一季"),
                 "poster_path": .string(seasonPoster.absoluteString),
             ])])])
-        fields["episodes"] = .array([
-            .object(["season": .number(1), "episode": .number(1), "name": .string("启航"),
-                     "overview": .string("真实分集简介"), "still_path": .string(still.absoluteString)]),
-            .object(["season": .number(1), "episode": .number(2)]),
-        ])
+        var episodes = FilmUIKitPlaybackFixture.episodes(numbers: [1, 2])
+        var first = try episodes[0].filmRequiredObject()
+        first["name"] = .string("启航"); first["overview"] = .string("真实分集简介")
+        first["still_path"] = .string(still.absoluteString); episodes[0] = .object(first)
+        var second = try episodes[1].filmRequiredObject()
+        second["name"] = nil; second["overview"] = nil; episodes[1] = .object(second)
+        fields["episodes"] = .array(episodes)
         let server = FilmUIKitPlaybackServer(.object(fields)), media = FilmUIKitPlaybackMedia()
         let model = makeModel(server, media)
         await model.open()?.value
@@ -803,7 +880,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let page = try detailPage(model, images: images), window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor { model.snapshot!.sequence > 1 }
+        XCTAssertEqual(model.snapshot?.sequence, 1, "Mounting a loaded page does not issue a browse RPC")
         await model.waitForPendingWork()
         let named = try button("film.episode.fixture-season-1-episode-1", page.view)
         let unnamed = try button("film.episode.fixture-season-1-episode-2", page.view)
@@ -857,7 +934,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let page = try detailPage(model), window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor { model.snapshot!.sequence > 1 }
+        XCTAssertEqual(model.snapshot?.sequence, 1, "Mounting a loaded page does not issue a browse RPC")
         await model.waitForPendingWork()
         let numberedCard = try button("film.file.file-numbered", page.view)
         let title = try XCTUnwrap(descendants(numberedCard).compactMap { $0 as? UILabel }.first { $0.text == "第 7 集" })
@@ -879,10 +956,10 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         let detail = try detailPage(model)
         let navigation = PageNavigationController(themeProvider: FilmPlaybackUIKitTheme())
         navigation.setViewControllers([detail], animated: false)
-        let window = try mount(navigation)
-        defer { unmount(navigation, window) }
+        let (presenter, window) = try await presentReady(navigation)
+        defer { PageViewController.invalidatePages(in: navigation); unmount(presenter, window) }
         try await visible(detail)
-        try await waitFor { model.snapshot!.sequence > 1 }
+        XCTAssertEqual(model.snapshot?.sequence, 1, "Mounting a loaded page does not issue a browse RPC")
         await model.waitForPendingWork()
         XCTAssertEqual(model.snapshot?.target.metadataProvider, .tmdb)
         XCTAssertTrue(try hasDirectory(detail), "Availability follows the selected site, not the entry card's provider")
@@ -892,16 +969,23 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await visible(directory)
         XCTAssertEqual(directory.sections[0].rows.map(\.id), ["film.directory.file.file-first"])
         let opened = await server.calls().count
-        XCTAssertEqual(opened, before)
+        let directoryCalls = await server.calls()
+        XCTAssertEqual(opened, before, "\(directoryCalls)")
         fields["browsing"] = FilmUIKitPlaybackFixture.browsing(sourceID: "result-a",
             files: [file], original: [file], error: "PAN_AUTH_EXPIRED")
         fields["sequence"] = .number(Double(try XCTUnwrap(model.snapshot).sequence) + 1)
-        await server.awaitObservation()
+        XCTAssertTrue(detail.isPageActive)
+        XCTAssertFalse(detail.isPageVisible)
+        try await waitFor("The raw directory retains the current runtime observation") {
+            await server.isObserving()
+        }
         try await server.publish(.object(fields))
         let error = try await presentedAlert(directory, title: "错误", style: .alert)
-        XCTAssertEqual(error.message, "PAN_AUTH_EXPIRED")
+        XCTAssertEqual(error.message, FilmPlaybackError(code: "PAN_AUTH_EXPIRED").localizedDescription)
         XCTAssertEqual(error.actions.map(\.title), ["取消", "重试"])
-        XCTAssertTrue(directory.sections.isEmpty, "An errored directory cannot retain playable rows or inline error rows")
+        XCTAssertEqual(directory.sections.first?.rows.count, 1)
+        XCTAssertEqual(directory.sections.first?.rows.first?.title, "加载失败")
+        XCTAssertFalse(directory.sections.first?.rows.first?.enabled ?? true, "A status row is not a playable file")
         XCTAssertNil(view("film.directory.error", directory.view))
         XCTAssertTrue(media.inputs.isEmpty)
     }
@@ -1339,11 +1423,9 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(calls.dropFirst(before).compactMap(\.action), [],
                        "The episode preference alone cannot enable short-video switching")
 
-        var fields = try FilmUIKitPlaybackFixture.snapshot(
-            Int(try XCTUnwrap(model.snapshot).sequence) + 1, shortVideo: true).filmRequiredObject()
-        fields["stage"] = .string("playing")
-        fields["current"] = .object(["attemptId": .string(attemptID), "candidate": FilmUIKitPlaybackFixture.candidate(),
-            "position": .number(34), "duration": .number(600), "paused": .bool(false)])
+        var fields = try await server.snapshotValue().filmRequiredObject()
+        fields["sequence"] = .number(Double(try XCTUnwrap(model.snapshot).sequence) + 1)
+        fields["shortVideo"] = .bool(true)
         try await server.publish(.object(fields))
         XCTAssertTrue(preferences.set(\.swipeEpisodes, false))
         try await waitFor("Short-video mode keeps the committed media while the episode preference is disabled") {
@@ -1459,11 +1541,15 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         changed["target"] = .object(target)
         try await server.publish(.object(changed))
         await settle()
-        XCTAssertTrue(descendants(page.view).compactMap { $0 as? ArtworkView }.allSatisfy { $0.image == nil })
+        XCTAssertTrue(descendants(page.view).compactMap { $0 as? ArtworkView }.filter {
+            !sequence(first: $0 as UIView, next: { $0.superview }).contains(where: \.isHidden)
+        }.allSatisfy { $0.image == nil })
         XCTAssertEqual(favorite.configuration?.title, "收藏")
         XCTAssertEqual(try XCTUnwrap(view("film.detail.title", page.view) as? UILabel).text, "星海航线")
         favorite.sendActions(for: .touchUpInside)
-        XCTAssertTrue(library.contains(.init(sourceID: "douban", id: "0", title: "星海航线")))
+        XCTAssertEqual(page.detail.item.sourceID, "douban")
+        XCTAssertEqual(page.detail.item.id, "0")
+        XCTAssertTrue(library.contains(page.detail.item))
         XCTAssertTrue(library.contains(original), "Switching metadata must not rewrite the existing favorite")
     }
 
@@ -1864,6 +1950,18 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         PageViewController.invalidatePages(in: page); window.isHidden = true; window.rootViewController = nil
         previous?.makeKey()
     }
+    private func presentReady(_ page: UIViewController) async throws -> (FilmPlaybackUIKitPresenter, UIWindow) {
+        let presenter = FilmPlaybackUIKitPresenter()
+        let ready = expectation(description: "Presenter completed its actual appearance")
+        presenter.onDidAppear = { ready.fulfill() }
+        let window = try mount(presenter)
+        await fulfillment(of: [ready], timeout: 2)
+        let presented = expectation(description: "Playback page completed its actual presentation")
+        page.modalPresentationStyle = .fullScreen
+        presenter.present(page, animated: false) { presented.fulfill() }
+        await fulfillment(of: [presented], timeout: 2)
+        return (presenter, window)
+    }
     private func visible(_ page: PageViewController) async throws {
         try await waitFor("The page is visible in the real active key window") {
             UIApplication.shared.applicationState == .active &&
@@ -2010,13 +2108,13 @@ final class FilmPlaybackUIKitTests: XCTestCase {
     }
     private enum FixtureFailure: Error { case prerequisite(String) }
     private func waitFor(_ description: String = "UIKit prerequisite", file: StaticString = #filePath, line: UInt = #line,
-                         _ condition: @escaping @MainActor () -> Bool) async throws {
+                         _ condition: @escaping @MainActor () async -> Bool) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(4))
-        while !condition(), ContinuousClock.now < deadline {
+        while !(await condition()), ContinuousClock.now < deadline {
             await settle()
             try? await Task.sleep(for: .milliseconds(10))
         }
-        let satisfied = condition()
+        let satisfied = await condition()
         XCTAssertTrue(satisfied, description, file: file, line: line)
         if !satisfied { throw FixtureFailure.prerequisite(description) }
     }
@@ -2028,6 +2126,17 @@ final class FilmPlaybackUIKitTests: XCTestCase {
                 continuation.resume()
             }
         }
+    }
+}
+
+@MainActor
+private final class FilmPlaybackUIKitPresenter: UIViewController {
+    var onDidAppear: (() -> Void)?
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        let completed = onDidAppear
+        onDidAppear = nil
+        completed?()
     }
 }
 

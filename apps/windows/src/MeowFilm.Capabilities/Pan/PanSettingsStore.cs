@@ -11,9 +11,7 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IDocumentStore st
     internal static IReadOnlyList<JsonElement> Providers { get; } = new[]
     {
         Provider("baidu", ["cookie"], true), Provider("quark", ["cookie"], true), Provider("uc", ["cookie"], true),
-        Provider("tianyi", ["cookie", "username", "password"], false), Provider("yidong", ["authorization", "refreshedAt"], false),
-        Provider("quark_tv", ["refreshToken", "deviceId", "accessToken", "expiresAt"], false),
-        Provider("uc_tv", ["refreshToken", "deviceId", "accessToken", "expiresAt"], false)
+        Provider("tianyi", ["cookie", "username", "password"], false), Provider("yidong", ["authorization", "refreshedAt"], false)
     };
     private static JsonElement Provider(string id, string[] fields, bool qr) =>
         JsonSerializer.SerializeToElement(new { provider = id, credentialFields = fields, login = qr, refresh = true });
@@ -131,7 +129,7 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IDocumentStore st
         if (fields.Select(item => item.Name).Distinct().Count() != fields.Length) throw new BridgeException(code);
         foreach (var field in fields)
         {
-            if (field.Name is "refreshedAt" or "expiresAt")
+            if (field.Name is "refreshedAt")
             {
                 if (field.Value.ValueKind != JsonValueKind.Number || !field.Value.TryGetInt64(out long number) ||
                     number is < 0 or > BridgeCodec.MaximumSafeInteger) throw new BridgeException(code);

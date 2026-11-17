@@ -26,8 +26,7 @@ export function createFilmCatalog({ library } = {}) {
       groups.find(row => row?.id === preferred) ??
       groups.find(row => Array.isArray(row?.members) && identities.some(member => row.members.includes(member)));
     if (!record) {
-      record = { id: /^group:[a-f0-9]{64}$/.test(preferred ?? '') ? preferred
-        : `group:${identity('group', identities[0])}`, keys: [], members: [] };
+      record = { id: `group:${identity('group', identities[0])}`, keys: [], members: [] };
       groups.push(record);
     }
     requireValue(/^group:[a-f0-9]{64}$/.test(record.id) && Array.isArray(record.keys) &&
@@ -46,7 +45,7 @@ export function createFilmCatalog({ library } = {}) {
     } else if (value.metadataProvider) {
       requireValue(['tmdb', 'douban'].includes(value.metadataProvider) &&
         /^[0-9]+$/.test(String(value.metadataId)));
-      result.id = stableId(value.id ?? '') ? value.id : metadataId(value.metadataProvider, value.kind, value.metadataId);
+      result.id = metadataId(value.metadataProvider, value.kind, value.metadataId);
     } else if (value.kind === 'source') {
       if (value.source?.engine === 'pan') {
         const manual = library.read().manual.find(row => row?.share && row.enabled !== false &&

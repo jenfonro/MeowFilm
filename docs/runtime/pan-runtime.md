@@ -27,10 +27,8 @@ await runtime.close();
 | `uc` | `cookie` | 是 | 是 | `streaming`, `download` | 二维码／Cookie 检测 |
 | `tianyi` | `cookie`, `username`, `password` | 是 | 否 | `streaming`, `download` | Cookie 检测／普通密码刷新 |
 | `yidong` | `authorization`, `refreshedAt` | 是 | 否 | `streaming`, `download` | Authorization 刷新 |
-| `quark_tv` | `refreshToken`, `deviceId`, `accessToken`, `expiresAt` | 否 | 否 | `streaming`, `download` | token 刷新 |
-| `uc_tv` | 同上 | 否 | 否 | `streaming`, `download` | token 刷新 |
 
-`refreshedAt/expiresAt` 为毫秒时间戳（非负安全整数），其余字段为字符串。天翼可只配置 Cookie；保存 username/password 才能在凭据失效后自动普通登录，不绕过验证码。移动 list/streaming 可匿名，download 需要 Authorization。TV 需要 deviceId 与 accessToken 或可刷新的 refreshToken；没有同账号 UID 绑定证明，调用者负责选用与普通盘转存文件对应的 TV 账号。
+`refreshedAt` 为毫秒时间戳（非负安全整数），其余字段为字符串。天翼可只配置 Cookie；保存 username/password 才能在凭据失效后自动普通登录，不绕过验证码。移动 list/streaming 可匿名，download 需要 Authorization。
 
 | operation | 请求 | 成功 value |
 | --- | --- | --- |
@@ -40,7 +38,7 @@ await runtime.close();
 | `settings.clear` | `{provider}` | 新 revision 的空账号状态 |
 | `refresh` | `{provider}` | `{refreshed:true,account:账号状态或单项错误}` |
 
-每个 provider 只有一份当前账号。`settings.set` **整份替换**该账号配置，不是合并；clear 删除凭据但保留递增 revision。`configured/fields` 只说明哪些字段非空，不证明账号有效或具备会员资格。普通配置读取、刷新及登录结果不回传原始秘密；不存在“读取 Cookie”接口。不同 provider 不互相读写凭据。
+每个 provider 只有一份当前账号。`settings.set` **整份替换**该账号配置，不是合并；clear 删除凭据但保留递增 revision。`configured/fields` 只说明哪些字段非空，不证明账号有效或具备会员资格。普通配置读取、刷新及登录结果不回传原始秘密；不存在“读取 Cookie”接口。不同 provider 不互相读写凭据，也不接受另一 provider 的文件引用。
 
 普通操作忽略未消费参数，不按字段白名单拒绝请求。`settings.set` 只提取所选 provider 定义的凭据字段，其他字段不会进入持久配置、认证或网络；已定义的字段仍按实际凭据类型及 HTTP 头要求处理。只含未知凭据字段的请求投影为空配置，仍遵循整份替换语义。顶层附加的 `method/url/headers` 等不能改变实际操作或目标，clear 也不会消费附带的 credentials。
 
@@ -50,7 +48,7 @@ await runtime.close();
 
 可投影账号状态中的 `status` 为 `signedIn/expired/signedOut`。无凭据为 `signedOut`；已有凭据且本进程未收到明确账号认证失败时为 `signedIn`，不是永久有效性保证。`refresh` 成功后为 `signedIn`，明确账号认证失败后为 `expired`；网络、超时、上游格式等错误不改变此前状态，也不删除凭据。刷新只证明实际使用的凭据路径；未用字段仍损坏时，刷新可以成功，但 account 仍返回上述显式单项错误，不把坏材料投影成健康配置。此观察状态不另建持久库，配置读取本身不执行在线验证；原生离线配置投影与显式验证见[设置页](#设置页)。分享密码错误不作为账号失效依据。
 
-七个 provider 均支持 `refresh`。Cookie-only 账号使用只读账号接口检测，不列分享、不转存；支持密码或 token 的账号按其协议刷新。天翼只有 Cookie 时也可检测；用户名与密码仍用于普通登录，不绕过验证码。本地保存凭据不等于验证成功；需要验证时显式刷新，只有真实在线回执才报告已验证。
+五个 provider 均支持 `refresh`。Cookie-only 账号使用只读账号接口检测，不列分享、不转存；支持密码或 token 的账号按其协议刷新。天翼只有 Cookie 时也可检测；用户名与密码仍用于普通登录，不绕过验证码。本地保存凭据不等于验证成功；需要验证时显式刷新，只有真实在线回执才报告已验证。
 
 未注入 store 时，配置明文原子保存在 `<dataRoot>/pan/accounts.json`：
 
@@ -92,16 +90,13 @@ await runtime.close();
 
 百度仅使用 `share/transfer` 返回的 `extra.list` 精确映射；若只返回 task ID 而没有所选文件的准确目标，报告 `UPSTREAM_FORMAT`，不增加参考实现没有的任务查询接口，也不猜测目标路径。报错不表示远端转存已经回滚。
 
-TV 只接受明确账号内的 `kind:"stored"` 引用，不 list、不转存、不尝试普通盘回退。可显式传入对应普通盘 `prepare` 返回的完整引用，service 同时校验普通账号 revision；也可传入 `{kind:"stored",provider:"quark_tv",accountRevision:当前TV账号revision,fileId:"准确账号内fid"}`。没有普通 Cookie 与 TV 账号的自动绑定或播放优先级策略。
-
 每次 `play` 只取调用方指定的一种模式，不同时请求 streaming/download，不因失败切换 provider。返回 URL 和必要 headers，调用方负责媒体请求；headers 可能含上游要求的 Cookie／Authorization，不用于其他域名，不写日志。pan provider 自身不建立媒体 relay；film 的独立受控媒体入口不属于此 provider 的取址接口。
 
 ### 参考接入与模式含义
 
-网盘通信能力以 meowfilm-server 的独立适配函数为依据，而不是将其播放编排整体移植。普通盘与 TV 的选择、优先级以及失败后是否再次尝试由调用方负责；正式 App 中由 Node film 智能会话编排，不由 pan provider 自行选择。
+网盘通信能力以 meowfilm-server 的独立适配函数为依据，而不是将其播放编排整体移植。网盘的选择、优先级以及失败后是否再次尝试由调用方负责；正式 App 中由 Node film 智能会话编排，不由 pan provider 自行选择。
 
-- **普通夸克／UC**：两种 `mode` 都调用一次同盘的 `file/download`。按参考 `quarkDirectDownloadWithCookie`／`ucDirectDownload`，在所选文件的同一响应中优先取 `streaming → play_url` 或 `download → download_url`，随后按 `download_url → play_url → url` 读取可用地址。这里的模式是字段偏好，**不保证两种地址不同，也不声明普通盘具有 TV 转码接口**；只有 `download_url` 时仍能提供原文件直链。不会为此请求 TV 或另一种上游取址接口。
-- **夸克 TV／UC TV**：明确调用 `/file?method=streaming` 或 `/file?method=download`，分别读取 `video_info` 中首个非空 URL 或 `download_url`。所选结果缺失时报错，不使用另一模式的结果，不补发普通盘请求。
+- **普通夸克／UC**：两种 `mode` 都调用一次同盘的 `file/download`。按参考 `quarkDirectDownloadWithCookie`／`ucDirectDownload`，在所选文件的同一响应中优先取 `streaming → play_url` 或 `download → download_url`，随后按 `download_url → play_url → url` 读取可用地址。这里的模式是字段偏好，**不保证两种地址不同，也不声明普通盘具有独立转码接口**；只有 `download_url` 时仍能提供原文件直链。不会为此请求另一种上游取址接口。
 - **百度**：只公开参考实现的 `streaming` 取址；不声明不存在的独立 `download` 能力。
 - **天翼**：streaming 使用 `getNewVlcVideoPlayUrl.action`，download 使用 `getFileDownloadUrl.action`，保留各自响应字段及同接口 `FileTooLarge` 处理，不套用普通夸克／UC 的字段规则。
 - **移动**：streaming 只使用匿名 `getContentInfoFromOutLink`；download 使用认证签名的 `dlFromOutLinkV3`，`9530` 时仅在已有明确 `contentId` 的条件下按参考换用同端点请求体。不为带密码文件额外重列目录，也不把 list 响应里的 URL 当作播放缓存。
@@ -142,17 +137,10 @@ await client.call('pan.login.poll', { sessionId }, { timeout: 45000 });
 
 百度／天翼解析播放重定向时仅需要响应头：保持上游要求的 GET／Range，收到头后停止并排空响应，不下载媒体正文。它不是按响应大小分类，也不改变其他完整响应接口。
 
-TV 刷新**按已确认方案**将长期 refreshToken 发送给第三方明文 HTTP：
-
-- `http://api.extscreen.com/quarkdrive/token`
-- `http://api.extscreen.com/ucdrive/token`
-
-实际 file 接口为官方网盘 HTTPS。第三方可获得长期凭据，HTTP 路径存在窃听／篡改风险；本实现不宣称消除这些风险，也不未经验证将协议改成 HTTPS。它与本地凭据保护是两个独立边界，Windows DPAPI 不消除上游明文 HTTP 的风险。
-
 各请求可同时等待网络，无全局业务队列、并发额度或每账号线程。解析计算仍在 Node 主线程，不能把 async 等同于 CPU 并行。仅同 provider/账号代次的刷新与相同文件的在途转存合并；取消一个等待者不影响其他等待者，全部取消、换号或关闭时取消上游。普通网络请求默认截止 30 秒；协议任务轮询受自身截止时间和调用方取消控制。`close()` 等待实际工作排空，不以等待者提前取消冒充物理释放。
 
 ## 错误与验证
 
 业务错误：`INVALID_REQUEST/UNSUPPORTED_OPERATION/NOT_CONFIGURED/AUTH_REQUIRED/AUTH_FAILED/CHALLENGE_REQUIRED/NOT_FOUND/UPSTREAM_HTTP/UPSTREAM_FORMAT/UPSTREAM_ERROR/NETWORK_ERROR/TIMEOUT/CANCELLED/CLOSED/STALE_ACCOUNT/STORAGE_ERROR/CORRUPT_STORAGE/LOGIN_EXPIRED/PAN_FAILURE`。调用方应按 code 处理，不解析供应方文案。不支持的模式、provider 操作及失效引用在网络副作用前拒绝。
 
-离线 provider 测试使用合成凭据和记录式 HTTP 替身；公共传输用本机真实 HTTP 验证；service 与公共 HTTP 测试覆盖持久化、代次、并发、取消及关闭；通用打包测试验证新闭包与原默认三模块。真实账号挑战、会员／频控、第三方服务可用性、真实转存、Windows/iOS App 接入不由这些测试证明。
+离线 provider 测试使用合成凭据和记录式 HTTP 替身；公共传输用本机真实 HTTP 验证；service 与公共 HTTP 测试覆盖持久化、代次、并发、取消及关闭；通用打包测试验证新闭包与原默认三模块。真实账号挑战、会员／频控、真实转存、Windows/iOS App 接入不由这些测试证明。

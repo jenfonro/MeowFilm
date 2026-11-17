@@ -53,7 +53,12 @@
     <Setter Property="Padding" Value="0"/>
     <Setter Property="FontFamily" Value="{DynamicResource MeowFilm.Font.Icons}"/>
    </Style>
+   <DataTemplate x:Key="Film.SourceLabel"><TextBlock Text="{Binding Label}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/></DataTemplate>
    <Style x:Key="Film.SourcePicker" TargetType="ComboBox" BasedOn="{StaticResource MeowFilm.ComboBox}">
+    <Setter Property="FontWeight" Value="Normal"/>
+    <Setter Property="ItemTemplate" Value="{StaticResource Film.SourceLabel}"/>
+    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+    <Setter Property="ItemContainerStyle"><Setter.Value><Style TargetType="ComboBoxItem" BasedOn="{StaticResource MeowFilm.SettingsComboItem}"><Setter Property="HorizontalContentAlignment" Value="Stretch"/></Style></Setter.Value></Setter>
     <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBox">
      <Grid>
       <ToggleButton Focusable="False" IsChecked="{Binding IsDropDownOpen,RelativeSource={RelativeSource TemplatedParent},Mode=TwoWay}"
@@ -66,21 +71,21 @@
        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="20"/></Grid.ColumnDefinitions>
        <ContentPresenter x:Name="SourceSelection" Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
         ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}" VerticalAlignment="Center"/>
-       <TextBlock x:Name="SourceLoading" Text="加载中..." Visibility="Collapsed" VerticalAlignment="Center"/>
+       <TextBlock x:Name="SourceLoading" Text="{Binding Tag,RelativeSource={RelativeSource TemplatedParent}}" Visibility="Collapsed" VerticalAlignment="Center"/>
        <Path x:Name="Arrow" Grid.Column="1" Data="M 0,0 L 4.5,4.5 L 9,0" Width="9" Height="5" Stretch="None" StrokeThickness="1.4"
         StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{TemplateBinding Foreground}"
         HorizontalAlignment="Right" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5"/>
       </Grid>
       <Popup x:Name="PART_Popup" Style="{StaticResource MeowFilm.Popup}" Placement="Bottom" VerticalOffset="4" IsOpen="{TemplateBinding IsDropDownOpen}"
        AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
-       <Border x:Name="DropDown" Margin="0,0,10,10" MinWidth="{Binding ActualWidth,RelativeSource={RelativeSource TemplatedParent}}"
+       <Border x:Name="DropDown" Margin="0,0,10,10" Width="{Binding ActualWidth,RelativeSource={RelativeSource TemplatedParent}}"
         Background="{TemplateBinding Background}" BorderBrush="{DynamicResource MeowFilm.Brush.Border}" BorderThickness="1" CornerRadius="8" Padding="4">
         <Border.Effect><DropShadowEffect BlurRadius="14" ShadowDepth="3" Opacity=".12"/></Border.Effect>
         <DockPanel KeyboardNavigation.TabNavigation="Cycle">
          <Button x:Name="SearchMoreSourcesButton" DockPanel.Dock="Bottom" Content="加载更多" Click="SearchMoreSources_Click"
           Style="{StaticResource Film.PlaybackAction}" HorizontalContentAlignment="Left" Margin="0,4,0,0"
-          IsEnabled="{Binding CanSearchMore}" AutomationProperties.Name="继续搜索未完成来源"/>
-         <ScrollViewer MaxHeight="300" VerticalScrollBarVisibility="Auto">
+          IsEnabled="{Binding CanSearchMore}" Visibility="{Binding CanBrowseSources,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.Name="继续搜索未完成来源"/>
+         <ScrollViewer MaxHeight="300" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
          </ScrollViewer>
         </DockPanel>
@@ -88,6 +93,7 @@
       </Popup>
      </Grid>
      <ControlTemplate.Triggers>
+      <Trigger Property="Name" Value="LinePicker"><Setter TargetName="SearchMoreSourcesButton" Property="Visibility" Value="Collapsed"/></Trigger>
       <Trigger Property="SelectedItem" Value="{x:Null}">
        <Setter TargetName="SourceSelection" Property="Visibility" Value="Collapsed"/>
        <Setter TargetName="SourceLoading" Property="Visibility" Value="Visible"/>
@@ -350,6 +356,112 @@
       </StackPanel>
      </Button>
    </DataTemplate>
+   <DataTemplate x:Key="Film.DirectoryPresentation"><StackPanel>
+    <ItemsControl x:Name="MovieCandidates" ItemsSource="{Binding Candidates}" Visibility="{Binding ShowMovieCandidates,Converter={StaticResource MeowFilm.BoolToVisibility}}">
+     <ItemsControl.ItemsPanel><ItemsPanelTemplate><local:AdaptiveCardPanel RowGap="16"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+     <ItemsControl.ItemTemplate><DataTemplate>
+      <Button x:Name="MovieTile" Tag="{Binding}" Click="Candidate_Click" Style="{StaticResource Film.EpisodeTile}"
+              local:CardMotion.Enabled="True" MaxWidth="176" AutomationProperties.Name="{Binding DisplayLabel}">
+       <Button.RenderTransform><ScaleTransform
+        ScaleX="{Binding Path=(local:CardMotion.Progress),ElementName=MovieTile,Converter={StaticResource Film.Scale},ConverterParameter=0.03}"
+        ScaleY="{Binding Path=(local:CardMotion.Progress),ElementName=MovieTile,Converter={StaticResource Film.Scale},ConverterParameter=0.03}"/>
+       </Button.RenderTransform>
+       <StackPanel>
+        <local:AspectRatioDecorator AspectRatio="176,264">
+        <Grid local:CardClip.Radius="10">
+         <local:FilmPlaybackPoster Address="{Binding Image}" AutomationProperties.Name="{Binding Name}"/>
+         <local:FilmHoverShade Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=MovieTile}"/>
+         <local:FilmPlayMark Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=MovieTile}"/>
+         <Border Style="{StaticResource Film.CurrentBadge}" Margin="10">
+          <StackPanel Orientation="Horizontal">
+           <Path Style="{StaticResource Film.CurrentGlyph}"/>
+           <TextBlock Text="当前" Style="{StaticResource Film.CurrentBadgeText}"/>
+          </StackPanel>
+         </Border>
+        </Grid>
+        </local:AspectRatioDecorator>
+        <TextBlock Text="{Binding Name}" FontSize="{StaticResource MeowFilm.Font.Size.Body}" Margin="2,9,2,0"
+                   TextTrimming="CharacterEllipsis"/>
+        <TextBlock Text="{Binding DisplayLabel}" FontSize="13" Margin="2,4,2,0"
+                   TextTrimming="CharacterEllipsis" Style="{StaticResource Capability.Muted}"/>
+        <TextBlock Text="{Binding Overview}" FontSize="13" LineHeight="21" Height="42"
+                   Margin="2,6,2,0" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
+                   Style="{StaticResource Capability.Muted}"/>
+       </StackPanel>
+      </Button>
+     </DataTemplate></ItemsControl.ItemTemplate>
+    </ItemsControl>
+    <local:Shelf x:Name="EpisodeShelf" ItemsSource="{Binding Episodes}" MinimumCardWidth="208"
+                 HorizontalOffset="{Binding EpisodeDirectory.HorizontalOffset,Mode=TwoWay}"
+                 NavigationButtonStyle="{StaticResource Film.ShelfArrow}"
+                 Visibility="{Binding ShowEpisodeCards,Converter={StaticResource MeowFilm.BoolToVisibility}}"
+                 CardTemplate="{StaticResource Film.EpisodeCard}"
+                 AutomationProperties.Name="横向选集列表"/>
+    <ItemsControl x:Name="EpisodeList" ItemsSource="{Binding Episodes}" AutomationProperties.Name="逐集列表"
+                  MaxHeight="{Binding ActualHeight,RelativeSource={RelativeSource AncestorType=ScrollViewer}}"
+                  VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                  VirtualizingPanel.ScrollUnit="Pixel" ScrollViewer.CanContentScroll="True"
+                  ScrollViewer.ScrollChanged="EpisodeList_ScrollChanged"
+                  PreviewMouseWheel="EpisodeList_MouseWheel"
+                  Visibility="{Binding ShowEpisodeList,Converter={StaticResource MeowFilm.BoolToVisibility}}">
+     <ItemsControl.Template><ControlTemplate TargetType="ItemsControl">
+      <ScrollViewer CanContentScroll="True" HorizontalScrollBarVisibility="Disabled"
+                    VerticalScrollBarVisibility="Auto" PanningMode="VerticalOnly"
+                    Style="{StaticResource MeowFilm.OverlayScrollViewer}">
+       <ItemsPresenter/>
+      </ScrollViewer>
+     </ControlTemplate></ItemsControl.Template>
+     <ItemsControl.ItemsPanel><ItemsPanelTemplate><VirtualizingStackPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+     <ItemsControl.ItemTemplate><DataTemplate>
+      <Button x:Name="Tile" Style="{StaticResource Film.EpisodeTile}" Margin="0,0,0,16"
+              local:CardMotion.Enabled="True" Tag="{Binding}" Click="Episode_Click" IsEnabled="{Binding CanSelect}"
+              AutomationProperties.Name="{Binding Label}">
+       <Button.RenderTransform><ScaleTransform
+        ScaleX="{Binding Path=(local:CardMotion.Progress),ElementName=Tile,Converter={StaticResource Film.Scale},ConverterParameter=0.01}"
+        ScaleY="{Binding Path=(local:CardMotion.Progress),ElementName=Tile,Converter={StaticResource Film.Scale},ConverterParameter=0.01}"/>
+       </Button.RenderTransform>
+       <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="176"/><ColumnDefinition Width="20"/><ColumnDefinition/></Grid.ColumnDefinitions>
+        <!-- Soft row lift on hover or focus; it reaches past the row without changing its layout. -->
+        <Border x:Name="RowHover" Grid.ColumnSpan="3" Margin="-10" CornerRadius="14" IsHitTestVisible="False"
+                Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Tile}">
+         <Border.Style><Style TargetType="Border">
+          <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Hover}"/>
+          <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+           <Setter Property="Visibility" Value="Collapsed"/>
+          </Trigger></Style.Triggers>
+         </Style></Border.Style>
+        </Border>
+        <Grid Height="99" local:CardClip.Radius="8" VerticalAlignment="Center">
+         <local:FilmPlaybackPoster Address="{Binding Image}" AutomationProperties.Name="{Binding Label}"
+                RenderTransformOrigin=".5,.5">
+          <local:FilmPlaybackPoster.RenderTransform><ScaleTransform
+           ScaleX="{Binding Path=(local:CardMotion.Progress),ElementName=Tile,Converter={StaticResource Film.Scale},ConverterParameter=0.05}"
+           ScaleY="{Binding Path=(local:CardMotion.Progress),ElementName=Tile,Converter={StaticResource Film.Scale},ConverterParameter=0.05}"/>
+          </local:FilmPlaybackPoster.RenderTransform>
+         </local:FilmPlaybackPoster>
+         <local:FilmHoverShade Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Tile}"/>
+         <local:FilmPlayMark Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Tile}"/>
+         <Border Style="{StaticResource Film.CurrentBadge}" Margin="8">
+          <StackPanel Orientation="Horizontal">
+           <Path Style="{StaticResource Film.CurrentGlyph}"/>
+           <TextBlock Text="当前" Style="{StaticResource Film.CurrentBadgeText}"/>
+          </StackPanel>
+         </Border>
+        </Grid>
+        <StackPanel Grid.Column="2" VerticalAlignment="Center">
+         <TextBlock Text="{Binding Label}" FontSize="15" TextWrapping="Wrap"
+                    Style="{StaticResource Film.EpisodeLabel}"/>
+         <TextBlock Text="{Binding Duration}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Margin="0,5,0,0" Style="{StaticResource Capability.Muted}"/>
+         <TextBlock Text="{Binding Overview}" TextWrapping="Wrap" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21"
+                    MaxHeight="63" Margin="0,7,0,0" TextTrimming="CharacterEllipsis"
+                    Style="{StaticResource Capability.Muted}"/>
+        </StackPanel>
+       </Grid>
+      </Button>
+     </DataTemplate></ItemsControl.ItemTemplate>
+    </ItemsControl>
+   </StackPanel></DataTemplate>
   </ResourceDictionary>
  </UserControl.Resources>
  <UserControl.Style><Style TargetType="UserControl">
@@ -593,16 +705,16 @@
         <ColumnDefinition MaxWidth="190">
          <ColumnDefinition.Style><Style TargetType="ColumnDefinition">
           <Setter Property="Width" Value="*"/>
-          <Style.Triggers><DataTrigger Binding="{Binding HasLines}" Value="False"><Setter Property="Width" Value="0"/></DataTrigger></Style.Triggers>
+          <Style.Triggers><DataTrigger Binding="{Binding ShowLinePicker}" Value="False"><Setter Property="Width" Value="0"/></DataTrigger></Style.Triggers>
          </Style></ColumnDefinition.Style>
         </ColumnDefinition>
         <ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/>
        </Grid.ColumnDefinitions>
-       <ComboBox x:Name="SourcePicker" ItemsSource="{Binding Sources}" SelectedItem="{Binding SelectedSource,Mode=OneWay}" DisplayMemberPath="Label"
+       <ComboBox x:Name="SourcePicker" ItemsSource="{Binding Sources}" SelectedItem="{Binding SelectedSource,Mode=OneWay}" Tag="{Binding SourcePlaceholder}"
         IsEnabled="{Binding CanBrowseSources,FallbackValue=False,TargetNullValue=False}" SelectionChanged="Source_Changed" Style="{StaticResource Film.SourcePicker}" MinHeight="36" VerticalAlignment="Center" AutomationProperties.Name="站点来源"/>
-       <ComboBox x:Name="LinePicker" Grid.Column="1" ItemsSource="{Binding Lines}" SelectedItem="{Binding SelectedLine,Mode=OneWay}" DisplayMemberPath="Label"
+       <ComboBox x:Name="LinePicker" Grid.Column="1" ItemsSource="{Binding Lines}" SelectedItem="{Binding SelectedLine,Mode=OneWay}" Tag="{Binding LinePlaceholder}" Style="{StaticResource Film.SourcePicker}" IsEnabled="{Binding CanBrowseLines}"
         SelectionChanged="Line_Changed" MinHeight="36" Margin="10,0,0,0" VerticalAlignment="Center"
-        Visibility="{Binding HasLines,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.Name="网盘来源"/>
+        Visibility="{Binding ShowLinePicker,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.Name="网盘来源"/>
        <CheckBox Grid.Column="2" Content="点映" IsChecked="{Binding PreviewEpisodes,Mode=OneWay}" Click="Preview_Click"
         Margin="10,0,16,0" VerticalAlignment="Center" AutomationProperties.Name="显示点映剧集"/>
        <Button x:Name="RawDirectory" Grid.Column="3" Content="查看原始列表" Click="Directory_Click" Style="{StaticResource Film.PlaybackAction}" Margin="0,0,8,0"
@@ -631,110 +743,7 @@
              HorizontalAlignment="Center" VerticalAlignment="Center" IsEnabled="{Binding CanStartSourceSearch}"
              AutomationProperties.Name="搜索剧集"/>
     </Grid>
-    <ItemsControl x:Name="MovieCandidates" ItemsSource="{Binding Candidates}" Visibility="{Binding ShowMovieCandidates,Converter={StaticResource MeowFilm.BoolToVisibility}}">
-     <ItemsControl.ItemsPanel><ItemsPanelTemplate><local:AdaptiveCardPanel RowGap="16"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
-     <ItemsControl.ItemTemplate><DataTemplate>
-      <Button x:Name="MovieTile" Tag="{Binding}" Click="Candidate_Click" Style="{StaticResource Film.EpisodeTile}"
-              local:CardMotion.Enabled="True" MaxWidth="176" AutomationProperties.Name="{Binding DisplayLabel}">
-       <Button.RenderTransform><ScaleTransform
-        ScaleX="{Binding Path=(local:CardMotion.Progress),ElementName=MovieTile,Converter={StaticResource Film.Scale},ConverterParameter=0.03}"
-        ScaleY="{Binding Path=(local:CardMotion.Progress),ElementName=MovieTile,Converter={StaticResource Film.Scale},ConverterParameter=0.03}"/>
-       </Button.RenderTransform>
-       <StackPanel>
-        <local:AspectRatioDecorator AspectRatio="176,264">
-        <Grid local:CardClip.Radius="10">
-         <local:FilmPlaybackPoster Address="{Binding Image}" AutomationProperties.Name="{Binding Name}"/>
-         <local:FilmHoverShade Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=MovieTile}"/>
-         <local:FilmPlayMark Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=MovieTile}"/>
-         <Border Style="{StaticResource Film.CurrentBadge}" Margin="10">
-          <StackPanel Orientation="Horizontal">
-           <Path Style="{StaticResource Film.CurrentGlyph}"/>
-           <TextBlock Text="当前" Style="{StaticResource Film.CurrentBadgeText}"/>
-          </StackPanel>
-         </Border>
-        </Grid>
-        </local:AspectRatioDecorator>
-        <TextBlock Text="{Binding Name}" FontSize="{StaticResource MeowFilm.Font.Size.Body}" Margin="2,9,2,0"
-                   TextTrimming="CharacterEllipsis"/>
-        <TextBlock Text="{Binding DisplayLabel}" FontSize="13" Margin="2,4,2,0"
-                   TextTrimming="CharacterEllipsis" Style="{StaticResource Capability.Muted}"/>
-        <TextBlock Text="{Binding Overview}" FontSize="13" LineHeight="21" Height="42"
-                   Margin="2,6,2,0" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
-                   Style="{StaticResource Capability.Muted}"/>
-       </StackPanel>
-      </Button>
-     </DataTemplate></ItemsControl.ItemTemplate>
-    </ItemsControl>
-    <local:Shelf x:Name="EpisodeShelf" ItemsSource="{Binding Episodes}" MinimumCardWidth="208"
-                 HorizontalOffset="{Binding EpisodeDirectory.HorizontalOffset,Mode=TwoWay}"
-                 NavigationButtonStyle="{StaticResource Film.ShelfArrow}"
-                 Visibility="{Binding ShowEpisodeCards,Converter={StaticResource MeowFilm.BoolToVisibility}}"
-                 CardTemplate="{StaticResource Film.EpisodeCard}"
-                 AutomationProperties.Name="横向选集列表"/>
-    <ItemsControl x:Name="EpisodeList" ItemsSource="{Binding Episodes}" AutomationProperties.Name="逐集列表"
-                  MaxHeight="{Binding ActualHeight,ElementName=PageScroll}"
-                  VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
-                  VirtualizingPanel.ScrollUnit="Pixel" ScrollViewer.CanContentScroll="True"
-                  ScrollViewer.ScrollChanged="EpisodeList_ScrollChanged"
-                  PreviewMouseWheel="EpisodeList_MouseWheel"
-                  Visibility="{Binding ShowEpisodeList,Converter={StaticResource MeowFilm.BoolToVisibility}}">
-     <ItemsControl.Template><ControlTemplate TargetType="ItemsControl">
-      <ScrollViewer CanContentScroll="True" HorizontalScrollBarVisibility="Disabled"
-                    VerticalScrollBarVisibility="Auto" PanningMode="VerticalOnly"
-                    Style="{StaticResource MeowFilm.OverlayScrollViewer}">
-       <ItemsPresenter/>
-      </ScrollViewer>
-     </ControlTemplate></ItemsControl.Template>
-     <ItemsControl.ItemsPanel><ItemsPanelTemplate><VirtualizingStackPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
-     <ItemsControl.ItemTemplate><DataTemplate>
-      <Button x:Name="Tile" Style="{StaticResource Film.EpisodeTile}" Margin="0,0,0,16"
-              local:CardMotion.Enabled="True" Tag="{Binding}" Click="Episode_Click" IsEnabled="{Binding CanSelect}"
-              AutomationProperties.Name="{Binding Label}">
-       <Button.RenderTransform><ScaleTransform
-        ScaleX="{Binding Path=(local:CardMotion.Progress),ElementName=Tile,Converter={StaticResource Film.Scale},ConverterParameter=0.01}"
-        ScaleY="{Binding Path=(local:CardMotion.Progress),ElementName=Tile,Converter={StaticResource Film.Scale},ConverterParameter=0.01}"/>
-       </Button.RenderTransform>
-       <Grid>
-        <Grid.ColumnDefinitions><ColumnDefinition Width="176"/><ColumnDefinition Width="20"/><ColumnDefinition/></Grid.ColumnDefinitions>
-        <!-- Soft row lift on hover or focus; it reaches past the row without changing its layout. -->
-        <Border x:Name="RowHover" Grid.ColumnSpan="3" Margin="-10" CornerRadius="14" IsHitTestVisible="False"
-                Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Tile}">
-         <Border.Style><Style TargetType="Border">
-          <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Hover}"/>
-          <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
-           <Setter Property="Visibility" Value="Collapsed"/>
-          </Trigger></Style.Triggers>
-         </Style></Border.Style>
-        </Border>
-        <Grid Height="99" local:CardClip.Radius="8" VerticalAlignment="Center">
-         <local:FilmPlaybackPoster Address="{Binding Image}" AutomationProperties.Name="{Binding Label}"
-                RenderTransformOrigin=".5,.5">
-          <local:FilmPlaybackPoster.RenderTransform><ScaleTransform
-           ScaleX="{Binding Path=(local:CardMotion.Progress),ElementName=Tile,Converter={StaticResource Film.Scale},ConverterParameter=0.05}"
-           ScaleY="{Binding Path=(local:CardMotion.Progress),ElementName=Tile,Converter={StaticResource Film.Scale},ConverterParameter=0.05}"/>
-          </local:FilmPlaybackPoster.RenderTransform>
-         </local:FilmPlaybackPoster>
-         <local:FilmHoverShade Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Tile}"/>
-         <local:FilmPlayMark Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Tile}"/>
-         <Border Style="{StaticResource Film.CurrentBadge}" Margin="8">
-          <StackPanel Orientation="Horizontal">
-           <Path Style="{StaticResource Film.CurrentGlyph}"/>
-           <TextBlock Text="当前" Style="{StaticResource Film.CurrentBadgeText}"/>
-          </StackPanel>
-         </Border>
-        </Grid>
-        <StackPanel Grid.Column="2" VerticalAlignment="Center">
-         <TextBlock Text="{Binding Label}" FontSize="15" TextWrapping="Wrap"
-                    Style="{StaticResource Film.EpisodeLabel}"/>
-         <TextBlock Text="{Binding Duration}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Margin="0,5,0,0" Style="{StaticResource Capability.Muted}"/>
-         <TextBlock Text="{Binding Overview}" TextWrapping="Wrap" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21"
-                    MaxHeight="63" Margin="0,7,0,0" TextTrimming="CharacterEllipsis"
-                    Style="{StaticResource Capability.Muted}"/>
-        </StackPanel>
-       </Grid>
-      </Button>
-     </DataTemplate></ItemsControl.ItemTemplate>
-    </ItemsControl>
+    <Grid x:Name="DirectoryHost" IsEnabled="{Binding CanSelectDirectory}"/>
     <Grid Margin="0,28,0,14">
      <Grid.Style><Style TargetType="Grid">
       <Style.Triggers><DataTrigger Binding="{Binding Recommendations.Count}" Value="0">

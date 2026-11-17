@@ -18,6 +18,7 @@ public static class FilmPlaybackKernelTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Test("prepare stays silent and commit preserves paused intent", SilentPreparePausedCommit);
+        yield return Test("pause and buffering presentation follows confirmed native snapshots without a pause request", ConfirmedNativeState);
         yield return Test("native playing without a rendered picture cannot publish output", MissingFirstPicture);
         yield return Test("only commit acquires output and holds its permit through publication", OutputAdmission);
         yield return Test("output admission can asynchronously stop prepared film without gate inversion", AdmissionStopsFilm);
@@ -395,7 +396,7 @@ public static class FilmPlaybackKernelTests
         var intent = Intent("paused", 12.5, paused: true);
         playback.Volume = 37;
         await rig.Prepare(owner, intent).WaitAsync(Limit);
-        Check(!playback.HasOutput && playback.Scope is null && !playback.PauseRequested,
+        Check(!playback.HasOutput && playback.Scope is null && !playback.IsPaused,
             "silent preparation publishes neither output nor the candidate's pause state");
         Check(rig.Kernel.Calls.Select(call => call.Name).SequenceEqual(["create", "prepare", "read"]) &&
             rig.Kernel.Values(owner, "prepare").SequenceEqual([12.5]) && owner.Lease.DisposeCalls == 0,
@@ -405,7 +406,7 @@ public static class FilmPlaybackKernelTests
         Check(await playback.TryCommitAsync(intent, () => true, () => committed++).WaitAsync(Limit),
             "the prepared candidate commits");
         Check(committed == 1 && playback.HasOutput && playback.Identity == intent.Identity &&
-            playback.Scope is { OwnerId: "film" } && playback.PauseRequested &&
+            playback.Scope is { OwnerId: "film" } && playback.IsPaused &&
             playback.PositionSeconds == 12.5 && playback.DurationSeconds == 600,
             "commit publishes the exact paused intent and prepared position");
         Check(rig.Kernel.Values(owner, "start").SequenceEqual([1d]) &&
@@ -416,7 +417,24 @@ public static class FilmPlaybackKernelTests
         Check(Array.IndexOf(calls, "attach") < Array.IndexOf(calls, "start"),
             "the picture target is attached before native start");
         await playback.RefreshAsync().WaitAsync(Limit);
-        Check(owner.Snapshot.State == 3 && playback.PauseRequested, "polling retains paused output");
+        Check(owner.Snapshot.State == 3 && playback.IsPaused, "polling retains paused output");
+    }
+
+    private static async Task ConfirmedNativeState()
+    {
+        var owner = new Owner("confirmed-state");
+        await using var rig = new Rig(owner);
+        var intent = Intent("confirmed-state");
+        await rig.Prepare(owner, intent);
+        await rig.Commit(intent);
+        owner.Update(state: 3);
+        await rig.Playback.RefreshAsync();
+        Check(rig.Playback.HasOutput && rig.Playback.IsPaused && !rig.Playback.IsBuffering &&
+            rig.Kernel.Values(owner, "pause").Length == 0, "native pause is published even without a requested pause");
+        owner.Update(state: 4);
+        await rig.Playback.RefreshAsync();
+        Check(rig.Playback.HasOutput && !rig.Playback.IsPaused && rig.Playback.IsBuffering,
+            "native buffering cannot be mislabelled as a remembered paused intent");
     }
 
     private static async Task MissingFirstPicture()
@@ -525,7 +543,7 @@ public static class FilmPlaybackKernelTests
         await releasing.Arrival();
         Check(!commit.IsCompleted && !duplicate.IsCompleted && commits == 1 &&
             rig.Playback.Identity == intent.Identity && rig.Playback.PositionSeconds == 137.75 &&
-            rig.Playback.PauseRequested && donor.Lease.DisposeCalls == 0,
+            rig.Playback.IsPaused && donor.Lease.DisposeCalls == 0,
             "publication preserves alignment and pause intent while donor release is still joining");
         releasing.Open();
         Check(await commit.WaitAsync(Limit), "the first queued commit publishes the candidate");
@@ -559,7 +577,7 @@ public static class FilmPlaybackKernelTests
         Released(rig, candidate);
         Check(commits == 0 && rig.Kernel.Values(candidate, "attach").Length == 0 &&
             rig.Kernel.Values(candidate, "start").Length == 0, "a late seek cannot attach or start cancelled output");
-        Check(rig.Playback.Scope == originalScope && rig.Playback.HasOutput && !rig.Playback.PauseRequested &&
+        Check(rig.Playback.Scope == originalScope && rig.Playback.HasOutput && !rig.Playback.IsPaused &&
             donor.Snapshot.State == 2 && rig.Kernel.Values(donor, "pause").SequenceEqual([1d, 0d]) &&
             donor.Lease.DisposeCalls == 0, "failed handoff restores the still-owned donor's playing intent");
     }
@@ -585,7 +603,7 @@ public static class FilmPlaybackKernelTests
         donor.Update(position: 137.75);
         await rig.Commit(intent);
         bool expected = sameEpisode ? pause : intent.Paused;
-        Check(rig.Playback.PauseRequested == expected && rig.Playback.Identity == intent.Identity &&
+        Check(rig.Playback.IsPaused == expected && rig.Playback.Identity == intent.Identity &&
             candidate.Snapshot.State == (expected ? 3 : 2) &&
             rig.Kernel.Values(candidate, "start").SequenceEqual([expected ? 1d : 0d]) &&
             rig.Playback.PositionSeconds == (sameEpisode ? 137.75 : 4) &&

@@ -22,9 +22,9 @@ final class PanAccountsUIKitTests: XCTestCase {
         page.loadViewIfNeeded()
         defer { PageViewController.invalidatePages(in: page); model.close() }
         XCTAssertNil(page.table.backgroundView)
-        XCTAssertEqual(model.rows.count, 7)
+        XCTAssertEqual(model.rows.map(\.id), [.baidu, .quark, .uc, .tianyi, .yidong])
         XCTAssertEqual(model.rows[0].account?.status, .unverified)
-        for index in 1...7 {
+        for index in 1...5 {
             let cell = page.tableView(page.table, cellForRowAt: IndexPath(row: index, section: 0))
             XCTAssertFalse(descendants(cell).contains { $0 is UIActivityIndicatorView })
         }
@@ -47,7 +47,7 @@ final class PanAccountsUIKitTests: XCTestCase {
         defer { PageViewController.invalidatePages(in: page); model.close() }
         XCTAssertTrue(page.table is SettingsTableView)
         XCTAssertEqual(page.table.separatorStyle, .none)
-        XCTAssertEqual(page.tableView(page.table, numberOfRowsInSection: 0), 8)
+        XCTAssertEqual(page.tableView(page.table, numberOfRowsInSection: 0), 6)
         let header = page.tableView(page.table, cellForRowAt: IndexPath(row: 0, section: 0))
         XCTAssertEqual(descendants(header).compactMap { ($0 as? UILabel)?.text }, ["平台", "状态", "操作"])
         XCTAssertTrue(descendants(header).compactMap { $0 as? UILabel }.allSatisfy(\.adjustsFontForContentSizeCategory))
@@ -349,7 +349,6 @@ private func panUIProvider(_ id: PanProviderID) -> RuntimeValue {
     case .baidu, .quark, .uc: fields = ["cookie"]
     case .tianyi: fields = ["cookie", "username", "password"]
     case .yidong: fields = ["authorization", "refreshedAt"]
-    case .quarkTV, .ucTV: fields = ["refreshToken", "deviceId", "accessToken", "expiresAt"]
     }
     return .object(["provider": .string(id.rawValue), "credentialFields": .array(fields.map(RuntimeValue.string)),
                     "login": .bool([PanProviderID.baidu, .quark, .uc].contains(id)), "refresh": .bool(true)])
@@ -358,7 +357,6 @@ private func panUICredentials(_ id: PanProviderID) -> RuntimeValue {
     switch id {
     case .baidu, .quark, .uc, .tianyi: return .object(["cookie": .string("synthetic-ui-cookie")])
     case .yidong: return .object(["authorization": .string("synthetic-ui-authorization")])
-    case .quarkTV, .ucTV: return .object(["refreshToken": .string("synthetic-ui-refresh"), "deviceId": .string("synthetic-ui-device")])
     }
 }
 private func panUIAccount(_ id: PanProviderID, _ status: PanAccountStatus = .signedOut, revision: Int = 0,

@@ -28,8 +28,8 @@ async function connect(t, handler, options = {}) {
 const response = (input, value) => ({
   url: input.url, status: 200, headers: {}, body: Buffer.from(JSON.stringify(value)),
 });
-const credentials = { refreshToken: 'synthetic-private-refresh', deviceId: 'synthetic-device' };
-async function account(client, provider = 'quark_tv') {
+const credentials = { cookie: 'session=synthetic-private-cookie' };
+async function account(client, provider = 'quark') {
   const result = await client.call('pan.settings.get');
   assert.equal(result.ok, true);
   return result.value.accounts.find(item => item.provider === provider);
@@ -38,22 +38,21 @@ async function account(client, provider = 'quark_tv') {
 test('HTTP account settings expose three states, distinguish authentication from network failure and never read back secrets', async t => {
   let outcome = 'success';
   const { client, dataRoot } = await connect(t, async input => {
-    assert.equal(input.url, 'http://api.extscreen.com/quarkdrive/token');
+    assert.equal(input.url, 'https://pan.quark.cn/account/info?fr=pc&platform=pc');
     if (outcome === 'network') throw new PanError('NETWORK_ERROR');
-    return response(input, outcome === 'auth'
-      ? { code: 200, data: { status: -1, errno: 11000 } }
-      : { code: 200, data: { access_token: 'synthetic-private-access',
-        refresh_token: 'synthetic-private-rotated', expires_in: 3600 } });
+    return { ...response(input, { code: 'OK', success: true,
+      data: outcome === 'auth' ? {} : { nickname: 'synthetic' } }),
+      headers: outcome === 'auth' ? {} : { 'set-cookie': ['session=synthetic-private-rotated; Path=/'] } };
   });
   const providers = (await client.call('pan.providers')).value.providers;
-  assert.equal(providers.length, 7);
+  assert.equal(providers.length, 5);
   assert.ok(providers.every(item => item.refresh));
   assert.equal((await account(client)).status, 'signedOut');
-  const saved = await client.call('pan.settings.set', { provider: 'quark_tv', credentials });
+  const saved = await client.call('pan.settings.set', { provider: 'quark', credentials });
   assert.equal(saved.ok, true);
   assert.equal(saved.value.status, 'signedIn');
   assert.equal(saved.value.revision, 1);
-  const refreshed = await client.call('pan.refresh', { provider: 'quark_tv' });
+  const refreshed = await client.call('pan.refresh', { provider: 'quark' });
   assert.equal(refreshed.ok, true);
   assert.equal(refreshed.value.account.status, 'signedIn');
   assert.equal(refreshed.value.account.revision, 1);
@@ -61,53 +60,54 @@ test('HTTP account settings expose three states, distinguish authentication from
     assert.ok(!JSON.stringify(value).includes('synthetic-private-'));
   }
   const stored = JSON.parse(readFileSync(join(dataRoot, 'pan/accounts.json'), 'utf8'));
-  assert.equal(stored.accounts.quark_tv.credentials.refreshToken, 'synthetic-private-rotated');
+  assert.equal(stored.accounts.quark.credentials.cookie, 'session=synthetic-private-rotated');
   outcome = 'auth';
-  assert.deepEqual(await client.call('pan.refresh', { provider: 'quark_tv' }),
-    { ok: false, contract: 'pan.runtime.v1', code: 'AUTH_FAILED' });
+  assert.deepEqual(await client.call('pan.refresh', { provider: 'quark' }),
+    { ok: false, contract: 'pan.runtime.v1', code: 'AUTH_REQUIRED' });
   assert.equal((await account(client)).status, 'expired');
   assert.equal((await account(client)).configured, true);
   outcome = 'network';
-  assert.deepEqual(await client.call('pan.refresh', { provider: 'quark_tv' }),
+  assert.deepEqual(await client.call('pan.refresh', { provider: 'quark' }),
     { ok: false, contract: 'pan.runtime.v1', code: 'NETWORK_ERROR' });
   assert.equal((await account(client)).status, 'expired');
   outcome = 'success';
-  assert.equal((await client.call('pan.refresh', { provider: 'quark_tv' })).value.account.status, 'signedIn');
+  assert.equal((await client.call('pan.refresh', { provider: 'quark' })).value.account.status, 'signedIn');
   outcome = 'network';
-  assert.equal((await client.call('pan.refresh', { provider: 'quark_tv' })).code, 'NETWORK_ERROR');
+  assert.equal((await client.call('pan.refresh', { provider: 'quark' })).code, 'NETWORK_ERROR');
   assert.equal((await account(client)).status, 'signedIn');
-  const cleared = await client.call('pan.settings.clear', { provider: 'quark_tv' });
+  const cleared = await client.call('pan.settings.clear', { provider: 'quark' });
   assert.equal(cleared.ok, true);
   assert.deepEqual(cleared.value, {
-    provider: 'quark_tv', revision: 2, configured: false, fields: [], status: 'signedOut',
+    provider: 'quark', revision: 2, configured: false, fields: [], status: 'signedOut',
   });
   assert.deepEqual(JSON.parse(readFileSync(join(dataRoot, 'pan/accounts.json'), 'utf8'))
-    .accounts.quark_tv.credentials, {});
+    .accounts.quark.credentials, {});
 });
 
 test('HTTP pan operations ignore extra fields and never grant them credential or transport authority', async t => {
   const requests = [];
   const { client, dataRoot } = await connect(t, async input => {
     requests.push(input);
-    assert.equal(input.url, 'http://api.extscreen.com/quarkdrive/token');
-    assert.equal(input.method, 'POST');
-    assert.equal(JSON.parse(input.body).refresh_token, credentials.refreshToken);
-    return response(input, { code: 200, data: { access_token: 'synthetic-access', expires_in: 3600 } });
+    assert.equal(input.url, 'https://pan.quark.cn/account/info?fr=pc&platform=pc');
+    assert.equal(input.method, 'GET');
+    assert.equal(input.body, undefined);
+    assert.equal(input.headers.Cookie, credentials.cookie);
+    return response(input, { code: 'OK', success: true, data: { nickname: 'synthetic' } });
   }, { now: () => 1800000000000 });
   const providers = await client.call('pan.providers');
-  const saved = await client.call('pan.settings.set', { provider: 'quark_tv',
-    credentials: { ...credentials, cookie: { unused: true }, method: 'DELETE', headers: ['unused'],
+  const saved = await client.call('pan.settings.set', { provider: 'quark',
+    credentials: { ...credentials, password: { unused: true }, method: 'DELETE', headers: ['unused'],
       url: 'https://untrusted.invalid' },
     accountRevision: 999, method: 'DELETE', url: 'https://untrusted.invalid', headers: { Cookie: 'untrusted' } });
   assert.equal(saved.ok, true);
-  assert.deepEqual(saved.value.fields, ['refreshToken', 'deviceId']);
-  assert.deepEqual(JSON.parse(readFileSync(join(dataRoot, 'pan/accounts.json'))).accounts.quark_tv.credentials, credentials);
-  for (const extra of [null, 'unused', [], { nested: { accessToken: 'untrusted' } }]) {
+  assert.deepEqual(saved.value.fields, ['cookie']);
+  assert.deepEqual(JSON.parse(readFileSync(join(dataRoot, 'pan/accounts.json'))).accounts.quark.credentials, credentials);
+  for (const extra of [null, 'unused', [], { nested: { cookie: 'untrusted' } }]) {
     const ignored = { method: extra, headers: extra, url: extra, body: extra, credentials: extra, extra };
     assert.deepEqual(await client.call('pan.providers', ignored), providers);
-    assert.deepEqual((await client.call('pan.settings.get', ignored)).value.accounts.find(item => item.provider === 'quark_tv'),
+    assert.deepEqual((await client.call('pan.settings.get', ignored)).value.accounts.find(item => item.provider === 'quark'),
       await account(client));
-    const refreshed = await client.call('pan.refresh', { ...ignored, provider: 'quark_tv' });
+    const refreshed = await client.call('pan.refresh', { ...ignored, provider: 'quark' });
     assert.equal(refreshed.ok, true);
     assert.equal(refreshed.value.account.revision, saved.value.revision);
     const { signal, ...actual } = requests.at(-1);
@@ -117,8 +117,8 @@ test('HTTP pan operations ignore extra fields and never grant them credential or
       assert.deepEqual(actual, initial);
     }
   }
-  const cleared = await client.call('pan.settings.clear', { provider: 'quark_tv',
-    credentials: { refreshToken: 'must-not-be-saved' }, extra: { headers: 'unused' } });
+  const cleared = await client.call('pan.settings.clear', { provider: 'quark',
+    credentials: { cookie: 'must-not-be-saved' }, extra: { headers: 'unused' } });
   assert.equal(cleared.ok, true);
   assert.equal(cleared.value.revision, saved.value.revision + 1);
   assert.equal(cleared.value.configured, false);
@@ -132,21 +132,20 @@ test('HTTP logout revokes an in-flight refresh and late credentials cannot sign 
     signal = input.signal;
     entered.resolve();
     await release.promise;
-    return response(input, { code: 200, data: {
-      access_token: 'synthetic-late-access', refresh_token: 'synthetic-late-refresh', expires_in: 3600,
-    } });
+    return { ...response(input, { code: 'OK', success: true, data: { nickname: 'synthetic' } }),
+      headers: { 'set-cookie': ['session=synthetic-late; Path=/'] } };
   });
-  assert.equal((await client.call('pan.settings.set', { provider: 'quark_tv', credentials })).ok, true);
-  const pending = client.call('pan.refresh', { provider: 'quark_tv' });
+  assert.equal((await client.call('pan.settings.set', { provider: 'quark', credentials })).ok, true);
+  const pending = client.call('pan.refresh', { provider: 'quark' });
   await entered.promise;
-  const cleared = await client.call('pan.settings.clear', { provider: 'quark_tv' });
+  const cleared = await client.call('pan.settings.clear', { provider: 'quark' });
   assert.equal(cleared.value.status, 'signedOut');
   assert.equal(signal.aborted, true);
   release.resolve();
   assert.deepEqual(await pending, { ok: false, contract: 'pan.runtime.v1', code: 'STALE_ACCOUNT' });
   assert.deepEqual(await account(client), cleared.value);
   assert.deepEqual(JSON.parse(readFileSync(join(dataRoot, 'pan/accounts.json'), 'utf8'))
-    .accounts.quark_tv.credentials, {});
+    .accounts.quark.credentials, {});
 });
 
 test('HTTP QR confirmation publishes the persisted account and closing the confirmed challenge does not log out', async t => {

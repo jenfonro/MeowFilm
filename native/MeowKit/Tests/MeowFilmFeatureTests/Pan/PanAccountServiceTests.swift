@@ -4,16 +4,16 @@ import MeowStorage
 @testable import MeowFilmFeature
 
 final class PanAccountServiceTests: XCTestCase {
-    func testAllSevenProvidersExposeExactManualFieldsAndQRCapabilities() async throws {
+    func testAllFiveProvidersExposeExactManualFieldsAndQRCapabilities() async throws {
         let runtime = try PanTestRuntime()
         let providers = runtime.service.providers()
+        XCTAssertEqual(providers.map(\.id), [.baidu, .quark, .uc, .tianyi, .yidong])
         XCTAssertEqual(providers.map(\.id), PanProviderID.allCases)
         XCTAssertEqual(providers.filter(\.login).map(\.id), [.baidu, .quark, .uc])
         XCTAssertTrue(providers.allSatisfy(\.refresh))
+        for provider in providers.prefix(3) { XCTAssertEqual(provider.credentialFields, [.cookie]) }
         XCTAssertEqual(providers[3].credentialFields, [.cookie, .username, .password])
         XCTAssertEqual(providers[4].credentialFields, [.authorization, .refreshedAt])
-        XCTAssertEqual(providers[5].credentialFields, [.refreshToken, .deviceId, .accessToken, .expiresAt])
-        XCTAssertEqual(providers[6].credentialFields, providers[5].credentialFields)
     }
 
     func testStatusIsRequiredAndConfiguredNeverActsAsValidityProof() throws {
@@ -66,17 +66,20 @@ final class PanAccountServiceTests: XCTestCase {
         XCTAssertEqual(storage.changes.values, [])
     }
 
-    func testOptionalTimestampsAndTokensFollowProtocolAndPasswordSpacesArePreserved() throws {
-        for id in [PanProviderID.quarkTV, .ucTV] {
+    func testManualCredentialsFollowProtocolAndPasswordSpacesArePreserved() throws {
+        for id in [PanProviderID.baidu, .quark, .uc] {
             let provider = try PanProvider(panProviderValue(id))
-            let fields = try provider.credentials(from: ["refreshToken": "synthetic-refresh", "deviceId": "synthetic-device"])
-            XCTAssertEqual(fields, .object(["refreshToken": .string("synthetic-refresh"), "deviceId": .string("synthetic-device")]))
-            let full = try provider.credentials(from: ["expiresAt": "1700000000000", "accessToken": "synthetic-access"])
-            XCTAssertEqual(full.panField("expiresAt"), .number(1_700_000_000_000))
+            XCTAssertEqual(try provider.credentials(from: ["cookie": "synthetic-cookie"]),
+                           .object(["cookie": .string("synthetic-cookie")]))
+            XCTAssertThrowsError(try provider.credentials(from: ["cookie": "synthetic-cookie", "unknown": "synthetic"])) {
+                XCTAssertEqual($0 as? RuntimeHTTPError, .remote("INVALID_REQUEST"))
+            }
         }
         let mobile = try PanProvider(panProviderValue(.yidong))
         XCTAssertEqual(try mobile.credentials(from: ["authorization": "synthetic-authorization"]),
                        .object(["authorization": .string("synthetic-authorization")]))
+        XCTAssertEqual(try mobile.credentials(from: ["refreshedAt": "1700000000000"]).panField("refreshedAt"),
+                       .number(1_700_000_000_000))
         let cloud = try PanProvider(panProviderValue(.tianyi))
         XCTAssertEqual(try cloud.credentials(from: ["username": "synthetic-user", "password": "  synthetic pass  "]),
                        .object(["username": .string("synthetic-user"), "password": .string("  synthetic pass  ")]))
@@ -86,8 +89,8 @@ final class PanAccountServiceTests: XCTestCase {
             XCTAssertThrowsError(try mobile.credentials(from: ["refreshedAt": bad]))
         }
         XCTAssertEqual(try mobile.credentials(from: ["refreshedAt": "0"]).panField("refreshedAt"), .number(0))
-        for field in [PanCredentialField.cookie, .password, .authorization, .refreshToken, .accessToken] { XCTAssertTrue(field.isSecret) }
-        for field in [PanCredentialField.username, .deviceId, .refreshedAt, .expiresAt] { XCTAssertFalse(field.isSecret) }
+        for field in [PanCredentialField.cookie, .password, .authorization] { XCTAssertTrue(field.isSecret) }
+        for field in [PanCredentialField.username, .refreshedAt] { XCTAssertFalse(field.isSecret) }
     }
 
     func testLoginURLIsKeptIntactAndImageDataURIKeepsItsRealMediaType() throws {
@@ -153,7 +156,7 @@ final class PanAccountServiceTests: XCTestCase {
             connections.record("connection")
             throw RuntimeHTTPError.closed
         })
-        XCTAssertEqual(service.providers().count, 7)
+        XCTAssertEqual(service.providers().count, 5)
         XCTAssertTrue(try service.accounts().allSatisfy { $0.configured == false && $0.status == .signedOut })
         XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: storage.root.path).isEmpty)
         for provider in PanProviderID.allCases {
@@ -165,9 +168,9 @@ final class PanAccountServiceTests: XCTestCase {
         let reopened = PanAccountService(document: reopenedDocument, request: { _, _, _ in
             XCTFail("Reopening native settings cannot request runtime"); throw RuntimeHTTPError.closed
         })
-        XCTAssertEqual(try reopened.accounts().map(\.revision), Array(repeating: 1, count: 7))
+        XCTAssertEqual(try reopened.accounts().map(\.revision), Array(repeating: 1, count: 5))
         XCTAssertTrue(try reopened.accounts().allSatisfy { $0.status == .unverified })
-        XCTAssertEqual(storage.changes.values, Array(repeating: "pan.accounts", count: 7))
+        XCTAssertEqual(storage.changes.values, Array(repeating: "pan.accounts", count: 5))
         let cleared = try service.clear(.tianyi)
         XCTAssertEqual(cleared.revision, 2); XCTAssertEqual(cleared.configured, false)
         XCTAssertEqual(cleared.status, .signedOut)
@@ -193,12 +196,12 @@ final class PanAccountServiceTests: XCTestCase {
             (.baidu, .object(["cookie": .number(3)])),
             (.tianyi, .object(["username": .string("synthetic\nuser")])),
             (.tianyi, .object(["password": .string("synthetic\0password")])),
-            (.quarkTV, .object(["deviceId": .string("synthetic\rdevice")])),
-            (.ucTV, .object(["accessToken": .bool(true)])),
+            (.quark, .object(["cookie": .string("synthetic\rcookie")])),
+            (.uc, .object(["cookie": .bool(true)])),
             (.yidong, .object(["refreshedAt": .number(-1)])),
             (.yidong, .object(["refreshedAt": .number(0.5)])),
             (.yidong, .object(["refreshedAt": .number(.nan)])),
-            (.ucTV, .object(["expiresAt": .number(9_007_199_254_740_992)])),
+            (.yidong, .object(["refreshedAt": .number(9_007_199_254_740_992)])),
         ]
         for (provider, value) in invalid {
             XCTAssertThrowsError(try service.replace(provider, credentials: value)) {
@@ -213,8 +216,8 @@ final class PanAccountServiceTests: XCTestCase {
         XCTAssertEqual(try storage.credentials(.tianyi), credentials)
         let zero = try service.replace(.yidong, credentials: .object(["refreshedAt": .number(0), "authorization": .string("")]))
         XCTAssertEqual(zero.configured, false); XCTAssertEqual(zero.fields, []); XCTAssertEqual(zero.status, .signedOut)
-        _ = try service.replace(.ucTV, credentials: .object(["expiresAt": .number(9_007_199_254_740_991)]))
-        XCTAssertEqual(try storage.credentials(.ucTV)?.panField("expiresAt"), .number(9_007_199_254_740_991))
+        _ = try service.replace(.yidong, credentials: .object(["refreshedAt": .number(9_007_199_254_740_991)]))
+        XCTAssertEqual(try storage.credentials(.yidong)?.panField("refreshedAt"), .number(9_007_199_254_740_991))
     }
 
     func testDocumentRootAndSelectedCredentialFailuresRemainExplicit() throws {

@@ -1926,9 +1926,9 @@ test('E42/E43: source installation and file-account scope survive prepare and on
   const receipts = [];
   const scopes = [
     { sourceKey: 'A', sourceRevision: 7, sourceEngine: 'cat', sourceInstallationId: 'install-A',
-      accountProvider: 'quark_tv', accountRevision: 4, fileProvider: 'quark', fileAccountRevision: 2 },
+      accountProvider: 'quark', accountRevision: 2, fileProvider: 'quark', fileAccountRevision: 2 },
     { sourceKey: 'B', sourceRevision: 7, sourceEngine: 'cat', sourceInstallationId: 'install-B',
-      accountProvider: 'quark_tv', accountRevision: 4, fileProvider: 'quark', fileAccountRevision: 3 },
+      accountProvider: 'quark', accountRevision: 3, fileProvider: 'quark', fileAccountRevision: 3 },
     { sourceKey: 'C', sourceRevision: 7, sourceEngine: 'source', sourceInstallationId: 'install-A',
       accountProvider: 'uc', accountRevision: 2, fileProvider: 'uc', fileAccountRevision: 2 },
   ];
@@ -1945,7 +1945,7 @@ test('E42/E43: source installation and file-account scope survive prepare and on
   assert.deepEqual((await read(receipts[1].url)).body, bytes);
   assert.deepEqual((await read(receipts[2].url)).body, bytes);
   await media.invalidate(scope => scope.fileProvider === 'quark' && scope.fileAccountRevision === 2);
-  assert.deepEqual((await read(receipts[1].url)).body, bytes, 'a different ordinary file account must retain its TV media stream');
+  assert.deepEqual((await read(receipts[1].url)).body, bytes, 'a different file account must retain its media stream');
   await media.invalidate(scope => scope.fileProvider === 'quark' && scope.fileAccountRevision === 3);
   assert.equal((await read(receipts[1].url)).status, 404);
   assert.deepEqual((await read(receipts[2].url)).body, bytes);

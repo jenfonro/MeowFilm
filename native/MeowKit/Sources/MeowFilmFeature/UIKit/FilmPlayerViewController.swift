@@ -28,6 +28,8 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
     private let skipChapter = FilmPlayerButton(type: .system)
     private let rate = FilmPlayerMenuButton(type: .system), scale = FilmPlayerMenuButton(type: .system)
     private let pan = FilmPlayerMenuButton(type: .system), quality = FilmPlayerMenuButton(type: .system)
+    private let change = FilmPlayerButton(type: .system), block = FilmPlayerButton(type: .system)
+    private let retryMedia = FilmPlayerButton(type: .system)
     private let settingsPanel = UIScrollView()
     private var videoView: UIView?
     private var videoSession: UUID?
@@ -139,7 +141,8 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
     }
 
     private func configureTop() {
-        let close = control("返回", id: "close", symbol: "chevron.left") { [weak self] in self?.dismissPlayer() }
+        let close = FilmPlayerButton(type: .system)
+        configure(close, title: "返回", id: "close", symbol: "chevron.left") { [weak self] in self?.dismissPlayer() }
         titleLabel.font = .systemFont(ofSize: 17)
         titleLabel.textColor = .white; titleLabel.numberOfLines = 1
         titleLabel.accessibilityIdentifier = "film.player.title"
@@ -226,8 +229,8 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         quality.menu = UIMenu(title: "画质", children: FilmResourceQuality.allCases.map { quality in
             UIAction(title: quality.title, identifier: .init(quality.rawValue)) { [weak model] _ in model?.selectQuality(quality) }
         })
-        let change = control("换源", id: "switch") { [weak model] in model?.send("switch") }
-        let block = control("片源错误", id: "block") { [weak self] in self?.confirmBlock() }
+        configure(change, title: "换源", id: "switch", symbol: nil) { [weak model] in model?.send("switch") }
+        configure(block, title: "片源错误", id: "block", symbol: nil) { [weak self] in self?.confirmBlock() }
         configure(skipChapter, title: "跳过片头", id: "skip-chapter", symbol: nil) { [weak model] in model?.skipChapter() }
         skipChapter.isHidden = true
         configure(pip, title: "画中画", id: "pip", symbol: "pip") { [weak model] in
@@ -295,10 +298,10 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
             guard let model, let snapshot = model.snapshot else { return }
             model.setShortVideo(!snapshot.shortVideo)
         }
-        let retry = control("重试地址", id: "retry-media") { [weak model] in model?.retryMedia() }
+        configure(retryMedia, title: "重试地址", id: "retry-media", symbol: nil) { [weak model] in model?.retryMedia() }
         let content = UIStackView(arrangedSubviews: [
             settingRow("倍速", rate), settingRow("比例", scale), settingRow("音量", volume),
-            row([shortVideo, retry], equal: true),
+            row([shortVideo, retryMedia], equal: true),
         ])
         content.axis = .vertical; content.spacing = 4
         content.isLayoutMarginsRelativeArrangement = true
@@ -356,16 +359,15 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
             model.setVideoScale(scaleMode)
         }
         let state = model.mediaState, snapshot = model.snapshot
-        let kind = snapshot.map { value in
-            value.metadataSources.first { $0.id == value.metadataSourceID }?.kind ?? value.target.kind
-        }
+        let kind = snapshot.map { $0.workInfo?.kind ?? $0.target.kind }
         titleLabel.text = model.presentation?.target.title
         let candidate = model.executionStage == nil ? nil : snapshot?.current?.candidate ?? snapshot?.attempt?.candidate
         sourceLabel.text = candidate.map { [$0.source.name, $0.lineLabel, $0.name].filter { !$0.isEmpty }.joined(separator: " · ") }
-        let playing = state.attemptID != nil
-        play.isEnabled = playing || snapshot != nil
-        play.configuration?.image = UIImage(systemName: state.paused ? "play.fill" : "pause.fill")
-        play.accessibilityLabel = state.paused ? "播放" : "暂停"
+        let playing = model.canControlPlayback
+        play.isEnabled = playing || model.canStartPlayback
+        let paused = !playing || state.paused
+        play.configuration?.image = UIImage(systemName: paused ? "play.fill" : "pause.fill")
+        play.accessibilityLabel = paused ? "播放" : "暂停"
         if let preview = panInteraction?.previewPosition {
             seek.maximumValue = Float(state.duration)
             seek.value = Float(preview)
@@ -384,27 +386,32 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         updateRateMenu()
         selectMenu(rate, value: String(state.rate))
         scale.configuration?.title = scaleMode.title; selectMenu(scale, value: scaleMode.rawValue)
-        pip.isEnabled = state.pictureInPictureAvailable
+        pip.isEnabled = state.pictureInPicture || playing && state.pictureInPictureAvailable
         pip.isSelected = state.pictureInPicture
         pip.accessibilityLabel = state.pictureInPicture ? "退出画中画" : "画中画"
         previous.isEnabled = kind != .movie && playing
         nextButton.isEnabled = kind != .movie && playing
         shortVideo.isSelected = snapshot?.shortVideo == true
         shortVideo.configuration?.title = shortVideo.isSelected ? "短视频：开" : "短视频"
-        shortVideo.isEnabled = snapshot != nil && kind != .movie
+        shortVideo.isEnabled = model.executionStage != nil && kind != .movie && model.playbackStatus != .unavailable
         if let segment = model.skipSegment {
             skipChapter.configuration?.title = segment.kind == .intro ? "跳过片头" : "跳过片尾"
             skipChapter.accessibilityLabel = skipChapter.configuration?.title
             skipChapter.isHidden = false
         } else { skipChapter.isHidden = true }
+        let selected = model.executionStage != nil && candidate != nil
+        pan.isEnabled = selected; quality.isEnabled = selected
+        change.isEnabled = selected; block.isEnabled = selected
+        retryMedia.isEnabled = model.executionStage != nil &&
+            (snapshot?.attempt != nil || snapshot?.current != nil || model.playbackStatus == .failed)
         pan.configuration?.title = candidate?.provider.flatMap(FilmPanProvider.init(rawValue:))?.title ?? candidate?.lineLabel ?? "网盘"
         quality.configuration?.title = candidate?.quality.flatMap(FilmResourceQuality.init(rawValue:))?.title ?? candidate?.quality ?? "画质"
         pan.accessibilityValue = pan.configuration?.title; quality.accessibilityValue = quality.configuration?.title
         scale.accessibilityValue = scaleMode.title
         selectMenu(pan, value: candidate?.provider); selectMenu(quality, value: candidate?.quality)
-        let busy = state.buffering || ["loading", "searching", "resolving", "pending"].contains(model.executionStage ?? "")
+        let busy = model.playbackStatus.busy
         if busy { activity.startAnimating() } else { activity.stopAnimating() }
-        stateLabel.text = busy ? "准备中" : model.executionStage == "ended" ? "播放结束" : nil
+        stateLabel.text = model.playbackStatus == .playing ? nil : model.playbackStatus.title
         let reported = snapshot?.reportError.map { FilmPlaybackError(code: $0) }
         let metadata = snapshot?.metadataError.map { FilmPlaybackError(code: $0) }
         let session = snapshot?.error.map { FilmPlaybackError(code: $0) }
@@ -762,12 +769,6 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         for case let action as UIAction in button.menu?.children ?? [] {
             action.state = action.identifier.rawValue == value ? .on : .off
         }
-    }
-
-    private func control(_ title: String, id: String, symbol: String? = nil, action: @escaping () -> Void) -> UIButton {
-        let button = FilmPlayerButton(type: .system)
-        configure(button, title: title, id: id, symbol: symbol, action: action)
-        return button
     }
 
     private func configure(_ button: UIButton, title: String, id: String, symbol: String?, action: @escaping () -> Void) {

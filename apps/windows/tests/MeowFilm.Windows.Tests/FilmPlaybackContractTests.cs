@@ -19,8 +19,8 @@ public static class FilmPlaybackContractTests
             name = "同名文件", path = "/one/part.mp4", season = 1, episode = 1 } },
         originalEpisodes = new[]
         {
-            new { id = "opaque-one", candidateId = "one", name = "同名文件", path = "/one/part.mp4", season = 1, episode = 1 },
-            new { id = "opaque-two", candidateId = "two", name = "同名文件", path = "/two/part.mp4", season = 2, episode = 1 }
+            new { id = "opaque-one", businessId = "fixture:file:one", playbackTarget = Candidate("one").GetProperty("playbackTarget"), candidateId = "one", name = "同名文件", path = "/one/part.mp4", season = 1, episode = 1 },
+            new { id = "opaque-two", businessId = "fixture:file:two", playbackTarget = Candidate("two").GetProperty("playbackTarget"), candidateId = "two", name = "同名文件", path = "/two/part.mp4", season = 2, episode = 1 }
         }
     });
 
@@ -56,7 +56,8 @@ public static class FilmPlaybackContractTests
                     {
                         root["entryResolution"] = "matched";
                         root["metadata"] = Node(FilmJson.Encode(new { title = "豆瓣内容", doubanSeasons = new[]
-                        { new { season = 1, name = "可信第一季", episodes = Array.Empty<object>() } } }));
+                        { new { businessId = target.Id + ":season:1", playbackTarget = (target with { Season = 1 }).Wire(),
+                            season = 1, name = "可信第一季", episodes = Array.Empty<object>() } } }));
                         root["metadataSupplement"] = Node(FilmJson.Encode(new { provider = "tmdb", metadataId = "100",
                             kind = "tv", metadata = Metadata(target, "supplement-poster") }));
                     }
@@ -64,13 +65,13 @@ public static class FilmPlaybackContractTests
                 await Until(() => rig.Page.ActiveTarget.Kind == "source");
                 Check(rig.Page.ActiveTarget.Id == target.Id && rig.Page.ActiveTarget.MetadataProvider is null &&
                     rig.Page.SelectedSource is { Id: "exact-site" } && rig.Page.HasImageEpisodes &&
-                    rig.Page.SelectedSeason?.Season == 1 && rig.Page.Metadata.Contains(rig.Page.SeasonLabel, StringComparison.Ordinal) &&
+                    rig.Page.SelectedSeason?.Season == 1 && rig.Page.Metadata.Contains("共 1 季", StringComparison.Ordinal) &&
                     rig.Page.Recommendations.Count > 0 && rig.Page.Poster.Length > 0,
                     "metadata source identity owns presentation while the exact source target owns playback");
+                int beforeSeason = rig.Runtime.Calls.Count;
                 await rig.Page.BrowseSeasonAsync(rig.Page.Seasons[0]);
-                var browse = rig.Runtime.Calls.Last(call => FilmJson.Text(call.Parameters, "action") == "browse.season").Parameters;
-                Check(FilmJson.Integer(browse, "season") == 1 && rig.Page.ActiveTarget.Kind == "source",
-                    "the existing season command remains available without converting a file selection into metadata play");
+                Check(rig.Runtime.Calls.Count == beforeSeason && rig.Page.ActiveTarget.Kind == "source",
+                    "selecting the already loaded season is local and leaves the exact playback target intact");
                 var captured = rig.Page.CaptureRequest;
                 Check(JsonElement.DeepEquals(FilmJson.Encode(captured.Target.Wire()), FilmJson.Encode(target.Wire())) &&
                     captured.ResumeTarget is { } resume && JsonElement.DeepEquals(FilmJson.Encode(resume.Wire()), FilmJson.Encode(exact.Wire())) &&
@@ -110,7 +111,7 @@ public static class FilmPlaybackContractTests
                 }
             }
         });
-        yield return Test("raw episode with only Node global number displays centrally and selects by candidate identity alone", async () =>
+        yield return Test("raw episode with only Node global number displays centrally and selects the complete exact playback target", async () =>
         {
             await using var rig = new FilmPlaybackRig();
             await rig.OpenAsync();
@@ -131,12 +132,12 @@ public static class FilmPlaybackContractTests
                 "the Node global number is display-only, remains centered without a real metadata title, and does not replace the source filename or local coordinate");
             await rig.Page.SelectEpisodeAsync(episode);
             var sent = rig.Runtime.Calls.Last(call => call.Method == "film.session.command" &&
-                FilmJson.Text(call.Parameters, "action") == "select.candidate").Parameters;
-            Check(FilmJson.Text(sent, "action") == "select.candidate" &&
-                FilmJson.Text(sent, "candidateId") == "opaque-global-episode" &&
+                FilmJson.Text(call.Parameters, "action") == "select.target").Parameters;
+            Check(FilmJson.Text(sent, "action") == "select.target" &&
+                FilmJson.Text(sent.GetProperty("target").GetProperty("source"), "candidateId") == "opaque-global-episode" &&
                 !sent.TryGetProperty("season", out _) && !sent.TryGetProperty("episode", out _) &&
                 !sent.TryGetProperty("globalEpisode", out _),
-                "selecting a global-only source episode sends its opaque candidate identity without inventing local coordinates");
+                "selecting a global-only source episode sends its complete target and opaque candidate identity without inventing local coordinates");
         });
         yield return Test("site and unknown pan labels keep separate identities and typed line selectors", async () =>
         {
@@ -154,14 +155,14 @@ public static class FilmPlaybackContractTests
                     sourceId = "exact-site-result", lineId = 0, loading = false,
                     lines = new object[]
                     {
-                        new { id = (object)0, label = "原线路", provider = "quark_tv" },
+                        new { id = (object)0, label = "原线路", provider = "quark" },
                         new { id = (object)"0", label = "未知网盘原标签", provider = "custom-provider" }
                     }, episodes = Array.Empty<object>()
                 }));
             });
             await Until(() => rig.Page.Lines.Count == 2);
             Check(rig.Page.SelectedSource?.Label == "真实站点" &&
-                rig.Page.SelectedLine is { Label: "夸克", Provider: "quark_tv" } &&
+                rig.Page.SelectedLine is { Label: "夸克", Provider: "quark" } &&
                 rig.Page.Lines[1] is { Label: "未知网盘原标签", Provider: "custom-provider" } &&
                 rig.Page.PlayerPanOptions.All(option => option.Value != "custom-provider"),
                 "station names never become pan labels and an unknown line retains its own provider and label");
@@ -353,17 +354,20 @@ public static class FilmPlaybackContractTests
             var sent = rig.Runtime.Calls.Last(call => FilmJson.Text(call.Parameters, "action") == "browse").Parameters;
             Check(sent.GetProperty("lineId").ValueKind == JsonValueKind.String && sent.GetProperty("lineId").GetString() == "0",
                 "manual line selection forwards its actual original type");
-            rig.Runtime.Change(root =>
+            await using var specialRig = new FilmPlaybackRig();
+            await specialRig.OpenAsync();
+            specialRig.Runtime.Change(root =>
             {
-                var special = rig.Runtime.Target with { Season = 0, Episode = 0, GlobalEpisode = null };
-                root["browsing"] = Node(FilmJson.Encode(new { sourceId = (string?)null, lines = Array.Empty<object>(), episodes = Array.Empty<object>() }));
+                var special = specialRig.Runtime.Target with { Season = 0, Episode = 0, GlobalEpisode = null };
+                root["browsing"] = Node(FilmJson.Encode(new { sourceId = (string?)null, season = 0, loading = false,
+                    lines = Array.Empty<object>(), episodes = Array.Empty<object>() }));
                 root["target"] = Node(FilmJson.Encode(special.Wire()));
                 root["episodes"] = Node(FilmJson.Encode(new[] { new { businessId = special.Id + ":season:0:episode:0",
                     playbackTarget = special.Wire(), season = 0, episode = 0, name = "真实特别集" } }));
             });
-            await Until(() => rig.Page.Episodes.Count == 1 && rig.Page.Episodes[0].Season == 0);
-            await rig.Page.SelectEpisodeAsync(rig.Page.Episodes[0]);
-            sent = rig.Runtime.Calls.Last(call => FilmJson.Text(call.Parameters, "action") == "select.episode").Parameters.GetProperty("episode");
+            await Until(() => specialRig.Page.Episodes.Count == 1 && specialRig.Page.Episodes[0].Season == 0);
+            await specialRig.Page.SelectEpisodeAsync(specialRig.Page.Episodes[0]);
+            sent = specialRig.Runtime.Calls.Last(call => FilmJson.Text(call.Parameters, "action") == "select.target").Parameters.GetProperty("target");
             Check(sent.GetProperty("season").GetInt32() == 0 && sent.GetProperty("episode").GetInt32() == 0 &&
                 !sent.TryGetProperty("globalEpisode", out _), "a real special coordinate is preserved without a fabricated global mapping");
         });
@@ -386,6 +390,7 @@ public static class FilmPlaybackContractTests
                     ]
                     """);
                 root["metadata"]!["overview"] = "同快照的有效主资料";
+                root["workInfo"]!["summary"] = "同快照的有效主资料";
                 root["sources"] = Node(FilmJson.Encode(new[]
                 { new { id = "site-choice", source = new { key = "cat:fixture:site:1", name = "准确站点", generation = 1 } } }));
                 root["browsing"] = Node(SourceBrowsing());
@@ -465,7 +470,7 @@ public static class FilmPlaybackContractTests
                 return Task.CompletedTask;
             });
         });
-        yield return Test("only proven metadata associations appear and switching uses current provider plus explicit keepSource", async () =>
+        yield return Test("only proven metadata associations appear and switching uses exact source and metadata identities", async () =>
         {
             await using var rig = new FilmPlaybackRig();
             await rig.OpenAsync();
@@ -486,16 +491,14 @@ public static class FilmPlaybackContractTests
             Check(rig.Page.HasMetadataMappings && rig.Runtime.Calls.Count == before, "rendering the proven menu performs no business fetch");
             await rig.Page.BrowseMetadataMappingAsync(association);
             var command = rig.Runtime.Calls.Last().Parameters;
-            Check(FilmJson.Text(command, "action") == "browse.metadata" && FilmJson.Bool(command, "keepSource") &&
+            Check(FilmJson.Text(command, "action") == "browse" && FilmJson.Text(command, "sourceId") == "site-choice" &&
                 FilmJson.Text(command, "metadataSourceId") == "douban:200", "only mapping selection keeps the actual station");
             await rig.Page.BrowseSourceAsync(rig.Page.Sources.Single(row => row.MetadataSourceId == "douban:200"));
             command = rig.Runtime.Calls.Last().Parameters;
-            Check(FilmJson.Text(command, "action") == "browse.metadata" && !FilmJson.Bool(command, "keepSource"),
+            Check(FilmJson.Text(command, "action") == "browse" && FilmJson.Text(command, "sourceId").Length == 0,
                 "normal metadata selection returns to pure information");
-            var douban = rig.Runtime.Target with { Id = "douban:tv:200", MetadataProvider = "douban", MetadataId = "200" };
             rig.Runtime.Change(root =>
             {
-                root["target"] = Node(FilmJson.Encode(douban.Wire()));
                 root["metadata"] = Node(FilmJson.Encode(new { title = "当前豆瓣资料", rating = new { value = 8.3 } }));
                 root["metadataSources"] = Node(FilmJson.Encode(new[]
                 {
@@ -503,12 +506,13 @@ public static class FilmPlaybackContractTests
                     new { id = "douban:200", provider = "douban", metadataId = "200", kind = "tv", title = "关联样例" }
                 }));
                 root["metadataSourceId"] = "douban:200";
-                root["browsing"] = Node(FilmJson.Encode(new { sourceId = (string?)null, lines = Array.Empty<object>(), episodes = Array.Empty<object>() }));
+                root["browsing"] = Node(FilmJson.Encode(new { sourceId = (string?)null, season = 1, lines = Array.Empty<object>(), episodes = Array.Empty<object>() }));
                 root["episodes"] = new JsonArray();
             });
-            await Until(() => rig.Page.ScoreProvider == "豆瓣");
-            Check(rig.Page.ActiveTarget.MetadataProvider == "douban" && !rig.Page.HasImageEpisodes && rig.Page.Poster == "" &&
-                rig.Page.Score == "8.3" && rig.Page.Recommendations.Count == 0, "old TMDB provider artwork and similar items do not leak into the new identity");
+            await Until(() => rig.Page.Score == "8.3");
+            Check(rig.Page.ActiveTarget == rig.Runtime.Target && !rig.Page.HasImageEpisodes && rig.Page.Poster == "" &&
+                rig.Page.Score == "8.3" && rig.Page.Recommendations.Count == 0,
+                $"old TMDB provider artwork and similar items do not leak into the new identity; provider={rig.Page.ActiveTarget.MetadataProvider}, episodes={rig.Page.Episodes.Count}, poster={rig.Page.Poster}, score={rig.Page.Score}, recommendations={rig.Page.Recommendations.Count}");
         });
         yield return Test("season-filtered third row and original directory use different real lists with exact candidate playback", async () =>
         {
@@ -532,7 +536,7 @@ public static class FilmPlaybackContractTests
             Check(rig.Runtime.Calls.Count == before, "directory traversal never lists transfers or plays a file");
             await rig.Page.SelectOriginalCandidateAsync("two");
             var command = rig.Runtime.Calls.Last().Parameters;
-            Check(FilmJson.Text(command, "action") == "select.candidate" && FilmJson.Text(command, "candidateId") == "two",
+            Check(FilmJson.Text(command, "action") == "select.target" && FilmJson.Text(command.GetProperty("target").GetProperty("source"), "candidateId") == "two",
                 "explicit directory playback can select an exact original file outside the third row's season");
             await Error("INVALID_REQUEST", () => rig.Page.SelectOriginalCandidateAsync("opaque-two"));
         });
@@ -553,11 +557,12 @@ public static class FilmPlaybackContractTests
                 "a snapshot with no current clears the derived marker while retaining navigation");
             return Task.CompletedTask;
         });
-        yield return Test("movie selection follows confirmed candidate identity rather than pending attempt display label or quality rank", () =>
+        yield return Test("movie selection follows confirmed candidate identity rather than pending attempt display label or quality rank", async () =>
         {
             var card = Card("movie");
-            var request = card.PlaybackContext!;
-            var page = new FilmPlaybackPage(card, request, null, null);
+            await using var rig = new FilmPlaybackRig();
+            await rig.OpenAsync(card);
+            var page = rig.Page;
             JsonElement Movie(string id, string quality = "1080p")
             {
                 var row = JsonNode.Parse(Candidate(id, episode: null, quality: quality).GetRawText())!;
@@ -567,13 +572,17 @@ public static class FilmPlaybackContractTests
             var a = Movie("a"); var b = Movie("b");
             // Movie order is the Node snapshot's quality order, not a native sorting policy.
             var candidates = FilmJson.Encode(new[] { Movie("hdr", "4k_hdr"), a, b, Movie("unknown", "") });
-            var sessionId = Guid.NewGuid(); long sequence = 0;
-            void Apply(string? current, bool pending)
+            async Task Apply(string? current, bool pending)
             {
-                page.Apply(new FilmPlaybackSnapshot(Snapshot(sessionId, ++sequence, request.Target, request.Metadata!.Value,
-                    attempt: pending ? FilmJson.Encode(new { id = "pending-b", candidate = b }) : null,
-                    current: current is null ? null : FilmJson.Encode(new
-                    { attemptId = "output-" + current, candidate = current == "a" ? a : b }), candidates: candidates)));
+                rig.Runtime.Change(root =>
+                {
+                    root["attempt"] = pending ? Node(FilmJson.Encode(new { id = "pending-b", candidate = b, prepareOnly = true })) : null;
+                    root["current"] = current is null ? null : Node(FilmJson.Encode(new
+                        { attemptId = "output-" + current, candidate = current == "a" ? a : b }));
+                    root["candidates"] = Node(candidates);
+                });
+                long sequence = rig.Runtime.Value.GetProperty("sequence").GetInt64();
+                await Until(() => rig.Session.SnapshotFor(page)?.Sequence == sequence);
                 Check(page.Candidates.Select(row => row.Id).SequenceEqual(new[] { "hdr", "a", "b", "unknown" }) &&
                     page.Candidates[1].DisplayLabel == "1080P · 契约来源" && page.Candidates[2].DisplayLabel == "1080P · 契约来源 (2)",
                     "current transitions retain quality ordering stable same-label numbering and all distinct IDs");
@@ -581,13 +590,12 @@ public static class FilmPlaybackContractTests
                     page.Candidates.Single(row => row.IsSelected).Id == current,
                     "selection comes only from the confirmed current candidate and never from a pending attempt");
             }
-            Apply(null, pending: true);
-            Apply("a", pending: false);
-            Apply("a", pending: true);
-            Apply("a", pending: false);
-            Apply("b", pending: false);
-            Apply(null, pending: false);
-            return Task.CompletedTask;
+            await Apply(null, pending: true);
+            await Apply("a", pending: false);
+            await Apply("a", pending: true);
+            await Apply("a", pending: false);
+            await Apply("b", pending: false);
+            await Apply(null, pending: false);
         });
         yield return Test("errors preserve successful list display and prepared addresses never claim buffered media", async () =>
         {
@@ -611,21 +619,18 @@ public static class FilmPlaybackContractTests
             });
             await Until(() => rig.Page.ListError.Length > 0);
             Check(ReferenceEquals(rig.Page.EpisodeDirectory, directory) && ReferenceEquals(rig.Page.Episodes, episodes) &&
-                ReferenceEquals(rig.Page.Candidates, candidates) && rig.Page.CanBrowseRaw &&
+                ReferenceEquals(rig.Page.Candidates, candidates) && !rig.Page.CanBrowseRaw &&
                 rig.Page.ShowListStatus && rig.Page.ListStatus == "请求超时，请重试" && rig.Page.StatusText == "上游数据格式错误" &&
                 rig.Page.Sources.Count > 0 && rig.Page.PrefetchStatus == "下一集媒体已缓存",
                 "third-row failure is explicit without destroying successful display or the actual buffered state");
             rig.Runtime.Change(root => { root["browsing"] = Node(SourceBrowsing()); root["stage"] = "unavailable"; root["error"] = null; });
             await Until(() => rig.Page.ListError.Length == 0);
-            Check(rig.Page.Episodes.Count == 1 && rig.Page.StatusText == "暂无可用片源", "a valid source recovers separately from playback unavailability");
+            Check(rig.Page.Episodes.Count == 1 && rig.Page.StatusText == "无可用视频源", "a valid source recovers separately from playback unavailability");
         });
         yield return Test("known failures keep their safe classification in list playback and connection presentation", async () =>
         {
             await using var rig = new FilmPlaybackRig();
             await rig.OpenAsync();
-            var directory = rig.Page.EpisodeDirectory;
-            var episodes = rig.Page.Episodes;
-            var candidates = rig.Page.Candidates;
             (string Code, string Message)[] failures =
             [
                 ("TIMEOUT", "请求超时，请重试"),
@@ -660,9 +665,9 @@ public static class FilmPlaybackContractTests
                 await Until(() => !rig.Page.ConnectionFailed && rig.Page.ListStatus == failure.Message &&
                     rig.Page.StatusText == failure.Message);
                 Check(rig.Page.ListError == failure.Message && rig.Page.ShowListStatus &&
-                    ReferenceEquals(rig.Page.EpisodeDirectory, directory) && ReferenceEquals(rig.Page.Episodes, episodes) &&
-                    ReferenceEquals(rig.Page.Candidates, candidates) && !rig.Page.CanBrowseRaw &&
-                    rig.Page.Sources.Count > 0, "each classified failure preserves successful display and permits source recovery: " + failure.Code);
+                    rig.Page.EpisodeDirectory is null && !rig.Page.ShowEpisodeCards && !rig.Page.ShowEpisodeList &&
+                    !rig.Page.ShowMovieCandidates && !rig.Page.CanBrowseRaw &&
+                    rig.Page.Sources.Count > 0, "each classified failure hides unrelated successful display and permits source recovery: " + failure.Code);
                 rig.Page.SetConnectionError(failure.Code);
                 Check(rig.Page.ConnectionFailed && rig.Page.StatusText == failure.Message,
                     "the connection consumer preserves the same actual code: " + failure.Code);
@@ -693,7 +698,7 @@ public static class FilmPlaybackContractTests
                 root["reportError"] = "AUTH_FAILED";
                 root["prefetch"] = Node(FilmJson.Encode(new[] { new { state = "error", error = "TIMEOUT" } }));
             });
-            await Until(() => rig.Page.ListStatus == "暂无内容" && rig.Page.StatusText == "已准备");
+            await Until(() => rig.Page.ListStatus == "无可用视频源" && rig.Page.StatusText == "已准备");
             Check(rig.Page.ListError == "" && rig.Page.ShowListStatus && !rig.Page.ConnectionFailed &&
                 rig.Page.Episodes.Count == 0 && rig.Page.Candidates.Count == 0 &&
                 rig.Page.ReportFailed && rig.Page.PrefetchStatus == "相邻集准备失败",
@@ -706,8 +711,8 @@ public static class FilmPlaybackContractTests
             {
                 root["browsing"]!["loading"] = false; root["stage"] = "unavailable"; root["error"] = "NO_MATCH";
             });
-            await Until(() => !rig.Page.ListLoading && rig.Page.StatusText == "暂无可用片源");
-            Check(rig.Page.ListError == "" && rig.Page.ListStatus == "暂无内容",
+            await Until(() => !rig.Page.ListLoading && rig.Page.StatusText == "无可用视频源");
+            Check(rig.Page.ListError == "" && rig.Page.ListStatus == "无可用视频源",
                 "playback unavailability does not forge a failed source list");
             rig.Runtime.Change(root =>
             {
