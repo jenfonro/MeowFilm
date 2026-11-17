@@ -58,6 +58,9 @@ public class KSMEPlayer: NSObject {
                     options.audioFilters = audioFilters
                 }
             }
+            videoOutput?.playbackRate = playbackRate
+            playerItem.setPlaybackRate(isPlaying && loadState == .playable && !isShutdown && !hasFailed
+                                       ? Double(playbackRate) : 0)
         }
     }
 
@@ -122,6 +125,7 @@ private extension KSMEPlayer {
         runOnMainThread { [weak self] in
             guard let self, !self.isShutdown, !self.hasFailed else { return }
             let isPaused = !(self.playbackState == .playing && self.loadState == .playable)
+            self.playerItem.setPlaybackRate(isPaused ? 0 : Double(self.playbackRate))
             if isPaused {
                 self.audioOutput.pause()
                 self.videoOutput?.pause()
@@ -188,6 +192,7 @@ extension KSMEPlayer: MEPlayerDelegate {
         runOnMainThread { [weak self] in
             guard let self, !self.isShutdown, !self.hasFailed else { return }
             self.hasFailed = true
+            self.playerItem.setPlaybackRate(0)
             self.playbackState = .stopped
             self.loadState = .idle
             self.isReadyToPlay = false
@@ -385,6 +390,7 @@ extension KSMEPlayer: MediaPlayerProtocol {
 
     public func shutdown() {
         isShutdown = true
+        playerItem.setPlaybackRate(0)
         audioOutput.pause()
         videoOutput?.pause()
         KSLog("shutdown \(self)")

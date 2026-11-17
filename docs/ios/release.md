@@ -4,6 +4,8 @@
 
 `build-ios.sh` 是 iOS 产品构建入口：使用 Xcode 构建 Release／iphoneos／arm64 未签名 IPA，在 `tmp/` 暂存和校验，成功后整体替换 `build/ios/`。
 
+App 部署目标及 MeowKit／AetherKernel 最低 iOS18；macOS15 仅为原生 XCTest 执行目标，不是 Mac 产品。仓库参考 Xcode26.1.1；Aether 7.68.0 上游以 Xcode27 为正式支持、26.3 为 best effort，工具链兼容须以实际编译结果确认，不由最低部署版本或准备通过推定。
+
 构建机需要使用 `scripts/script-host-native.json` 中 `build.node` 锁定的 Node 版本及根锁依赖 `npm ci --ignore-scripts`；客户端不需要用户安装 Node。`prepare-ios-runtime.py` 校验 `scripts/ios-node-mobile.json` 锁定的 Node Mobile 18.20.4 archive／许可，复用 `.cache/nodejs-mobile/ios/NodeMobile.xcframework`，并按 iOS SDK／架构准备 `MeowScriptHost.framework` 和公共载荷。`scripts/ios/package-runtime.mjs` 包装公共 `common-native` 打包器，包含 `complete`／`runtime.http.v1` manifest、iOS entry、按序 music／cat／source／pan／tmdb／douban／film／netease／music-platform 九模块、影视和音乐平台业务依赖、规则 SDK 与 token 的锁定 jsdom 依赖和许可，不包含 Windows 入口或 WASM／asm.js 引擎。
 
 `build-ios.sh`、`test-native.sh compile|all` 自动准备这些输入；直接运行 Xcode 前先准备相同目标的载体与载荷。可用 `MEOWFILM_BUILD_NODE` 指定构建工具 Node 路径；它不改变 App 内嵌版本。工程嵌入并签名 NodeMobile 和 MeowScriptHost，载荷及适用许可随 App 分发。影视规则／搜索程序由 Node 加载，共用 `scripts/script-host-native.json` 锁定的 QuickJS-NG 0.18.0 原生载体、派生补丁与 Unicode 表，不再通过 SwiftPM 静态链接另一套客户端规则核心；中央引擎 MIT 与 `Unicode-3.0.txt` 由 Xcode 随 App 打包。CI 两个工作流均恢复锁定依赖，不使用系统已装 Node 的隐式状态。
@@ -12,7 +14,11 @@
 
 视频输入由 `scripts/prepare-ios-video-kernel.py` 按 `scripts/ios-video-kernel.json` 锁定的 FFmpeg 8.1.2 源码、补丁与目标构建；`build-ios.sh` 准备 `ios-arm64`，原生测试入口选择对应 Mac／模拟器目标。`native/KSPlayer` 按固定来源与源码映射构建实际 KSPlayer 核心及必要依赖／原生输出，排除上游播放控件和 Demo；产物与回执位于 `native/KSPlayer/.cache/`。`native/VideoKernel` 的 `MeowVideoKernel` 经独立 `MeowPlaybackVideo` 适配接入，承担电影静默候选、实际首帧、命令与真实关闭适配，不再保留第二套 C decoder。两包都不拥有业务或 App 系统媒体会话。视频来源与适用许可引用 `LICENSES` 的唯一正文。目标产物准备和工程资源齐全不代表合并后的 iOS App 已编译、签名或真实播放通过，须分别取得平台证据。
 
-App 资源包含项目 `NOTICE.md`、现有 LGPL／FFmpeg 许可正文以及 `FFmpeg-audio-NOTICES.txt`；不重复许可正文。Apple 音频的来源、构建配方和 LGPL 源码／重链接义务见 `LICENSES/NOTICE.md` 与 `native/AudioKernel/Provenance/README.md`，动态封装和签名均不豁免这些发行义务。
+可选 Aether 输入由 `scripts/prepare-ios-aether-kernel.py` 按 `scripts/ios-aether-kernel.json` 锁定源码、九个动态 FFmpeg 依赖库、Dovi 和宿主补丁。`build-ios.sh` 准备 `ios-arm64`；原生与 UIKit 测试入口分别准备对应 Mac／simulator 目标。直接使用 Xcode／SwiftPM 前也须准备匹配输入，不能以 device 切片代替模拟器。唯一公开 dynamic `MeowAetherKernel` 的链接隔离、已知 plist 修正与补丁哈希规则见[Aether 构建边界](../../native/AetherKernel/README.md)，不在此复制锁清单。
+
+`build-ios.sh` 和 `test-native.sh` 的 Simulator App 编译后调用 Aether `--verify-app`；直接调用其他构建入口时须另行对实际 `.app` 执行该门禁。它核对 two-level dylib、FFmpeg 符号归属、原生 sections、依赖闭包与许可；准备／`--verify` 成功不代替实际 App 链接门禁，更不代替播放验收。
+
+App 资源包含项目 `NOTICE.md`、现有 LGPL／FFmpeg 许可正文、`FFmpeg-audio-NOTICES.txt` 及 Aether／Dovi 等适用的中央许可；不重复许可正文。第三方来源与义务见[中央声明](../../LICENSES/NOTICE.md)，Apple 音频配方另见 `native/AudioKernel/Provenance/README.md`；动态封装、App Store 例外和签名均不豁免依赖各自的发行义务。
 
 下载及 FFmpeg 完整依赖库按[构建依赖缓存](../common/dependency-cache.md)跨副本复用。缓存命中仍验证来源与文件身份，同配方正在构建时等待；源码、编译目录和安装输入归本副本，目标 slice 打包到上述核心目录。`--sources-only`、`--target`、`--verify` 调用方式不变。
 

@@ -44,7 +44,7 @@ public final class MEPlayerItem: @unchecked Sendable {
     // 没有音频数据可以渲染
     private var isAudioStalled = true
     private var audioClock = KSClock()
-    private var videoClock = KSClock()
+    private var videoClock = KSClock(continuous: true)
     private var isFirst = true
     private var isSeek = false
     private var allPlayerItemTracks = [PlayerItemTrackProtocol]()
@@ -286,12 +286,17 @@ extension MEPlayerItem {
             chapters.removeAll()
             for i in 0 ..< formatCtx.pointee.nb_chapters {
                 if let chapter = formatCtx.pointee.chapters[Int(i)]?.pointee {
+                    guard chapter.time_base.num > 0, chapter.time_base.den > 0,
+                          chapter.start != Int64.min, chapter.end != Int64.min else { continue }
                     let timeBase = Timebase(chapter.time_base)
                     let start = timeBase.cmtime(for: chapter.start).seconds
                     let end = timeBase.cmtime(for: chapter.end).seconds
                     let metadata = toDictionary(chapter.metadata)
                     let title = metadata["title"] ?? ""
-                    chapters.append(Chapter(start: start, end: end, title: title))
+                    if let value = Chapter.playbackTimeline(start: start, end: end, title: title,
+                                                          origin: startTime.seconds, duration: duration) {
+                        chapters.append(value)
+                    }
                 }
             }
         }
@@ -921,7 +926,9 @@ extension MEPlayerItem: CodecCapacityDelegate {
 
     func codecDidFinished(track: some CapacityProtocol) {
         if track.mediaType == .audio {
+            lifecycleLock.lock()
             isAudioStalled = true
+            lifecycleLock.unlock()
         }
         let allSatisfy = videoAudioTracks.allSatisfy { $0.isEndOfFile && $0.frameCount == 0 && $0.packetCount == 0 }
         if allSatisfy {
@@ -1002,12 +1009,23 @@ extension MEPlayerItem: CodecCapacityDelegate {
 }
 
 extension MEPlayerItem: OutputRenderSourceDelegate {
+    func setPlaybackRate(_ rate: Double) {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        videoClock.setRate(rate)
+        audioClock.setRate(rate)
+    }
+
     func mainClock() -> KSClock {
-        isAudioStalled ? videoClock : audioClock
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return isAudioStalled ? videoClock : audioClock
     }
 
     public func setVideo(time: CMTime, position: Int64) {
-        guard [.reading, .paused, .finished].contains(state) else { return }
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard [.reading, .paused, .finished].contains(sourceState) else { return }
 //        print("[video] video interval \(CACurrentMediaTime() - videoClock.lastMediaTime) video diff \(time.seconds - videoClock.time.seconds)")
         videoClock.time = time
         videoClock.position = position
@@ -1032,6 +1050,11 @@ extension MEPlayerItem: OutputRenderSourceDelegate {
             guard generation == self.inputGeneration, [.reading, .paused, .finished].contains(self.sourceState) else { return }
             self.audioClock.time = time
             self.audioClock.position = position
+            if self.videoClock.rate > 0 {
+                // If audio later exhausts, the fallback clock continues on
+                // this same media axis, not from the pre-audio start anchor.
+                self.videoClock.synchronize(to: self.audioClock.getTime())
+            }
             self.isAudioStalled = false
         }
     }
@@ -1040,10 +1063,28 @@ extension MEPlayerItem: OutputRenderSourceDelegate {
         guard [.reading, .paused, .finished].contains(state), let videoTrack else {
             return nil
         }
+        let clock = mainClock()
+        if !force, clock.rate > 1 {
+            // Consume only this tick's queued, due frames. Returning the newest
+            // one keeps media speed independent of the display refresh limit.
+            let target = clock.getTime() - options.videoDelay
+            var frame: VideoVTBFrame?
+            let count = videoTrack.outputRenderQueue.count
+            for _ in 0 ..< count {
+                guard let next = videoTrack.getOutputRender(where: { next, _ in
+                    next.seconds - target < 1 / Double(next.fps) / 2
+                }) else { break }
+                if frame != nil { dynamicInfo.droppedVideoFrameCount += 1 }
+                frame = next
+            }
+            // Preserve the track's real EOF callback when the queue is empty.
+            if count == 0 { return videoTrack.getOutputRender(where: nil) }
+            return frame
+        }
         var type: ClockProcessType = force ? .next : .remain
         let predicate: ((VideoVTBFrame, Int) -> Bool)? = force ? nil : { [weak self] frame, count -> Bool in
             guard let self else { return true }
-            (self.dynamicInfo.audioVideoSyncDiff, type) = self.options.videoClockSync(main: self.mainClock(), nextVideoTime: frame.seconds, fps: Double(frame.fps), frameCount: count)
+            (self.dynamicInfo.audioVideoSyncDiff, type) = self.options.videoClockSync(main: clock, nextVideoTime: frame.seconds, fps: Double(frame.fps), frameCount: count)
             return type != .remain
         }
         let frame = videoTrack.getOutputRender(where: predicate)

@@ -33,7 +33,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
         let candidate = try PlaybackVideoTransport(media: media, input: XCTUnwrap(media.takeInput()),
                                                    decoder: makePlaybackVideoDecoder(session: native))
         try await candidate.prepare()
-        film.surface.stage(candidate.output.presentationView)
+        film.surface.stage(candidate.output)
         try await candidate.renderFirstVideoFrame()
         let admission = controller.admitVideo(owner: film.owner, candidate: candidate)
         let activation = Task {
@@ -600,7 +600,7 @@ final class MeowfilmVideoAudioAdmissionHostTests: XCTestCase {
                 input: .init(resourceID: "controller-first", url: movie, title: "Synthetic video")) {}
             let transport = try PlaybackVideoTransport(media: media, input: XCTUnwrap(media.takeInput()), decoder: makePlaybackVideoDecoder())
             try await transport.prepare()
-            film.surface.stage(transport.output.presentationView)
+            film.surface.stage(transport.output)
             try await transport.renderFirstVideoFrame()
             let admission = controller.admitVideo(owner: film.owner, candidate: transport)
             try await controller.prepareVideoAudio(admission: admission, owner: film.owner, paused: false)

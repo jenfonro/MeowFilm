@@ -66,6 +66,7 @@ public final class PlaybackVideoLease {
     @discardableResult
     public func play(_ media: PlaybackVideoMediaLease, paused: Bool = false,
                      preservePosition: Bool = false,
+                     initialRate: Double? = nil, showsNowPlaying: Bool = true,
                      waitForCommit: @escaping @MainActor () async throws -> Void = {},
                      canCommit: @escaping @MainActor () -> Bool = { true }) async throws -> PlayAttempt {
         guard !closed, binding?.isCancelled == false else {
@@ -77,7 +78,10 @@ public final class PlaybackVideoLease {
         let operation = UUID(); revision = operation
         let preceding = pending.map { retire($0) }
         let candidate: PlaybackVideoTransport
-        do { candidate = try PlaybackVideoTransport(media: media, input: input, decoder: controller.makeVideoDecoder()) }
+        do {
+            candidate = try PlaybackVideoTransport(media: media, input: input, decoder: controller.makeVideoDecoder(),
+                initialRate: initialRate, showsNowPlaying: showsNowPlaying)
+        }
         catch {
             let failure = Self.error(error)
             _ = retirement(for: media) { try await media.close() }
@@ -96,7 +100,7 @@ public final class PlaybackVideoLease {
             try check(operation, admission: admission, candidate: candidate)
             emit(.prepared, transport: candidate, wantsPlayback: !paused)
             #if os(iOS)
-            surface.stage(candidate.output.presentationView)
+            surface.stage(candidate.output)
             #endif
             var deadline = now().advanced(by: .seconds(15))
             commitAdmission: while true {
@@ -333,7 +337,8 @@ public final class PlaybackVideoLease {
             ? (kind == .started ? transport.pictureInPictureState : pictureInPictureState) : .unavailable
         onEvent(PlaybackVideoEvent(attemptID: transport.media.attemptID, nativeAttempt: attempt,
             kind: kind, snapshot: sample, wantsPlayback: wantsPlayback ?? controller.wantsPlayback,
-            error: error, pictureInPicture: pip))
+            error: error, pictureInPicture: pip, engine: transport.kernel.engine,
+            chapters: transport.kernel.chapters))
     }
 
     static func error(_ error: Error) -> PlaybackVideoError {

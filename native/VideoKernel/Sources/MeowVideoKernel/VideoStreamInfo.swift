@@ -51,6 +51,7 @@ public struct VideoStreamInfo: Sendable {
     public let sampleRate: Double?
     public let audioChannels: Int?
     public let dolbyVisionProfile: UInt8?
+    public let chapters: [VideoChapter]
 
     @MainActor
     init(player: some MediaPlayerProtocol, video: some MediaPlayerTrack) {
@@ -67,7 +68,16 @@ public struct VideoStreamInfo: Sendable {
         sampleRate = audioFormat?.sampleRate
         audioChannels = audioFormat.map { Int($0.channelCount) }
         dolbyVisionProfile = video.dovi?.dv_profile
+        chapters = player.chapters.map {
+            VideoChapter(title: $0.title, start: $0.start, end: $0.end)
+        }
     }
+}
+
+public struct VideoChapter: Sendable, Equatable {
+    public let title: String
+    public let start: Double
+    public let end: Double
 }
 
 public struct VideoTrack: Sendable, Equatable {

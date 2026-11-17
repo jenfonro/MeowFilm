@@ -206,6 +206,18 @@ actor FilmUIKitPlaybackServer {
 }
 
 @MainActor
+final class FilmUIKitPlayerHost: UIViewController {
+    var player: FilmPlayerViewController?
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard let player else { return }
+        self.player = nil
+        player.present(from: self, animated: false)
+    }
+}
+
+@MainActor
 final class FilmUIKitPlaybackMedia: FilmPlaybackMediaControlling {
     let surface = UIView()
     var inputs: [FilmPlaybackMediaInput] = []

@@ -30,6 +30,12 @@ public final class PlaybackController: ObservableObject {
     /// rate or system output volume. Each mutation needs the current attempt.
     @Published public private(set) var preferredRate: Double = 1
     @Published public private(set) var volume: Double = 1
+    public var effectiveRate: Double { videoTransport == nil ? controlsRate : temporaryVideoRate ?? controlsRate }
+    // Like snapshot/title, preferredRate is a publication of owned state. A
+    // reentrant @Published subscriber cannot overwrite a newer owner's rate.
+    private var controlsRate: Double = 1
+    private var temporaryVideoRate: Double?
+    private var nowPlayingVisible = true
     private var controlsOwner: String?
     private var volumePreferences: (any PlaybackVolumeStoring)? { lifetime.volumePreferences }
     // This Sendable actor-owned holder, never the dying controller, can cross
@@ -191,6 +197,15 @@ public final class PlaybackController: ObservableObject {
         return true
     }
 
+    /// Card visibility does not revoke metadata or the owner's remote commands.
+    @discardableResult
+    public func setNowPlayingVisible(_ visible: Bool, attempt: PlayAttempt) -> Bool {
+        guard isCurrent(attempt), state.isPlayable else { return false }
+        nowPlayingVisible = visible
+        publish()
+        return true
+    }
+
     /// One product-owned binding per owner. Keep the lease outside page
     /// presentation lifetime. A later binding invalidates an earlier lease.
     public func bind(
@@ -298,7 +313,7 @@ public final class PlaybackController: ObservableObject {
 
     private func configureControls(owner: String) {
         if controlsOwner != owner {
-            controlsOwner = owner; preferredRate = 1
+            controlsOwner = owner; controlsRate = 1
             let saved = volumePreferences?.volume(for: owner) ?? 1
             volume = saved.isFinite && (0...1).contains(saved) ? saved : 1
         }
@@ -541,6 +556,9 @@ public final class PlaybackController: ObservableObject {
         }
         #endif
         try transport.validateForCommit()
+        if let rate = transport.initialRate, !rate.isFinite || rate < 0.5 {
+            throw PlaybackVideoError.invalidInput
+        }
         finishHandoff = lease.willCommit()
         guard acceptsVideo(admission, owner: lease.owner), videoCandidate === transport else {
             throw PlaybackVideoError.staleAttempt
@@ -556,18 +574,22 @@ public final class PlaybackController: ObservableObject {
         }
         videoCandidate = nil; videoAdmission = UUID(); videoAdmissionOwner = nil
         replacementAdmission = UUID(); replacementOwner = nil; failedReplacementAutoplay = false
+        let rate = min(transport.initialRate ?? (controlsOwner == lease.owner ? controlsRate : 1),
+                       min(3, transport.kernel.engine.maximumRate))
         let token = state.beginVideo(resourceID: transport.media.resourceID, title: transport.title,
                                     owner: lease.owner, autoplay: !paused)
         let attempt = PlayAttempt(id: token, owner: lease.owner, resourceID: transport.media.resourceID)
         systemMetadata.begin(attempt); owners.updateContext(state.commandContext)
         tearDownItem()
         if controlsOwner != lease.owner {
-            controlsOwner = lease.owner; preferredRate = 1
-            guard state.accepts(token) else { throw PlaybackVideoError.staleAttempt }
+            controlsOwner = lease.owner
             let saved = volumePreferences?.volume(for: lease.owner) ?? 1
             volume = saved.isFinite && (0...1).contains(saved) ? saved : 1
             guard state.accepts(token) else { throw PlaybackVideoError.staleAttempt }
         }
+        controlsRate = rate
+        guard state.accepts(token) else { throw PlaybackVideoError.staleAttempt }
+        nowPlayingVisible = transport.showsNowPlaying
         videoTransport = transport; videoLease = lease
         lease.activate(transport)
         transport.kernel.onFailure = { [weak self, weak transport] error in
@@ -590,8 +612,13 @@ public final class PlaybackController: ObservableObject {
             }
             self.publish()
         }
+        transport.kernel.onPlaybackIntent = { [weak self, weak transport] playing in
+            guard let self, let transport, self.videoTransport === transport, self.state.accepts(token) else { return }
+            _ = self.systemCommand(playing ? .play : .pause, generation: token)
+        }
         transport.kernel.onEnd = { [weak self, weak transport] in
             guard let self, let transport, self.videoTransport === transport, self.state.end(generation: token) else { return }
+            self.temporaryVideoRate = nil
             transport.setRate(0)
             #if os(iOS)
             self.deactivateAudio()
@@ -694,9 +721,12 @@ public final class PlaybackController: ObservableObject {
 
     @discardableResult
     public func setPreferredRate(_ rate: Double, attempt: PlayAttempt) -> Bool {
-        guard isCurrent(attempt), state.isPlayable, rate.isFinite, (0.5...3).contains(rate) else { return false }
+        let maximum = min(3, videoTransport?.kernel.engine.maximumRate ?? 3)
+        guard isCurrent(attempt), state.isPlayable, rate.isFinite, (0.5...maximum).contains(rate) else { return false }
+        mutationDepth += 1
+        defer { finishMutation() }
         sampleCurrentProgress()
-        preferredRate = rate
+        controlsRate = rate
         guard isCurrent(attempt) else { return true }
         // Changing a paused/seeking/interrupted item must not start it.
         if state.shouldPlay, state.isReady, state.outstandingSeek == nil {
@@ -704,7 +734,7 @@ public final class PlaybackController: ObservableObject {
             guard activateAudio(generation: attempt.id) else { return true }
             #endif
             if let videoTransport {
-                videoTransport.setRate(Float(rate))
+                videoTransport.setRate(Float(effectiveRate))
                 state.rateChanged(generation: attempt.id, rate: Double(videoTransport.output.rate),
                                   position: videoTransport.position)
             } else {
@@ -714,6 +744,21 @@ public final class PlaybackController: ObservableObject {
             }
         }
         publish()
+        return true
+    }
+
+    /// Temporary acceleration belongs to this video attempt, never to music or
+    /// a successor. nil restores its latest base speed without changing intent.
+    @discardableResult
+    public func setTemporaryVideoRate(_ rate: Double?, attempt: PlayAttempt) -> Bool {
+        guard isCurrent(attempt), state.isPlayable, state.snapshot.phase != .ended,
+              let transport = videoTransport else { return false }
+        if let rate, !rate.isFinite || !(0.5...transport.kernel.engine.maximumRate).contains(rate) { return false }
+        mutationDepth += 1
+        defer { finishMutation() }
+        sampleCurrentProgress()
+        temporaryVideoRate = rate
+        drivePlayback()
         return true
     }
 
@@ -838,7 +883,7 @@ public final class PlaybackController: ObservableObject {
             guard activateAudio(generation: generation) else { return }
             #endif
             guard admitOutput(generation: generation), state.accepts(generation), state.shouldPlay else { return }
-            do { try session.play(rate: Float(preferredRate)) }
+            do { try session.play(rate: Float(controlsRate)) }
             catch { fail(audioFailure(error), generation: generation); return }
         } else {
             session.pause()
@@ -933,7 +978,7 @@ public final class PlaybackController: ObservableObject {
             guard activateAudio(generation: generation) else { return }
             #endif
             guard admitOutput(generation: generation), state.accepts(generation), videoTransport === transport else { return }
-            transport.setRate(Float(preferredRate))
+            transport.setRate(Float(effectiveRate))
         } else {
             transport.setRate(0)
             #if os(iOS)
@@ -985,6 +1030,8 @@ public final class PlaybackController: ObservableObject {
     }
 
     private func tearDownItem(endingSystemSession: Bool = false) {
+        temporaryVideoRate = nil
+        nowPlayingVisible = true
         lifetime.tearDownItem(endingSystemSession: endingSystemSession)
     }
 
@@ -1007,8 +1054,10 @@ public final class PlaybackController: ObservableObject {
             systemSession?.update(snapshot: currentSnapshot, attempt: state.attempt,
                                   metadata: nowPlayingMetadata, rate: actualRate,
                                   canSeek: state.canSeek, navigation: owners.navigationRoutes,
-                                  playPause: owners.playPauseRoute)
+                                  playPause: owners.playPauseRoute, showsNowPlaying: nowPlayingVisible)
             #endif
+            if preferredRate != controlsRate { preferredRate = controlsRate }
+            if needsPublication { continue }
             if currentAttempt != state.attempt { currentAttempt = state.attempt }
             if needsPublication { continue }
             if snapshot != currentSnapshot { snapshot = currentSnapshot }

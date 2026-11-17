@@ -43,6 +43,12 @@ class ProductConfigurationTests(unittest.TestCase):
         self.assertEqual(project.count('path = "Navigation/MeowfilmCoordinator.swift";'), 1)
         self.assertEqual({p.name for p in (self.root / "apps/ios").glob("*.xcodeproj")}, {"Meowfilm.xcodeproj"})
 
+    def test_all_app_and_hosted_test_configurations_require_ios_18(self):
+        project = self.project("Meowfilm")
+        minimums = re.findall(r"IPHONEOS_DEPLOYMENT_TARGET = ([0-9.]+);", project)
+        self.assertTrue(minimums)
+        self.assertEqual(set(minimums), {"18.0"})
+
     def test_app_allows_arbitrary_http_without_scoped_ats_overrides(self):
         base = plistlib.loads((self.root / "apps/ios/Info.plist").read_bytes())
         app = plistlib.loads((self.root / "apps/ios/Info-Meowfilm.plist").read_bytes())
@@ -138,7 +144,9 @@ class ProductConfigurationTests(unittest.TestCase):
         project = self.project("Meowfilm")
         resources = next(line for line in project.splitlines() if "isa = PBXResourcesBuildPhase;" in line)
         for filename in ("NOTICE.md", "GPL-3.0-only.txt", "LGPL-2.1-only.txt", "LGPL-3.0-only.txt",
-                         "FFmpeg-LICENSE.md", "FFmpeg-IJG-NOTICE.txt", "FFmpeg-audio-NOTICES.txt"):
+                         "FFmpeg-LICENSE.md", "FFmpeg-IJG-NOTICE.txt", "FFmpeg-audio-NOTICES.txt",
+                         "AetherEngine-EXCEPTION.txt", "Aether-THIRD-PARTY-NOTICES.txt", "WTFPL-2.0.txt",
+                         "Aether-libzvbi-ure-MIT.txt", "libxml2-MIT.txt", "FilmKernel-THIRD-PARTY-NOTICES.txt"):
             references = [line.split()[0] for line in project.splitlines()
                           if f'path = "../../LICENSES/{filename}";' in line]
             self.assertEqual(len(references), 1, filename)
