@@ -102,7 +102,7 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         XCTAssertTrue(app.otherElements["novel.home"].waitForExistence(timeout: 5))
         assertPageOwnsHeader("novel", controls: ["app.menu", "search.open"])
         assertPrimaryNavigation(selected: "novel")
-        XCTAssertTrue(app.segmentedControls["novel.sections"].exists)
+        XCTAssertTrue(app.tables["novel.books"].waitForExistence(timeout: 5))
         attach("03-novel")
 
         app.buttons["app.primary.recommend"].tap()
