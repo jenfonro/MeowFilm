@@ -113,6 +113,8 @@ Cat 真实 Buffer/流/密钥对象按 Node 语义工作，资源按请求或实�
 
 公共构建输入见 `scripts/script-host-native.json`，桌面构建入口为 `scripts/quickjs/build-native.mjs`；公共打包 `scripts/package-runtime.mjs` 仅支持 `common-native`，manifest 的 entry 为 `app/entry.mjs`、status 为 complete 时表示打包完成。闭包含公共装配、实际导入的 workspace 包、规则 SDK、Cat 依赖和精确受信原生载体。Windows wrapper 在公共产物上增加私密启动包装；iOS wrapper 增加受信启动及签名 framework 装配，目标明确区分 device／simulator。旧 profile 不提供兼容后端。平台构建和完整性边界分别见[Windows 打包说明](../windows/runtime-packaging.md)及[iOS 发布说明](../ios/release.md)。
 
+平台包装从实际入口收集静态可解析的 helper 依赖，按源路径映射到产物路径；公开 workspace 导入按 exports 和根锁解析，Node 内建模块由 Node 自身识别，不维护逐文件导入批准表或固定文件数量。未引用的普通说明／数据文件不阻断构建，也不会自动成为载荷；实际引用缺失、私有／跨端越界、符号链接和非受信 native 输入仍拒绝。交付清单继续记录全部文件 bytes/hash，并标出实际法律／说明材料的 `documentation` 角色；Windows 启动只复核执行与解析输入，完整许可交付检查留在打包侧。
+
 构建成功、原生可加载、合成行为测试、清理/取消验证、真实第三方联网动作和同机性能测量是不同证据。main 整合前的定档 `b2ec723` 已在 Linux arm64／Node 24.21.0 上完成原生／SDK 增量构建；受影响的 33 个测试文件、740 个不同用例结合定向复验均通过，包含真实独立 payload 的三协议启动。首轮仅三个新增 Cat 夹具遗漏实例标准流基线，修正为完整对象身份及实际关闭检查后，三例复验通过；产品输入未变，其余通过结果复用。这些是定档证据，不代替本次管理功能与 HTTP 接线整合后的定向验证。
 
 本次整合 main `17b97e2` 后，在同一环境完成最终 native／SDK 增量构建；20 个相关测试文件的 495 个不同用例结合定向复验通过，无 skip。覆盖音乐/Cat 管理、完整 HTTP 与 64/65 层、源码下载的真实取消/关闭、独立推进、私有 KV、验收 CLI、打包边界和实际三协议 payload。首轮六项失败分别修复了 LX 存储控制包装重复计深及四处测试夹具/预期不匹配；复验另有一项 HTTP 取消用例偶发失败，同输入精确重跑通过，未修改该断言，原失败日志保留。详细测试迁移、输入适用范围及不确定点见任务交付记录。

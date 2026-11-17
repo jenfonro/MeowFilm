@@ -6,16 +6,16 @@
 
 启动参数恰好为按序 `--meow-pipe meowfilm-<UUID> --meow-session <UUID>`；UUID 使用规范小写格式，不接受远程管道或任意地址。原生 launcher 创建单实例 `CurrentUserOnly` 管道服务器，启动独占子进程并通过 Job 管理，在发送配置前核对管道客户端 PID。session 表示运行代次，不是认证秘密。
 
-App 通过已验证的管道发送一行 UTF-8 JSON `{sessionId,dataRoot,nativeSettings:true}`，Node 读取原生设置并启动公共监听器后回复一行 `{protocol:"runtime.http.v1",baseUrl:"http://127.0.0.1:<port>"}`。未装配原生设置的独立运行器会话仍发送 `{sessionId,dataRoot}`。`dataRoot` 由原生 `AppDataPaths.ScriptRuntime` 决定，是本机绝对目录。HTTP 不使用启动访问密钥；子进程清空非必要继承环境。
+App 通过已验证的管道发送一行 UTF-8 JSON `{sessionId,dataRoot,nativeSettings:true}`，Node 读取原生设置并启动公共监听器后回复一行 `{protocol:"runtime.http.v1",baseUrl:"http://127.0.0.1:<port>"}`。未装配原生设置的独立运行器会话仍发送 `{sessionId,dataRoot}`。普通配置及 ready 扩展不阻断启动，也不授予设置能力；只有 `nativeSettings:true` 选择该能力。`dataRoot` 由原生 `AppDataPaths.ScriptRuntime` 决定，是本机绝对目录。HTTP 不使用启动访问密钥；子进程清空非必要继承环境。
 
-启动控制行不设置应用字节配额，连接及握手有期限；管道的 64 KiB 缓冲不限制消息总长度。装配原生设置时，管道另外承载按块读取及网盘凭据 CAS 回写，协议与范围见[原生设置](native-settings.md#私密配置能力)；它不是通用 RPC、业务文件访问或心跳通道。未装配该能力时额外字节仍非法；坏帧、EOF、error 或 close 都关闭实际公共运行器。普通 HTTP keepalive 连接结束不代表会话退出。
+启动控制行不设置应用字节配额，连接及握手有期限；管道的 64 KiB 缓冲不限制消息总长度。装配原生设置时，管道另外承载按块读取及网盘凭据 CAS 回写，协议与范围见[原生设置](native-settings.md#私密配置能力)；它不是通用 RPC、业务文件访问或心跳通道。未装配该能力时收到任意额外字节即关闭会话，不等待完整 JSON 行；坏帧、EOF、error 或 close 都关闭实际公共运行器。普通 HTTP keepalive 连接结束不代表会话退出。
 
 ## 完整 HTTP 请求
 
-`RuntimeHttpClient` 接受合法 HTTP(S) 根端点，包括域名、非回环和默认端口；App 默认使用启动握手返回的本机 URL。不走系统代理、不跟随重定向、不自动重放业务。每次请求携带独立 UUID `X-Meow-Request-Id`，核对响应 ID、内容类型、状态及严格信封；公开契约见 [Runtime bridge](../runtime/runtime-bridge.md)。
+`RuntimeHttpClient` 接受合法 HTTP(S) 根端点，包括域名、非回环和默认端口；App 默认使用启动握手返回的本机 URL。ready 接收边界验证端点后在内部复用同一 `Uri`；公开 string 入口仍验证外部输入。不走系统代理、不跟随重定向、不自动重放业务。每次请求携带独立 UUID `X-Meow-Request-Id`，核对响应 ID、内容类型、状态及严格信封；公开契约见 [Runtime bridge](../runtime/runtime-bridge.md)。
 
-- `GET /v1/describe` 核对唯一 protocol／product，以及 `AppIdentity.ScriptModules` 所需模块的存在性、唯一性和 id／version／contract；按该处 `RequiredMethods` 核对原生实际调用的方法存在性，缺少必需模块或方法阻断启动。模块顺序、未用扩展、额外模块／方法或缺少未调用方法不阻断启动，不要求完整 operation 全集。TMDB／豆瓣／网易 token 由 aggregate 内部连接消费，本端只核其模块身份，不要求未调用的 HTTP 方法。请求权限仍来自本地 operation 表，额外声明不会授予调用能力。
-- Windows `RuntimeHttpProtocol` 操作表由 `scripts/windows/verify-app-structure.mjs` 与公共 `apps/runtime/contracts.mjs` 机械核对版本、契约、前缀及完整方法集合；包含稳定业务目标解析 `film.data.target`。源码机械同步与运行时动作消费是不同约束。
+- `GET /v1/describe` 核对唯一 protocol／product，以及 `AppIdentity.ScriptModules` 所需模块的存在性、唯一性和 id／version／contract；缺少必需身份或契约不匹配阻断启动。模块顺序、未用扩展、额外模块及未消费的 methods 元数据不阻断启动，不预检全局业务方法。
+- Windows 按契约 prefix 选择 owner 并验证 operation 语法，不维护业务操作批准表。公共注册将同 owner 的合法可调用 handler 登记到真实 methods Map，拒绝重复 owner、冲突、非法名称及不可用资源能力；描述不会凭空生成 handler。合法但未登记的方法发到实际路由后返回 `METHOD_NOT_FOUND`，不会改派其他 owner。
 - 普通调用为 `POST /v1/{module}/{operation}`，参数直接是 JSON，成功信封为 `{ok:true,contract,value}`，失败为 `{ok:false,contract,code}`；结果不再是 JSON 字符串。
 - 源码经 `UploadSourceAsync` 完整 raw PUT，由 installationId 与明确 sourceRevision 绑定。异步上传借用调用方字节直到实际发送任务结束，包括取消；业务层不管理 begin/chunk/read/release。
 - `ReadImageAsync` 只接受运行器相对图片引用，经同一客户端携带请求 ID；成功读二进制、错误解包 `502` 所属模块信封，取消等待物理响应释放。元数据与小说消费者统一使用 `ReadImageAsync(reference, cancellationToken)` 完整读取，不传入图片字节配额；编码缓存的单项准入和原生解码像素预算由图片消费者分别管理；图片契约见[元数据运行器](../runtime/metadata-data.md)与[书源仓库](../runtime/source-library.md)。

@@ -2,13 +2,12 @@ import XCTest
 import UIKit
 import MeowRuntime
 import MeowStorage
-import MeowMusicFeature
 import MeowUI
 import MeowNovelFeature
 @testable import MeowFilmFeature
 @testable import Meowfilm
 
-/// Real App-hosted UIKit; source directories and metadata responses are local fixtures.
+/// Real App-hosted UIKit; source directories and responses are local fixtures.
 @MainActor
 final class MeowfilmSidebarTests: XCTestCase {
     private var hostedWindows: [(window: UIWindow, previous: UIWindow?)] = []
@@ -34,15 +33,12 @@ final class MeowfilmSidebarTests: XCTestCase {
         let sidebar = try musicSidebar(selected: .channels)
         let window = try await host(sidebar)
         defer { unhost(window) }
-        try await waitForMusicMenu(sidebar)
         let parts = try parts(in: sidebar)
         assertLayout(parts, in: sidebar)
 
         XCTAssertNotNil(parts.icon.image, "The App icon must be bundled in the real host")
         XCTAssertEqual(parts.upper.arrangedSubviews.map(\.accessibilityIdentifier),
                        ["app.sidebar.home", "app.sidebar.channels"])
-        XCTAssertEqual(parts.lower.arrangedSubviews.map(\.accessibilityIdentifier),
-                       ["app.sidebar.musicSource"])
         let home = try item("home", in: sidebar, as: UIButton.self)
         let channels = try item("channels", in: sidebar, as: UIButton.self)
         XCTAssertEqual(home.configuration?.title, "首页")
@@ -68,50 +64,47 @@ final class MeowfilmSidebarTests: XCTestCase {
         attach(sidebar, "sidebar-music-ordinary")
     }
 
-    func testAddingIntrinsicQuickSettingGrowsContentDownwardWithoutMovingBottomSettings() async throws {
+    func testAddingIntrinsicMenuRowGrowsContentDownwardWithoutMovingBottomSettings() async throws {
         let sidebar = try musicSidebar()
         let window = try await host(sidebar)
         defer { unhost(window) }
-        try await waitForMusicMenu(sidebar)
         let parts = try parts(in: sidebar)
         let beforeUpper = frame(parts.upper, in: sidebar)
-        let beforeLower = frame(parts.lower, in: sidebar)
+        let beforeRows = parts.upper.arrangedSubviews.map { frame($0, in: sidebar) }
         let beforeCard = frame(parts.card, in: sidebar)
         let beforeSettings = frame(parts.settings, in: sidebar)
 
-        // Only this fixture adds a control; its height comes from UIKit content.
+        // Only this fixture adds a row; its height comes from UIKit content.
         let extra = UIButton(type: .system)
-        extra.setTitle("布局测试快捷设置", for: .normal)
+        extra.setTitle("布局测试菜单项", for: .normal)
         extra.titleLabel?.font = .preferredFont(forTextStyle: .body)
-        extra.accessibilityIdentifier = "fixture.sidebar.extraSetting"
+        extra.accessibilityIdentifier = "fixture.sidebar.extraRow"
         XCTAssertGreaterThan(extra.intrinsicContentSize.height, 0)
-        parts.lower.addArrangedSubview(extra)
+        parts.upper.addArrangedSubview(extra)
         sidebar.setNeedsLayout()
         sidebar.layoutIfNeeded()
 
         assertLayout(parts, in: sidebar)
-        let afterLower = frame(parts.lower, in: sidebar)
-        XCTAssertGreaterThan(afterLower.height, beforeLower.height)
-        XCTAssertEqual(afterLower.minY, beforeLower.minY, accuracy: 1)
-        XCTAssertGreaterThan(afterLower.maxY, beforeLower.maxY)
+        let afterUpper = frame(parts.upper, in: sidebar)
+        XCTAssertGreaterThan(afterUpper.height, beforeUpper.height)
+        XCTAssertEqual(afterUpper.minY, beforeUpper.minY, accuracy: 1)
+        XCTAssertGreaterThan(afterUpper.maxY, beforeUpper.maxY)
         XCTAssertGreaterThanOrEqual(extra.bounds.height, extra.intrinsicContentSize.height - 1)
-        assertEqualFrame(frame(parts.upper, in: sidebar), beforeUpper)
+        for (row, before) in zip(parts.upper.arrangedSubviews, beforeRows) {
+            assertEqualFrame(frame(row, in: sidebar), before)
+        }
         let afterCard = frame(parts.card, in: sidebar)
         XCTAssertEqual(afterCard.minY, beforeCard.minY, accuracy: 1)
         XCTAssertEqual(afterCard.width, beforeCard.width, accuracy: 1)
-        XCTAssertEqual(afterCard.height - beforeCard.height, afterLower.height - beforeLower.height, accuracy: 1)
+        XCTAssertEqual(afterCard.height - beforeCard.height, afterUpper.height - beforeUpper.height, accuracy: 1)
         assertEqualFrame(frame(parts.settings, in: sidebar), beforeSettings)
-        XCTAssertEqual(afterLower.minY - beforeUpper.maxY, beforeLower.minY - beforeUpper.maxY, accuracy: 1)
-        attach(sidebar, "sidebar-music-extra-quick-setting")
+        attach(sidebar, "sidebar-music-extra-menu-row")
     }
 
     func testNavigationSettingsAndDismissDispatchOnlyTheirOwnCallbacks() async throws {
-        let metadata = SidebarMetadataSource(id: "fixture", title: "测试元数据")
-        let home = FilmHomeModel(sources: [metadata])
-        defer { home.close() }
         let sidebars = [
             try musicSidebar(selected: .channels),
-            try sidebar(.film(home: home, settings: nil)),
+            try sidebar(.film(settings: nil)),
         ]
         for (index, sidebar) in sidebars.enumerated() {
             let window = try await host(sidebar)
@@ -123,7 +116,6 @@ final class MeowfilmSidebarTests: XCTestCase {
             sidebar.onSettings = { settingsCount += 1 }
             sidebar.onDismiss = { dismissCount += 1 }
             sidebar.onClosed = { XCTFail("A button action must not report a completed closing gesture") }
-            sidebar.onError = { XCTFail("Unexpected sidebar error: \($0)") }
             try item("home", in: sidebar, as: UIButton.self).sendActions(for: .touchUpInside)
             XCTAssertEqual(pages, [index == 0 ? .recommend : .film])
             if index == 0 {
@@ -143,26 +135,18 @@ final class MeowfilmSidebarTests: XCTestCase {
             XCTAssertEqual(settingsCount, 1)
             XCTAssertEqual(pages, expectedPages)
         }
-        let metadataReads = await metadata.reads
-        XCTAssertEqual(metadataReads, 0, "Navigation callbacks do not themselves fetch film content")
     }
 
-    func testFilmUsesSharedLayoutAndOnlyTheProductionDoubanMetadataChoice() async throws {
+    func testFilmUsesSharedLayoutWithHomeBeforeSavedVideoRows() async throws {
         let fixture = try await filmFixture(videos: [video(key: .init(installationId: "local", siteKey: "one"),
                                                          name: "示例视频源", order: 0)])
         let music = try musicSidebar()
         let musicWindow = try await host(music)
-        try await waitForMusicMenu(music)
         let musicParts = try parts(in: music)
         let reference = [musicParts.icon, musicParts.card, musicParts.settings].map { frame($0, in: music) }
         unhost(musicWindow)
 
-        // Read the real assembly's registered sources without asking them to load.
-        let home = FilmHomeModel(sources: try assembly().filmSources)
-        defer { home.close() }
-        XCTAssertEqual(home.sources.map(\.id), ["douban"])
-        XCTAssertEqual(home.sources.map(\.title), ["豆瓣"])
-        let film = try sidebar(.film(home: home, settings: fixture.model))
+        let film = try sidebar(.film(settings: fixture.model))
         let window = try await host(film)
         defer { unhost(window) }
         let parts = try parts(in: film)
@@ -174,17 +158,9 @@ final class MeowfilmSidebarTests: XCTestCase {
         XCTAssertEqual(frame(parts.card, in: film).minY, reference[1].minY, accuracy: 1)
         XCTAssertEqual(frame(parts.card, in: film).width, reference[1].width, accuracy: 1)
         XCTAssertEqual(parts.upper.arrangedSubviews.first?.accessibilityIdentifier, "app.sidebar.home")
-        XCTAssertEqual(parts.lower.arrangedSubviews.map(\.accessibilityIdentifier), ["app.sidebar.filmSource"])
-        XCTAssertNil(identified("app.sidebar.musicSource", in: film))
         XCTAssertNil(identified("app.sidebar.channels", in: film))
         let buttons = descendants(parts.card).compactMap { $0 as? UIButton }
-        XCTAssertEqual(buttons.map(\.accessibilityIdentifier), ["app.sidebar.home", "app.sidebar.filmSource"])
-        let source = try item("filmSource", in: film, as: UIButton.self)
-        XCTAssertTrue(source.showsMenuAsPrimaryAction)
-        XCTAssertEqual(source.configuration?.subtitle, "豆瓣")
-        let actions = try menuActions(source)
-        XCTAssertEqual(actions.map(\.title), ["豆瓣"])
-        XCTAssertEqual(actions.map(\.state), [.on])
+        XCTAssertEqual(buttons.map(\.accessibilityIdentifier), ["app.sidebar.home"])
         XCTAssertEqual(try videoRows(in: film).map(\.accessibilityLabel), ["示例视频源"])
         let videoRow = try XCTUnwrap(try videoRows(in: film).first)
         XCTAssertTrue(videoRow.isDescendant(of: parts.upper))
@@ -193,45 +169,7 @@ final class MeowfilmSidebarTests: XCTestCase {
         try assertSettingsReachable(parts, in: film)
         let calls = await fixture.transport.calls
         XCTAssertTrue(calls.isEmpty, "Rendering the saved directory must not start or probe video sources")
-        attach(film, "sidebar-film-shared-layout-douban")
-    }
-
-    func testFilmMenuActionsSelectRealModelSourcesAndRestoreCachedSelection() async throws {
-        let first = SidebarMetadataSource(id: "first", title: "第一源")
-        let second = SidebarMetadataSource(id: "second", title: "第二源")
-        let home = FilmHomeModel(sources: [first, second])
-        defer { home.close() }
-        await home.loadIfNeeded()?.value
-        let sidebar = try sidebar(.film(home: home, settings: nil))
-        let window = try await host(sidebar)
-        defer { unhost(window) }
-        let source = try item("filmSource", in: sidebar, as: UIButton.self)
-        var actions = try menuActions(source)
-        XCTAssertEqual(actions.map(\.title), ["第一源", "第二源"])
-        XCTAssertEqual(actions.map(\.state), [.on, .off])
-        XCTAssertEqual(source.configuration?.subtitle, "第一源")
-
-        // Invoke the actual menu handler, not FilmHomeModel.selectSource directly.
-        invoke(try XCTUnwrap(actions.first { $0.title == "第二源" }))
-        await eventually("second metadata source selected through sidebar") {
-            home.selectedSourceID == "second" && !home.isLoading &&
-                home.sections.first?.items.first?.sourceID == "second" &&
-                source.configuration?.subtitle == "第二源"
-        }
-        actions = try menuActions(source)
-        XCTAssertEqual(actions.map(\.state), [.off, .on])
-        attach(sidebar, "sidebar-film-second-metadata-selection")
-        invoke(try XCTUnwrap(actions.first { $0.title == "第一源" }))
-        await eventually("cached first metadata source restored through sidebar") {
-            home.selectedSourceID == "first" && !home.isLoading &&
-                home.sections.first?.items.first?.sourceID == "first" &&
-                source.configuration?.subtitle == "第一源"
-        }
-        XCTAssertEqual(try menuActions(source).map(\.state), [.on, .off])
-        let firstReads = await first.reads
-        let secondReads = await second.reads
-        XCTAssertEqual(firstReads, 2)
-        XCTAssertEqual(secondReads, 1)
+        attach(film, "sidebar-film-shared-layout")
     }
 
     func testVideoRowsPreserveExactIdentityOrderAndSnapshotChangesWithoutNavigationOrRequests() async throws {
@@ -252,10 +190,7 @@ final class MeowfilmSidebarTests: XCTestCase {
             video(key: composed, name: "组合形式", order: 40),
         ]
         let fixture = try await filmFixture(videos: catalog)
-        let metadata = SidebarMetadataSource(id: "metadata", title: "测试元数据")
-        let home = FilmHomeModel(sources: [metadata])
-        defer { home.close() }
-        let sidebar = try sidebar(.film(home: home, settings: fixture.model))
+        let sidebar = try sidebar(.film(settings: fixture.model))
         let window = try await host(sidebar)
         defer { unhost(window) }
         var navigations: [MeowfilmPrimaryPage] = []
@@ -308,10 +243,7 @@ final class MeowfilmSidebarTests: XCTestCase {
         await settle()
         XCTAssertTrue(navigations.isEmpty)
         XCTAssertEqual(settingsCount, 0)
-        XCTAssertEqual(home.selectedSourceID, "metadata")
-        let metadataReads = await metadata.reads
         let callsAfterRefresh = await fixture.transport.calls
-        XCTAssertEqual(metadataReads, 0)
         XCTAssertEqual(callsAfterRefresh, ["status"], "Only the test's explicit directory refresh is allowed")
         attach(sidebar, "sidebar-film-video-snapshot-updated")
 
@@ -324,7 +256,6 @@ final class MeowfilmSidebarTests: XCTestCase {
         let emptyParts = try parts(in: sidebar)
         XCTAssertEqual(emptyParts.upper.arrangedSubviews.filter { !$0.isHidden }.map(\.accessibilityIdentifier),
                        ["app.sidebar.home"])
-        XCTAssertEqual(emptyParts.lower.arrangedSubviews.map(\.accessibilityIdentifier), ["app.sidebar.filmSource"])
         assertLayout(emptyParts, in: sidebar)
         try assertSettingsReachable(emptyParts, in: sidebar)
         XCTAssertTrue(navigations.isEmpty)
@@ -334,7 +265,7 @@ final class MeowfilmSidebarTests: XCTestCase {
         attach(sidebar, "sidebar-film-empty-directory")
     }
 
-    func testNovelShowsAllAddedSourcesAndCategoryAndUpdatesWithoutNavigationOrRequests() async throws {
+    func testNovelShowsAllAddedSourcesAndUpdatesAvailabilityWithoutNavigationOrRequests() async throws {
         let catalog = [
             try bookSource(id: "book.two", name: "同名书源", order: 30, actions: ["search"]),
             try bookSource(id: "disabled", name: "停用书源", order: 20, enabled: false),
@@ -346,7 +277,7 @@ final class MeowfilmSidebarTests: XCTestCase {
         var dismissCount = 0
         var settingsCount = 0
         var pages: [MeowfilmPrimaryPage] = []
-        let sidebar = try sidebar(.novel(feature: fixture.feature, home: { homeCount += 1 }))
+        let sidebar = try sidebar(.novel(discovery: fixture.discovery, home: { homeCount += 1 }))
         sidebar.onDismiss = { dismissCount += 1 }
         sidebar.onSettings = { settingsCount += 1 }
         sidebar.onSelectPage = { pages.append($0) }
@@ -354,24 +285,20 @@ final class MeowfilmSidebarTests: XCTestCase {
         defer { unhost(window) }
         let parts = try parts(in: sidebar)
         assertLayout(parts, in: sidebar)
-        XCTAssertEqual(Array(parts.upper.arrangedSubviews.prefix(2)).map(\.accessibilityIdentifier),
-                       ["app.sidebar.home", "app.sidebar.category"])
-        XCTAssertTrue(parts.lower.isHidden)
-        XCTAssertTrue(parts.lower.arrangedSubviews.isEmpty)
+        XCTAssertEqual(parts.upper.arrangedSubviews.first?.accessibilityIdentifier, "app.sidebar.home")
         XCTAssertNil(identified("app.sidebar.shelf", in: sidebar))
         XCTAssertNil(identified("app.sidebar.musicSource", in: sidebar))
         XCTAssertNil(identified("app.sidebar.filmSource", in: sidebar))
-        let category = try item("category", in: sidebar, as: UIStackView.self)
-        XCTAssertEqual(category.accessibilityLabel, "分类")
-        assertDisplayOnly(category)
         var rows = try bookRows(in: sidebar)
         XCTAssertEqual(try rows.map(bookRowID), ["book.one", "disabled", "book.two", "no-explore"])
+        XCTAssertEqual(try rows.map(bookRowID), fixture.feature.sources.map(\.id))
         XCTAssertEqual(rows.map(\.accessibilityLabel), ["同名书源", "停用书源", "同名书源", "禁止发现书源"])
+        XCTAssertEqual(rows.map(\.isEnabled), [true, false, false, false])
         let identifiers = try rows.map { try XCTUnwrap($0.accessibilityIdentifier) }
         XCTAssertEqual(Set(identifiers).count, catalog.count)
         let initialRows = Dictionary(uniqueKeysWithValues: try rows.map { (try bookRowID($0), $0) })
         for row in rows {
-            assertDisplayOnly(row)
+            XCTAssertTrue(row.accessibilityTraits.contains(.button))
             XCTAssertTrue(row.isDescendant(of: parts.upper))
         }
         let initialCalls = await fixture.runtime.calls
@@ -381,16 +308,21 @@ final class MeowfilmSidebarTests: XCTestCase {
         var updated = catalog.filter { $0.id != "disabled" }
         updated[0].name = "已更新书源"
         updated[0].order = -1
+        updated[0].actions = ["search", "explore"]
+        updated[1].enabled = false
+        updated[2].enabledExplore = true
         updated.append(try bookSource(id: "new-source", name: "新增书源", order: 50, actions: ["search"]))
         await fixture.runtime.replaceSources(updated)
         try await fixture.feature.refreshSources()
         await eventually("novel snapshot changes reach the open sidebar") {
             (try? self.bookRows(in: sidebar).map(self.bookRowID)) == ["book.two", "book.one", "no-explore", "new-source"] &&
-                (try? self.bookRows(in: sidebar).first?.accessibilityLabel) == "已更新书源"
+                (try? self.bookRows(in: sidebar).first?.accessibilityLabel) == "已更新书源" &&
+                (try? self.bookRows(in: sidebar).map(\.isEnabled)) == [true, false, true, false]
         }
         rows = try bookRows(in: sidebar)
+        XCTAssertEqual(try rows.map(bookRowID), fixture.feature.sources.map(\.id))
         for row in rows {
-            assertDisplayOnly(row)
+            XCTAssertTrue(row.accessibilityTraits.contains(.button))
             if let previous = initialRows[try bookRowID(row)] {
                 XCTAssertTrue(row === previous, "Snapshot changes retain the row for the same installation")
             }
@@ -406,11 +338,11 @@ final class MeowfilmSidebarTests: XCTestCase {
 
         await fixture.runtime.replaceSources([])
         try await fixture.feature.refreshSources()
-        await eventually("empty novel snapshot hides source rows but retains category") {
+        await eventually("empty novel snapshot leaves the home action") {
             (try? self.bookRows(in: sidebar).isEmpty) == true
         }
         XCTAssertEqual(parts.upper.arrangedSubviews.filter { !$0.isHidden }.map(\.accessibilityIdentifier),
-                       ["app.sidebar.home", "app.sidebar.category"])
+                       ["app.sidebar.home"])
         assertLayout(parts, in: sidebar)
         try assertSettingsReachable(parts, in: sidebar)
         try item("home", in: sidebar, as: UIButton.self).sendActions(for: .touchUpInside)
@@ -420,8 +352,85 @@ final class MeowfilmSidebarTests: XCTestCase {
         XCTAssertTrue(pages.isEmpty)
         let finalCalls = await fixture.runtime.calls
         XCTAssertEqual(finalCalls, ["library.list", "library.list", "library.list"],
-                       "Display rows and the existing home callback must not invoke discovery")
+                       "Rendering source choices and the home callback must not invoke discovery")
         attach(sidebar, "sidebar-novel-empty-directory")
+    }
+
+    func testNovelSourceButtonsSelectDismissObserveSelectionAndStopUpdatingWhenClosed() async throws {
+        let catalog = [
+            try bookSource(id: "first", name: "第一书源", order: 0),
+            try bookSource(id: "disabled", name: "停用书源", order: 1, enabled: false),
+            try bookSource(id: "no-explore", name: "禁止发现书源", order: 2, enabledExplore: false),
+            try bookSource(id: "search-only", name: "仅搜索书源", order: 3, actions: ["search"]),
+            try bookSource(id: "second", name: "第二书源", order: 4),
+        ]
+        let fixture = try await novelFixture(sources: catalog)
+        fixture.discovery.selectSource(id: "first")
+        var homeCount = 0
+        var dismissCount = 0
+        let sidebar = try sidebar(.novel(discovery: fixture.discovery, home: { homeCount += 1 }))
+        sidebar.onDismiss = { dismissCount += 1 }
+        sidebar.onSettings = { XCTFail("A source choice must not open settings") }
+        sidebar.onSelectPage = { _ in XCTFail("A source choice must stay on the novel page") }
+        let window = try await host(sidebar)
+        defer { unhost(window) }
+        let rows = try bookRows(in: sidebar)
+        let first = try XCTUnwrap(rows.first)
+        let second = try XCTUnwrap(rows.last)
+        XCTAssertEqual(rows.map(\.isEnabled), [true, false, false, false, true])
+        XCTAssertEqual(rows.filter(\.isSelected), [first])
+        XCTAssertEqual(fixture.discovery.availableSources.map(\.id), ["first", "second"])
+
+        second.sendActions(for: .touchUpInside)
+        await eventually("source button selects the shared discovery session") {
+            fixture.discovery.selectedSource?.id == "second" && second.isSelected && !first.isSelected
+        }
+        XCTAssertEqual(dismissCount, 1)
+        XCTAssertEqual(homeCount, 0)
+        let panel = try XCTUnwrap(try parts(in: sidebar).scroll.superview as? WindowGradientView)
+        XCTAssertEqual(second.configuration?.background.backgroundColor, UIColor(panel.theme.buttonSelected))
+        XCTAssertEqual(second.configuration?.baseForegroundColor, UIColor(panel.theme.accent))
+        XCTAssertEqual(first.configuration?.background.backgroundColor, .clear)
+        assertLayout(try parts(in: sidebar), in: sidebar)
+
+        fixture.discovery.selectSource(id: "first")
+        await eventually("selection changes outside the sidebar update its buttons") {
+            first.isSelected && !second.isSelected
+        }
+        XCTAssertEqual(dismissCount, 1, "Observing a selection must not dispatch a dismissal")
+        try item("home", in: sidebar, as: UIButton.self).sendActions(for: .touchUpInside)
+        XCTAssertEqual(homeCount, 1)
+        XCTAssertEqual(dismissCount, 2)
+        XCTAssertEqual(fixture.discovery.selectedSource?.id, "first", "Home must preserve the discovery selection")
+
+        let closed = expectation(description: "sidebar finished closing")
+        sidebar.hide { closed.fulfill() }
+        await fulfillment(of: [closed], timeout: 3)
+        fixture.discovery.selectSource(id: "second")
+        var updated = catalog
+        updated[4].name = "第二书源已更新"
+        updated.append(try bookSource(id: "third", name: "第三书源", order: 5))
+        await fixture.runtime.replaceSources(updated)
+        try await fixture.feature.refreshSources()
+
+        let reopened = try self.sidebar(.novel(discovery: fixture.discovery, home: {}))
+        let reopenedWindow = try await host(reopened)
+        defer { unhost(reopenedWindow) }
+        await eventually("reopening observes current sources and selection") {
+            (try? self.bookRows(in: reopened).map(self.bookRowID)) == updated.map(\.id) &&
+                (try? self.bookRows(in: reopened).filter(\.isSelected).map(self.bookRowID)) == ["second"]
+        }
+        let reopenedSecond = try XCTUnwrap(try bookRows(in: reopened).first { try bookRowID($0) == "second" })
+        XCTAssertEqual(reopenedSecond.accessibilityLabel, "第二书源已更新")
+        XCTAssertEqual(try bookRows(in: sidebar).map(bookRowID), catalog.map(\.id))
+        XCTAssertTrue(first.isSelected, "The closed sidebar must unsubscribe from selection changes")
+        XCTAssertFalse(second.isSelected)
+        XCTAssertEqual(second.accessibilityLabel, "第二书源", "The closed sidebar must unsubscribe from source changes")
+        XCTAssertEqual(dismissCount, 2)
+        XCTAssertEqual(homeCount, 1)
+        let calls = await fixture.runtime.calls
+        XCTAssertEqual(calls, ["library.list", "library.list"],
+                       "The sidebar selects the session; it must not activate a hidden discovery page")
     }
 
     func testCompactLandscapeAndAccessibilityTypeKeepAllDomainsScrollableAndSettingsFixed() async throws {
@@ -434,8 +443,6 @@ final class MeowfilmSidebarTests: XCTestCase {
             try bookSource(id: "layout-book-\($0)", name: "书源 \($0) · 用于验证长名称完整换行显示",
                            order: Double($0), enabled: $0 % 2 == 0, actions: ["search"])
         })
-        let home = FilmHomeModel(sources: [SidebarMetadataSource(id: "fixture", title: "豆瓣")])
-        defer { home.close() }
         let cases: [(String, CGSize, UIContentSizeCategory)] = [
             ("compact", CGSize(width: 320, height: 568), .large),
             ("landscape", CGSize(width: 844, height: 390), .large),
@@ -448,11 +455,10 @@ final class MeowfilmSidebarTests: XCTestCase {
                 let sidebar: MeowfilmSidebarView
                 switch domain {
                 case "music": sidebar = try musicSidebar()
-                case "film": sidebar = try self.sidebar(.film(home: home, settings: fixture.model))
-                default: sidebar = try self.sidebar(.novel(feature: novel.feature, home: {}))
+                case "film": sidebar = try self.sidebar(.film(settings: fixture.model))
+                default: sidebar = try self.sidebar(.novel(discovery: novel.discovery, home: {}))
                 }
                 let window = try await host(sidebar, size: size, category: category)
-                if domain == "music" { try await waitForMusicMenu(sidebar) }
                 let parts = try parts(in: sidebar)
                 assertLayout(parts, in: sidebar)
                 XCTAssertEqual(sidebar.bounds.size, size)
@@ -468,19 +474,26 @@ final class MeowfilmSidebarTests: XCTestCase {
                     for label in descendants(button).compactMap({ $0 as? UILabel }) where !label.isHidden {
                         let fitting = label.sizeThatFits(CGSize(width: label.bounds.width, height: .greatestFiniteMagnitude))
                         XCTAssertGreaterThanOrEqual(label.bounds.height + 1, fitting.height,
-                                                    "Menu titles and selected values must fit at the requested text size")
+                                                    "Menu titles must fit at the requested text size")
                     }
                 }
-                for row in try videoRows(in: sidebar) + bookRows(in: sidebar) {
+                for row in try videoRows(in: sidebar) {
                     let label = try XCTUnwrap(row.arrangedSubviews.last as? UILabel)
                     let fitting = label.sizeThatFits(CGSize(width: label.bounds.width, height: .greatestFiniteMagnitude))
                     XCTAssertGreaterThanOrEqual(label.bounds.height + 1, fitting.height, "Source names must not be vertically clipped")
                     assertDisplayOnly(row)
                 }
+                for row in try bookRows(in: sidebar) {
+                    let label = try XCTUnwrap(row.titleLabel)
+                    let fitting = label.sizeThatFits(CGSize(width: label.bounds.width, height: .greatestFiniteMagnitude))
+                    XCTAssertGreaterThanOrEqual(label.bounds.height + 1, fitting.height, "Source names must not be vertically clipped")
+                    XCTAssertTrue(row.accessibilityTraits.contains(.button))
+                    XCTAssertFalse(row.isEnabled, "These layout fixtures only support search")
+                }
                 attach(sidebar, "sidebar-\(domain)-\(name)-top")
-                if domain != "music" || size.width > size.height || category.isAccessibilityCategory {
+                if domain != "music" {
                     XCTAssertGreaterThan(parts.scroll.contentSize.height, parts.scroll.bounds.height,
-                                         "Overflow must be scrollable instead of compressing the groups")
+                                         "Long source lists must be scrollable instead of compressing the rows")
                 }
                 try assertSettingsReachable(parts, in: sidebar)
                 attach(sidebar, "sidebar-\(domain)-\(name)-settings")
@@ -503,8 +516,7 @@ final class MeowfilmSidebarTests: XCTestCase {
     }
 
     private func musicSidebar(selected: MeowfilmPrimaryPage = .recommend) throws -> MeowfilmSidebarView {
-        let music = try XCTUnwrap(try assembly().music)
-        return try sidebar(.music(source: MusicHomeSourceSettingsModel(model: music), selectedPage: selected))
+        try sidebar(.music(selectedPage: selected))
     }
 
     private func filmFixture(videos: [FilmVideoSource]) async throws -> SidebarFilmFixture {
@@ -544,18 +556,10 @@ final class MeowfilmSidebarTests: XCTestCase {
                         options: options, order: order, detection: detection)
     }
 
-    private func waitForMusicMenu(_ sidebar: MeowfilmSidebarView) async throws {
-        let source = try item("musicSource", in: sidebar, as: UIButton.self)
-        await eventually("music source selection rendered") { source.menu != nil && source.configuration?.subtitle != nil }
-        sidebar.setNeedsLayout()
-        sidebar.layoutIfNeeded()
-    }
-
     private struct Parts {
         let icon: UIImageView
         let card: UIView
         let upper: UIStackView
-        let lower: UIStackView
         let settings: UIButton
         let scroll: UIScrollView
     }
@@ -564,7 +568,6 @@ final class MeowfilmSidebarTests: XCTestCase {
         try Parts(icon: item("icon", in: sidebar, as: UIImageView.self),
                   card: item("card", in: sidebar, as: UIView.self),
                   upper: item("upper", in: sidebar, as: UIStackView.self),
-                  lower: item("lower", in: sidebar, as: UIStackView.self),
                   settings: item("settings", in: sidebar, as: UIButton.self),
                   scroll: item("scroll", in: sidebar, as: UIScrollView.self))
     }
@@ -583,7 +586,7 @@ final class MeowfilmSidebarTests: XCTestCase {
         XCTAssertEqual(parts.settings.frame.maxY, safeArea.maxY - 16, accuracy: 1, file: file, line: line)
         XCTAssertEqual(parts.scroll.frame.maxY, parts.settings.frame.minY - 16, accuracy: 1, file: file, line: line)
         let icon = frame(parts.icon, in: sidebar), card = frame(parts.card, in: sidebar)
-        let upper = frame(parts.upper, in: sidebar), lower = frame(parts.lower, in: sidebar)
+        let upper = frame(parts.upper, in: sidebar)
         let settings = frame(parts.settings, in: sidebar)
         XCTAssertEqual(icon.midX, frame(parts.scroll, in: sidebar).midX, accuracy: 1, file: file, line: line)
         XCTAssertLessThan(icon.maxY, card.minY, file: file, line: line)
@@ -592,16 +595,12 @@ final class MeowfilmSidebarTests: XCTestCase {
         XCTAssertEqual(parts.card.backgroundColor ?? .clear, .clear, file: file, line: line)
         XCTAssertTrue(parts.icon.isDescendant(of: parts.scroll), file: file, line: line)
         XCTAssertTrue(parts.card.isDescendant(of: parts.scroll), file: file, line: line)
-        XCTAssertTrue(parts.upper.isDescendant(of: parts.card), file: file, line: line)
-        XCTAssertTrue(parts.lower.isDescendant(of: parts.card), file: file, line: line)
+        XCTAssertTrue(parts.upper.superview === parts.card, file: file, line: line)
+        XCTAssertNil(identified("app.sidebar.musicSource", in: sidebar), file: file, line: line)
+        XCTAssertNil(identified("app.sidebar.filmSource", in: sidebar), file: file, line: line)
         XCTAssertFalse(parts.settings.isDescendant(of: parts.scroll), file: file, line: line)
         XCTAssertEqual(upper.minY, card.minY, accuracy: 1, file: file, line: line)
-        if parts.lower.isHidden {
-            XCTAssertEqual(upper.maxY, card.maxY, accuracy: 1, file: file, line: line)
-        } else {
-            XCTAssertEqual(lower.minY - upper.maxY, 20, accuracy: 1, file: file, line: line)
-            XCTAssertEqual(lower.maxY, card.maxY, accuracy: 1, file: file, line: line)
-        }
+        XCTAssertEqual(upper.maxY, card.maxY, accuracy: 1, file: file, line: line)
         XCTAssertEqual(parts.scroll.contentSize.width, parts.scroll.bounds.width, accuracy: 1, file: file, line: line)
         XCTAssertEqual(frame(parts.card, in: parts.scroll).maxY + 16,
                        parts.scroll.contentSize.height, accuracy: 1, file: file, line: line)
@@ -609,12 +608,10 @@ final class MeowfilmSidebarTests: XCTestCase {
             XCTAssertGreaterThan(view.bounds.width, 0, file: file, line: line)
             XCTAssertGreaterThan(view.bounds.height, 0, file: file, line: line)
         }
-        for group in parts.lower.isHidden ? [upper] : [upper, lower] {
-            XCTAssertGreaterThanOrEqual(group.minX + 1, card.minX, file: file, line: line)
-            XCTAssertLessThanOrEqual(group.maxX, card.maxX + 1, file: file, line: line)
-        }
-        let ownedViews = [sidebar, parts.icon, parts.card, parts.upper, parts.lower, parts.settings, parts.scroll]
-            + parts.upper.arrangedSubviews + parts.lower.arrangedSubviews
+        XCTAssertEqual(upper.minX, card.minX, accuracy: 1, file: file, line: line)
+        XCTAssertEqual(upper.maxX, card.maxX, accuracy: 1, file: file, line: line)
+        let ownedViews = [sidebar, parts.icon, parts.card, parts.upper, parts.settings, parts.scroll]
+            + parts.upper.arrangedSubviews
             + descendants(parts.card).filter { $0 is UIStackView || $0 is UILabel || $0 is UIImageView }
         for view in ownedViews where !view.isHidden {
             XCTAssertFalse(view.hasAmbiguousLayout, view.accessibilityIdentifier ?? String(describing: type(of: view)), file: file, line: line)
@@ -663,7 +660,7 @@ final class MeowfilmSidebarTests: XCTestCase {
                 }
             }
         }
-        for stack in [parts.upper, parts.lower] + descendants(parts.upper).compactMap({ $0 as? UIStackView }) {
+        for stack in [parts.upper] + descendants(parts.upper).compactMap({ $0 as? UIStackView }) {
             guard stack.axis == .vertical, !stack.isHidden else { continue }
             XCTAssertEqual(stack.spacing, 4, file: file, line: line)
             let rows = stack.arrangedSubviews.filter { !$0.isHidden }
@@ -741,28 +738,17 @@ final class MeowfilmSidebarTests: XCTestCase {
                              siteKey: try XCTUnwrap(String(data: site, encoding: .utf8)))
     }
 
-    private func bookRows(in sidebar: UIView) throws -> [UIStackView] {
+    private func bookRows(in sidebar: UIView) throws -> [UIButton] {
         sidebar.layoutIfNeeded()
         return try descendants(sidebar).filter { $0.accessibilityIdentifier?.hasPrefix("app.sidebar.book.") == true }
-            .map { try XCTUnwrap($0 as? UIStackView) }
+            .map { try XCTUnwrap($0 as? UIButton) }
             .sorted { frame($0, in: sidebar).minY < frame($1, in: sidebar).minY }
     }
 
-    private func bookRowID(_ row: UIStackView) throws -> String {
+    private func bookRowID(_ row: UIButton) throws -> String {
         let id = try XCTUnwrap(row.accessibilityIdentifier)
         let bytes = try XCTUnwrap(Data(base64Encoded: String(id.dropFirst("app.sidebar.book.".count))))
         return try XCTUnwrap(String(data: bytes, encoding: .utf8))
-    }
-
-    private func menuActions(_ button: UIButton) throws -> [UIAction] {
-        let menu = try XCTUnwrap(button.menu)
-        return try menu.children.map { try XCTUnwrap($0 as? UIAction) }
-    }
-
-    private func invoke(_ action: UIAction) {
-        let sender = UIButton(type: .system)
-        sender.addAction(action, for: .touchUpInside)
-        sender.sendActions(for: .touchUpInside)
     }
 
     private func item<T: UIView>(_ suffix: String, in root: UIView, as type: T.Type) throws -> T {
@@ -866,19 +852,6 @@ final class MeowfilmSidebarTests: XCTestCase {
     }
 }
 
-private actor SidebarMetadataSource: FilmSource {
-    nonisolated let descriptor: FilmSourceDescriptor
-    private(set) var reads = 0
-
-    init(id: String, title: String) { descriptor = .init(id: id, title: title) }
-
-    func loadHome(refresh: Bool) async throws -> [FilmHomeSection] {
-        reads += 1
-        return [.init(id: "movies", title: descriptor.title,
-                      items: [.init(sourceID: descriptor.id, id: "shared", title: "\(descriptor.title)影片")])]
-    }
-}
-
 @MainActor
 private final class SidebarFilmFixture {
     let directory: URL
@@ -956,6 +929,7 @@ private actor SidebarSourceTransport {
 private final class SidebarNovelFixture {
     let directory: URL
     let feature: NovelFeature
+    let discovery: NovelDiscoverySession
     let runtime: SidebarNovelRuntime
 
     init(sources: [NovelSource]) throws {
@@ -966,9 +940,11 @@ private final class SidebarNovelFixture {
         feature = try NovelFeature(
             library: NovelLibrary(store: DocumentStore(baseURL: directory, namespace: NovelLibrary.namespace)),
             rules: NovelRuleProcessor(runtime: runtime), runtime: runtime)
+        discovery = NovelDiscoverySession(feature: feature)
     }
 
     func close() async throws {
+        await discovery.close()
         await feature.close()
         try FileManager.default.removeItem(at: directory)
     }

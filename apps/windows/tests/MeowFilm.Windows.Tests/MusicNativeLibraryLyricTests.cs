@@ -1,6 +1,8 @@
+using System.IO;
 using System.Text;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Capabilities.PlaybackCache;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -50,16 +52,26 @@ public static partial class MusicNativeLibraryTests
 
     private static async Task LyricDisplayRestart()
     {
-        await using var f = new Fixture(); var owner = f.Owner();
-        var (song, sourceKey) = await SeedLyricSong(owner);
+        await using var f = new Fixture();
+        string directory = TestWorkspace.DataPath("native-lyric-display-" + Guid.NewGuid().ToString("N"), MusicPresentationCache.DirectoryName);
+        Directory.CreateDirectory(directory);
+        JsonObject song;
+        string sourceKey;
         var lines = CurrentLyricRows();
         lines[0]!["translation"] = "译文";
         lines[0]!["romanization"] = "A B";
-        await Ok(owner, "music.lyrics.display.save", new { song, sourceKey, lines });
-        byte[] bytes = f.Store.Bytes!.ToArray(); int writes = f.Store.Writes;
-        await owner.DisposeAsync();
+        byte[] bytes;
+        int writes;
+        await using (var owner = new MusicLibraryOwner(f.Store, presentationCacheRoot: directory))
+        {
+            var seeded = await SeedLyricSong(owner); song = seeded.Song; sourceKey = seeded.SourceKey;
+            await Ok(owner, "music.lyrics.display.save", new { song, sourceKey, lines });
+            await owner.PresentationCache.DrainAsync();
+            bytes = f.Store.Bytes!.ToArray(); writes = f.Store.Writes;
+        }
+        Check(Directory.EnumerateFiles(directory, "*.resource").Count() == 1);
 
-        var reopened = f.Owner();
+        await using var reopened = new MusicLibraryOwner(f.Store, presentationCacheRoot: directory);
         var restored = await Ok(reopened, "music.lyrics.display.get", new { song, sourceKey });
         Check(restored.GetProperty("state").GetString() == "restored" && restored.GetProperty("sourceKey").GetString() == sourceKey);
         Check(JsonNode.DeepEquals(JsonNode.Parse(restored.GetProperty("lines").GetRawText()), lines));
@@ -149,17 +161,15 @@ public static partial class MusicNativeLibraryTests
     }
     private sealed class LyricCacheStore : IDocumentStore
     {
-        internal byte[]? Data;
         public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         {
-            Check(ns == MusicLibraryOwner.LyricDisplayNamespace); token.ThrowIfCancellationRequested();
-            return Task.FromResult(new DocumentSnapshot(Data?.ToArray(), Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data)));
+            token.ThrowIfCancellationRequested();
+            throw new InvalidOperationException("Unexpected document cache read in native library fixture: " + ns);
         }
         public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken token = default)
         {
-            Check(ns == MusicLibraryOwner.LyricDisplayNamespace); token.ThrowIfCancellationRequested();
-            Check(expected == (Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data)));
-            Data = bytes.ToArray(); return Task.FromResult(DocumentFingerprint.FromBytes(Data));
+            token.ThrowIfCancellationRequested();
+            throw new InvalidOperationException("Unexpected document cache write in native library fixture: " + ns);
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

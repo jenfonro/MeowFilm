@@ -32,7 +32,7 @@ export function parseIOSLaunchArguments(argv) {
 export function parseIOSConfiguration(bytes) {
   const value = decodeJSONValue(bytes);
   if (value === null || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).length !== (value.nativeSettings === true ? 3 : 2) || !Object.hasOwn(value, 'sessionId') ||
+      !Object.hasOwn(value, 'sessionId') ||
       !Object.hasOwn(value, 'dataRoot') ||
       typeof value.dataRoot !== 'string' || !isAbsolute(value.dataRoot) ||
       /[\u0000-\u001f\u007f]/.test(value.dataRoot)) throw new BridgeError('INVALID_REQUEST');

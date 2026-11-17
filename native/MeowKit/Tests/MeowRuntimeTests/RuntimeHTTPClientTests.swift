@@ -456,11 +456,6 @@ final class RuntimeHTTPClientTests: XCTestCase {
     }
 
     func testAppProvidersUseTheirOwnContractsAndClosedErrorCodes() async throws {
-        XCTAssertEqual(RuntimeModule.allCases.map { [$0.rawValue, $0.contract] }, [
-            ["music", "music.script.v3"], ["cat", "cat.script.v2"], ["source", "source.runtime.v2"],
-            ["pan", "pan.runtime.v1"], ["tmdb", "tmdb.data.v1"], ["douban", "douban.data.v1"],
-            ["film", "film.playback.v1"], ["netease", "netease.token.v1"], ["music-platform", "music.platform.v1"]
-        ])
         let client = try client()
         for (module, operation, contract, code, foreignCode): (RuntimeModule, String, String, String, String) in [
             (.pan, "providers", "pan.runtime.v1", "LOGIN_EXPIRED", "NO_MATCH"),
@@ -1033,21 +1028,18 @@ final class RuntimeHTTPClientTests: XCTestCase {
         await fulfillment(of: [stopped], timeout: 3); await client.close()
     }
 
-    func testAppDescribeChecksRequiredModulesAndMethodsWithoutRejectingExtraMaterial() async throws {
+    func testAppDescribeChecksRequiredModuleIdentitiesWithoutMethodAdmissionOrOrderSnapshots() async throws {
         let client = try client()
         let modules: [RuntimeValue] = [
             .object(["id": .string("music"), "version": .string("0.8.0"), "contract": .string("music.script.v3")]),
             .object(["id": .string("cat"), "version": .string("0.2.0"), "contract": .string("cat.script.v2")]),
             .object(["id": .string("source"), "version": .string("0.3.0"), "contract": .string("source.runtime.v2")]),
             .object(["id": .string("pan"), "version": .string("0.1.0"), "contract": .string("pan.runtime.v1")]),
-            .object(["id": .string("tmdb"), "version": .string("0.1.0"), "contract": .string("tmdb.data.v1"),
-                "methods": .array(["request", "settings.get", "settings.update"].map { .string("tmdb.data." + $0) })]),
+            .object(["id": .string("tmdb"), "version": .string("0.1.0"), "contract": .string("tmdb.data.v1")]),
             .object(["id": .string("douban"), "version": .string("0.1.0"), "contract": .string("douban.data.v1")]),
             .object(["id": .string("film"), "version": .string("0.1.0"), "contract": .string("film.playback.v1")]),
-            .object(["id": .string("netease"), "version": .string("0.1.0"), "contract": .string("netease.token.v1"),
-                "methods": .array([.string("netease.token.get")])]),
-            .object(["id": .string("music-platform"), "version": .string("0.1.0"), "contract": .string("music.platform.v1"),
-                "methods": .array(["cache.clear", "describe", "request", "session.update"].map { .string("music.platform." + $0) })])
+            .object(["id": .string("netease"), "version": .string("0.1.0"), "contract": .string("netease.token.v1")]),
+            .object(["id": .string("music-platform"), "version": .string("0.1.0"), "contract": .string("music.platform.v1")])
         ]
         var reordered = modules
         reordered.swapAt(3, 4)
@@ -1067,28 +1059,25 @@ final class RuntimeHTTPClientTests: XCTestCase {
         }
         for (index, field, value) in [
             (2, "version", RuntimeValue.string("0.2.0")),
-            (4, "version", .string("0.2.0")), (4, "methods", .array([])),
+            (4, "version", .string("0.2.0")),
             (4, "id", .string("music")),
             (7, "version", .string("0.2.0")), (7, "contract", .string("music.script.v3")),
-            (7, "methods", .array([])),
-            (7, "methods", .array([.string("netease.token.other")])), (7, "id", .string("music")),
-            (8, "methods", .array([])), (8, "methods", .array([.string("music.platform.other")]))
+            (7, "id", .string("music"))
         ] {
             var supplied = modules
             guard case .object(var fields) = supplied[index] else { return XCTFail("module fixture") }
             fields[field] = value; supplied[index] = .object(fields); invalid.append(supplied)
         }
-        var expanded = reordered
-        if case .object(var fields) = expanded[7] {
-            fields["methods"] = .array([.string("netease.token.get"), .string("extra"), .string("netease.token.get")])
-            expanded[7] = .object(fields)
+        var expanded = modules
+        for (index, methods): (Int, RuntimeValue) in [
+            (4, .array([])), (7, .array([.string("netease.token.other")])),
+            (8, .object(["future": .bool(true)]))
+        ] {
+            if case .object(var fields) = expanded[index] {
+                fields["methods"] = methods; expanded[index] = .object(fields)
+            }
         }
-        var requiredOnly = modules
-        if case .object(var fields) = requiredOnly[4] {
-            fields["methods"] = .array([.string("tmdb.data.request")])
-            requiredOnly[4] = .object(fields)
-        }
-        let valid = [modules, reordered, requiredOnly, expanded + [.object(["id": .string("future")])]]
+        let valid = [modules, reordered, expanded + [.object(["id": .string("future")])]]
         for (index, supplied) in (valid + invalid).enumerated() {
             RuntimeTestURLProtocol.fixture.set { _, transport in
                 transport.respond(.object(["ok": .bool(true), "contract": .string("runtime.http.v1"), "value": .object([

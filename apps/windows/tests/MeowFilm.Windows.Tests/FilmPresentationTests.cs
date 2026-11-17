@@ -23,7 +23,7 @@ public static class FilmPresentationTests
             () => MusicQualityConsumerTests.Sta(SkeletonPresentation));
         yield return new("film-presentation: transparent four-rail home matches card and paging interactions",
             () => MusicQualityConsumerTests.Sta(HomePresentation));
-        yield return new("film-presentation: more opens data while all cards open the playback page",
+        yield return new("film-presentation: section title opens data while all cards open the playback page",
             () => MusicQualityConsumerTests.Sta(DataNavigation));
         yield return new("film-presentation: classified list error uses the floating notice and real source selection recovers it",
             () => MusicQualityConsumerTests.Sta(PlaybackListFailure));
@@ -99,6 +99,7 @@ public static class FilmPresentationTests
         await using var module = new FilmCapability(new ImmediateFilmSource());
         await module.NavigateAsync(FilmCapability.HomeRoute, default);
         var view = (FilmView)module.View;
+        MeowFilm.Desktop.Artwork.ArtworkScope.SetLoader(view, new FilmPlaybackFixture.BundledArtworkLoader());
         var window = WindowFor(view, 1160, 760);
         try
         {
@@ -117,32 +118,43 @@ public static class FilmPresentationTests
             var shelves = Visuals(view).OfType<FilmShelf>().ToArray();
             Check(shelves.Length == 4 && shelves.All(shelf =>
                 ((ListBox)((Shelf)shelf.FindName("Cards")).FindName("ItemsHost")).Items.Count == 12), "four twelve-card rails");
-            var more = Visuals(view).OfType<Button>()
-                .Where(button => button.Content as string == "查看更多").ToArray();
-            var sharedHeading = (Style)view.FindResource("MeowFilm.SectionHeading");
+            var sectionEntries = Visuals(view).OfType<Button>()
+                .Where(button => button.Tag is FilmHomeSection).ToArray();
+            var headingSize = (double)view.FindResource("MeowFilm.Font.Size.SectionHeading");
             var sectionTitles = Visuals(view).OfType<TextBlock>()
                 .Where(text => module.Sections.Any(section => section.Title == text.Text))
                 .ToArray();
-            Check(more.Length == 4 && more.All(button =>
+            Check(sectionEntries.Length == 4 && sectionEntries.All(button =>
                 AutomationProperties.GetName(button).StartsWith("查看更多 ", StringComparison.Ordinal)),
-                "each section has one accessible more action");
+                "each section has one accessible title action");
+            Check(!Visuals(view).OfType<Button>().Any(button => button.Content as string == "查看更多"),
+                "no separate more button remains");
             Check(sectionTitles.Length == 4 &&
-                sectionTitles.All(title => ReferenceEquals(title.Style, sharedHeading)),
+                sectionTitles.All(title => title.FontSize == headingSize && title.FontWeight == FontWeights.Normal &&
+                    title.FontFamily.Equals(SystemFonts.MessageFontFamily)),
                 "film section typography reuses the shared music heading role");
             Check(sectionTitles.All(title =>
                 TextOptions.GetTextFormattingMode(title) == TextFormattingMode.Display &&
                 TextOptions.GetTextRenderingMode(title) == TextRenderingMode.Auto),
                 "actual film headings use Display and Auto");
-            foreach (var button in more)
+            foreach (var button in sectionEntries)
             {
                 button.ApplyTemplate();
-                var frame = Visuals(button).OfType<Border>().First();
-                Check(button.BorderThickness == new Thickness(1) && button.MinHeight == 34 &&
-                    frame.CornerRadius == new CornerRadius(17) &&
-                    Visuals(button).OfType<System.Windows.Shapes.Path>().Any() &&
-                    ReferenceEquals(button.Style.BasedOn, view.FindResource("MeowFilm.Button")),
-                    "more action derives shared button typography and keeps its direction affordance");
+                var title = ((FilmHomeSection)button.Tag).Title;
+                var labels = Visuals(button).OfType<TextBlock>().Select(text => text.Text).ToArray();
+                Check(button.BorderThickness == new Thickness(0) && labels.Contains(title) &&
+                    labels.Contains("\uE76C") &&
+                    ReferenceEquals(button.Style.BasedOn, view.FindResource("MeowFilm.QuietButton")) &&
+                    ReferenceEquals(button.FocusVisualStyle, view.FindResource("MeowFilm.FocusVisual")),
+                    "title and native chevron share one borderless button with keyboard focus feedback");
             }
+            var refreshButtons = Visuals(view).OfType<Button>()
+                .Where(button => button.DataContext is FilmHomeSection &&
+                    AutomationProperties.GetName(button).StartsWith("刷新 ", StringComparison.Ordinal)).ToArray();
+            Check(refreshButtons.Length == 4 && refreshButtons.All(button =>
+                button.Content as string == "\uE72C" && button.BorderThickness == new Thickness(0) &&
+                button.IsEnabled == ((FilmHomeSection)button.DataContext).CanRefresh),
+                "each section retains its accessible refresh action as a borderless circular arrow");
 
             var card = Visuals(shelves[0]).OfType<FilmCard>().First();
             var cardText = Visuals(card).OfType<TextBlock>().Where(text => !string.IsNullOrWhiteSpace(text.Text)).ToArray();
@@ -169,6 +181,7 @@ public static class FilmPresentationTests
             await Drain();
             var posterScale = (ScaleTransform)poster.RenderTransform;
             var artwork = Visuals(card).OfType<MeowFilm.Desktop.Artwork.ArtworkImage>().Single();
+            Check(artwork.Source is not null, "home visual evidence includes decoded bundled posters");
             var imageScale = (ScaleTransform)artwork.RenderTransform;
             var scoreScale = (ScaleTransform)score.RenderTransform;
             Check(Math.Abs(posterScale.ScaleX - 1.03) < .001 &&
@@ -193,6 +206,10 @@ public static class FilmPresentationTests
             await Until(() => Math.Abs(rail.HorizontalOffset - pageWidth) < .5 && shelf.IsSettled, "rail advances by complete visible cards");
             Check(previous.Visibility == Visibility.Visible, "backward arrow appears after paging");
 
+            // With twelve cards, one forward page can already reach the end.
+            previous.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Until(() => rail.HorizontalOffset < .5 && shelf.IsSettled,
+                "backward paging restores the first boundary before End");
             RaiseKey(sharedShelf, Key.End);
             await Until(() => Math.Abs(rail.HorizontalOffset - sharedShelf.MaximumOffset) < .5 &&
                 shelf.IsSettled, "End reaches the final boundary");
@@ -201,8 +218,9 @@ public static class FilmPresentationTests
             double retainedOffset = rail.HorizontalOffset;
             view.Visibility = Visibility.Collapsed;
             await Drain();
-            Check(shelf.IsSettled && ReferenceEquals(rail, shelf.ScrollHost),
-                "hidden rail stops motion while retaining its scroll host");
+            Check(shelf.IsSettled && shelf.ScrollHost is null &&
+                Visuals(shelf).OfType<ScrollViewer>().Contains(rail),
+                "hidden rail stops motion and detaches presentation while retaining its scroll host");
             view.Visibility = Visibility.Visible;
             await module.RestoreNavigationAsync(FilmCapability.HomeRoute, default);
             await Drain();
@@ -219,6 +237,18 @@ public static class FilmPresentationTests
             Check(shelf.IsSettled && Math.Abs(rail.HorizontalOffset - pausedOffset) < .5 &&
                 Math.Abs(module.Sections[0].HorizontalOffset - pageWidth) < .5,
                 "hiding during paging stops the offset clock immediately");
+            if (Environment.GetEnvironmentVariable("MEOWFILM_FILM_RAIL_PREVIEW_ROOT") is not null)
+            {
+                view.Visibility = Visibility.Visible;
+                sharedShelf.SetCurrentValue(Shelf.HorizontalOffsetProperty, 0d);
+                window.Left = 24;
+                window.Top = 24;
+                window.Topmost = true;
+                window.UpdateLayout();
+                await Until(() => rail.HorizontalOffset < .5 && shelf.IsSettled,
+                    "the first group is restored before desktop capture");
+                await NativeDesktopCapture.SaveAsync(view, "home-sections");
+            }
         }
         finally
         {
@@ -244,9 +274,9 @@ public static class FilmPresentationTests
             window.UpdateLayout();
             await Drain();
             var movie = module.Sections.Single(section => section.Key == "movie");
-            var more = Visuals(view).OfType<Button>()
+            var sectionEntry = Visuals(view).OfType<Button>()
                 .Single(button => ReferenceEquals(button.Tag, movie));
-            more.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            sectionEntry.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             var movieShelf = Visuals(view).OfType<FilmShelf>()
                 .Single(shelf => ReferenceEquals(shelf.DataContext, movie));
             var homeCard = Visuals(movieShelf).OfType<FilmCard>().First();
@@ -255,7 +285,7 @@ public static class FilmPresentationTests
             cardButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Drain();
             Check(routes.SequenceEqual([FilmCapability.DataRoute, FilmCapability.PlaybackRoute]),
-                "more and cards request their distinct internal destinations");
+                "section title and cards request their distinct internal destinations");
             Check(module.ActiveData.Key == "movie" &&
                 module.Playback?.Item.Id == homeItem.Id && module.Playback.Request.Target.Id == homeItem.PlaybackContext!.Target.Id,
                 "both entry points retain their data and playback contexts");
@@ -667,7 +697,8 @@ public static class FilmPresentationTests
             Calls.Add(new(section, start, limit));
             IReadOnlyList<FilmCardItem> items = Enumerable.Range(start + 1, limit)
                 .Select(index => FilmPlaybackFixture.Card(section.Kind == "movie" ? "movie" : "tv", 100 + index,
-                    $"{section.Title} {index}", "") with
+                    $"{section.Title} {index}", FilmPlaybackFixture.Assets +
+                        FilmPlaybackFixture.Posters[(index - 1) % FilmPlaybackFixture.Posters.Length]) with
                     { Id = $"{section.Key}:{index}", Score = index == 1 ? "8.6" : "" })
                 .ToArray();
             return Task.FromResult(items);

@@ -82,17 +82,17 @@ public sealed partial class MusicNativeApplication : IMusicApplication
     private long accountReceiptEpoch;
 
     public MusicNativeApplication(IDocumentStore store, IMusicLibraryStore libraryStore, IRuntimeClient scriptRuntime)
-        : this(store, libraryStore, scriptRuntime, null, null) { }
+        : this(store, libraryStore, scriptRuntime, feedbackFactory: null, discoveryFactory: null) { }
 
     public MusicNativeApplication(IDocumentStore store, IMusicLibraryStore libraryStore, IRuntimeClient scriptRuntime,
-        CacheDocumentStore cacheStore)
-        : this(store, libraryStore, scriptRuntime, null, null, cacheStore: cacheStore) { }
+        CacheDocumentStore cacheStore, string? presentationCacheRoot = null)
+        : this(store, libraryStore, scriptRuntime, null, null, cacheStore: cacheStore, presentationCacheRoot: presentationCacheRoot) { }
 
     // Native lifecycle tests substitute ports, not platform HTTP implementations.
     internal MusicNativeApplication(IDocumentStore store, IMusicLibraryStore libraryStore, IRuntimeClient scriptRuntime,
         Func<IMusicPlatformSessionSource, IMusicFeedbackProtocol>? feedbackFactory,
         Func<IMusicPlatformSessionSource, IMusicSearchDiscovery>? discoveryFactory,
-        TimeProvider? searchClock = null, CacheDocumentStore? cacheStore = null)
+        TimeProvider? searchClock = null, CacheDocumentStore? cacheStore = null, string? presentationCacheRoot = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(libraryStore);
@@ -100,7 +100,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         this.cacheStore = cacheStore ?? new CacheDocumentStore();
         ownsCacheStore = cacheStore is null;
         platform = new(scriptRuntime);
-        library = new(libraryStore, cacheStore: this.cacheStore);
+        library = new(libraryStore, cacheStore: this.cacheStore, presentationCacheRoot: presentationCacheRoot);
         accounts = new(store, new MusicAccountProtocol(platform), detailsCacheStore: this.cacheStore);
         vipPage = new(accounts, new MusicVipPageProtocol(platform));
         officialAudio = new(platform);

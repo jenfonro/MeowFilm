@@ -539,7 +539,14 @@ class AetherPackageBoundaryTests(unittest.TestCase):
         with patch.object(scope, "evaluate_package", return_value=self.fixture()):
             self.assertEqual(scope.aether_membership(ROOT), [])
 
-    def test_static_wrapper_remote_dependencies_and_extra_components_fail(self):
+    def test_dynamic_product_can_use_an_additional_local_source_target(self):
+        fixture = self.fixture()
+        fixture["targets"].append({"name": "AetherSupport", "type": "regular", "path": "Sources/AetherSupport"})
+        fixture["targets"][0]["dependencies"] = [{"target": ["AetherSupport", None]}]
+        with patch.object(scope, "evaluate_package", return_value=fixture):
+            self.assertEqual(scope.aether_membership(ROOT), [])
+
+    def test_static_wrapper_remote_dependencies_and_unlocked_inputs_fail(self):
         for change in ("static", "remote", "optional", "floating-path"):
             fixture = self.fixture()
             if change == "static":
@@ -547,6 +554,7 @@ class AetherPackageBoundaryTests(unittest.TestCase):
             elif change == "remote":
                 fixture["dependencies"] = [{"sourceControl": [{"identity": "floating"}]}]
             elif change == "optional":
+                # This adds an unlocked binary, not another regular source target.
                 fixture["targets"].append({"name": "TrueHD", "type": "binary", "path": ".cache/TrueHD.xcframework"})
             else:
                 fixture["targets"][1]["path"] = "../unverified/Sources"

@@ -693,7 +693,7 @@ public static class FilmMetadataRuntimeTests
         {
             string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
                 ?? throw new InvalidOperationException("A real aggregate Windows runtime bundle is required.");
-            var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), AppIdentity.RuntimeId, AppIdentity.ScriptModules);
+            var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), AppIdentity.RuntimeId);
             var host = new RuntimeHost(root, bundle);
             try
             {

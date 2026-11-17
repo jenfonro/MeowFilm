@@ -99,7 +99,7 @@ native-desktop-lyrics
 playback-settings
 ```
 
-共享图片和歌词展示字节存于 `MusicPresentationCache` 的 `music.presentation-resources.v1`，不属于业务 area，不参与整库提交；手工歌词仍属于 `native-local-lyrics`。完整 URL 图片键、预算、清理隔离等共同语义见[展示资源](../common/music/presentation-resources.md)，本端接线见[元数据策略](music-metadata-policy.md)。
+共享图片和歌词展示字节由 `MusicPresentationCache` 逐资源存于 Caches 下 `music-presentation-v2`，不属于业务 area，不参与歌曲数据库提交；手工歌词仍属于 `native-local-lyrics`。完整 URL 图片键、预算、清理隔离等共同语义见[展示资源](../common/music/presentation-resources.md)，本端接线见[元数据策略](music-metadata-policy.md)。
 
 脚本安装与私有 KV 由[公共音乐模块](../runtime/music-script-runtime.md)唯一持久化。
 本 owner 只从空数据建立并读取当前数据库，不检查或承接历史脚本条目。

@@ -13,13 +13,13 @@ public struct RuntimePayload: Sendable, Equatable {
     public init(root: URL) throws {
         struct Manifest: Decodable {
             let schemaVersion: Int, status: String, product: String, entry: String, assemblyProfile: String
-            let platform: String, transport: String, modules: [String]
+            let platform: String, transport: String
         }
         guard let data = try? Data(contentsOf: root.appendingPathComponent("runtime-manifest.json")),
               let manifest = try? JSONDecoder().decode(Manifest.self, from: data),
               manifest.schemaVersion == 1, manifest.status == "complete", manifest.product == "aggregate",
               manifest.platform == "ios", manifest.transport == "runtime.http.v1",
-              manifest.assemblyProfile == "common-native", manifest.modules == RuntimeModule.allCases.map(\.rawValue),
+              manifest.assemblyProfile == "common-native",
               Self.safe(manifest.entry) else {
             throw RuntimeLaunchError.payloadUnavailable
         }

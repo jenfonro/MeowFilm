@@ -6,17 +6,28 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
 
 ## 使用与 owner
 
-- 底栏“小说”内部切换首页／书架，书架内部切换历史；长按书籍可置顶、移出书架、
-  删除历史或从历史加入书架。搜索支持音乐／影视／小说三个目标，五个结果分类各有
-  稳定身份与独立消费者，返回详情后保留原查询。
-- 小说侧边栏显示“首页”“分类”及全部已添加书源，直接观察 `NovelFeature.sources`
-  的既有顺序和名称，不另建来源仓库，不按首页的发现能力筛选。首页仍返回现有发现模式；
-  分类与书源行目前仅展示，不触发发现请求或首页切源。书架／历史入口保留在小说页面内，
-  菜单样式与底部固定设置共用[App 外壳](architecture.md#ui-所有权)。
-- 首页只请求当前可见发现模式选中的启用源、分类和页码；书架／隐藏页面不请求发现。
-  搜索逐源记录失败与页码，来源 revision 变化取消旧代；隐藏查询返回后才重新请求。
-  `NovelSourceClient` 在搜索／发现页内隔离不可消费的书籍，保留健康兄弟；
-  空页正常结束追加，非空页全部不可用或缺少列表则失败，不提前推进页码。
+- 底栏“小说”直接显示发现首页，分类合并在首页。保留 App 原有“菜单＋搜索小说”头部，
+  头部下方为频道及当前频道的单选子项；频道按书源顺序排列，首次选择第一个可用入口。
+  `FilterTagsView` 在溢出时提供展开箭头，展开覆盖列表而不增加列表顶部占位；选择、外点和
+  离开页面均收起，被遮挡内容暂时退出无障碍遍历。不推测题材／字数等组合请求参数。
+- 小说侧边栏显示“首页”及全部已添加书源，观察 `NovelFeature.sources` 的既有顺序和名称，
+  可发现的源直接选择同一个 `NovelDiscoverySession`，停用或没有发现能力的源禁用。
+  不另建来源仓库。旧首页的书架／历史切换和独立分类入口已移除，不迁移或增加兼容入口；
+  原有本地书架／历史数据及独立业务保持不变，入口暂时孤立，不在本轮补接。
+- `NovelDiscoverySession` 拥有当前来源、频道、入口、页码与结果；无 URL 的标题形成分组，
+  同名分组保留独立身份，仅 URL 项保留入口且不显示原始请求模板。切换目标清除旧结果，
+  同目标刷新只在频道及第一页全部成功后替换；分页去重且成功后才推进，失败可重试同一页。
+  隐藏取消实际请求，返回保留已完成选择并恢复未完成工作；revision 变化失效旧代，关闭等待
+  接受的请求排空。来源失效不自动跳到另一个源，错误通过统一重试浮层呈现；
+  关闭错误后仍可重新打开浮层重试失败页。`NovelFeature` 只发布最新一次来源清单刷新，
+  防止启动与页面并发读取时迟到清单回退已接受的 revision。
+- 首页与搜索结果共用 `NovelBookCell`：74×104 封面、书名、作者、单行简介、原始字数、
+  来源名／实际候选来源数量，章节可覆盖在封面底部。字段缺失不编造、不额外逐本抓详情，
+  普通文字 Regular，使用 Dynamic Type 和自适应行高，封面沿受信图片获取／取消／释放路径。
+  搜索支持音乐／影视／小说三个目标，各结果分类保留独立消费者，返回详情后保留原查询。
+  搜索逐源记录失败与页码，来源 revision 变化取消旧代；隐藏查询返回后才恢复。
+  `NovelSourceClient` 在搜索／发现页内隔离不可消费的书籍，保留健康兄弟；空页正常结束追加，
+  非空页全部不可用或缺少列表则失败，不提前推进页码。
 - `NovelSource` 在 list／get／import／save 回执中共用来源投影；
   weight／lastUpdateTime／respondTime 只接受可选数字，hasExplore 只接受可选布尔值，
   不可消费时视为未提供，排序和管理菜单沿用缺省展示。安装身份、revision、启用状态
@@ -124,7 +135,9 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
 | `native/MeowKit/Sources/MeowNovelFeature/Reading/NovelReadingSession.swift` | A3/A5/A6/A9/A10：正文、目录、换源、购章、保存 |
 | `native/MeowKit/Sources/MeowNovelFeature/Reading/NovelAnchorResolver.swift` | A5/A6：内容改变后锚点核验与比例回退 |
 | `native/MeowKit/Sources/MeowNovelFeature/Reading/NovelReaderLayout.swift` | A6/A7：CoreText 四模式布局、字重、文字／图片锚点 |
-| `native/MeowKit/Sources/MeowNovelFeature/UIKit/NovelBrowsePages.swift` | A1/A2/A3/A10：首页、书架／历史、搜索、图片消费者 |
+| `native/MeowKit/Sources/MeowNovelFeature/NovelDiscoverySession.swift` | A1/A2/A10：发现频道、来源与入口选择、刷新／分页、代次和取消 |
+| `native/MeowKit/Sources/MeowNovelFeature/UIKit/NovelBrowsePages.swift` | A1/A2/A10：合并发现首页、搜索、标签展开与错误浮层 |
+| `native/MeowKit/Sources/MeowNovelFeature/UIKit/NovelBookCell.swift` | A1/A2/A10：共用书籍信息、动态字体与受信封面消费者 |
 | `native/MeowKit/Sources/MeowNovelFeature/UIKit/NovelDetailViewController.swift` | A1/A3/A6：详情与真实目录选择／刷新／顺倒序 |
 | `native/MeowKit/Sources/MeowNovelFeature/UIKit/NovelReaderViewController.swift` | A1/A6/A7/A9/A10：原生阅读、高清图、换源与购章确认组件 |
 | `native/MeowKit/Sources/MeowNovelFeature/UIKit/NovelSettingsPages.swift` | A1/A7：小说设置、完整排版与背景 |
@@ -139,8 +152,11 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
 | `apps/ios/Composition/MeowfilmResources.swift`、`MeowfilmAssembly.swift` | A1/A3/A4/A10：唯一宿主、原子库、后台保存、关闭 |
 | `apps/ios/Composition/MeowfilmSearchComposition.swift` | A1：三目标／五分类装配 |
 | `apps/ios/Navigation/MeowfilmCoordinator.swift`、`MeowfilmPrimaryPage.swift`、`MeowfilmRootContainerViewController.swift`、`MeowfilmSettingsViewController.swift` | A1/A9/A10：入口、路由、Web 呈现、阅读 dock 生命周期 |
-| `apps/ios/Presentation/MeowfilmDockView.swift`、`MeowfilmPrimaryShellViewController.swift`、`MeowfilmSidebarView.swift` | A1：现有原生容器、小说底栏／首页书架入口 |
+| `apps/ios/Presentation/MeowfilmDockView.swift`、`MeowfilmPrimaryShellViewController.swift`、`MeowfilmSidebarView.swift` | A1：现有原生容器、小说底栏／发现书源选择 |
 | `apps/ios/runtime/entries/aggregate.mjs` | A4：正式 source 装配传入 dataRoot |
+| `native/MeowKit/Tests/MeowNovelFeatureTests/NovelDiscoveryTests.swift` | R28/A1/A2/A10：分组、首选、切源、分页、刷新、取消、revision、迟到清单与关闭 |
+| `native/MeowKit/Tests/MeowNovelFeatureTests/NovelBookPresentationTests.swift` | R28/A1/A2：原始展示字段往返、缺失或非文本字段不造值 |
+| `native/MeowKit/Tests/MeowNovelFeatureTests/NovelSourceClientTests.swift` | R28/A2/A3/A8：来源投影、搜索／发现健康兄弟、空页与正文材料 |
 | `native/MeowKit/Tests/MeowNovelFeatureTests/NovelLibraryTests.swift`、`NovelRuleProcessorTests.swift`、`NovelSessionTests.swift`、`NovelAnchorTests.swift`、`NovelImageLifetimeTests.swift`、`NovelWebBrokerTests.swift` | A2–A10：行为、同 fixtures、取消／保存／释放定向回归 |
 | `native/MeowKit/Tests/MeowNovelFeatureTests/NovelRuleConsumerTests.swift`、`NovelRulesRPCFixture.swift` | A5/A10/D7：完整快照、RPC 错误、真实 HTTP 消费与借用 owner 排空 |
 | `native/MeowKit/Tests/MeowRuntimeTests/RuntimeHTTPClientTests.swift` | A4/A7/A8/A10：HTTP 版本、二进制图片与取消 |
@@ -148,7 +164,8 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
 | `apps/ios/UITests/Music/MusicUIKitRegressionTests.swift` | A1/A10：附加类别独立消费者与三目标回归 |
 | `apps/ios/UITests/Acceptance/MeowfilmNavigationAcceptanceTests.swift` | A1：四底栏与小说原生入口 |
 | `apps/ios/RuntimeTests/MeowfilmNovelHostTests.swift` | A3/A4/A8/A9/A10：真实 App source library、私有状态、两进程恢复 |
-| `apps/ios/RuntimeTests/MeowfilmNovelNavigationHostTests.swift` | A1/A6/A9/A10：真实 coordinator 书架→详情→阅读／设置、音乐状态 |
+| `apps/ios/RuntimeTests/MeowfilmNovelNavigationHostTests.swift` | R28/A1/A6/A9/A10：真实 coordinator 发现→详情→阅读／dock 返回／设置、音乐状态 |
+| `apps/ios/RuntimeTests/MeowfilmSidebarTests.swift` | R28/A1/A10：来源状态更新、选择／dismiss、关闭订阅及侧栏尺寸矩阵 |
 | `apps/ios/RuntimeTests/MeowfilmFilmSearchHostTests.swift`、`MeowfilmRuntimeHostTests.swift` | A1：搜索目标与设置分类消费者同步 |
 | `scripts/generate-ios-project.py`、`scripts/check-source-scope.py` | A1/A5/A9：product 装配、明确源码边界、App 全局 ATS HTTP 配置 |
 | `scripts/tests/test_source_scope.py`、`test_ios_product_configuration.py` | A1/A5/A9：依赖边界与生成策略回归 |
@@ -161,10 +178,10 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
 
 ## 精确验证选择
 
-用户已恢复 Mac／iOS 构建与测试授权，以下为主会话集中安排的定向选择，
-不代表源码存在即已通过。本轮返修及静态终审不提前执行 Apple 平台验证；
-后续模拟器全机并发1，按共享登记、原子锁串行排队；
-不运行全量、不清缓存、不调用发行 `build-ios.sh`、不安装真机。
+以下保留现行回归源码的精确选择，不代表源码存在即已通过；R28 的实际结果与待补项
+见文末独立小节，不与 D7 旧阶段混计。Apple 平台验证由主会话集中安排，
+模拟器全机并发1，按共享登记、原子锁串行排队；
+不运行全量、不清账号／歌曲库／小说数据、不调用发行 `build-ios.sh`、不安装真机。
 先按正常流程完成 `build-for-testing` 和 `scripts/check-simulator-signing.py`；
 所选测试完整执行、exit 0、零失败／零 skip 才计为通过。
 
@@ -183,7 +200,7 @@ source 响应契约精确校验。App 沿用全局 `NSAllowsArbitraryLoads`；
 MeowNovelFeatureTests|MeowRuntimeTests.RuntimeHTTPClientTests
 ```
 
-`MeowNovelFeatureTests` 涵盖七个类：`NovelLibraryTests`、
+`MeowNovelFeatureTests` 的既有阅读／库／规则回归包括：`NovelLibraryTests`、
 `NovelRuleProcessorTests`、`NovelSessionTests`、`NovelAnchorTests`、
 `NovelImageLifetimeTests`、`NovelWebBrokerTests`、`NovelRuleConsumerTests`。其中明确覆盖稳定锚点不再写入、
 原字段到 payAction、未知作者换源、缩短／歧义目录、源 revision 后同词刷新、
@@ -195,6 +212,23 @@ macOS 的原生 XCTest 规则夹具启动隔离的真实 source HTTP owner，依
 `tests/source-rules.test.mjs` 的运行器真实引擎测试；端侧保留同 fixtures、超时原文保护、
 会话代次／状态及图片／Cookie 断言。旧资源 allowlist 正向用例随 Swift 资源包装移除，
 现行本地 package 校验和共享层业务依赖禁止断言保留。
+
+R28 首页／搜索受影响范围的定向 pattern 为：
+
+```text
+MeowNovelFeatureTests.(NovelDiscoveryTests|NovelBookPresentationTests|NovelSourceClientTests|NovelImageLifetimeTests)
+```
+
+| 类选择 | 项数 | 对应覆盖 |
+| --- | --- | --- |
+| `NovelDiscoveryTests` | 17 | 分组、选择、分页／刷新提交、实际取消、revision、来源清单迟到隔离与排空 |
+| `NovelBookPresentationTests` | 2 | 展示字段持久化／部分详情合并、缺失或非文本不编造 |
+| `NovelSourceClientTests` | 7 | 来源投影、搜索／发现条目隔离、空页／坏页及正文材料 |
+| `NovelImageLifetimeTests` | 4 | 获取取消、读取／释放失败、owner 关闭与迟到消费者共用释放收据 |
+
+其中清单迟到回退的精确方法为
+`NovelDiscoveryTests/testLateSourceListCannotRollBackAcceptedRevisionOrRestartDiscovery`。
+这 30 项不代替下列既有阅读、库、规则或 HTTP 回归。
 
 timeout 的 0 语义另以隔离 Mac loopback 探针核对：macOS 15.7.2／Swift 6.2.1 下，
 正值 request／resource 对照均以 `NSURLErrorTimedOut` 结束，双 0 请求等待约 68s
@@ -237,7 +271,7 @@ NovelLibraryTests/testRecordedAuthorEnrichmentPersistsIdentityAndThirdSourceReta
 且书架、置顶、阅读锚点与历史时间未被元数据匹配改写；Session 换源用例同时核对
 实际 display 保存 owner 将未知作者的新匹配键与来源、锚点一起提交。
 
-四项终审返修的精确选择（均为回归源码，当前未执行）：
+四项终审返修的精确选择（D7／main 冲突适配旧阶段当时未执行，保留回归源码）：
 
 ```text
 NovelSessionTests/testDisplayedProgressFlushAndCloseRemainLocalWhenTheRuntimeIsUnavailable
@@ -258,7 +292,7 @@ NovelSessionTests/testResumeDoesNotConfirmAmbiguousInitialChapterOrAnUnknownAuth
 候选目录与支付的失败／取消、开放字段与最新 variable 连续性、初载下载／处理恢复及
 明确选章恢复；保留已有写入失败、排空和未知作者确认断言，不降低原覆盖。
 
-待选目录跨 revision 返修的精确选择（回归源码，尚未执行）：
+待选目录跨 revision 返修的精确选择（D7 旧阶段当时未执行，保留回归源码）：
 
 ```text
 NovelSessionTests/testAmbiguousInitialSelectionIsInvalidatedWhenItsSourceChangesOrIsDisabled
@@ -298,7 +332,7 @@ iOS App-hosted 真实 socket 的 >60s 等待与关闭排空用例由主会话提
 MeowfilmRuntimeTests/MeowfilmNovelHostTests/testRulesHTTPWaitsBeyondSixtySecondsAndDrainsOnClose
 ```
 
-该选择已由主会话纳入集中验证 helper，尚未执行；已获准只读核对独占文件
+该选择在 D7 旧阶段已由主会话纳入集中验证 helper，当时尚未执行；已获准只读核对独占文件
 `apps/ios/RuntimeTests/MeowfilmNovelHostTests.swift` 的68秒真实 socket／close drain
 源码及宿主接线，静态未见问题，未修改该文件。Mac 探针、源码检查及 URLProtocol
 超时配置断言均不替代这项 iOS 实测。
@@ -317,10 +351,14 @@ MeowfilmNavigationAcceptanceTests/testPrimaryPagesUseAppOwnedHeaders
 
 ### 小说 UIKit／WK（target：MeowfilmRuntimeTests）
 
-`apps/ios/RuntimeTests/Novel/` 的两个类共 16 项，均在真实 App 进程中执行：
+`apps/ios/RuntimeTests/Novel/` 的下列用例在真实 App 进程中执行；按本次受影响范围显式选测：
 
 ```text
-MeowfilmRuntimeTests/NovelUIKitTests/testEmptyAndPopulatedShelfKeepNativeSelectorsAndReturnToSameBook
+MeowfilmRuntimeTests/NovelUIKitTests/testDiscoveryEmptyAndLoadedListReturnsFromDetailsWithoutReloading
+MeowfilmRuntimeTests/NovelUIKitTests/testDismissedDiscoveryFailureCanReopenRetryAndKeepTheFailedPage
+MeowfilmRuntimeTests/NovelUIKitTests/testDiscoveryChannelAndCurrentKindsExpandOverBooksAndCloseOnSelectionOrOutside
+MeowfilmRuntimeTests/NovelUIKitTests/testHomeAndSearchUseSharedMetadataCellsAcrossThemesWidthAndDynamicType
+MeowfilmRuntimeTests/NovelUIKitTests/testSharedBookCellRejectsLateCoverAndReleasesEveryTrustedReference
 MeowfilmRuntimeTests/NovelUIKitTests/testReaderFourModesNativeLayoutProgressPurchaseAndBackgroundPause
 MeowfilmRuntimeTests/NovelUIKitTests/testVisibleReaderWithOpenMenuDoesNotRepublishAutomaticWhileIdle
 MeowfilmRuntimeTests/NovelUIKitTests/testTextImageAnchorsSurviveFontSafeAreaAndImageArrivalWithoutBreakingGraphemes
@@ -329,7 +367,7 @@ MeowfilmRuntimeTests/NovelUIKitTests/testActualReaderKeepsTextAnchorAcrossEveryM
 MeowfilmRuntimeTests/NovelUIKitTests/testActualReaderKeepsImageAnchorWhenHighResolutionArrivesFontAndSafeAreaChange
 MeowfilmRuntimeTests/NovelUIKitTests/testRetainedReaderAppliesChangedRulesAndConversionWhenItBecomesVisibleAgain
 MeowfilmRuntimeTests/NovelUIKitTests/testCancelledPurchaseConfirmationResumesPendingDisplaySettingsWithoutPurchasing
-MeowfilmRuntimeTests/NovelUIKitTests/testHomeShelfAndHiddenRefreshCancelDiscoveryAndOnlyUseTheCurrentRevision
+MeowfilmRuntimeTests/NovelUIKitTests/testHiddenDiscoveryCancelsAndResumesOnlyTheCurrentRevision
 MeowfilmRuntimeTests/NovelWebUIKitTests/testRealWebKitSeedsKeepPrivateHostOnlyDomainPrefixAndUnchangedCookiesDoNotWriteBack
 MeowfilmRuntimeTests/NovelWebUIKitTests/testRealRedirectCookieChangesKeepBothOriginsDeletionAndHostPrefixScope
 MeowfilmRuntimeTests/NovelWebUIKitTests/testRealWebKitKnownNoneDoesNotOverrideVisiblePoliciesOrLeakAcrossCookieScopes
@@ -337,6 +375,11 @@ MeowfilmRuntimeTests/NovelWebUIKitTests/testWebModesKeepScalarTypesOriginalArgum
 MeowfilmRuntimeTests/NovelWebUIKitTests/testCancellationDuringURLRulesRPCWaitsForTheMatchAndNeverReturnsCookies
 MeowfilmRuntimeTests/NovelWebUIKitTests/testVerificationWithoutURLAndExplicitCollectionCancellationCannotStallOrCompleteTwice
 ```
+
+R28 选测其中发现空／已载入列表、失败页重试、频道／子项展开、首页／搜索共用信息行、
+受信封面及隐藏恢复六项；其余阅读器／WK 用例不因 R28 结果计为重新通过。
+失败页用例关闭错误框并离开／返回后，核对“重试”重新打开统一浮层、保留原书籍，
+实际请求页码为 `[1, 2, 2]`，不跳过失败页。
 
 夹具只使用实际 `foregroundActive` UIWindowScene、scene bounds 和提高一级的
 windowLevel，结束后恢复此前 key window；不伪发 didBecomeActive。截图同时断言
@@ -362,7 +405,7 @@ Web modes 同时覆盖 webviewajax 的 false／null／number。
 MeowfilmNovelHostTests/testActualAppRulesRPCUsesCurrentSourceAndFilmMethodsAndKeepsNativeContentMetadata
 MeowfilmNovelHostTests/testActualAppLibrarySearchDetailCatalogContentPrivateValuesAndRevisionRetirement
 MeowfilmNovelHostTests/testActualAppWebBrokerScalarCookieIsolationAndRetiredPendingResponse
-MeowfilmNovelNavigationHostTests/testActualNovelShelfDetailReaderDockRestoreAndSettingsRoutes
+MeowfilmNovelNavigationHostTests/testActualNovelDiscoveryDetailReaderDockRestoreAndSettingsRoutes
 MeowfilmFilmSearchHostTests/testActualCoordinatorEntryUsesMusicAndFilmPageDefaultsWithoutSubmitting
 MeowfilmFilmSearchHostTests/testActualSearchTapRetainsLiveGroupTMDBAndLaterPageWithoutAnotherSearch
 MeowfilmMusicStartupHostTests/testStartupFailureUsesAlertAndPreservesTheOpenSettingsRoute
@@ -370,6 +413,15 @@ MeowfilmMusicStartupHostTests/testStartupFailureUsesAlertAndPreservesTheOpenSett
 
 7 项宿主选择覆盖真实 App 仓库、规则 RPC、私有状态、源换代和路由；Film 入口同时验证
 novel 默认目标，启动失败验证三项设置分类并保留当前路由。上述宿主不替代 WK 组件验证。
+
+R28 只选择上列发现→详情→阅读／dock／设置导航及以下三项侧栏回归，与前节六项
+首页／列表用例合计 10 个唯一必测宿主用例，不代表其余宿主用例重新执行：
+
+```text
+MeowfilmRuntimeTests/MeowfilmSidebarTests/testNovelShowsAllAddedSourcesAndUpdatesAvailabilityWithoutNavigationOrRequests
+MeowfilmRuntimeTests/MeowfilmSidebarTests/testNovelSourceButtonsSelectDismissObserveSelectionAndStopUpdatingWhenClosed
+MeowfilmRuntimeTests/MeowfilmSidebarTests/testCompactLandscapeAndAccessibilityTypeKeepAllDomainsScrollableAndSettingsFixed
+```
 
 ### 两个真实 App 进程
 
@@ -388,19 +440,22 @@ UUID＋PID；restore 断言两者均不同并清理 marker，日志仅 phase／P
 
 ### 截图入口与结果位置
 
-UIKit 用例把截图作为 `.keepAlways` XCTest attachments 保存。既有执行器
+UIKit 用例把截图作为 `.keepAlways` XCTest attachments 保存。旧阶段执行器
 `tmp/working/novel-ios-tests.py` 在 Mac 固定副本的 `tmp/test-results/novel/` 下
 按 suite 写入 `ios-ui.xcresult`、`ios-host.xcresult` 或 `ios-navigation.xcresult`；
 测试所属 target 以上述选择为准。两进程结果为同目录
-`ios-cold-prepare.xcresult`／`ios-cold-restore.xcresult`。截图入口如下：
+`ios-cold-prepare.xcresult`／`ios-cold-restore.xcresult`。R28 结果及附件收拢到
+`tmp/test-results/reader-page/r28/`（含 `ui-2-attachments/`、`ui-3-attachments/`、`headers-2-attachments/`）。截图入口如下：
 
 | 方法 | attachment 名称 |
 | --- | --- |
-| `NovelUIKitTests/testEmptyAndPopulatedShelfKeepNativeSelectorsAndReturnToSameBook` | `novel-shelf-empty`、`novel-shelf-book` |
+| `NovelUIKitTests/testDiscoveryEmptyAndLoadedListReturnsFromDetailsWithoutReloading` | `novel-home-empty`、`novel-home-book` |
+| `NovelUIKitTests/testDiscoveryChannelAndCurrentKindsExpandOverBooksAndCloseOnSelectionOrOutside` | `novel-home-channels-expanded`、`novel-home-kinds-expanded`、`novel-home-current-category` |
+| `NovelUIKitTests/testHomeAndSearchUseSharedMetadataCellsAcrossThemesWidthAndDynamicType` | `novel-home-compact-light`、`novel-home-wide-dark`、`novel-home-compact-large-type`、`novel-search-shared-book-list` |
 | `NovelUIKitTests/testReaderFourModesNativeLayoutProgressPurchaseAndBackgroundPause` | `novel-reader-cover`、`novel-reader-slide`、`novel-reader-instant`、`novel-reader-scroll`、`novel-purchase-confirmation` |
 | `NovelUIKitTests/testActualReaderKeepsTextAnchorAcrossEveryModeFontAndSafeAreaReflow` | `novel-reader-text-anchor` |
 | `NovelUIKitTests/testActualReaderKeepsImageAnchorWhenHighResolutionArrivesFontAndSafeAreaChange` | `novel-reader-late-image-anchor` |
-| `MeowfilmNovelNavigationHostTests/testActualNovelShelfDetailReaderDockRestoreAndSettingsRoutes` | `novel-real-app-reader-hidden-dock` |
+| `MeowfilmNovelNavigationHostTests/testActualNovelDiscoveryDetailReaderDockRestoreAndSettingsRoutes` | `novel-real-app-reader-hidden-dock` |
 | `MeowfilmNavigationAcceptanceTests/testPrimaryPagesUseAppOwnedHeaders` | `03-novel`，以及既有原生页面截图 |
 
 小说组件截图要求真实前台窗口且 `drawHierarchy` 成功；所有附件均须实际查看布局，
@@ -408,14 +463,43 @@ UIKit 用例把截图作为 `.keepAlways` XCTest attachments 保存。既有执�
 
 ## 验证状态与未覆盖
 
-D7／本次 main 冲突适配的工程生成及分块静态核对已有历史记录；其后完整终审指出的
-四项返修及待选目录跨 revision 修复均已落盘。本轮只做代码静态收口与累计终审，
-没有运行构建、测试、生成器或远端／Mac／模拟器操作，新增／迁移用例不算通过。
-用户已恢复 Mac／iOS 验证授权，尚未开始最终输入验证，由主会话集中安排，
-模拟器并发1并按共享登记、原子锁排队。仅 timeout 的隔离 Mac API 探针此前实际执行，
-不替代 iOS 行为验证或受影响目标构建。
+### R28：发现首页与搜索列表（2026-11-17，已完成）
 
-以下均为 D7 迁移前的历史证据；本次受影响输入不得据此宣称通过，未变范围能否复用
+完整日志、回执与附件目视结论见
+[R28 验证报告](../../tmp/test-results/reader-page/verification-report.md#r28)。
+
+| 验证 | 结果 |
+| --- | --- |
+| `swift-tests-2` | XCTest 30/30：`NovelDiscoveryTests` 17、`NovelBookPresentationTests` 2、`NovelSourceClientTests` 7、`NovelImageLifetimeTests` 4；零失败／跳过 |
+| `ios-build-5` | iOS Simulator App＋测试 target 增量 `build-for-testing` exit0；不代表测试执行或真机产物 |
+| `source-scope-final`、`simulator-signing-final`、`aether-linkage-final` | 各 exit0 |
+| `ui-2.xcresult` | 10 项，8 通过、2 失败、0 skip，exit65；上述六项 NovelUIKit 及两项侧栏来源行为通过 |
+| `ui-3.xcresult` | 4/4，exit0、0 skip；实际发现→详情→阅读→dock 返回→设置、侧栏尺寸矩阵、来源状态更新、选源／dismiss／订阅关闭通过 |
+| `headers-2.xcresult` | 1/1，exit0、0 skip；复用 `ios-build-5` 有效产物补跑 `MeowfilmNavigationAcceptanceTests/testPrimaryPagesUseAppOwnedHeaders` 通过（`headers-1` 因 `ENOSPC` 中断保留为失败证据） |
+
+`ui-2` 与 `ui-3` 合并覆盖上述 10 个唯一必测宿主用例；两项侧栏来源行为的重复执行
+不重复计数，不能称 `ui-2` 自身全部通过。公共头部 XCUITest 在 `headers-2` 独立补验通过。
+`ui-2` 的两项失败来自模拟器目标 App 旧音乐展示缓存引用 12 个缺失歌曲；仅在本任务
+独占时清理 19185 字节的 `last-success.json`，未清账号、永久歌曲仓库或小说数据，
+音乐产品无改动。
+
+`ui-2`（12 张）、`ui-3`（28 张）与 `headers-2`（8 张）导出的原生附件及联系表均已实际目视核对：
+去除重复禁用 alpha 后侧栏停用／禁止发现书源清晰可辨且符合系统禁用语义，长名称与 AXXXL 换行不遮挡固定“设置”底栏，
+真实阅读页隐藏公共 dock，小说首页保留公共头部与 Regular 空态／列表层次。以上隔离合成夹具验证不代表真实公网
+第三方书源、账号、支付或用户真机验收。
+
+### D7／main 冲突适配旧阶段（未执行返修）
+
+D7／当时 main 冲突适配的工程生成及分块静态核对已有历史记录；其后完整终审指出的
+四项返修及待选目录跨 revision 修复均已落盘。该阶段只做代码静态收口与累计终审，
+没有运行构建、测试、生成器或远端／Mac／模拟器操作，新增／迁移用例不算通过。
+当时用户已恢复 Mac／iOS 验证授权，尚未开始最终输入验证，由主会话集中安排，
+模拟器并发1并按共享登记、原子锁排队。仅 timeout 的隔离 Mac API 探针此前实际执行，
+不替代 iOS 行为验证或受影响目标构建；本小节不描述 R28 当前状态。
+
+### D7 迁移前历史证据
+
+以下均为 D7 迁移前的历史证据；R28 受影响输入不得据此宣称通过，未变范围能否复用
 由主会话按最终集成输入确定：
 
 - Swift 相关范围 63 项；最后 Session22／Library6／Anchor2 共30项全部通过，覆盖
@@ -440,7 +524,7 @@ D7／本次 main 冲突适配的工程生成及分块静态核对已有历史记
   [ios-simulator-signing.log](../../tmp/test-results/novel/ios-simulator-signing.log)、
   [ios-device-native-build.log](../../tmp/test-results/novel/ios-device-native-build.log)。
   arm64为 `CODE_SIGNING_ALLOWED=NO` 编译，不代表真机签名安装。
-- 9张真实组件图和8张导航图已实际目视；本次仅会话／身份逻辑变动，布局输入未改，
+- 9张真实组件图和8张导航图已实际目视；当时仅会话／身份逻辑变动，布局输入未改，
   复用 [ios-visual-review.md](../../tmp/test-results/novel/ios-visual-review.md)。
 
 SameSite=None 采用用户接受的公开API投影边界；None精确延续、未变零写回、删除、

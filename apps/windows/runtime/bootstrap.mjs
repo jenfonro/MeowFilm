@@ -157,7 +157,7 @@ export async function startWindowsRuntimeOnPipe(stream, {
       const value = decodeJSONValue(Buffer.concat(chunks, length).subarray(0, -1));
       chunks = [];
       if (value === null || typeof value !== 'object' || Array.isArray(value) ||
-          Object.keys(value).length !== (value.nativeSettings === true ? 3 : 2) || value.sessionId !== sessionId ||
+          value.sessionId !== sessionId ||
           !Object.hasOwn(value, 'dataRoot')) {
         throw new BridgeError('INVALID_REQUEST');
       }

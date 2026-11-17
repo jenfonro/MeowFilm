@@ -22,6 +22,37 @@ public static class ArtworkTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("Native artwork default file cache stores raw bytes and cold reads avoid HTTP", () => Sta(async () =>
+        {
+            string root = TestWorkspace.DataPath("artwork-files-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            byte[] png = Encode("png", 2, 1);
+            const string address = "https://art.example.test/default-file?variant=original";
+            try
+            {
+                var firstHttp = new Handler((_, _) => Task.FromResult(Reply(png)));
+                await using (var first = new ArtworkService(firstHttp, cacheDirectory: root))
+                {
+                    using var image = await first.AcquireAsync(address);
+                    Equal(2, image.Image.PixelWidth); Check(image.Image.IsFrozen);
+                    Equal(1, firstHttp.Count);
+                    string file = Directory.GetFiles(root, "*.resource").Single();
+                    Check(File.ReadAllBytes(file).SequenceEqual(png));
+                    Check(Directory.GetFiles(root).All(path => Path.GetFileName(path) == ".resources.lock" ||
+                        path.EndsWith(".resource", StringComparison.Ordinal)));
+                }
+                var coldHttp = new Handler((_, _) => throw new InvalidOperationException("No cold HTTP expected"));
+                await using var cold = new ArtworkService(coldHttp, cacheDirectory: root);
+                using var restored = await cold.AcquireAsync(address);
+                Equal(2, restored.Image.PixelWidth); Check(restored.Image.IsFrozen);
+                Equal(0, coldHttp.Count);
+            }
+            finally
+            {
+                TestWorkspace.ValidatePath(TestWorkspace.DataRoot, root);
+                Directory.Delete(root, true);
+            }
+        }));
         yield return new("Native artwork one sample produces raw catalog and bounded player palettes", () => Sta(() =>
         {
             var image = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgra32, null, new byte[] { 100, 200, 250, 255 }, 4);
@@ -282,13 +313,13 @@ public static class ArtworkTests
                             Check(!server.HasConnection);
                             int expected = ReferenceEquals(body, large) ? 0 : 1;
                             if (stored is null && expected == 1)
-                                await WaitFor(() => Directory.GetFiles(directory, "*.image").Length == expected,
+                                await WaitFor(() => Directory.GetFiles(directory, "*.resource").Length == expected,
                                     "Cache-admissible bytes did not finish persistence before shutdown");
                             await service.DisposeAsync();
                             if (stored is not null) Equal(expected, stored.Writes);
-                            else Equal(expected, Directory.GetFiles(directory, "*.image").Length);
+                            else Equal(expected, Directory.GetFiles(directory, "*.resource").Length);
                         }
-                        byte[] saved = stored?.Content ?? File.ReadAllBytes(Directory.GetFiles(directory, "*.image").Single());
+                        byte[] saved = stored?.Content ?? File.ReadAllBytes(Directory.GetFiles(directory, "*.resource").Single());
                         Check(saved.SequenceEqual(small), "Only the cache-admissible original bytes are persisted");
                     }
                     finally { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
@@ -329,7 +360,7 @@ public static class ArtworkTests
                     await disk.WriteAsync("oversized", new byte[admitted.Length + 1], default);
                     Check((await disk.ReadAsync("accepted", default))!.SequenceEqual(admitted));
                     Check(await disk.ReadAsync("oversized", default) is null);
-                    Equal(1, Directory.GetFiles(directory, "*.image").Length);
+                    Equal(1, Directory.GetFiles(directory, "*.resource").Length);
                     using var cancelled = new CancellationTokenSource();
                     cancelled.Cancel();
                     try
@@ -362,27 +393,255 @@ public static class ArtworkTests
             await Code("ARTWORK_CLOSED", () => service.AcquireAsync("https://art.example.test/x"));
             await service.DisposeAsync();
         });
-        yield return new("Native artwork concurrent visible URLs have no host or global request quota", () => Sta(async () =>
+        yield return new("Native artwork eighty distinct URLs share four execution slots across hosts and trusted reads", () => Sta(async () =>
         {
-            var arrived = Signal(); var release = Signal(); int active = 0;
+            var arrived = Signal(); var release = Signal(); int active = 0, maximum = 0, allocated = 0;
             byte[] png = Encode("png", 1, 1);
-            var handler = new Handler(async (request, ct) =>
+            async Task<byte[]> Read(CancellationToken token)
             {
-                if (request.RequestUri!.Host == "busy.example.test")
+                int count = Interlocked.Increment(ref active);
+                int prior;
+                do { prior = Volatile.Read(ref maximum); }
+                while (count > prior && Interlocked.CompareExchange(ref maximum, count, prior) != prior);
+                if (count == 4) arrived.TrySetResult();
+                try
                 {
-                    int count = Interlocked.Increment(ref active);
-                    if (count == 80) arrived.TrySetResult();
-                    try { await release.Task.WaitAsync(ct); } finally { Interlocked.Decrement(ref active); }
+                    await release.Task.WaitAsync(token);
+                    Interlocked.Increment(ref allocated);
+                    return png.ToArray();
                 }
-                return Reply(png);
-            });
-            await using var service = new ArtworkService(handler);
-            var busy = Enumerable.Range(0, 80).Select(i => service.AcquireAsync("https://busy.example.test/" + i)).ToArray();
-            await arrived.Task;
-            using var independent = await service.AcquireAsync("https://other.example.test/x").WaitAsync(TimeSpan.FromSeconds(5));
-            Equal(80, Volatile.Read(ref active)); release.SetResult();
-            foreach (var lease in await Task.WhenAll(busy)) lease.Dispose();
-            Equal(0, active);
+                finally { Interlocked.Decrement(ref active); }
+            }
+            var handler = new Handler(async (_, token) => Reply(await Read(token)));
+            await using var service = new ArtworkService(handler, readTrusted: (_, token) => Read(token));
+            var first = Enumerable.Range(0, 4).Select(i => service.AcquireAsync("https://busy.example.test/" + i)).ToArray();
+            try
+            {
+                await arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var queued = Enumerable.Range(4, 76).Select(i => service.AcquireAsync(i % 2 == 0
+                    ? "https://other.example.test/" + i : "/trusted/" + i)).ToArray();
+                await Tick();
+                Equal(4, Volatile.Read(ref active)); Equal(4, handler.Count);
+                Equal(0, Volatile.Read(ref allocated));
+                Check(queued.All(work => !work.IsCompleted), "queued demands cannot read or allocate image responses");
+                release.TrySetResult();
+                foreach (var lease in await Task.WhenAll(first.Concat(queued)).WaitAsync(TimeSpan.FromSeconds(10)))
+                { Check(lease.Image.IsFrozen); lease.Dispose(); }
+                Equal(4, maximum); Equal(80, allocated); Equal(0, active);
+            }
+            finally { release.TrySetResult(); }
+        }));
+        yield return new("Native artwork byte reads and physical writes retain four slots until actual completion", () => Sta(async () =>
+        {
+            var store = new HeldArtworkBytes();
+            byte[] png = Encode("png", 2, 1);
+            var handler = new Handler((_, _) => Task.FromResult(Reply(png)));
+            await using var service = new ArtworkService(handler, byteCache: store);
+            var first = Enumerable.Range(0, 4).Select(i => service.AcquireAsync("https://art.example.test/write/" + i)).ToArray();
+            try
+            {
+                await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var queued = Enumerable.Range(4, 16).Select(i => service.AcquireAsync("https://art.example.test/write/" + i)).ToArray();
+                await Tick();
+                Equal(4, store.Reads); Equal(4, store.Writes); Equal(4, handler.Count);
+                Check(first.Concat(queued).All(work => !work.IsCompleted), "decoded images cannot bypass unfinished physical writes");
+                store.Release.TrySetResult();
+                foreach (var lease in await Task.WhenAll(first.Concat(queued)).WaitAsync(TimeSpan.FromSeconds(10)))
+                { Equal(2, lease.Image.PixelWidth); lease.Dispose(); }
+                Equal(20, store.Reads); Equal(20, store.Ended); Equal(4, store.Maximum);
+                Check(store.ContentCleared, "encoded bytes are cleared after the physical writer returns");
+            }
+            finally { store.Release.TrySetResult(); }
+        }));
+        yield return new("Native artwork a shared physical write survives one consumer cancellation", () => Sta(async () =>
+        {
+            var store = new HeldArtworkBytes();
+            byte[] png = Encode("png", 2, 1);
+            var handler = new Handler((_, _) => Task.FromResult(Reply(png)));
+            await using var service = new ArtworkService(handler, byteCache: store);
+            using var departed = new CancellationTokenSource();
+            const string address = "https://art.example.test/shared-write";
+            var first = service.AcquireAsync(address, departed.Token);
+            try
+            {
+                await store.FirstEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var second = service.AcquireAsync(address);
+                departed.Cancel();
+                await Cancelled(first);
+                Check(!store.Cancelled.Task.IsCompleted && !second.IsCompleted && !store.ContentCleared);
+                Equal(1, store.Reads); Equal(1, store.Writes); Equal(1, handler.Count);
+                store.Release.TrySetResult();
+                using var visible = await second.WaitAsync(TimeSpan.FromSeconds(5));
+                using var cached = await service.AcquireAsync(address);
+                Check(ReferenceEquals(visible.Image, cached.Image) && store.ContentCleared);
+                Equal(1, store.Ended); Equal(1, handler.Count);
+            }
+            finally { store.Release.TrySetResult(); }
+        }));
+        yield return new("Native artwork same-key demand waits for cancelled or cleared physical writes before one successor", () => Sta(async () =>
+        {
+            foreach (bool clear in new[] { false, true })
+            {
+                var store = new HeldArtworkBytes();
+                byte[] png = Encode("png", 2, 1);
+                var handler = new Handler((_, _) => Task.FromResult(Reply(png)));
+                await using var service = new ArtworkService(handler, byteCache: store);
+                using var departed = new CancellationTokenSource();
+                const string address = "https://art.example.test/retired-write";
+                var first = service.AcquireAsync(address, departed.Token);
+                IArtworkLease? old = null;
+                try
+                {
+                    await store.FirstEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    if (clear)
+                    {
+                        service.ClearMemory();
+                        Interlocked.Increment(ref store.CurrentEpoch);
+                    }
+                    else
+                    {
+                        departed.Cancel();
+                        await Cancelled(first);
+                        await store.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    }
+                    var successor = service.AcquireAsync(address);
+                    var anotherPage = service.AcquireAsync(address);
+                    await Tick();
+                    Equal(1, store.Reads); Equal(1, store.Writes); Equal(0, store.Ended); Equal(1, handler.Count);
+                    Check(!successor.IsCompleted && !anotherPage.IsCompleted && !store.ContentCleared);
+                    store.Release.TrySetResult();
+                    if (clear) old = await first.WaitAsync(TimeSpan.FromSeconds(5));
+                    using var fresh = await successor.WaitAsync(TimeSpan.FromSeconds(5));
+                    using var shared = await anotherPage.WaitAsync(TimeSpan.FromSeconds(5));
+                    using var cached = await service.AcquireAsync(address);
+                    Check(ReferenceEquals(fresh.Image, shared.Image) && ReferenceEquals(fresh.Image, cached.Image));
+                    if (old is not null) Check(old.Image.IsFrozen && !ReferenceEquals(old.Image, fresh.Image));
+                    Equal(2, store.Reads); Equal(2, store.Writes); Equal(2, store.Ended); Equal(2, handler.Count);
+                    Equal(1, store.Maximum); Equal(clear ? 1L : 0L, store.LastWriteEpoch);
+                    Check(store.ContentCleared);
+                }
+                finally { store.Release.TrySetResult(); old?.Dispose(); }
+            }
+        }));
+        yield return new("Native artwork unrelated persistence cancellation remains a recoverable miss after successful decoding", () => Sta(async () =>
+        {
+            foreach (bool corrupt in new[] { false, true })
+            {
+                var store = new CancelledArtworkBytes(corrupt);
+                byte[] png = Encode("png", 2, 1);
+                var handler = new Handler((_, _) => Task.FromResult(Reply(png)));
+                await using var service = new ArtworkService(handler, byteCache: store);
+                using var decoded = await service.AcquireAsync("https://art.example.test/persistence-cancel");
+                using var shared = await service.AcquireAsync("https://art.example.test/persistence-cancel");
+                Check(decoded.Image.IsFrozen && ReferenceEquals(decoded.Image, shared.Image));
+                Equal(2, decoded.Image.PixelWidth); Equal(1, handler.Count);
+                Equal(1, store.Reads); Equal(corrupt ? 1 : 0, store.Removals); Equal(1, store.Writes);
+            }
+        }));
+        yield return new("Native artwork unrelated reader cancellation is not reported as a request timeout", () => Sta(async () =>
+        {
+            foreach (bool trusted in new[] { false, true })
+            {
+                int reads = 0;
+                byte[] png = Encode("png", 2, 1);
+                Task<byte[]> Read(CancellationToken token)
+                {
+                    Check(!token.IsCancellationRequested);
+                    return ++reads == 1 ? Task.FromCanceled<byte[]>(new CancellationToken(true)) : Task.FromResult(png.ToArray());
+                }
+                var handler = new Handler(async (_, token) => Reply(await Read(token)));
+                await using var service = new ArtworkService(handler, readTrusted: (_, token) => Read(token));
+                string address = trusted ? "/trusted/independent-cancel" : "https://art.example.test/independent-cancel";
+                await Code("ARTWORK_FAILED", () => service.AcquireAsync(address));
+                using var ready = await service.AcquireAsync(address);
+                Check(ready.Image.IsFrozen); Equal(2, reads); Equal(trusted ? 0 : 2, handler.Count);
+            }
+        }));
+        yield return new("Native artwork queued subscribers cancel independently without reading or blocking same-key retry", () => Sta(async () =>
+        {
+            var store = new HeldArtworkBytes();
+            byte[] png = Encode("png", 1, 1);
+            var handler = new Handler((_, _) => Task.FromResult(Reply(png)));
+            await using var service = new ArtworkService(handler, byteCache: store);
+            var active = Enumerable.Range(0, 4).Select(i => service.AcquireAsync("https://art.example.test/active/" + i)).ToArray();
+            using var departed = new CancellationTokenSource();
+            using var abandoned = new CancellationTokenSource();
+            try
+            {
+                await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                const string shared = "https://art.example.test/queued-shared";
+                const string retry = "https://art.example.test/queued-retry";
+                var first = service.AcquireAsync(shared, departed.Token);
+                var second = service.AcquireAsync(shared);
+                var anotherPage = service.AcquireAsync(shared);
+                var cancelled = service.AcquireAsync(retry, abandoned.Token);
+                departed.Cancel(); abandoned.Cancel();
+                await Cancelled(first); await Cancelled(cancelled);
+                var successor = service.AcquireAsync(retry);
+                await Tick();
+                Equal(4, store.Reads); Equal(4, handler.Count);
+                Check(!second.IsCompleted && !successor.IsCompleted);
+                store.Release.TrySetResult();
+                var leases = await Task.WhenAll(active.Concat([second, anotherPage, successor])).WaitAsync(TimeSpan.FromSeconds(10));
+                try { Check(ReferenceEquals(leases[4].Image, leases[5].Image)); }
+                finally { foreach (var lease in leases) lease.Dispose(); }
+                Equal(6, store.Reads); Equal(6, handler.Count); Equal(6, store.Writes);
+                using var sharedAgain = await service.AcquireAsync(shared);
+                Equal(6, handler.Count);
+            }
+            finally { store.Release.TrySetResult(); }
+        }));
+        yield return new("Native artwork last-consumer cancellation retains slots and close drains queued reads and physical writers", () => Sta(async () =>
+        {
+            var store = new HeldArtworkBytes();
+            byte[] png = Encode("png", 1, 1);
+            var handler = new Handler((_, _) => Task.FromResult(Reply(png)));
+            await using var service = new ArtworkService(handler, byteCache: store);
+            using var departed = new CancellationTokenSource();
+            var active = Enumerable.Range(0, 4).Select(i => service.AcquireAsync("https://art.example.test/closing/" + i, departed.Token)).ToArray();
+            try
+            {
+                await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var queued = Enumerable.Range(4, 12).Select(i => service.AcquireAsync("https://art.example.test/closing/" + i)).ToArray();
+                departed.Cancel();
+                foreach (var work in active) await Cancelled(work);
+                await store.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await Tick();
+                Equal(4, store.Reads); Equal(0, store.Ended);
+                Check(queued.All(work => !work.IsCompleted) && !store.ContentCleared,
+                    "consumer cancellation cannot return a physically occupied slot or clear its input bytes");
+                var close = service.DisposeAsync().AsTask();
+                var secondClose = service.DisposeAsync().AsTask();
+                foreach (var work in queued) await Cancelled(work);
+                Equal(4, store.Reads); Equal(4, store.Writes); Equal(4, handler.Count); Equal(0, store.Ended);
+                Check(!close.IsCompleted && !secondClose.IsCompleted && !handler.Disposed);
+                store.Release.TrySetResult();
+                await Task.WhenAll(close, secondClose).WaitAsync(TimeSpan.FromSeconds(5));
+                Equal(4, store.Ended); Check(handler.Disposed && store.ContentCleared);
+            }
+            finally { store.Release.TrySetResult(); }
+        }));
+        yield return new("Native artwork queued waiting does not consume the thirty-second request timeout", () => Sta(async () =>
+        {
+            var store = new HeldArtworkBytes();
+            byte[] png = Encode("png", 1, 1);
+            var handler = new Handler((_, _) => Task.FromResult(Reply(png)));
+            await using var service = new ArtworkService(handler, byteCache: store);
+            var active = Enumerable.Range(0, 4).Select(i => service.AcquireAsync("https://art.example.test/timeout/" + i)).ToArray();
+            try
+            {
+                await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var queued = service.AcquireAsync("https://art.example.test/after-timeout");
+                // Exercise the actual request timer, not a shortened test-only timeout.
+                await Task.Delay(TimeSpan.FromSeconds(31));
+                await store.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                Equal(4, store.Reads); Check(!queued.IsCompleted);
+                store.Release.TrySetResult();
+                foreach (var work in active) await Code("ARTWORK_TIMEOUT", async () => { using var lease = await work; });
+                using var ready = await queued.WaitAsync(TimeSpan.FromSeconds(5));
+                Check(ready.Image.IsFrozen); Equal(5, store.Reads); Equal(5, handler.Count);
+            }
+            finally { store.Release.TrySetResult(); }
         }));
         yield return new("Native artwork close drains a response body that ignores cancellation", async () =>
         {
@@ -484,20 +743,20 @@ public static class ArtworkTests
             var leases = new List<IArtworkLease>();
             try
             {
-                for (int i = 0; i < 64; i++) leases.Add(await service.AcquireAsync("https://art.example.test/" + i));
+                for (int i = 0; i < 32; i++) leases.Add(await service.AcquireAsync("https://art.example.test/" + i));
                 using var replacement = await service.AcquireAsync("https://art.example.test/overflow");
                 Check(leases[0].Image.IsFrozen && leases[1].Image.IsFrozen && replacement.Image.IsFrozen);
                 var original = leases[0].Image;
                 var reused = await service.AcquireAsync("https://art.example.test/0");
-                Check(ReferenceEquals(original, reused.Image)); Equal(65, handler.Count);
+                Check(ReferenceEquals(original, reused.Image)); Equal(33, handler.Count);
                 leases[0].Dispose(); leases[0].Dispose();
                 using (var shared = await service.AcquireAsync("https://art.example.test/0"))
                 {
-                    Check(ReferenceEquals(original, shared.Image)); Equal(65, handler.Count);
+                    Check(ReferenceEquals(original, shared.Image)); Equal(33, handler.Count);
                 }
                 reused.Dispose(); reused.Dispose();
                 using var fresh = await service.AcquireAsync("https://art.example.test/0");
-                Check(!ReferenceEquals(original, fresh.Image)); Equal(66, handler.Count);
+                Check(!ReferenceEquals(original, fresh.Image)); Equal(34, handler.Count);
             }
             finally { foreach (var lease in leases) lease.Dispose(); }
         }));
@@ -842,6 +1101,62 @@ public static class ArtworkTests
         }
         protected override void Dispose(bool disposing) { Disposed = true; base.Dispose(disposing); }
     }
+    private sealed class HeldArtworkBytes : IArtworkByteCache
+    {
+        internal readonly TaskCompletionSource FirstEntered = Signal(), Entered = Signal(), Cancelled = Signal(), Release = Signal();
+        internal int Reads, Writes, Ended, Maximum;
+        internal long CurrentEpoch, LastWriteEpoch;
+        private readonly List<ReadOnlyMemory<byte>> content = [];
+        private int active;
+        public long Epoch => Volatile.Read(ref CurrentEpoch);
+        public TimeSpan Lifetime => TimeSpan.FromDays(30);
+        internal bool ContentCleared
+        {
+            get { lock (content) return content.All(value => value.Span.IndexOfAnyExcept((byte)0) < 0); }
+        }
+        public Task<ArtworkBytes?> ReadAsync(string address, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref Reads);
+            return Task.FromResult<ArtworkBytes?>(null);
+        }
+        public async Task WriteAsync(string address, ReadOnlyMemory<byte> bytes, long epoch, CancellationToken token)
+        {
+            Check(bytes.Span.IndexOfAnyExcept((byte)0) >= 0, "writer must receive the original encoded image");
+            lock (content)
+            {
+                content.Add(bytes); Maximum = Math.Max(Maximum, ++active); LastWriteEpoch = epoch;
+                if (++Writes == 1) FirstEntered.TrySetResult();
+                if (Writes == 4) Entered.TrySetResult();
+            }
+            using var registration = token.Register(() => Cancelled.TrySetResult());
+            try { await Release.Task; } // Physical storage deliberately ignores cancellation until released.
+            finally { lock (content) { active--; Ended++; } }
+        }
+        public Task RemoveAsync(string address, long epoch, CancellationToken token) => Task.CompletedTask;
+    }
+    private sealed class CancelledArtworkBytes(bool corrupt) : IArtworkByteCache
+    {
+        internal int Reads, Removals, Writes;
+        public long Epoch => 0;
+        public TimeSpan Lifetime => TimeSpan.FromDays(30);
+        public Task<ArtworkBytes?> ReadAsync(string address, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested(); Reads++;
+            return corrupt ? Task.FromResult<ArtworkBytes?>(new([1, 2, 3], DateTimeOffset.UtcNow + Lifetime)) :
+                Task.FromCanceled<ArtworkBytes?>(new CancellationToken(true));
+        }
+        public Task WriteAsync(string address, ReadOnlyMemory<byte> bytes, long epoch, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested(); Writes++;
+            return Task.FromCanceled(new CancellationToken(true));
+        }
+        public Task RemoveAsync(string address, long epoch, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested(); Removals++;
+            return Task.FromCanceled(new CancellationToken(true));
+        }
+    }
     private sealed class HeldLoader : IArtworkLoader
     {
         internal readonly List<(TaskCompletionSource<IArtworkLease> Completion, CancellationToken Token)> Calls = [];
@@ -959,6 +1274,8 @@ public static class ArtworkTests
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static async Task Code(string code, Func<Task> action)
     { try { await action(); throw new InvalidOperationException("Expected artwork rejection"); } catch (ArtworkException e) { Equal(code, e.Code); Equal(code, e.Message); Check(e.InnerException is null); } }
+    private static async Task Cancelled(Task<IArtworkLease> work)
+    { try { using var lease = await work; throw new InvalidOperationException("Expected artwork cancellation"); } catch (OperationCanceledException) { } }
     private static void Check(bool value, string message = "Artwork assertion failed")
     { if (!value) throw new InvalidOperationException(message); }
     private static void Equal<T>(T expected, T actual)

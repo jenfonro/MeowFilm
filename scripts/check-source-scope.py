@@ -1,6 +1,7 @@
 """Check the current native source/dependency boundary, without compiling code."""
 from pathlib import Path
 import json
+import os
 import re
 import subprocess
 import sys
@@ -15,8 +16,6 @@ LOCAL_PRODUCTS = {
     "CMeowAudioKernel": ("audiokernel", "../AudioKernel"),
     "MeowAetherKernel": ("aetherkernel", "../AetherKernel"),
 }
-SYSTEM_TARGETS = {"CSQLite": {"MeowMusicNativeService"}}
-
 def application_membership(base, project_text):
     """Exact source closure in each target, not just PBXFileReference presence."""
     failures = []
@@ -33,9 +32,6 @@ def application_membership(base, project_text):
             expected_runtime.add(relative.as_posix())
         else:
             failures.append("Unowned App source: " + relative.as_posix())
-    for directory in APPLICATION_DIRECTORIES | {"UITests", "RuntimeTests"}:
-        if not any((base / directory).rglob("*.swift")):
-            failures.append("Empty App source directory: " + directory)
     objects = dict(re.findall(r"^\s*([A-F0-9]{24}) = \{ (.*) \};$", project_text, re.M))
     referenced = set()
     for target_name, expected in (
@@ -43,6 +39,8 @@ def application_membership(base, project_text):
         ("MeowfilmAcceptanceUITests", expected_test),
         ("MeowfilmRuntimeTests", expected_runtime),
     ):
+        if not expected:
+            failures.append("Empty App source target: " + target_name)
         targets = [text for text in objects.values()
                    if "isa = PBXNativeTarget;" in text and "name = " + target_name + ";" in text]
         if len(targets) != 1:
@@ -127,9 +125,6 @@ def aether_membership(root):
     lock = json.loads((root / "scripts/ios-aether-kernel.json").read_text())
     if binary != set(lock["libraries"]) | {"Dovi"}:
         failures.append("Aether binary closure differs from the lock")
-    regular = {name for name, item in declarations.items() if item["type"] == "regular"}
-    if regular != {"MeowAetherKernel", "AetherEngine", "AetherFFmpegBuild"}:
-        failures.append("Unexpected Aether source target")
     for name, path in (("AetherEngine", ".cache/AetherEngine"),
                        ("AetherFFmpegBuild", ".cache/AetherFFmpegBuild")):
         if declarations.get(name, {}).get("path") != path:
@@ -163,6 +158,7 @@ def check(root):
     external = set()
     targets = {}
     kinds = {}
+    directories = {}
     for declaration in manifest["targets"]:
         name, kind = declaration["name"], declaration["type"]
         if name in targets:
@@ -182,35 +178,66 @@ def check(root):
                 dependencies.add((dependency.get("target") or dependency["byName"])[0])
         targets[name] = dependencies
         kinds[name] = kind
+        folder = "Tests" if kind == "test" else "Sources"
+        declared = package / (declaration.get("path") or folder + "/" + name)
+        directory = Path(os.path.abspath(declared))
+        if declared.resolve() != directory or not directory.is_relative_to(package):
+            return failures + ["Linked or escaped target directory: " + name]
+        directories[name] = directory
     sources = {name for name, kind in kinds.items() if kind == "regular"}
     tests = {name for name, kind in kinds.items() if kind == "test"}
     systems = {name for name, kind in kinds.items() if kind == "system"}
-    if not systems <= SYSTEM_TARGETS.keys():
-        failures.append("Unapproved system target")
-    for declaration in manifest["targets"]:
-        name = declaration["name"]
-        if name not in systems:
-            continue
-        if (name != "CSQLite" or declaration.get("pkgConfig") != "sqlite3" or targets[name]
-                or declaration.get("providers") or declaration.get("path") is not None):
-            failures.append("Invalid system target: " + name)
-            continue
-        directory = package / "Sources" / name
-        modulemap, shim = directory / "module.modulemap", directory / "shim.h"
-        expected_module = r'module\s+CSQLite\s+\[system\]\s*\{\s*header\s+"shim\.h"\s+link\s+"sqlite3"\s+export\s+\*\s*\}'
-        if (not directory.is_dir() or {path.name for path in directory.iterdir()} != {"module.modulemap", "shim.h"}
-                or not modulemap.is_file() or not re.fullmatch(expected_module, modulemap.read_text(encoding="utf-8").strip())
-                or not shim.is_file() or shim.read_text(encoding="utf-8").strip() != "#include <sqlite3.h>"):
+    for name in systems:
+        directory = directories[name]
+        modulemap = directory / "module.modulemap"
+        if not modulemap.is_file() or modulemap.is_symlink():
             failures.append("Invalid system module: " + name)
+            continue
+        text = re.sub(r"//[^\n]*|/\*.*?\*/", "", modulemap.read_text(encoding="utf-8"), flags=re.S)
+        headers = [directory / path for excluded, path in re.findall(r'\b(?:(exclude)\s+)?header\s+"([^"]+)"', text)
+                   if not excluded]
+        umbrellas = [directory / path for path in re.findall(r'\bumbrella\s+"([^"]+)"', text)]
+        for umbrella in umbrellas:
+            headers.extend(umbrella.rglob("*.h"))
+        if (not re.search(r'\bmodule\s+(?:' + re.escape(name) + r'|"' + re.escape(name) + r'")(?=\s|\[|\{)', text)
+                or any(not path.is_dir() or path.resolve() != Path(os.path.abspath(path)) or not path.resolve().is_relative_to(package)
+                       for path in umbrellas)
+                or any(not path.is_file() or path.resolve() != Path(os.path.abspath(path)) or not path.resolve().is_relative_to(package)
+                       for path in headers)):
+            failures.append("Invalid system module: " + name)
+            continue
+        if name == "CSQLite":
+            pending, visited, sdk_header = list(headers), set(), False
+            while pending:
+                path = pending.pop().resolve()
+                if path in visited:
+                    continue
+                visited.add(path)
+                header = re.sub(r"//[^\n]*|/\*.*?\*/", "", path.read_text(encoding="utf-8"), flags=re.S)
+                for delimiter, included in re.findall(r'^\s*#\s*(?:include|import)\s*([<"])([^>"]+)[>"]', header, re.M):
+                    local = path.parent / included
+                    if included == "sqlite3.h" and (delimiter == "<" or not local.exists()):
+                        sdk_header = True
+                    elif delimiter == '"' and local.is_file():
+                        if local.resolve() != Path(os.path.abspath(local)) or not local.resolve().is_relative_to(package):
+                            failures.append("Linked or escaped system header: " + name)
+                        else:
+                            pending.append(local)
+            if (not re.search(r'\blink\s+"sqlite3"', text)
+                    or not sdk_header):
+                failures.append("Invalid system module: " + name)
     if not sources:
         failures.append("No package source targets")
     for folder, expected in (("Sources", sources | systems), ("Tests", tests)):
         parent = package / folder
+        expected_directories = {directories[target].relative_to(parent).parts[0] for target in expected
+                                if directories[target].is_relative_to(parent)}
         actual = {p.name for p in parent.iterdir() if p.is_dir()} if parent.exists() else set()
-        if actual != expected:
-            failures.append("{} directories: missing={}, extra={}".format(folder, sorted(expected - actual), sorted(actual - expected)))
+        if actual != expected_directories:
+            failures.append("{} directories: missing={}, extra={}".format(
+                folder, sorted(expected_directories - actual), sorted(actual - expected_directories)))
         for target in sorted(expected):
-            if target not in systems and not list((parent / target).rglob("*.swift")):
+            if target not in systems and not list(directories[target].rglob("*.swift")):
                 failures.append("Empty target: " + target)
     product_targets = [(item["name"], item["targets"]) for item in manifest["products"]]
     products = {name for name, _ in product_targets}
@@ -223,17 +250,15 @@ def check(root):
     for target, dependencies in targets.items():
         if not dependencies <= sources | external | systems:
             failures.append("Non-source dependency: " + target)
-        for system in dependencies & systems:
-            if target not in SYSTEM_TARGETS.get(system, set()):
-                failures.append("Unapproved system dependency: " + target)
-        folder = "Sources" if target in sources | systems else "Tests"
         imported = set()
-        for path in (package / folder / target).rglob("*.swift"):
-            if path.is_symlink() or not path.resolve().is_relative_to((package / folder / target).resolve()):
+        for path in directories[target].rglob("*.swift"):
+            if path.is_symlink() or not path.resolve().is_relative_to(directories[target].resolve()):
                 failures.append("Linked source: " + str(path.relative_to(root)))
                 continue
             text = path.read_text(encoding="utf-8")
-            imported.update(re.findall(r"^(?:@testable )?import (Meow\w+|CSQLite)", text, re.M))
+            names = re.findall(r"^\s*(?:(?:@testable|@preconcurrency|public|internal|package|fileprivate|private)\s+)*"
+                               r"import\s+(?:(?:typealias|struct|class|enum|protocol|let|var|func)\s+)?(\w+)", text, re.M)
+            imported.update(name for name in names if name in targets or name in external or name.startswith("Meow"))
         if not imported <= dependencies:
             failures.append("Undeclared imports for {}: {}".format(target, sorted(imported - dependencies)))
         if target in SHARED_TARGETS:
@@ -264,13 +289,17 @@ def check(root):
             failures.extend(aether_membership(root))
         except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
             failures.append("Cannot evaluate Aether package boundary: " + str(error))
-    for parent in (root / "apps/ios", package / "Sources", package / "Tests"):
+    for parent in (root / "apps/ios", package / "Sources", package / "Tests", *(
+            directory for directory in directories.values()
+            if not directory.is_relative_to(package / "Sources") and not directory.is_relative_to(package / "Tests"))):
         for path in parent.rglob("*"):
             if parent == root / "apps/ios" and path.relative_to(parent).parts[0] == ".cache":
                 continue
             if path.is_symlink() or path.resolve() != path.absolute():
                 failures.append("Linked source: " + str(path.relative_to(root)))
             if path.is_file() and path.suffix == ".swift":
+                if parent != root / "apps/ios" and not any(path.is_relative_to(directory) for directory in directories.values()):
+                    failures.append("Unowned package source: " + str(path.relative_to(root)))
                 if re.search(r"^\s*(?:(?:@testable|@preconcurrency|public|internal|package|fileprivate|private)\s+)*"
                              r"import (?:AetherEngine|AetherFFmpegBuild|AetherLib\w+|Dovi)\b",
                              path.read_text(encoding="utf-8"), re.M):
