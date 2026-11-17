@@ -7,152 +7,196 @@ import MeowStorage
 private final class PresentationCacheRevisions: @unchecked Sendable {
     private let lock = NSLock()
     private var image = UUID(), lyric = UUID()
+    private var imageClears = 0, lyricClears = 0
     func value(images: Bool) -> UUID { lock.lock(); defer { lock.unlock() }; return images ? image : lyric }
-    func clear(images: Bool, lyrics: Bool) {
+    func permits(_ expected: UUID, images: Bool) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        if images { image = UUID() }
-        if lyrics { lyric = UUID() }
+        return (images ? image : lyric) == expected && (images ? imageClears : lyricClears) == 0
+    }
+    func perform(_ expected: UUID, images: Bool, _ operation: () throws -> Void) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !Task.isCancelled, (images ? image : lyric) == expected,
+              (images ? imageClears : lyricClears) == 0 else { throw CancellationError() }
+        try operation()
+    }
+    func beginClear(images: Bool, lyrics: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        if images { image = UUID(); imageClears += 1 }
+        if lyrics { lyric = UUID(); lyricClears += 1 }
+    }
+    func endClear(images: Bool, lyrics: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        if images { imageClears -= 1 }
+        if lyrics { lyricClears -= 1 }
     }
 }
 
 /// Original network bytes, keyed by full public URL. Lyrics and images share
 /// the original 256 MiB budget and 30-day lifetime; no song image copies exist.
 public actor MusicNativePresentationCache: MusicPresentationCaching {
-    public static let namespace = "music.presentation-resources.v1"
+    public static let namespace = "music.presentation-resources.v2"
     private static let lifetime: TimeInterval = 30 * 86_400
     private static let capacity = Int(NativeMusicAudioCacheHTTPPolicy.maximumBytes)
     private nonisolated let revisions = PresentationCacheRevisions()
     public nonisolated var revision: UUID { revisions.value(images: true) }
     public nonisolated var lyricRevision: UUID { revisions.value(images: false) }
-    private let factory: @Sendable () throws -> DocumentStore
+    private let factory: @Sendable () throws -> ResourceFileStore
     private let clock: @Sendable () -> Date
-    private var document: DocumentStore?
-    private enum Kind: String, Codable { case image, lyrics }
-    private struct Entry: Codable {
-        let key: String
-        let resource: String
+    private var files: ResourceFileStore?
+    private enum Kind: String {
+        case image, lyrics
+        var maximumBytes: Int { self == .image ? 4 * 1024 * 1024 : 1024 * 1024 }
+        static func from(key: String) -> Kind? {
+            for kind in [Kind.image, .lyrics] where key.hasPrefix(kind.rawValue + "-") {
+                let hash = key.dropFirst(kind.rawValue.count + 1)
+                if hash.utf8.count == 64 && hash.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) {
+                    return kind
+                }
+            }
+            return nil
+        }
+    }
+    private struct Entry {
         let kind: Kind
         var updatedAt: Date
-        var bytes: Int
+        let bytes: Int
         var ready: Bool
+        let stageName: String?
     }
-    private struct Index: Codable { var entries: [Entry] = [] }
+    private var entries: [String: Entry] = [:]
+    private var byteCount = 0
+    private var nextExpiry: Date?
+    // A failed first clear must not adopt surviving leaves on a later inventory retry.
     private var imagesReadable = true, lyricsReadable = true
 
-    public init(storeFactory: @escaping @Sendable () throws -> DocumentStore,
+    public init(storeFactory: @escaping @Sendable () throws -> ResourceFileStore,
                 clock: @escaping @Sendable () -> Date = { Date() }) {
         factory = storeFactory; self.clock = clock
     }
-    private func store() throws -> DocumentStore {
-        if let document { return document }
-        let value = try factory(); document = value; return value
+    private func store() throws -> ResourceFileStore {
+        if let files { return files }
+        let value = try factory()
+        let inventory = try value.inventory()
+        for leaf in inventory {
+            guard let kind = Kind.from(key: leaf.key) else { continue }
+            entries[leaf.stageName ?? leaf.key] = .init(kind: kind, updatedAt: leaf.modifiedAt, bytes: leaf.byteCount,
+                ready: leaf.stageName == nil && leaf.byteCount > 0 && leaf.byteCount <= kind.maximumBytes &&
+                    (kind == .image ? imagesReadable : lyricsReadable), stageName: leaf.stageName)
+            byteCount += leaf.byteCount
+        }
+        updateNextExpiry()
+        files = value
+        return value
     }
     private static func key(_ resource: String, kind: Kind) -> String {
         kind.rawValue + "-" + SHA256.hash(data: Data(resource.utf8)).map { String(format: "%02x", $0) }.joined()
     }
-    private func index() throws -> Index {
-        guard let data = try store().read(key: "index") else { return .init() }
-        guard data.count <= 1024 * 1024 else { throw DocumentStoreError.documentTooLarge }
-        return try JSONDecoder().decode(Index.self, from: data)
+    private func updateNextExpiry() {
+        nextExpiry = entries.values.lazy.filter(\.ready).map { $0.updatedAt.addingTimeInterval(Self.lifetime) }.min()
     }
-    private func commit(_ value: Index) throws {
-        try store().write(JSONEncoder().encode(value), key: "index")
+    private func forget(_ key: String) {
+        if let old = entries.removeValue(forKey: key) { byteCount -= old.bytes }
     }
-    private func prune(_ value: inout Index) throws {
-        let expired = value.entries.filter { $0.updatedAt.addingTimeInterval(Self.lifetime) <= clock() }
-        guard !expired.isEmpty else { return }
-        // Failed removals remain charged. Missing leaves are individual misses.
-        for entry in expired {
-            do {
-                try store().remove(key: entry.key)
-                value.entries.removeAll { $0.key == entry.key }
-            } catch {
-                if let position = value.entries.firstIndex(where: { $0.key == entry.key }) {
-                    value.entries[position].ready = false
-                }
+    private func remove(_ key: String, from files: ResourceFileStore) throws {
+        // Failed removals remain charged, but are never readable after invalidation.
+        guard let entry = entries[key] else { return }
+        entries[key]?.ready = false
+        if let stageName = entry.stageName { try files.removeStage(name: stageName) }
+        else { try files.remove(key: key) }
+        forget(key)
+    }
+    private func prune(at: Date, files: ResourceFileStore) {
+        guard let nextExpiry, nextExpiry <= at else { return }
+        let expired = entries.filter { $0.value.updatedAt.addingTimeInterval(Self.lifetime) <= at }.map(\.key)
+        for key in expired { try? remove(key, from: files) }
+        updateNextExpiry()
+    }
+    private func put(_ data: Data, resource: String, kind: Kind, at: Date, expected: UUID) throws {
+        let files = try store(), key = Self.key(resource, kind: kind)
+        guard revisions.permits(expected, images: kind == .image), !Task.isCancelled else { throw CancellationError() }
+        prune(at: at, files: files)
+        // Charge the temporary raw leaf as well as the old committed leaf until rename.
+        // Only budget pressure sorts metadata; ordinary puts never scan/encode an index.
+        if byteCount + data.count > Self.capacity {
+            let victims = entries.filter { $0.key != key }.sorted {
+                $0.value.updatedAt == $1.value.updatedAt ? $0.key < $1.key : $0.value.updatedAt < $1.value.updatedAt
             }
-        }
-        try commit(value)
-    }
-    private func put(_ data: Data, resource: String, kind: Kind, at: Date) throws {
-        var value = try index(); try prune(&value)
-        for position in value.entries.indices where
-            value.entries[position].kind == .image && !imagesReadable ||
-            value.entries[position].kind == .lyrics && !lyricsReadable {
-            value.entries[position].ready = false
-        }
-        let key = Self.key(resource, kind: kind)
-        let old = value.entries.first { $0.key == key }
-        value.entries.removeAll { $0.key == key }
-        // Reserve enough for both the old leaf and its atomic replacement. A
-        // failed leaf write leaves a charged miss, never an uncharged orphan.
-        value.entries.append(.init(key: key, resource: resource, kind: kind, updatedAt: at,
-                                   bytes: max(old?.bytes ?? 0, data.count), ready: false))
-        var encoded = try JSONEncoder().encode(value)
-        var removed: [Entry] = []
-        while encoded.count > 1024 * 1024 || value.entries.reduce(encoded.count, { $0 + $1.bytes }) > Self.capacity {
-            guard let victim = value.entries.filter({ $0.key != key }).min(by: { $0.updatedAt < $1.updatedAt }) else {
-                throw DocumentStoreError.documentTooLarge
+            for victim in victims where byteCount + data.count > Self.capacity {
+                try? remove(victim.key, from: files)
             }
-            value.entries.removeAll { $0.key == victim.key }; removed.append(victim)
-            encoded = try JSONEncoder().encode(value)
+            guard byteCount + data.count <= Self.capacity else { throw DocumentStoreError.documentTooLarge }
         }
-        for entry in removed { try store().remove(key: entry.key) }
-        try store().write(encoded, key: "index")
-        try store().write(data, key: key)
-        if let position = value.entries.firstIndex(where: { $0.key == key }) {
-            value.entries[position].bytes = data.count
-            value.entries[position].ready = true
-            try commit(value)
+        try files.write(data, key: key, modifiedAt: at, retainedStage: { leaf in
+            if let stageName = leaf.stageName {
+                entries[stageName] = .init(kind: kind, updatedAt: leaf.modifiedAt, bytes: leaf.byteCount,
+                    ready: false, stageName: stageName)
+                byteCount += leaf.byteCount
+            }
+        }) { publish in
+            try revisions.perform(expected, images: kind == .image, publish)
+        }
+        forget(key)
+        entries[key] = .init(kind: kind, updatedAt: at, bytes: data.count, ready: true, stageName: nil)
+        byteCount += data.count
+        let expiry = at.addingTimeInterval(Self.lifetime)
+        nextExpiry = nextExpiry.map { min($0, expiry) } ?? expiry
+    }
+    private func bytes(resource: String, kind: Kind) throws -> (Data, Date)? {
+        let files = try store(), key = Self.key(resource, kind: kind)
+        guard let entry = entries[key], entry.ready,
+              entry.updatedAt.addingTimeInterval(Self.lifetime) > clock() else { return nil }
+        do {
+            guard let data = try files.read(key: key, maximumBytes: kind.maximumBytes) else {
+                forget(key); return nil
+            }
+            guard !data.isEmpty else { entries[key]?.ready = false; return nil }
+            return (data, entry.updatedAt.addingTimeInterval(Self.lifetime))
+        } catch DocumentStoreError.unsafePath, DocumentStoreError.documentTooLarge {
+            entries[key]?.ready = false
+            return nil
         }
     }
     public func read(_ url: URL) -> ArtworkBytes? {
-        guard imagesReadable else { return nil }
+        let expected = revision
+        guard !Task.isCancelled, revisions.permits(expected, images: true) else { return nil }
         do {
-            let value = try index(), key = Self.key(url.absoluteString, kind: .image)
-            guard let entry = value.entries.first(where: {
-                $0.kind == .image && $0.ready && $0.key == key && $0.resource == url.absoluteString &&
-                    $0.updatedAt.addingTimeInterval(Self.lifetime) > clock()
-            }),
-                  let data = try store().read(key: entry.key), data.count <= 4 * 1024 * 1024 else { return nil }
-            return .init(data: data, expiresAt: entry.updatedAt.addingTimeInterval(Self.lifetime))
+            guard let (data, expiresAt) = try bytes(resource: url.absoluteString, kind: .image),
+                  !Task.isCancelled, revisions.permits(expected, images: true) else { return nil }
+            return .init(data: data, expiresAt: expiresAt)
         } catch { return nil }
     }
     public func store(_ data: Data, for url: URL, revision expected: UUID) -> ArtworkBytes? {
-        guard !Task.isCancelled, revision == expected, data.count <= 4 * 1024 * 1024,
-              MusicArtworkURL.normalized(url.absoluteString) == url else { return nil }
+        guard !Task.isCancelled, revisions.permits(expected, images: true), !data.isEmpty,
+              data.count <= Kind.image.maximumBytes, MusicArtworkURL.normalized(url.absoluteString) == url else { return nil }
         let at = clock()
         // Decode admission is owned by ArtworkImages, before this call.
-        do {
-            try put(data, resource: url.absoluteString, kind: .image, at: at)
-            imagesReadable = true
-        } catch {}
-        guard revision == expected else { return nil }
+        do { try put(data, resource: url.absoluteString, kind: .image, at: at, expected: expected) } catch {}
+        guard !Task.isCancelled, revisions.permits(expected, images: true) else { return nil }
         return .init(data: data, expiresAt: at.addingTimeInterval(Self.lifetime))
     }
     public func lyrics(songID: String, authorization: MusicQueueAuthorization) -> MusicLyricDisplaySnapshot? {
-        guard lyricsReadable else { return nil }
+        let expected = lyricRevision
+        guard !Task.isCancelled, revisions.permits(expected, images: false) else { return nil }
         do {
             return try authorization.perform {
-                let value = try index()
-                let key = Self.key(songID, kind: .lyrics)
-                guard value.entries.contains(where: { $0.key == key && $0.ready &&
-                    $0.updatedAt.addingTimeInterval(Self.lifetime) > clock() }),
-                      let data = try store().read(key: key), data.count <= 1024 * 1024 else { return nil }
-                let saved = try JSONDecoder().decode(MusicLyricDisplaySnapshot.self, from: data)
-                return saved.songID == songID && Self.usableLyrics(saved.lines) ? saved : nil
+                guard let (data, _) = try bytes(resource: songID, kind: .lyrics) else { return nil }
+                guard let saved = try? JSONDecoder().decode(MusicLyricDisplaySnapshot.self, from: data),
+                      saved.songID == songID, !saved.lines.isEmpty, Self.usableLyrics(saved.lines) else {
+                    entries[Self.key(songID, kind: .lyrics)]?.ready = false
+                    return nil
+                }
+                return !Task.isCancelled && revisions.permits(expected, images: false) ? saved : nil
             }
         } catch { return nil }
     }
     public func storeLyrics(_ lines: [MusicLyricLine], sourceKey: String, songID: String,
                             revision expected: UUID, authorization: MusicQueueAuthorization) {
-        guard !Task.isCancelled, lyricRevision == expected, !lines.isEmpty, Self.usableLyrics(lines) else { return }
+        guard !Task.isCancelled, revisions.permits(expected, images: false), !lines.isEmpty, Self.usableLyrics(lines) else { return }
         do {
             let value = MusicLyricDisplaySnapshot(songID: songID, sourceKey: sourceKey, lines: lines)
             let data = try JSONEncoder().encode(value)
-            guard data.count <= 1024 * 1024 else { return }
-            try authorization.perform { try put(data, resource: songID, kind: .lyrics, at: clock()) }
-            lyricsReadable = true
+            guard data.count <= Kind.lyrics.maximumBytes else { return }
+            try authorization.perform { try put(data, resource: songID, kind: .lyrics, at: clock(), expected: expected) }
         } catch {}
     }
     private static func usableLyrics(_ lines: [MusicLyricLine]) -> Bool {
@@ -162,42 +206,41 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
         }
     }
     public func played(songID: String, artwork: URL?, confirmedAt: Date) {
-        guard confirmedAt <= clock() else { return }
+        guard !Task.isCancelled, confirmedAt <= clock() else { return }
         do {
-            var value = try index(); try prune(&value)
-            for i in value.entries.indices where value.entries[i].ready &&
-                (value.entries[i].kind == .lyrics && value.entries[i].resource == songID ||
-                value.entries[i].kind == .image && value.entries[i].resource == artwork?.absoluteString) {
-                value.entries[i].updatedAt = max(value.entries[i].updatedAt, confirmedAt)
+            let files = try store()
+            let resources: [(Kind, String)] = [(Kind.lyrics, songID)] + (artwork.map { [(.image, $0.absoluteString)] } ?? [])
+            for (kind, resource) in resources {
+                let expected = revisions.value(images: kind == .image), key = Self.key(resource, kind: kind)
+                guard revisions.permits(expected, images: kind == .image), let entry = entries[key], entry.ready,
+                      entry.updatedAt.addingTimeInterval(Self.lifetime) > clock(), confirmedAt > entry.updatedAt else { continue }
+                do {
+                    if let updatedAt = try files.touch(key: key, modifiedAt: confirmedAt, commit: { touch in
+                        try revisions.perform(expected, images: kind == .image, touch)
+                    }) {
+                        entries[key]?.updatedAt = updatedAt
+                    } else { forget(key) }
+                } catch {}
             }
-            try commit(value)
         } catch {}
     }
-    public func clearImages() { clear(images: true, lyrics: false) }
-    public func clearLyrics() { clear(images: false, lyrics: true) }
-    public func clear() { clear(images: true, lyrics: true) }
-    private func clear(images: Bool, lyrics: Bool) {
-        revisions.clear(images: images, lyrics: lyrics)
+    public nonisolated func clearImages() async { await clear(images: true, lyrics: false) }
+    public nonisolated func clearLyrics() async { await clear(images: false, lyrics: true) }
+    public nonisolated func clear() async { await clear(images: true, lyrics: true) }
+    private nonisolated func clear(images: Bool, lyrics: Bool) async {
+        // Revoke before waiting for actor I/O. An already staged write checks at rename.
+        revisions.beginClear(images: images, lyrics: lyrics)
+        defer { revisions.endClear(images: images, lyrics: lyrics) }
+        await removeCleared(images: images, lyrics: lyrics)
+    }
+    private func removeCleared(images: Bool, lyrics: Bool) {
         if images { imagesReadable = false }
         if lyrics { lyricsReadable = false }
         do {
-            var value = try index()
-            let removed = value.entries.filter { $0.kind == .image ? images : lyrics }
-            for index in value.entries.indices where value.entries[index].kind == .image ? images : lyrics {
-                value.entries[index].ready = false
-            }
-            // Invalidate successful-read eligibility before deleting leaves.
-            // Failed deletions remain charged but cannot be served after clear.
-            try commit(value)
-            if images { imagesReadable = true }
-            if lyrics { lyricsReadable = true }
-            for entry in removed {
-                do {
-                    try store().remove(key: entry.key)
-                    value.entries.removeAll { $0.key == entry.key }
-                } catch {}
-            }
-            try commit(value)
+            let files = try store()
+            let removed = entries.filter { $0.value.kind == .image ? images : lyrics }.map(\.key)
+            for key in removed { try? remove(key, from: files) }
+            updateNextExpiry()
         } catch {}
     }
 }

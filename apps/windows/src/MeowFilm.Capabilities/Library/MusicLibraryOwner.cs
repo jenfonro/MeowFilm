@@ -49,13 +49,14 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         IReadOnlyDictionary<(string SongId, string Platform), long>? Observations = null,
         QueueNavigation? BeforeQueue = null, QueueNavigation? AfterQueue = null);
 
-    public MusicLibraryOwner(IMusicLibraryStore store, IDocumentStore? cacheStore = null) : this(store, "local", cacheStore) { }
-    public MusicLibraryOwner(IMusicLibraryStore store, string scope, IDocumentStore? cacheStore = null)
+    public MusicLibraryOwner(IMusicLibraryStore store, IDocumentStore? cacheStore = null, string? presentationCacheRoot = null)
+        : this(store, "local", cacheStore, presentationCacheRoot) { }
+    public MusicLibraryOwner(IMusicLibraryStore store, string scope, IDocumentStore? cacheStore = null, string? presentationCacheRoot = null)
     {
         ArgumentNullException.ThrowIfNull(store); LJ.Require(LJ.Id(scope)); this.store = store; this.scope = scope;
         ownsDisplayCache = cacheStore is not CacheDocumentStore;
         displayCache = cacheStore as CacheDocumentStore ?? (cacheStore is null ? new() : new(cacheStore));
-        PresentationCache = new(displayCache);
+        PresentationCache = new(presentationCacheRoot);
     }
 
     public Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
@@ -310,6 +311,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     {
         await EnterAsync(cancellationToken).ConfigureAwait(false);
         try { lock (repositoryGate) closed = true; ClearRecommendations(); InvalidateOfficialSources(); } finally { gate.Release(); }
+        await PresentationCache.DisposeAsync().ConfigureAwait(false);
         await displayCache.DrainAsync().ConfigureAwait(false);
         if (ownsDisplayCache) await displayCache.DisposeAsync().ConfigureAwait(false);
     }

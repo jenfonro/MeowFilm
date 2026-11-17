@@ -6,12 +6,14 @@ using System.Security.Principal;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using System.Windows.Threading;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Desktop.Artwork;
 using MeowFilm.Media;
 using MeowFilm.Platform.Runtime;
 using MeowFilm.Platform.Storage;
@@ -109,7 +111,8 @@ internal static class MusicLiveAcceptance
             report.Record("live.runtime-pid", "PASS", count: runtime.ProcessId);
             var observed = new ObservedRuntime(runtime, report);
             MusicTestStores.Use(store, Path.Combine(data, "native", "music-library"));
-            application = new(store, MusicTestStores.For(store), observed, cache);
+            application = new(store, MusicTestStores.For(store), observed, cache,
+                presentationCacheRoot: Path.Combine(data, "music-presentation-v2"));
             player = new(audioOutput: NativeAudioOutput.SystemDefault);
             module = new(application, store, player, playbackCacheRoot: Path.Combine(data, "media"), cacheStore: cache);
 
@@ -249,7 +252,10 @@ internal static class MusicLiveAcceptance
         Require((await AccountStatesAsync(application)).Values.All(state => state == "none"), "STORAGE_CONFLICT");
         foreach (string platform in new[] { "wy", "kg" })
         {
-            await report.StepAsync("guest." + platform + ".home.ui", () => HomeAsync(module, runtime, report, window, platform, refresh: true));
+            bool home = await report.StepAsync("guest." + platform + ".home.ui",
+                () => HomeAsync(module, runtime, report, window, platform, refresh: true));
+            if (home)
+                await report.StepAsync("guest." + platform + ".home.artwork", () => WaitForVisibleArtworkAsync(window));
             if (platform != "wy") continue;
             int directoryReads = runtime.Successes("wy", "channels"), channelReads = runtime.Successes("wy", "channel");
             int errors = report.Failures;
@@ -275,12 +281,77 @@ internal static class MusicLiveAcceptance
                         report.Failures > errors ? report.LastError : "UNCLASSIFIED_CODE");
                     return Cards(module).Count();
                 });
+                await report.StepAsync("guest.wy.channel.artwork", () => WaitForVisibleArtworkAsync(window));
+                string firstRoute = module.CaptureNavigationLocation();
+                var alternatives = module.VisibleChannelTabs.Concat(module.MoreChannelTabs)
+                    .Where(card => card.CanOpen && !card.RequiresAccount && card.Kind == "channel" &&
+                        card.Song is null && card.Locator is null && card.ActionId != selected.ActionId)
+                    .Take(2).ToArray();
+                for (int index = 0; index < 2; index++)
+                {
+                    int position = index;
+                    bool opened = await report.StepAsync("guest.wy.channel.switch-" + (index + 1), async () =>
+                    {
+                        Require(position < alternatives.Length, "NOT_COVERED");
+                        var target = alternatives[position];
+                        await module.OpenCatalogCardAsync(target);
+                        await RenderAsync(window);
+                        Require(module.CaptureNavigationLocation() == "catalog-channel/wy/" +
+                            Uri.EscapeDataString(target.ActionId) && Cards(module).Any() &&
+                            module.Status.Length == 0, "NOT_COVERED");
+                        Require(!player.HasMedia && !player.IsPlaying, "PERMISSION_DENIED");
+                        return Cards(module).Count();
+                    });
+                    if (opened)
+                        await report.StepAsync("guest.wy.channel.switch-" + (index + 1) + ".artwork",
+                            () => WaitForVisibleArtworkAsync(window));
+                }
+                await report.StepAsync("guest.wy.channel.restore", async () =>
+                {
+                    await module.RestoreNavigationAsync(firstRoute, CancellationToken.None);
+                    await RenderAsync(window);
+                    Require(module.CaptureNavigationLocation() == firstRoute && Cards(module).Any() &&
+                        module.Status.Length == 0, "NOT_COVERED");
+                    return Cards(module).Count();
+                });
+                await report.StepAsync("guest.wy.channel.restore.artwork", () => WaitForVisibleArtworkAsync(window));
             }
             else report.Record("guest.wy.channel.ui", "NOT_COVERED", "NOT_COVERED");
         }
         Require(!player.HasMedia && !player.IsPlaying &&
             runtime.AuthenticatedPublications("wy") == 0 && runtime.AuthenticatedPublications("kg") == 0, "PERMISSION_DENIED");
         report.Record("guest.catalog.no-account-or-media", "PASS", count: 1);
+    }
+
+    private static async Task<int> WaitForVisibleArtworkAsync(Window window)
+    {
+        await RenderAsync(window);
+        var bounds = new Rect(0, 0, window.ActualWidth, window.ActualHeight);
+        var images = Descendants(window).OfType<ArtworkImage>().Where(image =>
+            image.IsVisible && image.ActualWidth > 0 && image.ActualHeight > 0 && image.Address.Length > 0 &&
+            image.TransformToAncestor(window).TransformBounds(new Rect(0, 0, image.ActualWidth, image.ActualHeight))
+                .IntersectsWith(bounds)).ToArray();
+        Require(images.Length > 0, "NOT_COVERED");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        var held = new List<IDisposable>();
+        try
+        {
+            foreach (var image in images)
+                held.Add(await image.PrepareForPresentationAsync(deadline.Token));
+            Require(images.All(image => image.Source is not null), "NOT_COVERED");
+            return images.Length;
+        }
+        finally { foreach (var lease in held) lease.Dispose(); }
+
+        static IEnumerable<DependencyObject> Descendants(DependencyObject parent)
+        {
+            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+            {
+                var child = VisualTreeHelper.GetChild(parent, i);
+                yield return child;
+                foreach (var descendant in Descendants(child)) yield return descendant;
+            }
+        }
     }
 
     private static async Task CheckSafetyAsync(MusicNativeApplication application)
@@ -644,6 +715,7 @@ internal static class MusicLiveAcceptance
         internal async Task<bool> StepAsync(string stage, Func<Task<int>> action)
         {
             Stage = stage;
+            Write($"LIVE {stage} BEGIN");
             try { Record(stage, "PASS", count: await action()); return true; }
             catch (Exception error)
             {
