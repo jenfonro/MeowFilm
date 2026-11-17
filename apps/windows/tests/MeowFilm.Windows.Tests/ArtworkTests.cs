@@ -242,18 +242,109 @@ public static class ArtworkTests
             await Code("ARTWORK_FORMAT", () => service.AcquireAsync("https://art.example.test/x"));
             using var good = await service.AcquireAsync("https://art.example.test/x"); Equal(3, handler.Count);
         }));
-        yield return new("Native artwork encoded dimensions and response length budgets are enforced before display", () => Sta(async () =>
+        yield return new("Native artwork encoded dimensions and response completeness are enforced before display", () => Sta(async () =>
         {
             byte[] wide = Encode("png", 1, 1); BinaryPrimitives.WriteUInt32BigEndian(wide.AsSpan(16), 20000);
             int round = 0;
             var handler = new Handler((_, _) => {
                 var response = Reply(++round == 1 ? wide : new byte[1]);
-                if (round == 2) response.Content.Headers.ContentLength = ArtworkService.MaximumBytes + 1L;
+                if (round == 2) response.Content.Headers.ContentLength = ArtworkService.MaximumCacheEntryBytes + 1L;
                 return Task.FromResult(response); });
             await using var service = new ArtworkService(handler);
             await Code("ARTWORK_LIMIT", () => service.AcquireAsync("https://art.example.test/first"));
-            await Code("ARTWORK_LIMIT", () => service.AcquireAsync("https://art.example.test/second"));
+            await Code("ARTWORK_FORMAT", () => service.AcquireAsync("https://art.example.test/second"));
         }));
+        foreach (bool chunked in new[] { false, true })
+            foreach (bool domainCache in new[] { false, true })
+                yield return new($"Native artwork large complete HTTP image decodes without encoded caching chunked={chunked} domain={domainCache}", () => Sta(async () =>
+                {
+                    byte[] large = LargePng(), small = Encode("png", 2, 3);
+                    string directory = TestWorkspace.DataPath("artwork-large-" + Guid.NewGuid().ToString("N"));
+                    var stored = domainCache ? new RecordingByteCache() : null;
+                    try
+                    {
+                        await using var server = new RuntimeHttpClientTests.Server();
+                        string address = server.BaseUrl + "/large.png";
+                        foreach (byte[] body in new[] { large, small })
+                        {
+                            await using var service = new ArtworkService(byteCache: stored, cacheDirectory: directory);
+                            var loading = service.AcquireAsync(address);
+                            await using (var exchange = await server.AcceptAsync())
+                            {
+                                if (chunked) await exchange.ReplyChunkedAsync(body);
+                                else await exchange.ReplyAsync(body, contentType: "image/png");
+                            }
+                            using var image = await loading;
+                            Equal(ReferenceEquals(body, large) ? 512 : 2, image.Image.PixelWidth);
+                            Check(image.Image.IsFrozen);
+                            using var hit = await service.AcquireAsync(address);
+                            Check(ReferenceEquals(image.Image, hit.Image));
+                            Check(!server.HasConnection);
+                            int expected = ReferenceEquals(body, large) ? 0 : 1;
+                            if (stored is null && expected == 1)
+                                await WaitFor(() => Directory.GetFiles(directory, "*.image").Length == expected,
+                                    "Cache-admissible bytes did not finish persistence before shutdown");
+                            await service.DisposeAsync();
+                            if (stored is not null) Equal(expected, stored.Writes);
+                            else Equal(expected, Directory.GetFiles(directory, "*.image").Length);
+                        }
+                        byte[] saved = stored?.Content ?? File.ReadAllBytes(Directory.GetFiles(directory, "*.image").Single());
+                        Check(saved.SequenceEqual(small), "Only the cache-admissible original bytes are persisted");
+                    }
+                    finally { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
+                }));
+        yield return new("Native artwork oversized cached bytes are removed before fetching a valid replacement", () => Sta(async () =>
+        {
+            var stored = new RecordingByteCache { Content = LargePng() };
+            byte[] oversized = stored.Content, replacement = Encode("png", 2, 3);
+            var handler = new Handler((_, _) => Task.FromResult(Reply(replacement)));
+            await using var service = new ArtworkService(handler, byteCache: stored);
+            using var image = await service.AcquireAsync("https://art.example.test/cached");
+            Equal(1, handler.Count); Equal(1, stored.Removals); Equal(1, stored.Writes);
+            Equal(2, image.Image.PixelWidth);
+            Check(oversized.All(value => value == 0));
+            Check(stored.Content!.SequenceEqual(replacement));
+        }));
+        yield return new("Native artwork default HTTP accepts response headers beyond the old explicit quota", () => Sta(async () =>
+        {
+            await using var server = new RuntimeHttpClientTests.Server();
+            await using var service = new ArtworkService();
+            var loading = service.AcquireAsync(server.BaseUrl + "/headers.png");
+            await using (var exchange = await server.AcceptAsync())
+                await exchange.ReplyAsync(Encode("png", 2, 3), contentType: "image/png",
+                    extraHeaders: "X-Image-Metadata: " + new string('x', 33 * 1024) + "\r\n");
+            using var image = await loading;
+            Equal(2, image.Image.PixelWidth);
+        }));
+        yield return new("Native artwork disk admission retains the exact per-entry quota and cancellation", async () =>
+        {
+            string directory = TestWorkspace.DataPath("artwork-admission-" + Guid.NewGuid().ToString("N"));
+            byte[] admitted = new byte[ArtworkService.MaximumCacheEntryBytes];
+            new Random(19).NextBytes(admitted);
+            try
+            {
+                using (var disk = new ArtworkDiskCache(directory))
+                {
+                    await disk.WriteAsync("accepted", admitted, default);
+                    await disk.WriteAsync("oversized", new byte[admitted.Length + 1], default);
+                    Check((await disk.ReadAsync("accepted", default))!.SequenceEqual(admitted));
+                    Check(await disk.ReadAsync("oversized", default) is null);
+                    Equal(1, Directory.GetFiles(directory, "*.image").Length);
+                    using var cancelled = new CancellationTokenSource();
+                    cancelled.Cancel();
+                    try
+                    {
+                        await disk.WriteAsync("cancelled", new byte[admitted.Length + 1], cancelled.Token);
+                        throw new InvalidOperationException("Expected cancellation");
+                    }
+                    catch (OperationCanceledException) { }
+                }
+                using var reopened = new ArtworkDiskCache(directory);
+                Check((await reopened.ReadAsync("accepted", default))!.SequenceEqual(admitted));
+                Check(await reopened.ReadAsync("oversized", default) is null);
+            }
+            finally { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
+        });
         yield return new("Native artwork cancellation and disposal drain native HTTP instead of keeping a background fetch", async () =>
         {
             var entered = Signal(); var ended = Signal();
@@ -387,7 +478,7 @@ public static class ArtworkTests
         }));
         yield return new("Native artwork cache eviction preserves pinned visuals and admits fresh images", () => Sta(async () =>
         {
-            byte[] png = Encode("png", 1, 1);
+            byte[] png = Encode("png", 512, 512);
             var handler = new Handler((_, _) => Task.FromResult(Reply(png)));
             await using var service = new ArtworkService(handler);
             var leases = new List<IArtworkLease>();
@@ -772,6 +863,34 @@ public static class ArtworkTests
         (bool)typeof(ArtworkImage).GetField("observingLayout",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(view)!;
     private static HttpResponseMessage Reply(byte[] bytes) => new(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+
+    private sealed class RecordingByteCache : IArtworkByteCache
+    {
+        public long Epoch => 0;
+        public TimeSpan Lifetime => TimeSpan.FromDays(30);
+        internal byte[]? Content;
+        internal int Writes, Removals;
+        public Task<ArtworkBytes?> ReadAsync(string address, CancellationToken token) =>
+            Task.FromResult(Content is null ? null : new ArtworkBytes(Content, DateTimeOffset.UtcNow + Lifetime));
+        public Task WriteAsync(string address, ReadOnlyMemory<byte> bytes, long epoch, CancellationToken token)
+        { Writes++; Content = bytes.ToArray(); return Task.CompletedTask; }
+        public Task RemoveAsync(string address, long epoch, CancellationToken token)
+        { Removals++; Content = null; return Task.CompletedTask; }
+    }
+
+    internal static byte[] LargePng()
+    {
+        byte[] pixels = new byte[1200 * 1200 * 4];
+        new Random(17).NextBytes(pixels);
+        var image = BitmapSource.Create(1200, 1200, 96, 96, PixelFormats.Bgra32, null, pixels, 1200 * 4);
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(image));
+        using var stream = new MemoryStream();
+        encoder.Save(stream);
+        byte[] bytes = stream.ToArray();
+        Check(bytes.Length > ArtworkService.MaximumCacheEntryBytes);
+        return bytes;
+    }
     // Synthetic solid-color fixtures encoded by Pillow 13 / libwebp, independently of the production decoder.
     private static byte[] WebP(string kind) => Convert.FromBase64String(kind switch
     {
@@ -844,7 +963,7 @@ public static class ArtworkTests
     { if (!value) throw new InvalidOperationException(message); }
     private static void Equal<T>(T expected, T actual)
     { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Artwork expected {expected}, actual {actual}"); }
-    private static async Task Sta(Func<Task> action)
+    internal static async Task Sta(Func<Task> action)
     {
         var done = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var stopped = Signal(); Dispatcher? dispatcher = null;

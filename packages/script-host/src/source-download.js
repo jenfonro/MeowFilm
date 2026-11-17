@@ -1,20 +1,18 @@
 import http from 'node:http';
 import https from 'node:https';
-import { Transform, Writable } from 'node:stream';
+import { Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip, createInflate, createBrotliDecompress } from 'node:zlib';
-import { fault, requireValue, safeError } from './errors.js';
+import { requireValue, safeError } from './errors.js';
 
 const redirects = new Set([301, 302, 303, 307, 308]);
 const decompressors = { gzip: createGunzip, deflate: createInflate, br: createBrotliDecompress };
 const closed = stream => new Promise(resolve => stream.once('close', resolve));
 const abortReason = signal => safeError(signal.reason, 'CANCELLED');
 
-/** Complete source downloads, not the guest HTTP adapter or a media proxy.
- * The source contract bounds both transferred bytes and decompressed source. */
-export function createSourceDownload({ maxSourceBytes, maxRedirects = 5 } = {}) {
-  requireValue(Number.isSafeInteger(maxSourceBytes) && maxSourceBytes > 0 &&
-    Number.isSafeInteger(maxRedirects) && maxRedirects >= 0 && maxRedirects <= 10);
+/** Complete source downloads, not the guest HTTP adapter or a media proxy. */
+export function createSourceDownload({ maxRedirects = 5 } = {}) {
+  requireValue(Number.isSafeInteger(maxRedirects) && maxRedirects >= 0 && maxRedirects <= 10);
   return async ({ url: input, options = {}, signal, validateURL }) => {
     requireValue(signal instanceof AbortSignal && typeof validateURL === 'function' &&
       options && typeof options === 'object' && !Array.isArray(options) &&
@@ -52,17 +50,10 @@ export function createSourceDownload({ maxSourceBytes, maxRedirects = 5 } = {}) 
           continue; // Finally drains this hop before opening the next connection.
         }
         const chunks = [];
-        let transferred = 0, decoded = 0;
-        const wire = own(new Transform({
-          transform(chunk, _encoding, callback) {
-            transferred += chunk.length;
-            callback(transferred > maxSourceBytes ? fault('RESOURCE_LIMIT') : null, chunk);
-          },
-        }));
+        let decoded = 0;
         const sink = own(new Writable({
           write(chunk, _encoding, callback) {
             decoded += chunk.length;
-            if (decoded > maxSourceBytes) { callback(fault('RESOURCE_LIMIT')); return; }
             chunks.push(chunk);
             callback();
           },
@@ -70,7 +61,7 @@ export function createSourceDownload({ maxSourceBytes, maxRedirects = 5 } = {}) 
         const encoding = String(response.headers['content-encoding'] ?? 'identity').toLowerCase();
         const factory = Object.hasOwn(decompressors, encoding) ? decompressors[encoding] : undefined;
         requireValue(encoding === 'identity' || factory, 'UNSUPPORTED_OPTION');
-        const streams = [response, wire];
+        const streams = [response];
         if (factory) streams.push(own(factory()));
         streams.push(sink);
         await pipeline(streams, { signal });

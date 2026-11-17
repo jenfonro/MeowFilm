@@ -159,7 +159,7 @@ final class MusicArtworkImagesTests: XCTestCase {
         configuration.protocolClasses = [ArtworkImageProtocol.self]
         let http = MusicArtworkHTTP(configuration: configuration)
         let music = images()
-        let film = ArtworkImages(maximumBytes: MusicArtworkHTTP.maximumBytes) { try await http.read($0) }
+        let film = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024) { try await http.read($0) }
         let musicRead = Task { try await music.read(fixture.url) }
         let filmRead = Task { try await film.read(fixture.url) }
         await fulfillment(of: [started], timeout: 3)

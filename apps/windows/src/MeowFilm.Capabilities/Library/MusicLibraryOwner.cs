@@ -152,8 +152,6 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         var changes = candidate.Changes();
         if (changes.Areas.Count == 0 && changes.Songs.Count == 0) { AcceptSongObservations(observations); return; }
         ValidateChangedSongs(candidate);
-        foreach (var area in changes.Areas.Values)
-            LJ.Require(LJ.Bytes(area).Length <= 8 * 1024 * 1024, "LIMIT");
         var expected = new MusicLibraryRevision(checked(revision.Generation + 1), Guid.NewGuid().ToString("D"));
         bool artworkPolicyChanged = document is not null && !JsonNode.DeepEquals(Value(document, MetadataPolicyArea), Value(candidate, MetadataPolicyArea));
         // A physical commit may precede its receipt. Until it settles, readers
@@ -234,7 +232,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         try
         {
             JsonObject p;
-            try { p = LJ.Parameters(parameters, full ? 16 * 1024 * 1024 : 512 * 1024); }
+            try { p = LJ.Parameters(parameters); }
             catch (MusicLibraryException error) when (error.Code == "CORRUPT_STORAGE" &&
                 (method is "music.officialSources.settings.get" or "music.officialSources.settings.save" or
                     "music.catalogSource.settings.get" or "music.catalogSource.settings.save"))
@@ -256,7 +254,6 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             var candidate = document!.Candidate(!IsReadCommand(method));
             var outcome = await DispatchAsync(method, p, candidate, token, full).ConfigureAwait(false);
             var response = LJ.Merge(LJ.Obj(("ok", true)), outcome.Result);
-            LJ.Require(LJ.Bytes(response).Length <= 512 * 1024, "LIMIT");
             if (outcome.Mutate)
             {
                 var owner = CommandOwner(method);

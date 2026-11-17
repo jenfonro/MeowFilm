@@ -49,7 +49,6 @@ async function binaryServer(t, handler, { expectCleanupFailure = false, ...optio
     }
     if (method === 'PUT' && url.pathname === '/v1/upload') {
       return { contract, codes: new Set(['LIMIT']), contentType: 'application/octet-stream',
-        maximumBytes: 8, limitCode: 'LIMIT', status: reply => reply.ok ? 200 : 413,
         handler: bytes => ({ ok: true, contract, value: [...bytes] }) };
     }
   }, ...options });
@@ -862,7 +861,7 @@ test('raw and existing JSON/upload routes coexist without changing their contrac
   assert.deepEqual(await client.request({ method: 'PUT', path: '/v1/upload', body: bytes, raw: true,
     contract, codes: new Set(['LIMIT']) }), { ok: true, contract, value: [...bytes] });
   assert.deepEqual(await client.request({ method: 'PUT', path: '/v1/upload', body: Buffer.alloc(9), raw: true,
-    contract, codes: new Set(['LIMIT']) }), { ok: false, contract, code: 'LIMIT' });
+    contract, codes: new Set(['LIMIT']) }), { ok: true, contract, value: [...Buffer.alloc(9)] });
   assertJSON(await fixture.request({ path: '/v1/json', method: 'POST', body: '{"x":1,"x":2}',
     headers: { 'content-type': 'application/json' } }).ended, 200,
     { ok: true, contract: HTTP_PROTOCOL, value: { x: 2 } });

@@ -7,7 +7,7 @@ import MeowMusicFeature
 /// Ordered JSON keeps locator hashes stable. Foundation Dictionary and
 /// sortedKeys must not reorder an existing platform locator object.
 indirect enum MJ: Sendable, Equatable {
-    static let maximumBytes = 8 * 1024 * 1024
+    private static let maximumExpandedIntegerBytes = 8 * 1024 * 1024
     case object([(String, MJ)]), array([MJ]), string(String), number(Double), bool(Bool), null
     /// Numeric lexeme that cannot be represented exactly as a Double.
     /// Unconsumed metadata can remain opaque; ID consumers use exact decimal text.
@@ -53,8 +53,8 @@ indirect enum MJ: Sendable, Equatable {
         return isString ? string : isInteger ? String(int) : ""
     }
     /// Called only for syntax-checked JSON numbers. Expands integer exponents
-    /// without floating point. Expanded numeric text uses the document's byte
-    /// budget so a small exponent token cannot allocate an unbounded string.
+    /// without floating point. Expansion has a separate parser resource budget
+    /// so a small exponent token cannot allocate an unbounded string.
     /// Fractional values (including those Double rounds to an integer) fail.
     private static func exactIntegerID(_ token: String) -> String? {
         let negative = token.hasPrefix("-")
@@ -68,7 +68,7 @@ indirect enum MJ: Sendable, Equatable {
         let (shift, overflow) = exponent.subtractingReportingOverflow(fraction)
         guard !overflow else { return nil }
         if shift >= 0 {
-            guard digits.count <= maximumBytes, shift <= maximumBytes - digits.count else { return nil }
+            guard digits.count <= maximumExpandedIntegerBytes, shift <= maximumExpandedIntegerBytes - digits.count else { return nil }
             return String(digits) + String(repeating: "0", count: shift)
         }
         guard shift > -digits.count, digits.suffix(-shift).allSatisfy({ $0 == "0" }) else { return nil }
@@ -86,8 +86,8 @@ indirect enum MJ: Sendable, Equatable {
     }
     func contains(_ key: String) -> Bool { fields.contains { $0.0.utf8.elementsEqual(key.utf8) } }
     mutating func remove(_ key: String) { self = .object(fields.filter { !$0.0.utf8.elementsEqual(key.utf8) }) }
-    func text(_ maximum: Int = 2048, empty: Bool = false) throws -> String {
-        guard isString, string.utf8.count <= maximum, empty || !string.isEmpty,
+    func text(_ maximum: Int? = nil, empty: Bool = false) throws -> String {
+        guard isString, maximum.map({ string.utf8.count <= $0 }) ?? true, empty || !string.isEmpty,
               !string.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { throw MusicServiceError.invalidResponse }
         return string
     }
@@ -154,8 +154,8 @@ indirect enum MJ: Sendable, Equatable {
         case .object(let v): return "{" + Self.enumeration(v).map { Self.quote($0.0) + ":" + $0.1.json }.joined(separator: ",") + "}"
         }
     }
-    static func parse(_ data: Data, maximum: Int = maximumBytes) throws -> MJ {
-        guard data.count <= maximum, String(data: data, encoding: .utf8) != nil else { throw MusicServiceError.limit }
+    static func parse(_ data: Data) throws -> MJ {
+        guard String(data: data, encoding: .utf8) != nil else { throw MusicServiceError.corruptDocument }
         func value(_ raw: Any) throws -> MJ {
             if let fields = raw as? JSONObject.Fields {
                 return .object(try fields.map { ($0.key, try value($0.value)) })
@@ -180,7 +180,7 @@ indirect enum MJ: Sendable, Equatable {
 func musicRequire(_ condition: @autoclosure () throws -> Bool, _ error: MusicServiceError = .invalidRequest) throws {
     guard try condition() else { throw error }
 }
-func musicText(_ value: String, maximum: Int = 2048) throws -> String { try MJ.string(value).text(maximum) }
+func musicText(_ value: String, maximum: Int? = nil) throws -> String { try MJ.string(value).text(maximum) }
 func musicHash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
 func musicHex(_ value: String) -> Bool { value.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil }
 func musicSame(_ a: String, _ b: String) -> Bool { a.utf8.elementsEqual(b.utf8) }

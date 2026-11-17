@@ -4,6 +4,7 @@ import ImageIO
 
 @MainActor
 public final class ArtworkImages {
+    /// Encoded bytes admitted to caches; never a network or decoding input limit.
     private let maximumBytes: Int
     private let loadData: @Sendable (URL) async throws -> Data
     private var byteCache: (any ArtworkByteCaching)?
@@ -142,7 +143,7 @@ public final class ArtworkImages {
         flight.task = nil
         let current = !closed && !flight.abandoned && flight.loaderRevision == loaderRevision &&
             flight.byteRevision == byteCache?.revision
-        if current, case .success(let (image, _, expiresAt)) = result {
+        if current, case .success(let (image, data, expiresAt)) = result, data.count <= maximumBytes {
             store(image, for: url, expiresAt: expiresAt, revision: flight.byteRevision)
         }
         let value: Result<(UIImage, Data?), Error> = current ?
@@ -175,7 +176,7 @@ public final class ArtworkImages {
         loadData: @Sendable (URL) async throws -> Data
     ) async throws -> (UIImage, Data, Date?) {
         try Task.checkCancellation()
-        if let cachedData, cachedData.count <= maximumBytes, let value = decode(cachedData) {
+        if let cachedData, let value = decode(cachedData) {
             try Task.checkCancellation()
             return (value, cachedData, nil)
         }
@@ -186,10 +187,9 @@ public final class ArtworkImages {
         }
         let data = try await loadData(url)
         try Task.checkCancellation()
-        guard data.count <= maximumBytes else { throw URLError(.dataLengthExceedsMaximum) }
         guard let value = decode(data) else { throw URLError(.cannotDecodeContentData) }
         try Task.checkCancellation()
-        if let byteCache, let revision {
+        if data.count <= maximumBytes, let byteCache, let revision {
             let saved = await byteCache.store(data, for: url, revision: revision)
             try Task.checkCancellation()
             guard byteCache.revision == revision else { throw CancellationError() }

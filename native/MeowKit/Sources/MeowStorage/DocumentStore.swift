@@ -23,11 +23,11 @@ public enum DocumentStoreError: Error, Equatable, Sendable {
 public final class DocumentStore: @unchecked Sendable {
     private let base: String
     private let namespace: String
-    private let maximumDocumentBytes: Int
+    private let maximumDocumentBytes: Int?
     private let lock = NSLock()
 
     /// Passive: validates the namespace and URL, never creates a directory.
-    public init(baseURL: URL, namespace: String, maximumDocumentBytes: Int = 8 * 1_024 * 1_024) throws {
+    public init(baseURL: URL, namespace: String, maximumDocumentBytes: Int? = nil) throws {
         guard Self.validIdentifier(namespace) else { throw DocumentStoreError.invalidNamespace }
         guard baseURL.isFileURL, baseURL.path.hasPrefix("/"), !baseURL.path.utf8.contains(0) else {
             throw DocumentStoreError.invalidBaseURL
@@ -48,7 +48,7 @@ public final class DocumentStore: @unchecked Sendable {
 
     public func write(_ data: Data, key: String) throws {
         let name = try fileName(key)
-        guard data.count <= maximumDocumentBytes else { throw DocumentStoreError.documentTooLarge }
+        if let maximumDocumentBytes, data.count > maximumDocumentBytes { throw DocumentStoreError.documentTooLarge }
         lock.lock(); defer { lock.unlock() }
         guard let directory = try openDirectory(creating: true) else { throw DocumentStoreError.storageFailure }
         defer { Darwin.close(directory) }
@@ -59,7 +59,7 @@ public final class DocumentStore: @unchecked Sendable {
     /// absent). This is a content comparison, not a monotonic revision.
     public func compareAndSwap(key: String, expected: Data?, replacement: Data) throws {
         let name = try fileName(key)
-        guard replacement.count <= maximumDocumentBytes else { throw DocumentStoreError.documentTooLarge }
+        if let maximumDocumentBytes, replacement.count > maximumDocumentBytes { throw DocumentStoreError.documentTooLarge }
         lock.lock(); defer { lock.unlock() }
         guard let directory = try openDirectory(creating: expected == nil) else {
             throw DocumentStoreError.revisionConflict
@@ -134,9 +134,9 @@ public final class DocumentStore: @unchecked Sendable {
         guard info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), info.st_nlink == 1 else {
             throw DocumentStoreError.unsafePath
         }
-        guard info.st_size <= off_t(maximumDocumentBytes) else { throw DocumentStoreError.documentTooLarge }
-        // Bound the allocation before reading; reject short reads and growth.
-        let count = Int(info.st_size)
+        guard let count = Int(exactly: info.st_size), count >= 0 else { throw DocumentStoreError.storageFailure }
+        if let maximumDocumentBytes, count > maximumDocumentBytes { throw DocumentStoreError.documentTooLarge }
+        // Allocate the actual file size; reject short reads and growth.
         var bytes = Data(count: count)
         var offset = 0
         while offset < count {

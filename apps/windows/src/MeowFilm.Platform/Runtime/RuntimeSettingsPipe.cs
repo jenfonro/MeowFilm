@@ -9,7 +9,6 @@ namespace MeowFilm.Platform.Runtime;
 internal sealed class RuntimeSettingsPipe(Stream stream, IDocumentStore? store,
     IReadOnlyDictionary<string, string>? namespaces)
 {
-    private const int MaximumFrameBytes = 8 * 1024 * 1024;
     private readonly byte[] buffer = new byte[4096];
     private int offset, count;
 
@@ -104,7 +103,6 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IDocumentStore? store,
         byte[] response = BridgeCodec.EncodeJSONValue(reply);
         try
         {
-            if (response.Length > MaximumFrameBytes) throw new BridgeException("INVALID_RESPONSE");
             await stream.WriteAsync(response, token).ConfigureAwait(false);
             await stream.WriteAsync("\n"u8.ToArray(), token).ConfigureAwait(false);
             await stream.FlushAsync(token).ConfigureAwait(false);
@@ -131,7 +129,6 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IDocumentStore? store,
                 }
                 int newline = Array.IndexOf(buffer, (byte)'\n', offset, count - offset);
                 int length = (newline < 0 ? count : newline) - offset;
-                if (line.Length + length > MaximumFrameBytes) throw new BridgeException("INVALID_RESPONSE");
                 line.Write(buffer, offset, length);
                 CryptographicOperations.ZeroMemory(buffer.AsSpan(offset, length));
                 offset += length;

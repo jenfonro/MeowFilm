@@ -10,8 +10,9 @@ final class RuntimeLaunchRecord: @unchecked Sendable {
     func get() -> [String]? { lock.lock(); defer { lock.unlock() }; return value }
 }
 
-private struct RuntimeBootstrapPeer {
+private final class RuntimeBootstrapPeer {
     let descriptor: Int32
+    private var buffered = Data()
     init(duplicating descriptor: Int32) {
         self.descriptor = Darwin.dup(descriptor)
         XCTAssertGreaterThanOrEqual(self.descriptor, 0)
@@ -19,13 +20,18 @@ private struct RuntimeBootstrapPeer {
     }
 
     func readLine() -> Data? {
-        var data = Data(), byte: UInt8 = 0
+        var searched = 0, bytes = [UInt8](repeating: 0, count: 64 * 1024)
         while true {
-            let count = Darwin.read(descriptor, &byte, 1)
+            if let newline = buffered.dropFirst(searched).firstIndex(of: 10) {
+                let data = Data(buffered.prefix(upTo: newline))
+                buffered.removeSubrange(...newline)
+                return data
+            }
+            searched = buffered.count
+            let count = Darwin.read(descriptor, &bytes, bytes.count)
             if count < 0, errno == EINTR { continue }
             guard count > 0 else { return nil }
-            if byte == 10 { return data }
-            data.append(byte)
+            buffered.append(contentsOf: bytes.prefix(count))
         }
     }
     func endpoint(_ address: String = "http://127.0.0.1:43210") {
@@ -117,6 +123,39 @@ final class RuntimeEmbeddedLauncherTests: XCTestCase {
         XCTAssertEqual(writes.get(), ["pan.accounts"])
         await launcher.close()
         XCTAssertTrue(client.isClosed)
+    }
+
+    func testLargeSettingsFramesRoundTripWithoutClosingTheChannel() async throws {
+        let root = try payload()
+        let document: RuntimeValue = .object(["value": .string(String(repeating: "x", count: 8 * 1024 * 1024 + 1))])
+        let fingerprint: RuntimeValue = .object(["exists": .bool(false), "length": .number(0), "sha256": .null])
+        let completed = expectation(description: "large settings frame round trip")
+        let access = RuntimeSettingsAccess(blocks: ["pan.accounts"], writableBlocks: ["pan.accounts"], read: { _ in
+            .init(document: document, fingerprint: fingerprint)
+        }, write: { _, value, expected in
+            XCTAssertEqual(value, document); XCTAssertEqual(expected, fingerprint)
+            return .init(document: value, fingerprint: fingerprint)
+        })
+        let launcher = RuntimeEmbeddedLauncher(payload: { try RuntimePayload(root: root) }, dataDirectory: root,
+            settings: access, start: { arguments in
+                let peer = RuntimeBootstrapPeer(duplicating: Int32(arguments[3])!)
+                defer { peer.close() }
+                guard peer.readLine() != nil else { return 1 }
+                peer.endpoint()
+                peer.frame(.object(["kind": .string("settings.write"), "id": .number(1),
+                    "block": .string("pan.accounts"), "document": document, "expected": fingerprint]))
+                guard let bytes = peer.readLine(), case .object(let reply) = try? RuntimeJSON.decode(bytes) else {
+                    XCTFail("large frame missing"); completed.fulfill(); return 1
+                }
+                XCTAssertEqual(reply["ok"], .bool(true)); XCTAssertEqual(reply["document"], document)
+                completed.fulfill()
+                XCTAssertNil(peer.readLine())
+                return 0
+            })
+        let client = try await launcher.connect()
+        await fulfillment(of: [completed], timeout: 60)
+        XCTAssertFalse(client.isClosed)
+        await launcher.close()
     }
 
     func testPrivateSettingsConflictIsClosedErrorAndForbiddenWriteEndsLaunch() async throws {

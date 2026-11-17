@@ -3,10 +3,8 @@ import Foundation
 /// Explicit file boundary only. Never attach this payload to an account/display DTO.
 public struct MusicAccountFilePayload: Sendable, CustomStringConvertible, CustomDebugStringConvertible,
                                        CustomReflectable {
-    public static let maximumBytes = 1024 * 1024
     private let bytes: Data
     public init(fileData: Data) throws {
-        guard fileData.count <= Self.maximumBytes else { throw MusicAccountTransferError.invalidFile }
         bytes = fileData
     }
     public func dataForFile() -> Data { bytes }

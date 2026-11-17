@@ -771,7 +771,7 @@ public static partial class MusicOfficialPlaybackScopeTests
         clock.Now++;
         await cache.WriteAsync(displayed + "?large=1", new byte[3 * 1024 * 1024], cache.Epoch, default);
         byte[] actual = documents.ReadMemory(MusicPresentationCache.Namespace).Data!;
-        Check(actual.Length <= LocalDocumentStore.MaximumDocumentBytes &&
+        Check(actual.Length <= CacheDocumentStore.MaximumDocumentBytes &&
             await cache.ReadAsync(displayed, default) is null && cache.ReadLyricsMemory(songId) is null,
             "images and lyrics compete in the original 8 MiB serialized budget, not two independent allocations");
         Check(ReferenceEquals(visible.Image, pixels), "disk eviction cannot revoke displayed pixels");

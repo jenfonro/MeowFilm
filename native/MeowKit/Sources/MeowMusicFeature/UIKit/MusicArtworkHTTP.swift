@@ -1,9 +1,8 @@
 import Foundation
 
 /// Artwork owns an isolated session, never the API CookieJar or credential
-/// store. Responses are admitted before reading bounded body chunks.
+/// store. Responses are admitted before reading their complete body.
 final class MusicArtworkHTTP: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    static let maximumBytes = 4 * 1_024 * 1_024
     private let session: URLSession
     private let lock = NSLock()
     private final class Flight: @unchecked Sendable {
@@ -39,14 +38,6 @@ final class MusicArtworkHTTP: NSObject, URLSessionDataDelegate, @unchecked Senda
         guard Self.permits(url) else { throw URLError(.badURL) }
         return try await fetch(url)
     }
-    // Only used after the original exceeds its existing byte budget. The
-    // shared loader reads/caches this URL as a distinct real resource.
-    static func boundedNeteaseRendition(_ url: URL) -> URL? {
-        guard let host = url.host?.lowercased(), host.hasSuffix(".music.126.net"),
-              var parts = URLComponents(url: url, resolvingAgainstBaseURL: false), parts.percentEncodedQuery == nil else { return nil }
-        parts.percentEncodedQuery = "imageView&thumbnail=1024x1024"
-        return parts.url
-    }
     private func fetch(_ url: URL) async throws -> Data {
         let flight = Flight()
         let data: Data = try await withTaskCancellationHandler {
@@ -77,26 +68,17 @@ final class MusicArtworkHTTP: NSObject, URLSessionDataDelegate, @unchecked Senda
         guard let flight = flights[dataTask.taskIdentifier], !flight.cancelled else {
             lock.unlock(); completionHandler(.cancel); return
         }
-        guard response.expectedContentLength <= Self.maximumBytes else {
-            flight.failure = URLError(.dataLengthExceedsMaximum)
-            lock.unlock(); completionHandler(.cancel); return
-        }
         guard Self.permits(response.url), let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             flight.failure = URLError(.badServerResponse)
             lock.unlock(); completionHandler(.cancel); return
         }
         flight.acceptedResponse = true
-        flight.bytes.reserveCapacity(Int(max(0, response.expectedContentLength)))
         lock.unlock(); completionHandler(.allow)
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         lock.lock()
         guard let flight = flights[dataTask.taskIdentifier], !flight.cancelled, flight.failure == nil else {
             lock.unlock(); return
-        }
-        guard data.count <= Self.maximumBytes - flight.bytes.count else {
-            flight.failure = URLError(.dataLengthExceedsMaximum)
-            lock.unlock(); dataTask.cancel(); return
         }
         flight.bytes.append(data); lock.unlock()
     }

@@ -60,10 +60,10 @@ public static class FilmMetadataPlaybackIntegrationTests
 
         var direct = new RejectPublicImages();
         var trusted = new ConcurrentQueue<string>();
-        await using var artwork = new ArtworkService(direct, (reference, budget, token) =>
+        await using var artwork = new ArtworkService(direct, (reference, token) =>
         {
             trusted.Enqueue(reference);
-            return ((IRuntimeImageClient)host.Client).ReadImageAsync(reference, budget, token);
+            return ((IRuntimeImageClient)host.Client).ReadImageAsync(reference, token);
         });
         var native = new FilmNativeProbe();
         var session = new FilmPlaybackSession(host.Client.CaptureConnectionAsync, native);
@@ -206,10 +206,10 @@ public static class FilmMetadataPlaybackIntegrationTests
 
         var trusted = new ConcurrentQueue<string>();
         var direct = new RejectPublicImages();
-        await using var artwork = new ArtworkService(direct, (address, budget, token) =>
+        await using var artwork = new ArtworkService(direct, (address, token) =>
         {
             trusted.Enqueue(address);
-            return ((IRuntimeImageClient)host.Client).ReadImageAsync(address, budget, token);
+            return ((IRuntimeImageClient)host.Client).ReadImageAsync(address, token);
         });
         var native = new FilmNativeProbe();
         var session = new FilmPlaybackSession(host.Client.CaptureConnectionAsync, native);

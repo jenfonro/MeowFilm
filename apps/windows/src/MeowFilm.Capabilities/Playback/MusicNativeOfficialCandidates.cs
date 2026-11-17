@@ -18,7 +18,6 @@ public sealed partial class MusicNativeApplication
         try
         {
             var input = JsonSerializer.SerializeToNode(parameters) as JsonObject ?? throw new MusicLibraryException("INVALID_REQUEST");
-            LJ.Require(LJ.Bytes(input).Length <= 512 * 1024, "LIMIT");
             LJ.Fields(input, "song quality qualityPolicySignature manualSource", "song quality qualityPolicySignature");
             LJ.Require(input["manualSource"] is null || LJ.IsBool(input["manualSource"]), "INVALID_REQUEST");
             bool manualSource = LJ.B(input["manualSource"]);

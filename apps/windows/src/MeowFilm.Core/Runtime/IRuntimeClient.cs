@@ -60,7 +60,6 @@ public sealed record RuntimeModule(string Id, string Version)
 /// Completion includes physical response disposal, including cancellation.</summary>
 public interface IRuntimeImageClient
 {
-    Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default);
-    /// <summary>Reads the complete image without a caller's thumbnail/card byte quota.</summary>
+    /// <summary>Reads the complete image; cache admission belongs to the consumer.</summary>
     Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default);
 }

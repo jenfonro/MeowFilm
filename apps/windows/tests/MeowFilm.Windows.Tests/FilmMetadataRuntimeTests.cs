@@ -187,7 +187,7 @@ public static class FilmMetadataRuntimeTests
         await first.WaitSettingsAsync("tmdb");
 
         IRuntimeImageClient current = first.Client;
-        await using var artwork = new ArtworkService(readTrusted: (reference, budget, token) => current.ReadImageAsync(reference, budget, token));
+        await using var artwork = new ArtworkService(readTrusted: (reference, token) => current.ReadImageAsync(reference, token));
         // Exercise the retained card's w500 search reference, not the handoff detail's original poster.
         var pixels = artwork.AcquireAsync(searchPoster);
         await using (var exchange = await api.AcceptAsync())

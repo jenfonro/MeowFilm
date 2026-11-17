@@ -117,8 +117,6 @@ internal sealed class FilmSettingsNotificationSession : IRuntimeSession, IRuntim
     public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
         ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Settings do not upload source.");
-    public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default) =>
-        throw new InvalidOperationException("Settings do not read images.");
     public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Settings do not read images.");
     public async ValueTask DisposeAsync()

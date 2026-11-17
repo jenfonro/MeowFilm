@@ -52,11 +52,11 @@ Content-Type: application/octet-stream
 - 文件/网络来源由导入操作决定，不由脚本头推断。网络地址持久保存，列表只显示 host，详情返回完整 URL。
 - 客户端可保存常用列表和检测结果等读取快照；运行器仍是安装事实所有者。不读、不迁移、不双写、不删除旧原生数据，不保存脚本执行内存快照。
 - 损坏目录/文档明确报错，格式损坏为 `CORRUPT_STORAGE`，I/O 写失败为 `STORAGE_ERROR`，不静默重置目录或发布未落盘状态。
-- 源码最多16 MiB、严格 UTF-8、非空；允许前导 BOM，文件名为平面 `.js` basename。脚本头只提供名称、版本、作者、描述和主页元数据。
+- 源码严格 UTF-8、非空，不设人为字节上限；允许前导 BOM，文件名为平面 `.js` basename。脚本头只提供名称、版本、作者、描述和主页元数据，版本完整保留，不按字符数量截断。
 
 脚本 `meow.config` 固定为空对象；处理器第二参数的 `context.storage` 提供私有 get/set/delete。请求内读写固定启用，每次操作检查 scope 当前性、installation、generation、声明 site 和取消信号。startup/background 无存储权限，旧 context 不能借用后续请求的权限。
 
-KV 保留持久化数据边界：每值16 KiB，每 site 最多64键/64 KiB，每安装最多32 sites/512 KiB。逐值独立验证 JSON；site/安装文档只做编码字节计量，不把包装层计入64层业务限制。这些是数据契约，与脚本引擎堆配额无关。
+KV 不设单值、site 或安装的字节/键数配额，也不设键字符串长度配额；逐值独立验证 JSON，不把 site/安装文档包装层计入64层业务限制。读写仍检查请求有效性、generation、声明的 site 与非空字符串键，保持安装隔离和原子持久化。
 
 ## 声明、检测与生命周期
 
@@ -72,9 +72,9 @@ KV 保留持久化数据边界：每值16 KiB，每 site 最多64键/64 KiB，�
 
 ## 网络与承载
 
-源码下载默认使用 `createSourceDownload({maxSourceBytes:SCRIPT_LIMITS.maxSourceBytes,maxRedirects:0})`。保留 HTTPS `.js` URL、无凭据/fragment、拒绝重定向、只接受200、30秒期限。源码实际传输及显式解压都受16 MiB边界约束；取消等待 request/response/socket/解压流的真实完成。
+源码下载默认使用 `createSourceDownload({maxRedirects:0})`。保留 HTTPS `.js` URL、无凭据/fragment、拒绝重定向、只接受200、30秒期限。源码实际传输及显式解压不设人为字节配额；取消等待 request/response/socket/解压流的真实完成。
 
-普通 guest 网络仍使用 `createNodeNetwork`，只验证 HTTP(S) 语法，不设域名或私网授权名单，不继承源码下载字节边界。LX request 的回调、字节和取消语义保持；followRedirect=false 禁止跳转，true 与 follow_max 遵守既有重定向上限，retry 不启动宿主重放。
+普通 guest 网络仍使用 `createNodeNetwork`，只验证 HTTP(S) 语法，不设域名或私网授权名单，不设响应字节配额。LX request 的回调、字节和取消语义保持；followRedirect=false 禁止跳转，true 与 follow_max 遵守既有重定向上限，retry 不启动宿主重放。
 
 LX timer、microtask 和 request 回调的调用、返回值吸收及同步／异步异常分类均受活跃来源的原执行控制；正常回调异常只诊断，退休来源的晚回调保留 session 语义且不能重新取得存储权限。网络 I/O 仍由 session 持有，失败跨线程只传安全分类，进入可信回调后才构造公开 Error；成功响应不额外包装或复制字节。
 

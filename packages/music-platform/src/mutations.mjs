@@ -10,7 +10,7 @@ export function createMutations() {
     async 'vip.signCard'(c) {
       if (c.platform !== 'wy') fail('UNSUPPORTED');
       c.accountRequired();
-      const raw = await c.wy('/api/vipnewcenter/app/minidesk/music/sign/pc', { type: 1 }, false, { vip: true, maximumBytes: 512 * 1024 });
+      const raw = await c.wy('/api/vipnewcenter/app/minidesk/music/sign/pc', { type: 1 }, false, { vip: true });
       const background = image(raw.bgTexture);
       return background ? { text: text(raw.text), subText: text(raw.subText), redPrize: Boolean(raw.redPrize),
         redDay: Boolean(raw.redDay), buttonText: text(raw.btnText), background, days: rows(raw.signInfoList ?? []).map(row => ({
@@ -20,7 +20,7 @@ export function createMutations() {
     async 'vip.banner'(c) {
       if (c.platform !== 'wy') fail('UNSUPPORTED');
       c.accountRequired();
-      const raw = await c.wy('/api/vipnewcenter/app/resource/common/list', { positionType: 16 }, false, { vip: true, maximumBytes: 512 * 1024 });
+      const raw = await c.wy('/api/vipnewcenter/app/resource/common/list', { positionType: 16 }, false, { vip: true });
       for (const value of rows(raw.data?.contentList ?? [])) {
         let row;
         try { row = typeof value === 'string' ? decodeJSON(Buffer.from(value)) : value; }
@@ -34,7 +34,7 @@ export function createMutations() {
       if (c.platform !== 'wy') fail('UNSUPPORTED');
       c.accountRequired();
       return settleWrite(c, async callbacks => {
-        const raw = await c.wy('/api/vip-center-bff/task/sign', {}, true, { ...callbacks, maximumBytes: 65536 });
+        const raw = await c.wy('/api/vip-center-bff/task/sign', {}, true, callbacks);
         if (!raw.data) fail('INVALID_RESPONSE');
         return {};
       });

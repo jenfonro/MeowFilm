@@ -76,7 +76,7 @@ music.online.lyrics
 
 - 安装输入来自原生已选择文件的只读字节快照或 HTTPS 下载；两种获取方式进入同一检查、传输与安装流程。
 - 设置页允许一次明确选择多份 `.js`；导入只持久当前源元数据并保持停用，不连接音源服务器、不执行脚本。
-- 本地 `.js` 快照通过 `ImportSourceAsync` 完整 raw PUT，installationId/sourceRevision 精确绑定安装候选；严格 UTF-8 与16 MiB源码契约由公共模块验证，无业务传输分片或摘要。
+- 本地 `.js` 快照通过 `ImportSourceAsync` 完整 raw PUT，installationId/sourceRevision 精确绑定安装候选；公共模块验证严格 UTF-8 与脚本格式，不设源码字节配额，无业务传输分片或摘要。
 - 每个 installation、platform、recording 和 quality 都显式指定；共享模块管理运行 generation。
 - 启用状态决定实例是否可参与候选；应用启动和列出候选不激活全部脚本，实际需要时才按顺序请求并激活实例。
 - 脚本在线请求的内部 25 秒期限届满返回 `TIMEOUT`，统一选择将其作为该候选不可用处理，保留其他已成功的内置候选。普通调用方取消、源撤销或质量取消仍返回 `CANCELLED`，终止旧操作。

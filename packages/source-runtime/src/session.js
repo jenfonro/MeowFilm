@@ -38,7 +38,6 @@ class SessionState {
 
   #identity(namespace, key) {
     const name = String(key);
-    sourceRequire(textEncoder.encode(name).length <= 4096, 'RESOURCE_LIMIT');
     return JSON.stringify([namespace, name]);
   }
 

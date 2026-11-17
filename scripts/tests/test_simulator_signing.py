@@ -53,24 +53,43 @@ class SimulatorSigningTests(unittest.TestCase):
             with self.subTest(host=host), self.assertRaises(ValueError):
                 SIGNING.validate(self.info, self.entitlements, self.signature, host_entitlements=host)
 
-    def executable(self, payload=None, cpu=0x01000007, platform=7, sections=1, name=b"__entitlements"):
+    def executable(self, payload=None, cpu=0x01000007, platform=7, sections=1, name=b"__entitlements",
+                   additional_commands=()):
         if payload is None:
             payload = plistlib.dumps(self.entitlements)
         segment_size = 72 + sections * 80
-        size = segment_size + 24
+        size = segment_size + 24 + sum(map(len, additional_commands))
         start = 32 + size
-        header = struct.pack("<8I", 0xFEEDFACF, cpu, 0, 2, 2, size, 0, 0)
+        header = struct.pack("<8I", 0xFEEDFACF, cpu, 0, 2, 2 + len(additional_commands), size, 0, 0)
         segment = struct.pack("<II16s4Q4I", 0x19, segment_size, b"__TEXT",
                               0, start + len(payload), 0, start + len(payload), 7, 5, sections, 0)
         section = struct.pack("<16s16sQQ8I", name, b"__TEXT", start, len(payload),
                               start, 0, 0, 0, 0, 0, 0, 0)
         build = struct.pack("<6I", 0x32, 24, platform, 17 << 16, 26 << 16, 0)
-        return header + segment + section * sections + build + payload
+        return header + segment + section * sections + build + b"".join(additional_commands) + payload
 
     def test_reads_simulated_permissions_from_both_current_64_bit_architectures(self):
         for cpu in (0x01000007, 0x0100000C):
             with self.subTest(cpu=cpu):
                 self.assertEqual(SIGNING.simulator_entitlements(self.executable(cpu=cpu)), self.entitlements)
+
+    def test_large_executable_preserves_permissions(self):
+        binary = bytearray(self.executable())
+        binary.extend(b"\0" * (64 * 1024 * 1024 + 1 - len(binary)))
+        self.assertEqual(SIGNING.simulator_entitlements(binary), self.entitlements)
+
+    def test_large_load_command_tables_preserve_permissions(self):
+        linker_option = struct.pack("<4I", 0x2D, 16, 0, 0)
+        large_option = struct.pack("<3I", 0x2D, 1024 * 1024 + 16, 1) + b"x" * (1024 * 1024) + b"\0" * 4
+        for commands in ((linker_option,) * 4096, (large_option,)):
+            with self.subTest(commands=len(commands)):
+                binary = self.executable(additional_commands=commands)
+                self.assertEqual(SIGNING.simulator_entitlements(binary), self.entitlements)
+
+    def test_large_entitlement_section_preserves_its_contents(self):
+        entitlements = dict(self.entitlements, padding="x" * 65537)
+        binary = self.executable(payload=plistlib.dumps(entitlements))
+        self.assertEqual(SIGNING.simulator_entitlements(binary), entitlements)
 
     def test_missing_duplicate_and_invalid_entitlement_sections_fail(self):
         for binary in (self.executable(name=b"__other"), self.executable(sections=2),
@@ -88,10 +107,10 @@ class SimulatorSigningTests(unittest.TestCase):
     def test_truncated_commands_and_out_of_bounds_entitlements_fail(self):
         original = self.executable()
         malformed = [original[:length] for length in (0, 16, 31, 64, len(original) - 1)]
-        for offset, format, value in ((20, "<I", len(original)), (36, "<I", 0),
-                                     (96, "<I", 4096), (144, "<Q", 65537),
+        for offset, format, value in ((20, "<I", len(original)), (36, "<I", 0), (36, "<I", 9),
+                                     (96, "<I", 4096), (144, "<Q", 0), (144, "<Q", 65537),
                                      (152, "<I", len(original)), (152, "<I", 0),
-                                     (12, "<I", 6), (16, "<I", 4097)):
+                                     (12, "<I", 6), (16, "<I", 0), (16, "<I", 1), (16, "<I", 4097)):
             data = bytearray(original)
             struct.pack_into(format, data, offset, value)
             malformed.append(bytes(data))

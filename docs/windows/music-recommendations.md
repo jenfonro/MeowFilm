@@ -136,9 +136,9 @@ Task PrepareRecommendationsAsync(CancellationToken ct = default);
 
 未确认的 pending 只通过对应 owner 的 reconcile 结算。已提交但队列读回失败时保留协调状态，且不把成功提交后的回读失败改记为 `COMMIT_UNKNOWN`。owner 只保留最近一次推荐结果回执，由下一次推荐提交覆盖；replay 和 reconcile 仍按 nonce 读取该回执。
 
-返回原队列所需 checkpoint 按实际保留字节管理（8 MiB），由恢复、discard 或关闭释放，不另设四个 checkpoint 的数量门槛。
+返回原队列所需 checkpoint 由恢复、discard 或关闭释放，不设字节或数量门槛。
 
-推荐平台响应保留 512 KiB 字节资源边界，曲库仍执行请求／响应字节和持久 envelope 的资源校验。心动及 scene 单曲推荐不另设条数裁剪；FM 三首、规则五首和 SIMILAR 三首仍是各自的协议批次。
+推荐平台响应、曲库请求／响应及业务持久数据不设人为字节上限，格式、身份和事务回执校验继续执行。心动及 scene 单曲推荐不另设条数裁剪；FM 三首、规则五首和 SIMILAR 三首仍是各自的协议批次。
 
 ## 关闭
 

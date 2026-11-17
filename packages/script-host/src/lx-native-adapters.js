@@ -82,11 +82,10 @@ export class LXAdapterOwner {
 
   scriptInfo() {
     const metadata = { name: 'LX script', version: this.revision.version };
-    const prefix = this.revision.source.slice(0, 8192);
-    const header = prefix.match(/^\s*(\/\*[\s\S]*?\*\/|(?:\/\/[^\n]*\n?)+)/)?.[0] ?? '';
+    const header = this.revision.source.match(/^\s*(\/\*[\s\S]*?\*\/|(?:\/\/[^\n]*\n?)+)/)?.[0] ?? '';
     for (const field of ['name', 'description', 'author', 'homepage', 'version']) {
       const value = header.match(new RegExp(`(?:^|\\n)\\s*(?:\\/\\/|\\/\\*|\\*)?\\s*@${field}\\s+([^\\r\\n]*)`))?.[1];
-      if (value) metadata[field] = value.replace(/\*\/\s*$/, '').trim().slice(0, 1024);
+      if (value) metadata[field] = value.replace(/\*\/\s*$/, '').trim();
     }
     return { ...metadata, ...this.revision.metadata, rawScript: this.revision.source };
   }
@@ -161,8 +160,7 @@ export class LXAdapterOwner {
       this.initialized = true;
     } else if (event === 'updateAlert') {
       requireValue(!this.alert && data && typeof data.log === 'string' &&
-        data.log.length <= 1024 && (data.updateUrl === undefined ||
-        (typeof data.updateUrl === 'string' && data.updateUrl.length <= 1024)), 'SCRIPT_PROTOCOL_ERROR');
+        (data.updateUrl === undefined || typeof data.updateUrl === 'string'), 'SCRIPT_PROTOCOL_ERROR');
       if (data.updateUrl) this.validateURL(data.updateUrl, this.root);
       this.alert = { log: data.log, updateUrl: data.updateUrl ?? '' };
     } else throw fault('SCRIPT_PROTOCOL_ERROR');
@@ -250,7 +248,7 @@ export class LXAdapterOwner {
     requireValue(this.revision.permissions.storage.includes(operation === 'get' ? 'read' : 'write'),
       'PERMISSION_DENIED');
     requireValue(typeof this.storage?.[operation] === 'function', 'PERMISSION_DENIED');
-    requireValue(typeof key === 'string' && key.length > 0 && key.length <= 256);
+    requireValue(typeof key === 'string' && key.length > 0);
     // Native revocation precedes finite guest cleanup and invocation settlement.
     const signal = AbortSignal.any([scope.signal, capabilitySignal]), session = new WeakRef(this);
     const input = { ...this.scopeIdentity(scope), associationId: scope.associationId, key, signal,

@@ -11,6 +11,7 @@ public static class NovelConfigurationTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return new("novel configuration: offline import edit metadata export and reload never require the runtime", Offline);
+        yield return new("novel configuration: definition beyond sixteen MiB imports exports and reopens completely", LargeDefinition);
         yield return new("novel configuration: atomic failure and conflicting owner preserve the committed source", Failure);
         yield return new("novel configuration: accepted cancellation drains the real write and publishes its receipt", Receipt);
         yield return new("novel configuration: slow application cannot block saving and cannot publish an older snapshot", Latest);
@@ -53,6 +54,33 @@ public static class NovelConfigurationTests
         }
         finally { await service.PrepareShutdownAsync(); }
     }
+    private static async Task LargeDefinition()
+    {
+        var definition = System.Text.Json.Nodes.JsonNode.Parse(Definition)!.AsObject();
+        string text = new('x', 16 * 1024 * 1024 + 1);
+        definition["bookSourceComment"] = text;
+        var runtime = new Probe { Offline = true }; var store = new NovelSourceMemoryStore();
+        var service = new NovelSourceService(runtime, store);
+        try
+        {
+            string input = definition.ToJsonString();
+            var preview = await service.PreviewImportAsync(text: input);
+            Check(preview.GetProperty("items").GetArrayLength() == 1);
+            await service.ImportAsync(text: input);
+            Check(store.Writes == 1 && store.Bytes!.Length > 16 * 1024 * 1024);
+            var reopened = new NovelSourceService(runtime, store);
+            try
+            {
+                await reopened.RefreshAsync();
+                var exported = await reopened.ExportAsync([reopened.Sources.Single().InstallationId]);
+                using var output = JsonDocument.Parse(exported.GetProperty("text").GetString()!);
+                Check(output.RootElement[0].GetProperty("bookSourceComment").GetString() == text);
+            }
+            finally { await reopened.PrepareShutdownAsync(); }
+        }
+        finally { await service.PrepareShutdownAsync(); }
+    }
+
     private static async Task Failure()
     {
         var runtime = new Probe { Offline = true }; var store = new NovelSourceMemoryStore();

@@ -11,6 +11,7 @@ public static partial class MusicNativeLibraryTests
     {
         yield return new("Native music lyric display independent cache preserves plain and true words across restart", LyricDisplayRestart);
         yield return new("Native music local lyrics current schema preserves plain and true words across restart", LocalLyricsRestart);
+        yield return new("Native music local lyrics beyond sixty four songs and two MiB reopen without truncation", LargeLocalLyrics);
         yield return new("Native music current local lyric documents reject damaged schema fields without writes", LyricSnapshotSchemas);
         yield return new("Native music lyric snapshots ignore unused timing fields without rewriting source data", LyricSnapshotFields);
     }
@@ -64,6 +65,24 @@ public static partial class MusicNativeLibraryTests
         Check(JsonNode.DeepEquals(JsonNode.Parse(restored.GetProperty("lines").GetRawText()), lines));
         await Ok(reopened, "music.lyrics.display.save", new { song, sourceKey, lines });
         Check(f.Store.Writes == writes && bytes.SequenceEqual(f.Store.Bytes!));
+    }
+
+    private static async Task LargeLocalLyrics()
+    {
+        await using var f = new Fixture(); var owner = f.Owner();
+        JsonObject song = null!;
+        string text = new('x', 2 * 1024 * 1024 + 1);
+        for (int i = 0; i < 65; i++)
+        {
+            await Ok(owner, "music.queue.replace", new { songs = new[] { Online((1000 + i).ToString()) }, index = 0 });
+            song = Parsed((await Ok(owner, "music.queue.get")).GetProperty("current").GetProperty("song"));
+            await Ok(owner, "music.lyrics.local.save", new { song, text = "[00:01]" + (i == 64 ? text : "line") });
+        }
+        Check(f.Store.State("native-local-lyrics")["items"]!.AsArray().Count == 65);
+        await owner.DisposeAsync();
+        var restored = await Ok(f.Owner(), "music.lyrics.local.get", new { song });
+        Check(restored.GetProperty("state").GetString() == "local" &&
+            restored.GetProperty("lines")[0].GetProperty("text").GetString() == text);
     }
 
     private static async Task LocalLyricsRestart()

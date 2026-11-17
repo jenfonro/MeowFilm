@@ -4,13 +4,13 @@
 
 ## 公共入口
 
-| 入口 | 扩展名 | 最大字节 | 结果 |
-| --- | --- | ---: | --- |
-| `SelectedJsonSnapshot` | `.json` | 8 MiB | 原始字节、SHA-256、文件名 |
-| `SelectedScriptSnapshot` | `.js` | 16 MiB | 原始字节、文件名 |
-| `SelectedLyricSnapshot` | `.lrc`、`.qrc`、`.yrc`、`.txt` | 256 KiB | 严格解码文本、SHA-256、文件名 |
+| 入口 | 扩展名 | 结果 |
+| --- | --- | --- |
+| `SelectedJsonSnapshot` | `.json` | 原始字节、SHA-256、文件名 |
+| `SelectedScriptSnapshot` | `.js` | 原始字节、文件名 |
+| `SelectedLyricSnapshot` | `.lrc`、`.qrc`、`.yrc`、`.txt` | 严格解码文本、SHA-256、文件名 |
 
-JSON 与脚本入口只创建字节快照；脚本快照与公共 ScriptHost 使用同一个 16 MiB 单脚本源码上限，不把历史 512 KiB 门槛当成兼容条件。脚本原始字节经完整 HTTP 上传，由公共运行器校验源码大小、严格 UTF-8（允许开头 BOM）及安装事务；客户端不计算传输摘要、不拆分源码，也不按源码哈希补网络 origin。歌词接受 UTF-8，或带 BOM 的 UTF-8／UTF-16；最多 65536 个字符并拒绝非法控制字符。
+JSON 与脚本入口只创建字节快照，不设置业务字节配额。脚本原始字节经完整 HTTP 上传，由公共运行器校验严格 UTF-8（允许开头 BOM）及安装事务；客户端不计算传输摘要、不拆分源码，也不按源码哈希补网络 origin。歌词接受 UTF-8，或带 BOM 的 UTF-8／UTF-16，并拒绝非法控制字符，不设置内容字符数配额。快照仍受 .NET 数组可表示长度和实际内存约束，长度转换使用 checked，不能截断后返回成功。
 
 ## 路径与文件边界
 

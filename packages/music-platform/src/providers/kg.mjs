@@ -144,7 +144,7 @@ export const kgProvider = {
     const args = { album_audio_id: scalar(musicInfo.albumAudioId) || '0', appid: 1005, clientver: 20489,
       duration: Math.round(number(musicInfo.duration, 0, 'INVALID_REQUEST') * 1000), hash, keyword: '', lrctxt: 1, man: 'no' };
     args.signature = md5(kgSalt + Object.keys(args).sort().map(key => `${key}=${scalar(args[key])}`).join('') + kgSalt);
-    const data = await c.read({ url: 'https://lyrics.kugou.com/v1/search?' + form(args), maximumBytes: 512 * 1024 });
+    const data = await c.read({ url: 'https://lyrics.kugou.com/v1/search?' + form(args) });
     if (number(data.status) === 404) return { text: '', translation: '', romanization: '' };
     kgSuccess(data);
     if (number(required(data.status)) !== 200) fail('UPSTREAM_ERROR');
@@ -154,14 +154,14 @@ export const kgProvider = {
     const download = { ver: 1, client: 'android', id: required(candidate.id),
       accesskey: required(candidate.accesskey), fmt: 'krc', charset: 'utf8' };
     download.signature = md5(kgSalt + Object.keys(download).sort().map(key => `${key}=${scalar(download[key])}`).join('') + kgSalt);
-    const result = kgSuccess(await c.read({ url: 'https://lyrics.kugou.com/download?' + form(download), maximumBytes: 512 * 1024 }));
+    const result = kgSuccess(await c.read({ url: 'https://lyrics.kugou.com/download?' + form(download) }));
     if (number(required(result.status)) !== 200 || number(required(result.error_code)) !== 0) fail('UPSTREAM_ERROR');
     return text(result.content) ? krcLyrics(result.content) : { text: '', translation: '', romanization: '' };
   },
   async chorus(c, { id, musicInfo = {} }) {
     id = input(first(id, musicInfo.hash, musicInfo.songmid)).toUpperCase();
     const raw = await c.read({ url: 'https://expendablekmrcdn.kugou.com/v1/audio_climax/audio?' +
-      form({ data: JSON.stringify([{ hash: id }]) }), maximumBytes: 65536 });
+      form({ data: JSON.stringify([{ hash: id }]) }) });
     if (number(required(raw.status)) !== 1) fail('UPSTREAM_ERROR');
     const row = rows(raw.data)[0];
     const start = optionalNumber(row?.start_time), end = optionalNumber(row?.end_time);

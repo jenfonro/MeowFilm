@@ -46,10 +46,10 @@ final class PlaybackNowPlayingMetadataTests: XCTestCase {
         XCTAssertFalse(state.set(.init(title: "late", artwork: image), attempt: attempt))
     }
 
-    func testArtworkIsBoundedBytesNeverAFetchInstruction() {
+    func testArtworkPreservesLargeBytesAndNeverBecomesAFetchInstruction() {
         XCTAssertNil(PlaybackNowPlayingArtwork(data: Data()))
-        XCTAssertNil(PlaybackNowPlayingArtwork(data: Data(repeating: 0,
-            count: PlaybackNowPlayingArtwork.maximumBytes + 1)))
+        let data = Data(repeating: 0, count: 2 * 1_024 * 1_024 + 1)
+        XCTAssertEqual(PlaybackNowPlayingArtwork(data: data)?.data, data)
         // The adapter, not the generic contract, validates encoded image syntax.
         XCTAssertNotNil(PlaybackNowPlayingArtwork(data: Data([0])))
     }

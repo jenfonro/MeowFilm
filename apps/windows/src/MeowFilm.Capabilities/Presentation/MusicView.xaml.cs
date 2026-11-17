@@ -158,7 +158,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
     private async Task RenamePlaylistNameAsync(CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        var input = new TextBox { Text = module.Heading, MaxLength = 200, Margin = new(0, 0, 0, 16) };
+        var input = new TextBox { Text = module.Heading, Margin = new(0, 0, 0, 16) };
         input.SetResourceReference(StyleProperty, "MeowFilm.TextBox");
         System.Windows.Automation.AutomationProperties.SetName(input, "歌单名称");
         var confirm = new Button { Content = "重命名", IsDefault = true };
@@ -234,7 +234,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         var hasName = PlaylistNameInput.Text.Trim().Length > 0;
         PlaylistNamePlaceholder.Visibility = PlaylistNameInput.Text.Length == 0
             ? Visibility.Visible : Visibility.Collapsed;
-        PlaylistNameCount.Text = $"{PlaylistNameInput.Text.Length} / {PlaylistNameInput.MaxLength}";
+        PlaylistNameCount.Text = $"{PlaylistNameInput.Text.Length}";
         CreatePlaylistButton.IsEnabled = playlistDialogOpen && !playlistDialogSubmitting &&
             module.CanEdit && hasName;
     }

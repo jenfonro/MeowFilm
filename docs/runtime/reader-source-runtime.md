@@ -74,11 +74,11 @@ source.runtime.web.respond
 source.runtime.rules.process
 ```
 
-`PUT /v1/source/sources/{installationId}/{sourceRevision}?basename=...` 一次上传原始源码，接受无路径 `.json/.js/.html/.htm`，长度 1 至 16 MiB，严格 UTF-8 并保留既有 BOM 行为。POST body 是普通 JSON，响应统一 `{ok:true,contract:"source.runtime.v2",value}` 或 `{ok:false,contract,code}`；invoke 的 value 即业务值，控制正文没有普通字节配额。
+`PUT /v1/source/sources/{installationId}/{sourceRevision}?basename=...` 一次上传原始源码，接受无路径 `.json/.js/.html/.htm`，非空且无字节配额，严格 UTF-8 并保留既有 BOM 行为。POST body 是普通 JSON，响应统一 `{ok:true,contract:"source.runtime.v2",value}` 或 `{ok:false,contract,code}`；invoke 的 value 即业务值，控制正文没有普通字节配额。
 
 完整候选按 installation/sourceRevision 拥有，同键同内容幂等，不同内容报 SOURCE_INTEGRITY。新完整上传替换未采用候选，部分 body 不发布；指定版本不存在报 SOURCE_NOT_FOUND。必需材料、身份或 CAS 不满足时不消费候选，取入试运行后失败释放；未采用候选在下一次完整上传、卸载或关闭释放，无分片、token、TTL、Base64 或传输摘要。原始 uploadHash 与规范化 contentHash 分别计算并复用，不能混淆。普通 RPC 附加参数不触发白名单拒绝，也不进入执行 spec、能力配置或其他操作的参数。
 
-load 必填 `installationId,sourceRevision,revision,expectedRevision`；protocol/version/metadata 可选，默认自动识别、1.0.0、空对象，metadata 保留 32 KiB 格式边界。invoke 必填 `installationId,revision,generation,action,payload`，可选 timeoutMs 为 1 至 60000；unload 必填 installationId/revision，generation 可选。
+load 必填 `installationId,sourceRevision,revision,expectedRevision`；protocol/version/metadata 可选，默认自动识别、1.0.0、空对象，metadata 验证 JSON 对象且不设字节配额。invoke 必填 `installationId,revision,generation,action,payload`，可选 timeoutMs 为 1 至 60000；unload 必填 installationId/revision，generation 可选。
 
 `rules.process {request}` 单独承载小说身份、归并、章节匹配、净化／简繁及固定 URL 正则匹配，返回原纯规则结果，不接受客户端程序，不提供独立规则检查。Node owner 接受完整规则列表，稳定排序后逐条使用原规则预算，最后统一简繁；默认 3000ms、URL 匹配 2000ms，不增加规则预算业务上限或整个 transform 的固定截止。管理字段和未执行分支不参与规则计算；实际编译／执行失败仍明确返回。`TIMEOUT`／`CANCELLED` 保留原分类，失败实际释放后可重建，close 等待所有已接受规则任务排空。RPC 字段、错误及所有权以[书源仓库的小说纯规则契约](source-library.md#小说纯规则)为准；原生本地配置不迁入 Node 存储。
 
@@ -88,7 +88,7 @@ load 必填 `installationId,sourceRevision,revision,expectedRevision`；protocol
 
 卸载清理失败仍报告 `SOURCE_CLEANUP`；host 已移除的实例不再保留 RPC binding，其他实例的状态与调用不受影响。退休 profile 和物理任务的清理债务独立保留，不因 binding 删除冒充完成。应用关闭同时检查模块抛错与失败信封，仍等待全部模块清理，并以公共 `INVALID_RESPONSE` 报告失败；重复关闭复用同一结果。
 
-每个实例的原生 Runtime、两个 Context、profile、DOM registry、变量和虚拟路由独立。源码 16 MiB 与 QuickJS 栈边界保留；移除脚本内存配额、普通响应/state 累计配额与 OOM 自动重启。初始化/请求默认 60 秒、清理 3 秒，不设单段同步时限或固定实例/并发/timer/网络/profile 数量。主控可取消卡死执行并等待真实原生线程退出。
+每个实例的原生 Runtime、两个 Context、profile、DOM registry、变量和虚拟路由独立。源码不设字节配额，QuickJS 栈边界保留；移除脚本内存配额、普通响应/state 累计配额与 OOM 自动重启。初始化/请求默认 60 秒、清理 3 秒，不设单段同步时限或固定实例/并发/timer/网络/profile 数量。主控可取消卡死执行并等待真实原生线程退出。
 
 初始化整体受同一截止信号约束，候选 HTML 和外部脚本请求按实际 I/O 所有权登记。同一安装的执行生命周期事务有序，永久仓库管理事务统一串行提交；动作可在 await 等待期间交错推进，各自保留请求身份、阶段上下文和取消 fence，status 不等待慢实例。HTTP abort/未完成 response close fence 结果，正常 finish 不取消完成工作。Reader DOM 文档/节点/字符串、HTML 候选、外部脚本及规则解析预算保留；目录与正文分页使用去重队列，不设固定页数截断，仍可取消或超时。`maximumParseBytes` 只用于解析，不限制普通 HTTP body、变量、Cookie、storage 或路由状态。
 

@@ -89,25 +89,14 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         RequestAsync(HttpMethod.Get, "/v1/describe", default, false,
             RuntimeHttpProtocol.Name, RuntimeHttpProtocol.PublicCodes, cancellationToken);
 
-    public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        if (maximumBytes <= 0) throw new BridgeException("INVALID_REQUEST");
-        return RequestImageAsync(reference, (response, token) => ReadImageBodyAsync(response, maximumBytes, token), cancellationToken);
-    }
-
-    public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default) =>
-        RequestImageAsync(reference, ReadImageBodyAsync, cancellationToken);
-
-    private Task<byte[]> RequestImageAsync(string reference,
-        Func<HttpResponseMessage, CancellationToken, Task<byte[]>> readBody, CancellationToken cancellationToken)
+    public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var provider = RuntimeHttpProtocol.ImageProvider(reference);
         if (provider is null) throw new BridgeException("INVALID_REQUEST");
         return ExchangeAsync(imageClient, HttpMethod.Get, reference, default, false, async (response, token) =>
         {
-            var bytes = await readBody(response, token).ConfigureAwait(false);
+            var bytes = await ReadImageBodyAsync(response, token).ConfigureAwait(false);
             try
             {
                 if (response.StatusCode != HttpStatusCode.OK)
@@ -155,34 +144,6 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         }
     }
 
-    private static async Task<byte[]> ReadImageBodyAsync(HttpResponseMessage response, int maximumBytes, CancellationToken token)
-    {
-        if (response.Content.Headers.ContentEncoding.Count != 0) throw new BridgeException("INVALID_RESPONSE");
-        long? expected = response.Content.Headers.ContentLength;
-        if (expected is 0 || expected > maximumBytes) throw new BridgeException("RESOURCE_LIMIT");
-        await using var source = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
-        using var bytes = new MemoryStream();
-        byte[] buffer = new byte[32768];
-        try
-        {
-            for (;;)
-            {
-                int count = await source.ReadAsync(buffer, token).ConfigureAwait(false);
-                if (count == 0) break;
-                if (bytes.Length + count > maximumBytes) throw new BridgeException("RESOURCE_LIMIT");
-                bytes.Write(buffer, 0, count);
-            }
-            token.ThrowIfCancellationRequested();
-            if (bytes.Length == 0 || expected is { } length && bytes.Length != length)
-                throw new BridgeException("INVALID_RESPONSE");
-            return bytes.ToArray();
-        }
-        finally
-        {
-            Clear(buffer);
-            if (bytes.TryGetBuffer(out var view)) System.Security.Cryptography.CryptographicOperations.ZeroMemory(view);
-        }
-    }
     private static void Clear(byte[] bytes) => System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes);
 
     public async Task ShutdownAsync(CancellationToken cancellationToken = default)

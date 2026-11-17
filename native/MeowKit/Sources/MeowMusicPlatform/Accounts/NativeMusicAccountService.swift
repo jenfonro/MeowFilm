@@ -911,7 +911,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             let challenge = try await run(platform) { try await provider.createQR(id: id) }
             try check(own); guard login?.id == id else { throw MusicServiceError.staleResult }
             guard challenge.id == id, challenge.platform == platform,
-                  !challenge.image.isEmpty, challenge.image.count <= 1024 * 1024 else { throw MusicServiceError.invalidResponse }
+                  !challenge.image.isEmpty else { throw MusicServiceError.invalidResponse }
             return challenge
         } catch {
             if login?.id == id { login = nil }

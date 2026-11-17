@@ -195,8 +195,8 @@ for (const mutation of [
 }
 
 for (const bytes of [Buffer.from([0xff, 10]), Buffer.from('{"sessionId":"a","sessionId":"b"}\n'),
-  Buffer.from('{}\nextra'), Buffer.alloc(64 * 1024 + 1, 32)]) {
-  test('malformed UTF8/JSON, extra bytes and oversized bootstrap messages close without ready', async t => {
+  Buffer.from('{}\nextra')]) {
+  test('malformed UTF8/JSON and extra bytes in bootstrap messages close without ready', async t => {
     const f = fixture(t);
     f.pipe.push(bytes);
     await assert.rejects(f.started, { code: 'INVALID_REQUEST' });
@@ -205,9 +205,9 @@ for (const bytes of [Buffer.from([0xff, 10]), Buffer.from('{"sessionId":"a","ses
   });
 }
 
-test('64 KiB bootstrap bound includes the newline and permits an exact boundary line', async t => {
+test('complete bootstrap messages above the former 64 KiB boundary retain their configuration', async t => {
   const f = fixture(t), json = JSON.stringify(f.input);
-  f.pipe.push(Buffer.from(json + ' '.repeat(64 * 1024 - Buffer.byteLength(json) - 1) + '\n'));
+  f.pipe.push(Buffer.from(json + ' '.repeat(64 * 1024 + 1) + '\n'));
   await f.started;
   assert.equal(f.seen.length, 1);
 });
@@ -357,7 +357,7 @@ test('assembly failure and invalid ready endpoint fail closed without exposing d
     let closed = false;
     const f = fixture(t, { makeRuntime: () => {
       if (failingFactory) throw new Error('private assembly detail');
-      return { baseUrl: 'https://outside.invalid', async start() {}, async close() { closed = true; } };
+      return { baseUrl: 'https://outside.invalid/not-a-root', async start() {}, async close() { closed = true; } };
     } });
     f.send();
     await assert.rejects(f.started, { code: failingFactory ? 'INVALID_RESPONSE' : 'INVALID_REQUEST' });

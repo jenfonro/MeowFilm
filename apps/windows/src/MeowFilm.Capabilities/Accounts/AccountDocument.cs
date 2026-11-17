@@ -21,7 +21,6 @@ internal sealed class StoredAccount
 
 internal sealed class AccountDocument
 {
-    internal const int MaximumBytes = 8 * 1024 * 1024;
     private static readonly JsonSerializerOptions Encoding = new()
     {
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
@@ -40,8 +39,7 @@ internal sealed class AccountDocument
                 AccountRules.Require(document.Fingerprint == DocumentFingerprint.Missing, "CORRUPT_STORAGE");
                 return new(new JsonObject { ["version"] = 1, ["entries"] = new JsonArray() }, document.Fingerprint);
             }
-            AccountRules.Require(document.Data.Length <= MaximumBytes &&
-                DocumentFingerprint.FromBytes(document.Data) == document.Fingerprint, "CORRUPT_STORAGE");
+            AccountRules.Require(DocumentFingerprint.FromBytes(document.Data) == document.Fingerprint, "CORRUPT_STORAGE");
             using var json = JsonDocument.Parse(document.Data, new JsonDocumentOptions { MaxDepth = 64 });
             // Reject ambiguous duplicate properties, rather than normalizing a corrupt document on save.
             CheckJson(json.RootElement);
@@ -137,10 +135,7 @@ internal sealed class AccountDocument
             entries.Add(new JsonObject { ["key"] = Key(platform), ["value"] = value });
         }
         else existing["value"] = value;
-        byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(root, Encoding);
-        if (bytes.Length <= MaximumBytes) return bytes;
-        CryptographicOperations.ZeroMemory(bytes);
-        throw new MusicAccountException("LIMIT");
+        return JsonSerializer.SerializeToUtf8Bytes(root, Encoding);
     }
     internal static JsonObject? ProfileNode(MusicAccountProfile? profile)
     {

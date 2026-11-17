@@ -622,10 +622,10 @@ public static class FilmCacheConsumerTests
     {
         int reads = 0;
         const string address = "/v1/douban/images/view/photo/poster.jpg";
-        await using var artwork = new ArtworkService(readTrusted: (reference, budget, token) =>
+        await using var artwork = new ArtworkService(readTrusted: (reference, token) =>
         {
             token.ThrowIfCancellationRequested();
-            Check(reference == address && budget == ArtworkService.MaximumBytes, "the native image transport receives the exact runtime reference");
+            Check(reference == address, "the native image transport receives the exact runtime reference");
             reads++;
             return Task.FromResult(RuntimeImageTests.Png.ToArray());
         });

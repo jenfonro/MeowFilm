@@ -41,6 +41,15 @@ public static class MusicNativeAccountTests
         yield return Case("owner.ordinary-validation-failure-keeps-saved-authority-without-credential-write", OrdinaryValidation);
         yield return Case("owner.failed-candidate-does-not-revoke-or-replace-existing-account", CandidateFailure);
         yield return Case("storage.unknown-entry-survives-account-write", () => UnknownEntry("unsupported-entry", new JsonObject { ["kept"] = true }));
+        yield return Case("storage.account-document-beyond-eight-MiB-preserves-unedited-entry",
+            () => UnknownEntry("large-entry", new JsonObject { ["text"] = new string('x', 8 * 1024 * 1024 + 1) }));
+        yield return Case("credential-cookie-preserves-more-than-sixty-four-pairs", () =>
+        {
+            string cookie = string.Join("; ", Enumerable.Range(0, 65).Select(i => $"part{i}={new string('x', 256)}"));
+            var fields = AccountRules.Cookies(cookie);
+            Check(fields.Count == 65 && fields["part64"] == new string('x', 256));
+            return Task.CompletedTask;
+        });
         yield return Case("owner.no-memory-fallback-on-store-read-error", StorageFailure);
         yield return Case("owner.canonical-profile-rejection-never-saves", ProfileReflection);
         yield return Case("owner.observer-failure-cannot-turn-commit-into-error", ObserverFailure);

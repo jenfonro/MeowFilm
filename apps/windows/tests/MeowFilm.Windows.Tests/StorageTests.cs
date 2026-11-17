@@ -17,7 +17,6 @@ namespace MeowFilm.Windows.Tests;
 public static class StorageTests
 {
     private const string Ns = "test.documents.v1", Other = "test.other.v1";
-    private const int Maximum = LocalDocumentStore.MaximumDocumentBytes;
     public static IEnumerable<TestCase> Cases()
     {
         yield return new("storage.local.raw-json-edit-length-and-reopen", LocalRoundTrip);
@@ -30,9 +29,9 @@ public static class StorageTests
         yield return new("storage.local.cancel-close-lock-contention", LocalCancellation);
         yield return new("storage.local.accepted-writes-FIFO-survive-cancel-and-close", () => QueuedWrites(false));
         yield return new("storage.dpapi.accepted-writes-FIFO-survive-cancel-and-close", () => QueuedWrites(true));
-        yield return new("storage.local.document-eight-mib-limit-on-read-and-write", LocalMaximum);
+        yield return new("storage.local.large-document-read-write-cas-and-reopen", LocalLarge);
         yield return new("storage.local.unknown-files-and-stages-preserved", LocalUnknownFiles);
-        yield return new("storage.local.complete-source-sixteen-mib-edit-and-cas", LocalSource);
+        yield return new("storage.local.large-complete-source-edit-and-cas", LocalSource);
         yield return new("storage.local.plain-junction-and-hardlink-rejected", LocalPathIsolation);
         yield return new("storage.dpapi.absent-empty-binary-reopen", DpapiRoundTrip);
         yield return new("storage.dpapi.product-and-namespace-binding", DpapiBinding);
@@ -50,7 +49,7 @@ public static class StorageTests
         yield return new("storage.dpapi.long-path-hardlink-document-rejected", DpapiLongPathHardlink);
         yield return new("storage.dpapi.concurrent-store-instances-cas", DpapiConcurrent);
         yield return new("storage.dpapi.cancel-close-lock-contention", DpapiCancellation);
-        yield return new("storage.dpapi.maximum-and-oversize", DpapiMaximum);
+        yield return new("storage.dpapi.large-document-read-write-cas-and-reopen", DpapiLarge);
         yield return new("storage.dpapi.unknown-file-is-not-empty", DpapiUnknownFile);
         yield return new("storage.dpapi.root-passive-pinned-and-path-validation", DpapiRoot);
         yield return new("storage.dpapi.directory-pins-share-write-not-delete", DpapiDirectorySharing);
@@ -241,20 +240,25 @@ public static class StorageTests
         await using var reopened = new LocalDocumentStore(fixture.Root, [Ns], protectedNamespaces: protect ? [Ns] : []);
         Equal("final"u8.ToArray(), (await reopened.ReadAsync(Ns)).Data!);
     }
-    private static async Task LocalMaximum()
+    private static async Task LocalLarge()
     {
-        using var fixture = new Temp(); await using var store = new LocalDocumentStore(fixture.Root, [Ns]);
-        byte[] data = new byte[Maximum]; data.AsSpan().Fill((byte)' ');
-        var next = await store.WriteAsync(Ns, data, DocumentFingerprint.Missing);
+        using var fixture = new Temp();
+        byte[] data = new byte[8 * 1024 * 1024 + 1]; data.AsSpan().Fill((byte)' ');
+        DocumentFingerprint next;
+        await using (var store = new LocalDocumentStore(fixture.Root, [Ns]))
+        {
+            next = await store.WriteAsync(Ns, data, DocumentFingerprint.Missing);
+            Equal(data, File.ReadAllBytes(fixture.PlainDocument(Ns)));
+            Equal(data, (await store.ReadAsync(Ns)).Data!);
+            await StoreError(() => store.WriteAsync(Ns, "x"u8.ToArray(), DocumentFingerprint.Missing), DocumentStoreError.Conflict);
+            Assert((await store.ReadAsync(Ns)).Fingerprint == next);
+        }
+        await using var reopened = new LocalDocumentStore(fixture.Root, [Ns]);
+        Equal(data, (await reopened.ReadAsync(Ns)).Data!);
+        data[^1] = (byte)'\n';
+        var edited = await reopened.WriteAsync(Ns, data, next);
+        Assert(edited != next && (await reopened.ReadAsync(Ns)).Fingerprint == edited);
         Equal(data, File.ReadAllBytes(fixture.PlainDocument(Ns)));
-        Equal(data, (await store.ReadAsync(Ns)).Data!);
-        await StoreError(() => store.WriteAsync(Ns, new byte[Maximum + 1], next), DocumentStoreError.Limit);
-        Assert((await store.ReadAsync(Ns)).Fingerprint == next);
-        using (var file = new FileStream(fixture.PlainDocument(Ns), FileMode.Open, FileAccess.Write))
-            file.SetLength(Maximum + 1);
-        await StoreError(() => store.ReadAsync(Ns), DocumentStoreError.Limit);
-        await StoreError(() => store.WriteAsync(Ns, "x"u8.ToArray(), next), DocumentStoreError.Limit);
-        Assert(new FileInfo(fixture.PlainDocument(Ns)).Length == Maximum + 1);
     }
     private static async Task LocalUnknownFiles()
     {
@@ -292,30 +296,26 @@ public static class StorageTests
             path = Directory.GetFiles(fixture.Root, "*.js", SearchOption.AllDirectories).Single();
             Assert(Path.GetFileName(path) == importHash + ".js" && Path.GetFileName(Path.GetDirectoryName(path)!).Contains(collection, StringComparison.Ordinal));
             Equal(original, File.ReadAllBytes(path));
-            byte[] maximum = new byte[LocalDocumentStore.MaximumSourceBytes]; maximum.AsSpan().Fill((byte)' ');
+            byte[] maximum = new byte[16 * 1024 * 1024 + 1]; maximum.AsSpan().Fill((byte)' ');
             original.CopyTo(maximum, 0);
             var maximumWrite = await store.WriteAsync(ns, maximum, first);
-            Assert(maximumWrite.Length == 16 * 1024 * 1024 && Directory.GetFiles(Path.GetDirectoryName(path)!, "*.js").Length == 1);
+            Assert(maximumWrite.Length == maximum.Length && Directory.GetFiles(Path.GetDirectoryName(path)!, "*.js").Length == 1);
             Equal(maximum, File.ReadAllBytes(path));
             maximum[^1] = (byte)'\n';
             File.WriteAllBytes(path, maximum);
             var read = await store.ReadAsync(ns);
-            Assert(read.Fingerprint.Length == 16 * 1024 * 1024 && read.Fingerprint != maximumWrite && read.Fingerprint.Sha256 != importHash);
+            Assert(read.Fingerprint.Length == maximum.Length && read.Fingerprint != maximumWrite && read.Fingerprint.Sha256 != importHash);
             Equal(maximum, read.Data!);
-            // A CAS base over 8 MiB is valid for a source, but never for an ordinary document.
-            await StoreError(() => store.WriteAsync(Ns, edited, read.Fingerprint), DocumentStoreError.InvalidRequest);
+            // A valid fingerprint still cannot replace an unrelated document.
+            await StoreError(() => store.WriteAsync(Ns, edited, read.Fingerprint), DocumentStoreError.Conflict);
             using (var block = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
                 await StoreError(() => store.WriteAsync(ns, edited, read.Fingerprint), DocumentStoreError.Storage);
             Assert((await store.ReadAsync(ns)).Fingerprint == read.Fingerprint &&
                 Directory.GetFiles(Path.GetDirectoryName(path)!, "*.js").Length == 1);
             Equal(maximum, File.ReadAllBytes(path));
-            var next = await store.WriteAsync(ns, edited, read.Fingerprint);
+            await store.WriteAsync(ns, edited, read.Fingerprint);
             Equal(edited, File.ReadAllBytes(path));
             await StoreError(() => store.WriteAsync(ns, original, first), DocumentStoreError.Conflict);
-            await StoreError(() => store.WriteAsync(ns, new byte[LocalDocumentStore.MaximumSourceBytes + 1], next), DocumentStoreError.Limit);
-            File.WriteAllBytes(path, new byte[LocalDocumentStore.MaximumSourceBytes + 1]);
-            await StoreError(() => store.ReadAsync(ns), DocumentStoreError.Limit);
-            File.WriteAllBytes(path, edited);
             string sibling = collection + "." + Hash("another source"u8.ToArray());
             await store.WriteAsync(sibling, "another source"u8.ToArray(), DocumentFingerprint.Missing);
             string stage = Path.Combine(Path.GetDirectoryName(path)!, "stage-interrupted.js"); File.WriteAllBytes(stage, [99]);
@@ -627,14 +627,24 @@ public static class StorageTests
         }
         finally { await store.DisposeAsync(); }
     }
-    private static async Task DpapiMaximum()
+    private static async Task DpapiLarge()
     {
-        using var fixture = new Temp(); await using var store = fixture.Store();
-        byte[] data = new byte[Maximum]; RandomNumberGenerator.Fill(data);
-        var next = await store.WriteAsync(Ns, data, DocumentFingerprint.Missing);
-        Equal(data, (await store.ReadAsync(Ns)).Data!);
-        await StoreError(() => store.WriteAsync(Ns, new byte[Maximum + 1], next), DocumentStoreError.Limit);
-        Assert((await store.ReadAsync(Ns)).Fingerprint == next);
+        using var fixture = new Temp();
+        byte[] data = new byte[8 * 1024 * 1024 + 1]; RandomNumberGenerator.Fill(data);
+        DocumentFingerprint next;
+        await using (var store = fixture.Store())
+        {
+            next = await store.WriteAsync(Ns, data, DocumentFingerprint.Missing);
+            Equal(data, (await store.ReadAsync(Ns)).Data!);
+            await StoreError(() => store.WriteAsync(Ns, new byte[] { 42 }, DocumentFingerprint.Missing), DocumentStoreError.Conflict);
+            Assert((await store.ReadAsync(Ns)).Fingerprint == next);
+        }
+        await using var reopened = fixture.Store();
+        Equal(data, (await reopened.ReadAsync(Ns)).Data!);
+        data[^1] ^= 1;
+        var edited = await reopened.WriteAsync(Ns, data, next);
+        Assert(edited != next && (await reopened.ReadAsync(Ns)).Fingerprint == edited);
+        Equal(data, (await reopened.ReadAsync(Ns)).Data!);
     }
     private static async Task DpapiCorruption(string variant)
     {

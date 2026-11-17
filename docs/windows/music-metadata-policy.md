@@ -71,7 +71,7 @@ native-local-lyrics
 
 文件入口只接受 `.lrc`、`.qrc`、`.yrc`、`.txt`：
 
-- 最大 256 KiB、65,536 个 UTF-16 字符；
+- 完整读取，不设文件字节或文本字符配额；
 - 接受严格 UTF-8，可带 BOM；UTF-16 LE/BE 必须带 BOM；
 - 拒绝 ANSI 猜测、损坏编码、控制字符、UNC、设备路径、硬链接、重解析点及读取期间变化；
 - 不扫描目录、不执行文本、不保存所选路径或文件名。
@@ -80,11 +80,11 @@ native-local-lyrics
 
 ## 本地歌词区域
 
-`native-local-lyrics` 当前 schema 为 1，items 为 `{songId,contentHash,lines}`；songId 是仓库永久 UUID，contentHash 仅绑定导入文本，不是歌曲身份。现有实际资源限制为 64 首、区域 2 MiB、单项 256 KiB；保存通用时间轴，不保存路径、文件能力、凭据或媒体 URL。`music.lyrics.local.get/save/remove` 按永久引用读取／替换／移除，歌词关闭不删除本地内容。
+`native-local-lyrics` 当前 schema 为 1，items 为 `{songId,contentHash,lines}`；songId 是仓库永久 UUID，contentHash 仅绑定导入文本，不是歌曲身份。本地歌词不设首数、字节、文本或行词数量上限；保存通用时间轴，不保存路径、文件能力、凭据或媒体 URL。`music.lyrics.local.get/save/remove` 按永久引用读取／替换／移除，歌词关闭不删除本地内容。时间轴格式、有限时间值与当前歌曲身份仍须有效。
 
 ## 共享音乐图片与展示缓存
 
-`MusicPresentationCache` 使用 `music.presentation-resources.v1`，图片按完整 URL 保存原网络字节，展示歌词按永久 songId 保存；二者合计按实际序列化文档占用沿原 8 MiB／30 天预算。音乐专用 `ArtworkService` 使用该 byte port，内存 32 MiB／64 项、图片单次 4 MiB，WPF `ArtworkImage` 与播放器共用此实例。`MusicRecordingPresentationCache` 和播放器独占图片持久副本已删除；其他业务图片实例不接音乐磁盘 port。
+`MusicPresentationCache` 使用 `music.presentation-resources.v1`，图片按完整 URL 保存原网络字节，展示歌词按永久 songId 保存；二者合计按实际序列化文档占用沿原 8 MiB／30 天预算。音乐专用 `ArtworkService` 使用该 byte port，解码内存按 32 MiB 像素字节管理（不设条数上限）、编码图片缓存单项准入为 4 MiB，WPF `ArtworkImage` 与播放器共用此实例。`MusicRecordingPresentationCache` 和播放器独占图片持久副本已删除；其他业务图片实例不接音乐磁盘 port。
 
 封面选择写入同一歌曲仓库，`artworkSourceKey/artworkSourceImage/cover_url` 区分平台原图与实际选定 URL。`SongMetadataChanged` 在提交后通知当前搜索、目录、队列和播放投影。具体换图／共享取消／清理语义只在共同资源契约维护；这些接线尚未取得本轮运行验证。
 

@@ -26,7 +26,7 @@ public sealed partial class RuntimeBundle
             var manifestPath = Path.Combine(root, "runtime-manifest.json");
             EnsureOrdinaryAncestors(manifestPath);
             var info = new FileInfo(manifestPath);
-            if (!info.Exists || info.Length is 0 or > 4 * 1024 * 1024) Invalid();
+            if (!info.Exists || info.Length == 0) Invalid();
             using var document = JsonDocument.Parse(File.ReadAllBytes(manifestPath), new JsonDocumentOptions { MaxDepth = 32 });
             var manifest = document.RootElement;
             if (manifest.GetProperty("schemaVersion").GetInt32() != 1

@@ -208,9 +208,9 @@ public static class AppLauncher
                     lifecycle.CloseAsync, lifecycle.ForceReleaseAsync, lifecycle.CancelShutdownPreparationAsync,
                     appearance, closePreferences, mediaControls: mediaControls,
                     resetUserData: reset.ResetAsync) { Title = "meowfilm" };
-                artwork = new ArtworkService(readTrusted: async (reference, maximumBytes, token) =>
+                artwork = new ArtworkService(readTrusted: async (reference, token) =>
                 {
-                    try { return await runtime.ReadImageAsync(reference, maximumBytes, token).ConfigureAwait(false); }
+                    try { return await runtime.ReadImageAsync(reference, token).ConfigureAwait(false); }
                     catch (BridgeException error)
                     {
                         throw new ArtworkException(error.Code switch

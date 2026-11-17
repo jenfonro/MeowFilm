@@ -190,7 +190,7 @@ final class MusicSourceManagementState: ObservableObject {
             for url in urls {
                 guard self?.canSubmit(access, page: page) == true else { break }
                 do {
-                    let data = try await ImportedFileReader.read(url, maximumBytes: MusicScriptSourceItem.maximumSourceBytes)
+                    let data = try await ImportedFileReader.read(url)
                     try submit()
                     let value = try await receipts.submit(settings: ["scripts/import/" + url.absoluteString],
                                                          operation: "导入音源") {
@@ -328,7 +328,7 @@ final class MusicSourceManagementState: ObservableObject {
     func update(_ id: String, file: URL? = nil) {
         perform(id) { service, submit in
             if let file {
-                let data = try await ImportedFileReader.read(file, maximumBytes: MusicScriptSourceItem.maximumSourceBytes)
+                let data = try await ImportedFileReader.read(file)
                 try submit()
                 return try await self.model.settingsReceipts.submit(
                     settings: ["scripts/" + id + "/source"], operation: "更新音源") {

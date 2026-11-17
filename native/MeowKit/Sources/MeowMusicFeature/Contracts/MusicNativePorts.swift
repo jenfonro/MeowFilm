@@ -31,13 +31,11 @@ public struct MusicQueueTrackReference: Sendable {
     public let sourceKey: String
     public let sourcePosition: Int?
     public let recommendation: Data?
-    /// Actual bytes received for this occurrence, before adopting its song.
-    public let byteCount: Int
     public init(songID: String, occurrenceID: String, platform: String, sourceKey: String,
-                sourcePosition: Int? = nil, recommendation: Data? = nil, byteCount: Int) {
+                sourcePosition: Int? = nil, recommendation: Data? = nil) {
         self.songID = songID; self.occurrenceID = occurrenceID
         self.platform = platform; self.sourceKey = sourceKey; self.sourcePosition = sourcePosition
-        self.recommendation = recommendation; self.byteCount = byteCount
+        self.recommendation = recommendation
     }
 }
 public struct MusicQueueReferencePage: Sendable {
@@ -185,8 +183,6 @@ public protocol MusicScriptResolving: Sendable {
 /// from the script header; platforms are the declared, consumable sites of the
 /// last successful load. Never a URL, credential, grant or script source text.
 public struct MusicScriptSourceItem: Sendable, Equatable, Identifiable {
-    /// The single-script source bound of the shared ScriptHost.
-    public static let maximumSourceBytes = 16 * 1024 * 1024
     public enum Origin: Sendable, Equatable { case file, network(host: String) }
     public enum State: String, Sendable, Equatable { case disabled, idle, starting, ready, failed }
     public let id: String

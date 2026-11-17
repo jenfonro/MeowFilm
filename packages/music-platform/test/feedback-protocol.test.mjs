@@ -186,15 +186,15 @@ test('QQ prepare ignores playback facts and Finish encodes only listened plus th
     { status: 'notSent', errorCode: 'STALE_SESSION' });
 });
 
-test('QQ five-byte zlib ACK rejects corrupt, trailing, concatenated, gzip, oversized and noninteger successes', async () => {
+test('QQ five-byte zlib ACK rejects corrupt, trailing, concatenated, gzip, large malformed and noninteger successes', async () => {
   const valid = deflateSync(Buffer.from('{"code":0}')), broken = Buffer.from(valid); broken[broken.length - 1] ^= 1;
   const bomb = Buffer.from('eJztwYEAAAAAgCC2/aUWqQoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACqASKYBBE=', 'base64');
   const cases = [
     ...[Buffer.alloc(0), Buffer.from([0x78, 0x9c]), valid.subarray(0, -1), broken,
       Buffer.concat([valid, Buffer.from([0])]), Buffer.concat([valid, valid]), gzipSync(Buffer.from('{}'))]
       .map(bytes => [Buffer.concat([Buffer.alloc(5), bytes]), 'INVALID_RESPONSE']),
-    [Buffer.concat([Buffer.alloc(5), bomb]), 'LIMIT'],
-    [Buffer.alloc(65537), 'LIMIT'], [Buffer.concat([Buffer.from([1, 0, 0, 0, 0]), valid]), 'INVALID_RESPONSE'],
+    [Buffer.concat([Buffer.alloc(5), bomb]), 'INVALID_RESPONSE'],
+    [Buffer.alloc(65537), 'INVALID_RESPONSE'], [Buffer.concat([Buffer.from([1, 0, 0, 0, 0]), valid]), 'INVALID_RESPONSE'],
     [valid, 'INVALID_RESPONSE'], ...[false, '0', null, 0.5].map(code => [ack({ code }), 'INVALID_RESPONSE']),
     [ack({}), 'INVALID_RESPONSE'],
   ];

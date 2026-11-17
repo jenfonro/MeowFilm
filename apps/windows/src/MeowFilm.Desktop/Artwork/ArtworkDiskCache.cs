@@ -39,7 +39,7 @@ internal sealed class ArtworkDiskCache(string directory) : IDisposable
             token.ThrowIfCancellationRequested();
             if (file.Name.Length != 70 || file.Name.AsSpan(0, 64).ContainsAnyExcept("0123456789ABCDEF")) continue;
             long size = file.Length;
-            if (size is <= 0 or > ArtworkService.MaximumBytes) { file.Delete(); continue; }
+            if (size is <= 0 or > ArtworkService.MaximumCacheEntryBytes) { file.Delete(); continue; }
             items.Add(file.Name, new(size, ++clock)); bytes += size;
         }
         Trim(0, token);
@@ -108,6 +108,8 @@ internal sealed class ArtworkDiskCache(string directory) : IDisposable
 
     internal async Task WriteAsync(string key, byte[] encoded, CancellationToken token)
     {
+        token.ThrowIfCancellationRequested();
+        if (encoded.Length is 0 or > ArtworkService.MaximumCacheEntryBytes) return;
         await io.WaitAsync(token).ConfigureAwait(false);
         string? temporary = null;
         try

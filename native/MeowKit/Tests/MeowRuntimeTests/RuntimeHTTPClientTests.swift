@@ -910,13 +910,13 @@ final class RuntimeHTTPClientTests: XCTestCase {
         await client.close()
     }
 
-    func testTMDBImageErrorsWrongIdentityTruncationAndBudgetNeverReturnBytes() async throws {
+    func testTMDBImageErrorsWrongIdentityAndTruncationNeverReturnBytes() async throws {
         let client = try client()
         for (path, contract) in [("/v1/tmdb/images/w500/a.jpg", "tmdb.data.v1"),
                                  ("/v1/douban/images/view/photo/public/a.jpg", "douban.data.v1")] {
             let relative = try XCTUnwrap(RuntimeHTTPClient.metadataImageURL(path))
             let failure: RuntimeValue = .object(["ok": .bool(false), "contract": .string(contract), "code": .string("UPSTREAM_HTTP")])
-            for mode in ["remote", "identity", "json", "redirect", "truncated", "length", "stream"] {
+            for mode in ["remote", "identity", "json", "redirect", "truncated", "length"] {
                 RuntimeTestURLProtocol.fixture.set { _, transport in
                     switch mode {
                     case "remote": transport.respond(failure, status: 502)
@@ -930,23 +930,33 @@ final class RuntimeHTTPClientTests: XCTestCase {
                         try! transport.startResponse(headers: ["Content-Type": "image/png", "Content-Length": "100"])
                         transport.send(Data([137, 80])); transport.fail(NSURLErrorNetworkConnectionLost)
                     case "length":
-                        // Complete the custom URLProtocol response so Foundation delivers
-                        // its headers. One byte cannot trigger the body budget; the declared
-                        // length must still be rejected before truncated-image validation.
+                        // A declared length is an integrity check, not a byte quota.
                         try! transport.respond(data: Data([0]),
                             headers: ["Content-Type": "image/png", "Content-Length": "4194305"])
-                    default:
-                        try! transport.startResponse(headers: ["Content-Type": "image/png"])
-                        transport.send(Data(repeating: 0, count: 4 * 1_024 * 1_024 + 1))
+                    default: XCTFail("Unknown fixture mode")
                     }
                 }
                 do { _ = try await client.readMetadataImage(relative); XCTFail(mode) }
                 catch {
                     if mode == "remote" { XCTAssertEqual(error as? RuntimeHTTPError, .remote("UPSTREAM_HTTP")) }
-                    else if mode == "length" || mode == "stream" {
-                        XCTAssertEqual((error as? URLError)?.code, .dataLengthExceedsMaximum, mode)
-                    } else { XCTAssertEqual(error as? RuntimeHTTPError, .invalidResponse) }
+                    else { XCTAssertEqual(error as? RuntimeHTTPError, .invalidResponse) }
                 }
+            }
+        }
+        await client.close()
+    }
+
+    func testLargeMetadataImagesWithAndWithoutLengthReturnCompleteBytes() async throws {
+        let client = try client(), bytes = Data(repeating: 0x45, count: 4 * 1_024 * 1_024 + 1)
+        for path in ["/v1/tmdb/images/w500/a.jpg", "/v1/douban/images/view/photo/public/a.jpg"] {
+            for declared in [false, true] {
+                RuntimeTestURLProtocol.fixture.set { _, transport in
+                    var headers = ["Content-Type": "image/png"]
+                    if declared { headers["Content-Length"] = String(bytes.count) }
+                    try! transport.respond(data: bytes, headers: headers)
+                }
+                let actual = try await client.readMetadataImage(try XCTUnwrap(RuntimeHTTPClient.metadataImageURL(path)))
+                XCTAssertEqual(actual, bytes)
             }
         }
         await client.close()

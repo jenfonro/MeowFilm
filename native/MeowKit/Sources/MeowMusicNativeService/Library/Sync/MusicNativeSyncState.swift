@@ -116,8 +116,7 @@ struct MusicNativeSyncLedger: Codable {
         guard value.schema == 2, value.selections.count <= 3,
               Set(value.selections.map(\.platform)).count == value.selections.count,
               value.scopes.count <= 3, value.scopes.keys.allSatisfy({ MusicAccountPlatform(rawValue: $0) != nil }),
-              value.fences.count <= 512, Set(value.fences.map { $0.mutation.id }).count == value.fences.count,
-              value.issues.count <= 128 else { throw MusicServiceError.corruptDocument }
+              Set(value.fences.map { $0.mutation.id }).count == value.fences.count else { throw MusicServiceError.corruptDocument }
         try value.automatic.validate()
         for fence in value.fences {
             guard fence.localRevision >= 0, !fence.localID.isEmpty, !fence.accountID.isEmpty, !fence.scope.isEmpty,
@@ -181,7 +180,6 @@ struct MusicNativeSyncLedger: Codable {
     func json() throws -> MJ {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let data = try encoder.encode(self)
-        try musicRequire(data.count <= 5 * 1024 * 1024, .limit)
         let next = try RuntimeJSON.decode(data)
         guard let original, let projection else { return try MJ.parse(data) }
         var merged = original.applyingChanges(from: projection, to: next)
@@ -210,7 +208,6 @@ struct MusicNativeSyncLedger: Codable {
             merged = .object(fields)
         }
         let preserved = try RuntimeJSON.encode(merged)
-        try musicRequire(preserved.count <= 5 * 1024 * 1024, .limit)
         return try MJ.parse(preserved)
     }
 }
@@ -246,7 +243,7 @@ struct MusicNativeAutomaticSyncPreferences: Codable {
             (relationshipPlatforms.isEmpty || orderOnly == nil), .corruptDocument)
         for binding in bindings.values {
             try musicRequire(!binding.accountID.isEmpty &&
-                !binding.scope.isEmpty && binding.scope.utf8.count <= 1024, .corruptDocument)
+                !binding.scope.isEmpty, .corruptDocument)
         }
         if let orderOnly {
             try musicRequire(orderOnly == "favorites" ||
@@ -268,7 +265,7 @@ struct MusicNativeSyncRound {
     var relationshipsOnly = false
     mutating func issue(_ code: String, platform: MusicAccountPlatform? = nil, collection: String? = nil) {
         let issue = MusicLibrarySyncIssue(platform: platform, collectionID: collection, code: code)
-        if !ledger.issues.contains(issue), ledger.issues.count < 128 { ledger.issues.append(issue) }
+        if !ledger.issues.contains(issue) { ledger.issues.append(issue) }
     }
 }
 

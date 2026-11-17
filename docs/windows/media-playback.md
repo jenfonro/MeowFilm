@@ -7,13 +7,13 @@
 ### 受控 HTTP
 
 - `MeowFilm.Core` 内部的 `FFmpegHttpTransport` 为音乐和电影 custom AVIO 提供 HTTP(S) 输入；其私有 Reader 负责实际打开、读取、Range 和表示身份校验，不创建媒体转发服务。
-- `NativeHttpMediaOptions` 管理请求／读取期限和重定向预算。标准 HTTP(S) URL 的 userinfo 按百分号解码后用于 Basic Authorization，无密码时使用空密码；显式 Authorization 请求头优先。每次重定向／子请求按其实际 URL 处理，不建立额外凭据或 Origin 许可表。
+- `NativeHttpMediaOptions` 管理请求／读取期限和重定向预算，不设显式请求头条数／字节或自定义响应头配额（底层 `SocketsHttpHandler` 保留 .NET 默认 64 KiB 响应头缓冲框架边界）。标准 HTTP(S) URL 的 userinfo 按百分号解码后用于 Basic Authorization，无密码时使用空密码；显式 Authorization 请求头优先。每次重定向／子请求按其实际 URL 处理，不建立额外凭据或 Origin 许可表。
 - 只有真实、已校验的 `206` 响应证明随机访问能力，单独的 `Accept-Ranges` 不够；后续读取／seek 继续核对实际范围、总长度及已取得的 validator，表示改变或截断明确失败。非 Range 输入可顺序读取，不虚构 seek 能力。
 - Core 的公开 `NativeHttpMediaTransfer.CopyCompleteAsync` 复用同一 Reader，供[音乐完整文件 producer](music-audio-core.md#缓存与验证)使用，不创建原生解码器或输出。`PlaybackException` 只公开固定 `PlaybackError` 代码，不包含输入地址、头或响应正文。
 
 ### 音乐读取租约
 
-- Core 的 `INativeMediaReadLease` 表达已授权的只读、可 seek 字节表示，不是路径、URL 或永久文件权限。`Content` 必须可读、可 seek、不可写；`Length` 与流实际长度一致，范围为 0 至 1 TiB。
+- Core 的 `INativeMediaReadLease` 表达已授权的只读、可 seek 字节表示，不是路径、URL 或永久文件权限。`Content` 必须可读、可 seek、不可写；`Length` 非负且与流实际长度一致，不另设媒体总长度配额。
 - `Revoked` 必须可取消，文件、缓存、账号或能力授权失效时立即触发，暂停不延缓撤权。
 - `NativeAudioPlayback.OpenReadAsync` 调用即接管独占所有权，包括参数拒绝、预取消、dispatcher 不可用和打开失败。调用方不得另读、关闭或复用已转移的流。
 - 租约的 `DisposeAsync` 必须关闭底层句柄并解除读取阻塞，不依赖 UI dispatcher；音乐 owner 等待实际输入、解码和输出排空后才确认退休，释放失败不能冒充自然结束或成功排空。缓存和文件授权仍归原能力 owner。

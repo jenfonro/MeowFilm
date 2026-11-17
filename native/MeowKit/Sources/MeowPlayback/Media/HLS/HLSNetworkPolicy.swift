@@ -7,7 +7,7 @@ enum HLSByteRange: Equatable {
     case closed(Int64, Int64), from(Int64), suffix(Int64)
 
     init(_ raw: String) throws {
-        guard raw.utf8.count <= 96, raw.hasPrefix("bytes=") else { throw PlaybackNetworkError.rangeUnsupported }
+        guard raw.hasPrefix("bytes=") else { throw PlaybackNetworkError.rangeUnsupported }
         let parts = raw.dropFirst(6).split(separator: "-", omittingEmptySubsequences: false)
         guard parts.count == 2 else { throw PlaybackNetworkError.rangeUnsupported }
         if parts[0].isEmpty, let count = Self.unsigned(String(parts[1])), count > 0 {
@@ -34,27 +34,26 @@ enum HLSByteRange: Equatable {
         }
     }
     static func unsigned(_ text: String) -> Int64? {
-        guard !text.isEmpty, text.utf8.count <= 19, text.utf8.allSatisfy({ (48...57).contains($0) }) else { return nil }
+        guard !text.isEmpty, text.utf8.allSatisfy({ (48...57).contains($0) }) else { return nil }
         return Int64(text)
     }
 }
 
 struct HLSClientRequest {
-    static let maximumHeaderBytes = 16 * 1024
     let method: String
     let path: String
     let range: HLSByteRange?
 
     init(_ data: Data, port: UInt16) throws {
-        guard data.count <= Self.maximumHeaderBytes, let text = String(data: data, encoding: .ascii),
+        guard let text = String(data: data, encoding: .ascii),
               text.hasSuffix("\r\n\r\n") else { throw PlaybackNetworkError.invalidResponse }
         let lines = text.components(separatedBy: "\r\n").dropLast(2)
-        guard let first = lines.first, lines.count <= 33 else { throw PlaybackNetworkError.invalidResponse }
+        guard let first = lines.first else { throw PlaybackNetworkError.invalidResponse }
         let fields = first.split(separator: " ", omittingEmptySubsequences: false)
         guard fields.count == 3, ["GET", "HEAD"].contains(String(fields[0])),
               ["HTTP/1.1", "HTTP/1.0"].contains(String(fields[2])) else { throw PlaybackNetworkError.invalidResponse }
         method = String(fields[0]); path = String(fields[1])
-        guard path.utf8.count <= 256, path.hasPrefix("/"), !path.contains("?"),
+        guard path.hasPrefix("/"), !path.contains("?"),
               path.utf8.allSatisfy({ (45...57).contains($0) || (97...122).contains($0) }) else {
             throw PlaybackNetworkError.invalidResponse
         }
@@ -132,7 +131,7 @@ struct HLSUpstreamResponse {
         guard rawLength == nil || length != nil else { throw PlaybackNetworkError.invalidResponse }
         let rawType = response.value(forHTTPHeaderField: "Content-Type")?.split(separator: ";", maxSplits: 1).first.map(String.init)
         let mime = rawType?.trimmingCharacters(in: .whitespaces).lowercased() ?? "application/octet-stream"
-        guard mime.utf8.count <= 128, mime.utf8.allSatisfy({ (32...126).contains($0) }) else {
+        guard mime.utf8.allSatisfy({ (32...126).contains($0) }) else {
             throw PlaybackNetworkError.invalidResponse
         }
         if kind == .playlist {
@@ -143,10 +142,6 @@ struct HLSUpstreamResponse {
         }
         guard !PlaybackNetworkPlan.hlsMIMEs.contains(mime), mime != "text/html",
               kind == .metadata || mime != "application/json" else { throw PlaybackNetworkError.unsupportedContent }
-        let maximum: Int64 = kind == .media ? 512 * 1024 * 1024 : 64 * 1024
-        guard length == nil || request.method == "HEAD" || length! <= maximum else {
-            throw PlaybackNetworkError.resourceBudgetExceeded
-        }
         switch response.statusCode {
         case 200:
             guard request.range == nil else { throw PlaybackNetworkError.rangeUnsupported }

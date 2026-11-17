@@ -33,7 +33,7 @@ extension NativeMusicService: MusicHomeActionQueueServing {
                 authorization.revoke()
                 Task { await reader.close() }
             }
-            publicQueueSources[registration] = (context.id, authorization, reader, 0)
+            publicQueueSources[registration] = (context.id, authorization, reader)
             let source = MusicRemoteQueueSource(context: context, authorization: authorization,
                 loadReferences: { try await reader.page($0, intent: $1) },
                 validate: { [weak self] in
@@ -96,7 +96,7 @@ extension NativeMusicService: MusicHomeActionQueueServing {
             return try await self.adoptQueueTracks(value.items, epoch: own, authorization: authorization, intent: intent)
         }
         fence.register(registration) { authorization.revoke(); Task { await reader.close() } }
-        publicQueueSources[registration] = (context.id, authorization, reader, 0)
+        publicQueueSources[registration] = (context.id, authorization, reader)
         let source = MusicRemoteQueueSource(context: context, authorization: authorization,
             loadReferences: { try await reader.page($0, intent: $1) },
             validate: { [weak self] in

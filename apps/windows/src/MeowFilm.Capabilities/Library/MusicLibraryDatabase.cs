@@ -10,7 +10,6 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
 {
     private const int Format = 1;
     private const string FileName = "music-library.sqlite3";
-    private const int MaximumRecordBytes = 16 * 1024 * 1024;
     private readonly string? databaseRoot;
     private readonly object admission = new(), databaseGate = new();
     private readonly SerialOperationQueue queue = new();
@@ -226,18 +225,17 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
         {
             string text = value.ToJsonString(LJ.Json);
             byte[] bytes = Encoding.UTF8.GetBytes(text);
-            if (bytes.Length > MaximumRecordBytes) throw new DocumentStoreException(DocumentStoreError.Limit);
-            _ = LJ.Parse(bytes, MaximumRecordBytes);
+            _ = LJ.Parse(bytes);
             return text;
         }
-        catch (MusicLibraryException error)
-        { throw new DocumentStoreException(error.Code == "LIMIT" ? DocumentStoreError.Limit : DocumentStoreError.InvalidRequest); }
+        catch (MusicLibraryException)
+        { throw new DocumentStoreException(DocumentStoreError.InvalidRequest); }
         catch (DocumentStoreException) { throw; }
         catch { throw new DocumentStoreException(DocumentStoreError.InvalidRequest); }
     }
     private static JsonNode? Parse(string text)
     {
-        try { return LJ.ParseValue(Encoding.UTF8.GetBytes(text), MaximumRecordBytes); }
+        try { return LJ.ParseValue(Encoding.UTF8.GetBytes(text)); }
         catch (MusicLibraryException) { throw new DocumentStoreException(DocumentStoreError.Corrupt); }
     }
     private static JsonObject Decode(string text)

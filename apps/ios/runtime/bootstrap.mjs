@@ -4,7 +4,7 @@ import { Socket } from 'node:net';
 import { BridgeError, decodeJSONValue, validateSession } from '@meowfilm/runtime-bridge';
 import { duplicateBootstrapDescriptor } from '../../../packages/script-host/src/native-engine.js';
 import { createAppRuntime } from '../../runtime/bootstrap.mjs';
-import { createNativeSettings, nativeSettingsFrameBytes } from '../../runtime/native-settings.mjs';
+import { createNativeSettings } from '../../runtime/native-settings.mjs';
 
 const startupStages = new Set([
   'arguments', 'native-binding', 'bootstrap-channel', 'configuration', 'assembly',
@@ -142,7 +142,6 @@ function readConfiguration(channel, configured) {
     const failed = () => finish(new BridgeError('CLOSED'));
     const data = bytes => {
       chunks.push(bytes); length += bytes.length;
-      if (length > nativeSettingsFrameBytes) { finish(new BridgeError('INVALID_REQUEST')); return; }
       const newline = bytes.indexOf(10);
       if (newline === -1) return;
       try {

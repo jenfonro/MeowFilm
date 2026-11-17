@@ -38,12 +38,12 @@ extension NativeMusicService {
         try musicRequire(source.isCandidate && source.generation >= 0 &&
             (source.state == .ready ? source.generation > 0 : source.generation == 0) &&
             source.generation <= 9_007_199_254_740_991 && source.capabilities.count <= 5, .sourceUnavailable)
-        _ = try musicText(source.installationID, maximum: 128); _ = try musicText(source.version, maximum: 128)
+        _ = try musicText(source.installationID, maximum: 128); _ = try musicText(source.version)
         try musicRequire(musicHex(source.contentHash) && musicHex(source.revisionHash), .invalidResponse)
         try musicRequire(Set(source.capabilities.map(\.siteID)).count == source.capabilities.count, .invalidResponse)
         guard let cap = source.capabilities.first(where: { $0.siteID == site }), cap.actions.contains(action),
               quality == nil || cap.qualities.contains(quality!) else { throw MusicServiceError.sourceUnavailable }
-        try musicRequire(cap.qualities.count <= 32 && Set(cap.qualities).count == cap.qualities.count, .invalidResponse)
+        try musicRequire(Set(cap.qualities).count == cap.qualities.count, .invalidResponse)
         return cap
     }
     func sameSource(_ current: MusicScriptSource, _ previous: MusicScriptSource) throws {
@@ -115,12 +115,11 @@ extension NativeMusicService {
         try value.playbackAuthorization?.check()
         let url = value.url
         try musicRequire(["https", "http"].contains(url.scheme?.lowercased() ?? "") &&
-            url.host?.isEmpty == false && url.user == nil && url.password == nil && url.fragment == nil &&
-            url.absoluteString.utf8.count <= 8192, .invalidMediaCandidate)
+            url.host?.isEmpty == false && url.user == nil && url.password == nil && url.fragment == nil, .invalidMediaCandidate)
         var headers: [String: String] = [:]
         for (key, value) in value.headers {
             let name = key.lowercased()
-            try musicRequire(["referer", "user-agent"].contains(name) && headers[name] == nil && value.utf8.count <= 2048 &&
+            try musicRequire(["referer", "user-agent"].contains(name) && headers[name] == nil &&
                 !value.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }), .invalidMediaCandidate)
             headers[name] = value
         }
@@ -276,7 +275,7 @@ extension NativeMusicService {
                 try musicRequire(day["songs"].isArray, .corruptDocument)
                 day["songs"] = .array([item] + day["songs"].array.filter { $0["songId"] != item["songId"] })
                 if let index { days[index] = day } else { days.append(day) }
-                d.history["days"] = .array(Array(days.sorted { $0["date"].string > $1["date"].string }.prefix(7)))
+                d.history["days"] = .array(days.sorted { $0["date"].string > $1["date"].string })
             }
             d.playback["position"] = .obj([("occurrenceId", .string(current.occurrence)), ("seconds", .number(fact.kind == .ended ? 0 : fact.position))])
             if fact.kind == .failed {

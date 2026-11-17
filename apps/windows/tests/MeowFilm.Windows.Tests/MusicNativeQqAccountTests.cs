@@ -11,6 +11,11 @@ public static class MusicNativeQqAccountTests
         yield return new("music.native.accounts.qq.native-png-valid-before-image-decode", () => {
             AccountQrPng.Validate(MusicAccountRuntimeFixture.QrPng()); return Task.CompletedTask;
         });
+        yield return new("music.native.accounts.qq.native-png-over-half-MiB-and-256-chunks", () => {
+            byte[] bytes = MusicAccountRuntimeFixture.QrPng(width: 1024, height: 1024, noise: true, chunkBytes: 2048);
+            Check(bytes.Length > 524288);
+            AccountQrPng.Validate(bytes); return Task.CompletedTask;
+        });
         foreach (string fault in new[] { "bad-crc", "huge", "bomb", "trailing" })
             yield return new("music.native.accounts.qq.native-png-reject-" + fault, () => {
                 byte[] bytes = fault switch {

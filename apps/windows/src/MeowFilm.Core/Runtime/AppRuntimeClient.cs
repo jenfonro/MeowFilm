@@ -68,7 +68,7 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRun
         lock (gate)
         {
             if (closed) throw new BridgeException("CLOSED");
-            if (current is not null || scopes.Count >= 32 || scopes.Any(item => ReferenceEquals(item, scope)))
+            if (current is not null || scopes.Any(item => ReferenceEquals(item, scope)))
                 throw new BridgeException("INVALID_MESSAGE");
             scopes.Add(scope);
         }
@@ -96,15 +96,6 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRun
         cancellationToken.ThrowIfCancellationRequested();
         return ExecuteAsync((session, token) => session.UploadSourceAsync(module, installationId,
             sourceRevision, source, basename, token), cancellationToken, waitForCompletion: true);
-    }
-    public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        if (!RuntimeHttpProtocol.ValidImageReference(reference) || maximumBytes <= 0)
-            throw new BridgeException("INVALID_REQUEST");
-        return ExecuteAsync((session, token) => session.ReadImageAsync(reference, maximumBytes, token),
-            cancellationToken, waitForCompletion: true, discard: bytes =>
-                System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes));
     }
     public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default)
     {

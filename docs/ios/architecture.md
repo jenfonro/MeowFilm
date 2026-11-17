@@ -79,7 +79,7 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 
 原生源码检查仅覆盖 `apps/ios` 和 `native/MeowKit`，不遍历 Windows 专属源码。Node 根测试可用 `node scripts/test-root.mjs --platform ios` 选择 iOS 与共享契约测试；共享 packager 用例不读取 Windows 入口源码，iOS 入口及生成载荷由本端 wrapper 用例验证。
 
-平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器使用 `MeowRuntime.RuntimeValue`／`RuntimeObject`／`RuntimeJSON`：对象键按原始 UTF-8 区分，保留 Unicode 规范等价但标量不同的成员；语法解析复用 `JSONObject.decodeValue`／`Fields`，同一 UTF-8 键重复时采用末值。`Fields` 按首次插入顺序迭代，同键更新不重排，删除后重插追加到末尾；`JSONObject.encode` 仍按键排序输出。无法无损表示的数字由 `JSONNumber`／`RuntimeValue.exactNumber` 保留原文，不因未消费数字拒绝整棵树。普通数字、身份与资源由实际消费者检查；解码深度 64 和私密帧字节预算保留。HTTP 只解析一次 envelope，核对 request-id、contract、ok 与 value/code，不再次全树校验。共同语义见[公共 HTTP 契约](../runtime/runtime-bridge.md)。`JSONObject.decode` 是供既有 DTO 使用的 Foundation 字典投影，不用于原始文档保留；持久原文使用 `decodeValue` 或 `RuntimeJSON`。该边界不增加普通 JSON 总字节配额。
+平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器使用 `MeowRuntime.RuntimeValue`／`RuntimeObject`／`RuntimeJSON`：对象键按原始 UTF-8 区分，保留 Unicode 规范等价但标量不同的成员；语法解析复用 `JSONObject.decodeValue`／`Fields`，同一 UTF-8 键重复时采用末值。`Fields` 按首次插入顺序迭代，同键更新不重排，删除后重插追加到末尾；`JSONObject.encode` 仍按键排序输出。无法无损表示的数字由 `JSONNumber`／`RuntimeValue.exactNumber` 保留原文，不因未消费数字拒绝整棵树。普通数字、身份与资源由实际消费者检查；解码深度 64 保留，私密帧不设业务字节配额。HTTP 只解析一次 envelope，核对 request-id、contract、ok 与 value/code，不再次全树校验。共同语义见[公共 HTTP 契约](../runtime/runtime-bridge.md)。`JSONObject.decode` 是供既有 DTO 使用的 Foundation 字典投影，不用于原始文档保留；持久原文使用 `decodeValue` 或 `RuntimeJSON`。该边界不增加普通 JSON 总字节配额。
 
 ## UI 技术选型
 

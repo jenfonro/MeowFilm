@@ -62,7 +62,7 @@ internal sealed class MusicPresentationCache(CacheDocumentStore store, TimeProvi
             var row = Decode(store.ReadMemory(Namespace).Data)[Key("image", address)];
             if (row is null) return null;
             var bytes = Convert.FromBase64String(row["content"]!.GetValue<string>());
-            return bytes.Length <= ArtworkService.MaximumBytes
+            return bytes.Length <= ArtworkService.MaximumCacheEntryBytes
                 ? new(bytes, DateTimeOffset.FromUnixTimeMilliseconds(row["updatedAt"]!.GetValue<long>() + Ttl)) : null;
         }
         catch { token.ThrowIfCancellationRequested(); return null; }
@@ -89,7 +89,7 @@ internal sealed class MusicPresentationCache(CacheDocumentStore store, TimeProvi
                 update(entries);
                 byte[] Encode() => JsonSerializer.SerializeToUtf8Bytes(LJ.Obj(("version", 1), ("entries", entries)));
                 byte[] bytes = Encode();
-                while (bytes.Length > LocalDocumentStore.MaximumDocumentBytes)
+                while (bytes.Length > CacheDocumentStore.MaximumDocumentBytes)
                 {
                     var oldest = entries.Where(pair => pair.Key != retained)
                         .OrderBy(pair => pair.Value!["updatedAt"]!.GetValue<long>()).FirstOrDefault();

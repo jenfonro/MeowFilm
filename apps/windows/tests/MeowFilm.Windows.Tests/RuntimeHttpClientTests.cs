@@ -102,7 +102,7 @@ public static class RuntimeHttpClientTests
             BridgeTests.Equal(0, (await list).GetProperty("value").GetProperty("sources").GetArrayLength());
             const string reference = "/v1/source/images/opaque-reference";
             byte[] pixels = [137, 80, 78, 71, 13, 10, 26, 10];
-            var image = client.ReadImageAsync(reference, 1024);
+            var image = client.ReadImageAsync(reference);
             await using (var exchange = await server.AcceptAsync())
             {
                 CheckCorrelation(exchange, server);
@@ -122,13 +122,13 @@ public static class RuntimeHttpClientTests
             BridgeTests.Equal(true, (await release).GetProperty("value").GetProperty("released").GetBoolean());
             foreach (string contract in new[] { "source.runtime.v2", "tmdb.data.v1", "douban.data.v1" })
             {
-                var missing = client.ReadImageAsync(reference, 1024);
+                var missing = client.ReadImageAsync(reference);
                 await using (var exchange = await server.AcceptAsync())
                     await exchange.ReplyAsync(Failure("SOURCE_NOT_FOUND", contract), status: 502);
                 await BridgeTests.Expect(contract == "source.runtime.v2" ? "SOURCE_NOT_FOUND" : "INVALID_RESPONSE", () => missing);
             }
             foreach (string invalid in new[] { "/v1/source/images/../private", reference + "?cookie=fixture", reference + "#fragment" })
-                await BridgeTests.Expect("INVALID_REQUEST", () => client.ReadImageAsync(invalid, 1024));
+                await BridgeTests.Expect("INVALID_REQUEST", () => client.ReadImageAsync(invalid));
             foreach (string code in new[] { "SOURCE_INTEGRITY", "SOURCE_ENCODING", "STALE_SOURCE", "SOURCE_NOT_FOUND", "SOURCE_DISABLED",
                 "UNSUPPORTED_PROTOCOL", "UNSUPPORTED_ACTION", "UNSUPPORTED_RULE", "UNSUPPORTED_DEPENDENCY",
                 "CAPABILITY_UNAVAILABLE", "SOURCE_CLEANUP", "SOURCE_FAILURE", "HTTP_ERROR", "VIRTUAL_ROUTE_NOT_FOUND" })
@@ -194,17 +194,6 @@ public static class RuntimeHttpClientTests
                 }
                 var received = await full;
                 BridgeTests.Equal(true, pixels.SequenceEqual(received));
-                var capped = client.ReadImageAsync(reference, cardBudget);
-                await using (var exchange = await server.AcceptAsync())
-                {
-                    if (!chunked) await exchange.BeginImageAsync(pixels.Length);
-                    else
-                    {
-                        try { await exchange.ReplyChunkedAsync(pixels); }
-                        catch (IOException) { } // The bounded reader may reset an oversized stream.
-                    }
-                }
-                await BridgeTests.Expect("RESOURCE_LIMIT", () => capped);
             }
         });
         yield return new("runtime-http: unbounded images retain trusted paths response identity MIME and source failures", async () =>

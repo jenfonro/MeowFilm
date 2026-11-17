@@ -12,15 +12,12 @@ public sealed partial class MusicLibraryOwner
 
     private static void ValidateDisplayLines(JsonArray lines)
     {
-        LJ.Require(lines.Count is > 0 and <= 10000, "INVALID_LYRIC_RESPONSE");
+        LJ.Require(lines.Count > 0, "INVALID_LYRIC_RESPONSE");
         double previous = -1;
-        int characters = 0, words = 0;
         void Text(JsonNode? value)
         {
             LJ.Require(value is JsonValue v && v.TryGetValue<string>(out var text) &&
-                text.Length <= 65536 && !text.Contains('\0'), "INVALID_LYRIC_RESPONSE");
-            characters += LJ.S(value).Length;
-            LJ.Require(characters <= 4 * 65536, "LIMIT");
+                !text.Contains('\0'), "INVALID_LYRIC_RESPONSE");
         }
         double Seconds(JsonNode? value)
         {
@@ -41,7 +38,6 @@ public sealed partial class MusicLibraryOwner
             if (row["words"] is not null)
                 foreach (var wordValue in LJ.Array(row["words"]))
                 {
-                    LJ.Require(++words <= 65536, "LIMIT");
                     var word = LJ.Object(wordValue);
                     LJ.Fields(word, "time duration text offset", "time duration text");
                     // Negative word timestamps can occur with a negative LRC
@@ -115,7 +111,7 @@ public sealed partial class MusicLibraryOwner
         {
             bool save = method == "music.lyrics.display.save";
             LJ.Require(save || method == "music.lyrics.display.get", "CAPABILITY_UNAVAILABLE");
-            var p = LJ.Parameters(parameters, 512 * 1024);
+            var p = LJ.Parameters(parameters);
             LJ.Fields(p, save ? "song sourceKey lines" : "song sourceKey", save ? "song sourceKey lines" : "song");
             var song = NativeMusicSong.Normalize(p["song"]);
             string key = DisplayKey(song);
