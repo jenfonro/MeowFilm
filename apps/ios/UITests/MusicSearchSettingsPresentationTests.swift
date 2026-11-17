@@ -16,6 +16,12 @@ final class MusicSearchSettingsPresentationTests: XCTestCase {
                 let list = try searchList(in: page)
                 XCTAssertEqual(list.numberOfSections, 4)
                 XCTAssertEqual((0..<4).map { list.numberOfItems(inSection: $0) }, [1, 2, 3, 3])
+                let ordinaryHeight = try XCTUnwrap(list.layoutAttributesForItem(
+                    at: IndexPath(item: 0, section: 1)
+                )).size.height
+                XCTAssertEqual(try XCTUnwrap(list.layoutAttributesForItem(
+                    at: IndexPath(item: 0, section: 0)
+                )).size.height, ordinaryHeight, accuracy: 1)
                 let toggle = runner.switches["music.search.searchPlaylists"]
                 let songs = runner.buttons["music.search.songs.platforms"]
                 let playlists = runner.buttons["music.search.playlists.platforms"]
@@ -38,6 +44,9 @@ final class MusicSearchSettingsPresentationTests: XCTestCase {
                         showRow(row, section: section, in: list)
                         XCTAssertTrue(runner.staticTexts["music.search.\(kind).\(name).label"].exists)
                         XCTAssertTrue(runner.staticTexts["music.search.\(kind).\(name).value"].exists)
+                        XCTAssertEqual(try XCTUnwrap(list.cellForItem(
+                            at: IndexPath(item: row, section: section)
+                        )).bounds.height, ordinaryHeight, accuracy: 1)
                     }
                 }
             }
@@ -126,6 +135,12 @@ final class MusicSearchSettingsPresentationTests: XCTestCase {
                         XCTAssertFalse(rowFrame.isEmpty)
                         XCTAssertGreaterThanOrEqual(platformSwitch.frame.midY, rowFrame.minY)
                         XCTAssertLessThanOrEqual(platformSwitch.frame.midY, rowFrame.maxY)
+                        let font = UIFont.preferredFont(forTextStyle: .body, compatibleWith: cell.traitCollection)
+                        XCTAssertEqual(cell.bounds.height, max(SettingsVisualMetrics.rowHeight,
+                            ceil(font.lineHeight) + SettingsVisualMetrics.rowVerticalPadding * 2), accuracy: 1)
+                        let input = try XCTUnwrap(descendants(cell).compactMap { $0 as? SettingsSwitch }.first)
+                        XCTAssertEqual(input.bounds.height, font.lineHeight, accuracy: 1)
+                        XCTAssertLessThanOrEqual(control.frame.height, input.bounds.height + 1)
                     }
                     try closeWindow(on: page, runner: runner)
                 }
@@ -190,6 +205,34 @@ final class MusicSearchSettingsPresentationTests: XCTestCase {
                     }
                 }
                 attach(page.view, name: "Music search settings 320 AXXXL")
+            }
+        }
+    }
+
+    func testCompactNumberButtonsKeepFullRowTouchHeight() throws {
+        try withPreferences { defaults, store, appearance in
+            let page = MusicSearchSettingsViewController(appearance: appearance, store: store)
+            try withMountedPage(page) { runner in
+                let list = try searchList(in: page)
+                showRow(0, section: 2, in: list)
+                let increase = runner.buttons["music.search.songs.pages.increase"]
+                let decrease = runner.buttons["music.search.songs.pages.decrease"]
+                XCTAssertTrue(increase.waitForExistence(timeout: 3))
+                let before = try saved(defaults)
+                perform {
+                    increase.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                        .withOffset(CGVector(dx: 0, dy: 20)).tap()
+                }
+                var expected = before
+                expected.songs.pages += 1
+                waitFor("compact increment accepts lower row touch") { store.preferences == expected }
+                XCTAssertEqual(try saved(defaults), expected)
+                perform {
+                    decrease.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                        .withOffset(CGVector(dx: 0, dy: -20)).tap()
+                }
+                waitFor("compact decrement accepts upper row touch") { store.preferences == before }
+                XCTAssertEqual(try saved(defaults), before)
             }
         }
     }

@@ -373,7 +373,7 @@ private struct MusicPlatformAccountRow: View {
                     Text("登录")
                         .font(.body)
                         .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(minWidth: 44)
                         .fixedSize(horizontal: true, vertical: false)
                 } else if account.phase != .unavailable {
                     Image(systemName: "chevron.right")

@@ -40,7 +40,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
         }))
     }
 
-    func testGroupDraftSurvivesNavigationAndRestoreAndSeparateTestNeverSave() async throws {
+    func testGroupDraftSurvivesNavigationAndRestoreAndInlineTestNeverSave() async throws {
         let fixture = try await makeFixture()
         let rules = fixture.rules
         try await rules.initialize()
@@ -69,7 +69,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
         XCTAssertNotEqual(owner.rules(.movie).first?.pattern, "(电影)")
         owner.edit(.movie, index: 0, rule: .init(pattern: "["))
         let before = try fixture.rulesDocument.read()
-        let test = FilmRuleTestController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
+        let test = FilmRulePageViewController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
         let testWindow = try await host(test)
         defer { unhost(testWindow) }
         test.testFields.input.text = "电影 2026"; test.runTest()
@@ -443,7 +443,6 @@ final class FilmSettingsPlatformTests: XCTestCase {
             let pages: [FilmSettingsListController] = [
                 FilmRulePageViewController(owner: owner, group: .search, themeProvider: FilmSettingsTheme()),
                 FilmRulePageViewController(owner: owner, group: .episode, themeProvider: FilmSettingsTheme()),
-                FilmRuleTestController(owner: owner, group: .search, themeProvider: FilmSettingsTheme()),
                 FilmCatSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme()),
                 FilmVideoSourcesViewController(service: fixture.sources, themeProvider: FilmSettingsTheme()),
             ]
@@ -455,6 +454,27 @@ final class FilmSettingsPlatformTests: XCTestCase {
                 }
                 await settle()
                 page.view.layoutIfNeeded()
+                if let rules = page as? FilmRulePageViewController {
+                    let scroll = rules.scrollView
+                    let frame = scroll.convert(scroll.bounds, to: page.view)
+                    XCTAssertGreaterThan(scroll.bounds.width, 0)
+                    XCTAssertLessThanOrEqual(frame.maxX, page.view.bounds.maxX)
+                    XCTAssertGreaterThanOrEqual(frame.minY, page.pageHeader.frame.maxY)
+                    XCTAssertEqual(frame.maxY, page.view.safeAreaLayoutGuide.layoutFrame.maxY, accuracy: 1)
+                    for editor in rules.editors {
+                        XCTAssertGreaterThanOrEqual(editor.bounds.height, 44)
+                        XCTAssertFalse(editor.accessibilityIdentifier?.isEmpty ?? true)
+                        XCTAssertLessThanOrEqual(editor.bounds.width, scroll.bounds.width)
+                        XCTAssertGreaterThan(editor.pattern.bounds.width, 0)
+                    }
+                    let test = try ruleButton(rules, "film.rules.test")
+                    let last = test.convert(test.bounds, to: scroll)
+                    scroll.scrollRectToVisible(last, animated: false); scroll.layoutIfNeeded()
+                    XCTAssertLessThanOrEqual(test.convert(test.bounds, to: scroll).maxY, scroll.bounds.maxY + 1)
+                    attach(page, "film-settings-\(index)-\(Int(width))-AXXXL-bottom")
+                    unhost(window)
+                    continue
+                }
                 let manager = (page as? FilmCatSourcesViewController)?.manager
                     ?? (page as? FilmVideoSourcesViewController)?.manager
                 let table = manager?.table ?? page.table
@@ -462,7 +482,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
                 XCTAssertGreaterThan(table.bounds.width, 0)
                 XCTAssertLessThanOrEqual(frame.maxX, page.view.bounds.maxX)
                 XCTAssertGreaterThanOrEqual(frame.minY, page.pageHeader.frame.maxY)
-                XCTAssertEqual(frame.maxY, page.view.safeAreaLayoutGuide.layoutFrame.maxY - (manager == nil ? 0 : 8), accuracy: 1)
+                XCTAssertEqual(frame.maxY, page.view.safeAreaLayoutGuide.layoutFrame.maxY - (manager == nil ? 0 : 4), accuracy: 1)
                 for cell in table.visibleCells {
                     XCTAssertGreaterThanOrEqual(cell.bounds.height, 44)
                     XCTAssertFalse(cell.accessibilityIdentifier?.isEmpty ?? true)
@@ -537,7 +557,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
         await fixture.rules.close(); await fixture.sources.close()
     }
 
-    func testAddAndDefaultsOnlyChangeCurrentGroupDraftAndTestOpensSeparatePage() async throws {
+    func testAddAndDefaultsOnlyChangeCurrentGroupDraftAndTestStaysInline() async throws {
         let fixture = try await makeFixture()
         try await fixture.rules.initialize()
         let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
@@ -549,7 +569,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let window = try await host(navigation); defer { unhost(window) }
         let count = page.editors.count
         XCTAssertEqual(page.pageHeader.trailingCount, 1)
-        try selectRow(page, "film.rules.episodeClean.add")
+        try ruleButton(page, "film.rules.episodeClean.add").sendActions(for: .touchUpInside)
         XCTAssertEqual(page.editors.count, count + 1)
         page.editors[count].pattern.text = "new rule"
         page.editors[count].pattern.delegate?.textViewDidChange?(page.editors[count].pattern)
@@ -562,25 +582,28 @@ final class FilmSettingsPlatformTests: XCTestCase {
         remove.sendActions(for: .touchUpInside)
         XCTAssertEqual(page.editors.count, count)
         XCTAssertEqual(owner.rules(.episodeClean), initialEpisode)
-        try selectRow(page, "film.rules.restore")
+        try ruleButton(page, "film.rules.restore").sendActions(for: .touchUpInside)
         try await activateAlert(page, title: "确认")
         await eventually { !page.writing && page.editors.count == count }
         XCTAssertEqual(owner.rules(.movie), initialMovie)
-        try selectRow(page, "film.rules.test")
-        let test = try XCTUnwrap(navigation.topViewController as? FilmRuleTestController)
-        XCTAssertEqual(test.group, .episodeClean)
-        XCTAssertEqual(test.pageTitle, "\(FilmRuleGroup.episodeClean.title)测试")
+        page.testFields.input.text = "广告第12集"
+        try ruleButton(page, "film.rules.test").sendActions(for: .touchUpInside)
+        await eventually { !page.testing && page.result != nil }
+        XCTAssertTrue(navigation.topViewController === page)
+        XCTAssertEqual(navigation.viewControllers.count, 1)
+        XCTAssertEqual(page.pageTitle, FilmRuleGroup.episodeClean.title)
+        XCTAssertTrue(page.editors.allSatisfy { $0.resultLabel.text?.hasPrefix("测试结果：") == true })
         let after = try fixture.rulesDocument.read()
         XCTAssertEqual(after, before)
         await fixture.rules.close(); await fixture.sources.close()
     }
 
-    func testSeparateRuleTestCancellationOnHiddenPageDoesNotPublishOrSave() async throws {
+    func testInlineRuleTestCancellationOnHiddenPageDoesNotPublishOrSave() async throws {
         let fixture = try await makeFixture()
         try await fixture.rules.initialize()
         let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
         owner.edit(.movie, index: 0, rule: .init(pattern: "^(a+)+$", replace: "x"))
-        let page = FilmRuleTestController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
+        let page = FilmRulePageViewController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
         let window = try await host(page); defer { unhost(window) }
         let before = try fixture.rulesDocument.read()
         page.testFields.input.text = String(repeating: "a", count: 100_000) + "!"
@@ -599,7 +622,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
         await fixture.rules.close(); await fixture.sources.close()
     }
 
-    func testSeparateEpisodeTestsUseThisGroupDraftAndAssociatedSavedGroupOnly() async throws {
+    func testInlineEpisodeTestsUseThisGroupDraftAndAssociatedSavedGroupOnly() async throws {
         let fixture = try await makeFixture()
         let saved = FilmRuleSet(episodeCleanRegexRules: ["^广告"],
                                 episodeRules: [.init(pattern: "^第([0-9]+)集$", replace: "E$1")])
@@ -609,7 +632,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
         owner.edit(.episode, index: 0, rule: .init(pattern: "^第([0-9]+)集$", replace: "Draft$1"))
         let before = try fixture.rulesDocument.read()
         for group in [FilmRuleGroup.episodeClean, .episode] {
-            let page = FilmRuleTestController(owner: owner, group: group, themeProvider: FilmSettingsTheme())
+            let page = FilmRulePageViewController(owner: owner, group: group, themeProvider: FilmSettingsTheme())
             let window = try await host(page)
             page.testFields.input.text = group == .episodeClean ? "草稿第12集" : "广告第12集"
             page.runTest()
@@ -618,6 +641,8 @@ final class FilmSettingsPlatformTests: XCTestCase {
             XCTAssertEqual(result.processedText.displayString, "第12集")
             XCTAssertEqual(result.outputText.displayString, group == .episodeClean ? "E12" : "Draft12")
             XCTAssertTrue(result.errors.isEmpty)
+            XCTAssertEqual(page.editors.first?.resultLabel.text,
+                group == .episodeClean ? "测试结果：第12集" : "测试结果：Draft12")
             unhost(window)
         }
         let after = try fixture.rulesDocument.read()
@@ -681,7 +706,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
         await fixture.rules.close(); await fixture.sources.close()
     }
 
-    func testRuleFieldsHideFlagsAndKeepReplacementInTheSameEditor() async throws {
+    func testRuleFieldsShowEditableFlagsBesideReplacementInTheSameCard() async throws {
         let fixture = try await makeFixture()
         try await fixture.rules.initialize()
         let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
@@ -691,52 +716,70 @@ final class FilmSettingsPlatformTests: XCTestCase {
                 let page = FilmRulePageViewController(owner: owner, group: group, themeProvider: FilmSettingsTheme())
                 if largeType { page.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge }
                 let window = try await host(page, size: CGSize(width: width, height: 844))
-                await settle(); page.table.layoutIfNeeded()
+                await settle(); page.view.layoutIfNeeded()
                 let editor = try XCTUnwrap(page.editors.first)
                 editor.layoutIfNeeded()
                 let replacement = try XCTUnwrap(editor.replacement)
-                XCTAssertEqual(editor.pattern.layer.borderWidth, 0)
-                XCTAssertEqual(replacement.layer.borderWidth, 0)
-                XCTAssertEqual(editor.pattern.backgroundColor, .clear)
-                XCTAssertNil(replacement.backgroundColor)
+                let flags = try XCTUnwrap(editor.flags)
+                XCTAssertEqual(editor.pattern.layer.borderWidth, 1)
+                XCTAssertEqual(replacement.layer.borderWidth, 1)
+                XCTAssertEqual(flags.layer.borderWidth, 1)
+                XCTAssertEqual(editor.pattern.backgroundColor, UIColor(page.theme.settings.input))
+                XCTAssertEqual(replacement.backgroundColor, UIColor(page.theme.settings.input))
                 XCTAssertEqual(editor.deleteButton.titleColor(for: .normal), UIColor(page.theme.settings.danger))
                 XCTAssertEqual(editor.pattern.font?.pointSize,
-                    UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 17), compatibleWith: editor.traitCollection).pointSize)
+                    UIFont.preferredFont(forTextStyle: .body, compatibleWith: editor.traitCollection).pointSize)
                 let replace = replacement.convert(replacement.bounds, to: editor)
+                let flagsFrame = flags.convert(flags.bounds, to: editor)
+                if largeType {
+                    XCTAssertGreaterThanOrEqual(flagsFrame.minY, replace.maxY)
+                    XCTAssertEqual(replace.width, flagsFrame.width, accuracy: 1)
+                } else {
+                    XCTAssertEqual(replace.minY, flagsFrame.minY, accuracy: 1)
+                    XCTAssertEqual(replace.maxY, flagsFrame.maxY, accuracy: 1)
+                    XCTAssertGreaterThan(replace.width, flagsFrame.width)
+                    XCTAssertGreaterThanOrEqual(flagsFrame.minX, replace.maxX)
+                }
+                XCTAssertEqual(replacement.layer.cornerRadius, replacement.bounds.height / 2, accuracy: 1)
+                XCTAssertEqual(flags.layer.cornerRadius, flags.bounds.height / 2, accuracy: 1)
+                XCTAssertEqual(flags.text, owner.rules(group).first?.flags)
                 editor.pattern.text = "changed"
                 editor.pattern.delegate?.textViewDidChange?(editor.pattern)
                 replacement.text = "replacement"
                 replacement.sendActions(for: .editingChanged)
-                XCTAssertEqual(owner.rules(group).first, .init(pattern: "changed", replace: "replacement", flags: "g"))
+                flags.text = "gi"; flags.sendActions(for: .editingChanged)
+                XCTAssertEqual(owner.rules(group).first, .init(pattern: "changed", replace: "replacement", flags: "gi"))
                 XCTAssertTrue(editor.pattern.isDescendant(of: editor))
                 XCTAssertTrue(replacement.isDescendant(of: editor))
-                XCTAssertGreaterThanOrEqual(replace.width, editor.bounds.width - 32)
-                XCTAssertFalse(descendants(editor).contains { $0.accessibilityIdentifier?.contains(".flags") == true })
+                XCTAssertTrue(flags.isDescendant(of: editor))
+                XCTAssertEqual(flags.accessibilityIdentifier, "film.rules.\(group.rawValue).0.flags")
                 unhost(window)
             }
             try await owner.save(group)
             let saved = try await fixture.rules.savedSnapshot()
-            XCTAssertEqual(saved.rules(in: group).first, .init(pattern: "changed", replace: "replacement", flags: "g"))
+            XCTAssertEqual(saved.rules(in: group).first, .init(pattern: "changed", replace: "replacement", flags: "gi"))
         }
         await fixture.rules.close(); await fixture.sources.close()
     }
 
-    func testNewMatchingRuleWithoutFlagsFieldKeepsRuntimeCaseInsensitiveDefault() async throws {
+    func testNewMatchingRuleWithEmptyFlagsKeepsRuntimeCaseInsensitiveDefault() async throws {
         let fixture = try await makeFixture()
         _ = try await fixture.rules.save(.movie, rules: [])
         let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
         let page = FilmRulePageViewController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
         let window = try await host(page); defer { unhost(window) }
-        try selectRow(page, "film.rules.movie.add")
+        try ruleButton(page, "film.rules.movie.add").sendActions(for: .touchUpInside)
         let editor = try XCTUnwrap(page.editors.first)
         editor.pattern.text = "^movie$"; editor.pattern.delegate?.textViewDidChange?(editor.pattern)
         let replacement = try XCTUnwrap(editor.replacement)
+        XCTAssertEqual(editor.flags?.text, "")
         replacement.text = "matched"; replacement.sendActions(for: .editingChanged)
         try await owner.save(.movie)
         let saved = try await fixture.rules.savedSnapshot()
         XCTAssertEqual(saved.movieRules.first?.pattern, "^movie$")
         XCTAssertEqual(saved.movieRules.first?.replace, "matched")
-        let test = FilmRuleTestController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
+        XCTAssertEqual(saved.movieRules.first?.flags, "")
+        let test = FilmRulePageViewController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
         let testWindow = try await host(test); defer { unhost(testWindow) }
         test.testFields.input.text = "MOVIE"
         test.runTest()
@@ -944,29 +987,22 @@ final class FilmSettingsPlatformTests: XCTestCase {
         try await fixture.rules.initialize()
         _ = try await fixture.rules.save(.init(movieRules: [.init(pattern: "^.", replace: "x")]))
         let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
-        let page = FilmRuleTestController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
+        let page = FilmRulePageViewController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
         let window = try await host(page); defer { unhost(window) }
         let before = try fixture.rulesDocument.read()
-        XCTAssertEqual(try row(page, "film.rule.test.output.row").detail, "尚未测试")
-        let inputCell = try XCTUnwrap(try cell(page, "film.rule.test.fields") as? SettingsTableCell)
-        let pendingCell = try XCTUnwrap(try cell(page, "film.rule.test.output.row") as? SettingsTableCell)
-        XCTAssertEqual(inputCell.contentView.directionalLayoutMargins,
-                       try XCTUnwrap(pendingCell.contentConfiguration as? UIListContentConfiguration).directionalLayoutMargins)
-        XCTAssertEqual(page.testFields.input.layer.borderWidth, 0)
+        let editor = try XCTUnwrap(page.editors.first)
+        XCTAssertTrue(editor.resultLabel.isHidden)
+        XCTAssertEqual(page.testFields.input.layer.borderWidth, 1)
         page.testFields.input.becomeFirstResponder(); page.testFields.input.insertText("🎬")
-        let run = try XCTUnwrap(descendants(page.view).compactMap { $0 as? UIButton }.first {
-            $0.accessibilityIdentifier == "film.rule.test.run"
-        })
+        let run = try ruleButton(page, "film.rules.test")
         XCTAssertTrue(run.isEnabled); run.sendActions(for: .touchUpInside)
         await eventually { !page.testing && page.result != nil }
         let result = try XCTUnwrap(page.result)
         XCTAssertEqual(result.outputText.utf16, [0x0078, 0xDFAC])
-        let outputCell = try XCTUnwrap(try cell(page, "film.rule.test.output.row") as? SettingsTableCell)
-        let output = try XCTUnwrap(outputCell.contentConfiguration as? UIListContentConfiguration)
-        XCTAssertEqual(output.text, "最终结果")
-        XCTAssertEqual(output.secondaryText, "x\u{FFFD}")
-        XCTAssertEqual(outputCell.accessibilityValue, "x\u{FFFD}")
-        XCTAssertFalse(descendants(outputCell).contains { $0 is UITextView })
+        XCTAssertTrue(page.editors.first === editor)
+        XCTAssertEqual(editor.resultLabel.text, "测试结果：x\u{FFFD}")
+        XCTAssertEqual(editor.resultLabel.accessibilityLabel, "测试结果：x\u{FFFD}")
+        XCTAssertFalse(editor.resultLabel.isHidden)
         XCTAssertEqual(page.testFields.input.text, "🎬")
         XCTAssertEqual(owner.rules(.movie).first?.pattern, "^.")
         let after = try fixture.rulesDocument.read()
@@ -1046,21 +1082,229 @@ final class FilmSettingsPlatformTests: XCTestCase {
         await fixture.sources.close(); await fixture.rules.close()
     }
 
-    func testEmptyRuleResultKeepsTheSharedOutputRow() async throws {
+    func testEmptyInputKeepsLosslessResultAndMarksMatchingCardsUnexecuted() async throws {
         let fixture = try await makeFixture()
         _ = try await fixture.rules.save(.movie, rules: [.init(pattern: "^nonempty$")])
         let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
-        let page = FilmRuleTestController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
+        let page = FilmRulePageViewController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
         let window = try await host(page); defer { unhost(window) }
         page.testFields.input.text = ""
         page.runTest()
         await eventually { !page.testing && page.result != nil }
         XCTAssertEqual(page.result?.outputText.displayString, "")
-        let outputCell = try XCTUnwrap(try cell(page, "film.rule.test.output.row") as? SettingsTableCell)
-        let output = try XCTUnwrap(outputCell.contentConfiguration as? UIListContentConfiguration)
-        XCTAssertEqual(output.text, "空结果")
-        XCTAssertEqual(output.secondaryText, "")
-        XCTAssertEqual(outputCell.accessibilityValue, "")
+        XCTAssertEqual(page.editors.first?.resultLabel.text, "测试结果：未执行")
+        XCTAssertEqual(page.editors.first?.resultLabel.accessibilityLabel, "测试结果：未执行")
+        await fixture.sources.close(); await fixture.rules.close()
+    }
+
+    func testInlineCleanPreviewsKeepSubmittedOrderEmptyRowsAndSearchTailProtection() async throws {
+        let fixture = try await makeFixture()
+        _ = try await fixture.rules.save(.init(
+            episodeCleanRegexRules: ["^广告", "\\s+", "["],
+            episodeRules: [.init(pattern: "^第([0-9]+)集$", replace: "E$1")],
+            aggregateRegexRules: ["\\([^)]*\\)", "\\d+$", "["]))
+        let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
+        owner.add(.search)
+        let before = try fixture.rulesDocument.read()
+        for group in [FilmRuleGroup.episodeClean, .search] {
+            let page = FilmRulePageViewController(owner: owner, group: group, themeProvider: FilmSettingsTheme())
+            let window = try await host(page)
+            page.testFields.input.text = group == .search ? "作品2(广告)" : "广告 第12集"
+            page.testFields.query.text = "作品2"
+            page.runTest()
+            await eventually { !page.testing && page.result != nil }
+            let result = try XCTUnwrap(page.result)
+            XCTAssertEqual(result.previews.count, owner.rules(group).count)
+            for (editor, preview) in zip(page.editors, result.previews) {
+                XCTAssertEqual(editor.resultLabel.text, "测试结果：" + (preview.isEmpty ? "空结果" : preview.displayString))
+                XCTAssertNil(editor.replacement); XCTAssertNil(editor.flags)
+            }
+            XCTAssertEqual(page.editors[2].resultLabel.textColor, UIColor(page.theme.settings.danger))
+            if group == .search {
+                XCTAssertEqual(page.editors[0].resultLabel.text, "测试结果：作品2")
+                XCTAssertEqual(page.editors[1].resultLabel.text, "测试结果：作品2（跳过尾号规则）")
+                XCTAssertEqual(page.editors[3].resultLabel.text, "测试结果：作品2")
+                XCTAssertFalse(page.testFields.query.isHidden)
+            } else {
+                XCTAssertEqual(page.editors[0].resultLabel.text, "测试结果：第12集")
+                XCTAssertEqual(result.outputText.displayString, "E12")
+                XCTAssertTrue(page.testFields.query.isHidden)
+            }
+            XCTAssertTrue(page.sections.isEmpty, "Inline previews must not recreate an output table")
+            attach(page, "film-rule-inline-results-\(group.rawValue)")
+            unhost(window)
+        }
+        XCTAssertEqual(try fixture.rulesDocument.read(), before)
+        await fixture.sources.close(); await fixture.rules.close()
+    }
+
+    func testInlineMatchingSeparatesGroupErrorsFirstHitAndUnexecutedRules() async throws {
+        let fixture = try await makeFixture()
+        _ = try await fixture.rules.save(.init(
+            episodeCleanRegexRules: ["["],
+            episodeRules: [.init(pattern: "^miss$"), .init(pattern: "^第([0-9]+)集$", replace: "E$1"),
+                           .init(pattern: "[")],
+            movieRules: [.init(pattern: "["), .init(pattern: "^miss$"),
+                         .init(pattern: "^match$", replace: "rewritten"), .init(pattern: "[")]))
+        let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
+        for group in [FilmRuleGroup.episode, .movie] {
+            let page = FilmRulePageViewController(owner: owner, group: group, themeProvider: FilmSettingsTheme())
+            let window = try await host(page)
+            page.testFields.input.text = group == .episode ? "第12集" : "match"
+            page.runTest()
+            await eventually { !page.testing && page.result != nil }
+            let result = try XCTUnwrap(page.result)
+            if group == .episode {
+                XCTAssertEqual(result.previews.first?.displayString, "正则无效")
+                XCTAssertEqual(result.errors.first?.group, "episodeClean")
+                XCTAssertEqual(page.editors[0].resultLabel.text, "测试结果：未命中")
+                XCTAssertEqual(page.editors[1].resultLabel.text, "测试结果：E12")
+                XCTAssertEqual(page.editors[1].resultLabel.textColor, UIColor(page.theme.settings.ink))
+                XCTAssertEqual(page.editors[2].resultLabel.text, "测试结果：未执行")
+            } else {
+                XCTAssertTrue(page.editors[0].resultLabel.text?.contains("正则无效") == true)
+                XCTAssertEqual(page.editors[0].resultLabel.textColor, UIColor(page.theme.settings.danger))
+                XCTAssertEqual(page.editors[1].resultLabel.text, "测试结果：未命中")
+                XCTAssertEqual(page.editors[2].resultLabel.text, "测试结果：rewritten")
+                XCTAssertEqual(page.editors[3].resultLabel.text, "测试结果：未执行")
+                page.testFields.input.text = "unknown"; page.testFields.input.sendActions(for: .editingChanged)
+                XCTAssertNil(page.result)
+                page.runTest()
+                await eventually { !page.testing && page.result != nil }
+                XCTAssertEqual(page.editors[1].resultLabel.text, "测试结果：未命中")
+                XCTAssertEqual(page.editors[2].resultLabel.text, "测试结果：未命中")
+                XCTAssertTrue(page.editors[3].resultLabel.text?.contains("正则无效") == true)
+            }
+            unhost(window)
+        }
+        await fixture.sources.close(); await fixture.rules.close()
+    }
+
+    func testInlineEmptyPreviewAndFailedRewriteStayDifferentFromUntestedOrUnmatched() async throws {
+        let fixture = try await makeFixture()
+        _ = try await fixture.rules.save(.init(movieRules: [.init(pattern: "^match()$", replace: "$1")],
+                                               aggregateRegexRules: ["^match$"]))
+        let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
+        for group in [FilmRuleGroup.search, .movie] {
+            let page = FilmRulePageViewController(owner: owner, group: group, themeProvider: FilmSettingsTheme())
+            let window = try await host(page)
+            page.testFields.input.text = "match"
+            page.runTest()
+            await eventually { !page.testing && page.result != nil }
+            let result = try XCTUnwrap(page.result)
+            XCTAssertEqual(result.outputText.utf16, [])
+            XCTAssertFalse(try XCTUnwrap(page.editors.first).resultLabel.isHidden)
+            if group == .search {
+                XCTAssertEqual(page.editors.first?.resultLabel.text, "测试结果：空结果")
+                XCTAssertEqual(result.previews.first?.utf16, [])
+            } else {
+                XCTAssertEqual(result.rewrittenText?.utf16, [])
+                XCTAssertTrue(result.matched)
+                XCTAssertEqual(page.editors.first?.resultLabel.text, "测试结果：空结果（改写失败）")
+                let replacement = try XCTUnwrap(page.editors.first?.replacement)
+                replacement.text = ""; replacement.sendActions(for: .editingChanged)
+                page.runTest()
+                await eventually { !page.testing && page.result != nil }
+                XCTAssertNil(page.result?.rewrittenText)
+                XCTAssertEqual(page.editors.first?.resultLabel.text, "测试结果：match（无改写）")
+            }
+            unhost(window)
+        }
+        await fixture.sources.close(); await fixture.rules.close()
+    }
+
+    func testInlineResultAndThemeUpdatesKeepActiveFieldsSelectionAndLongHeaderReadable() async throws {
+        let fixture = try await makeFixture()
+        let output = String(repeating: "结果", count: 100)
+        _ = try await fixture.rules.save(.movie, rules: [.init(pattern: "^match$", replace: output)])
+        let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
+        let page = FilmRulePageViewController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
+        let window = try await host(page, size: .init(width: 320, height: 844)); defer { unhost(window) }
+        let editor = try XCTUnwrap(page.editors.first)
+        editor.pattern.becomeFirstResponder()
+        let selection = NSRange(location: 1, length: 2)
+        editor.pattern.selectedRange = selection
+        page.testFields.input.text = "match"
+        page.runTest()
+        await eventually { !page.testing && page.result != nil }
+        XCTAssertTrue(page.editors.first === editor)
+        XCTAssertTrue(editor.pattern.isFirstResponder)
+        XCTAssertEqual(editor.pattern.selectedRange, selection)
+        XCTAssertEqual(editor.resultLabel.text, "测试结果：" + output)
+        page.traitOverrides.userInterfaceStyle = .dark
+        page.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+        await settle(); page.view.layoutIfNeeded()
+        XCTAssertTrue(page.editors.first === editor)
+        XCTAssertTrue(editor.pattern.isFirstResponder)
+        XCTAssertEqual(editor.pattern.selectedRange, selection)
+        XCTAssertEqual(editor.pattern.text, "^match$")
+        let result = editor.resultLabel.convert(editor.resultLabel.bounds, to: editor)
+        let remove = editor.deleteButton.convert(editor.deleteButton.bounds, to: editor)
+        XCTAssertGreaterThan(result.height, editor.resultLabel.font.lineHeight)
+        XCTAssertLessThanOrEqual(result.maxX, remove.minX)
+        XCTAssertGreaterThanOrEqual(remove.width, 44)
+        XCTAssertGreaterThanOrEqual(remove.height, 44)
+        XCTAssertEqual(editor.pattern.layer.cornerRadius,
+            min(editor.pattern.bounds.width, editor.pattern.bounds.height) / 2, accuracy: 1)
+        editor.pattern.text = "^changed$"; editor.pattern.delegate?.textViewDidChange?(editor.pattern)
+        XCTAssertNil(page.result); XCTAssertTrue(editor.resultLabel.isHidden)
+        await fixture.sources.close(); await fixture.rules.close()
+    }
+
+    func testInlineInputQueryRuleChangesAndCancelRejectHeldPreviewReceipts() async throws {
+        let fixture = try await makeFixture()
+        _ = try await fixture.rules.save(.search, rules: [.init(pattern: "^广告")])
+        let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
+        let page = FilmRulePageViewController(owner: owner, group: .search, themeProvider: FilmSettingsTheme())
+        let window = try await host(page); defer { unhost(window) }
+        let before = try fixture.rulesDocument.read()
+        for change in ["input", "query", "pattern", "cancel"] {
+            page.testFields.input.text = "广告作品2"; page.testFields.query.text = "作品2"
+            let editor = try XCTUnwrap(page.editors.first)
+            await fixture.ruleRPC.holdNextPreviewReceipt()
+            page.runTest()
+            await fixture.ruleRPC.waitForPreviewReceipt()
+            XCTAssertTrue(page.testing)
+            switch change {
+            case "input":
+                page.testFields.input.text = "changed"; page.testFields.input.sendActions(for: .editingChanged)
+            case "query":
+                page.testFields.query.text = "作品3"; page.testFields.query.sendActions(for: .editingChanged)
+            case "pattern":
+                editor.pattern.text = "^作品"; editor.pattern.delegate?.textViewDidChange?(editor.pattern)
+            default: try ruleButton(page, "film.rules.test").sendActions(for: .touchUpInside)
+            }
+            XCTAssertFalse(page.testing); XCTAssertNil(page.result)
+            XCTAssertTrue(editor.resultLabel.isHidden)
+            XCTAssertTrue(page.editors.first === editor)
+            await fixture.ruleRPC.releasePreviewReceipt()
+            _ = try await fixture.rules.process(.init(section: .search, text: "drained"), group: .search, rules: [])
+            XCTAssertNil(page.result); XCTAssertTrue(editor.resultLabel.isHidden)
+        }
+        XCTAssertEqual(try fixture.rulesDocument.read(), before)
+        await fixture.sources.close(); await fixture.rules.close()
+    }
+
+    func testInlinePreviewDoesNotBlockNativeSaveOrPublishAfterSaveNormalization() async throws {
+        let fixture = try await makeFixture()
+        _ = try await fixture.rules.save(.movie, rules: [.init(pattern: "^match$")])
+        let owner = FilmRulesDraft(service: fixture.rules); try await owner.load()
+        owner.edit(.movie, index: 0, rule: .init(pattern: "  ^match$  ", replace: "saved"))
+        let page = FilmRulePageViewController(owner: owner, group: .movie, themeProvider: FilmSettingsTheme())
+        let window = try await host(page); defer { unhost(window) }
+        page.testFields.input.text = "match"
+        await fixture.ruleRPC.holdNextPreviewReceipt()
+        page.runTest()
+        await fixture.ruleRPC.waitForPreviewReceipt()
+        page.save()
+        await eventually { !page.writing && !owner.busy }
+        XCTAssertEqual(try FilmRuleSettings.read(fixture.rulesDocument.read()).movieRules.first?.pattern, "^match$")
+        XCTAssertEqual(page.editors.first?.pattern.text, "^match$")
+        XCTAssertNil(page.result); XCTAssertFalse(page.testing)
+        await fixture.ruleRPC.releasePreviewReceipt()
+        _ = try await fixture.rules.process(.init(section: .movie, text: "drained"), group: .movie, rules: [])
+        XCTAssertNil(page.result)
+        XCTAssertTrue(page.editors.allSatisfy { $0.resultLabel.isHidden })
         await fixture.sources.close(); await fixture.rules.close()
     }
 
@@ -1127,6 +1371,15 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let location = try indexPath(page, id)
         XCTAssertTrue(page.sections[location.section].rows[location.row].enabled)
         page.tableView(page.table, didSelectRowAt: location)
+    }
+
+    private func ruleButton(_ page: FilmRulePageViewController, _ id: String) throws -> UIButton {
+        page.loadViewIfNeeded()
+        let button = try XCTUnwrap(descendants(page.view).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == id
+        })
+        XCTAssertTrue(button.isEnabled)
+        return button
     }
 
     /// Drive the exact choice handler installed on the real UIAlertController,

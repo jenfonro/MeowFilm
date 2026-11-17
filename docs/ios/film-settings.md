@@ -4,7 +4,7 @@
 
 普通配置直接读写原生设置文档，不以运行器在线为前提；唯一 owner、离线提交及通知规则见[共同设置契约](../common/settings-storage.md)，实际 namespace、保护和迁移见[存储](storage.md#影视设置)。本文保留 iOS 现有界面，不套用 Windows 列表或弹框调整。
 
-手机一般三级，智能匹配规则和来源详情可到第四级，规则测试从编辑页进入独立页面。当前标题放 App 自有页头，内容只保留实际分组。分组采用公共设置卡片、动态字体与至少 44 pt 点击区；字段、选择与开关遵循[设置语义配色](architecture.md#设置语义配色)，背景／页头继续跟随主题。返回保持位置；规则草稿由 App 持有的 `FilmSettingsModel.rules` 保留，不随页面销毁。
+手机一般三级，智能匹配规则和来源详情可到第四级；规则测试直接更新当前卡片标题，不进入独立页面。当前标题放 App 自有页头，内容只保留实际分组。分组采用公共设置卡片、动态字体与至少 44 pt 点击区；字段、选择与开关遵循[设置语义配色](architecture.md#设置语义配色)，背景／页头继续跟随主题。返回保持位置；规则草稿由 App 持有的 `FilmSettingsModel.rules` 保留，不随页面销毁。
 
 ## Node 规则与原生草稿
 
@@ -12,7 +12,9 @@
 
 共享载体保留锁定派生源码的正则编译／执行／全局空替换中断能力，普通构建不现场下载或打补丁；中断不冒充正则语法错误。异常、取消或截止后排空真实资源并恢复同一程序。App 资源分发共享原生引擎 MIT 与 Unicode 表许可。
 
-原生编辑分为搜索净化、剧集列表净化、集数匹配、电影匹配四个独立页面。每页纵向排列规则块，标题行右侧提供删除；匹配规则和替换内容在同块内纵向编辑。`flags` 不显示，编辑时保留原值，缺省仍由运行器按 `i` 处理。添加、修改、删除均只改本页草稿；页头唯一保存一次提交本页整组，失败保留编辑。恢复默认只读取当前组默认到草稿，仍需保存才生效。独立测试页使用公共菜单行容纳测试文本、测试按钮与最终结果，使用本页草稿与必要关联组的已保存配置，不混用其他页草稿、不保存；隐藏或退出取消测试并拒绝迟到结果。
+原生编辑分为搜索净化、剧集列表净化、集数匹配、电影匹配四个独立页面。每条规则使用独立卡片，标题左侧“规则 N”、右侧删除，`pattern` 标签及多行胶囊输入在上；匹配组的 `replace`／`flags` 在下方同排，辅助字号时可纵排。净化组仍只有现有 pattern 字段。`flags` 可编辑并保留原值，空值仍由运行器按 `i` 处理。规则列表下方为独立添加按钮，再下方为恢复默认及测试，页头保留唯一保存。添加、修改、删除及恢复只改本组草稿，保存才提交，失败保留编辑。
+
+测试文本及搜索查询词在当前页输入；测试使用本组草稿和必要关联组的已保存配置，不混用其他页草稿、不保存。各卡片在“规则 N”后留布局间距显示“测试结果：结果”，长结果在标题区换行，不另建输出列表。净化组消费逐条累计预览，匹配组根据同组错误与首命中索引区分未命中、实际输出及命中后的未执行；空字符串保留为有效结果。编辑规则／输入、换代、保存规范化、隐藏或失活使旧结果失效并取消测试，迟到结果不能覆盖当前快照，刷新结果不重建正在输入的字段。本地保存不等待在线测试，真实执行失败仍走统一错误与重试反馈。
 
 `FilmRuleSettings` 在原生保存边界完成同语义的纯字符串规范化、默认值及新规则文本解析，不编译正则；草稿测试不提前套用保存归一化，匹配规则 JSON 内的 pattern／replace 保持原文。空集数匹配组仍返回清理结果与 previews，同时报告“无匹配规则”，不自动回填规则。
 
@@ -52,9 +54,9 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 
 ### 数据源与智能播放设置
 
-`FilmDataSourceSettingsViewController` 同页切换 TMDB／豆瓣，字段采用上方标签、下方全宽输入。字段及代理含义以[元数据运行器](../runtime/metadata-data.md#设置与凭据)为准：TMDB 单一明文 API TOKEN 支持 v3/v4，附数据／图片代理、语言、地区和成人开关；豆瓣 Cookie 明文回显，数据／图片代理独立选择，默认“无”，自定义只展开普通代理前缀。无服务器代理、密码遮罩、configured 占位或单独清除按钮；空凭据保存即清空。`FilmTMDBService(settingsDocument:connection:)` 和 `FilmDoubanSettingsService(settingsDocument:)` 直接访问各自加密原生文档；失败保留输入与 saved 状态，已提交保存不因离页丢回执，不在启动时经 HTTP 回灌。
+`FilmDataSourceSettingsViewController` 顶部以独立完整胶囊切换 TMDB／豆瓣，不外套设置卡片；下方使用书源编辑共用的 `ManagementFormView` 整体表单，无重复供应商节头。字段采用上方标签、下方胶囊输入，供应商字段实例及草稿分别保留，切换和主题变化不重建输入。字段及代理含义以[元数据运行器](../runtime/metadata-data.md#设置与凭据)为准：TMDB 单一明文 API TOKEN 支持 v3/v4，附数据／图片代理、语言、地区和成人开关；豆瓣 Cookie 明文回显，数据／图片代理独立选择，默认“无”，自定义只展开普通代理前缀。无服务器代理、密码遮罩、configured 占位或单独清除按钮；空凭据保存即清空。`FilmTMDBService(settingsDocument:connection:)` 和 `FilmDoubanSettingsService(settingsDocument:)` 直接访问各自加密原生文档；失败保留输入与 saved 状态，已提交保存不因离页丢回执，不在启动时经 HTTP 回灌。
 
-偏好关键词和站点净化词用单行逗号分隔，键入不重建正在编辑的行，恢复默认只改选定组。`FilmPlaybackSettingsModel(transport:settingsDocument:)` 在原生文档读取／保存偏好，只规范化实际编辑字段、保留其他原始 JSON；preferencesBusy 与在线业务 busy 分开，挂起的资料库请求不阻塞本地偏好读写。人工匹配按目标分组，分享链接／提取码直接编辑，仍经运行器管理。设置不展示或删除历史／收藏；原业务 owner 不变。
+偏好优先片源与网盘排序共用音乐歌词／封面的 `SettingsOrderingSection` 直接拖动列表，只修改各组草稿，由页头保存；不新增启用开关，也不保留偏好页的恢复默认入口。偏好关键词和站点净化词用单行逗号分隔，键入不重建输入；站点净化及其他组仍保留各自恢复能力。`FilmPlaybackSettingsModel(transport:settingsDocument:)` 在原生文档读取／保存偏好，只规范化实际编辑字段、保留其他原始 JSON；preferencesBusy 与在线业务 busy 分开，挂起的资料库请求不阻塞本地偏好读写。人工匹配按目标分组，添加／编辑使用同一 `ManagementFormView` 整体表单，短选项紧凑组织，长身份及分享链接保留全宽，仍经运行器管理。设置不展示或删除历史／收藏；原业务 owner 不变。
 
 `FilmPlaybackLibrary` 只投影当前 Manual 或屏蔽页面所需的列表；偏好走独立设置入口。Manual 选影片只读取历史的 targetId/title，不校验位置、时长或时间；无法读取这两个字段的辅助历史不进入选项。当前列表可分离坏项不阻断健康兄弟，真实空列表有效，坏根／列表形状错误及非空但全部不可用仍报错。读取投影不回写资料，删除仍提交原始 typed block 身份，保存失败不发布。
 
@@ -66,7 +68,7 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 
 ### 网盘账号
 
-列表保留平台、状态、操作三列，适配窄屏；登录沿用音乐账号浮层、输入和按钮的共享视觉组件，不依赖音乐账号服务或存储。刷新、整份替换、退出与二维码取消以[网盘公共契约](../runtime/pan-runtime.md#设置页)为唯一来源。
+普通字号保留平台、状态、操作三列，适配窄屏；辅助字号改为三个全宽纵向内容区，避免平台名与操作逐字竖排，不压缩字体。平台主文字及操作仍为 Body Regular，表头为 Subheadline Regular，平台图标保持 24pt。操作表头及按钮在同一内容区居中，离散状态采用公共小胶囊、浅色底及同色深文字／图标。未登录／不可用为中性，已登录为成功，未验证为警告，失效为错误；busy 继续显示真实操作进度。登录沿用音乐账号浮层、输入和按钮的共享视觉组件，不依赖音乐账号服务或存储。刷新、整份替换、退出与二维码取消以[网盘公共契约](../runtime/pan-runtime.md#设置页)为唯一来源。
 
 `PanAccountsModel.start()` 同步读取原生 providers／accounts，无配置读取进度，不连接运行器或自动刷新账号。`PanAccountService(document:request:)`／`PanAccountService(document:connection:)` 的 replace／clear 直接提交同一加密文档；仅有配置时显示「未验证」，真实在线观察才可显示已登录／失效，且绑定当前 revision、字段及凭据内容身份。
 
@@ -88,16 +90,16 @@ App 关闭先停止接纳并排空规则执行／来源任务；规则适配的 
 规则迁移的精确 `MeowfilmAcceptance` 选择如下；每项须实际执行，编译或跳过不算规则载体通过：
 
 ```text
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testGroupDraftSurvivesNavigationAndRestoreAndSeparateTestNeverSave
+-only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testGroupDraftSurvivesNavigationAndRestoreAndInlineTestNeverSave
 -only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testRulesGroupSaveFailureRetainsDraftAndRetryPreservesOtherSavedGroups
 -only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testModelLoadsNativeRulesAndLocalSourcesAndCloseDoesNotCloseServices
 -only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testNarrowWideLargeTypeAndEmptyScreensProduceRealUIKitAttachments
 -only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testPageSaveNormalizesClearedRowsAndStaleFieldsCannotChangeSuccessor
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testAddAndDefaultsOnlyChangeCurrentGroupDraftAndTestOpensSeparatePage
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testSeparateEpisodeTestsUseThisGroupDraftAndAssociatedSavedGroupOnly
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testSeparateRuleTestCancellationOnHiddenPageDoesNotPublishOrSave
+-only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testAddAndDefaultsOnlyChangeCurrentGroupDraftAndTestStaysInline
+-only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testInlineEpisodeTestsUseThisGroupDraftAndAssociatedSavedGroupOnly
+-only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testInlineRuleTestCancellationOnHiddenPageDoesNotPublishOrSave
 -only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testNativeGroupSaveWhilePreviewHeldKeepsReceiptAfterPageRemovalAndWaiterCancellation
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testRuleFieldsHideFlagsAndKeepReplacementInTheSameEditor
+-only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testRuleFieldsShowEditableFlagsBesideReplacementInTheSameCard
 -only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testRuleResultDisplayDoesNotReplaceLosslessBusinessText
 -only-testing:MeowfilmRuntimeTests/MeowfilmFilmSettingsHostTests/testNodeMobileRulesUseSameSavedAndDraftEntryAndKeepIsolatedUTF16
 -only-testing:MeowfilmRuntimeTests/MeowfilmFilmSettingsHostTests/testNodeMobileGroupSaveAndDraftPreviewPreserveAssociatedSavedGroups

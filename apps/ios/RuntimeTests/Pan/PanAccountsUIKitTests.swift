@@ -28,6 +28,9 @@ final class PanAccountsUIKitTests: XCTestCase {
             let cell = page.tableView(page.table, cellForRowAt: IndexPath(row: index, section: 0))
             XCTAssertFalse(descendants(cell).contains { $0 is UIActivityIndicatorView })
         }
+        let configured = page.tableView(page.table, cellForRowAt: IndexPath(row: 1, section: 0))
+        XCTAssertEqual(try statusLabel(in: configured).text, "未验证")
+        XCTAssertEqual(try statusLabel(in: configured).textColor, UIColor(page.theme.settings.warning))
         model.close(); model.start()
         let calls = await runtime.operations
         XCTAssertTrue(calls.isEmpty)
@@ -52,6 +55,9 @@ final class PanAccountsUIKitTests: XCTestCase {
         XCTAssertEqual(descendants(header).compactMap { ($0 as? UILabel)?.text }, ["平台", "状态", "操作"])
         XCTAssertTrue(descendants(header).compactMap { $0 as? UILabel }.allSatisfy(\.adjustsFontForContentSizeCategory))
         XCTAssertTrue((header.backgroundView as? SettingsRowBackgroundView)?.drawsSeparator == true)
+        let headerColumns = try XCTUnwrap(descendants(header).compactMap { $0 as? PanAccountColumns }.first)
+        let actionHeading = try XCTUnwrap(headerColumns.columns[2].arrangedSubviews.first as? UILabel)
+        XCTAssertEqual(actionHeading.textAlignment, .center)
         for (index, status, titles) in [(1, "已登录", ["刷新", "退出登录"]), (2, "失效", ["重新登录", "退出登录"]), (3, "未登录", ["登录"])] {
             let cell = page.tableView(page.table, cellForRowAt: IndexPath(row: index, section: 0))
             let columns = try XCTUnwrap(descendants(cell).compactMap { $0 as? PanAccountColumns }.first)
@@ -59,18 +65,45 @@ final class PanAccountsUIKitTests: XCTestCase {
             XCTAssertEqual(descendants(columns.columns[1]).compactMap { ($0 as? UILabel)?.text }, [status])
             XCTAssertTrue(descendants(columns.columns[1]).compactMap { $0 as? UILabel }.allSatisfy(\.adjustsFontForContentSizeCategory))
             XCTAssertEqual(descendants(columns.columns[2]).compactMap { ($0 as? UIButton)?.configuration?.title }, titles)
+            let badge = try statusBadge(in: cell)
             for width in [CGFloat(320), 390, 430] {
                 cell.frame = CGRect(x: 0, y: 0, width: width - 32, height: 120)
                 cell.setNeedsLayout(); cell.layoutIfNeeded(); cell.contentView.layoutIfNeeded()
+                header.frame = cell.frame
+                header.setNeedsLayout(); header.layoutIfNeeded(); header.contentView.layoutIfNeeded()
                 XCTAssertFalse(columns.hasAmbiguousLayout)
+                XCTAssertEqual(columns.axis, .horizontal)
                 XCTAssertEqual(columns.columns[0].frame.minX, 0, accuracy: 0.5)
                 XCTAssertGreaterThan(columns.columns[1].frame.minX, columns.columns[0].frame.maxX)
                 XCTAssertGreaterThan(columns.columns[2].frame.minX, columns.columns[1].frame.maxX)
                 XCTAssertEqual(columns.columns[2].frame.maxX, columns.bounds.width, accuracy: 0.5)
                 XCTAssertGreaterThan(columns.columns[2].bounds.width, 60)
+                XCTAssertLessThanOrEqual(badge.bounds.width, columns.columns[1].bounds.width + 0.5)
+                if width == 430 {
+                    XCTAssertLessThan(badge.bounds.width, columns.columns[1].bounds.width, "Short status must not fill its column")
+                }
+                XCTAssertEqual(badge.layer.cornerRadius, min(badge.bounds.width, badge.bounds.height) / 2, accuracy: 0.5)
+                XCTAssertEqual(descendants(badge).compactMap { $0 as? UIImageView }.count, 1)
+                let badgeIcon = try XCTUnwrap(descendants(badge).compactMap { $0 as? UIImageView }.first)
+                assertContained(badgeIcon, in: badge)
+                assertSymbolFits(badgeIcon, size: 12)
+                try assertPlatformFits(in: cell, title: model.rows[index - 1].id.title)
+                for heading in descendants(header).compactMap({ $0 as? UILabel }) {
+                    assertRegular(heading, style: .subheadline)
+                    try assertTextFits(heading, in: header.contentView, maximumLines: 1)
+                }
                 for button in descendants(columns.columns[2]).compactMap({ $0 as? UIButton }) {
                     XCTAssertGreaterThanOrEqual(button.bounds.height, 44)
                     XCTAssertEqual(button.titleLabel?.font, .preferredFont(forTextStyle: .body))
+                    XCTAssertEqual(button.contentHorizontalAlignment, .center)
+                    XCTAssertEqual(button.titleLabel?.textAlignment, .center)
+                    let headingFrame = header.contentView.convert(actionHeading.bounds, from: actionHeading)
+                    let actionFrame = cell.contentView.convert(button.bounds, from: button)
+                    XCTAssertEqual(headingFrame.midX, actionFrame.midX, accuracy: 0.5)
+                    let title = try XCTUnwrap(button.titleLabel)
+                    XCTAssertEqual(button.convert(title.bounds, from: title).midX, button.bounds.midX, accuracy: 0.5)
+                    XCTAssertEqual(title.text, button.configuration?.title)
+                    try assertTextFits(title, in: button, maximumLines: 2)
                 }
             }
         }
@@ -80,14 +113,22 @@ final class PanAccountsUIKitTests: XCTestCase {
         let darkBackground = try XCTUnwrap(darkCell.backgroundView as? SettingsRowBackgroundView)
         let fill = try XCTUnwrap(darkBackground.layer.sublayers?.compactMap { $0 as? CAShapeLayer }.first?.fillColor)
         XCTAssertTrue(UIColor(cgColor: fill).isEqual(UIColor(page.theme.settings.surface)))
-        let status = try XCTUnwrap(descendants(darkCell).first { $0.accessibilityIdentifier == "pan.accounts.status" } as? UILabel)
-        XCTAssertEqual(status.textColor, UIColor(page.theme.settings.muted))
+        XCTAssertEqual(try statusLabel(in: darkCell).textColor, UIColor(page.theme.settings.success))
+        let window = mount(page)
+        defer { unmount(page, window: window) }
+        await eventually { page.isPageVisible }
+        for dark in [false, true] {
+            page.overrideUserInterfaceStyle = dark ? .dark : .light
+            page.applyTheme(); page.table.reloadData(); page.view.layoutIfNeeded()
+            attach(page, name: "pan-account-statuses-\(dark ? "dark" : "light")")
+        }
     }
 
     func testTableSemanticColorsAndBusyActionsFollowStyleWithoutFollowingPalette() async throws {
         let runtime = try PanUIKitRuntime()
         try await runtime.set(.baidu, status: .signedIn)
         try await runtime.set(.quark, status: .expired)
+        try await runtime.set(.tianyi, status: .signedIn)
         let model = PanAccountsModel(service: runtime.service)
         model.start()
         await model.refresh(.baidu)?.value
@@ -105,14 +146,23 @@ final class PanAccountsUIKitTests: XCTestCase {
                 let headings = descendants(header).compactMap { $0 as? UILabel }
                 XCTAssertEqual(headings.count, 3)
                 for heading in headings { XCTAssertEqual(heading.textColor, UIColor(settings.muted)) }
-                for index in 1...3 {
+                for (index, text, color, count) in [
+                    (1, "已登录", settings.success, 2), (2, "失效", settings.danger, 2),
+                    (3, "未登录", settings.muted, 1), (4, "未验证", settings.warning, 3),
+                ] {
                     let cell = page.tableView(page.table, cellForRowAt: IndexPath(row: index, section: 0))
-                    let status = try XCTUnwrap(descendants(cell).first {
-                        $0.accessibilityIdentifier == "pan.accounts.status"
-                    } as? UILabel)
-                    XCTAssertEqual(status.textColor, UIColor(index == 2 ? settings.danger : settings.muted))
+                    let badge = try statusBadge(in: cell)
+                    let status = try statusLabel(in: cell)
+                    XCTAssertEqual(status.text, text)
+                    XCTAssertEqual(status.textColor, UIColor(color))
+                    let icon = try XCTUnwrap(descendants(badge).compactMap { $0 as? UIImageView }.first)
+                    XCTAssertNotNil(icon.image)
+                    XCTAssertEqual(icon.tintColor, status.textColor)
+                    XCTAssertNotNil(badge.backgroundColor)
+                    XCTAssertNotEqual(badge.backgroundColor, UIColor(settings.surface))
+                    XCTAssertNotEqual(badge.backgroundColor, status.textColor)
                     let actions = descendants(cell).compactMap { $0 as? UIButton }
-                    XCTAssertEqual(actions.count, index == 3 ? 1 : 2)
+                    XCTAssertEqual(actions.count, count)
                     for action in actions {
                         XCTAssertTrue(action.isEnabled)
                         XCTAssertEqual(action.configuration?.baseForegroundColor, UIColor(settings.accent))
@@ -121,6 +171,10 @@ final class PanAccountsUIKitTests: XCTestCase {
                 }
                 XCTAssertNotNil(model.openLogin(.baidu))
                 let busyCell = page.tableView(page.table, cellForRowAt: IndexPath(row: 1, section: 0))
+                XCTAssertFalse(descendants(busyCell).contains { $0 is SettingsStatusBadge })
+                let spinner = try XCTUnwrap(descendants(busyCell).compactMap { $0 as? UIActivityIndicatorView }.first)
+                XCTAssertTrue(spinner.isAnimating)
+                XCTAssertEqual(spinner.accessibilityLabel, "正在操作账号")
                 let busyActions = descendants(busyCell).compactMap { $0 as? UIButton }
                 XCTAssertEqual(busyActions.count, 2)
                 for action in busyActions {
@@ -130,6 +184,7 @@ final class PanAccountsUIKitTests: XCTestCase {
                 }
                 model.closeLogin()
                 let restoredCell = page.tableView(page.table, cellForRowAt: IndexPath(row: 1, section: 0))
+                XCTAssertEqual(try statusLabel(in: restoredCell).text, "已登录")
                 let restoredActions = descendants(restoredCell).compactMap { $0 as? UIButton }
                 XCTAssertEqual(restoredActions.count, 2)
                 for action in restoredActions {
@@ -138,6 +193,131 @@ final class PanAccountsUIKitTests: XCTestCase {
                 }
             }
         }
+    }
+
+    func testStatusBadgeFitsPhoneWidthsAndDynamicTypeWithoutClaimingOnlineLogin() async throws {
+        let runtime = try PanUIKitRuntime()
+        try await runtime.set(.baidu, status: .signedIn)
+        let model = PanAccountsModel(service: runtime.service)
+        let page = PanAccountsViewController(model: model, themeProvider: PanAccountsTheme())
+        let window = mount(page)
+        defer { unmount(page, window: window); model.close() }
+        await eventually { page.isPageVisible }
+        var heights: [CGFloat] = []
+        for category in [UIContentSizeCategory.large, .extraExtraExtraLarge, .accessibilityMedium,
+                         .accessibilityExtraExtraExtraLarge, .large] {
+            page.traitOverrides.preferredContentSizeCategory = category
+            for width in [CGFloat(320), 390, 430] {
+                window.frame = CGRect(x: 0, y: 0, width: width, height: 844)
+                page.view.frame = window.bounds
+                window.setNeedsLayout(); window.layoutIfNeeded(); page.view.layoutIfNeeded()
+                page.table.scrollToRow(at: IndexPath(row: 0, section: 0), at: .top, animated: false)
+                page.table.layoutIfNeeded()
+                let header = try XCTUnwrap(page.table.cellForRow(at: IndexPath(row: 0, section: 0)))
+                let headerColumns = try XCTUnwrap(descendants(header).compactMap { $0 as? PanAccountColumns }.first)
+                let headings = descendants(header).compactMap { $0 as? UILabel }
+                XCTAssertEqual(headings.map(\.text), ["平台", "状态", "操作"])
+                for heading in headings {
+                    assertRegular(heading, style: .subheadline)
+                    try assertTextFits(heading, in: header.contentView, maximumLines: 1)
+                }
+                XCTAssertEqual(headerColumns.axis, category.isAccessibilityCategory ? .vertical : .horizontal)
+                let actionHeading = try XCTUnwrap(headerColumns.columns[2].arrangedSubviews.first as? UILabel)
+                let cell = try XCTUnwrap(page.table.cellForRow(at: IndexPath(row: 1, section: 0)))
+                cell.layoutIfNeeded(); cell.contentView.layoutIfNeeded()
+                let columns = try XCTUnwrap(descendants(cell).compactMap { $0 as? PanAccountColumns }.first)
+                let badge = try statusBadge(in: cell)
+                let label = try statusLabel(in: cell)
+                XCTAssertEqual(label.text, "未验证")
+                XCTAssertTrue(label.adjustsFontForContentSizeCategory)
+                XCTAssertEqual(badge.traitCollection.preferredContentSizeCategory, category)
+                XCTAssertFalse(badge.hasAmbiguousLayout, "\(width)pt / \(category.rawValue)")
+                XCTAssertGreaterThan(badge.bounds.width, 0)
+                XCTAssertLessThanOrEqual(badge.bounds.width, columns.columns[1].bounds.width + 0.5)
+                XCTAssertEqual(badge.layer.cornerRadius, min(badge.bounds.width, badge.bounds.height) / 2, accuracy: 0.5)
+                let labelFrame = badge.convert(label.bounds, from: label)
+                XCTAssertGreaterThanOrEqual(labelFrame.minX, 0)
+                XCTAssertLessThanOrEqual(labelFrame.maxX, badge.bounds.maxX + 0.5)
+                XCTAssertGreaterThanOrEqual(labelFrame.minY, 0)
+                XCTAssertLessThanOrEqual(labelFrame.maxY, badge.bounds.maxY + 0.5)
+                let required = label.sizeThatFits(CGSize(width: label.bounds.width, height: .greatestFiniteMagnitude))
+                XCTAssertLessThanOrEqual(required.height, label.bounds.height + 0.5)
+                try assertTextFits(label, in: badge, maximumLines: category.isAccessibilityCategory ? 1 : 3)
+                let badgeIcon = try XCTUnwrap(descendants(badge).compactMap { $0 as? UIImageView }.first)
+                assertContained(badgeIcon, in: badge)
+                assertSymbolFits(badgeIcon, size: 12)
+                if category.isAccessibilityCategory {
+                    XCTAssertEqual(badge.bounds.width, columns.columns[1].bounds.width, accuracy: 0.5)
+                }
+                if width == 320 && category != .extraExtraExtraLarge && category != .accessibilityMedium {
+                    heights.append(badge.bounds.height)
+                }
+                attach(page, name: "pan-account-unverified-\(Int(width))-\(category.rawValue)")
+                for index in 1...model.rows.count {
+                    let path = IndexPath(row: index, section: 0)
+                    page.table.scrollToRow(at: path, at: .top, animated: false)
+                    page.table.layoutIfNeeded()
+                    let rowCell = try XCTUnwrap(page.table.cellForRow(at: path))
+                    rowCell.layoutIfNeeded(); rowCell.contentView.layoutIfNeeded()
+                    let rowColumns = try XCTUnwrap(descendants(rowCell).compactMap { $0 as? PanAccountColumns }.first)
+                    XCTAssertFalse(rowColumns.hasAmbiguousLayout)
+                    XCTAssertEqual(rowColumns.axis, category.isAccessibilityCategory ? .vertical : .horizontal)
+                    assertContained(rowColumns, in: rowCell.contentView)
+                    if category.isAccessibilityCategory {
+                        for column in rowColumns.columns {
+                            XCTAssertEqual(column.bounds.width, rowColumns.bounds.width, accuracy: 0.5)
+                            assertContained(column, in: rowColumns)
+                        }
+                        XCTAssertGreaterThan(rowColumns.columns[1].frame.minY, rowColumns.columns[0].frame.maxY)
+                        XCTAssertGreaterThan(rowColumns.columns[2].frame.minY, rowColumns.columns[1].frame.maxY)
+                    }
+                    try assertPlatformFits(in: rowCell, title: model.rows[index - 1].id.title)
+                    let rowBadge = try statusBadge(in: rowCell)
+                    XCTAssertFalse(rowBadge.hasAmbiguousLayout, "\(width)pt / \(category.rawValue) / \(model.rows[index - 1].id)")
+                    try assertTextFits(try statusLabel(in: rowCell), in: rowBadge,
+                        maximumLines: category.isAccessibilityCategory ? 1 : 3)
+                    assertContained(rowBadge, in: rowColumns.columns[1])
+                    let rowBadgeIcon = try XCTUnwrap(descendants(rowBadge).compactMap { $0 as? UIImageView }.first)
+                    assertContained(rowBadgeIcon, in: rowBadge)
+                    assertSymbolFits(rowBadgeIcon, size: 12)
+                    for button in descendants(rowColumns.columns[2]).compactMap({ $0 as? UIButton }) {
+                        XCTAssertGreaterThanOrEqual(button.bounds.height, 44)
+                        assertContained(button, in: rowColumns.columns[2])
+                        let title = try XCTUnwrap(button.titleLabel)
+                        XCTAssertEqual(title.text, button.configuration?.title)
+                        assertRegular(title)
+                        try assertTextFits(title, in: button, maximumLines: 2)
+                        XCTAssertEqual(button.convert(title.bounds, from: title).midX, button.bounds.midX, accuracy: 0.5)
+                        let headingFrame = header.contentView.convert(actionHeading.bounds, from: actionHeading)
+                        let actionFrame = rowCell.contentView.convert(button.bounds, from: button)
+                        XCTAssertEqual(headingFrame.midX, actionFrame.midX, accuracy: 0.5)
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(heights.count, 3)
+        XCTAssertGreaterThan(heights[1], heights[0])
+        XCTAssertEqual(heights[2], heights[0], accuracy: 0.5)
+        XCTAssertEqual(model.rows[0].account?.status, .unverified)
+        let calls = await runtime.operations
+        XCTAssertTrue(calls.isEmpty)
+    }
+
+    func testUnavailableAccountUsesNeutralBadgeWithoutActions() async throws {
+        let runtime = try PanUIKitRuntime()
+        try runtime.storage.store.write(Data("synthetic-invalid-document".utf8), key: FilmSettingsDocument.key)
+        let model = PanAccountsModel(service: runtime.service)
+        model.start()
+        let page = PanAccountsViewController(model: model, themeProvider: PanAccountsTheme())
+        page.loadViewIfNeeded()
+        defer { PageViewController.invalidatePages(in: page); model.close() }
+        let cell = page.tableView(page.table, cellForRowAt: IndexPath(row: 1, section: 0))
+        XCTAssertNil(model.rows[0].account)
+        XCTAssertEqual(try statusLabel(in: cell).text, "不可用")
+        XCTAssertEqual(try statusLabel(in: cell).textColor, UIColor(page.theme.settings.muted))
+        XCTAssertTrue(descendants(cell).compactMap { $0 as? UIButton }.isEmpty)
+        let calls = await runtime.operations
+        XCTAssertTrue(calls.isEmpty)
     }
 
     func testTableRefreshCallsRuntimeButLogoutIsNativeAndLoginOpensSharedFloatingCard() async throws {
@@ -295,6 +475,13 @@ final class PanAccountsUIKitTests: XCTestCase {
     private func button(_ id: String, in view: UIView) throws -> UIButton {
         try XCTUnwrap(descendants(view).first { $0.accessibilityIdentifier == id } as? UIButton)
     }
+    private func statusBadge(in view: UIView) throws -> SettingsStatusBadge {
+        try XCTUnwrap(descendants(view).first { $0.accessibilityIdentifier == "pan.accounts.status" } as? SettingsStatusBadge)
+    }
+    private func statusLabel(in view: UIView) throws -> UILabel {
+        let badge = try statusBadge(in: view)
+        return try XCTUnwrap(descendants(badge).compactMap { $0 as? UILabel }.first)
+    }
     private func titleColor(_ button: UIButton) throws -> UIColor {
         button.setNeedsLayout(); button.layoutIfNeeded()
         let label = try XCTUnwrap(button.titleLabel)
@@ -303,6 +490,82 @@ final class PanAccountsUIKitTests: XCTestCase {
             return color
         }
         return label.textColor
+    }
+    private func assertRegular(_ label: UILabel, style: UIFont.TextStyle = .body,
+                               file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(label.font, UIFont.preferredFont(forTextStyle: style, compatibleWith: label.traitCollection),
+            file: file, line: line)
+        XCTAssertFalse(label.font.fontDescriptor.symbolicTraits.contains(.traitBold), file: file, line: line)
+        XCTAssertFalse(label.font.fontDescriptor.symbolicTraits.contains(.traitItalic), file: file, line: line)
+        XCTAssertTrue(label.adjustsFontForContentSizeCategory, file: file, line: line)
+        XCTAssertFalse(label.adjustsFontSizeToFitWidth, file: file, line: line)
+    }
+    private func assertContained(_ child: UIView, in owner: UIView, file: StaticString = #filePath, line: UInt = #line) {
+        let frame = owner.convert(child.bounds, from: child)
+        XCTAssertGreaterThan(child.bounds.width, 0, file: file, line: line)
+        XCTAssertGreaterThan(child.bounds.height, 0, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(frame.minX, owner.bounds.minX - 0.5, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(frame.minY, owner.bounds.minY - 0.5, file: file, line: line)
+        XCTAssertLessThanOrEqual(frame.maxX, owner.bounds.maxX + 0.5, file: file, line: line)
+        XCTAssertLessThanOrEqual(frame.maxY, owner.bounds.maxY + 0.5, file: file, line: line)
+    }
+    private func assertTextFits(_ label: UILabel, in owner: UIView, maximumLines: Int,
+                                file: StaticString = #filePath, line: UInt = #line) throws {
+        assertContained(label, in: owner, file: file, line: line)
+        let text = try XCTUnwrap(label.text, file: file, line: line)
+        if let rendered = label.attributedText {
+            XCTAssertEqual(rendered.string, text, file: file, line: line)
+        }
+        // UILabel's native text rect excludes the extra font leading used by
+        // NSAttributedString.boundingRect. An unlimited wrapping probe still
+        // measures every character, independently of the visible label's cap.
+        let probe = UILabel()
+        probe.font = label.font; probe.text = text
+        if let rendered = label.attributedText { probe.attributedText = rendered }
+        probe.numberOfLines = 0; probe.lineBreakMode = .byWordWrapping
+        let fittingBounds = CGRect(x: 0, y: 0, width: label.bounds.width, height: .greatestFiniteMagnitude)
+        let required = probe.textRect(forBounds: fittingBounds, limitedToNumberOfLines: 0)
+        let limited = probe.textRect(forBounds: fittingBounds, limitedToNumberOfLines: maximumLines)
+        XCTAssertLessThanOrEqual(required.width, label.bounds.width + 0.5, file: file, line: line)
+        XCTAssertLessThanOrEqual(required.height, label.bounds.height + 0.5, file: file, line: line)
+        XCTAssertEqual(required.height, limited.height, accuracy: 0.5, file: file, line: line)
+        let visible = label.textRect(forBounds: label.bounds, limitedToNumberOfLines: label.numberOfLines)
+        XCTAssertEqual(visible.height, required.height, accuracy: 0.5, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(visible.minX, label.bounds.minX - 0.5, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(visible.minY, label.bounds.minY - 0.5, file: file, line: line)
+        XCTAssertLessThanOrEqual(visible.maxX, label.bounds.maxX + 0.5, file: file, line: line)
+        XCTAssertLessThanOrEqual(visible.maxY, label.bounds.maxY + 0.5, file: file, line: line)
+    }
+    private func assertSymbolFits(_ icon: UIImageView, size: CGFloat,
+                                  file: StaticString = #filePath, line: UInt = #line) {
+        // SF Symbols have optical alignment insets: the constrained square
+        // alignment rect need not be the image view's non-square drawing bounds.
+        XCTAssertEqual(icon.alignmentRect(forFrame: icon.bounds).size, CGSize(width: size, height: size),
+            file: file, line: line)
+        XCTAssertEqual(max(icon.bounds.width, icon.bounds.height), size, accuracy: 0.5, file: file, line: line)
+        XCTAssertGreaterThan(icon.bounds.width, 0, file: file, line: line)
+        XCTAssertGreaterThan(icon.bounds.height, 0, file: file, line: line)
+        XCTAssertEqual(icon.contentMode, .scaleAspectFit, file: file, line: line)
+        XCTAssertNotNil(icon.image, file: file, line: line)
+    }
+    private func assertPlatformFits(in cell: UITableViewCell, title expectedTitle: String,
+                                    file: StaticString = #filePath, line: UInt = #line) throws {
+        let platform = try XCTUnwrap(descendants(cell).first { $0.accessibilityIdentifier == "pan.accounts.platform" },
+            file: file, line: line)
+        let title = try XCTUnwrap(descendants(platform).compactMap { $0 as? UILabel }.first, file: file, line: line)
+        let icon = try XCTUnwrap(descendants(platform).compactMap { $0 as? UIImageView }.first, file: file, line: line)
+        XCTAssertEqual(title.text, expectedTitle, file: file, line: line)
+        assertRegular(title, file: file, line: line)
+        try assertTextFits(title, in: platform, maximumLines: 2, file: file, line: line)
+        assertContained(platform, in: cell.contentView, file: file, line: line)
+        assertContained(icon, in: platform, file: file, line: line)
+        assertContained(icon, in: cell.contentView, file: file, line: line)
+        assertContained(icon, in: try XCTUnwrap(cell.backgroundView, file: file, line: line), file: file, line: line)
+        let titleFrame = platform.convert(title.bounds, from: title)
+        let iconFrame = platform.convert(icon.bounds, from: icon)
+        XCTAssertGreaterThanOrEqual(titleFrame.minX, iconFrame.maxX + 7.5, file: file, line: line)
+        assertSymbolFits(icon, size: 24, file: file, line: line)
+        XCTAssertFalse(icon.isAccessibilityElement, file: file, line: line)
     }
     private func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
     private func mount(_ page: UIViewController) -> UIWindow {
@@ -323,6 +586,14 @@ final class PanAccountsUIKitTests: XCTestCase {
         PageViewController.invalidatePages(in: page)
         window.isHidden = true; window.rootViewController = nil
         previousKeyWindow?.makeKey(); previousKeyWindow = nil
+    }
+    private func attach(_ page: UIViewController, name: String) {
+        let image = UIGraphicsImageRenderer(bounds: page.view.bounds).image { _ in
+            XCTAssertTrue(page.view.drawHierarchy(in: page.view.bounds, afterScreenUpdates: true))
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name; attachment.lifetime = .keepAlways
+        add(attachment)
     }
     private func eventually(_ predicate: @escaping @MainActor () async -> Bool,
                             file: StaticString = #filePath, line: UInt = #line) async {

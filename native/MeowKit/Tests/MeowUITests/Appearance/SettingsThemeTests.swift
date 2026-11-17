@@ -2,6 +2,11 @@ import XCTest
 @testable import MeowUI
 
 final class SettingsThemeTests: XCTestCase {
+    func testLightSettingsInputsUseWhiteInsteadOfThePageGround() {
+        XCTAssertEqual(SettingsTheme(dark: false).input, PageColor(rgb: 0xffffff))
+        XCTAssertNotEqual(SettingsTheme(dark: true).input, PageColor(rgb: 0xffffff))
+    }
+
     func testSettingsColorsAreIndependentOfPresetAndCustomPalettes() {
         let palettes = PageColorway.allCases.map(PagePalette.preset) +
             [0, 0xffffff, 0xff0000, 0x00ff00, 0x0000ff, 0xffff00].map(PagePalette.custom)
@@ -32,6 +37,10 @@ final class SettingsThemeTests: XCTestCase {
             }
             XCTAssertGreaterThanOrEqual(colors.onAccent.contrastRatio(with: colors.accent), 4.5)
             XCTAssertGreaterThanOrEqual(colors.inputBorder.contrastRatio(with: colors.input), 3)
+            for ink in [colors.muted, colors.success, colors.warning, colors.danger] {
+                let fill = colors.surface.mixed(with: ink, ratio: dark ? 0.12 : 0.08)
+                XCTAssertGreaterThanOrEqual(ink.contrastRatio(with: fill), 4.5)
+            }
             for color in [colors.surface, colors.input, colors.separator, colors.border] {
                 XCTAssertLessThanOrEqual(Int(max(color.red, color.green, color.blue)) -
                     Int(min(color.red, color.green, color.blue)), 17, "Structural colors stay neutral")

@@ -12,7 +12,7 @@ public struct SettingsTheme: Equatable, Sendable {
         surface = .init(rgb: dark ? 0x242426 : 0xffffff)
         border = .init(rgb: dark ? 0x62646b : 0xaeb4bf)
         separator = .init(rgb: dark ? 0x4a4a50 : 0xd7dadf)
-        input = .init(rgb: dark ? 0x1b1b1e : 0xf2f3f5)
+        input = .init(rgb: dark ? 0x1b1b1e : 0xffffff)
         inputBorder = .init(rgb: dark ? 0x858892 : 0x858b95)
         selected = .init(rgb: dark ? 0x33445a : 0xe7eef8)
         danger = .init(rgb: dark ? 0xff8f96 : 0xb4232c)
@@ -34,7 +34,7 @@ public extension SettingsTheme {
         field.textColor = UIColor(ink)
         field.tintColor = UIColor(accent)
         field.backgroundColor = UIColor(input)
-        field.layer.cornerRadius = 6
+        field.layer.cornerRadius = min(field.bounds.width, field.bounds.height) / 2
         field.layer.borderWidth = 1
         field.layer.borderColor = UIColor(inputBorder).cgColor
         if let placeholder = field.placeholder {
@@ -47,7 +47,7 @@ public extension SettingsTheme {
         field.textColor = UIColor(ink)
         field.tintColor = UIColor(accent)
         field.backgroundColor = UIColor(input)
-        field.layer.cornerRadius = 6
+        field.layer.cornerRadius = min(field.bounds.width, field.bounds.height) / 2
         field.layer.borderWidth = 1
         field.layer.borderColor = UIColor(inputBorder).cgColor
     }

@@ -1,6 +1,5 @@
 #if os(iOS)
 import UIKit
-import SwiftUI
 import MeowUI
 
 @MainActor
@@ -26,6 +25,9 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
             table.topAnchor.constraint(equalTo: contentTopAnchor),
             table.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
         ])
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) {
+            (page: PanAccountsViewController, _: UITraitCollection) in page.table.reloadData()
+        }
         observe(model) { [weak self] in self?.render() }
         render()
     }
@@ -51,7 +53,8 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
         cell.selectionStyle = .none; cell.backgroundColor = .clear
         cell.backgroundView = SettingsRowBackgroundView(theme: theme, first: indexPath.row == 0,
             last: last, showsSeparator: !last)
-        let columns = PanAccountColumns()
+        let columns = PanAccountColumns(accessibilityLayout: traitCollection.preferredContentSizeCategory.isAccessibilityCategory)
+        let font = UIFont.preferredFont(forTextStyle: .body, compatibleWith: traitCollection)
         columns.translatesAutoresizingMaskIntoConstraints = false; cell.contentView.addSubview(columns)
         NSLayoutConstraint.activate([
             columns.leadingAnchor.constraint(equalTo: cell.contentView.layoutMarginsGuide.leadingAnchor),
@@ -62,19 +65,30 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
         if indexPath.row == 0 {
             cell.accessibilityIdentifier = "pan.accounts.header"
             for (column, text) in zip(columns.columns, ["平台", "状态", "操作"]) {
-                let label = UILabel(); label.text = text; label.font = .preferredFont(forTextStyle: .subheadline)
+                let label = UILabel(); label.text = text
+                label.font = UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: traitCollection)
+                label.numberOfLines = 0; label.lineBreakMode = .byWordWrapping
                 label.adjustsFontForContentSizeCategory = true
+                if column === columns.columns[2] { label.textAlignment = .center }
                 label.textColor = UIColor(theme.settings.muted); column.addArrangedSubview(label)
             }
             return cell
         }
         let row = model.rows[indexPath.row - 1]
         cell.accessibilityIdentifier = "pan.accounts." + row.id.rawValue
-        let platform = UIHostingConfiguration {
-            AccountPlatformLabel(title: row.id.title, symbol: "externaldrive", size: 24, theme: theme)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
-        }.margins(.all, 0).makeContentView()
+        let icon = UIImageView(image: UIImage(systemName: "externaldrive",
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 24, weight: .regular)))
+        icon.contentMode = .scaleAspectFit; icon.tintColor = UIColor(theme.settings.muted)
+        icon.isAccessibilityElement = false
+        NSLayoutConstraint.activate([
+            icon.widthAnchor.constraint(equalToConstant: 24),
+            icon.heightAnchor.constraint(equalToConstant: 24),
+        ])
+        let title = UILabel(); title.text = row.id.title; title.font = font
+        title.numberOfLines = 0; title.lineBreakMode = .byWordWrapping
+        title.adjustsFontForContentSizeCategory = true; title.textColor = UIColor(theme.settings.ink)
+        let platform = UIStackView(arrangedSubviews: [icon, title])
+        platform.alignment = .center; platform.spacing = 8
         platform.accessibilityIdentifier = "pan.accounts.platform"
         columns.columns[0].addArrangedSubview(platform)
         if row.busy {
@@ -82,12 +96,17 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
             spinner.accessibilityLabel = "正在操作账号"; spinner.startAnimating()
             columns.columns[1].addArrangedSubview(spinner)
         } else {
-            let label = UILabel(); label.text = row.account?.status.title ?? "不可用"
-            label.accessibilityIdentifier = "pan.accounts.status"
-            label.font = .preferredFont(forTextStyle: .subheadline); label.numberOfLines = 0
-            label.adjustsFontForContentSizeCategory = true
-            label.textColor = row.account?.status == .expired ? UIColor(theme.settingsDanger) : UIColor(theme.settings.muted)
-            columns.columns[1].addArrangedSubview(label)
+            let status: SettingsStatusBadge.Status
+            switch row.account?.status {
+            case .signedIn: status = .success
+            case .expired: status = .danger
+            case .unverified: status = .warning
+            case .signedOut, nil: status = .neutral
+            }
+            let badge = SettingsStatusBadge(status: status, text: row.account?.status.title ?? "不可用", theme: theme)
+            badge.accessibilityIdentifier = "pan.accounts.status"
+            columns.columns[1].alignment = traitCollection.preferredContentSizeCategory.isAccessibilityCategory ? .fill : .leading
+            columns.columns[1].addArrangedSubview(badge)
         }
         for action in row.actions {
             let title: String, suffix: String
@@ -102,16 +121,19 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
             configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
                 var attributes = $0
                 attributes.foregroundColor = foreground
-                attributes.font = .preferredFont(forTextStyle: .body)
+                attributes.font = font
                 return attributes
             }
+            configuration.titleAlignment = .center
             configuration.titleLineBreakMode = .byWordWrapping
             configuration.contentInsets = .init(top: 6, leading: 0, bottom: 6, trailing: 0)
             let button = UIButton(configuration: configuration, primaryAction: UIAction { [weak self] _ in
                 self?.perform(action, provider: row.id)
             })
-            button.titleLabel?.font = .preferredFont(forTextStyle: .body)
+            button.contentHorizontalAlignment = .center
+            button.titleLabel?.font = font
             button.titleLabel?.numberOfLines = 0
+            button.titleLabel?.textAlignment = .center
             button.titleLabel?.adjustsFontForContentSizeCategory = true
             button.accessibilityIdentifier = "pan.accounts.\(row.id.rawValue).\(suffix)"
             button.isEnabled = !row.busy
@@ -138,20 +160,23 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
     }
 }
 
-/// Three stable columns at narrow and wide phone sizes; paired operations stack
-/// within the last column instead of turning account status into a subtitle.
+/// Stable columns at ordinary sizes; accessibility sizes use full-width content
+/// areas so platform names and operations do not wrap one character at a time.
 @MainActor
 final class PanAccountColumns: UIStackView {
     let columns = (0..<3).map { _ in UIStackView() }
-    init() {
+    init(accessibilityLayout: Bool) {
         super.init(frame: .zero)
-        axis = .horizontal; alignment = .center; spacing = 8
+        axis = accessibilityLayout ? .vertical : .horizontal
+        alignment = accessibilityLayout ? .fill : .center; spacing = 8
         accessibilityIdentifier = "pan.accounts.columns"
         for column in columns { column.axis = .vertical; column.spacing = 0; addArrangedSubview(column) }
-        NSLayoutConstraint.activate([
-            columns[0].widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.38),
-            columns[1].widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.22),
-        ])
+        if !accessibilityLayout {
+            NSLayoutConstraint.activate([
+                columns[0].widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.38),
+                columns[1].widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.30),
+            ])
+        }
     }
     @available(*, unavailable)
     required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }

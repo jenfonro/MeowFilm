@@ -32,13 +32,16 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         let (window, previous) = try await mount(page)
         defer { unmount(window, previous: previous) }
         let form = try XCTUnwrap(page.children.compactMap { $0 as? FilmDataSourceFormController }.first)
-        let provider = try XCTUnwrap(form.sections.first?.rows.first?.content as? UISegmentedControl)
+        let provider = try XCTUnwrap(descendants(form.view).first {
+            $0.accessibilityIdentifier == "film.dataSources.provider"
+        } as? UISegmentedControl)
         provider.selectedSegmentIndex = 1; provider.sendActions(for: .valueChanged)
         await waitFor { settings.douban.saved != nil && !settings.douban.busy && form.canPresentPageAlert }
         try select(form, "film.douban.data.custom"); try select(form, "film.douban.image.custom")
         func field(_ suffix: String) throws -> UITextField {
-            try XCTUnwrap(form.sections.flatMap(\.rows).compactMap(\.content).flatMap(self.fields)
-                .first { $0.accessibilityIdentifier == "film.douban." + suffix })
+            try XCTUnwrap(descendants(form.view).first {
+                $0.accessibilityIdentifier == "film.douban." + suffix
+            } as? UITextField)
         }
         func edit(_ suffix: String, _ value: String) throws {
             let input = try field(suffix); input.text = value; input.sendActions(for: .editingChanged)
@@ -176,7 +179,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         XCTAssertEqual(context.snapshot.metadataSearch?.catField("results")?.catArray?.first?.catField("poster_path"),
             .string("/v1/tmdb/images/w500/tv.png"), "The original search response retains its distinct list-sized image identity")
         let poster = try XCTUnwrap(context.detail.item.posterURL)
-        XCTAssertEqual(poster.absoluteString, "/v1/tmdb/images/original/tv.png")
+        XCTAssertEqual(poster.absoluteString, "/v1/tmdb/images/w500/tv.png")
         XCTAssertNil(poster.scheme); XCTAssertNil(poster.baseURL)
         let cell = FilmPosterCell(frame: CGRect(x: 0, y: 0, width: 110, height: 224))
         cell.configure(item: context.detail.item, images: assembly.filmImages, theme: PageTheme(), label: tv.label)
@@ -196,7 +199,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
             $0.query == ["language": "zh-CN", "append_to_response": "credits,similar,images"]
         })
         assertNoRuntimeAuthentication(upstream.requests)
-        let imageReads = upstream.requests.filter { $0.path == "/images/t/p/original/tv.png" }
+        let imageReads = upstream.requests.filter { $0.path == "/images/t/p/w500/tv.png" }
         XCTAssertEqual(imageReads.count, 1)
         XCTAssertNil(imageReads.first?.headers["authorization"])
         XCTAssertEqual(imageReads.first?.query, [:])
@@ -370,8 +373,15 @@ final class MeowfilmTMDBHostTests: XCTestCase {
             "Cancelling the borrower must leave the admitted upstream producer alive")
         let next = try await resources.filmMetadata.detailRead(type: "tv", id: 7)
         XCTAssertTrue(next.producer === connection)
-        XCTAssertEqual(next.value.catField("overview"), .string("已得剧集详情"))
-        XCTAssertEqual(next.value.catField("poster_path"), .string("/v1/tmdb/images/original/tv.png"))
+        var expectedRaw = try XCTUnwrap(tmdbHostTV.filmObject)
+        expectedRaw["poster_path"] = .string("/v1/tmdb/images/original/tv.png")
+        var expectedDetail = expectedRaw
+        expectedDetail["businessId"] = .string("tmdb:tv:7")
+        expectedDetail["playbackTarget"] = .object([
+            "id": .string("tmdb:tv:7"), "kind": .string("tv"), "title": .string("受控剧集"),
+            "metadataProvider": .string("tmdb"), "metadataId": .string("7")
+        ])
+        XCTAssertEqual(next.value, .object(expectedDetail))
         let seed = try XCTUnwrap(next.cacheEntry)
         XCTAssertEqual(seed.catField("kind"), .string("metadata"))
         XCTAssertEqual(seed.catField("completeness"), .string("complete"))
@@ -379,7 +389,8 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         XCTAssertEqual(seed.catField("query"), .object([
             "language": .string("zh-CN"), "append_to_response": .string("credits,similar,images")
         ]))
-        XCTAssertEqual(seed.catField("value"), next.value)
+        XCTAssertEqual(seed.catField("value"), .object(expectedRaw),
+            "The data owner caches the complete upstream value before catalog identity projection")
         XCTAssertNotNil(seed.catField("fetchedAt"))
         XCTAssertNotNil(seed.catField("settings")?.catField("revision"))
         let cached = try await resources.filmMetadata.detailRead(type: "tv", id: 7)
@@ -494,12 +505,12 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         XCTAssertTrue(requests.allSatisfy { $0.headers["x-meow-session"] == nil && $0.headers["x-meow-request-id"] == nil })
     }
     private func field(_ page: FilmDataSourceFormController, _ suffix: String) throws -> UITextField {
-        try XCTUnwrap(page.sections.flatMap(\.rows).compactMap(\.content).flatMap(fields)
-            .first { $0.accessibilityIdentifier == "film.tmdb." + suffix })
+        try XCTUnwrap(descendants(page.view).first {
+            $0.accessibilityIdentifier == "film.tmdb." + suffix
+        } as? UITextField)
     }
-    private func fields(_ view: UIView) -> [UITextField] {
-        if let field = view as? UITextField { return [field] }
-        return view.subviews.flatMap(fields)
+    private func descendants(_ view: UIView) -> [UIView] {
+        view.subviews.flatMap { [$0] + descendants($0) }
     }
     private func edit(_ page: FilmDataSourceFormController, _ suffix: String, _ text: String) {
         do { let field = try field(page, suffix); field.text = text; field.sendActions(for: .editingChanged) }
@@ -515,6 +526,23 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         }
         XCTFail("Missing TMDB action \(id)")
         throw TMDBHostFailure.missingAction
+    }
+    private func select(_ page: FilmDataSourceFormController, _ id: String) throws {
+        let buttons = descendants(page.view).compactMap { $0 as? UIButton }
+        if let button = buttons.first(where: { $0.accessibilityIdentifier == id }) {
+            XCTAssertTrue(button.isEnabled)
+            button.sendActions(for: .touchUpInside)
+            return
+        }
+        let button = try XCTUnwrap(buttons.first {
+            $0.menu?.children.contains { ($0 as? UIAction)?.identifier.rawValue == id } == true
+        })
+        XCTAssertTrue(button.isEnabled)
+        let action = try XCTUnwrap(button.menu?.children.compactMap { $0 as? UIAction }.first {
+            $0.identifier.rawValue == id
+        })
+        let control = UIButton(type: .system)
+        control.addAction(action, for: .touchUpInside); control.sendActions(for: .touchUpInside)
     }
     private func save(_ page: FilmDataSourceFormController, model: FilmTMDBSettingsModel) async throws {
         try select(page, "film.tmdb.save")

@@ -765,8 +765,10 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         XCTAssertTrue(field.isHittable)
         let table = app.tables["management.list"]
         XCTAssertTrue(table.waitForExistence(timeout: 5))
-        XCTAssertEqual(table.frame.maxY, app.frame.maxY, accuracy: 1,
-                       "The actual source list surface reaches the full page bottom")
+        XCTAssertLessThan(table.frame.maxY, app.frame.maxY,
+                          "The actual source list must leave its complete bottom edge visible")
+        XCTAssertLessThanOrEqual(app.buttons["management.selectAll"].frame.maxY, table.frame.maxY - 4 + 1)
+        XCTAssertGreaterThanOrEqual(app.buttons["management.selectAll"].frame.minY, table.frame.minY)
         XCTAssertGreaterThanOrEqual(field.frame.minY, app.otherElements["page.header"].frame.maxY)
         assertSettingsDock()
         attach(screenshot)
