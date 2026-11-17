@@ -77,6 +77,8 @@ public struct NovelBook: Codable, Equatable, Sendable, Identifiable {
     public var intro: String
     public var latestChapterTitle: String
     private var business = NovelBusinessFields()
+    public var kind: String? { business.fields["kind"]?.string }
+    public var wordCount: String? { business.fields["wordCount"]?.string }
     public var variable: RuntimeValue {
         get { business.fields["variable"] ?? .null }
         set { business.fields["variable"] = newValue }
