@@ -14,23 +14,19 @@ public sealed class FilmSearchVirtualizingPanel : VirtualizingPanel, IScrollInfo
 {
     public static readonly DependencyProperty MinimumCardWidthProperty = DependencyProperty.Register(
         nameof(MinimumCardWidth), typeof(double), typeof(FilmSearchVirtualizingPanel),
-        new FrameworkPropertyMetadata(144d, FrameworkPropertyMetadataOptions.AffectsMeasure));
-    public static readonly DependencyProperty MaximumCardWidthProperty = DependencyProperty.Register(
-        nameof(MaximumCardWidth), typeof(double), typeof(FilmSearchVirtualizingPanel),
-        new FrameworkPropertyMetadata(176d, FrameworkPropertyMetadataOptions.AffectsMeasure));
+        new FrameworkPropertyMetadata(180d, FrameworkPropertyMetadataOptions.AffectsMeasure));
     public static readonly DependencyProperty CardGapProperty = DependencyProperty.Register(
         nameof(CardGap), typeof(double), typeof(FilmSearchVirtualizingPanel),
-        new FrameworkPropertyMetadata(24d, FrameworkPropertyMetadataOptions.AffectsMeasure));
+        new FrameworkPropertyMetadata(36d, FrameworkPropertyMetadataOptions.AffectsMeasure));
     public static readonly DependencyProperty RowGapProperty = DependencyProperty.Register(
         nameof(RowGap), typeof(double), typeof(FilmSearchVirtualizingPanel),
-        new FrameworkPropertyMetadata(24d, FrameworkPropertyMetadataOptions.AffectsMeasure));
+        new FrameworkPropertyMetadata(36d, FrameworkPropertyMetadataOptions.AffectsMeasure));
     public static readonly DependencyProperty FooterTemplateProperty = DependencyProperty.Register(
         nameof(FooterTemplate), typeof(DataTemplate), typeof(FilmSearchVirtualizingPanel),
         new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsMeasure,
             (value, args) => ((FilmSearchVirtualizingPanel)value).footer.ContentTemplate = (DataTemplate?)args.NewValue));
 
     public double MinimumCardWidth { get => (double)GetValue(MinimumCardWidthProperty); set => SetValue(MinimumCardWidthProperty, value); }
-    public double MaximumCardWidth { get => (double)GetValue(MaximumCardWidthProperty); set => SetValue(MaximumCardWidthProperty, value); }
     public double CardGap { get => (double)GetValue(CardGapProperty); set => SetValue(CardGapProperty, value); }
     public double RowGap { get => (double)GetValue(RowGapProperty); set => SetValue(RowGapProperty, value); }
     public DataTemplate? FooterTemplate { get => (DataTemplate?)GetValue(FooterTemplateProperty); set => SetValue(FooterTemplateProperty, value); }
@@ -73,6 +69,8 @@ public sealed class FilmSearchVirtualizingPanel : VirtualizingPanel, IScrollInfo
     protected override Size MeasureOverride(Size availableSize)
     {
         if (IsLoaded && !IsVisible) return DesiredSize;
+        // Accessing the items-host children connects WPF's container generator.
+        _ = InternalChildren;
         // ItemsPresenter requires an empty panel while applying its template.
         // Attach the non-item visual only when that step has completed.
         if (!footerAttached)
@@ -83,13 +81,13 @@ public sealed class FilmSearchVirtualizingPanel : VirtualizingPanel, IScrollInfo
         }
         var previous = (ExtentWidth, ExtentHeight, ViewportWidth, ViewportHeight, VerticalOffset);
         int count = ItemsControl.GetItemsOwner(this)?.Items.Count ?? 0;
-        double width = double.IsInfinity(availableSize.Width) ? MaximumCardWidth : availableSize.Width;
+        double width = double.IsInfinity(availableSize.Width) ? MinimumCardWidth : availableSize.Width;
         ViewportWidth = width;
         ViewportHeight = double.IsInfinity(availableSize.Height) ? 0 : availableSize.Height;
         footer.Measure(new Size(width, double.PositiveInfinity));
 
         var (nextColumns, nextPitch) = Shelf.MeasureCards(width, MinimumCardWidth, CardGap);
-        double nextWidth = Math.Max(0, Math.Min(MaximumCardWidth, nextPitch - CardGap));
+        double nextWidth = Math.Max(0, nextPitch - CardGap);
         double target = requestedOffset ?? VerticalOffset;
         bool explicitOffset = requestedOffset.HasValue;
         requestedOffset = null;
