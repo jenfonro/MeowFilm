@@ -172,7 +172,9 @@ private final class MusicSearchPlatformCell: UITableViewCell {
     static let reuseIdentifier = "MusicSearchPlatformCell"
     private let logo = UIImageView()
     private let title = UILabel()
-    private let enabledSwitch = UISwitch()
+    private let switchInput = SettingsSwitch()
+    private var enabledSwitch: UISwitch { switchInput.control }
+    private var logoSize: [NSLayoutConstraint] = []
     private var onChange: ((Bool) -> Void)?
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
@@ -189,19 +191,21 @@ private final class MusicSearchPlatformCell: UITableViewCell {
         title.adjustsFontForContentSizeCategory = true
         title.isAccessibilityElement = false
         title.setContentCompressionResistancePriority(.required, for: .vertical)
-        enabledSwitch.setContentHuggingPriority(.required, for: .horizontal)
-        enabledSwitch.setContentCompressionResistancePriority(.required, for: .horizontal)
+        switchInput.setContentHuggingPriority(.required, for: .horizontal)
+        switchInput.setContentCompressionResistancePriority(.required, for: .horizontal)
         enabledSwitch.addTarget(self, action: #selector(enabledChanged), for: .valueChanged)
-        let row = UIStackView(arrangedSubviews: [logo, title, enabledSwitch])
+        let row = UIStackView(arrangedSubviews: [logo, title, switchInput])
         row.axis = .horizontal
         row.alignment = .center
         row.spacing = 12
         row.semanticContentAttribute = .forceLeftToRight
         row.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(row)
-        NSLayoutConstraint.activate([
-            logo.widthAnchor.constraint(equalToConstant: 28),
-            logo.heightAnchor.constraint(equalToConstant: 28),
+        logoSize = [
+            logo.widthAnchor.constraint(equalToConstant: 0),
+            logo.heightAnchor.constraint(equalToConstant: 0)
+        ]
+        NSLayoutConstraint.activate(logoSize + [
             row.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
             row.trailingAnchor.constraint(equalTo: contentView.trailingAnchor,
                                           constant: -SettingsVisualMetrics.rowHorizontalPadding),
@@ -209,6 +213,9 @@ private final class MusicSearchPlatformCell: UITableViewCell {
             row.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -SettingsVisualMetrics.rowVerticalPadding),
             contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: SettingsVisualMetrics.rowHeight)
         ])
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (cell: MusicSearchPlatformCell, _: UITraitCollection) in
+            cell.updateMetrics(traits: cell.traitCollection)
+        }
     }
 
     @available(*, unavailable)
@@ -223,13 +230,18 @@ private final class MusicSearchPlatformCell: UITableViewCell {
         }
         logo.tintColor = UIColor(theme.settings.muted)
         title.text = platform.title
-        title.font = .preferredFont(forTextStyle: .body, compatibleWith: traits)
+        updateMetrics(traits: traits)
         title.textColor = UIColor(theme.settings.ink)
         enabledSwitch.onTintColor = UIColor(theme.settings.accent)
         enabledSwitch.isOn = enabled
         enabledSwitch.accessibilityLabel = platform.title
         enabledSwitch.accessibilityIdentifier = identifier
         self.onChange = onChange
+    }
+
+    private func updateMetrics(traits: UITraitCollection) {
+        title.font = .preferredFont(forTextStyle: .body, compatibleWith: traits)
+        for constraint in logoSize { constraint.constant = title.font.lineHeight }
     }
 
     @objc private func enabledChanged() { onChange?(enabledSwitch.isOn) }

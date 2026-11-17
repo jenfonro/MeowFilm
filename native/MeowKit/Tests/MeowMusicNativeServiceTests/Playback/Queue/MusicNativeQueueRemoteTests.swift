@@ -29,7 +29,7 @@ final class MusicNativeQueueRemoteTests: XCTestCase {
     }
 
     func testCancelledOpenReleasesNonCooperativeLateAccountLeaseWithoutQueueMutation() async throws {
-        let owner = MusicAccountQueueOpeningFixture(), store = NativeMusicMemoryDocument()
+        let owner = MusicAccountQueueOpeningFixture(), store = NativeMusicTestLibrary()
         let service = try await NativeMusicFixture.service(store, accounts: owner)
         let task = Task { try await service.openAccountQueue(platform: .qq, kind: .collection(id: "favorites"), title: "Favorites") }
         await owner.gate.started()
@@ -42,7 +42,7 @@ final class MusicNativeQueueRemoteTests: XCTestCase {
     }
 
     func testCompleteSnapshotBeyondHandleBudgetKeepsDuplicateOccurrencesStartContextAndHistory() async throws {
-        let store = NativeMusicMemoryDocument(), scripts = NativeMusicScriptFixture()
+        let store = NativeMusicTestLibrary(), scripts = NativeMusicScriptFixture()
         let service = try await NativeMusicFixture.service(store, scripts: scripts)
         let old = try await MusicAccountQueueFixture.seed(service)
         let repeated = NativeMusicFixture.track("Duplicate")
@@ -88,7 +88,7 @@ final class MusicNativeQueueRemoteTests: XCTestCase {
     }
 
     func testLaterPageFailureAndCASFailureLeaveOriginalQueueBytesAndHistoryUntouched() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let old = try await MusicAccountQueueFixture.seed(service)
         let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("First")]],
             pages: ["p1": .init(items: [NativeMusicFixture.track("Second")])], rootCursor: "p1")
@@ -114,7 +114,7 @@ final class MusicNativeQueueRemoteTests: XCTestCase {
 
     func testRevokedAccountOrPageIntentRejectsNonCooperativeLatePageWithoutWriting() async throws {
         for revokeAccount in [false, true] {
-            let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+            let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
             let old = try await MusicAccountQueueFixture.seed(service)
             let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("First")]],
                 pages: ["p1": .init(items: [NativeMusicFixture.track("Second")])], rootCursor: "p1")
@@ -137,7 +137,7 @@ final class MusicNativeQueueRemoteTests: XCTestCase {
     }
 
     func testOutOfRangeOccurrenceAndCursorCycleCannotProduceAPartialQueue() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let old = try await MusicAccountQueueFixture.seed(service)
         let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("First")]])
         let source = MusicAccountQueueFixture.source(loader)

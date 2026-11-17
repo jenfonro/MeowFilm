@@ -2,12 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { Readable } from 'node:stream';
+import { stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { NativeJsonProgram } from '@meowfilm/script-host/native-json';
 import { checkSource, clone, codeOf, fail, object, requireValue, sourceIdentity,
   sourceRevision, text } from './identity.js';
 
 const require = createRequire(import.meta.url);
-const itemIdentity = item => JSON.stringify([item.siteKey, item.detailId]);
+const itemIdentity = item => stringifyJSONValue([item.siteKey, item.detailId]);
 const metadataIdentity = item => `${item.tmdbType}:${item.tmdbId}`;
 const metadataSearchRequest = query => ({ kind: 'metadata', provider: 'tmdb',
   path: '/3/search/multi', query: { query, page: 1 }, imageSize: 'w500' });
@@ -31,6 +32,7 @@ function scalarText(value) {
   return true;
 }
 function wireValue(value) {
+  if (isRawJSON(value)) return clone(value);
   if (typeof value === 'string') return scalarText(value) ? value
     : Array.from({ length: value.length }, (_, index) => value.charCodeAt(index));
   if (Array.isArray(value)) return value.map(wireValue);
@@ -211,7 +213,7 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
   }
   async function metadataRead(session, epoch, request) {
     admitted(session, epoch);
-    const key = JSON.stringify(request);
+    const key = stringifyJSONValue(request);
     let read = session.metadataReads.get(key);
     if (!read) {
       const value = await data.metadata(request.provider, request.path, request.query,
@@ -460,7 +462,7 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
       if (closed || session.released) { body.push(null); return; }
       if (!demand || !initial && session.sequence <= after) return;
       initial = false; demand = false; after = session.sequence;
-      body.push(Buffer.from(`id: ${after}\nevent: snapshot\ndata: ${JSON.stringify(snapshot(session))}\n\n`));
+      body.push(Buffer.from(`id: ${after}\nevent: snapshot\ndata: ${stringifyJSONValue(snapshot(session))}\n\n`));
     };
     const body = new Readable({ highWaterMark: 16 * 1024, read() { demand = true; changed(); },
       destroy(error, done) { disposed = true; session.listeners.delete(changed); done(error); } });

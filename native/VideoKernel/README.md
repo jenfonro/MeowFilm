@@ -10,6 +10,10 @@
 
 候选的 `validateForCommit()` 为同步健康性门禁。媒体实例采用 8 秒最大前向缓冲；取消尚未确认的 seek 后保留确认位置，只有之后明确恢复才重建失效的 feeding。PiP 始终绑定当前真实 display layer，核心格式变化替换 layer 时由产品 owner 重新绑定。
 
+`VideoSession.chapters` 与 `VideoStreamInfo.chapters` 输出真实容器的 `[VideoChapter]`（`title`、`start`、`end`），时间使用和 seek 相同的零基坐标。关闭后列表清空；没有有效章节时为空。此包不识别片头/片尾，不补固定时长或自动跳过。
+
+KS 倍率沿原生音频 time-pitch、无音轨连续时钟及 sample-buffer timebase 同步；高倍率只输出每次显示 tick 最新的到期帧，避免播放速度被屏幕刷新率限制。`VideoRateChapterTests` 使用 24 秒合成输入测量媒体时间与单调墙钟之比，分别覆盖有/无音轨 4/6/8X、音频提前结束后的连续时钟、暂停/恢复、真实章节及 seek；测试定义和编译成功均不代表已经执行实际播放验收。
+
 在 Mac 仓库根目录按所需目标准备：
 
 ```sh

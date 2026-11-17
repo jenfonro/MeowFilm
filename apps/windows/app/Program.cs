@@ -1,6 +1,7 @@
 using MeowFilm.AppHost;
 using MeowFilm.App;
 using MeowFilm.Capabilities;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
@@ -30,6 +31,7 @@ internal static class Program
         SearchResultsPage? searchPage = null;
         AppMediaWindowAttachment? pendingMediaAttachment = null;
         CacheDocumentStore? cacheStore = null;
+        MusicLibraryDatabase? musicLibraryStore = null;
         AppLauncher.Run(new(AppIdentity.RuntimeId, AppIdentity.ScriptModules,
             AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces),
             (runtime, storage, capabilities) =>
@@ -46,7 +48,8 @@ internal static class Program
                     return new LocalDocumentStore(cacheRoot, AppIdentity.CacheNamespaces,
                         protectedNamespaces: AppIdentity.CacheProtectedNamespaces);
                 });
-                capabilities.Add(new MusicCapability(runtime, storage, musicPlayback,
+                musicLibraryStore = new(Path.Combine(AppDataPaths.Current.Documents, "music-library"));
+                capabilities.Add(new MusicCapability(runtime, storage, musicLibraryStore, musicPlayback,
                     Path.Combine(cacheRoot, "music-audio"), cacheStore));
                 pendingRules = new FilmRuleService(runtime, storage);
                 pendingSources = new FilmSourceService(runtime, storage);
@@ -87,28 +90,39 @@ internal static class Program
                 {
                     try
                     {
-                        if (cacheStore is not null)
+                        if (musicLibraryStore is not null)
                         {
-                            await cacheStore.DisposeAsync();
-                            cacheStore = null;
+                            await musicLibraryStore.DisposeAsync();
+                            musicLibraryStore = null;
                         }
                     }
                     finally
                     {
                         try
                         {
-                            if (musicPlayback is not null)
+                            if (cacheStore is not null)
                             {
-                                await musicPlayback.DisposeAsync();
-                                musicPlayback = null;
+                                await cacheStore.DisposeAsync();
+                                cacheStore = null;
                             }
                         }
                         finally
                         {
-                            if (filmPlayback is not null)
+                            try
                             {
-                                await filmPlayback.DisposeAsync();
-                                filmPlayback = null;
+                                if (musicPlayback is not null)
+                                {
+                                    await musicPlayback.DisposeAsync();
+                                    musicPlayback = null;
+                                }
+                            }
+                            finally
+                            {
+                                if (filmPlayback is not null)
+                                {
+                                    await filmPlayback.DisposeAsync();
+                                    filmPlayback = null;
+                                }
                             }
                         }
                     }

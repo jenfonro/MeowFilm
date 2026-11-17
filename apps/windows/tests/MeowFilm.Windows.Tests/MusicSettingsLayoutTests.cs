@@ -301,8 +301,8 @@ public static partial class MusicUiTests
             held.Release(); await shutdown;
             Equal("wy", f.Module.CatalogSourcePlatform);
             Equal(1, f.Calls.Count("music.catalogSource.settings.save"));
-            var settings = await f.Store.ReadAsync(MeowFilm.Capabilities.Library.MusicLibraryOwner.DocumentNamespace);
-            True(settings.Data is not null, "the confirmed source receipt is durable");
+            var settings = await MusicTestStores.For(f.Store).ReadAsync("local");
+            True(settings.Revision.Generation > 0, "the confirmed source receipt is durable");
             await f.Module.CancelShutdownPreparationAsync();
             view.Visibility = Visibility.Visible;
             await Until(() => f.Module.CanEditCatalogSource && f.Module.CatalogSourcePlatform == "kg");

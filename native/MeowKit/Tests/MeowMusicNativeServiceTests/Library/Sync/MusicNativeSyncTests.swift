@@ -236,7 +236,7 @@ import MeowMusicFeature
         let mergedSong = try MusicModel.mergeSources(txSong, adding: wySong["sources"].array)
         var document = try MusicDocument(nil, runID: "first-binding")
         document.library["library"]["songs"][mergedSong["songId"].string] = mergedSong
-        let store = NativeMusicMemoryDocument(try document.encode(changed: ["library"]))
+        let store = NativeMusicTestLibrary(try document.encode(changed: ["library"]))
         let tx = NativeSyncPeer(platform: .qq, rows: [
             NativeSyncFixture.collection("600", name: "Favorites", kind: .favorites, members: [txOnly])
         ]), wy = NativeSyncPeer(rows: [
@@ -339,8 +339,7 @@ import MeowMusicFeature
         XCTAssertEqual(calls.suffix(4).map(\.action), [.remove, .delete, .add, .add]) // WY likes: one per request.
         XCTAssertEqual(calls.filter { $0.before?.kind == .favorites }.map { $0.members.count }, [1, 1])
         let saved = try NativeSyncFixture.document(store)
-        XCTAssertEqual(saved.envelope["version"].int, 1)
-        XCTAssertEqual(saved.library["library"]["songs"].fields.count, 2)
+        XCTAssertEqual((try saved.fixtureSongs()).fields.count, 2)
         XCTAssertFalse(saved.library["library"]["collections"].array.first { $0["id"].string == created.id }!["intents"].fields.contains { $0.1["pending"].bool })
         XCTAssertFalse(saved.library.json.contains("https://"))
         await service.close()

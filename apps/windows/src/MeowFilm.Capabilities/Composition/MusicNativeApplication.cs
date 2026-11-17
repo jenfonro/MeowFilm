@@ -68,7 +68,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
     internal Task ArtworkLoadCompletedAsync(string address, bool succeeded) =>
         library.ArtworkLoadCompletedAsync(address, succeeded);
     internal JsonElement? SongSnapshot(string id) => library.SongSnapshot(id);
-    internal event Action? SongMetadataChanged
+    internal event Action<IReadOnlySet<string>>? SongMetadataChanged
     {
         add => library.SongMetadataChanged += value;
         remove => library.SongMetadataChanged -= value;
@@ -81,25 +81,26 @@ public sealed partial class MusicNativeApplication : IMusicApplication
     private bool stopping, closed, accountReceiptUnknown;
     private long accountReceiptEpoch;
 
-    public MusicNativeApplication(IDocumentStore store, IRuntimeClient scriptRuntime)
-        : this(store, scriptRuntime, null, null) { }
+    public MusicNativeApplication(IDocumentStore store, IMusicLibraryStore libraryStore, IRuntimeClient scriptRuntime)
+        : this(store, libraryStore, scriptRuntime, null, null) { }
 
-    public MusicNativeApplication(IDocumentStore store, IRuntimeClient scriptRuntime,
+    public MusicNativeApplication(IDocumentStore store, IMusicLibraryStore libraryStore, IRuntimeClient scriptRuntime,
         CacheDocumentStore cacheStore)
-        : this(store, scriptRuntime, null, null, cacheStore: cacheStore) { }
+        : this(store, libraryStore, scriptRuntime, null, null, cacheStore: cacheStore) { }
 
     // Native lifecycle tests substitute ports, not platform HTTP implementations.
-    internal MusicNativeApplication(IDocumentStore store, IRuntimeClient scriptRuntime,
+    internal MusicNativeApplication(IDocumentStore store, IMusicLibraryStore libraryStore, IRuntimeClient scriptRuntime,
         Func<IMusicPlatformSessionSource, IMusicFeedbackProtocol>? feedbackFactory,
         Func<IMusicPlatformSessionSource, IMusicSearchDiscovery>? discoveryFactory,
         TimeProvider? searchClock = null, CacheDocumentStore? cacheStore = null)
     {
         ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(libraryStore);
         ArgumentNullException.ThrowIfNull(scriptRuntime);
         this.cacheStore = cacheStore ?? new CacheDocumentStore();
         ownsCacheStore = cacheStore is null;
         platform = new(scriptRuntime);
-        library = new(store, cacheStore: this.cacheStore);
+        library = new(libraryStore, cacheStore: this.cacheStore);
         accounts = new(store, new MusicAccountProtocol(platform), detailsCacheStore: this.cacheStore);
         vipPage = new(accounts, new MusicVipPageProtocol(platform));
         officialAudio = new(platform);

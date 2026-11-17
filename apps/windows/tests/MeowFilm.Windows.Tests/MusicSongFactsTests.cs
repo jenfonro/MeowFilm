@@ -73,7 +73,7 @@ public static class MusicSongFactsTests
         internal Fixture()
         {
             CacheStore = new(Store);
-            Library = new(Store);
+            Library = new(MusicTestStores.For(Store));
             Facts = new(Library, new(CacheStore), async (request, token) =>
             {
                 Searches++;
@@ -293,15 +293,15 @@ public static class MusicSongFactsTests
         await f.Favorite(original); await f.Match(original, "tx"); await f.Facts.PersistAsync(default);
         await f.CacheStore.DrainAsync();
         await using var restartedCache = new CacheDocumentStore(f.Store);
-        await using var restartedLibrary = new MusicLibraryOwner(f.Store);
+        await using var restartedLibrary = new MusicLibraryOwner(MusicTestStores.For(f.Store));
         var restartedFacts = new MusicSongMatcher(restartedLibrary, new(restartedCache), (_, _) =>
             throw new InvalidOperationException("first library read cannot search"), f.Clock);
         await restartedFacts.InitializeAsync(default);
-        string before = Convert.ToHexString(f.Store.Data[MusicLibraryOwner.DocumentNamespace]);
-        int writes = f.Store.Writes;
+        string before = Convert.ToHexString(MusicTestStores.For(f.Store).Data!);
+        int writes = MusicTestStores.For(f.Store).Writes;
         var first = await Ok(restartedLibrary, "music.library.detail", new { id = "favorites" });
-        Check(Has(first.GetProperty("songs")[0], "tx") && f.Store.Writes == writes &&
-            Convert.ToHexString(f.Store.Data[MusicLibraryOwner.DocumentNamespace]) == before,
+        Check(Has(first.GetProperty("songs")[0], "tx") && MusicTestStores.For(f.Store).Writes == writes &&
+            Convert.ToHexString(MusicTestStores.For(f.Store).Data!) == before,
             "the first read must query saved facts without a prior complete command or library mutation");
     }
     private static async Task LibraryAcquisition()
@@ -527,7 +527,7 @@ public static class MusicSongFactsTests
             }))
             : throw new InvalidOperationException(call.Method);
         int Searches() => runtime.Requests.Count(call => call.Operation == "search");
-        await using var app = new MusicNativeApplication(store, runtime, null, null, clock);
+        await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime, null, null, clock);
         await Ok(app, "music.accounts.import", new { platform = "tx", cookie = "musicid=123; musickey=synthetic; encrypt_uin=FixtureEUIN" });
         var original = Song(title: "Same Song", duration: 100);
         var first = await Ok(app, "music.songs.complete", new { song = original, platforms = new[] { "tx" } });

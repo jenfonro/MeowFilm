@@ -196,27 +196,28 @@ final class MusicSourceSessionOwnershipTests: XCTestCase {
 
 /// A synchronous document port lets the test close the real shared lifetime
 /// inside a selected owner check, with no sleep or production scheduling hook.
-private final class OwnershipClosingDocument: MusicNativeDocumentStoring, @unchecked Sendable {
-    let base: NativeMusicMemoryDocument
+private final class OwnershipClosingDocument: NativeMusicTestLibraryWrapping, @unchecked Sendable {
+    let base: NativeMusicTestLibrary
+    var backingLibrary: NativeMusicTestLibrary { base }
     private let lock = NSLock()
     private var reads = 0
     private var closeOnRead: Int?
     private var lifetime: MusicNativeCandidateDiscoveryLifetime?
     private var closures = 0
-    init(_ base: NativeMusicMemoryDocument) { self.base = base }
+    init(_ base: NativeMusicTestLibrary) { self.base = base }
     func arm(_ lifetime: MusicNativeCandidateDiscoveryLifetime, onRead: Int?) {
         lock.lock(); defer { lock.unlock() }
         reads = 0; closures = 0; self.lifetime = lifetime; closeOnRead = onRead
     }
-    func read() throws -> Data? {
+    func readSnapshot() throws -> MusicNativeLibrarySnapshot {
         lock.lock()
         reads += 1
         if reads == closeOnRead { lifetime?.close(); closures += 1 }
         lock.unlock()
-        return try base.read()
+        return try base.readSnapshot()
     }
-    func compareAndSwap(expected: Data?, replacement: Data) throws {
-        try base.compareAndSwap(expected: expected, replacement: replacement)
+    func withTransaction<T>(commit: (_ action: () throws -> Void) throws -> Void, _ body: (any MusicNativeLibraryWriting) throws -> T) throws -> T {
+        return try base.withTransaction(commit: commit, body)
     }
     func closureCount() -> Int { lock.lock(); defer { lock.unlock() }; return closures }
 }
@@ -234,7 +235,7 @@ extension MusicSourceSessionOwnershipTests {
     private func existingSessionClosure(onRead: Int?) async throws {
         let document = OwnershipClosingDocument(try MusicNativeCandidateDiscoveryFixture.store())
         let scripts = NativeMusicScriptFixture()
-        let service = NativeMusicService(document: document, scripts: scripts, platformClient: try NativeMusicFixture.client(),
+        let service = NativeMusicService(database: document, scripts: scripts, platformClient: try NativeMusicFixture.client(),
             clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let initial = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)

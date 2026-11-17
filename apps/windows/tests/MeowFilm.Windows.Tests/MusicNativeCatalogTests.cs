@@ -148,7 +148,7 @@ public static partial class MusicNativeCatalogTests
             return Task.FromResult(request is MusicPlaylistRequest p
                 ? Pages?.Invoke(method == "playlist.complete" ? p with { Limit = Total } : p) ??
                     Page(method == "playlist.complete" ? p with { Limit = Total } : p, Total)
-                : E(new { marker = method, items = new[] { "opaque" }, continuation = new { provider = new { cursor = 7 } } }));
+                : E(new { marker = method, items = Array.Empty<object>(), continuation = new { provider = new { cursor = 7 } } }));
         }
         public Task<JsonElement> SearchAsync(MusicSearchRequest r, CancellationToken t = default) => Run("search", r, t);
         public Task<JsonElement> SongAsync(MusicSongRequest r, CancellationToken t = default) => Run("song", r, t);
@@ -169,39 +169,10 @@ public static partial class MusicNativeCatalogTests
         public void Invalidate(string? platform = null) { lock (gate) Invalidations.Add(platform); }
         public void Dispose() => Disposed = true;
     }
-    private sealed class Store : IDocumentStore
+    private sealed class Store : MusicRecordTestStore
     {
-        private readonly object gate = new();
-        internal byte[]? Bytes;
-        internal int Writes, Failure;
-        internal bool Disposed;
-        internal TaskCompletionSource? Entered, Release;
         internal bool WriteWasUncancellable;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken t = default)
-        {
-            Check(ns == MusicLibraryOwner.DocumentNamespace); t.ThrowIfCancellationRequested();
-            lock (gate) return Task.FromResult(new DocumentSnapshot(Bytes?.ToArray(),
-                Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes)));
-        }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes,
-            DocumentFingerprint expected, CancellationToken t = default)
-        {
-            Check(ns == MusicLibraryOwner.DocumentNamespace); WriteWasUncancellable = !t.CanBeCanceled;
-            if (Release is { } release) { Entered!.TrySetResult(); await release.Task; }
-            lock (gate)
-            {
-                var current = Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes);
-                if (current != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-                Writes++;
-                int failure = Failure; Failure = 0;
-                if (failure == 1) throw new DocumentStoreException(DocumentStoreError.Storage);
-                Bytes = bytes.ToArray();
-                if (failure == 2) throw new DocumentStoreException(DocumentStoreError.Storage);
-                return DocumentFingerprint.FromBytes(Bytes);
-            }
-        }
-        internal void Block() { Entered = Signal(); Release = Signal(); }
-        public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
+        internal Store() { BeforeCommit = (_, token) => { WriteWasUncancellable = !token.CanBeCanceled; return Task.CompletedTask; }; }
     }
     private sealed class Clock : TimeProvider
     {
@@ -250,7 +221,7 @@ public static partial class MusicNativeCatalogTests
         internal readonly MusicNativeCatalogOwner Owner;
         internal readonly List<TaskCompletionSource> Releases = [];
         internal bool ExpectedCloseTimeout;
-        internal Fixture() { Library = new(Store); Owner = new(Platform, Library, Clock); }
+        internal Fixture() { Library = new(MusicTestStores.For(Store)); Owner = new(Platform, Library, Clock); }
         internal TaskCompletionSource Hold() { var signal = Signal(); Releases.Add(signal); return signal; }
         internal Task<JsonElement> Run(string method, object? input = null, CancellationToken token = default) =>
             Owner.ExecuteAsync("music.catalog." + method, input, token);
@@ -345,7 +316,7 @@ public static partial class MusicNativeCatalogTests
                 card.Cover == "https://images.example.test/actual.png" && Guid.TryParseExact(card.Song.Id, "D", out _),
                 "Unused branches cannot reject or alter the consumed song");
             songId ??= card.Song!.Id;
-            var songs = (await f.Library.ReadLibrarySyncAsync()).Library.GetProperty("songs");
+            var songs = MusicSongFixture.Element(MusicTestStores.For(f.Store).Root["songs"]!);
             Check(card.Song!.Id == songId && songs.EnumerateObject().Count() == 1 &&
                 songs.GetProperty(songId).GetProperty("songId").GetString() == songId,
                 "Unused branches cannot create another recording or replace its permanent UUID");
@@ -356,6 +327,41 @@ public static partial class MusicNativeCatalogTests
                 JsonElement.DeepEquals(queue.GetProperty("entries"), before.GetProperty("entries")));
         }
         Check(f.Platform.Calls.Length == variants.Length, "Canonical consumption cannot request supplemental confirmation");
+        var visible = MusicSongFixture.Online("wy", "direct-song", "Direct card");
+        visible["available"] = false; visible["requiresAccount"] = true; visible["display"] = true;
+        visible["errorCode"] = "AUTH_REQUIRED"; visible["key"] = "direct-key";
+        visible["playbackSource"] = new JsonObject { ["type"] = "playlist", ["id"] = "origin" };
+        var hidden = new JsonObject { ["display"] = false, ["count"] = "bad", ["song"] = new JsonObject { ["sources"] = false } };
+        var preview = new JsonArray();
+        for (int i = 0; i < 3; i++) preview.Add(new JsonObject { ["title"] = "Preview " + i });
+        preview.Add(new JsonObject { ["song"] = new JsonObject { ["sources"] = false } });
+        var chart = new JsonObject { ["id"] = "chart", ["name"] = "Chart", ["kind"] = "playlist", ["preview"] = preview };
+        var page = new JsonObject { ["items"] = new JsonArray(visible, hidden, chart,
+            new JsonObject { ["song"] = new JsonObject { ["sources"] = false } }) };
+        f.Platform.Handler = _ => Task.FromResult(J(page));
+        var adopted = Ok(await f.Run("home", new { platform = "wy" }));
+        var cards = MusicCatalogDto.Read(adopted, "wy", "home", "").Single().Items;
+        Check(cards.Count == 2);
+        var direct = cards.Single(card => card.Song is not null);
+        Check(!direct.Available && direct.RequiresAccount && direct.Display && direct.ErrorCode == "AUTH_REQUIRED" &&
+            direct.StableKey == "direct-key" && direct.PlaybackSource!.Value.GetProperty("id").GetString() == "origin");
+        Check(cards.Single(card => card.Id == "chart").PreviewSongs.Count == 3);
+        foreach (var malformed in new[] { new JsonObject(), new JsonObject { ["items"] = false },
+            new JsonObject { ["items"] = new JsonArray(new JsonObject { ["song"] = new JsonObject { ["sources"] = false } }) } })
+        {
+            f.Platform.Handler = _ => Task.FromResult(J(malformed));
+            Error(await f.Run("playlist", new { platform = "wy", id = "42" }), "INVALID_RESPONSE");
+        }
+        foreach (var malformed in new[] { new JsonObject(), new JsonObject { ["items"] = false },
+            new JsonObject { ["items"] = new JsonArray(new JsonObject { ["count"] = "bad" }) } })
+        {
+            bool failed = false;
+            try { _ = MusicCatalogDto.Read(J(malformed), "wy", "home", ""); }
+            catch (MusicOperationException error) when (error.Code == "INVALID_RESPONSE") { failed = true; }
+            Check(failed, "Missing or wholly unusable content cannot become a successful empty page");
+        }
+        Check(MusicCatalogDto.Read(E(new { items = Array.Empty<object>() }), "wy", "playlist", "").Single().Items.Count == 0);
+
     }
     private static async Task PersonalRoute(string route)
     {
@@ -460,11 +466,11 @@ public static partial class MusicNativeCatalogTests
         var duplicate = Ok(await f.Run("playlist.save", new { platform = "wy", id = "42", name = "Saved reference", count = 235 }));
         Check(S(duplicate.GetProperty("collection"), "id") == S(saved.GetProperty("collection"), "id") && f.Store.Writes == 1);
         var snapshot = await f.Library.ReadLibrarySyncAsync();
-        Check(snapshot.Library.GetProperty("songs").EnumerateObject().Count() == 0 &&
+        Check(MusicTestStores.For(f.Store).SongIds().Count == 0 &&
             snapshot.Library.GetProperty("collections").GetArrayLength() == 1 &&
             snapshot.Library.GetProperty("networkPlaylists").GetArrayLength() == 1);
         Error(await f.Library.ExecuteAsync("music.library.detail", new { id = S(saved.GetProperty("collection"), "id") }), "READ_ONLY");
-        await using var reader = new MusicLibraryOwner(f.Store);
+        await using var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store));
         Check(N(Ok(await reader.ExecuteAsync("music.library.list")), "total") == 2);
         Check(S(Ok(await reader.ExecuteAsync("music.library.network.get", new { platform = "wy", id = "42" }))
             .GetProperty("collection"), "remoteId") == "42");
@@ -522,7 +528,7 @@ public static partial class MusicNativeCatalogTests
             S(queue.GetProperty("source"), "title") == title);
         Ok(await f.Library.ExecuteAsync("music.queue.replace",
             new { songs = new[] { Song("wy", 99) }, index = 0, context = new { searchKeyword = keyword } }));
-        await using var reader = new MusicLibraryOwner(f.Store);
+        await using var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store));
         var restored = Ok(await reader.ExecuteAsync("music.queue.get"));
         Check(S(restored.GetProperty("current").GetProperty("context"), "searchKeyword") == keyword);
         var archives = Ok(await reader.ExecuteAsync("music.history.list", new { kind = "playlists" })).GetProperty("items");
@@ -716,7 +722,7 @@ public static partial class MusicNativeCatalogTests
     private static async Task RequestSlots()
     {
         await using var f = new Fixture(); var release = f.Hold();
-        f.Platform.Handler = async c => { await release.Task.WaitAsync(c.Token); return E(new { marker = "home" }); };
+        f.Platform.Handler = async c => { await release.Task.WaitAsync(c.Token); return E(new { marker = "home", items = Array.Empty<object>() }); };
         var tasks = Enumerable.Range(0, 40).Select(_ => f.Run("home", new { platform = "wy" })).ToArray();
         await Until(() => f.Platform.Calls.Length == 40);
         release.TrySetResult();
@@ -727,7 +733,7 @@ public static partial class MusicNativeCatalogTests
     {
         await using var f = new Fixture(); f.Platform.Total = 1;
         var a = await f.Prepare(); var b = await f.Prepare();
-        f.Store.Block();
+        f.Store.HoldCommit();
         var writing = f.Run("playlist.commit", new { token = S(a, "token"), action = "play", expectedVersion = 0 });
         using var cancel = new CancellationTokenSource();
         Task<JsonElement>? queued = null;
@@ -797,7 +803,7 @@ public static partial class MusicNativeCatalogTests
     private static async Task InvalidateCommit()
     {
         await using var f = new Fixture(); f.Platform.Total = 1;
-        var stage = await f.Prepare(); f.Store.Block();
+        var stage = await f.Prepare(); f.Store.HoldCommit();
         var other = f.Library.CreatePlaylistAsync("Other user action", [Song("wy", 99)]);
         await f.Store.Entered!.Task;
         var queued = f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 });
@@ -806,7 +812,7 @@ public static partial class MusicNativeCatalogTests
     }
     private static async Task CancelCommit()
     {
-        await using var f = new Fixture(); f.Platform.Total = 1; var stage = await f.Prepare(); f.Store.Block();
+        await using var f = new Fixture(); f.Platform.Total = 1; var stage = await f.Prepare(); f.Store.HoldCommit();
         using var cancel = new CancellationTokenSource();
         var writing = f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }, cancel.Token);
         await f.Store.Entered!.Task; cancel.Cancel(); f.Store.Release!.TrySetResult();
@@ -834,8 +840,8 @@ public static partial class MusicNativeCatalogTests
             await using var f = new Fixture(); f.Platform.Total = 1;
             Ok(await f.Library.ExecuteAsync("music.library.list")); // Capture this owner's real baseline.
             string? token = afterStage ? S(await f.Prepare(), "token") : null;
-            f.Store.Bytes = Encoding.UTF8.GetBytes("{\"version\":1,\"entries\":[]}");
-            var external = f.Store.Bytes.ToArray();
+            f.Store.SetArea("playback-settings", new JsonObject { ["schema"] = 1, ["mode"] = 1 });
+            var external = (f.Store.Bytes ?? throw new InvalidOperationException("Expected committed SQLite state")).ToArray();
             var result = afterStage
                 ? await f.Run("playlist.commit", new { token, action = "play", expectedVersion = 0 })
                 : await f.Run("playlist.prepare", new { platform = "wy", id = "42" });
@@ -866,7 +872,7 @@ public static partial class MusicNativeCatalogTests
     }
     private static async Task CloseCommit()
     {
-        await using var f = new Fixture(); f.Platform.Total = 1; var stage = await f.Prepare(); f.Store.Block();
+        await using var f = new Fixture(); f.Platform.Total = 1; var stage = await f.Prepare(); f.Store.HoldCommit();
         var writing = f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 });
         await f.Store.Entered!.Task;
         var closing = f.Owner.DisposeAsync().AsTask(); await Until(() => f.Clock.HasTimer(TimeSpan.FromSeconds(30)));
@@ -893,7 +899,7 @@ public static partial class MusicNativeCatalogTests
         using var json = JsonDocument.Parse("{\"platform\":\"wy\",\"keyword\":\"" + new string('猫', 30000) + "\"}");
         Ok(await f.Run("search", json.RootElement));
         Check(((MusicSearchRequest)f.Platform.Calls.Single().Request!).Keyword.Length == 30000);
-        f.Platform.Handler = _ => Task.FromResult(E(new { data = new string('x', 512 * 1024) }));
+        f.Platform.Handler = _ => Task.FromResult(E(new { items = Array.Empty<object>(), data = new string('x', 512 * 1024) }));
         Check(S(Ok(await f.Run("home", new { platform = "wy" })), "data").Length == 512 * 1024);
         f.Platform.Handler = _ => Task.FromResult(E(new { ok = false, code = "AUTH_REQUIRED" }));
         Error(await f.Run("home", new { platform = "wy" }), "INVALID_RESPONSE");

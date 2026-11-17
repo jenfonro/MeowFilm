@@ -51,9 +51,9 @@ private actor MusicSearchBatchQQ: MusicPlatformFixtureResponding {
 }
 
 @MainActor final class MusicSearchBatchPlaybackTests: XCTestCase {
-    private func setup(_ count: Int) async throws -> (NativeMusicService, NativeMusicMemoryDocument, MusicSearchBatchQQ, MusicSearchBatchClock) {
-        let document = NativeMusicMemoryDocument(), peer = MusicSearchBatchQQ(count: count), clock = MusicSearchBatchClock()
-        let service = NativeMusicService(document: document, platformClient: try peer.makeClient(), clock: { clock.read() })
+    private func setup(_ count: Int) async throws -> (NativeMusicService, NativeMusicTestLibrary, MusicSearchBatchQQ, MusicSearchBatchClock) {
+        let document = NativeMusicTestLibrary(), peer = MusicSearchBatchQQ(count: count), clock = MusicSearchBatchClock()
+        let service = NativeMusicService(database: document, platformClient: try peer.makeClient(), clock: { clock.read() })
         try await service.setAccess(available: true, generation: 1); return (service, document, peer, clock)
     }
     private func capture(_ service: NativeMusicService, count: Int) async throws -> [MusicSearchBatchTarget] {
@@ -65,7 +65,7 @@ private actor MusicSearchBatchQQ: MusicPlatformFixtureResponding {
     }
     func testDirectSearchClickUsesOnlyClickedSongAndItsFixedRecommendationSeed() async throws {
         let peer = NativeMusicResultFixture([try MusicPlatformFixture.page([MusicNativePublicBrowseFixture.track("101", title: "弑仙"), MusicNativePublicBrowseFixture.track("102", title: "重生")], platform: "wy")])
-        let account = SimilarModeAccountFixture([["301"]]), document = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(document, accounts: account, platform: peer)
+        let account = SimilarModeAccountFixture([["301"]]), document = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(document, accounts: account, platform: peer)
         let results = try await service.search(platform: "wy", query: "弑仙", page: 1, limit: 30), clicked = try XCTUnwrap(results.items.last)
         let state = try await service.replaceSearchBatch(.init(query: "弑仙", targets: [.init(track: clicked)]), expectedRevision: 0, intent: .init()), queue = try await service.queue()
         XCTAssertEqual(queue.entries.map(\.track.title), ["重生"]); XCTAssertEqual(queue.entries[0].track.sources[0].nativeId, "102")
@@ -171,7 +171,7 @@ private actor MusicSearchBatchQQ: MusicPlatformFixtureResponding {
         let saved = try await service.editPlaylist(favorite, name: nil, refs: [recording.ref], order: nil)
         let favoriteTracks = try await service.tracks(in: saved); XCTAssertEqual(favoriteTracks[0].sources, recording.sources)
         _ = try await service.replaceSearchBatch(.init(query: "q", targets: [.init(track: recording)]), expectedRevision: 0, intent: .init())
-        let document = try await service.read(), entry = document.queue["entries"].array[0], stored = document.library["library"]["songs"][recording.songId]
+        let document = try await service.read(), entry = document.queue["entries"].array[0], stored = (try document.fixtureSong(recording.songId))
         XCTAssertEqual(entry["song"], .null); XCTAssertEqual(entry["songId"].string, recording.songId); XCTAssertEqual(stored["sources"].array.count, 5)
         let feedback = try MusicNativeFeedbackMapping.targets(song: stored, context: .obj()); XCTAssertEqual(Set(feedback.map(\.platform)), Set(MusicAccountPlatform.allCases)); await service.close()
     }

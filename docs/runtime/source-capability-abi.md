@@ -10,7 +10,7 @@
 
 当前版本为 `hostApiVersion = 2`，请求携带 `version: 2`。结构数据保持 JSON，原始 body/算法/编码字节为 Uint8Array，保留 typed-array view 的 byteOffset/byteLength，不以 Base64 或 JSON 数字数组搬运普通字节；脚本显式要求的 Base64 编码算法不在删除范围。
 
-存储等能力的 JSON 业务值保留 64 层格式边界；内部参数列表、scope 和异步完成信封不挤占业务值深度。宿主适配中的树转换不依赖逐层 JavaScript 递归；这不移除用户脚本自身的执行栈限制，也不放宽循环、非法 Unicode 或非有限／不安全数值的拒绝。
+存储等能力的 JSON 业务值统一使用 Node 无关的 `@meowfilm/runtime-bridge/json` 克隆，保留会失真的数字原文、负零、UTF-16 字符串及不同 Unicode 键，不再另设全树安全整数或 Unicode scalar 门禁。公共 owner 保留非 JSON 值、循环、accessor 与 64 层深度边界；内部参数列表、scope 和异步完成信封不挤占业务值深度。普通非有限 Number 不能序列化；合法 JSON 数字原文可原样保管，实际数字消费者仍按自身要求处理。用户脚本执行栈和实际字节编码边界不变。
 
 Portable guest 常态执行栈仍为 256 KiB。可信 core 仅在同步、纯字符串的 Cat 脚本标准化与 capability 脚本转换（含完整 AST 遍历）期间使用 QuickJS-NG 默认的有限 1 MiB 栈作用域；不重置栈顶，不执行 guest、宿主回调、thenable 或 pending jobs，正常、异常及取消退出均恢复原预算。该入口由 core 私有捕获，guest 不可访问或通过跨 realm helper 借用；独立 JSON 程序的 512 KiB 预算不变。普通预处理语法错误为 `SCRIPT_PROTOCOL_ERROR`，Acorn 栈耗尽包装及原生栈溢出为 `RESOURCE_LIMIT`，取消／超时保留原分类。
 
@@ -30,7 +30,7 @@ Portable guest 常态执行栈仍为 256 KiB。可信 core 仅在同步、纯字
 | `web.interact` | 登录、验证码、动态页面等可选平台交互 |
 | `virtual.register/unregister` | generation 绑定的虚拟资源路由 |
 
-未知能力、未知字段、非法 typed bytes、非 HTTP(S) URL、非法算法或错误响应均明确失败，不静默降级。HTTP(S) URL 可包含调用方提供的 userinfo，Host／Origin 等显式请求头保留；Content-Length、Transfer-Encoding、Upgrade 和代理认证等逐跳／传输控制字段仍拒绝，合法 Connection 提示由宿主处理而不透传。
+能力请求、响应与受信 scope 只投影实际成员；普通附加字段不拒绝、不透传，也不能覆盖受信 profile／requestId。未知能力、非法 typed bytes、非 HTTP(S) URL、非法算法或实际错误响应仍明确失败。HTTP(S) URL 可包含调用方提供的 userinfo，Host／Origin 等显式请求头保留；Content-Length、Transfer-Encoding、Upgrade 和代理认证等逐跳／传输控制字段仍拒绝，合法 Connection 提示由宿主处理而不透传。
 
 ## 作用域与生命周期
 
@@ -60,7 +60,7 @@ guest 只得到能力调用结果，不得到 Node socket、`fetch` 实现、Coo
 
 通用 Node 主控的 `createNodeSourceCapabilities` 负责异步 HTTP、Cookie、作用域存储和虚拟路由等 I/O/profile 所有权；不承担编码或加解密同步计算。`encoding.*`、`crypto.*` 由 source core 在实例所属 native 线程执行，不为这些计算往返 Node 主线程。独立 owner 未注入 `web` 时返回 `CAPABILITY_UNAVAILABLE`；source 模块默认注入可取消的 `web.pending/respond` broker，由平台实际呈现。自定义 storage 必须同时实现 get/set/delete 和 `releaseProfiles`，不能把未清理状态当作成功。持久仓库另使用 profile snapshot/restore 与接受写入回调恢复私有状态，不向源开放 CatNode 私有卷；RPC、Cookie 回传格式和受信二进制图片见[书源仓库](source-library.md)。
 
-`web.interact` 的 request 由 owner 注入权威 `cookies:[{name,value,domain,hostOnly,path,secure,httpOnly,sameSite,expires}]`，仅含当前源 HTTP profile 未过期 Cookie；显式 Cookie header 只合并到临时种子，不提前持久化。平台使用 cookies 初始化隔离 Web store，不从 header 扩大作用域。结果封套为 `{value,url,headers,cookieChanges?:[{url,setCookie}]}`；每条变化按自身 HTTP(S) origin 处理，与响应 headers 的 Set-Cookie 合为一次可回滚持久化事务，受取消及 generation fence 约束，再仅返回 value。sameSite 为 null／Lax／Strict／None，expires 为 null／Unix 毫秒；旧持久 Cookie 缺 httpOnly／sameSite 时默认 false／null。参数顺序、标量类型、前缀与删除规则见[Web ABI 有据表](source-library.md#已核实的-web-helper-abi)。
+`web.interact` 的 request 由 owner 注入权威 `cookies:[{name,value,domain,hostOnly,path,secure,httpOnly,sameSite,expires}]`，仅含当前源 HTTP profile 未过期 Cookie；显式 Cookie header 只合并到临时种子，不提前持久化。平台使用 cookies 初始化隔离 Web store，不从 header 扩大作用域。结果封套为 `{value,url,headers,cookieChanges?:[{url,setCookie}]}`；每条变化按自身 HTTP(S) origin 处理，与响应 headers 的 Set-Cookie 合为一次可回滚持久化事务，受取消及 generation fence 约束，再仅返回 value。sameSite 为 null／Lax／Strict／None，expires 为 null／Unix 毫秒；不再回填旧持久 Cookie 缺失的 httpOnly／sameSite。参数顺序、标量类型、前缀与删除规则见[Web ABI 有据表](source-library.md#已核实的-web-helper-abi)。
 
 iOS 通过内置 `MeowScriptHost.framework`、Windows 通过受信原生 Node addon 承载原生核心，均使用 HTTP v1 和此能力 ABI，source 与音乐、Cat 共用各自平台的 Node 主控；平台装配与验证边界分别见[iOS 平台预检](../ios/runtime-preflight.md)和[Windows 平台接入](../windows/app-runtime.md)。不将通用验证视为全平台通过，也不据此声明 Android 已接入。Reader/CatVod 的规则与动作维护一份；只有新增现有 ABI 无法表达的系统语义时才扩展 ABI，并由各平台分别实现。不能据此宣称 CatNode 的 Node 兼容层可脱离 Node。
 

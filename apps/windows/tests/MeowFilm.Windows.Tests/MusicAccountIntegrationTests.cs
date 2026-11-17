@@ -344,7 +344,7 @@ public static class MusicAccountIntegrationTests
         yield return Case("production unknown library receipt fails prepare and final disposal fences without disposing shared store or runtime", async () =>
         {
             var f = await Fixture.Create();
-            f.Store.LoseReceipt = MusicLibraryOwner.DocumentNamespace;
+            MusicTestStores.For(f.Store).Failure = 2;
             try
             {
                 var result = await f.Application.ExecuteAsync("music.queue.mode", new { mode = 2 });
@@ -355,7 +355,7 @@ public static class MusicAccountIntegrationTests
                 Check(f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0);
                 await Unknown(f.Application.DisposeAsync().AsTask());
                 Check(f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0);
-                Check((await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace)).Fingerprint.Exists);
+                Check((await MusicTestStores.For(f.Store).ReadAsync("local")).Revision.Generation > 0);
             }
             finally { await Unknown(f.DisposeAsync().AsTask()); }
         });
@@ -928,7 +928,7 @@ public static class MusicAccountIntegrationTests
         {
             Data = data; Store = store;
             Runtime.OnRequest = Transport.Respond;
-            Application = new(store, Runtime);
+            Application = new(store, MusicTestStores.For(store), Runtime);
             Calls = new(Application);
             Module = new(Calls, store, new Output(), new Dialogs());
         }

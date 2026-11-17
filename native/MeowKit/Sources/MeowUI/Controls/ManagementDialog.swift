@@ -103,20 +103,19 @@ public final class ManagementDialog: UIViewController {
             label.setContentCompressionResistancePriority(.required, for: .vertical)
             return
         }
-        if let input = content as? UITextField { theme.settings.apply(to: input); input.layer.cornerRadius = 12; return }
-        if let input = content as? UITextView { theme.settings.apply(to: input); input.layer.cornerRadius = 12; return }
+        if let input = content as? UITextField { theme.settings.apply(to: input); return }
+        if let input = content as? UITextView { theme.settings.apply(to: input); return }
         for child in content.subviews { applyTheme(theme, to: child) }
     }
     public static func input(placeholder: String) -> UITextField {
-        let input = UITextField(); input.placeholder = placeholder
+        let input = SettingsTextField(); input.placeholder = placeholder
         input.font = UIFontMetrics(forTextStyle: .body).scaledFont(for: .systemFont(ofSize: 14))
         input.adjustsFontForContentSizeCategory = true; input.setContentCompressionResistancePriority(.required, for: .vertical)
         input.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        input.backgroundColor = ManagementAppearance.input; input.layer.cornerRadius = 12
+        input.backgroundColor = ManagementAppearance.input
+        input.layer.borderWidth = 1; input.layer.borderColor = ManagementAppearance.inputBorder.cgColor
         input.textColor = ManagementAppearance.ink; input.tintColor = ManagementAppearance.accent
         input.attributedPlaceholder = NSAttributedString(string: placeholder, attributes: [.foregroundColor: ManagementAppearance.muted])
-        input.leftView = UIView(frame: .init(x: 0, y: 0, width: 12, height: 1)); input.leftViewMode = .always
-        input.rightView = UIView(frame: .init(x: 0, y: 0, width: 12, height: 1)); input.rightViewMode = .always
         input.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true; return input
     }
     public override func viewWillDisappear(_ animated: Bool) { super.viewWillDisappear(animated); task?.cancel() }
@@ -219,17 +218,16 @@ public final class ManagementImportView: UIView, UITableViewDataSource, UITableV
         let title = UILabel(); title.text = item.title; title.font = UIFontMetrics(forTextStyle: .subheadline).scaledFont(for: .systemFont(ofSize: 14), compatibleWith: tableView.traitCollection); title.textColor = UIColor(settings.ink)
         let detail = UILabel(); detail.text = item.detail; detail.font = .preferredFont(forTextStyle: .caption1, compatibleWith: tableView.traitCollection); detail.textColor = UIColor(settings.muted); detail.isHidden = item.detail.isEmpty
         let labels = UIStackView(arrangedSubviews: [title, detail]); labels.axis = .vertical; labels.spacing = 4; labels.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let status = UILabel(); status.text = item.status; status.font = .preferredFont(forTextStyle: .caption1, compatibleWith: tableView.traitCollection); status.textColor = UIColor(item.status == "已存在" || item.status == "已有" ? settings.warning : settings.accent)
-        for label in [title, detail, status] {
+        for label in [title, detail] {
             label.adjustsFontForContentSizeCategory = true; label.numberOfLines = 0; label.lineBreakMode = .byWordWrapping
             label.setContentCompressionResistancePriority(.required, for: .vertical)
         }
-        status.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        let badge = UIView(); badge.backgroundColor = status.textColor.withAlphaComponent(0.1); badge.layer.cornerRadius = 10; badge.addSubview(status); status.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([status.leadingAnchor.constraint(equalTo: badge.leadingAnchor, constant: 8), status.trailingAnchor.constraint(equalTo: badge.trailingAnchor, constant: -8), status.topAnchor.constraint(equalTo: badge.topAnchor, constant: 3), status.bottomAnchor.constraint(equalTo: badge.bottomAnchor, constant: -3)])
+        let badge = SettingsStatusBadge(status: item.status == "已存在" || item.status == "已有" ? .warning : .success,
+            text: item.status, theme: currentTheme)
+        badge.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         let text = UIStackView(arrangedSubviews: [labels, badge]); text.spacing = 10
         let labelsWidth = max(title.intrinsicContentSize.width, detail.isHidden ? 0 : detail.intrinsicContentSize.width)
-        let inlineWidth = 44 + 20 + labelsWidth + status.intrinsicContentSize.width + 16
+        let inlineWidth = 44 + 20 + labelsWidth + badge.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width
         let vertical = tableView.traitCollection.preferredContentSizeCategory.isAccessibilityCategory || inlineWidth > tableView.bounds.width
         text.axis = vertical ? .vertical : .horizontal; text.alignment = vertical ? .fill : .center
         let row = UIStackView(arrangedSubviews: [check, text]); row.alignment = .center; row.spacing = 10; cell.contentView.addSubview(row); row.translatesAutoresizingMaskIntoConstraints = false

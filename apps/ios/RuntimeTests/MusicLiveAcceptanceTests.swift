@@ -204,7 +204,8 @@ final class MusicLiveAcceptanceTests: XCTestCase {
             throw Failure.startupFailed
         }
         // Fail closed; do not erase existing documents, credentials or caches.
-        try require(try resources.musicDocument.read() == nil, Failure.nonemptyData)
+        let library = try resources.musicLibrary.readSnapshot()
+        try require(library.revision == 0 && library.areas.isEmpty && (try resources.musicLibrary.allSongIDs()).isEmpty, Failure.nonemptyData)
         await model.ensureLibraryLoaded()
         try await waitUntil(timeout: 15) {
             model.hasLoadedLibrary || (!model.libraryState.isLoading && model.notices.error != nil)

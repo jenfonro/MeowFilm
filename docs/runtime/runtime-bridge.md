@@ -1,6 +1,6 @@
 # Runtime HTTP v1
 
-`@meowfilm/runtime-bridge@0.2.0` 提供标准 Node HTTP(S) client／HTTP server、严格 JSON 和 HTTP 请求生命周期；业务路由由 `apps/runtime` 装配。iOS 与 Windows 均使用相同公开契约及原生 HTTP 客户端；iOS 平台载体与验证边界见[iOS 运行底座](../ios/runtime-preflight.md)，Windows 的私密启动和 HTTP 消费者见[Windows 接入](../windows/app-runtime.md)。公共契约通过不代表全平台应用验证。
+`@meowfilm/runtime-bridge@0.2.0` 提供标准 Node HTTP(S) client／HTTP server、JSON 保真编解码和 HTTP 请求生命周期；业务路由由 `apps/runtime` 装配。iOS 与 Windows 均使用相同公开契约及原生 HTTP 客户端；iOS 平台载体与验证边界见[iOS 运行底座](../ios/runtime-preflight.md)，Windows 的私密启动和 HTTP 消费者见[Windows 接入](../windows/app-runtime.md)。公共契约通过不代表全平台应用验证。
 
 ## 会话与公共入口
 
@@ -26,19 +26,19 @@
 
 设置通知不传设置值或凭据，不授予 HTTP 客户端原生读写能力，也不声明异步装载完成。现行消费者为 [Windows 原生设置适配](../windows/native-settings.md#私密配置能力)与 [iOS 原生设置适配](../ios/runtime-preflight.md#原生设置私密通道)；通用默认入口未装配此通知路由，模块版本与 describe 方法清单不因此改变。
 
-成功统一 `{ok:true,contract,value}`，失败统一 `{ok:false,contract,code}`。value 是直接对象、数组、标量或 null，不是另一份序列化 JSON。通用默认三模块为 `music@0.8.0/music.script.v3`、`cat@0.2.0/cat.script.v2`、`source@0.3.0/source.runtime.v2`。iOS／Windows 正式 App 按此前三项、`pan@0.1.0/pan.runtime.v1`、`tmdb@0.1.0/tmdb.data.v1`、`douban@0.1.0/douban.data.v1`、`film@0.1.0/film.playback.v1`、`netease@0.1.0/netease.token.v1`、`music-platform@0.1.0/music.platform.v1` 的顺序精确装配九模块；元数据见[元数据契约](metadata-data.md)，影视会话与媒体见[影视播放契约](film-playback.md)，实时 token 见[网易订阅 token](netease-token.md)，共同音乐配方见[音乐平台](music-platform.md)。
+成功统一 `{ok:true,contract,value}`，失败统一 `{ok:false,contract,code}`。只读取信封实际所需成员，不因额外字段拒绝响应。value 是直接对象、数组、标量或 null，不是另一份序列化 JSON。通用默认三模块为 `music@0.8.0/music.script.v3`、`cat@0.2.0/cat.script.v2`、`source@0.3.0/source.runtime.v2`。iOS／Windows 正式 App 按此前三项、`pan@0.1.0/pan.runtime.v1`、`tmdb@0.1.0/tmdb.data.v1`、`douban@0.1.0/douban.data.v1`、`film@0.1.0/film.playback.v1`、`netease@0.1.0/netease.token.v1`、`music-platform@0.1.0/music.platform.v1` 的顺序精确装配九模块；元数据见[元数据契约](metadata-data.md)，影视会话与媒体见[影视播放契约](film-playback.md)，实时 token 见[网易订阅 token](netease-token.md)，共同音乐配方见[音乐平台](music-platform.md)。
 
-受信 Node 装配可显式加入 [pan.runtime.v1](pan-runtime.md)，使用 `POST /v1/pan/{operation}`；pan 不支持源码上传。`pan-entry.mjs` 提供同进程 pan-only 入口，或 `createRuntime({...,pan:{}})` 共用 aggregate HTTP 会话。通用默认 `createRuntime()` 不装配 pan；正式 App 显式装配它，双端平台握手按序精确匹配九模块及其版本、契约，不接受模块缺项／多项／重复项。Windows 还严格核对全部模块的完整方法清单；iOS 对 TMDB、netease 与 music-platform 严格核对方法清单，其余模块沿各自既有方法契约。
+受信 Node 装配可显式加入 [pan.runtime.v1](pan-runtime.md)，使用 `POST /v1/pan/{operation}`；pan 不支持源码上传。`pan-entry.mjs` 提供同进程 pan-only 入口，或 `createRuntime({...,pan:{}})` 共用 aggregate HTTP 会话。通用默认 `createRuntime()` 不装配 pan；正式 App 显式装配它。双端平台握手确认应用实际依赖的九模块及其版本、契约和必要方法存在，缺项或同一所需模块的歧义身份仍失败；未使用的额外模块、方法与描述字段不阻断启动。
 
 合法请求正文与成功业务值各自按现有 64 层 JSON 契约校验；调用器的位置参数列表和内部结果信封不占业务值深度。普通业务对象即使包含 `ok/value` 字段也不豁免计深，65 层仍拒绝。此格式边界不同于脚本执行的真实栈限制。
 
-普通 JSON 没有总字节上限或大小分流；不增加正文摘要、压缩、加解密或预解析加工。请求与响应严格 UTF-8，业务 JSON 深度最多 64，支持不同码点序列的 Unicode 键并原样保留；重复解码键、孤立 surrogate、非有限数、不安全整数、循环、BigInt、getter 及其他非 JSON 值拒绝。信封本身不挤占业务值的 64 层深度。源码保持 1 至 16 MiB 的输入契约及各协议 BOM 行为；config/metadata 的独立格式边界不等于普通正文配额。
+普通 JSON 没有总字节上限或大小分流；不增加正文摘要、压缩、加解密或预解析加工。请求与响应严格 UTF-8，业务 JSON 深度最多 64，支持不同码点序列的 Unicode 键并原样保留；重复键采用末值覆盖，不按未消费成员、Unicode 内容或数值范围拒绝整个业务值。纯 `@meowfilm/runtime-bridge/json` 入口提供 `parseJSONText/stringifyJSONValue/cloneJSONValue`，以同一 codec 和不透明数字载体保留会失真的整数、小数及指数值；Node 18、Node 24 与 QuickJS 不依赖新版 JSON API，原生端同样保留数字原材料和扩展成员。内存中的非有限 Number、循环、BigInt、getter 等不能无损序列化的非 JSON 值仍拒绝，实际数字运算在其消费者处解释。信封本身不挤占业务值的 64 层深度。源码保持 1 至 16 MiB 的输入契约及各协议 BOM 行为；config/metadata 的独立格式边界不等于普通正文配额。
 
 旧长度帧、stage/control/blob、Base64 传输、随机 token、offset、TTL 和 checksum 协议均已删除，没有兼容回退、续传或旧分块传输的 release 方法。影视的 `session.release`／`session.media.release` 释放业务会话／媒体资源，不是恢复旧传输协议，见[影视播放契约](film-playback.md)。底层 HTTP 分段读写属于标准流传输。媒体代理沿独立入口流式转发，不经控制 JSON 聚合。
 
 ## 原生设置注入
 
-普通设置的唯一存储、离线提交与通知语义见[共同契约](../common/settings-storage.md)。`createAppRuntime({settingsChanged})` 可选提供上述通知路由，使用 `runtime.http.v1` 信封；它不增加业务模块、describe 方法或设置值传输接口。正文只允许一个 `block` 字段；具体块名由装配分派，非法或未知块不作为配置保存受理。
+普通设置的唯一存储、离线提交与通知语义见[共同契约](../common/settings-storage.md)。`createAppRuntime({settingsChanged})` 可选提供上述通知路由，使用 `runtime.http.v1` 信封；它不增加业务模块、describe 方法或设置值传输接口。正文只消费 `block` 字段，附加成员不参与设置写入；具体块名由装配分派，非法或未知块不作为配置保存受理。
 
 `apps/runtime/native-settings.mjs` 为受信启动通道提供设置快照适配：启动时读齐六块，业务模块只读该原生值；后续通知重新读取对应块。元数据、影视规则和偏好的 HTTP 写设置方法在注入模式返回 `PERMISSION_DENIED`，Cat 来源意图也不由 HTTP 安装／编辑接口写入。pan 的在线凭据通过受限私密 CAS 能力写回同一原生 owner，不在公开 HTTP 增加读秘密的接口。各模块的确切读写接口见对应契约。
 

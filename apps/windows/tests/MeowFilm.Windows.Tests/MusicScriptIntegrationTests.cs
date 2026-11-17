@@ -58,8 +58,9 @@ public static class MusicScriptIntegrationTests
         internal Fixture(string path)
         {
             Path = path;
-            Store = new(path, [MusicLibraryOwner.DocumentNamespace], []);
-            Library = new(Store);
+            Store = new(path, ["music.files.v2"], []);
+            MusicTestStores.Use(Store, System.IO.Path.Combine(path, "music-records"));
+            Library = new(MusicTestStores.For(Store));
             Runtime = new(async token =>
             {
                 string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
@@ -83,6 +84,7 @@ public static class MusicScriptIntegrationTests
             {
                 await Runtime.DisposeAsync();
                 await Library.DisposeAsync();
+                await MusicTestStores.For(Store).DisposeAsync();
                 await Store.DisposeAsync();
             }
         }

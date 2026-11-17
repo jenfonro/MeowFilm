@@ -7,6 +7,7 @@ import {
   normalizeSourceDefinition,
   SourceSession,
 } from '../src/index.js';
+import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 
 const turn = () => new Promise(resolve => setImmediate(resolve));
 const body = value => new TextEncoder().encode(value);
@@ -291,6 +292,28 @@ test('Legado explicit list selectors can return no matches without requiring a r
   assert.deepEqual((await session.invoke('toc', { tocUrl: 'https://books.invalid/list' })).chapters, []);
 });
 
+test('Legado raw TOC never fabricates chapters from missing identities', async t => {
+  let data;
+  const session = new SourceSession({
+    installationId: 'raw-toc', protocol: 'legado',
+    source: { ...legadoSource, ruleToc: { nextTocUrl: '' } },
+    capabilities: capabilitiesFor({ '/toc': () => data }), createSandbox: sandboxFactory(),
+  });
+  t.after(() => session.close());
+  await session.start(); session.activate();
+  const toc = () => session.invoke('toc', { bookUrl: 'https://books.invalid/book', tocUrl: 'https://books.invalid/toc' });
+  for (const item of [null, {}, false, 7]) {
+    data = JSON.stringify([{ name: 'One', url: '/one' }, item, { name: 'Three', url: '/three' }]);
+    await assert.rejects(toc(), { code: 'INVALID_RESPONSE' });
+  }
+  data = JSON.stringify([{ name: 'Volume', isVolume: true }, { name: 'Single page' },
+    { name: 'Next', url: '/next' }]);
+  const { chapters } = await toc();
+  assert.deepEqual(chapters.map(item => item.index), [0, 1, 2]);
+  assert.equal(chapters[0].isVolume, true);
+  assert.equal(chapters[1].chapterUrl, 'https://books.invalid/toc');
+  assert.equal(chapters[2].chapterUrl, 'https://books.invalid/next');
+});
 test('Legado categories isolate bad rows while retaining title-only groups and URL-only entries', async t => {
   let value;
   const session = new SourceSession({
@@ -357,6 +380,157 @@ test('Legado Cookie-only login status does not consume Reader variables', async 
   assert.equal(session.kernel.invocations.size, 0);
   assert.equal(session.stats().pendingAdapterTasks, 0);
 });
+
+test('persistent Reader values decode only consumed fields and preserve untouched exact material', async t => {
+  let saved = '{"values":{"kept":9007199254740993},"variable":false,"extra":1.234567890123456789}';
+  let operation, failWrite = false;
+  const base = capabilitiesFor({ '/search': '[]' });
+  const session = new SourceSession({
+    installationId: 'persistent-values', protocol: 'legado', metadata: { persistentSource: true },
+    source: { ...legadoSource, ruleSearch: {}, coverDecodeJs: 'fixture()' },
+    capabilities: createCapabilityClient({ invoke(name, input, context) {
+      if (name === 'storage.get') return saved;
+      if (name === 'storage.set') {
+        if (failWrite) throw Object.assign(new Error(), { code: 'STORAGE_ERROR' });
+        saved = input.value; return true;
+      }
+      return base.call(name, input, context);
+    } }),
+    createSandbox: sandboxFactory({ evaluate(options, _code, _bindings, { context }) {
+      return operation((name, input = {}) => options.onSync(`legado.${name}`, input, context));
+    } }),
+  });
+  t.after(() => session.close());
+  await session.start(); session.activate();
+  assert.deepEqual((await session.invoke('search', { keyword: 'unused' })).books, []);
+  operation = call => call('sourceSet', { key: 'new', value: 'new value' });
+  await session.invoke('image', { body: '' });
+  assert.match(saved, /9007199254740993/);
+  assert.match(saved, /1\.234567890123456789/);
+  assert.equal(JSON.parse(saved).variable, false);
+  operation = call => call('sourceGet', { key: 'new' });
+  assert.equal((await session.invoke('image', { body: '' })).body, 'new value');
+  operation = call => typeof call('sourceGet', { key: 'kept' });
+  assert.equal((await session.invoke('image', { body: '' })).body, 'number');
+  assert.match(saved, /9007199254740993/);
+  operation = call => call('sourceVariableGet');
+  await assert.rejects(session.invoke('image', { body: '' }), { code: 'STORAGE_ERROR' });
+  const before = saved;
+  operation = call => call('sourceVariableSet', { value: 'replacement' });
+  failWrite = true;
+  await assert.rejects(session.invoke('image', { body: '' }), { code: 'STORAGE_ERROR' });
+  assert.equal(saved, before);
+  failWrite = false;
+  await session.invoke('image', { body: '' });
+  assert.equal(JSON.parse(saved).variable, 'replacement');
+  assert.match(saved, /9007199254740993/);
+});
+
+test('persistent Reader malformed values do not block unrelated actions or variable-only writes', async t => {
+  for (const initial of ['{broken', '9007199254740993',
+    '{"values":false,"variable":"ready","extra":9007199254740993}',
+    '{"values":9007199254740993,"variable":"ready"}']) {
+    let saved = initial, operation;
+    const session = new SourceSession({
+      installationId: 'lazy-private', protocol: 'legado', metadata: { persistentSource: true },
+      source: { ...legadoSource, coverDecodeJs: 'fixture()' },
+      capabilities: createCapabilityClient({ invoke(name, input) {
+        if (name === 'storage.get') return saved;
+        if (name === 'storage.set') { saved = input.value; return true; }
+        if (name === 'cookie.get') return '';
+        throw new Error(name);
+      } }),
+      createSandbox: sandboxFactory({ evaluate(options, _code, _bindings, { context }) {
+        return operation((name, input = {}) => options.onSync(`legado.${name}`, input, context));
+      } }),
+    });
+    t.after(() => session.close());
+    await session.start(); session.activate();
+    assert.equal((await session.invoke('loginStatus')).loggedIn, false);
+    operation = call => call('sourceGet', { key: 'unused' });
+    await assert.rejects(session.invoke('image', { body: '' }), { code: 'STORAGE_ERROR' });
+    operation = call => call('sourceVariableGet');
+    if (!initial.includes('"variable"')) {
+      await assert.rejects(session.invoke('image', { body: '' }), { code: 'STORAGE_ERROR' });
+      operation = call => call('sourceVariableSet', { value: 'updated' });
+      await assert.rejects(session.invoke('image', { body: '' }), { code: 'STORAGE_ERROR' });
+      assert.equal(saved, initial);
+    } else {
+      assert.equal((await session.invoke('image', { body: '' })).body, 'ready');
+      operation = call => call('sourceVariableSet', { value: 'updated' });
+      await session.invoke('image', { body: '' });
+      if (initial.includes('"values":false')) assert.equal(JSON.parse(saved).values, false);
+      assert.match(saved, /9007199254740993/);
+    }
+  }
+});
+
+for (const protocol of ['legado', 'cat', 'qysg']) {
+  test(`${protocol} script storage reads project numbers without replacing precise private material`, async t => {
+    const exact = '{"integer":9007199254740993,"decimal":1.234567890123456789,"zero":-0,' +
+      '"nested":{"kept":true},"text":"\\ud800"}';
+    const reads = protocol === 'qysg' ? [
+      ['bridge.call', { name: 'cache.get', args: ['key'] }, 'key'],
+      ['bridge.call', { name: 'cacheGet', args: ['key'] }, 'key'],
+      ['bridge.call', { name: 'cache.allget', args: ['key'] }, 'all:key'],
+      ['bridge.call', { name: 'getLoginInfo', args: [] }, 'loginInfo'],
+      ['bridge.call', { name: 'getbookVariable', args: ['key'] }, 'book:key'],
+    ] : [[`${protocol}.storageGet`, { key: 'key' }, 'key']];
+    const stored = new Map(reads.map(([, , key]) => [key, parseJSONText(exact)]));
+    const permanent = '{"values":{"kept":9007199254740993},"variable":"old","extra":1.234567890123456789}';
+    stored.set('reader.source.values', parseJSONText(permanent));
+    let failRead = false;
+    const exercise = async (sandbox, _method, _payload, options) => {
+      const context = { ...options.context, signal: options.signal };
+      for (const [name, input, key] of reads) {
+        const value = await sandbox.onCapability(name, input, context);
+        assert.deepEqual(value, JSON.parse(exact));
+        assert.equal(typeof value.integer, 'number');
+        value.nested.kept = false;
+        assert.equal(stringifyJSONValue(stored.get(key)), exact);
+        assert.deepEqual(await sandbox.onCapability(name, input, context), JSON.parse(exact));
+      }
+      await sandbox.onCapability(protocol === 'qysg' ? 'bridge.call' : `${protocol}.storageSet`,
+        protocol === 'qysg' ? { name: 'cache.set', args: ['other', 'updated'] }
+          : { key: 'other', value: 'updated' }, context);
+      if (protocol === 'legado') sandbox.onSync('legado.sourceVariableSet', { value: 'updated' }, context);
+      return 'read';
+    };
+    const session = new SourceSession({
+      installationId: `projected-${protocol}`, protocol, metadata: { persistentSource: true },
+      source: protocol === 'legado' ? { ...legadoSource, coverDecodeJs: 'fixture()' }
+        : protocol === 'cat' ? 'export default { searchContent() {} }'
+          : { bookSourceUrl: 'https://books.invalid/', html: '<script>function imagedecrypt() {}</script>' },
+      capabilities: createCapabilityClient({ invoke(name, input) {
+        if (name === 'storage.get') {
+          if (failRead) throw Object.assign(new Error(), { code: 'STORAGE_ERROR' });
+          return stored.get(input.key) ?? null;
+        }
+        assert.equal(name, 'storage.set');
+        stored.set(input.key, input.value);
+        return true;
+      } }),
+      createSandbox: sandboxFactory({
+        actions: protocol === 'cat' ? ['search'] : protocol === 'qysg' ? ['imagedecrypt'] : ['image'],
+        evaluate: exercise, invoke: exercise,
+      }),
+    });
+    t.after(() => session.close());
+    await session.start(); session.activate();
+    const action = protocol === 'cat' ? 'search' : 'image';
+    const result = await session.invoke(action, { body: '' });
+    assert.equal(protocol === 'cat' ? result : result.body, 'read');
+    for (const [, , key] of reads) assert.equal(stringifyJSONValue(stored.get(key)), exact);
+    assert.equal(stored.get('other'), 'updated');
+    if (protocol === 'legado') {
+      assert.equal(stored.get('reader.source.values'), permanent.replace('"old"', '"updated"'));
+    }
+    const before = stringifyJSONValue([...stored]);
+    failRead = true;
+    await assert.rejects(session.invoke(action, { body: '' }), { code: 'STORAGE_ERROR' });
+    assert.equal(stringifyJSONValue([...stored]), before);
+  });
+}
 
 test('Legado login checks import variables when the script actually reads them', async t => {
   const session = new SourceSession({

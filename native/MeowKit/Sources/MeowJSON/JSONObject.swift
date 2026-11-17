@@ -1,11 +1,39 @@
 import Foundation
 import CoreFoundation
 
-/// A syntax-checked number that Foundation cannot represent without losing
-/// an integer identity. It remains numeric when forwarded, never a string.
+/// A syntax-checked JSON number. The original token survives read/modify/write.
 public struct JSONNumber: Sendable, Equatable {
     public let literal: String
     fileprivate init(_ literal: String) { self.literal = literal }
+
+    /// Ordinary consumers can use a Double only when writing it back preserves
+    /// the decimal value and integer identity. Unconsumed numbers stay opaque.
+    public var exactDouble: Double? {
+        guard let value = Double(literal), value.isFinite,
+              value.rounded(.towardZero) != value || abs(value) <= 9_007_199_254_740_991,
+              let decimal = Self.decimal(literal), decimal == Self.decimal(String(value)) else { return nil }
+        return value
+    }
+
+    private static func decimal(_ token: String) -> String? {
+        let negative = token.hasPrefix("-")
+        let parts = token.drop(while: { $0 == "-" }).split(whereSeparator: { $0 == "e" || $0 == "E" })
+        let mantissa = parts[0]
+        let fraction = mantissa.firstIndex(of: ".").map {
+            mantissa.distance(from: mantissa.index(after: $0), to: mantissa.endIndex)
+        } ?? 0
+        var digits = mantissa.filter { $0 != "." }.drop(while: { $0 == "0" })
+        if digits.isEmpty { return negative ? "-0" : "0" }
+        guard let exponent = parts.count == 2 ? Int(parts[1]) : 0 else { return nil }
+        var (shift, overflow) = exponent.subtractingReportingOverflow(fraction)
+        guard !overflow else { return nil }
+        while digits.last == "0" {
+            digits = digits.dropLast()
+            (shift, overflow) = shift.addingReportingOverflow(1)
+            guard !overflow else { return nil }
+        }
+        return (negative ? "-" : "") + String(digits) + "e" + String(shift)
+    }
 }
 
 /// Dictionary JSON for external documents. Repeated members always use the
@@ -13,16 +41,64 @@ public struct JSONNumber: Sendable, Equatable {
 public enum JSONObject {
     public enum Error: Swift.Error { case invalidJSON }
 
-    public static func decode(_ data: Data) throws -> [String: Any] {
+    /// Exact object members in insertion order; updating a key keeps its place.
+    /// Swift String dictionary equality normalizes keys.
+    public struct Fields: Sequence {
+        public typealias Element = (key: String, value: Any)
+        private var members: [Data: Any] = [:]
+        private var order: [Data] = []
+        public init() {}
+        public subscript(_ key: String) -> Any? {
+            get { members[Data(key.utf8)] }
+            set {
+                let key = Data(key.utf8)
+                if let newValue {
+                    if members.updateValue(newValue, forKey: key) == nil { order.append(key) }
+                } else if members.removeValue(forKey: key) != nil {
+                    order.removeAll { $0 == key }
+                }
+            }
+        }
+        public var count: Int { members.count }
+        public func makeIterator() -> AnyIterator<Element> {
+            var iterator = order.makeIterator()
+            return AnyIterator {
+                guard let key = iterator.next() else { return nil }
+                return (String(decoding: key, as: UTF8.self), self.members[key]!)
+            }
+        }
+    }
+
+    /// Exact raw JSON, including scalar roots, numeric tokens and UTF-8 keys.
+    public static func decodeValue(_ data: Data, maximumDepth: Int = 511) throws -> Any {
         guard String(data: data, encoding: .utf8) != nil else { throw Error.invalidJSON }
-        var parser = Parser(bytes: Array(data))
+        var parser = Parser(bytes: Array(data), maximumDepth: maximumDepth)
         if parser.bytes.starts(with: [0xEF, 0xBB, 0xBF]) { parser.offset = 3 }
         let value = try parser.value(depth: 0)
         parser.space()
-        guard parser.offset == parser.bytes.count, let object = value as? [String: Any] else {
-            throw Error.invalidJSON
+        guard parser.offset == parser.bytes.count else { throw Error.invalidJSON }
+        return value
+    }
+
+    /// A Foundation projection for DTO consumers. Retained documents must use
+    /// decodeValue; a String dictionary cannot retain distinct UTF-8 spellings.
+    public static func decode(_ data: Data) throws -> [String: Any] {
+        guard let fields = try decodeValue(data) as? Fields else { throw Error.invalidJSON }
+        func project(_ value: Any) -> Any {
+            if let fields = value as? Fields {
+                var result: [String: Any] = [:]
+                for (key, value) in fields { result[key] = project(value) }
+                return result
+            }
+            if let values = value as? [Any] { return values.map(project) }
+            if let number = value as? JSONNumber {
+                if let value = Int64(number.literal) { return NSNumber(value: value) }
+                if let value = UInt64(number.literal) { return NSNumber(value: value) }
+                if let value = number.exactDouble { return NSNumber(value: value) }
+            }
+            return value
         }
-        return object
+        return project(fields) as! [String: Any]
     }
 
     /// Used when forwarding parsed metadata, including opaque number literals.
@@ -34,7 +110,15 @@ public enum JSONObject {
         func write(_ value: Any, depth: Int) throws {
             // Preserve Foundation's nesting resource boundary for recursive I/O.
             guard depth < 512 else { throw Error.invalidJSON }
-            if let object = value as? [String: Any] {
+            if let object = value as? Fields {
+                bytes.append(123)
+                for (index, field) in object.sorted(by: { $0.key.utf8.lexicographicallyPrecedes($1.key.utf8) }).enumerated() {
+                    if index > 0 { bytes.append(44) }
+                    bytes.append(try encoder.encode(field.key)); bytes.append(58)
+                    try write(field.value, depth: depth + 1)
+                }
+                bytes.append(125)
+            } else if let object = value as? [String: Any] {
                 bytes.append(123)
                 for (index, key) in object.keys.sorted().enumerated() {
                     if index > 0 { bytes.append(44) }
@@ -68,6 +152,7 @@ public enum JSONObject {
 
     private struct Parser {
         let bytes: [UInt8]
+        let maximumDepth: Int
         var offset = 0
         let decoder = JSONDecoder()
 
@@ -100,12 +185,12 @@ public enum JSONObject {
             space()
             // As in Foundation, bound recursive stack use, not key names or
             // node counts. The caller already bounds the whole byte buffer.
-            guard depth < 512, offset < bytes.count else { throw Error.invalidJSON }
+            guard depth <= maximumDepth, offset < bytes.count else { throw Error.invalidJSON }
             switch bytes[offset] {
             case 34: return try string()
             case 123:
                 offset += 1
-                var object: [String: Any] = [:]
+                var object = Fields()
                 if take(125) { return object }
                 repeat {
                     let key = try string()
@@ -144,61 +229,16 @@ public enum JSONObject {
             else {
                 guard (49...57).contains(bytes[offset]), digits() > 0 else { throw Error.invalidJSON }
             }
-            var integer = true
             if offset < bytes.count, bytes[offset] == 46 {
-                integer = false; offset += 1
+                offset += 1
                 guard digits() > 0 else { throw Error.invalidJSON }
             }
             if offset < bytes.count, bytes[offset] == 101 || bytes[offset] == 69 {
-                integer = false; offset += 1
+                offset += 1
                 if offset < bytes.count, bytes[offset] == 43 || bytes[offset] == 45 { offset += 1 }
                 guard digits() > 0 else { throw Error.invalidJSON }
             }
-            let token = String(decoding: bytes[start..<offset], as: UTF8.self)
-            if integer {
-                if let value = Int64(token) { return NSNumber(value: value) }
-                if let value = UInt64(token) { return NSNumber(value: value) }
-                return JSONNumber(token)
-            }
-            // Scalar conversion preserves Foundation's existing NSNumber types
-            // (including decimal/exponent tokens for credential imports). It
-            // does not parse objects or decide which duplicate member wins.
-            guard let number = try? JSONSerialization.jsonObject(with: Data(token.utf8),
-                                                                 options: .fragmentsAllowed) as? NSNumber,
-                  number.doubleValue.isFinite, abs(number.doubleValue) <= 9_007_199_254_740_991 else {
-                return JSONNumber(token)
-            }
-            let value = number.doubleValue
-            if value.rounded() == value, !Self.represents(token, integer: Int64(value)) {
-                return JSONNumber(token)
-            }
-            return number
-        }
-
-        /// Compare an exponent/fraction token with the integer Foundation
-        /// produced, without rounding, expanding giant exponents or bounding
-        /// unused number literals. Non-integral/underflowing IDs stay opaque.
-        static func represents(_ token: String, integer: Int64) -> Bool {
-            let negative = token.hasPrefix("-")
-            let unsigned = negative ? token.dropFirst() : token[...]
-            let parts = unsigned.split(whereSeparator: { $0 == "e" || $0 == "E" })
-            let mantissa = parts[0]
-            let fraction = mantissa.firstIndex(of: ".").map {
-                mantissa.distance(from: mantissa.index(after: $0), to: mantissa.endIndex)
-            } ?? 0
-            let digits = mantissa.filter { $0 != "." }.drop(while: { $0 == "0" })
-            if digits.isEmpty { return integer == 0 }
-            guard integer != 0, negative == (integer < 0),
-                  let exponent = parts.count == 2 ? Int(parts[1]) : 0 else { return false }
-            let (shift, overflow) = exponent.subtractingReportingOverflow(fraction)
-            guard !overflow else { return false }
-            let expected = String(abs(integer))
-            if shift >= 0 {
-                guard digits.count <= expected.count, shift == expected.count - digits.count else { return false }
-                return expected == String(digits) + String(repeating: "0", count: shift)
-            }
-            guard shift > -digits.count, digits.suffix(-shift).allSatisfy({ $0 == "0" }) else { return false }
-            return digits.dropLast(-shift) == expected
+            return JSONNumber(String(decoding: bytes[start..<offset], as: UTF8.self))
         }
     }
 }

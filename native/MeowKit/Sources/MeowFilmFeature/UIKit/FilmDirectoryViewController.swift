@@ -9,16 +9,21 @@ final class FilmDirectoryViewController: FilmSettingsListController, FilmPlaybac
     private let model: FilmPlaybackModel
     private let sourceID: String
     private let lineID: FilmPlaybackIdentifier?
+    private let metadataSourceID: String?
+    private let season: Int?
     private let path: [String]
     private let presentationOwner = UUID()
     private var displayedError: String?
     private var displayedEntries: [FilmPlaybackDirectory.Entry]?
+    private var displayedState: String?
     private var playbackAvailable = false
     var onPresentPlayback: (() -> Void)?
 
-    init(model: FilmPlaybackModel, sourceID: String, lineID: FilmPlaybackIdentifier?, path: [String] = [],
+    init(model: FilmPlaybackModel, sourceID: String, lineID: FilmPlaybackIdentifier?,
+         metadataSourceID: String?, season: Int?, path: [String] = [],
          themeProvider: any PageThemeProviding) {
         self.model = model; self.sourceID = sourceID; self.lineID = lineID; self.path = path
+        self.metadataSourceID = metadataSourceID; self.season = season
         super.init(themeProvider: themeProvider)
         pageTitle = path.last.map { $0.isEmpty ? "/" : $0 } ?? "原始目录"
     }
@@ -37,31 +42,39 @@ final class FilmDirectoryViewController: FilmSettingsListController, FilmPlaybac
     }
 
     private func update() {
-        guard let browsing = model.presentation?.browsing, browsing.sourceID == sourceID, browsing.lineID == lineID else {
-            if displayedEntries != nil || sections.isEmpty {
-                displayedEntries = nil
-                sections = [.init(title: "", rows: [.init(title: "目录已变更", id: "film.directory.changed")])]
-                render()
-            }
-            return
-        }
-        let failure = model.actionError ?? model.observationError ?? model.snapshot?.browsing.error.map { FilmPlaybackError(code: $0) }
+        let selected = model.presentation
+        let ownsSelection = selected?.browsing.sourceID == sourceID && selected?.browsing.lineID == lineID &&
+            selected?.metadataSourceID == metadataSourceID && selected?.browsing.season == season
+        let failure = ownsSelection ? model.actionError ?? model.observationError ??
+            selected?.browsing.error.map { FilmPlaybackError(code: $0) } : model.observationError
         if let failure {
             if failure.code != displayedError {
                 displayedError = failure.code
                 self.failure(failure, retry: { [weak self] in
                     guard let self else { return }
-                    if model.restoringRead { model.refreshBrowsing() }
-                    else { model.reconnect() }
+                    if model.observationError != nil { model.reconnect() }
+                    else { model.refreshBrowsing() }
                 })
             }
         } else { displayedError = nil }
+        let reading = ownsSelection && selected?.browsing.error != nil
+        let directory = reading ? nil : model.loadedDirectory(sourceID: sourceID, lineID: lineID,
+            metadataSourceID: metadataSourceID, season: season)
+        guard let browsing = directory?.browsing else {
+            let loading = model.presentation?.browsing.loading == true
+            let state = failure != nil ? "加载失败" : loading ? "加载中" : "无可用视频源"
+            if displayedEntries != nil || displayedState != state {
+                displayedEntries = nil
+                displayedState = state
+                sections = [.init(title: "", rows: [.init(title: state,
+                                                         id: "film.directory.state", enabled: false)])]
+                render()
+            }
+            return
+        }
+        displayedState = nil
         let entries = FilmPlaybackDirectory(files: browsing.originalFiles).children(at: path)
-        let execution = model.snapshot
-        let available = model.executionStage != nil &&
-            execution?.entryResolution != "loading" && execution?.entryResolution != "error" &&
-            !(execution?.browsing.loading == true && execution?.browsing.refreshing != true) &&
-            execution?.browsing.error == nil
+        let available = model.executionStage != nil && !model.restoringRead
         if entries == displayedEntries {
             guard playbackAvailable != available else { return }
             playbackAvailable = available
@@ -88,6 +101,7 @@ final class FilmDirectoryViewController: FilmSettingsListController, FilmPlaybac
                              action: { [weak self] in
                     guard let self else { return }
                     let page = FilmDirectoryViewController(model: model, sourceID: sourceID, lineID: lineID,
+                                                           metadataSourceID: metadataSourceID, season: season,
                                                            path: path + [name], themeProvider: themeProvider)
                     page.onPresentPlayback = onPresentPlayback
                     navigationController?.pushViewController(page, animated: true)
@@ -95,12 +109,14 @@ final class FilmDirectoryViewController: FilmSettingsListController, FilmPlaybac
             case .file(let file):
                 return .init(title: file.name, id: "film.directory.file.\(file.id)",
                              enabled: file.candidateID != nil && available, action: { [weak self] in
-                    guard let self, let candidateID = file.candidateID else { return }
-                    model.selectCandidate(candidateID); onPresentPlayback?()
+                    guard let self, file.candidateID != nil else { return }
+                    model.selectTarget(file.playbackTarget, metadataSourceID: metadataSourceID)
+                    onPresentPlayback?()
                 })
             }
         }
-        sections = [.init(title: "", rows: rows.isEmpty ? [.init(title: "空目录", id: "film.directory.empty")] : rows)]
+        sections = [.init(title: "", rows: rows.isEmpty ?
+            [.init(title: "无可用视频源", id: "film.directory.empty", enabled: false)] : rows)]
         render()
     }
 }

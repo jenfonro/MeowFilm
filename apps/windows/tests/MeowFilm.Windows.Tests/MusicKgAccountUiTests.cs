@@ -334,7 +334,7 @@ public static class MusicKgAccountUiTests
             Store = new(new LocalDocumentStore(Root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
             Dialogs = new() { Path = System.IO.Path.Combine(Root, "explicit-qr.png") };
             Runtime.Platform.OnRequest = Transport.Read;
-            Calls = new(new MusicNativeApplication(Store, Runtime));
+            Calls = new(new MusicNativeApplication(Store, MusicTestStores.For(Store), Runtime));
             Module = new(Calls, Store, new Output(), Dialogs);
         }
         internal static async Task<Fixture> Create()

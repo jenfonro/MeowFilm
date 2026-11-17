@@ -73,9 +73,9 @@ public static class FilmPlaybackRecoveryTests
                 var original = FilmJson.Encode(request);
                 await rig.OpenAsync(request);
                 var first = rig.Epochs[0];
-                await rig.Session.CommandAsync("select.episode", new { episode = new { season = 2, episode = 4, globalEpisode = 16 } });
+                await rig.Session.CommandAsync("select.target", new { target = (request.Target with { Season = 2, Episode = 4, GlobalEpisode = 16 }).Wire() });
                 await Until(() => rig.Page.ActiveTarget.Season == 2 && rig.Page.ActiveTarget.Episode == 4);
-                var currentMetadata = FilmJson.Encode(new { title = "当前第二季资料", seasons = new[] { new { season_number = 2, name = "第二季" } } });
+                var currentMetadata = FilmJson.Encode(new { title = "当前第二季资料", seasons = new[] { new { businessId = request.Target.Id + ":season:2", playbackTarget = (request.Target with { Season = 2 }).Wire(), season_number = 2, name = "第二季" } } });
                 first.Film.Change(root => root["metadata"] = Node(currentMetadata));
                 await Until(() => rig.Page.Title == "当前第二季资料");
                 first.Crash();

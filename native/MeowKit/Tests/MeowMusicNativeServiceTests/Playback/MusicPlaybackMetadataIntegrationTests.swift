@@ -85,7 +85,7 @@ final class MusicPlaybackMetadataIntegrationTests: XCTestCase {
         let document = try await service.read()
         let last = try XCTUnwrap(document.queue["entries"].array.last)
         XCTAssertEqual(last["songId"], original["songId"])
-        XCTAssertEqual(Set(document.library["library"]["songs"][last["songId"].string]["sources"].array.map {
+        XCTAssertEqual(Set((try document.fixtureSong(last["songId"].string))["sources"].array.map {
             $0["source"].string
         }), ["wy", "tx"])
         let shared = try await service.sharedSongMetadata(original), calls = await qq.calls()
@@ -115,7 +115,10 @@ final class MusicPlaybackMetadataIntegrationTests: XCTestCase {
         XCTAssertEqual(after.queue, before.queue)
         XCTAssertEqual(after.playback, before.playback)
         let shared = try await service.sharedSongMetadata(original)
-        XCTAssertEqual(shared, original, "Saving a reference cannot import metadata from unseen members")
+        // Only song-root field order is unspecified; nested source values stay byte-exact.
+        XCTAssertEqual(MJ.obj(shared.fields.sorted { $0.0 < $1.0 }).bytes,
+                       MJ.obj(original.fields.sorted { $0.0 < $1.0 }).bytes,
+                       "Saving a reference cannot import metadata from unseen members")
         let reads = await pages.events(), calls = await qq.calls()
         XCTAssertEqual(reads, ["root"], "Saving a previewed reference must not read additional members")
         XCTAssertEqual(calls, 0, "Saving a reference does not search for song metadata")
@@ -151,7 +154,7 @@ final class MusicPlaybackMetadataIntegrationTests: XCTestCase {
         for failure in failures {
             let original = try seed(), gate = NativeMusicGate(), clock = NativeMusicFixtureClock()
             let qq = PlaybackMetadataQQ(gate: gate, failure: failure)
-            let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: original),
+            let service = NativeMusicService(database: try MusicNativeCandidateDiscoveryFixture.store(song: original),
                 scripts: NativeMusicScriptFixture(), platformClient: try qq.makeClient(), enabledPlatforms: [.qq],
                 clock: { clock.now() })
             try await service.setAccess(available: true, generation: 1)

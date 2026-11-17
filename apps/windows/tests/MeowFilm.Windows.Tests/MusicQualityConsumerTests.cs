@@ -86,44 +86,44 @@ public static class MusicQualityConsumerTests
     {
         await using var f = new Scene(); await f.Module.InitializeAsync(default); await f.Module.ActivateQualitySettingsAsync();
         await Editable(f.Module);
-        f.Fixture.Store.FaultNamespace = MusicLibraryOwner.DocumentNamespace; f.Fixture.Store.Fault = true; f.Fixture.Store.FaultAfter = true;
+        MusicTestStores.For(f.Fixture.Store).Fault = true; MusicTestStores.For(f.Fixture.Store).FaultAfter = true;
         await f.Module.SetPlaybackQualityRequestAsync("master"); await Editable(f.Module);
         Check(f.Module.CanEditQuality && f.Module.PlaybackQualityRequest == "master" &&
             f.Module.QualityStatus.Length == 0);
-        int writes = f.Fixture.Store.Writes;
+        int writes = MusicTestStores.For(f.Fixture.Store).Writes;
         await f.Module.SetPlaybackQualityRequestAsync("master");
-        Check(f.Fixture.Store.Writes == writes);
-        f.Fixture.Store.Fault = true; f.Fixture.Store.FaultAfter = false;
+        Check(MusicTestStores.For(f.Fixture.Store).Writes == writes);
+        MusicTestStores.For(f.Fixture.Store).Fault = true; MusicTestStores.For(f.Fixture.Store).FaultAfter = false;
         await f.Module.SetPlaybackQualityRequestAsync("128k"); await Editable(f.Module);
         Check(f.Module.PlaybackQualityRequest == "master" &&
             f.Module.QualityStatus == "音质设置保存失败" &&
-            f.Fixture.Store.Writes == writes + 1);
+            MusicTestStores.For(f.Fixture.Store).Writes == writes + 1);
     }
     private static async Task Close()
     {
         await using var f = new Scene(); await f.Module.InitializeAsync(default); await f.Module.ActivateQualitySettingsAsync();
         await Editable(f.Module);
         string before = f.Module.PlaybackQualityRequest;
-        int writes = f.Fixture.Store.Writes;
-        f.Fixture.Store.HoldNamespace = MeowFilm.Capabilities.Library.MusicLibraryOwner.DocumentNamespace;
+        int writes = MusicTestStores.For(f.Fixture.Store).Writes;
+        MusicTestStores.For(f.Fixture.Store).HoldCommit();
         var save = f.Module.SetPlaybackQualityRequestAsync("auto");
-        await f.Fixture.Store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await MusicTestStores.For(f.Fixture.Store).Entered!.Task.WaitAsync(TimeSpan.FromSeconds(5));
         var close = f.Module.PrepareShutdownAsync(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
         Check(!save.IsCompleted && !close.IsCompleted, "physical durable write must still own input");
-        f.Fixture.Store.Release.TrySetResult(); await Task.WhenAll(save, close);
+        MusicTestStores.For(f.Fixture.Store).Release?.TrySetResult(); await Task.WhenAll(save, close);
         Check(f.Module.QualityStatus.Length == 0 && f.Module.PlaybackQualityRequest == before &&
-            f.Fixture.Store.Writes == writes + 1,
+            MusicTestStores.For(f.Fixture.Store).Writes == writes + 1,
             "the admitted save commits while its retired page keeps its prior projection");
         await f.Module.CancelShutdownPreparationAsync();
         await f.Module.ActivateQualitySettingsAsync();
-        Check(f.Module.PlaybackQualityRequest == "auto" && f.Fixture.Store.Writes == writes + 1,
+        Check(f.Module.PlaybackQualityRequest == "auto" && MusicTestStores.For(f.Fixture.Store).Writes == writes + 1,
             "a fresh read adopts the committed policy without replaying the save");
     }
     private static async Task RealLx()
     {
         var store = new QualityFixture.DocumentStore();
         await using var runtime = new NativeMusicScriptTestRuntime();
-        await using var app = new MusicNativeApplication(store, runtime);
+        await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
         async Task<JsonElement> Call(string method, object? p = null)
         {
             var r = await app.ExecuteAsync(method, p); Check(r.GetProperty("ok").GetBoolean(), method + r.GetRawText()); return r;
@@ -166,7 +166,7 @@ public static class MusicQualityConsumerTests
     {
         await using var store = new MusicOfficialAudioTests.MemoryStore();
         await using var runtime = new NativeMusicScriptTestRuntime();
-        await using var app = new MusicNativeApplication(store, runtime);
+        await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
         var output = new SwitchingOutput();
         await using var module = new MusicCapability(app, store, output, new Dialogs());
         async Task<JsonElement> Call(string method, object? p = null)
@@ -246,8 +246,7 @@ public static class MusicQualityConsumerTests
             foreach (var entry in queue["entries"]!.AsArray().OfType<JsonObject>()
                 .Append(queue["current"]!.AsObject()))
                 entry["song"] = new JsonObject { ["songId"] = entry["song"]!["songId"]!.DeepClone() };
-            var history = store.Root(MusicLibraryOwner.DocumentNamespace)["entries"]!.AsArray().Single(entry =>
-                entry!["key"]!.GetValue<string>() == new JsonArray("meowfilm", "music", 1, "local", "history").ToJsonString())!["value"]!;
+            var history = MusicTestStores.For(store).State("history");
             return queue.ToJsonString() + history.ToJsonString();
         }
         string control = await Control();
@@ -332,7 +331,7 @@ public static class MusicQualityConsumerTests
         }
         public async ValueTask DisposeAsync()
         {
-            Fixture.Store.Release.TrySetResult(); Fixture.Runtime.Release.TrySetResult();
+            MusicTestStores.For(Fixture.Store).Release?.TrySetResult(); Fixture.Runtime.Release.TrySetResult();
             await Module.DisposeAsync(); await Fixture.DisposeAsync();
         }
     }

@@ -30,7 +30,7 @@ final class MusicNativeKuwoSearchTests: XCTestCase {
         for platform in ["kw", "mg"] {
             let input = MusicNativeCandidateDiscoveryFixture.track(platform, id: "123")
             let peer = NativeMusicResultFixture([try MusicPlatformFixture.page([input], platform: platform)])
-            let store = NativeMusicMemoryDocument(), scripts = MusicNativeCandidateDiscoveryScripts()
+            let store = NativeMusicTestLibrary(), scripts = MusicNativeCandidateDiscoveryScripts()
             await scripts.supported([platform])
             let service = try await NativeMusicFixture.service(store, scripts: scripts, platform: peer)
             let page = try await service.search(platform: platform, query: "Synthetic", page: 1, limit: 30)
@@ -92,7 +92,7 @@ final class MusicNativeKuwoSearchTests: XCTestCase {
 
     func testCancellationAndRevocationRejectLateCanonicalResultsWithoutRepositoryWrites() async throws {
         for revoke in [false, true] {
-            let gate = NativeMusicGate(), store = NativeMusicMemoryDocument()
+            let gate = NativeMusicGate(), store = NativeMusicTestLibrary()
             let peer = NativeMusicResultFixture([try MusicPlatformFixture.page([MusicNativeCandidateDiscoveryFixture.track("kw")], platform: "kw")], gate: gate)
             let service = try await NativeMusicFixture.service(store, platform: peer)
             let task = Task { try await service.search(platform: "kw", query: "Synthetic", page: 1, limit: 30) }

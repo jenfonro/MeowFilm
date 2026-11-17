@@ -67,7 +67,7 @@ public static class MusicSongMatcherTests
         internal Fixture()
         {
             CacheStore = new(Store);
-            Library = new(Store);
+            Library = new(MusicTestStores.For(Store));
             Matcher = new(Library, new(CacheStore), async (request, token) =>
             {
                 lock (Requests) Requests.Add(request);

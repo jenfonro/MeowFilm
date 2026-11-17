@@ -413,8 +413,8 @@ struct MusicScriptSourceDetailContent: View {
                         Button { state.rollback(id) } label: {
                             Text("回退更新")
                                 .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
-                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                                .contentShape(Rectangle())
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle().inset(by: -SettingsVisualMetrics.rowVerticalPadding))
                         }
                         .disabled(!state.available || state.isPending(id))
                         .accessibilityLabel("回退更新")

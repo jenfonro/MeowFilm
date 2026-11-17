@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createPlaybackLibrary } from '../packages/film-playback/src/library.js';
+import { cloneJSONValue, parseJSONText, stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { defaultPreferences } from '../packages/film-playback/src/policy.js';
 
 function area(t) {
@@ -26,6 +27,8 @@ const history = () => ({
   candidateId: 'candidate:exact-file', episode: { season: 1, episode: 2, globalEpisode: 2 },
   detailId: 'detail:one', lineId: 'raw-flag', position: 12.5, duration: 600,
   paused: false, ended: false, playedAt: 1000, updatedAt: 1200,
+  playbackTarget: { id: 'tmdb:tv:42', kind: 'source', title: '合成剧集', season: 1, episode: 2, globalEpisode: 2,
+    source: { key: 'cat:installation:site', detailId: 'detail:one', lineId: 'raw-flag', candidateId: 'candidate:exact-file' } },
 });
 const manual = () => ({
   id: 'manual:one', targetId: 'tmdb:tv:42', kind: 'site', sourceKey: 'cat:installation:site',
@@ -37,18 +40,6 @@ const block = (extra = {}) => ({
 });
 const empty = () => ({
   version: 2, preferences: defaultPreferences(), history: [], manual: [], blocks: [], previewTargets: [], groups: [],
-});
-
-test('v1 playback documents migrate once without losing existing watching and source preferences', t => {
-  const dataRoot = area(t), directory = join(dataRoot, 'film-playback');
-  fs.mkdirSync(directory);
-  const previous = { version: 1, preferences: defaultPreferences(), history: [history()],
-    manual: [manual()], blocks: [block()], previewTargets: ['tmdb:tv:42'] };
-  fs.writeFileSync(join(directory, 'library.json'), JSON.stringify(previous));
-  const { owner } = library(t, dataRoot);
-  assert.deepEqual(owner.read(), { ...previous, version: 2, groups: [] });
-  owner.update(draft => { draft.preferences.iosAutoPrepare = false; });
-  assert.equal(JSON.parse(fs.readFileSync(join(directory, 'library.json'))).version, 2);
 });
 
 test('native preferences stay in their sole settings owner while repeated business writes and reopen preserve library facts', t => {
@@ -180,6 +171,8 @@ test('E30: history preserves movie identity, exact source/candidate and progress
   entry.targetId = 'douban:movie:50';
   entry.title = '合成电影';
   delete entry.episode;
+  entry.playbackTarget = { id: entry.targetId, kind: 'movie', title: entry.title,
+    metadataProvider: 'douban', metadataId: 50 };
   owner.update(draft => { draft.history.push(entry); });
   owner.update(draft => {
     const current = draft.history[0];
@@ -244,18 +237,18 @@ test('E35/E36: preference groups can save, restart and restore individually usin
   assert.deepEqual(restarted.read().preferences, defaultPreferences());
 });
 
-test('E36/E37: invalid preferences fail their transaction, while invalid saved preferences are explicit corruption', t => {
+test('stored unused preferences and bad siblings are retained during unrelated business writes', t => {
   const { owner, path, dataRoot } = library(t);
-  owner.update(() => {});
-  const before = owner.read(), bytes = fs.readFileSync(path);
-  assert.throws(() => owner.update(draft => { draft.preferences.ruleOrder = []; }),
-    { code: 'INVALID_PREFERENCES' });
-  assert.equal(owner.read(), before);
-  assert.deepEqual(fs.readFileSync(path), bytes);
-  const invalid = { ...empty(), preferences: { ruleOrder: [] } };
-  fs.writeFileSync(path, JSON.stringify(invalid));
-  assert.throws(() => createPlaybackLibrary({ dataRoot }), { code: 'CORRUPT_STORAGE' });
-  assert.equal(fs.readFileSync(path, 'utf8'), JSON.stringify(invalid));
+  owner.close();
+  const original = { ...empty(), preferences: { ruleOrder: [], extra: true },
+    history: [null, { targetId: 'broken' }], manual: [null], blocks: [null],
+    groups: [null], extra: { nested: 'retained' } };
+  fs.mkdirSync(join(dataRoot, 'film-playback'), { recursive: true });
+  fs.writeFileSync(path, JSON.stringify(original));
+  const restarted = createPlaybackLibrary({ dataRoot });
+  t.after(() => restarted.close());
+  restarted.update(draft => { draft.previewTargets.push('tmdb:movie:42'); });
+  assert.deepEqual(restarted.read(), { ...original, previewTargets: ['tmdb:movie:42'] });
 });
 
 test('E37/E48: mutator exceptions fail without publication or disk replacement and redact their diagnostics', t => {
@@ -288,64 +281,58 @@ test('E37: asynchronous and reentrant transactions cannot publish a partial draf
   await Promise.resolve();
 });
 
-test('E37: invalid schemas, duplicate identities and unsafe history never replace the committed document', async t => {
-  const cases = [
+test('root and non-JSON transaction failures preserve the committed document', async t => {
+  for (const [name, mutate] of [
     ['version', draft => { draft.version = 3; }],
-    ['foreign favorites owner', draft => { draft.favorites = []; }],
-    ['foreign native rules owner', draft => { draft.rules = []; }],
     ['missing section', draft => { delete draft.manual; }],
+    ['bad container', draft => { draft.history = {}; }],
     ['missing preview targets', draft => { delete draft.previewTargets; }],
-    ['untyped preview target', draft => { draft.previewTargets.push(42); }],
-    ['duplicate history target', draft => { draft.history.push(history(), history()); }],
-    ['duplicate manual id', draft => { draft.manual.push(manual(), manual()); }],
-    ['duplicate exact block', draft => { draft.blocks.push(block(), block()); }],
-    ['negative progress', draft => { draft.history.push({ ...history(), position: -1 }); }],
-    ['nonfinite progress', draft => { draft.history.push({ ...history(), position: Infinity }); }],
-    ['invalid timestamp', draft => { draft.history.push({ ...history(), updatedAt: -1 }); }],
-    ['missing exact line', draft => { const value = history(); delete value.lineId; draft.history.push(value); }],
-    ['play URL field', draft => { draft.history.push({ ...history(), url: 'https://synthetic.invalid/video' }); }],
-    ['headers field', draft => { draft.history.push({ ...history(), headers: { cookie: 'fixture-only' } }); }],
-    ['playId field', draft => { draft.history.push({ ...history(), playId: 'https://synthetic.invalid/video' }); }],
-    ['raw file field', draft => { draft.history.push({ ...history(), file: { token: 'fixture-only' } }); }],
-    ['source credentials', draft => { draft.history.push({ ...history(), cookie: 'fixture-only' }); }],
-    ['signed candidate id', draft => {
-      draft.history.push({ ...history(), candidateId: 'https://synthetic.invalid/video?sign=fixture-only' });
-    }],
-    ['escaped signed id', draft => {
-      draft.history.push({ ...history(),
-        candidateId: 'candidate:https%3A%2F%2Fsynthetic.invalid%2Fvideo%3Fsign%3Dfixture-only' });
-    }],
-    ['signed detail id', draft => {
-      draft.history.push({ ...history(), detailId: 'https://synthetic.invalid/video?signature=fixture-only' });
-    }],
-    ['credential URL', draft => {
-      draft.history.push({ ...history(), detailId: 'https://fixture-only@synthetic.invalid/detail' });
-    }],
-    ['fractional count', draft => { draft.manual.push({ ...manual(), failureCount: 1.5 }); }],
-    ['untyped enabled', draft => { draft.manual.push({ ...manual(), enabled: 'yes' }); }],
-    ['inexact block', draft => { draft.blocks.push({ ...block(), lineId: '' }); }],
-  ];
-  for (const [name, mutate] of cases) {
-    await t.test(name, sub => {
-      const { owner, path } = library(sub);
-      owner.update(() => {});
-      const before = owner.read(), bytes = fs.readFileSync(path);
-      assert.throws(() => owner.update(mutate), { code: 'INVALID_REQUEST' });
-      assert.equal(owner.read(), before);
-      assert.deepEqual(fs.readFileSync(path), bytes);
-    });
-  }
+    ['nonfinite material', draft => { draft.extra = Infinity; }],
+    ['undefined material', draft => { draft.extra = undefined; }],
+    ['accessor', draft => { Object.defineProperty(draft, 'extra', { enumerable: true, get() { assert.fail('getter'); } }); }],
+    ['cycle', draft => { draft.extra = draft; }],
+  ]) await t.test(name, sub => {
+    const { owner, path } = library(sub);
+    owner.update(() => {});
+    const before = owner.read(), bytes = fs.readFileSync(path);
+    assert.throws(() => owner.update(mutate), { code: 'INVALID_REQUEST' });
+    assert.equal(owner.read(), before);
+    assert.deepEqual(fs.readFileSync(path), bytes);
+  });
 });
 
-test('E37: malformed JSON, unsupported versions, invalid rows and invalid UTF-8 are explicit corruption', async t => {
+test('exact numeric extensions and malformed records survive unrelated writes and reopen', t => {
+  const { owner, path, dataRoot } = library(t);
+  const material = parseJSONText('{"integer":9007199254740993,"decimal":1.00000000000000001,"big":1e400,"tiny":1e-400,"zero":-0}');
+  owner.update(draft => {
+    draft.extra = material;
+    draft.preferences.extra = material;
+    draft.history.push(null, { targetId: 'broken', extra: material }, { ...history(), extra: material });
+    draft.manual.push(null, { ...manual(), extra: material });
+    draft.blocks.push(null, { ...block(), extra: material });
+    draft.groups.push({ broken: material });
+  });
+  const before = cloneJSONValue(owner.read());
+  owner.update(draft => { draft.previewTargets.push('tmdb:movie:42'); });
+  before.previewTargets.push('tmdb:movie:42');
+  assert.equal(fs.readFileSync(path, 'utf8'), stringifyJSONValue(before));
+  owner.close();
+  const restarted = createPlaybackLibrary({ dataRoot });
+  t.after(() => restarted.close());
+  assert.equal(stringifyJSONValue(restarted.read()), stringifyJSONValue(before));
+  assert.equal(isRawJSON(restarted.read().extra.integer), true);
+});
+
+test('E37: malformed JSON, unsupported versions, invalid roots and invalid UTF-8 are explicit corruption', async t => {
   const unpublishedDraft = empty();
   delete unpublishedDraft.previewTargets;
   const cases = [
     ['JSON', Buffer.from('{')],
     ['version', Buffer.from(JSON.stringify({ ...empty(), version: 3 }))],
     ['missing rows', Buffer.from(JSON.stringify({ version: 1, preferences: defaultPreferences() }))],
-    ['row schema', Buffer.from(JSON.stringify({ ...empty(), blocks: [{ targetId: 'x' }] }))],
-    ['foreign owner', Buffer.from(JSON.stringify({ ...empty(), favorites: [] }))],
+    ['null root', Buffer.from('null')],
+    ['bad container', Buffer.from(JSON.stringify({ ...empty(), blocks: {} }))],
+    ['old version', Buffer.from(JSON.stringify({ ...empty(), version: 1 }))],
     ['unpublished draft missing preview targets', Buffer.from(JSON.stringify(unpublishedDraft))],
     ['UTF-8', Buffer.concat([Buffer.from('{"version":1,"x":"'), Buffer.from([0xff]), Buffer.from('"}')])],
   ];
@@ -577,32 +564,6 @@ test('E37: obstructed paths cannot commit and preserve existing filesystem conte
   }
 });
 
-test('E37: bad manual sharing references and transport secrets fail with safe errors', async t => {
-  for (const share of [
-    { url: 'not a URL/private-fixture' },
-    { url: 'file:///private-fixture' },
-    { url: 'https://private-fixture@synthetic.invalid/s/id' },
-    { url: 'https://synthetic.invalid/s/id', cookie: 'private-fixture' },
-  ]) {
-    await t.test('invalid share', sub => {
-      const { owner, path } = library(sub);
-      assert.throws(() => owner.update(draft => {
-        draft.manual.push({
-          id: 'manual:share', targetId: 'tmdb:movie:42', kind: 'share', share,
-          enabled: true, autoDisable: false, failureCount: 0,
-        });
-      }), error => {
-        assert.equal(error.code, 'INVALID_REQUEST');
-        assert.equal(error.message, 'INVALID_REQUEST');
-        assert.equal(error.stack.includes('private-fixture'), false);
-        return true;
-      });
-      assert.equal(fs.existsSync(path), false);
-      assert.deepEqual(owner.read().manual, []);
-    });
-  }
-});
-
 test('E48: close is idempotent, rejects further operations, and cannot be bypassed by a held transaction', t => {
   const { owner, dataRoot, path } = library(t);
   owner.update(draft => { draft.blocks.push(block()); });
@@ -630,6 +591,8 @@ test('E19/E30: ordinary source page URLs remain valid opaque target/source/line 
   value.targetId = 'https://synthetic.invalid/detail?id=42';
   value.sourceKey = 'https://synthetic.invalid/source?id=site';
   value.lineId = 'https://synthetic.invalid/line?id=original';
+  value.playbackTarget = { ...value.playbackTarget, id: value.targetId,
+    source: { ...value.playbackTarget.source, key: value.sourceKey, lineId: value.lineId } };
   owner.update(draft => {
     draft.history.push(value);
     draft.blocks.push(block({ targetId: value.targetId, sourceKey: value.sourceKey, lineId: value.lineId }));
@@ -643,8 +606,8 @@ test('E19/E30/E31: source numeric detail and line ids retain their exact scalar 
   const entry = { ...history(), detailId: 42, lineId: 0 };
   delete entry.ended;
   delete entry.playedAt;
-  entry.duration = undefined;
-  entry.episode = { season: undefined, episode: undefined };
+  delete entry.duration;
+  entry.episode = {};
   owner.update(draft => {
     draft.history.push(entry);
     draft.manual.push({

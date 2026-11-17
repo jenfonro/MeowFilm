@@ -36,7 +36,7 @@ public static partial class MusicNativeCatalogTests
         Check(list.GetArrayLength() == 8 && list.EnumerateArray().Count(item => S(item, "kind") == "network") == 6 &&
             list.EnumerateArray().Count(item => S(item, "kind") == "playlist") == 1 && f.Platform.Calls.Length == 0);
         var snapshot = await f.Library.ReadLibrarySyncAsync();
-        Check(snapshot.Library.GetProperty("songs").EnumerateObject().Count() == 0);
+        Check(MusicTestStores.For(f.Store).SongIds().Count == 0);
     }
     private static async Task NetworkOpaqueReferences()
     {
@@ -59,7 +59,7 @@ public static partial class MusicNativeCatalogTests
                 saved.Add(collection);
             }
             await f.Owner.DisposeAsync(); await f.Library.AbortAsync();
-            await using var reader = new MusicLibraryOwner(f.Store);
+            await using var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store));
             var bytes = f.Store.Bytes!.ToArray(); int before = f.Store.Writes;
             for (int i = 0; i < remoteIds.Length; i++)
             {
@@ -116,7 +116,7 @@ public static partial class MusicNativeCatalogTests
         var saved = Ok(await f.Library.ExecuteAsync("music.library.network.get", new { platform = "wy", id = "42" }));
         Check(saved.GetProperty("present").GetBoolean() && S(saved.GetProperty("collection"), "remoteId") == "42");
         var snapshot = await f.Library.ReadLibrarySyncAsync();
-        Check(snapshot.Library.GetProperty("songs").EnumerateObject().Count() == 2 &&
+        Check(MusicTestStores.For(f.Store).SongIds().Count == 2 &&
             snapshot.Library.GetProperty("collections").GetArrayLength() == 1);
     }
     private static async Task NetworkRecreateCas(string platform)
@@ -137,7 +137,7 @@ public static partial class MusicNativeCatalogTests
         Error(await f.Library.ExecuteAsync("music.library.network.remove", stale), "REVISION_CONFLICT");
         Check(f.Store.Writes == writes && f.Store.Bytes.SequenceEqual(bytes));
         await f.Owner.DisposeAsync(); await f.Library.AbortAsync();
-        await using var reader = new MusicLibraryOwner(f.Store);
+        await using var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store));
         var reopened = Ok(await reader.ExecuteAsync("music.library.network.get", new { platform, id = remoteId }));
         Check(reopened.GetProperty("present").GetBoolean() &&
             reopened.GetProperty("collection").GetRawText() == current.GetRawText());
@@ -155,17 +155,24 @@ public static partial class MusicNativeCatalogTests
             await using var f = new Fixture();
             Ok(await f.Run("playlist.save", new { platform = "wy", id = "42", name = "Reference" }));
             var document = JsonNode.Parse(f.Store.Bytes!)!.AsObject();
-            var wrapper = document["entries"]!.AsArray().Select(entry => entry!["value"])
-                .OfType<JsonObject>().Single(value => value.ContainsKey("library"));
+            var wrapper = document["areas"]!["library"]!.AsObject();
             if (defect == "members") wrapper["library"]!["networkPlaylists"]![0]!["order"] = new JsonArray("1");
             if (defect == "locator") wrapper["library"]!["networkPlaylists"]![0]!["remoteId"] = new JsonArray();
             f.Store.Bytes = JsonSerializer.SerializeToUtf8Bytes(document, LJ.Json);
             var original = f.Store.Bytes.ToArray(); int writes = f.Store.Writes;
-            await using var reader = new MusicLibraryOwner(f.Store);
-            var result = await reader.ExecuteAsync("music.library.list");
-            if (defect == "none") Check(N(Ok(result), "total") == 2);
-            else Error(result, "CORRUPT_LIBRARY");
-            Check(f.Store.Writes == writes && f.Store.Bytes.SequenceEqual(original));
+            await using var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store));
+            Check(N(Ok(await reader.ExecuteAsync("music.library.list")), "total") == 2);
+            if (defect == "locator")
+            {
+                try { await reader.ReadLibrarySyncAsync(); throw new InvalidOperationException("Expected CORRUPT_LIBRARY"); }
+                catch (MusicLibraryException error) { Check(error.Code == "CORRUPT_LIBRARY", error.Code); }
+            }
+            else
+            {
+                var restored = (await reader.ReadLibrarySyncAsync()).Library.GetProperty("networkPlaylists")[0];
+                Check(JsonNode.DeepEquals(JsonNode.Parse(restored.GetRawText()), wrapper["library"]!["networkPlaylists"]![0]));
+            }
+            Check(f.Store.Writes == writes && f.Store.Bytes.SequenceEqual(original) && f.Platform.Calls.Length == 0);
         }
     }
     private static async Task NetworkCancellation()
@@ -174,7 +181,7 @@ public static partial class MusicNativeCatalogTests
         using var before = new CancellationTokenSource(); before.Cancel();
         Error(await f.Run("playlist.save", new { platform = "wy", id = "42", name = "Reference" }, before.Token), "CANCELLED");
         Check(f.Store.Writes == 0 && f.Platform.Calls.Length == 0);
-        f.Store.Block(); using var after = new CancellationTokenSource();
+        f.Store.HoldCommit(); using var after = new CancellationTokenSource();
         var saving = f.Run("playlist.save", new { platform = "wy", id = "42", name = "Reference" }, after.Token);
         await f.Store.Entered!.Task; after.Cancel(); f.Store.Release!.TrySetResult();
         var receipt = Ok(await saving);

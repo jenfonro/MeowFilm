@@ -44,5 +44,7 @@ public struct PlaybackVideoEvent {
     public let wantsPlayback: Bool
     public let error: PlaybackVideoError?
     public let pictureInPicture: PlaybackVideoPictureInPictureState
+    public let engine: PlaybackVideoEngine
+    public let chapters: [PlaybackVideoChapter]
 }
 #endif

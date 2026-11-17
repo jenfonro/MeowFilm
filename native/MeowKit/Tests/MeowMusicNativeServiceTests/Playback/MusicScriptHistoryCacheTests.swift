@@ -71,7 +71,7 @@ final class MusicScriptHistoryCacheTests: XCTestCase {
                 .init(rootURL: root, clock: { clock.now() }, transport: HistoryBytes(), inspector: HistoryMeasurement())
             }
             let file = cache()
-            let service = NativeMusicService(document: store, scripts: scripts, platformClient: try NativeMusicFixture.client(),
+            let service = NativeMusicService(database: store, scripts: scripts, platformClient: try NativeMusicFixture.client(),
                 audioFileCache: file, clock: { clock.now() })
             try await service.setAccess(available: true, generation: 1)
             clock.advance(1) // Actual play follows the access-transition capture cutoff.
@@ -97,7 +97,7 @@ final class MusicScriptHistoryCacheTests: XCTestCase {
             let beforeCounts = await scripts.counts()
             let reopenedFile = cache()
             let accounts = MusicRecoveryTestAccounts(platform: .qq, nativeID: "UnusedMID", clock: clock)
-            let reopened = NativeMusicService(document: store, scripts: change == "deleted" ? nil : scripts,
+            let reopened = NativeMusicService(database: store, scripts: change == "deleted" ? nil : scripts,
                 accounts: accounts, platformClient: try NativeMusicFixture.client(),
                 audioFileCache: reopenedFile, clock: { clock.now() })
             try await reopened.setAccess(available: true, generation: 2)

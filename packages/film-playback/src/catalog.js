@@ -1,3 +1,4 @@
+import { cloneJSONValue, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { checkSource, checkTarget, clone, identity, isIdentifier, object, requireValue,
   resultDetailId, sourceIdentity, text } from './identity.js';
 import { candidateIdentity, candidateResourceIdentity } from './recognition.js';
@@ -13,22 +14,6 @@ function sourceMember(source, detailId) {
   return identity(sourceIdentity(source), detailId);
 }
 
-function relocate(document, previous, next) {
-  if (!previous || previous === next) return;
-  for (const name of ['history', 'manual', 'blocks'])
-    for (const row of document[name]) if (row.targetId === previous) {
-      row.targetId = next;
-      if (row.playbackTarget?.id === previous) row.playbackTarget.id = next;
-    }
-  const latest = new Map();
-  for (const row of document.history)
-    if (!latest.has(row.targetId) || row.updatedAt > latest.get(row.targetId).updatedAt) latest.set(row.targetId, row);
-  document.history = [...latest.values()];
-  document.blocks = [...new Map(document.blocks.map(row =>
-    [JSON.stringify([row.targetId, row.sourceKey, row.detailId, row.lineId]), row])).values()];
-  document.previewTargets = [...new Set(document.previewTargets.map(id => id === previous ? next : id))];
-}
-
 /** Stable content addressing belongs to the film owner, not a search session or a view. */
 export function createFilmCatalog({ library } = {}) {
   requireValue(library && typeof library.read === 'function' && typeof library.update === 'function');
@@ -37,14 +22,15 @@ export function createFilmCatalog({ library } = {}) {
     const identities = [...new Set(members.map(member =>
       sourceMember(sources.find(source => source.key === member.sourceKey), member.detailId)))].sort();
     requireValue(identities.length);
-    let record = groups.find(row => key && row.keys.includes(key)) ??
-      groups.find(row => row.id === preferred) ??
-      groups.find(row => identities.some(member => row.members.includes(member)));
+    let record = groups.find(row => key && Array.isArray(row?.keys) && row.keys.includes(key)) ??
+      groups.find(row => row?.id === preferred) ??
+      groups.find(row => Array.isArray(row?.members) && identities.some(member => row.members.includes(member)));
     if (!record) {
-      record = { id: /^group:[a-f0-9]{64}$/.test(preferred ?? '') ? preferred
-        : `group:${identity('group', identities[0])}`, keys: [], members: [] };
+      record = { id: `group:${identity('group', identities[0])}`, keys: [], members: [] };
       groups.push(record);
     }
+    requireValue(/^group:[a-f0-9]{64}$/.test(record.id) && Array.isArray(record.keys) &&
+      Array.isArray(record.members), 'CORRUPT_STORAGE');
     if (key && !record.keys.includes(key)) record.keys.push(key);
     for (const member of identities) if (!record.members.includes(member)) record.members.push(member);
     return record.id;
@@ -59,10 +45,10 @@ export function createFilmCatalog({ library } = {}) {
     } else if (value.metadataProvider) {
       requireValue(['tmdb', 'douban'].includes(value.metadataProvider) &&
         /^[0-9]+$/.test(String(value.metadataId)));
-      result.id = stableId(value.id ?? '') ? value.id : metadataId(value.metadataProvider, value.kind, value.metadataId);
+      result.id = metadataId(value.metadataProvider, value.kind, value.metadataId);
     } else if (value.kind === 'source') {
       if (value.source?.engine === 'pan') {
-        const manual = library.read().manual.find(row => row.share && row.enabled !== false &&
+        const manual = library.read().manual.find(row => row?.share && row.enabled !== false &&
           `manual:${row.id}` === value.source.key && row.id === value.source.detailId && row.targetId === value.id);
         requireValue(manual, 'SOURCE_NOT_FOUND');
         result.source = { ...value.source, engine: 'pan' };
@@ -76,28 +62,21 @@ export function createFilmCatalog({ library } = {}) {
     return checkTarget(result);
   }
 
-  function commit(groups, moves) {
-    const current = library.read();
-    const changed = JSON.stringify(current.groups) !== JSON.stringify(groups);
-    const relocation = moves.some(([old, id]) => old !== id && ['history', 'manual', 'blocks'].some(name =>
-      current[name].some(row => row.targetId === old)) || old !== id && current.previewTargets.includes(old));
-    if (!changed && !relocation) return;
-    library.update(document => {
-      document.groups = groups;
-      for (const [old, id] of moves) relocate(document, old, id);
-    });
+  function commit(groups) {
+    if (stringifyJSONValue(library.read().groups) === stringifyJSONValue(groups)) return;
+    library.update(document => { document.groups = groups; });
   }
 
   function resolve(value, sources = []) {
     requireValue(Array.isArray(sources));
-    const groups = clone(library.read().groups);
+    const groups = cloneJSONValue(library.read().groups);
     const resolved = target(value, sources, groups);
-    commit(groups, [[value.id, resolved.id]]);
+    commit(groups);
     return resolved;
   }
 
   function search(cards, sources, revision) {
-    const groups = clone(library.read().groups), moves = [];
+    const groups = cloneJSONValue(library.read().groups);
     const result = cards.map(card => {
       const members = (card.aggregateItems?.length ? card.aggregateItems : card.sourceKind === 'site' ? [card] : [])
         .map(row => ({ sourceKey: row.siteKey, detailId: row.detailId }));
@@ -110,11 +89,9 @@ export function createFilmCatalog({ library } = {}) {
         : { kind: 'group', title: text(card.title), members };
       const key = value.kind === 'group' ? identity('aggregation', revision, card.groupKey) : undefined;
       const resolved = target(value, sources, groups, key);
-      const previous = card.displayKey.startsWith('group:') ? `group:${JSON.stringify(card.displayKey.slice(6))}` : card.displayKey;
-      moves.push([previous, resolved.id]);
       return { ...card, businessId: resolved.id, playbackTarget: resolved };
     });
-    commit(groups, moves);
+    commit(groups);
     return result;
   }
 
@@ -200,7 +177,7 @@ export function createFilmCatalog({ library } = {}) {
   }
 
   function file(parent, source, lineId, value) {
-    const scope = [source.key, source.engine, source.installationId, source.siteId];
+    const scope = [source.key, source.engine ?? null, source.installationId ?? null, source.siteId ?? null];
     const resource = candidateResourceIdentity(value.file, value.share, scope, source.detailId, lineId, value.playId);
     return candidate(parent, { ...fields(value, ['season', 'episode', 'globalEpisode']),
       id: candidateIdentity(scope, source.detailId, lineId, resource), source, lineId });
@@ -213,10 +190,14 @@ export function createFilmCatalog({ library } = {}) {
   }
 
   function history(value) {
-    const playbackTarget = value.playbackTarget ?? { id: value.targetId, kind: 'source', title: value.title,
-      ...value.episode, source: { key: value.sourceKey, detailId: value.detailId,
-        lineId: value.lineId, candidateId: value.candidateId } };
-    return { ...value, businessId: value.targetId, playbackTarget: clone(playbackTarget) };
+    if (!object(value)) return { errorCode: 'CORRUPT_STORAGE' };
+    try {
+      checkTarget(value.playbackTarget);
+      requireValue(value.playbackTarget.id === value.targetId);
+      return { ...cloneJSONValue(value), businessId: value.targetId };
+    } catch {
+      return { ...cloneJSONValue(value), errorCode: 'CORRUPT_STORAGE' };
+    }
   }
 
   function directory(source, value) {

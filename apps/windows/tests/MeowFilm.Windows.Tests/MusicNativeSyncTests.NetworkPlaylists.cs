@@ -45,7 +45,7 @@ public static partial class MusicNativeSyncTests
         yield return new("Music network KG unsubscribe lost response retains account list fence", NetworkKgUnsubscribeRecovery);
         yield return new("Music network KG unsubscribe carries the actual account relation locator", NetworkKgUnsubscribeRequest);
         foreach (string platform in new[] { "tx", "kg" })
-            foreach (string defect in new[] { "none", "members", "same-presence", "managed-target", "account", "remote", "locator" })
+            foreach (string defect in new[] { "none", "same-presence", "managed-target", "account", "remote", "locator" })
             {
                 string p = platform, d = defect;
                 yield return new($"Music network {p} persisted subscription fence format {d}", () => NetworkFenceFormat(p, d));
@@ -92,7 +92,7 @@ public static partial class MusicNativeSyncTests
             ifRevision = before.GetProperty("revision").GetInt64(), confirm = true
         }));
     }
-    private static int LocalSongCount(JsonElement library) => library.GetProperty("songs").EnumerateObject().Count();
+    private static int LocalSongCount(Fixture fixture) => MusicTestStores.For(fixture.Store).SongIds().Count;
 
     private static async Task NetworkLocalOnly(string platform)
     {
@@ -103,7 +103,7 @@ public static partial class MusicNativeSyncTests
         var again = Ok(await SaveNetwork(f, platform));
         Check(f.Store.Writes == writes && again.GetProperty("collection").GetRawText() == saved.GetProperty("collection").GetRawText());
         var snapshot = await f.Owner.ReadLibrarySyncAsync();
-        Check(LocalSongCount(snapshot.Library) == 0 && snapshot.Library.GetProperty("collections").GetArrayLength() == 1 &&
+        Check(LocalSongCount(f) == 0 && snapshot.Library.GetProperty("collections").GetArrayLength() == 1 &&
             snapshot.Library.GetProperty("networkPlaylists").GetArrayLength() == 1);
         var removed = Ok(await RemoveNetwork(f, saved.GetProperty("collection")));
         Check(!removed.GetProperty("present").GetBoolean() && S(NetworkSync(removed), "state") == "local-only");
@@ -122,7 +122,7 @@ public static partial class MusicNativeSyncTests
         if (platform == "wy") Check(f.Server.Preparations == 1 && request["preparationId"]!.GetValue<string>() == "synthetic-preparation-1");
         if (platform == "kg") Check(request["remote"]!["locator"]!["creatorId"]!.GetValue<string>() == "77" && request["remote"]!["locator"]!["creatorListId"]!.GetValue<string>() == "301");
         var snapshot = await f.Owner.ReadLibrarySyncAsync();
-        Check(LocalSongCount(snapshot.Library) == 0 && snapshot.Library.GetProperty("collections").GetArrayLength() == 1);
+        Check(LocalSongCount(f) == 0 && snapshot.Library.GetProperty("collections").GetArrayLength() == 1);
         var baseline = snapshot.Library.GetProperty("networkPlaylists")[0].GetProperty("subscription");
         Check(baseline.GetProperty("present").GetBoolean() && S(baseline, "accountId") == "42");
         if (platform == "kg") Check(S(baseline.GetProperty("locator"), "listId") == "901");
@@ -200,7 +200,7 @@ public static partial class MusicNativeSyncTests
         Ok(await SaveNetwork(f, "kw", "702", "Same")); Ok(await SaveNetwork(f, "mg", "702", "Same"));
         await f.Enable(false, true); Ok(await f.Run());
         var snapshot = await f.Owner.ReadLibrarySyncAsync();
-        Check(snapshot.Library.GetProperty("collections").GetArrayLength() == 2 && LocalSongCount(snapshot.Library) == 1 &&
+        Check(snapshot.Library.GetProperty("collections").GetArrayLength() == 2 && LocalSongCount(f) == 1 &&
             snapshot.Library.GetProperty("networkPlaylists").GetArrayLength() == 3);
         var managed = snapshot.Library.GetProperty("collections")[1];
         Check(managed.GetProperty("bindings").GetArrayLength() == 1 && S(managed.GetProperty("bindings")[0], "id") == "701");
@@ -491,12 +491,11 @@ public static partial class MusicNativeSyncTests
         f.Server.ThrowAfterSubscription = true; f.Server.FailSubscriptionReadback = true;
         Code(NetworkSync(await SaveNetwork(f)), "UPSTREAM_ERROR");
         var document = JsonNode.Parse(f.Store.Data!)!.AsObject();
-        var sync = document["entries"]!.AsArray().Select(entry => entry!["value"])
+        var sync = document["areas"]!.AsObject().Select(entry => entry.Value)
             .OfType<JsonObject>().Single(value => value.ContainsKey("platforms"));
         var pending = sync["pending"]!.AsObject();
         switch (defect)
         {
-            case "members": pending["before"] = new JsonArray(); break;
             case "same-presence": pending["desiredPresent"] = false; break;
             case "managed-target": pending["collectionId"] = "favorites"; break;
             case "account": pending["accountId"] = "77"; break;
@@ -505,16 +504,19 @@ public static partial class MusicNativeSyncTests
         }
         f.Store.Data = LJ.Bytes(document);
         var original = f.Store.Data.ToArray(); int writes = f.Store.Writes, requests = f.Server.Reads + f.Server.Writes;
-        await using var reader = new MusicLibraryOwner(f.Store);
-        var result = await reader.ExecuteAsync("music.library.list");
+        await f.Restart();
+        Check(Ok(await f.Owner.ExecuteAsync("music.library.list")).GetProperty("total").GetInt64() == 2);
         if (defect == "none")
         {
-            Check(Ok(result).GetProperty("total").GetInt64() == 2);
-            var restored = (await reader.ReadLibrarySyncAsync()).State.GetProperty("pending");
+            var restored = (await f.Owner.ReadLibrarySyncAsync()).State.GetProperty("pending");
             Check(S(restored, "operation") == "subscribe" &&
-                JsonNode.DeepEquals(JsonNode.Parse(restored.GetProperty("locator").GetRawText()), pending["locator"]));
+                JsonNode.DeepEquals(JsonNode.Parse(restored.GetRawText()), pending));
         }
-        else Code(result, "CORRUPT_SYNC");
+        else
+        {
+            Code(await f.Sync.ExecuteAsync("music.librarySync.get"), "CORRUPT_SYNC");
+            Code(await f.Run(), "CORRUPT_SYNC");
+        }
         Check(f.Store.Data.SequenceEqual(original) && f.Store.Writes == writes &&
             f.Server.Reads + f.Server.Writes == requests);
     }

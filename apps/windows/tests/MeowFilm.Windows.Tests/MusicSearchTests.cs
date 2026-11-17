@@ -179,7 +179,7 @@ public static partial class MusicSearchTests
         internal Fixture(TimeProvider? clock = null,
             Func<Catalog, MusicSearchRequest, CancellationToken, Task<JsonElement>>? searchAsync = null)
         {
-            Library = new(Store);
+            Library = new(MusicTestStores.For(Store));
             Search = new(Catalog, clock, async (request, token) =>
             {
                 long observation = Library.BeginSongObservation();
@@ -499,10 +499,67 @@ public static partial class MusicSearchTests
     }
     private static async Task DurationChain()
     {
-        await using var f = new Fixture();
-        await f.Library.AdoptSongAsync(Song("wy", "id", duration: 100), default);
-        f.Catalog.Handler = (r, _) => Task.FromResult(Page(r, [Song(r.Platform, "id", duration: r.Platform == "wy" ? 100 : r.Platform == "tx" ? 103 : 106)]));
-        Check((await f.Idle(S(await f.Start(["wy", "tx", "kg"]), "id"))).GetProperty("items").GetArrayLength() == 2);
+        foreach (bool seedKg in new[] { false, true })
+        {
+            await using var f = new Fixture();
+            var first = await f.Library.AdoptSongAsync(Song("wy", "id", duration: 100), default);
+            if (seedKg) await f.Library.AdoptSongAsync(Song("kg", "id", duration: 106), default);
+            var store = MusicTestStores.For(f.Store);
+            string wyKey = NativeMusicSong.SourceKey(first);
+            string txKey = NativeMusicSong.SourceKey(Song("tx", "id", duration: 103));
+            string kgKey = NativeMusicSong.SourceKey(Song("kg", "id", duration: 106));
+            bool? kgRegisteredBeforeTx = null;
+            // The contract uses five seconds: TX 103 is ambiguous once both
+            // WY 100 and KG 106 exist. Observe admission without ordering requests.
+            store.BeforeCommit = (changes, _) =>
+            {
+                if (kgRegisteredBeforeTx is null && changes.Songs.Values.Any(song =>
+                    LJ.Array(song["sources"]).OfType<JsonObject>().Any(source => LJ.S(source["sourceKey"]) == txKey)))
+                    kgRegisteredBeforeTx = store.FindSource(kgKey) is not null;
+                return Task.CompletedTask;
+            };
+            f.Catalog.Handler = (r, _) => Task.FromResult(Page(r, [Song(r.Platform, "id",
+                duration: r.Platform == "wy" ? 100 : r.Platform == "tx" ? 103 : 106)]));
+            string id = S(await f.Start(["wy", "tx", "kg"]), "id");
+            var result = await f.Idle(id);
+            store.BeforeCommit = null;
+            string diagnostic = $"seedKg={seedKg}, kgRegisteredBeforeTx={kgRegisteredBeforeTx}: {result.GetRawText()}";
+            var rows = CanonicalRows(result);
+            Check(kgRegisteredBeforeTx.HasValue && (!seedKg || kgRegisteredBeforeTx == true), diagnostic);
+            bool ambiguous = kgRegisteredBeforeTx == true;
+            var owners = rows.SelectMany(row => row.GetProperty("sources").EnumerateArray()
+                .Select(source => (Key: S(source, "sourceKey"), Id: S(row, "songId"))))
+                .ToDictionary(source => source.Key, source => source.Id, StringComparer.Ordinal);
+            Check(owners.Count == 3 && owners[wyKey] == LJ.S(first["songId"]) &&
+                owners[kgKey] != owners[wyKey], "incompatible endpoints merged or lost their owners: " + diagnostic);
+            Check(rows.Length == (ambiguous ? 3 : 2) && (ambiguous
+                ? owners[txKey] != owners[wyKey] && owners[txKey] != owners[kgKey]
+                : owners[txKey] == owners[wyKey]), "fusion disagrees with admission-time candidate ambiguity: " + diagnostic);
+            foreach (var row in rows)
+            {
+                double baseline = S(row, "songId") == owners[wyKey] ? 100 :
+                    S(row, "songId") == owners[kgKey] ? 106 : 103;
+                Check(row.GetProperty("baselineDuration").GetDouble() == baseline, "fixed baseline changed: " + diagnostic);
+                Check(S(row.GetProperty("sources")[0], "sourceKey") == (baseline == 100 ? wyKey : baseline == 106 ? kgKey : txKey),
+                    "first registered primary changed: " + diagnostic);
+                CurrentSongSurface(row);
+            }
+            int writes = store.WriteCalls;
+            foreach (string platform in new[] { "wy", "tx", "kg" })
+            {
+                var partial = Song(platform, "id", "", "", 0);
+                string key = NativeMusicSong.SourceKey(partial);
+                string owner = owners[key];
+                Check(store.FindSource(key) == owner, "source index and fused owner differ: " + diagnostic);
+                var adopted = await f.Library.AdoptSongAsync(partial, default);
+                var projected = f.Library.ProjectRepository(partial, MusicLibraryOwner.PlatformSongShape.Song);
+                var expected = JsonNode.Parse(rows.Single(row => S(row, "songId") == owner).GetRawText());
+                Check(JsonNode.DeepEquals(adopted, expected) && JsonNode.DeepEquals(projected, expected),
+                    "registered partial observation rematched or replaced repository metadata: " + diagnostic);
+            }
+            Check(store.WriteCalls == writes && (await f.Call("get", id)).GetProperty("items").GetRawText() ==
+                result.GetProperty("items").GetRawText(), "partial observation wrote or moved displayed rows: " + diagnostic);
+        }
     }
     private static async Task KgDiscriminators()
     {
@@ -908,9 +965,9 @@ public static partial class MusicSearchTests
     private static async Task InvalidInput()
     {
         await using var f = new Fixture();
-        foreach (var data in new object[] { new { keyword = "", kind = "songs", platforms = Five },
-            new { keyword = "x", kind = "other", platforms = Five }, new { keyword = "x", kind = "songs", platforms = new[] { "evil" } },
-            new { keyword = "x", kind = "songs", platforms = Five, pages = 1, concurrency = 1, cacheMinutes = 60, unexpected = true },
+        foreach (var data in new object[] { new { keyword = "", kind = "songs", platforms = Five, pages = 1, concurrency = 1, cacheMinutes = 60 },
+            new { keyword = "x", kind = "other", platforms = Five, pages = 1, concurrency = 1, cacheMinutes = 60 },
+            new { keyword = "x", kind = "songs", platforms = new[] { "evil" }, pages = 1, concurrency = 1, cacheMinutes = 60 },
             new { keyword = "x", kind = "songs", platforms = Five, pages = 0, concurrency = 1, cacheMinutes = 60 },
             new { keyword = "x", kind = "songs", platforms = Five, pages = 2147483648L, concurrency = 1, cacheMinutes = 60 },
             new { keyword = "x", kind = "songs", platforms = Five, pages = 1, concurrency = 0, cacheMinutes = 60 },
@@ -919,6 +976,14 @@ public static partial class MusicSearchTests
             Code(await f.Search.ExecuteAsync("music.search.start", data), "INVALID_REQUEST");
         using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
         Code(await f.Start(["wy"], token: cancelled.Token), "CANCELLED"); Check(f.Catalog.Calls.IsEmpty);
+        var admitted = await f.Search.ExecuteAsync("music.search.start", new
+            { keyword = "x", kind = "songs", platforms = Five, pages = 1, concurrency = 1, cacheMinutes = 60, unexpected = true });
+        Check(admitted.GetProperty("ok").GetBoolean());
+        var completed = await f.Idle(S(admitted, "id"));
+        Check(completed.GetProperty("items").GetArrayLength() == Five.Length &&
+            f.Catalog.Calls.Select(call => call.Platform).Order(StringComparer.Ordinal).SequenceEqual(Five.Order(StringComparer.Ordinal)) &&
+            f.Catalog.Calls.All(call => call.Keyword == "x" && call.Kind == MusicSearchKind.Songs && call.Page == 1 && call.Pages == 1),
+            "unused admission fields preserve the exact requested platform work");
     }
 
     private sealed class Clock : TimeProvider

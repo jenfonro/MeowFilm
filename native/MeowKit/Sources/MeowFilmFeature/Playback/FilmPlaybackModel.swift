@@ -1,9 +1,30 @@
 import Foundation
 import Combine
+import MeowContracts
 import MeowRuntime
 #if os(iOS)
 import UIKit
 #endif
+
+public enum FilmPlaybackStatus: Equatable {
+    case idle, loading, searching, preparing, prepared, buffering, playing, paused, ended, unavailable, failed
+    public var title: String? {
+        switch self {
+        case .idle: nil
+        case .loading: "加载中"
+        case .searching: "匹配片源"
+        case .preparing: "准备中"
+        case .prepared: "地址已准备"
+        case .buffering: "缓冲中"
+        case .playing: "播放中"
+        case .paused: "已暂停"
+        case .ended: "播放结束"
+        case .unavailable: "无可用视频源"
+        case .failed: "播放失败"
+        }
+    }
+    public var busy: Bool { self == .loading || self == .searching || self == .preparing || self == .buffering }
+}
 
 /// Node owns matching, freshness, episode mapping and persistent playback facts.
 /// This owner holds one observation and one admitted native preparation at a time.
@@ -17,7 +38,62 @@ public final class FilmPlaybackModel: ObservableObject {
     /// Independent close failures; media.stop includes its media-receipt drain.
     @Published public private(set) var mediaStopError: FilmPlaybackError?
     @Published public private(set) var sessionReleaseError: FilmPlaybackError?
-    @Published public private(set) var mediaState = FilmMediaState()
+    @Published public private(set) var mediaState = FilmMediaState() {
+        didSet {
+            if let heldRate, heldRate.identity != controlIdentity || oldValue.engine != mediaState.engine {
+                cancelTemporaryRate()
+            }
+            updateChapters()
+        }
+    }
+    @Published private var nativeStatus: FilmPlaybackStatus?
+    public var playbackStatus: FilmPlaybackStatus {
+        if let nativeStatus { return nativeStatus }
+        switch executionStage {
+        case "loading": return .loading
+        case "searching": return .searching
+        case "resolving", "pending": return .preparing
+        case "prepared": return .prepared
+        case "ended": return .ended
+        case "unavailable": return .unavailable
+        case "error": return .failed
+        default: return .idle
+        }
+    }
+    public var canControlPlayback: Bool {
+        guard !runtimeClosed, let committed, committed.started, !committed.terminal, !committed.retired else { return false }
+        return media.isCurrent(sessionID: committed.sessionID, attemptID: committed.attempt.id)
+    }
+    public var canStartPlayback: Bool {
+        guard executionStage != nil, !playbackStatus.busy, !restoringRead, let snapshot,
+              snapshot.entryResolution != "loading", snapshot.entryResolution != "error",
+              snapshot.stage != "unavailable", snapshot.stage != "error" else { return false }
+        return snapshot.current != nil || snapshot.attempt != nil ||
+            !(snapshot.searchComplete && snapshot.sources.isEmpty && snapshot.candidates.isEmpty)
+    }
+    public var canSelectFromPresentation: Bool {
+        guard executionStage != nil, !restoringRead, let presentation else { return false }
+        return !presentation.browsing.loading && presentation.browsing.error == nil &&
+            presentation.entryResolution != "loading" && presentation.entryResolution != "error" &&
+            presentation.stage != "loading"
+    }
+    public var directoryHasNoVideoSource: Bool {
+        guard let presentation, canSelectFromPresentation else { return false }
+        if presentation.browsing.sourceID != nil {
+            return !presentation.browsing.files.contains { $0.candidateID != nil }
+        }
+        return presentation.stage == "unavailable" ||
+            presentation.searchComplete && presentation.sources.isEmpty && presentation.candidates.isEmpty
+    }
+    public var playerPreferences: FilmPlayerPreferences { preferencesStore.preferences }
+    public var actualEngine: PlaybackVideoEngine { mediaState.engine }
+    public var availableRates: [Double] {
+        [0.5, 0.75] + FilmPlayerPreferences.defaultRates(for: actualEngine)
+    }
+    public var skipSegment: FilmPlaybackSegment? {
+        guard controlIdentity != nil else { return nil }
+        return chapterModel.segments.first { mediaState.position >= $0.start && mediaState.position < $0.end }
+    }
     public var sessionID: UUID? { allocatedSessionID }
     var restoringRead: Bool { restorePresentation != nil }
     public var executionStage: String? {
@@ -39,10 +115,23 @@ public final class FilmPlaybackModel: ObservableObject {
     private var searchObservation: AnyCancellable?
     private var searchUpdateTask: Task<Void, Never>?
     private var restorePresentation: FilmPlaybackSnapshot?
+    private var selectedDirectory: FilmPlaybackDirectoryKey?
+    private var directorySelectionExplicit = false
+    private var directoryLoading = false
+    private var directoryError: String?
+    private var directoryAdmission = UUID()
+    private var directories: [FilmPlaybackDirectoryKey: FilmPlaybackDirectorySlice] = [:]
+    private var directoryOrder: [FilmPlaybackDirectoryKey] = []
     private var searchRevision = -1
     private var reentryTarget: FilmPlaybackTarget?
     private var reentryError: String?
     private let media: any FilmPlaybackMediaControlling
+    private let preferencesStore: FilmPlayerPreferencesStore
+    private let chapterModel: FilmPlaybackChapterModel
+    private var preferencesObservation: AnyCancellable?
+    private var chaptersObservation: AnyCancellable?
+    private var chapterErrorObservation: AnyCancellable?
+    private var heldRate: (token: UUID, identity: FilmPlayerControlIdentity)?
     private var allocatedSessionID: UUID?
     private var openingTask: Task<Void, Never>?
     private var observationTask: Task<Void, Never>?
@@ -127,12 +216,28 @@ public final class FilmPlaybackModel: ObservableObject {
         let key: String
         let intent: UUID?
         let ui: Bool
+        var directoryAdmission: UUID? = nil
     }
     public init(transport: FilmPlaybackTransport, media: any FilmPlaybackMediaControlling,
                 searchContext: FilmSearchContext? = nil,
+                playerPreferences: FilmPlayerPreferencesStore? = nil,
                 request: @escaping @Sendable () async throws -> FilmPlaybackRequest) {
         self.transport = transport; self.media = media; makeRequest = request
         self.searchContext = searchContext
+        preferencesStore = playerPreferences ?? FilmPlayerPreferencesStore()
+        chapterModel = FilmPlaybackChapterModel(transport: transport)
+        preferencesObservation = preferencesStore.$preferences.dropFirst().sink { [weak self] value in
+            guard let self else { return }
+            cancelTemporaryRate()
+            updateChapters(enabled: value.recognizesChapters)
+            objectWillChange.send()
+        }
+        chaptersObservation = chapterModel.$segments.dropFirst().sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        chapterErrorObservation = chapterModel.$error.compactMap { $0 }.sink { [weak self] error in
+            self?.actionError = error
+        }
     }
 
     @discardableResult
@@ -223,7 +328,7 @@ public final class FilmPlaybackModel: ObservableObject {
         committed = nil; preparing = nil; mediaStopped = true
         // An explicit selection can own the drain/reopen. Its publication fence
         // survives until that exact command, not the opening snapshot, is accepted.
-        mediaState = FilmMediaState(); blockedAttemptID = nil
+        mediaState = FilmMediaState(); nativeStatus = nil; blockedAttemptID = nil
     }
 
     public func acknowledgeError() { actionError = nil }
@@ -247,6 +352,7 @@ public final class FilmPlaybackModel: ObservableObject {
     public func setPresentationVisible(_ visible: Bool, owner: UUID) {
         if visible { presentationOwners.insert(owner) }
         else { presentationOwners.remove(owner) }
+        if presentationOwners.isEmpty { cancelTemporaryRate() }
     }
 
     /// App runtime availability, not a replay of a playback intent. Hidden
@@ -362,14 +468,75 @@ public final class FilmPlaybackModel: ObservableObject {
                     actionError = FilmPlaybackError(code: error)
                 } else {
                     restorePresentation = nil
-                    presentation = value.retainingLoadedPresentation(previous)
+                    publishDirectory(value.retainingLoadedPresentation(previous))
                     observeSearchContext()
                 }
             }
-        } else { presentation = value.retainingLoadedPresentation(presentation) }
+        } else { publishDirectory(value) }
         reentryTarget = value.target
         reentryError = value.error
         if reconcileMedia { reconcilePreparation() }
+        updateChapters()
+    }
+
+    private func publishDirectory(_ value: FilmPlaybackSnapshot) {
+        let key = FilmPlaybackDirectoryKey(value)
+        if value.browsing.error == "STALE_SOURCE" || value.browsing.error == "SOURCE_NOT_FOUND" {
+            directories.removeValue(forKey: key); directoryOrder.removeAll { $0 == key }
+        }
+        let completed = !value.browsing.loading && value.browsing.error == nil &&
+            value.entryResolution != "loading" && value.entryResolution != "error" &&
+            (value.browsing.sourceID != nil || value.metadataError == nil) && value.stage != "loading"
+        if completed {
+            directories[key] = .init(value)
+            if !directoryOrder.contains(key) { directoryOrder.append(key) }
+        }
+        if selectedDirectory == nil || !directorySelectionExplicit { selectedDirectory = key }
+        if selectedDirectory?.accepts(key) == true {
+            if directorySelectionExplicit, !directoryLoading, value.browsing.loading || value.browsing.error != nil,
+               let selectedDirectory, let cached = directories[selectedDirectory] {
+                presentation = value.displaying(cached)
+                return
+            }
+            selectedDirectory = key
+            directoryLoading = value.browsing.loading
+            directoryError = value.browsing.error
+            presentation = value.retainingLoadedPresentation(presentation).displaying(.init(value))
+        } else if let selectedDirectory {
+            if !directoryLoading, let cached = directories[selectedDirectory] {
+                presentation = value.displaying(cached)
+            } else {
+                presentation = value.loadingDirectory(selectedDirectory, error: directoryError)
+            }
+        }
+    }
+
+    func loadedDirectory(sourceID: String, lineID: FilmPlaybackIdentifier?,
+                         metadataSourceID: String?, season: Int?) -> FilmPlaybackDirectorySlice? {
+        directories[.init(source: sourceID, line: lineID, metadata: metadataSourceID, season: season)]
+    }
+
+    private func selectDirectory(_ requested: FilmPlaybackDirectoryKey,
+                                 matching: (FilmPlaybackDirectoryKey) -> Bool) -> Bool {
+        directoryAdmission = UUID()
+        directorySelectionExplicit = true
+        if let key = directoryOrder.reversed().first(where: matching), let cached = directories[key] {
+            selectedDirectory = key; directoryLoading = false; directoryError = nil
+            directoryOrder.removeAll { $0 == key }; directoryOrder.append(key)
+            if let snapshot { presentation = snapshot.displaying(cached) }
+            return true
+        }
+        selectedDirectory = requested; directoryLoading = true; directoryError = nil
+        if let snapshot { presentation = snapshot.loadingDirectory(requested) }
+        return false
+    }
+
+    private func browsingFields(_ key: FilmPlaybackDirectoryKey) -> RuntimeObject {
+        var fields: RuntimeObject = ["sourceId": key.source.map(RuntimeValue.string) ?? .null,
+                                    "metadataSourceId": key.metadata.map(RuntimeValue.string) ?? .null]
+        fields["lineId"] = key.line?.value
+        fields["season"] = key.season.map { .number(Double($0)) }
+        return fields
     }
 
     private func observeSearchContext() {
@@ -418,13 +585,13 @@ public final class FilmPlaybackModel: ObservableObject {
                 // The Node snapshot hides a disposed receipt but retains its
                 // existing feedback identity. The captured preparation still
                 // owns an accurate terminal event; no tombstone map is needed.
-                mediaState = FilmMediaState()
+                mediaState = FilmMediaState(); nativeStatus = nil
             } else if stoppingMedia == nil {
                 stoppingMedia = Task { [weak self, media] in
                     do {
                         try await media.stop(sessionID: value.sessionID)
                         if let self, self.committed === committed {
-                            self.committed = nil; self.mediaState = FilmMediaState()
+                            self.committed = nil; self.mediaState = FilmMediaState(); self.nativeStatus = nil
                             self.mediaStopped = true
                         }
                     } catch { self?.actionError = Self.failure(error) }
@@ -438,6 +605,7 @@ public final class FilmPlaybackModel: ObservableObject {
     /// keeps only its latest queued value. Actual start/terminal facts stay ordered.
     @discardableResult
     public func send(_ action: String, parameters: RuntimeObject = [:]) -> Task<Void, Never>? {
+        if Self.mediaActions.contains(action) { cancelTemporaryRate() }
         if action == "stop", closed || closingTask != nil || openingTask != nil || reopeningTask != nil {
             let admission = UUID(); commandAdmission = admission
             let generation = generation
@@ -449,7 +617,7 @@ public final class FilmPlaybackModel: ObservableObject {
         if openingTask == nil {
             restorePresentation = nil
         }
-        let explicitPlayback = action == "play" || action == "select.episode" || action == "select.candidate"
+        let explicitPlayback = action == "play" || action == "select.target"
         if (explicitPlayback || runtimeClosed || openingTask != nil),
            closed || openingTask != nil || reopeningTask != nil {
             // Admit the explicit intent before drain/reopen can publish an older attempt.
@@ -484,7 +652,7 @@ public final class FilmPlaybackModel: ObservableObject {
     @discardableResult
     private func enqueueAction(_ action: String, parameters: RuntimeObject, ui: Bool) -> Task<Void, Never>? {
         var intent: UUID?
-        if Self.mediaActions.contains(action) || action == "browse.metadata" {
+        if Self.mediaActions.contains(action) {
             commandAdmission = UUID(); awaitingIntent = commandAdmission
             intent = commandAdmission
             // Blocking or retry may reject without replacing anything.
@@ -494,8 +662,10 @@ public final class FilmPlaybackModel: ObservableObject {
                 cancelPreparation()
             }
         }
-        let key = intent == nil || action == "browse.metadata" ? action : "media.intent"
-        enqueue(.init(action: action, parameters: parameters, key: key, intent: intent, ui: ui))
+        let browsing = action == "browse" || action.hasPrefix("browse.")
+        let key = browsing ? "browse.selection" : intent == nil ? action : "media.intent"
+        enqueue(.init(action: action, parameters: parameters, key: key, intent: intent, ui: ui,
+                      directoryAdmission: browsing ? directoryAdmission : nil))
         return commandWorker
     }
 
@@ -518,6 +688,7 @@ public final class FilmPlaybackModel: ObservableObject {
             let command = queuedCommands.removeFirst()
             if closed && (command.ui || !retained && command.intent != nil) { continue }
             if let intent = command.intent, command.key == "media.intent", intent != commandAdmission { continue }
+            if let admission = command.directoryAdmission, admission != directoryAdmission { continue }
             do {
                 if command.action == "stop" {
                     await preparationWorker?.value
@@ -529,7 +700,7 @@ public final class FilmPlaybackModel: ObservableObject {
                     // captured facts must reach Node before stop replaces them.
                     try await drainFeedback(sessionID: sessionID)
                     try await flushProgress()
-                    committed = nil; mediaState = FilmMediaState()
+                    committed = nil; mediaState = FilmMediaState(); nativeStatus = nil
                 }
                 let previousCurrent = committed
                 let value = try await callCommand(command.action, fields: command.parameters, sessionID: sessionID)
@@ -552,6 +723,14 @@ public final class FilmPlaybackModel: ObservableObject {
             } catch {
                 if command.ui, closed { continue }
                 if command.intent == awaitingIntent { awaitingIntent = nil }
+                if let admission = command.directoryAdmission {
+                    guard admission == directoryAdmission else { continue }
+                    directoryLoading = false
+                    directoryError = Self.failure(error).code
+                    if let snapshot, let selectedDirectory {
+                        presentation = snapshot.loadingDirectory(selectedDirectory, error: directoryError)
+                    }
+                }
                 if !Self.cancelled(error), command.intent == nil || command.intent == commandAdmission,
                    !queuedCommands.contains(where: { $0.key == command.key }),
                    command.ui || (error as? FilmPlaybackError)?.code != "STALE_SESSION" {
@@ -582,20 +761,37 @@ public final class FilmPlaybackModel: ObservableObject {
         return value
     }
 
-    public func selectEpisode(_ position: FilmEpisodePosition) {
-        send("select.episode", parameters: ["episode": .object(position.value)])
+    public func selectTarget(_ target: FilmPlaybackTarget, metadataSourceID: String? = nil) {
+        var fields: RuntimeObject = ["target": .object(target.value)]
+        fields["metadataSourceId"] = metadataSourceID.map(RuntimeValue.string) ?? .null
+        send("select.target", parameters: fields)
     }
-    public func selectCandidate(_ id: String) { send("select.candidate", parameters: ["candidateId": .string(id)]) }
     public func browse(sourceID: String?, lineID: FilmPlaybackIdentifier? = nil) {
-        var fields: RuntimeObject = ["sourceId": sourceID.map(RuntimeValue.string) ?? .null]
-        fields["lineId"] = lineID?.value
-        send("browse", parameters: fields)
+        let metadata = presentation?.metadataSourceID
+        let season = presentation?.browsing.season
+        let requested = FilmPlaybackDirectoryKey(source: sourceID, line: lineID, metadata: metadata, season: season)
+        if selectDirectory(requested, matching: {
+            $0.source == sourceID && $0.metadata == metadata && (lineID == nil || $0.line == lineID)
+                && (lineID == nil || $0.season == season)
+        }) { return }
+        send("browse", parameters: browsingFields(requested))
     }
-    public func browseSeason(_ number: Int) { send("browse.season", parameters: ["season": .number(Double(number))]) }
+    public func browseSeason(_ number: Int) {
+        let key = FilmPlaybackDirectoryKey(source: presentation?.browsing.sourceID, line: presentation?.browsing.lineID,
+            metadata: presentation?.metadataSourceID, season: number)
+        if selectDirectory(key, matching: { $0 == key }) { return }
+        send("browse.season", parameters: browsingFields(key))
+    }
     @discardableResult
     public func refreshBrowsing() -> Task<Void, Never>? {
         actionError = nil
-        return send("browse.refresh")
+        directoryAdmission = UUID()
+        if let key = selectedDirectory {
+            directories.removeValue(forKey: key); directoryOrder.removeAll { $0 == key }
+            directoryLoading = true; directoryError = nil
+            if let snapshot { presentation = snapshot.loadingDirectory(key) }
+        }
+        return send("browse.refresh", parameters: selectedDirectory.map(browsingFields) ?? [:])
     }
     @discardableResult
     public func retryMedia(attemptID: String? = nil) -> Task<Void, Never>? {
@@ -604,7 +800,11 @@ public final class FilmPlaybackModel: ObservableObject {
         return send("media.retry", parameters: id.map { ["attemptId": .string($0)] } ?? [:])
     }
     public func browseMetadata(_ id: String, keepSource: Bool = false) {
-        var fields: RuntimeObject = ["metadataSourceId": .string(id)]
+        let source = keepSource ? presentation?.browsing.sourceID : nil
+        let key = FilmPlaybackDirectoryKey(source: source, line: keepSource ? presentation?.browsing.lineID : nil,
+            metadata: id, season: nil)
+        if selectDirectory(key, matching: { $0.source == source && $0.metadata == id && $0.line == key.line }) { return }
+        var fields = browsingFields(key)
         if keepSource { fields["keepSource"] = .bool(true) }
         send("browse.metadata", parameters: fields)
     }
@@ -630,8 +830,9 @@ public final class FilmPlaybackModel: ObservableObject {
     private func prepare(_ attempt: FilmPlaybackAttempt, sessionID: UUID) {
         guard preparingID != attempt.id, requestedPreparation?.attempt.id != attempt.id else { return }
         cancelPreparation()
+        if committed == nil { nativeStatus = .preparing }
         guard let snapshot else { return }
-        let contentKind = snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }?.kind ?? snapshot.target.kind
+        let contentKind = snapshot.workInfo?.kind ?? snapshot.target.kind
         requestedPreparation = .init(attempt: attempt, target: snapshot.target, contentKind: contentKind, sessionID: sessionID,
                                      admission: mediaAdmission, generation: generation)
         if preparationWorker == nil {
@@ -685,7 +886,9 @@ public final class FilmPlaybackModel: ObservableObject {
             }, release: { [weak self] in
                 request.retired = true
                 try await request.releaseResource(transport: transport)
-                if let self, self.committed === request { self.mediaState = FilmMediaState() }
+                if let self, self.committed === request {
+                    self.mediaState = FilmMediaState(); self.nativeStatus = nil
+                }
             }) { [weak self] event in
                 self?.receiveMedia(event, request: request)
             }
@@ -693,6 +896,7 @@ public final class FilmPlaybackModel: ObservableObject {
             let preparationError = error
             if eligible(request), !Self.cancelled(preparationError), !request.terminal {
                 actionError = Self.failure(preparationError)
+                if committed == nil { nativeStatus = .failed }
                 if handedToMedia {
                     request.terminal = true
                     feedback("media.failed", attemptID: request.attempt.id, code: Self.failure(preparationError).code)
@@ -779,16 +983,23 @@ public final class FilmPlaybackModel: ObservableObject {
         switch event {
         case .state(let state):
             guard state.sessionID == sessionID, state.attemptID == request.attempt.id else { return }
+            var state = state
+            state.resourceID = request.resourceID
             request.state = state
             guard request.didCommit else { return }
             if committed === request, !request.retired { mediaState = state }
+            if committed === request, !request.retired, !request.terminal {
+                nativeStatus = state.buffering ? .buffering : state.paused ? .paused : .playing
+            }
             if request.started && !request.terminal { queueProgress(state) }
         case .started(let id):
             guard id == request.attempt.id, admits(request), !request.started else { return }
+            cancelTemporaryRate()
             // The shared owner's started callback is synchronous with its final
             // cancelled-task fence and real output commit. No second commit shim.
             committed = request; request.didCommit = true; request.started = true
             if let state = request.state { mediaState = state }
+            nativeStatus = mediaState.buffering ? .buffering : mediaState.paused ? .paused : .playing
             feedback("media.started", attemptID: id)
             if let state = request.state { queueProgress(state) }
             closeRetainedWithoutSystemOwner(request)
@@ -797,11 +1008,15 @@ public final class FilmPlaybackModel: ObservableObject {
             actionError = error
             if request.started, let state = request.state { queueProgress(state) }
             request.terminal = true
+            cancelTemporaryRate(); updateChapters()
+            if committed == nil || committed === request { nativeStatus = .failed }
             feedback("media.failed", attemptID: id, code: error.code)
         case .ended(let id):
             guard id == request.attempt.id, request.didCommit, !request.terminal else { return }
             if request.started, let state = request.state { queueProgress(state) }
             request.terminal = true
+            cancelTemporaryRate(); updateChapters()
+            if committed === request { nativeStatus = .ended }
             feedback("media.ended", attemptID: id)
         case .ownerEnded(let id):
             guard id == request.attempt.id, committed === request else { return }
@@ -847,14 +1062,68 @@ public final class FilmPlaybackModel: ObservableObject {
         guard !runtimeClosed else { return }
         guard let current = committed, current.started, !current.retired, !current.terminal,
               media.isCurrent(sessionID: current.sessionID, attemptID: current.attempt.id) else {
-            send("play"); return
+            if canStartPlayback { send("play") }
+            return
         }
         if mediaState.paused { media.resume(sessionID: current.sessionID, attemptID: current.attempt.id, userInitiated: true) }
         else { _ = media.pause(sessionID: current.sessionID, attemptID: current.attempt.id) }
     }
-    public func seek(to value: Double) { if !runtimeClosed, let sessionID { media.seek(sessionID: sessionID, to: value) } }
-    public func setRate(_ value: Double) { if !runtimeClosed, let sessionID { media.setRate(sessionID: sessionID, rate: value) } }
-    public func setVolume(_ value: Double) { if !runtimeClosed, let sessionID { media.setVolume(sessionID: sessionID, volume: value) } }
+    var controlIdentity: FilmPlayerControlIdentity? {
+        guard !closed, !runtimeClosed, let committed, committed.started, !committed.retired, !committed.terminal,
+              media.isCurrent(sessionID: committed.sessionID, attemptID: committed.attempt.id),
+              mediaState.sessionID == committed.sessionID, mediaState.attemptID == committed.attempt.id else { return nil }
+        return .init(sessionID: committed.sessionID, attemptID: committed.attempt.id)
+    }
+
+    public func seek(to value: Double) {
+        guard value.isFinite, let identity = controlIdentity, mediaState.duration > 0 else { return }
+        media.seek(sessionID: identity.sessionID, to: min(mediaState.duration, max(0, value)))
+    }
+    public func seekByStep(forward: Bool) {
+        seek(to: mediaState.position + (forward ? 1 : -1) * playerPreferences.seekStep)
+    }
+    public func setRate(_ value: Double) {
+        guard value.isFinite, (0.5...3).contains(value), let identity = controlIdentity else { return }
+        cancelTemporaryRate()
+        guard identity == controlIdentity else { return }
+        media.setRate(sessionID: identity.sessionID, rate: min(value, actualEngine.maximumRate))
+    }
+    public func setVolume(_ value: Double) {
+        guard value.isFinite, let identity = controlIdentity else { return }
+        media.setVolume(sessionID: identity.sessionID, volume: min(1, max(0, value)))
+    }
+
+    @discardableResult
+    public func beginTemporaryRate() -> UUID? {
+        cancelTemporaryRate()
+        guard let identity = controlIdentity else { return nil }
+        let token = UUID()
+        heldRate = (token, identity)
+        media.setTemporaryRate(sessionID: identity.sessionID, attemptID: identity.attemptID,
+                               rate: min(playerPreferences.holdRate, actualEngine.maximumRate))
+        return token
+    }
+    public func endTemporaryRate(_ token: UUID) {
+        guard heldRate?.token == token else { return }
+        cancelTemporaryRate()
+    }
+    public func cancelTemporaryRate() {
+        guard let heldRate else { return }
+        self.heldRate = nil
+        guard media.isCurrent(sessionID: heldRate.identity.sessionID, attemptID: heldRate.identity.attemptID) else { return }
+        media.setTemporaryRate(sessionID: heldRate.identity.sessionID, attemptID: heldRate.identity.attemptID, rate: nil)
+    }
+
+    public func skipChapter() {
+        if let skipSegment { seek(to: skipSegment.end) }
+    }
+    private func updateChapters(enabled: Bool? = nil) {
+        let current = controlIdentity
+        chapterModel.update(sessionID: current?.sessionID, attemptID: current?.attemptID,
+                            resourceID: current == nil ? nil : mediaState.resourceID,
+                            chapters: current == nil ? [] : mediaState.chapters,
+                            enabled: enabled ?? playerPreferences.recognizesChapters)
+    }
     public func startPictureInPicture() { if !runtimeClosed, let sessionID { media.startPictureInPicture(sessionID: sessionID) } }
     public func stopPictureInPicture() { if let sessionID { media.stopPictureInPicture(sessionID: sessionID) } }
     public var hasSystemOwner: Bool {
@@ -874,6 +1143,8 @@ public final class FilmPlaybackModel: ObservableObject {
     #endif
 
     public func close(allowSystemOwner: Bool = false) async {
+        cancelTemporaryRate()
+        chapterModel.update(sessionID: nil, attemptID: nil, resourceID: nil, chapters: [], enabled: false)
         recoveryTask?.cancel()
         reopeningTask?.cancel()
         reopeningTask = nil; reopeningAdmission = UUID()
@@ -927,7 +1198,7 @@ public final class FilmPlaybackModel: ObservableObject {
             do { try await flushProgress() }
             catch { failure = failure ?? Self.failure(error) }
             if !keepNative, media.isLocallyDrained(sessionID: sessionID) {
-                committed = nil; mediaState = FilmMediaState()
+                committed = nil; mediaState = FilmMediaState(); nativeStatus = nil
             }
             if !released {
                 do {
@@ -970,7 +1241,7 @@ public final class FilmPlaybackModel: ObservableObject {
     }
 
     private static let mediaActions: Set<String> = [
-        "prepare", "play", "select.episode", "select.candidate", "pan", "quality", "switch", "block", "next", "previous", "stop",
+        "prepare", "play", "select.target", "pan", "quality", "switch", "block", "next", "previous", "stop",
         "media.retry",
     ]
     private static func cancelled(_ error: Error) -> Bool {

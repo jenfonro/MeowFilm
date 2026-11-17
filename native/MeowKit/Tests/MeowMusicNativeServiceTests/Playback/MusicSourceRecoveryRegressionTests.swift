@@ -132,7 +132,7 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
     func testPauseDuringRecommendationNavigationCancelsNativeLessAudioSelection() async throws {
         let store = try recommendationStore()
         let scripts = ReviewScripts(sites: ["a": ["wy"], "b": ["wy"]])
-        let service = NativeMusicService(document: store, scripts: scripts, accounts: SimilarModeAccountFixture([["301"]]),
+        let service = NativeMusicService(database: store, scripts: scripts, accounts: SimilarModeAccountFixture([["301"]]),
             platformClient: try NativeMusicFixture.client(), clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let initial = try await service.state()
@@ -184,18 +184,18 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         await model.close(); await service.close()
     }
 
-    private func recommendationStore() throws -> NativeMusicMemoryDocument {
+    private func recommendationStore() throws -> NativeMusicTestLibrary {
         let song = try NativeMusicFixture.storedSong(SimilarModeAccountFixture.track("100"))
         var document = try MusicDocument(MusicNativeCandidateDiscoveryFixture.store(song: song).read(), runID: "fixture")
         document.queue["source"] = .obj([("sourceType", .string("search-song")), ("seedEntryId", .string("entry-1"))])
-        return NativeMusicMemoryDocument(try document.encode(changed: ["queue", "playback"]))
+        return NativeMusicTestLibrary(try document.encode(changed: ["queue", "playback"]))
     }
 
     private func pauseRetiredSource(excluding: Bool) async throws {
         let store = try recommendationStore()
         let scripts = ReviewScripts(sites: ["a": ["wy"], "b": ["wy"]])
         let accounts = SimilarModeAccountFixture([[], ["301"]])
-        let service = NativeMusicService(document: store, scripts: scripts, accounts: accounts,
+        let service = NativeMusicService(database: store, scripts: scripts, accounts: accounts,
             platformClient: try NativeMusicFixture.client(), clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let initial = try await service.state()
@@ -445,7 +445,7 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
         ])
         document.queue["currentId"] = .string("entry-1")
         document.queue["serial"] = .n(2); document.queue["revision"] = .n(1)
-        let store = NativeMusicMemoryDocument(try document.encode(changed: ["library", "queue"]))
+        let store = NativeMusicTestLibrary(try document.encode(changed: ["library", "queue"]))
         let scripts = ReviewScripts()
         let service = try await NativeMusicFixture.service(store, scripts: scripts)
         let player = ReviewPlayer(), model = MusicViewModel(service: service, player: player)

@@ -59,7 +59,7 @@ public static class MediaControlSettingsTests
     {
         var store = new DocumentStore();
         store.Data[AppAppearance.DocumentNamespace] = [1, 2, 3];
-        store.Data[MusicLibraryOwner.DocumentNamespace] = [4, 5, 6];
+        var musicBefore = MusicTestStores.For(store).Snapshot().Revision;
         await using var owner = new AppMediaControlSettings(store);
         await owner.LoadAsync();
         await owner.SaveAsync(owner.Preferences with { GlobalEnabled = false });
@@ -81,7 +81,7 @@ public static class MediaControlSettingsTests
         Check(data["bindings"]![0]!["global"] is null, "cleared keys remain unassigned after persistence");
         Check(store.WriteNames.SetEquals([AppMediaControlSettings.DocumentNamespace]));
         Check(store.Data[AppAppearance.DocumentNamespace].SequenceEqual(new byte[] { 1, 2, 3 }));
-        Check(store.Data[MusicLibraryOwner.DocumentNamespace].SequenceEqual(new byte[] { 4, 5, 6 }));
+        Check(MusicTestStores.For(store).Snapshot().Revision == musicBefore);
     }
     private static async Task WriteFailures()
     {

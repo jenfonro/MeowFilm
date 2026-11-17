@@ -34,8 +34,7 @@ public sealed partial class MusicLibraryOwner
         foreach (var item in NetworkPlaylists(library))
         {
             var reference = LJ.Object(item);
-            LJ.Fields(reference, "id platform remoteId name cover count revision present subscription intent",
-                "id platform remoteId name cover count revision present subscription intent");
+            LJ.Fields(reference, "id platform remoteId name cover count revision present subscription intent", "id platform remoteId name cover count revision present subscription intent");
             string platform = NetworkPlaylistText(reference["platform"]), remoteId = NetworkPlaylistText(reference["remoteId"]);
             LJ.Require(LJ.S(reference["id"]) == NetworkPlaylistId(platform, remoteId) && ids.Add(LJ.S(reference["id"])));
             _ = NetworkPlaylistText(reference["name"]); _ = Revision(reference); _ = LJ.I(reference["count"], 0, int.MaxValue);
@@ -61,12 +60,11 @@ public sealed partial class MusicLibraryOwner
             else LJ.Require(reference["intent"] is null);
         }
     }
-    private (JsonObject Result, bool Mutate) NetworkPlaylistCommand(string method, JsonObject p, JsonObject doc)
+    private (JsonObject Result, bool Mutate) NetworkPlaylistCommand(string method, JsonObject p, MusicLibraryData doc)
     {
         var wrapper = LibraryState(doc); var library = LJ.Object(wrapper["library"]); var references = NetworkPlaylists(library);
         if (method == "music.library.network.list")
         {
-            LJ.Fields(p, "offset limit");
             return (LJ.Merge(LJ.Page(references.OfType<JsonObject>().Where(r => LJ.B(r["present"])).Select(NetworkPlaylistView), p),
                 LJ.Obj(("revision", library["revision"]))), false);
         }

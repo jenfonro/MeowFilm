@@ -32,9 +32,7 @@ actor MusicNativePlatforms {
         let value = try await client.request(platform: platform.rawValue, operation: "search", parameters: [
             "keyword": .string(query), "kind": .string("playlists"), "page": .number(Double(page)), "limit": .number(Double(limit))
         ])
-        return .init(items: try value[music: "items"].musicRequiredArray().map {
-            try MusicNativePlatformResult.collection($0, platform: platform)
-        }, total: try MusicPlatformDTO.count(value[music: "total"]),
+        return .init(items: try MusicNativePlatformResult.collections(value[music: "items"], platform: platform), total: try MusicPlatformDTO.count(value[music: "total"]),
             nextPage: value[music: "continuation"][music: "page"] == .null ? nil :
                 try MusicPlatformDTO.count(value[music: "continuation"][music: "page"]))
     }
@@ -44,12 +42,8 @@ actor MusicNativePlatforms {
             parameters: ["id": .string(collection.nativeID), "page": .number(continuation["page"].number > 0 ?
                 continuation["page"].number : 1), "limit": .number(30),
                 "continuation": try RuntimeJSON.decode(continuation.bytes)])
-        let tracks = try MusicPlatformDTO.tracks(value), positions = value[music: "sourcePositions"]
-        let sourcePositions: [Int?]
-        if positions == .null { sourcePositions = tracks.indices.map { _ in nil } }
-        else { sourcePositions = try positions.musicRequiredArray().map {
-            $0 == .null ? nil : try MusicPlatformDTO.count($0)
-        } }
+        let tracks = try MusicPlatformDTO.tracks(value)
+        let sourcePositions = tracks.map(\.sourcePosition)
         return .init(collection: try MusicNativePlatformResult.collection(value, platform: collection.platform,
                 kind: collection.kind), tracks: tracks, sourcePositions: sourcePositions,
             total: try MusicPlatformDTO.count(value[music: "total"], default: tracks.count),

@@ -6,12 +6,12 @@ import Combine
 /// Product-owned projection of the existing favorites collection, not another store.
 /// Writes use the music owner's existing protected, revision-checked port.
 @MainActor public final class MusicMiniPlayerFavorites: ObservableObject {
-    @Published public private(set) var tracks: [MusicRemoteTrack] = []
+    @Published public private(set) var references: Set<MusicReference> = []
     @Published public private(set) var loaded = false
     @Published public private(set) var loading = false
     @Published public private(set) var busy = false
     @Published public private(set) var error: MusicServiceError?
-    @Published private var pending: (track: MusicRemoteTrack, liked: Bool)?
+    @Published private var pending: (ref: MusicReference, liked: Bool)?
     private weak var model: MusicViewModel?
     private struct CollectionIdentity: Equatable {
         let id: String
@@ -19,6 +19,7 @@ import Combine
         init(_ collection: MusicCollection) { id = collection.id; revision = collection.revision }
     }
     private var collectionIdentity: CollectionIdentity?
+    private var favoriteCollection: MusicCollection?
     private var binding: MusicCollectionPageBinding?
     private var reads: [UUID: Task<Void, Never>] = [:]
     private var readID: UUID?
@@ -40,7 +41,7 @@ import Combine
         }
         let next = CollectionIdentity(collection)
         guard collectionIdentity != next else { return }
-        if collectionIdentity?.id != next.id { tracks = []; loaded = false }
+        if collectionIdentity?.id != next.id { references = []; favoriteCollection = nil; loaded = false }
         collectionIdentity = next
         if write != nil { needsReload = true }
         else { reload() }
@@ -63,17 +64,19 @@ import Combine
         visible = false
         binding?.active = false; binding = nil; readID = nil
         collectionIdentity = nil
+        favoriteCollection = nil
         needsReload = false
         for task in reads.values { task.cancel() }
         write?.task.cancel()
         // Keep cancelled work tracked until non-cooperative operations settle.
-        tracks = []; loaded = false; loading = false; pending = nil; error = nil
+        references = []; loaded = false; loading = false; pending = nil; error = nil
         busy = write != nil
     }
 
     public func isFavorite(_ track: MusicRemoteTrack) -> Bool {
-        if let pending, Self.sameSong(pending.track, track) { return pending.liked }
-        return tracks.contains { Self.sameSong($0, track) }
+        let ref = MusicReference(kind: .library, id: track.songId)
+        if let pending, pending.ref == ref { return pending.liked }
+        return references.contains(ref)
     }
 
     static func sameSong(_ lhs: MusicRemoteTrack, _ rhs: MusicRemoteTrack) -> Bool {
@@ -119,10 +122,12 @@ import Combine
     }
 
     @discardableResult public func toggle(_ track: MusicRemoteTrack) -> Task<Void, Never>? {
-        guard let model, visible, loaded, !loading, write == nil,
+        guard let model, visible, loaded, !loading, write == nil, let collection = favoriteCollection,
               let own = binding, own.matches(model) else { return nil }
         let liked = !isFavorite(track), id = UUID()
-        pending = (track, liked); busy = true; error = nil
+        let ref = MusicReference(kind: .library, id: track.songId)
+        let ticket = MusicCollectionEditTicket(binding: own, collection: collection)
+        pending = (ref, liked); busy = true; error = nil
         readID = nil; loading = false
         for task in reads.values { task.cancel() }
         let task = Task { [weak self, weak model] in
@@ -139,17 +144,14 @@ import Combine
             }
             guard let model else { return }
             do {
-                let snapshot = try await self.read(own, model: model)
+                let snapshot = try await self.read(own, model: model, collection: ticket.collection)
                 try own.check(model)
                 guard self.binding === own, self.visible else { return }
-                let exists = snapshot.tracks.contains { Self.sameSong($0, track) }
+                let exists = snapshot.refs.contains(ref)
                 if exists != liked {
-                    let refs = liked
-                        ? [track.ref] + snapshot.tracks.map(\.ref)
-                        : snapshot.tracks.filter { !Self.sameSong($0, track) }.map(\.ref)
-                    let ticket = MusicCollectionEditTicket(binding: own, collection: snapshot.collection)
                     needsReconciliation = true
-                    try await model.editCollectionPage(ticket, name: nil, refs: refs, order: nil)
+                    try await model.changeCollectionPageMembership(ticket,
+                        adding: liked ? [track.ref] : [], removing: liked ? [] : [ref])
                 }
                 try own.check(model)
                 guard self.binding === own, self.visible else { return }
@@ -175,19 +177,47 @@ import Combine
         }
     }
 
-    private func accept(_ snapshot: MusicCollectionPageSnapshot, model: MusicViewModel) -> Bool {
+    private func accept(_ snapshot: (collection: MusicCollection, refs: Set<MusicReference>), model: MusicViewModel) -> Bool {
         guard let collection = model.collections.first(where: { $0.kind == "favorites" }),
               CollectionIdentity(collection) == CollectionIdentity(snapshot.collection) else { return false }
         collectionIdentity = CollectionIdentity(snapshot.collection)
-        tracks = snapshot.tracks; loaded = true; needsReload = false
+        favoriteCollection = snapshot.collection
+        references = snapshot.refs; loaded = true; needsReload = false
         return true
     }
 
-    private func read(_ own: MusicCollectionPageBinding, model: MusicViewModel) async throws -> MusicCollectionPageSnapshot {
+    private func read(_ own: MusicCollectionPageBinding, model: MusicViewModel,
+                      collection requested: MusicCollection? = nil) async throws ->
+        (collection: MusicCollection, refs: Set<MusicReference>) {
+        if let requested {
+            let refs = try await model.readCollectionReferences(requested, binding: own)
+            return (requested, Set(refs))
+        }
         let id = model.collections.first { $0.kind == "favorites" }?.id ?? "favorites"
-        guard let snapshot = try await model.readCollectionPage(id: id, binding: own),
-              snapshot.collection.kind == "favorites" else { throw MusicServiceError.notFound }
-        return snapshot
+        if let current = model.collections.first(where: { $0.id == id && $0.kind == "favorites" }) {
+            do {
+                let refs = try await model.readCollectionReferences(current, binding: own)
+                return (current, Set(refs))
+            } catch {
+                try own.check(model)
+                guard [.notFound, .staleRevision].contains(MusicServiceError.sanitized(error)) else { throw error }
+            }
+        }
+        // A lost acknowledgement can leave the catalogue behind the saved refs.
+        try own.check(model)
+        let epoch = try model.enter(), catalogueID = model.collectionCatalogueID
+        let values = try await model.requireService().collections()
+        try model.check(epoch); try own.check(model)
+        guard values.count <= 2000, Set(values.map { Data($0.id.utf8) }).count == values.count else {
+            throw MusicServiceError.invalidResponse
+        }
+        guard let collection = values.first(where: { $0.id == id && $0.kind == "favorites" }) else {
+            if model.collectionCatalogueID == catalogueID { model.publishCollections(values, origin: own.id) }
+            throw MusicServiceError.notFound
+        }
+        let refs = try await model.readCollectionReferences(collection, binding: own)
+        if model.collectionCatalogueID == catalogueID { model.publishCollections(values, origin: own.id) }
+        return (collection, Set(refs))
     }
 
     deinit {

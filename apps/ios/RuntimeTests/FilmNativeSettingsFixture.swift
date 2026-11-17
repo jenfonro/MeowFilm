@@ -31,9 +31,39 @@ final class FilmRuntimeTestSettings {
     }
 }
 
-extension XCTestCase {
+enum NativeFilmFixture {
     @MainActor
-    func waitForNativeRuntimeSettings(_ block: FilmSettingsBlock, resources: MeowfilmResources) async throws {
+    static func removeCat(_ id: String, resources: MeowfilmResources) async throws {
+        try await resources.filmSourceSettings.initialize()
+        let snapshot = await resources.filmSourceSettings.snapshot
+        if snapshot.cats.contains(where: { $0.installationId == id }) {
+            try await resources.filmSourceSettings.deleteCat(id)
+        }
+        let client = try await resources.scriptSession.connection()
+        let deadline = Date().addingTimeInterval(15)
+        repeat {
+            let status = try await client.call(module: .cat, operation: "status").filmRequiredObject()
+            if try !status.filmArray("instances").contains(where: {
+                $0.filmObject?["installationId"] == .string(id)
+            }) { return }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        } while Date() < deadline
+        XCTFail("The actual runtime did not retire the deleted Cat input")
+        throw RuntimeHTTPError.timeout
+    }
+
+    @MainActor
+    static func preferences(_ value: RuntimeValue, resources: MeowfilmResources) async throws {
+        _ = try resources.filmSettings[.preferences].update { current in
+            var root = current?.filmObject ?? ["version": .number(1)]
+            root["preferences"] = value
+            return .object(root)
+        }
+        try await waitForNativeRuntimeSettings(.preferences, resources: resources)
+    }
+
+    @MainActor
+    static func waitForNativeRuntimeSettings(_ block: FilmSettingsBlock, resources: MeowfilmResources) async throws {
         let client = try await resources.scriptSession.connection()
         guard case .object(let document)? = try resources.filmSettings[block].read() else {
             throw FilmSettingsStorageError.invalidDocument
@@ -72,7 +102,7 @@ extension XCTestCase {
     }
 
     @MainActor
-    func waitForNativeCat(_ id: String, service: FilmSourceService) async throws -> FilmCatSource {
+    static func waitForNativeCat(_ id: String, service: FilmSourceService) async throws -> FilmCatSource {
         let deadline = Date().addingTimeInterval(15)
         repeat {
             try await service.refresh()
@@ -85,5 +115,16 @@ extension XCTestCase {
         } while Date() < deadline
         XCTFail("The actual runtime did not publish the saved Cat input")
         throw RuntimeHTTPError.timeout
+    }
+}
+
+extension XCTestCase {
+    @MainActor
+    func waitForNativeRuntimeSettings(_ block: FilmSettingsBlock, resources: MeowfilmResources) async throws {
+        try await NativeFilmFixture.waitForNativeRuntimeSettings(block, resources: resources)
+    }
+    @MainActor
+    func waitForNativeCat(_ id: String, service: FilmSourceService) async throws -> FilmCatSource {
+        try await NativeFilmFixture.waitForNativeCat(id, service: service)
     }
 }

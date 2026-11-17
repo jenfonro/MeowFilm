@@ -22,23 +22,23 @@ public static class MusicDesktopLyricSettingsTests
             Settings(defaults, 0, "single", Normal, Highlight);
             Check(!defaults.TryGetProperty("geometry", out _), "unset geometry is absent from current settings");
             await f.Ok(Save, Draft());
-            Check(f.Store.Writes == 0 && f.Runtime.Calls.Count == 0);
+            Check(MusicTestStores.For(f.Store).Writes == 0 && f.Runtime.Calls.Count == 0);
             await f.Ok("music.appearance.save", new { ifRevision = 0, playlistView = "list",
                 playerTheme = "starlight", colorMode = "fixed", colorPalette = "mint" });
             await f.Ok("music.library.create", new { name = "Keep" });
             var before = Document(f.Store);
-            await using (var reader = new MusicLibraryOwner(f.Store))
+            await using (var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store)))
                 Settings((await reader.ExecuteAsync(Get)).GetProperty("settings"), 0, "single", Normal, Highlight);
-            int writes = f.Store.Writes;
+            int writes = MusicTestStores.For(f.Store).Writes;
             Check(JsonNode.DeepEquals(before, Document(f.Store)), "reading a missing area never writes current state");
             await f.Ok(Save, Draft(layout: "double", normal: "#12abef", highlight: "#000000"));
-            Check(f.Store.Writes == writes + 1);
+            Check(MusicTestStores.For(f.Store).Writes == writes + 1);
             var current = Document(f.Store);
-            foreach (var entry in before["entries"]!.AsArray().OfType<JsonObject>())
-                Check(current["entries"]!.AsArray().OfType<JsonObject>().Any(saved => JsonNode.DeepEquals(saved, entry)),
+            foreach (var entry in before["areas"]!.AsObject())
+                Check(JsonNode.DeepEquals(current["areas"]![entry.Key], entry.Value),
                     "saving desktop lyrics preserves each independent current area");
             Check(StoredSettings(current).Count == 5, "only schema, revision, layout and two colors are persisted");
-            await using var reopened = new MusicLibraryOwner(f.Store);
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(f.Store));
             var reopenedSettings = (await reopened.ExecuteAsync(Get)).GetProperty("settings");
             Settings(reopenedSettings, 1, "double", "#12ABEF", "#000000");
             Check(!reopenedSettings.TryGetProperty("geometry", out _), "unset geometry does not acquire a placeholder");
@@ -57,8 +57,7 @@ public static class MusicDesktopLyricSettingsTests
                 ("geometry", new { monitor = @"\\.\DISPLAY1", x = 0d, y = 0d, width = 0d, height = 144d }),
                 ("geometry", new { monitor = @"\\.\DISPLAY1", x = "12", y = 0d, width = 760d, height = 144d }),
                 ("geometry", null),
-                ("ifRevision", -1), ("ifRevision", "0"), ("ifRevision", .5),
-                ("showTranslation", false), ("offset", .5), ("locked", true), ("left", 20) })
+                ("ifRevision", -1), ("ifRevision", "0"), ("ifRevision", .5) })
             {
                 var draft = Draft(layout: "double"); draft[field] = JsonSerializer.SerializeToNode(value);
                 await f.Error(Save, draft, "INVALID_REQUEST");
@@ -68,14 +67,16 @@ public static class MusicDesktopLyricSettingsTests
                 var draft = Draft(layout: "double"); draft.Remove(field);
                 await f.Error(Save, draft, "INVALID_REQUEST");
             }
-            await f.Error(Get, new { layout = "single" }, "INVALID_REQUEST");
+            await f.Ok(Get, new { layout = "single" });
             await f.Error("music.lyrics.desktop.settings.reconcile", null, "CAPABILITY_UNAVAILABLE");
-            Check(f.Store.Writes == 0);
-            await f.Ok(Save, Draft(layout: "double"));
+            Check(MusicTestStores.For(f.Store).Writes == 0);
+            var extended = Draft(layout: "double");
+            extended["showTranslation"] = false; extended["offset"] = .5; extended["locked"] = true; extended["left"] = 20;
+            await f.Ok(Save, extended);
             await f.Error(Save, Draft(), "REVISION_CONFLICT");
             using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
             Code(await f.App.ExecuteAsync(Save, Draft(1), cancelled.Token), "CANCELLED");
-            Check(f.Store.Writes == 1);
+            Check(MusicTestStores.For(f.Store).Writes == 1);
             Settings((await f.Ok(Get)).GetProperty("settings"), 1, "double", Normal, Highlight);
         });
         yield return Case("window geometry uses the settings CAS and subsequent appearance changes preserve it", async () =>
@@ -91,12 +92,12 @@ public static class MusicDesktopLyricSettingsTests
             Settings(saved, 2, "single", "#000000", Highlight);
             Check(JsonNode.DeepEquals(JsonNode.Parse(saved.GetProperty("geometry").GetRawText()), geometry),
                 "a color write preserves the independently-owned window geometry");
-            Check(f.Store.Writes == 2);
-            await using var reopened = new MusicLibraryOwner(f.Store);
+            Check(MusicTestStores.For(f.Store).Writes == 2);
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(f.Store));
             var reopenedSettings = (await reopened.ExecuteAsync(Get)).GetProperty("settings");
             Check(JsonNode.DeepEquals(JsonNode.Parse(reopenedSettings.GetProperty("geometry").GetRawText()), geometry));
         });
-        yield return Case("persisted desktop fields and independent current appearance fields remain strict", async () =>
+        yield return Case("selected desktop fields stay validated while unrelated extensions survive", async () =>
         {
             await using var f = new QualityFixture();
             await f.Ok(Save, Draft(layout: "double"));
@@ -110,35 +111,39 @@ public static class MusicDesktopLyricSettingsTests
                     ("normalColor", "#123"), ("highlightColor", "#FFAABBCC"),
                     ("geometry", new JsonObject { ["monitor"] = "DISPLAY1", ["x"] = "20",
                         ["y"] = 0, ["width"] = 760, ["height"] = 144 }),
-                    ("geometry", null),
-                    ("showTranslation", true), ("offset", 0), ("locked", false) })
+                    ("geometry", null) })
                 {
                     var doc = (JsonObject)original.DeepClone();
                     StoredSettings(doc)[field] = JsonSerializer.SerializeToNode(value);
-                    f.Store.Data[MusicLibraryOwner.DocumentNamespace] = LJ.Bytes(doc);
-                    await using var invalid = new MusicLibraryOwner(f.Store);
+                    MusicTestStores.For(f.Store).Seed(doc);
+                    await using var invalid = new MusicLibraryOwner(MusicTestStores.For(f.Store));
                     Code(await invalid.ExecuteAsync(Get), "CORRUPT_STORAGE");
                 }
                 var damaged = (JsonObject)original.DeepClone();
-                Entry(damaged, "native-appearance")["value"]!["desktopLyrics"] = new JsonObject();
-                f.Store.Data[MusicLibraryOwner.DocumentNamespace] = LJ.Bytes(damaged);
-                await using var strict = new MusicLibraryOwner(f.Store);
-                Code(await strict.ExecuteAsync(Get), "CORRUPT_STORAGE");
+                Entry(damaged, "native-appearance")["desktopLyrics"] = new JsonObject();
+                StoredSettings(damaged)["showTranslation"] = true;
+                StoredSettings(damaged)["offset"] = 0;
+                StoredSettings(damaged)["locked"] = false;
+                MusicTestStores.For(f.Store).Seed(damaged);
+                await using var selected = new MusicLibraryOwner(MusicTestStores.For(f.Store));
+                Check((await selected.ExecuteAsync(Get)).GetProperty("ok").GetBoolean());
+                Check((await selected.ExecuteAsync(Save, Draft(1, layout: "single"))).GetProperty("ok").GetBoolean());
+                Check(StoredSettings(Document(f.Store))["showTranslation"]!.GetValue<bool>());
+                Check(JsonNode.DeepEquals(Entry(damaged, "native-appearance"), Entry(Document(f.Store), "native-appearance")));
             }
-            finally { f.Store.Data[MusicLibraryOwner.DocumentNamespace] = LJ.Bytes(original); }
+            finally { MusicTestStores.For(f.Store).Seed(original); }
         });
         yield return Case("native unknown receipts reconcile the exact attempt without replaying a write", async () =>
         {
             await using var f = new QualityFixture();
-            f.Store.FaultNamespace = MusicLibraryOwner.DocumentNamespace;
-            f.Store.Fault = true; f.Store.FaultAfter = true;
+            MusicTestStores.For(f.Store).Fault = true; MusicTestStores.For(f.Store).FaultAfter = true;
             await f.Error(Save, Draft(layout: "double"), "COMMIT_UNKNOWN");
             Settings((await f.Ok(Get)).GetProperty("settings"), 1, "double", Normal, Highlight);
-            Check(f.Store.Writes == 1);
-            f.Store.Fault = true; f.Store.FaultAfter = false;
+            Check(MusicTestStores.For(f.Store).Writes == 1);
+            MusicTestStores.For(f.Store).Fault = true; MusicTestStores.For(f.Store).FaultAfter = false;
             await f.Error(Save, Draft(1, normal: "#000000"), "COMMIT_UNKNOWN");
             Settings((await f.Ok(Get)).GetProperty("settings"), 1, "double", Normal, Highlight);
-            Check(f.Store.Writes == 2, "authoritative reads settle both before and after receipt loss without saving again");
+            Check(MusicTestStores.For(f.Store).Writes == 2, "authoritative reads settle both before and after receipt loss without saving again");
         });
         yield return UiCase("consumer selections persist independently and leave the shared translation switch in its session", ConsumerRoundTrip);
         yield return UiCase("failed reads are retryable and concurrent callers share the physical read", ReadRecovery);
@@ -174,16 +179,16 @@ public static class MusicDesktopLyricSettingsTests
             Check(module.DesktopLyricGeometry == geometry);
             await module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation);
             Check(!module.ShowLyricTranslation);
-            int writes = store.Writes;
+            int writes = MusicTestStores.For(store).Writes;
             await module.SetDesktopLyricLayoutAsync("triple");
             await module.SetDesktopLyricColorAsync("translation", "#112233");
             await module.SetDesktopLyricColorAsync("normal", "#123");
-            Check(module.Status == "桌面歌词设置无效" && store.Writes == writes &&
+            Check(module.Status == "桌面歌词设置无效" && MusicTestStores.For(store).Writes == writes &&
                 module.DesktopLyricLayout == "double" && module.DesktopLyricNormalColor == "#000000" &&
                 module.DesktopLyricHighlightColor == "#12ABEF" && !module.ShowLyricTranslation);
             await module.SetDesktopLyricColorAsync("highlight", "#12ABEF");
             await module.SetDesktopLyricLayoutAsync("double");
-            Check(store.Writes == writes && scene.Runtime.Calls.Count == 0, "unchanged values do not save");
+            Check(MusicTestStores.For(store).Writes == writes && scene.Runtime.Calls.Count == 0, "unchanged values do not save");
             Settings((await scene.Native.ExecuteAsync(Get)).GetProperty("settings"),
                 4, "double", "#000000", "#12ABEF");
             Check(StoredSettings(Document(store)).Count == 6);
@@ -204,7 +209,7 @@ public static class MusicDesktopLyricSettingsTests
         await scene.Module.EnsureDesktopLyricSettingsAsync();
         Check(!scene.Module.CanEditDesktopLyricSettings && scene.Module.Status == "桌面歌词设置读取失败");
         await scene.Module.SetDesktopLyricLayoutAsync("double");
-        Check(scene.App.Saves == 0 && scene.Store.Writes == 0);
+        Check(scene.App.Saves == 0 && MusicTestStores.For(scene.Store).Writes == 0);
         var hold = new Hold(); scene.App.NextRead = hold;
         var first = scene.Module.EnsureDesktopLyricSettingsAsync();
         await hold.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -212,7 +217,7 @@ public static class MusicDesktopLyricSettingsTests
         Check(ReferenceEquals(first, second) && !second.IsCompleted && scene.App.Reads == 2);
         hold.Release.TrySetResult();
         await Task.WhenAll(first, second);
-        Check(scene.Module.CanEditDesktopLyricSettings && scene.Store.Writes == 0);
+        Check(scene.Module.CanEditDesktopLyricSettings && MusicTestStores.For(scene.Store).Writes == 0);
         await scene.Module.EnsureDesktopLyricSettingsAsync();
         Check(scene.App.Reads == 2, "a successful load is reused, but a failed read was not installed as success");
     }
@@ -222,16 +227,15 @@ public static class MusicDesktopLyricSettingsTests
         await using var scene = new Scene();
         var module = scene.Module;
         await module.EnsureDesktopLyricSettingsAsync();
-        scene.Store.FaultNamespace = MusicLibraryOwner.DocumentNamespace;
-        scene.Store.Fault = true; scene.Store.FaultAfter = true;
+        MusicTestStores.For(scene.Store).Fault = true; MusicTestStores.For(scene.Store).FaultAfter = true;
         await module.SetDesktopLyricLayoutAsync("double");
         Check(module.CanEditDesktopLyricSettings && module.DesktopLyricLayout == "double" &&
-            module.Status.Length == 0 && scene.Store.Writes == 1 && scene.App.Saves == 1);
-        scene.Store.Fault = true; scene.Store.FaultAfter = false;
+            module.Status.Length == 0 && MusicTestStores.For(scene.Store).Writes == 1 && scene.App.Saves == 1);
+        MusicTestStores.For(scene.Store).Fault = true; MusicTestStores.For(scene.Store).FaultAfter = false;
         await module.SetDesktopLyricColorAsync("normal", "#000000");
         Check(module.CanEditDesktopLyricSettings && module.DesktopLyricNormalColor == Normal &&
             module.DesktopLyricLayout == "double" && module.Status == "桌面歌词设置保存失败" &&
-            scene.Store.Writes == 2 && scene.App.Saves == 2);
+            MusicTestStores.For(scene.Store).Writes == 2 && scene.App.Saves == 2);
     }
 
     private static async Task GeometryUnknownConsumer()
@@ -239,18 +243,17 @@ public static class MusicDesktopLyricSettingsTests
         await using var scene = new Scene();
         await scene.Module.EnsureDesktopLyricSettingsAsync();
         var accepted = new MusicDesktopLyricsGeometry(@"\\.\DISPLAY1", 23.5, 48.25, 880, 144);
-        scene.Store.FaultNamespace = MusicLibraryOwner.DocumentNamespace;
-        scene.Store.Fault = true; scene.Store.FaultAfter = true;
+        MusicTestStores.For(scene.Store).Fault = true; MusicTestStores.For(scene.Store).FaultAfter = true;
         await scene.Module.SaveDesktopLyricGeometryAsync(accepted);
         Check(scene.Module.CanEditDesktopLyricSettings && scene.Module.DesktopLyricGeometry == accepted &&
-            scene.Module.Status.Length == 0 && scene.Store.Writes == 1 && scene.App.Saves == 1,
+            scene.Module.Status.Length == 0 && MusicTestStores.For(scene.Store).Writes == 1 && scene.App.Saves == 1,
             "an accepted-but-unknown geometry commit is adopted from the authority without replay");
         var rejected = accepted with { X = 123.5, Y = 148.25 };
-        scene.Store.Fault = true; scene.Store.FaultAfter = false;
+        MusicTestStores.For(scene.Store).Fault = true; MusicTestStores.For(scene.Store).FaultAfter = false;
         await scene.Module.SaveDesktopLyricGeometryAsync(rejected);
         Check(scene.Module.CanEditDesktopLyricSettings && scene.Module.DesktopLyricGeometry == accepted &&
             scene.Module.Status == "桌面歌词位置和大小保存失败" &&
-            scene.Store.Writes == 2 && scene.App.Saves == 2,
+            MusicTestStores.For(scene.Store).Writes == 2 && scene.App.Saves == 2,
             "an uncommitted geometry draft is not published when the authority retains the prior value");
     }
 
@@ -259,8 +262,7 @@ public static class MusicDesktopLyricSettingsTests
         await using var scene = new Scene();
         await scene.Module.EnsureDesktopLyricSettingsAsync();
         var geometry = new MusicDesktopLyricsGeometry(@"\\.\DISPLAY1", 23, 48, 880, 144);
-        scene.Store.FaultNamespace = MusicLibraryOwner.DocumentNamespace;
-        scene.Store.Fault = true; scene.Store.FaultAfter = false;
+        MusicTestStores.For(scene.Store).Fault = true; MusicTestStores.For(scene.Store).FaultAfter = false;
         await scene.Module.SaveDesktopLyricGeometryAsync(geometry);
         Check(scene.Module.DesktopLyricGeometry is null && scene.Module.OwnedNotices.Count == 1);
         object owner = scene.Module.OwnedNotices.Single().Owner;
@@ -272,7 +274,7 @@ public static class MusicDesktopLyricSettingsTests
         Check(scene.Module.OwnedNotices.Count == 1, "a read is not a save receipt");
         await scene.Module.SaveDesktopLyricGeometryAsync(geometry);
         Check(scene.Module.DesktopLyricGeometry == geometry && scene.Module.OwnedNotices.Count == 0 &&
-            scene.App.Saves == 3 && scene.Store.Writes == 3,
+            scene.App.Saves == 3 && MusicTestStores.For(scene.Store).Writes == 3,
             "a later confirmed document containing geometry clears its own earlier unknown without replay");
     }
 
@@ -282,13 +284,13 @@ public static class MusicDesktopLyricSettingsTests
         await scene.Module.EnsureDesktopLyricSettingsAsync();
         var updated = await scene.Native.ExecuteAsync(Save, Draft(normal: "#12ABEF"));
         Check(updated.GetProperty("ok").GetBoolean());
-        int writes = scene.Store.Writes;
+        int writes = MusicTestStores.For(scene.Store).Writes;
         await scene.Module.SetDesktopLyricLayoutAsync("double");
         Check(scene.Module.CanEditDesktopLyricSettings && scene.Module.DesktopLyricLayout == "single" &&
             scene.Module.DesktopLyricNormalColor == "#12ABEF" && scene.Module.Status == "桌面歌词设置已更新" &&
-            scene.Store.Writes == writes && scene.App.Saves == 1);
+            MusicTestStores.For(scene.Store).Writes == writes && scene.App.Saves == 1);
         await scene.Module.SetDesktopLyricLayoutAsync("double");
-        Check(scene.Module.DesktopLyricLayout == "double" && scene.Store.Writes == writes + 1 &&
+        Check(scene.Module.DesktopLyricLayout == "double" && MusicTestStores.For(scene.Store).Writes == writes + 1 &&
             scene.Module.DesktopLyricNormalColor == "#12ABEF",
             "a fresh explicit choice uses the authority revision without overwriting its other fields");
     }
@@ -297,34 +299,33 @@ public static class MusicDesktopLyricSettingsTests
     {
         await using var scene = new Scene();
         await scene.Module.EnsureDesktopLyricSettingsAsync();
-        scene.Store.FaultNamespace = MusicLibraryOwner.DocumentNamespace;
-        scene.Store.Fault = true; scene.Store.FaultAfter = true;
+        MusicTestStores.For(scene.Store).Fault = true; MusicTestStores.For(scene.Store).FaultAfter = true;
         scene.App.ReadError = "STORAGE_UNAVAILABLE";
         await scene.Module.SetDesktopLyricLayoutAsync("double");
         Check(!scene.Module.CanEditDesktopLyricSettings && scene.Module.DesktopLyricLayout == "single" &&
-            scene.Module.Status == "桌面歌词设置保存失败" && scene.App.Saves == 1 && scene.Store.Writes == 1,
+            scene.Module.Status == "桌面歌词设置保存失败" && scene.App.Saves == 1 && MusicTestStores.For(scene.Store).Writes == 1,
             "lost save and read receipts cannot install an optimistic draft");
         await scene.Module.SetDesktopLyricColorAsync("highlight", "#000000");
         Check(scene.App.Saves == 1);
         await scene.Module.EnsureDesktopLyricSettingsAsync();
         Check(scene.Module.CanEditDesktopLyricSettings && scene.Module.DesktopLyricLayout == "double" &&
-            scene.Module.DesktopLyricHighlightColor == Highlight && scene.App.Saves == 1 && scene.Store.Writes == 1);
+            scene.Module.DesktopLyricHighlightColor == Highlight && scene.App.Saves == 1 && MusicTestStores.For(scene.Store).Writes == 1);
     }
 
     private static async Task StorageConflict()
     {
         await using var scene = new Scene();
         await scene.Module.EnsureDesktopLyricSettingsAsync();
-        await using var competing = new MusicLibraryOwner(scene.Store);
+        await using var competing = new MusicLibraryOwner(MusicTestStores.For(scene.Store));
         var committed = await competing.ExecuteAsync(Save, Draft(normal: "#12ABEF"));
         Check(committed.GetProperty("ok").GetBoolean());
         await scene.Module.SetDesktopLyricLayoutAsync("double");
         Check(!scene.Module.CanEditDesktopLyricSettings && scene.Module.DesktopLyricLayout == "single" &&
             scene.Module.DesktopLyricNormalColor == Normal && scene.Module.Status == "桌面歌词设置保存失败");
         Settings((await competing.ExecuteAsync(Get)).GetProperty("settings"), 1, "single", "#12ABEF", Highlight);
-        int writes = scene.Store.Writes;
+        int writes = MusicTestStores.For(scene.Store).Writes;
         await scene.Module.EnsureDesktopLyricSettingsAsync();
-        Check(!scene.Module.CanEditDesktopLyricSettings && scene.Store.Writes == writes,
+        Check(!scene.Module.CanEditDesktopLyricSettings && MusicTestStores.For(scene.Store).Writes == writes,
             "an unresolved document conflict stays fail closed and never replays the rejected save");
     }
 
@@ -341,15 +342,15 @@ public static class MusicDesktopLyricSettingsTests
         Check(!scene.Module.CanEditDesktopLyricSettings);
         await scene.Module.SetDesktopLyricLayoutAsync("double");
         await scene.Module.SetDesktopLyricColorAsync("normal", "#000000");
-        Check(scene.App.Saves == 0 && scene.Store.Writes == 0);
+        Check(scene.App.Saves == 0 && MusicTestStores.For(scene.Store).Writes == 0);
         hold.Release.TrySetResult(); await command;
         Check(scene.Module.CanEditDesktopLyricSettings);
-        scene.Store.HoldNamespace = MusicLibraryOwner.DocumentNamespace;
+        MusicTestStores.For(scene.Store).HoldCommit();
         var save = scene.Module.SetDesktopLyricLayoutAsync("double");
-        await scene.Store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await MusicTestStores.For(scene.Store).Entered!.Task.WaitAsync(TimeSpan.FromSeconds(5));
         var shutdown = scene.Module.PrepareShutdownAsync();
         Check(!save.IsCompleted && !shutdown.IsCompleted && !scene.Module.CanEditDesktopLyricSettings);
-        scene.Store.Release.TrySetResult();
+        MusicTestStores.For(scene.Store).Release?.TrySetResult();
         await Task.WhenAll(save, shutdown);
         Check(scene.Module.DesktopLyricLayout == "double" && scene.Module.Status.Length == 0 &&
             scene.App.Saves == 1, "admitted physical success is retained while shutdown drains the command lane");
@@ -368,10 +369,9 @@ public static class MusicDesktopLyricSettingsTests
         Check(value.GetProperty("schema").GetInt32() == 1 && value.GetProperty("revision").GetInt64() == revision &&
             value.GetProperty("layout").GetString() == layout && value.GetProperty("normalColor").GetString() == normal &&
             value.GetProperty("highlightColor").GetString() == highlight);
-    private static JsonObject Document(DocumentStore store) => JsonNode.Parse(store.Data[MusicLibraryOwner.DocumentNamespace])!.AsObject();
-    private static JsonObject Entry(JsonObject doc, string area) => doc["entries"]!.AsArray().OfType<JsonObject>()
-        .Single(entry => LJ.S(entry["key"]) == LJ.Stringify(new JsonArray("meowfilm", "music", 1, "local", area)));
-    private static JsonObject StoredSettings(JsonObject doc) => Entry(doc, Area)["value"]!.AsObject();
+    private static JsonObject Document(DocumentStore store) => MusicTestStores.For(store).Root;
+    private static JsonObject Entry(JsonObject doc, string area) => doc["areas"]![area]!.AsObject();
+    private static JsonObject StoredSettings(JsonObject doc) => Entry(doc, Area);
 
     private sealed class Hold
     {
@@ -419,13 +419,13 @@ public static class MusicDesktopLyricSettingsTests
         internal Scene(DocumentStore? store = null)
         {
             Store = store ?? new();
-            Native = new(Store, Runtime);
+            Native = new(Store, MusicTestStores.For(Store), Runtime);
             App = new(Native);
             Module = new(App, Store, new Output());
         }
         public async ValueTask DisposeAsync()
         {
-            Store.Release.TrySetResult(); Runtime.Release.TrySetResult();
+            MusicTestStores.For(Store).Release?.TrySetResult(); Store.Release.TrySetResult(); Runtime.Release.TrySetResult();
             App.NextRead?.Release.TrySetResult();
             foreach (var hold in App.PendingReads) hold.Release.TrySetResult();
             await Module.AbortAsync();

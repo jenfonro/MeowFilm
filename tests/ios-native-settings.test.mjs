@@ -6,6 +6,7 @@ import http from 'node:http';
 import { once } from 'node:events';
 import { join } from 'node:path';
 import { createNativeSettings, nativeSettingsFrameBytes } from '../apps/runtime/native-settings.mjs';
+import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { parseIOSConfiguration } from '../apps/ios/runtime/bootstrap.mjs';
 import { createTMDBDataModule } from '../apps/runtime/modules/metadata-data.mjs';
 import { defaultPreferences } from '../packages/film-playback/src/policy.js';
@@ -15,11 +16,11 @@ import { connect, okay, root, simulatedIOS, spawnRuntime } from './ios-runtime-s
 const blocks = ['cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences'];
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const fingerprint = document => {
-  const bytes = document === null ? null : Buffer.from(JSON.stringify(document));
+  const bytes = document === null ? null : Buffer.from(stringifyJSONValue(document));
   return { exists: bytes !== null, length: bytes?.length ?? 0, sha256: bytes === null ? null : hash(bytes) };
 };
 const result = (id, document) => ({ kind: 'settings.result', id, ok: true, document, fingerprint: fingerprint(document) });
-const line = value => Buffer.from(JSON.stringify(value) + '\n');
+const line = value => Buffer.from(stringifyJSONValue(value, -2) + '\n');
 const rules = () => ({ episodeCleanRegexRules: [], episodeRules: [], movieRules: [], aggregateRegexRules: [] });
 const tmdb = language => ({ version: 1, settings: { apiBase: 'https://api.themoviedb.org/3',
   imageBase: 'https://image.tmdb.org', apiKey: '', accessToken: '', language, region: 'CN', includeAdult: false } });
@@ -28,7 +29,7 @@ const entry = join(root, 'apps/ios/runtime/entries/aggregate.mjs');
 function pipe(t) {
   const requests = [], stopped = [];
   const settings = createNativeSettings({
-    write(bytes, complete) { requests.push(JSON.parse(bytes)); complete(); },
+    write(bytes, complete) { requests.push(parseJSONText(bytes.toString())); complete(); },
   }, code => stopped.push(code));
   t.after(() => settings.close());
   return { settings, requests, stopped, respond(id, document) { settings.accept(line(result(id, document))); } };
@@ -94,6 +95,40 @@ test('private pan writes use the observed fingerprint and rejected CAS never pub
   await assert.rejects(store.write(next), { code: 'CLOSED' });
 });
 
+test('private settings consume the reply fields without rejecting or changing unused JSON material', async t => {
+  const f = pipe(t);
+  const document = parseJSONText('{"version":1,"accounts":{},"extension":9007199254740993,"é":1,"é":2}');
+  const pending = f.settings.reload('pan.accounts');
+  const reply = result(1, document);
+  reply.extension = 'unused';
+  reply.fingerprint.extension = 1;
+  f.settings.accept(line(reply));
+  await pending;
+  const copy = f.settings.document('pan.accounts').read();
+  assert.equal(stringifyJSONValue(copy), stringifyJSONValue(document));
+  const failure = assert.rejects(f.settings.reload('tmdb'), { code: 'STORAGE_ERROR' });
+  f.settings.accept(line({ kind: 'settings.result', id: 2, ok: false, code: 'STORAGE_ERROR', extension: true }));
+  await failure;
+  assert.deepEqual(f.stopped, []);
+});
+
+test('private settings control frames do not consume the document depth budget', async t => {
+  const f = pipe(t);
+  let nested = null;
+  for (let index = 0; index < 63; index++) nested = [nested];
+  const document = { nested }, pending = f.settings.reload('pan.accounts');
+  f.respond(1, document);
+  assert.deepEqual(await pending, document);
+  const store = f.settings.document('pan.accounts');
+  assert.deepEqual(store.read(), document);
+  const written = store.write(document);
+  assert.deepEqual(f.requests[1].document, document);
+  f.respond(2, document);
+  assert.deepEqual(await written, document);
+  store.close();
+  assert.deepEqual(f.stopped, []);
+});
+
 test('private frame parsing rejects malformed values, fingerprints, unknown codes and invalid UTF-8, draining every exchange',
   async t => {
     for (const reply of [
@@ -101,9 +136,7 @@ test('private frame parsing rejects malformed values, fingerprints, unknown code
       { ...result(1, null), document: [] },
       { ...result(1, null), fingerprint: { exists: false, length: 1, sha256: null } },
       { ...result(1, null), fingerprint: { exists: true, length: 1, sha256: 'not-a-digest' } },
-      { ...result(1, null), extra: 'unexpected' },
       { kind: 'settings.result', id: 1, ok: false, code: 'private-error-message' },
-      { kind: 'settings.result', id: 1, ok: false, code: 'STORAGE_ERROR', message: 'private-error-message' },
       Buffer.from([0xff, 10]),
       Buffer.alloc(nativeSettingsFrameBytes + 1, 32),
     ]) await t.test(Buffer.isBuffer(reply) ? `bytes-${reply.length}` : JSON.stringify(reply), async sub => {
@@ -211,8 +244,7 @@ test('real iOS bootstrap cold-reads all native blocks, applies notifications and
     const { client } = await connect(first);
     t.after(() => client.close());
     assert.deepEqual(first.requests.map(request => request.block), blocks);
-    for (const invalid of [null, [], {}, { block: 1 }, { block: 'tmdb\n' },
-      { block: 'tmdb', document: {} }, { block: 'tmdb', cookie: 'synthetic-not-a-settings-frame' }]) {
+    for (const invalid of [null, [], {}, { block: 1 }, { block: 'tmdb\n' }]) {
       const response = await rawRequest(await first.endpoint, {},
         { path: '/v1/settings/changed', body: JSON.stringify(invalid) }).response;
       assert.equal(response.status, 400);
@@ -354,52 +386,54 @@ test('real iOS private pan refresh CAS commits only native storage and a stale r
     const requested = [], entered = deferred(), release = deferred();
     let hold = false;
     const server = http.createServer(async (request, response) => {
-      const chunks = [];
-      for await (const chunk of request) chunks.push(chunk);
-      requested.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      assert.equal(request.method, 'GET');
+      assert.equal(request.url, '/account/info?fr=pc&platform=pc');
+      requested.push(request.headers.cookie);
       if (hold) { entered.resolve(); await release.promise; }
       response.setHeader('content-type', 'application/json');
-      response.end(JSON.stringify({ code: 200, data: {
-        access_token: 'synthetic-new-access', refresh_token: 'synthetic-new-refresh', expires_in: 3600,
-      } }));
+      response.setHeader('set-cookie', `session=${hold ? 'synthetic-late-refresh' : 'synthetic-new'}; Path=/`);
+      response.end(JSON.stringify({ code: 'OK', success: true, data: { uid: 'synthetic-user' } }));
     });
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     t.after(async () => { release.resolve(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
     const runtime = nativeRuntime(t, { documents: { 'pan.accounts': { version: 1, accounts: {
-      quark_tv: { revision: 1, credentials: { refreshToken: 'synthetic-initial-refresh', deviceId: 'synthetic-device' } },
+      quark: { revision: 1, credentials: { cookie: 'session=synthetic-initial' } },
     } } }, preload: `${simulatedIOS}
+      import assert from 'node:assert/strict';
       import http from 'node:http';
-      const request = http.request;
-      http.request = function(url, ...args) {
-        if (String(url) === 'http://api.extscreen.com/quarkdrive/token')
-          url = new URL(${JSON.stringify(`http://127.0.0.1:${server.address().port}/token`)});
-        return Reflect.apply(request, this, [url, ...args]);
+      import https from 'node:https';
+      https.request = function(url, options) {
+        assert.equal(String(url), 'https://pan.quark.cn/account/info?fr=pc&platform=pc');
+        return http.request(
+          new URL(${JSON.stringify(`http://127.0.0.1:${server.address().port}/account/info?fr=pc&platform=pc`)}),
+          { ...options, agent: false });
       };
     ` });
     const { client } = await connect(runtime);
     t.after(() => client.close());
     assert.equal(requested.length, 0, 'cold-reading accounts must not refresh them');
-    const refreshed = okay(await client.call('pan.refresh', { provider: 'quark_tv' }), 'pan.runtime.v1');
+    const refreshed = okay(await client.call('pan.refresh', { provider: 'quark' }), 'pan.runtime.v1');
     assert.equal(refreshed.account.revision, 1);
     assert.equal(runtime.writes.length, 1);
-    assert.equal(runtime.saved.get('pan.accounts').accounts.quark_tv.credentials.refreshToken, 'synthetic-new-refresh');
-    assert.equal(requested[0].refresh_token, 'synthetic-initial-refresh');
+    assert.equal(runtime.saved.get('pan.accounts').accounts.quark.credentials.cookie, 'session=synthetic-new');
+    assert.equal(requested[0], 'session=synthetic-initial');
     assert.equal(existsSync(join(runtime.configuration.dataRoot, 'pan/accounts.json')), false);
     hold = true;
-    const refreshing = client.call('pan.refresh', { provider: 'quark_tv' });
+    const refreshing = client.call('pan.refresh', { provider: 'quark' });
     await entered.promise;
     const latest = { version: 1, accounts: {
-      quark_tv: { revision: 2, credentials: { refreshToken: 'synthetic-native-later', deviceId: 'synthetic-device' } },
+      quark: { revision: 2, credentials: { cookie: 'session=synthetic-native-later' } },
       baidu: { revision: 1, credentials: { cookie: 'synthetic-unrelated-native' } },
     } };
     runtime.saved.set('pan.accounts', latest);
     release.resolve();
     assert.deepEqual(await refreshing, { ok: false, contract: 'pan.runtime.v1', code: 'STALE_ACCOUNT' });
+    assert.equal(requested[1], 'session=synthetic-new');
     assert.deepEqual(runtime.saved.get('pan.accounts'), latest);
     assert.equal(runtime.writes.length, 1, 'CAS failure cannot blind-retry');
     const accounts = okay(await client.call('pan.settings.get'), 'pan.runtime.v1');
     assert.equal(accounts.accounts.find(account => account.provider === 'baidu').revision, 1);
-    assert.equal(accounts.accounts.find(account => account.provider === 'quark_tv').revision, 2);
+    assert.equal(accounts.accounts.find(account => account.provider === 'quark').revision, 2);
     assert.equal(JSON.stringify(accounts).includes('synthetic-'), false);
     assert.equal(runtime.requests.filter(request => request.kind === 'settings.write').length, 2);
     await stop(runtime, client);

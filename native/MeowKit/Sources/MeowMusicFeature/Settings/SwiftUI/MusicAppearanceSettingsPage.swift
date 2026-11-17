@@ -125,13 +125,15 @@ struct MusicColorSettingsContent: View {
     var body: some View {
         List {
             Section {
-                Picker("主题模式", selection: Binding(get: { state.value.colorMode }, set: state.setMode)) {
+                MusicSettingsMenuRow(selection: Binding(
+                    get: { state.value.colorMode }, set: state.setMode
+                ), selectedTitle: state.value.colorMode.title, identifier: "settings.colors.mode") {
                     ForEach(MusicColorMode.allCases, id: \.rawValue) { mode in
                         Text(mode.title).tag(mode)
                     }
+                } label: {
+                    Text("主题模式")
                 }
-                .pickerStyle(.menu)
-                .accessibilityIdentifier("settings.colors.mode")
                 .modifier(MusicSettingsRowStyle(theme: theme, first: true, last: true))
             }
             .listSectionSeparator(.hidden)

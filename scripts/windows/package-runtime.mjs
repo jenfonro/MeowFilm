@@ -222,6 +222,7 @@ export async function packageWindowsRuntime({
     ]);
     const settingsImports = new Map([
       ['@meowfilm/runtime-bridge', '@meowfilm/runtime-bridge'],
+      ['@meowfilm/runtime-bridge/json', '@meowfilm/runtime-bridge/json'],
     ]);
     const entryImports = new Map([
       ['../bootstrap.mjs', '../bootstrap.mjs'],

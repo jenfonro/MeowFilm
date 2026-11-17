@@ -18,6 +18,7 @@ public static partial class MusicUiTests
         yield return Case("TMDB save cancels old details without allowing late data to replace new query metadata", MetadataLateConsumer);
         yield return Case("TMDB admitted settings save drains before close and never restores a revoked search", MetadataSaveDrain);
         yield return Case("native TMDB and Douban settings work offline with CAS failures and block notifications", MetadataNativeOwner);
+        yield return Case("metadata field edits ignore extra patch input and preserve exact raw extensions", MetadataRawInputs);
         yield return Case("native metadata saves preserve canonical text endpoints and proxy validation offline", MetadataNativeNormalization);
     }
     private static void MetadataSearch(FilmSearchConsumerRuntime runtime)
@@ -188,6 +189,27 @@ public static partial class MusicUiTests
             await new FilmPlaybackClient(owner.Client).CallAsync("data.metadata", input, owner.Revoked);
         }
     }
+    private static async Task MetadataRawInputs()
+    {
+        using var runtime = new MetadataRuntime { Offline = true };
+        await using var store = new FilmNativeSettingsFixture();
+        await using var metadata = new FilmMetadataService(runtime, store);
+        await metadata.SaveSettingsAsync(new Dictionary<string, object?>());
+        var raw = store.Value("film.tmdb.v1").GetRawText();
+        raw = raw.Insert(1, "\"future\":1e400,\"future\":9007199254740993,");
+        int at = raw.IndexOf("\"settings\":{", StringComparison.Ordinal) + "\"settings\":{".Length;
+        raw = raw.Insert(at, "\"future\":9007199254740993,\"future\":0.12345678901234567890123456789,");
+        store.SeedBytes("film.tmdb.v1", System.Text.Encoding.UTF8.GetBytes(raw));
+        await metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["language"] = " ja-JP ", ["unused"] = new object() });
+        var after = store.Value("film.tmdb.v1");
+        var settings = after.GetProperty("settings");
+        True(after.EnumerateObject().Count(item => item.NameEquals("future")) == 2 &&
+            settings.EnumerateObject().Count(item => item.NameEquals("future")) == 2 &&
+            settings.GetProperty("future").GetRawText() == "0.12345678901234567890123456789" &&
+            settings.GetProperty("language").GetString() == "ja-JP" && !settings.TryGetProperty("unused", out _),
+            "only the consumed patch field changes; unused inputs do not become runtime settings");
+    }
+
     private static async Task MetadataNativeNormalization()
     {
         using var runtime = new MetadataRuntime { Offline = true };

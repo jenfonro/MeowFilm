@@ -220,7 +220,7 @@ public static partial class MusicUiTests
             await using var store = ServiceStore();
             await using var runtime = new NativeMusicScriptTestRuntime();
             var service = new PausedInvalidationDiscovery();
-            await using var app = new MusicNativeApplication(store, runtime, null, _ => service);
+            await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime, null, _ => service);
             var old = await app.ReadDiscoveryAsync(false);
             True(app.IsDiscoveryCurrent(old.Generation), "anonymous result initially current");
             service.Block = true;
@@ -278,7 +278,7 @@ public static partial class MusicUiTests
         {
             store = selectedStore ?? ServiceStore();
             Runtime.Platform.OnRequest = Http.Read;
-            App = new(store, Runtime);
+            App = new(store, MusicTestStores.For(store), Runtime);
             Module = new(App, store, Playback, Dialog);
         }
         internal static async Task<DiscoveryScene> Create(IDocumentStore? store = null)

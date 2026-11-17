@@ -61,6 +61,7 @@ internal static class Program
                 Console.WriteLine($"ERROR_HRESULT 0x{error.HResult:X8}");
                 Console.WriteLine(error.StackTrace);
             }
+            finally { await MusicTestStores.ReleaseAsync(); }
         }
         Console.WriteLine($"TOTAL {tests.Length}; PASSED {tests.Length - failed}; FAILED {failed}; SKIPPED 0");
         return failed == 0 ? 0 : 1;

@@ -1,6 +1,6 @@
 import Foundation
+import MeowRuntime
 import XCTest
-import MeowJSON
 @testable import MeowMusicFeature
 @testable import MeowMusicNativeService
 @testable import MeowMusicPlatform
@@ -15,7 +15,7 @@ private struct DurationAdmissionAccounts: MusicNativeAccountProviding {
     }
     func nativeResolve(platform: MusicAccountPlatform, nativeID: String,
                        selection: MusicPlaybackSelection) throws -> MusicNativeAudio {
-        var fields: [String: JSONValue] = [
+        var fields: RuntimeObject = [
             "url": .string("https://media.invalid/unknown-quality"),
             "expiresAt": .null, "qualityVerified": .bool(actualQuality != nil)
         ]

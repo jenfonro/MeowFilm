@@ -39,10 +39,16 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
     private var songs: [String: MusicRemoteTrack] = [:]
     private var queueProjectionFailure: MusicServiceError?
     func failQueueProjection(_ failure: MusicServiceError) { queueProjectionFailure = failure }
-    private var songObservers: [UUID: AsyncStream<Void>.Continuation] = [:]
-    func repositoryTracks(songIDs: Set<String>) -> [String: MusicRemoteTrack] { songs.filter { songIDs.contains($0.key) } }
-    func songChanges() -> AsyncStream<Void> {
-        let id = UUID(), pair = AsyncStream<Void>.makeStream()
+    private var songObservers: [UUID: AsyncStream<Set<String>>.Continuation] = [:]
+    private var repositoryRequests: [Set<String>] = []
+    func readRequests() -> [Set<String>] { repositoryRequests }
+    func resetReadRequests() { repositoryRequests = [] }
+    func repositoryTracks(songIDs: Set<String>) -> [String: MusicRemoteTrack] {
+        repositoryRequests.append(songIDs)
+        return songs.filter { songIDs.contains($0.key) }
+    }
+    func songChanges() -> AsyncStream<Set<String>> {
+        let id = UUID(), pair = AsyncStream<Set<String>>.makeStream()
         songObservers[id] = pair.continuation
         pair.continuation.onTermination = { [weak self] _ in Task { await self?.removeSongObserver(id) } }
         return pair.stream
@@ -50,7 +56,7 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
     private func removeSongObserver(_ id: UUID) { songObservers[id] = nil }
     func publishSong(_ track: MusicRemoteTrack) {
         songs[track.songId] = track
-        songObservers.values.forEach { $0.yield(()) }
+        songObservers.values.forEach { $0.yield([track.songId]) }
     }
     func suspend(_ gate: MusicPublicBrowseGate) { self.gate = gate }
     func fail(_ error: MusicServiceError?) { self.error = error }
@@ -212,9 +218,13 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
                 sections.flatMap(\.items).contains { if case .track(let track) = $0.content { return track.title == current.title }; return false }
             }.prefix(1).sink { _ in detailChanged.fulfill() }
         ]
+        await service.resetReadRequests()
+        await service.publishSong(MusicCollectionService.track("unrelated"))
         await service.publishSong(current)
         await fulfillment(of: [homeChanged, detailChanged], timeout: 2)
         observations.forEach { $0.cancel() }
+        let requests = await service.readRequests()
+        XCTAssertEqual(requests, [[before.songId], [before.songId]])
         XCTAssertEqual(detail.tracks.first?.ref, before.ref)
         XCTAssertEqual(detail.tracks.first?.sourcePosition, before.sourcePosition)
         XCTAssertEqual(detail.tracks.first?.songId, before.songId)

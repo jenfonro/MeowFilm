@@ -10,7 +10,7 @@ import MeowPlayback
 
 @MainActor
 final class MusicSettingsPlatformTests: XCTestCase {
-    func testSettingsRowsShareUIKitTypeGeometryAndDoNotRepeatTheHeaderInset() throws {
+    func testSettingsRowsShareUIKitTypeGeometryAndMatchHomeTableHeaderInset() throws {
         let domain = "MusicSettingsRowGeometry." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
         defer { defaults.removePersistentDomain(forName: domain) }
@@ -20,6 +20,20 @@ final class MusicSettingsPlatformTests: XCTestCase {
         page.pageTitle = "音乐设置"
         try withSettingsComponent(page) {
             let window = try XCTUnwrap(page.view.window)
+            let reference = SettingsTableView()
+            let referenceData = MusicSettingsTableGeometryFixture()
+            reference.dataSource = referenceData
+            reference.rowHeight = UITableView.automaticDimension
+            reference.estimatedRowHeight = 56
+            reference.alpha = 0
+            reference.translatesAutoresizingMaskIntoConstraints = false
+            page.view.insertSubview(reference, at: 0)
+            NSLayoutConstraint.activate([
+                reference.topAnchor.constraint(equalTo: page.contentTopAnchor),
+                reference.leadingAnchor.constraint(equalTo: page.view.safeAreaLayoutGuide.leadingAnchor),
+                reference.trailingAnchor.constraint(equalTo: page.view.safeAreaLayoutGuide.trailingAnchor),
+                reference.bottomAnchor.constraint(equalTo: page.view.bottomAnchor)
+            ])
             let width = try XCTUnwrap(page.view.constraints.first {
                 $0.firstAttribute == .width && $0.secondItem == nil
             })
@@ -35,6 +49,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
                 for dark in [false, true] {
                     page.traitOverrides.userInterfaceStyle = dark ? .dark : .light
                     page.setContent(MusicSettingsContent(theme: PageTheme(palette: .sky, dark: dark)))
+                    reference.reloadData()
                     waitForSettingsComponent("settings rows laid out for current type and theme") {
                         window.layoutIfNeeded(); page.view.layoutIfNeeded()
                         return !visibleRows().isEmpty &&
@@ -48,8 +63,10 @@ final class MusicSettingsPlatformTests: XCTestCase {
                     XCTAssertEqual(frame.maxX, page.view.bounds.maxX - SettingsVisualMetrics.cardHorizontalInset, accuracy: 0.5)
                     let headerBottom = page.pageHeader.convert(page.pageHeader.bounds, to: page.view).maxY
                     XCTAssertGreaterThanOrEqual(frame.minY, headerBottom)
-                    XCTAssertLessThanOrEqual(frame.minY - headerBottom, SettingsVisualMetrics.sectionSpacing,
-                        "The SwiftUI list must not add a second header-sized gap")
+                    let referenceFrame = reference.convert(reference.rectForRow(at: IndexPath(row: 0, section: 0)),
+                                                           to: page.view)
+                    XCTAssertEqual(frame.minY - headerBottom, referenceFrame.minY - headerBottom, accuracy: 1,
+                        "The SwiftUI list must use the settings home table's first-section gap")
                     let title = UILabel()
                     title.font = .preferredFont(forTextStyle: .body, compatibleWith: page.traitCollection)
                     title.numberOfLines = 0; title.text = "平台账号"
@@ -69,6 +86,119 @@ final class MusicSettingsPlatformTests: XCTestCase {
                     screenshot.lifetime = .keepAlways; add(screenshot)
                 }
             }
+        }
+    }
+
+    func testCatalogSourceAndLockLyricAccessoriesDoNotEnlargeOrdinaryRows() throws {
+        let appearance = MusicAppearancePreferencesStore()
+        let page = HostingPageViewController(themeProvider: appearance, content: MusicSettingsContent(
+            theme: PageTheme(palette: .sky), catalogSource: MusicHomeSourceSelection(
+                selected: .qq, revision: 0, available: [.qq, .netease]
+            )
+        ))
+        try withSettingsComponent(page) {
+            waitForSettingsComponent("catalogue source row laid out") {
+                page.view.layoutIfNeeded()
+                return self.settingsDescendants(page.view).compactMap { $0 as? UICollectionView }
+                    .contains { $0.numberOfSections == 2 && $0.numberOfItems(inSection: 0) == 7 }
+            }
+            let list = try XCTUnwrap(settingsDescendants(page.view).compactMap { $0 as? UICollectionView }.first)
+            let baseline = try XCTUnwrap(list.layoutAttributesForItem(at: IndexPath(item: 0, section: 0))).size.height
+            for index in [IndexPath(item: 6, section: 0), IndexPath(item: 0, section: 1)] {
+                list.scrollToItem(at: index, at: .centeredVertically, animated: false)
+                waitForSettingsComponent("compact accessory row visible") {
+                    list.layoutIfNeeded()
+                    return list.cellForItem(at: index) != nil
+                }
+                let cell = try XCTUnwrap(list.cellForItem(at: index))
+                XCTAssertEqual(cell.bounds.height, baseline, accuracy: 1)
+                for control in settingsDescendants(cell).compactMap({ $0 as? SettingsSwitch }) {
+                    XCTAssertEqual(control.bounds.height, UIFont.preferredFont(forTextStyle: .body,
+                        compatibleWith: control.traitCollection).lineHeight, accuracy: 1)
+                    XCTAssertLessThanOrEqual(control.control.frame.height, control.bounds.height + 1)
+                }
+            }
+        }
+    }
+
+    func testCompactToggleTapsOnlyOnceAndDisabledLabelKeepsValue() throws {
+        let runner = XCUIApplication(bundleIdentifier: try XCTUnwrap(Bundle.main.bundleIdentifier))
+        performAccountPageAction { runner.activate() }
+        waitForSettingsComponent("compact toggle runner active") { UIApplication.shared.applicationState == .active }
+        var changes: [Bool] = []
+        let appearance = MusicAppearancePreferencesStore()
+        let page = HostingPageViewController(themeProvider: appearance,
+            content: CompactToggleFixture(enabled: true, changed: { changes.append($0) }))
+        try withSettingsComponent(page) {
+            waitForSettingsComponent("compact native switch visible") {
+                !self.settingsDescendants(page.view).compactMap { $0 as? SettingsSwitch }.isEmpty
+            }
+            let wrapper = try XCTUnwrap(settingsDescendants(page.view).compactMap { $0 as? SettingsSwitch }.first)
+            let control = runner.switches["settings.compact-toggle"]
+            XCTAssertTrue(control.waitForExistence(timeout: 3))
+            XCTAssertTrue(control.isHittable)
+            XCTAssertLessThanOrEqual(wrapper.convert(wrapper.bounds, to: page.view).maxX, page.view.bounds.maxX)
+            performAccountPageAction { control.tap() }
+            waitForSettingsComponent("native switch sends exactly one change") { changes == [true] }
+            XCTAssertEqual(changes, [true])
+            performAccountPageAction {
+                control.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                    .withOffset(CGVector(dx: 0, dy: 20)).tap()
+            }
+            waitForSettingsComponent("compact switch accepts the lower row touch once") { changes == [true, false] }
+            performAccountPageAction {
+                control.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                    .withOffset(CGVector(dx: 0, dy: -20)).tap()
+            }
+            waitForSettingsComponent("compact switch accepts the upper row touch once") { changes == [true, false, true] }
+            page.setContent(CompactToggleFixture(enabled: false, changed: { changes.append($0) }))
+            waitForSettingsComponent("compact switch disabled") { !wrapper.control.isEnabled }
+            let label = runner.staticTexts["紧凑开关"]
+            XCTAssertTrue(label.waitForExistence(timeout: 3))
+            performAccountPageAction { label.tap() }
+            XCTAssertEqual(changes, [true, false, true])
+            XCTAssertTrue(wrapper.control.isOn)
+        }
+    }
+
+    func testCompactCatalogMenuRetainsSelectionBindingAndDisabledState() throws {
+        let runner = XCUIApplication(bundleIdentifier: try XCTUnwrap(Bundle.main.bundleIdentifier))
+        performAccountPageAction { runner.activate() }
+        waitForSettingsComponent("settings menu test host active") { UIApplication.shared.applicationState == .active }
+        var selections: [MusicPublicBrowsePlatform] = []
+        let appearance = MusicAppearancePreferencesStore()
+        let page = HostingPageViewController(themeProvider: appearance, content: MusicSettingsContent(
+            theme: PageTheme(palette: .sky), catalogSource: MusicHomeSourceSelection(
+                selected: .qq, revision: 0, available: [.qq, .netease]
+            ), selectCatalogSource: { selections.append($0) }
+        ))
+        try withSettingsComponent(page) {
+            waitForSettingsComponent("catalogue source menu list ready") {
+                self.settingsDescendants(page.view).compactMap { $0 as? UICollectionView }
+                    .contains { $0.numberOfSections == 2 && $0.numberOfItems(inSection: 0) == 7 }
+            }
+            let list = try XCTUnwrap(settingsDescendants(page.view).compactMap { $0 as? UICollectionView }.first)
+            list.scrollToItem(at: IndexPath(item: 6, section: 0), at: .centeredVertically, animated: false)
+            list.layoutIfNeeded()
+            let menu = runner.buttons["music.settings.catalogSource"]
+            XCTAssertTrue(menu.waitForExistence(timeout: 3))
+            XCTAssertTrue(menu.isEnabled)
+            XCTAssertTrue(menu.label.contains(MusicPublicBrowsePlatform.qq.title))
+            performAccountPageAction { menu.tap() }
+            let option = runner.buttons[MusicPublicBrowsePlatform.netease.title]
+            XCTAssertTrue(option.waitForExistence(timeout: 3))
+            performAccountPageAction { option.tap() }
+            waitForSettingsComponent("compact menu invokes the original selection binding") { selections == [.netease] }
+            page.setContent(MusicSettingsContent(
+                theme: PageTheme(palette: .sky), catalogSource: MusicHomeSourceSelection(
+                    selected: .netease, revision: 1, available: [.qq, .netease]
+                ), savingCatalogSource: true, selectCatalogSource: { selections.append($0) }
+            ))
+            waitForSettingsComponent("in-flight catalogue save disables the compact menu") {
+                page.view.layoutIfNeeded()
+                return menu.exists && !menu.isEnabled && menu.label.contains(MusicPublicBrowsePlatform.netease.title)
+            }
+            XCTAssertEqual(selections, [.netease])
         }
     }
 
@@ -356,7 +486,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
         let manager = try XCTUnwrap(views(host.view).compactMap { $0 as? ManagementListView }.first)
         let table = try XCTUnwrap(views(manager).compactMap { $0 as? UITableView }.first)
         XCTAssertEqual(manager.convert(manager.bounds, to: host.view).maxY, host.view.bounds.maxY, accuracy: 0.5)
-        XCTAssertEqual(table.frame.maxY, manager.bounds.maxY, accuracy: 0.5)
+        XCTAssertEqual(table.frame.maxY, manager.safeAreaLayoutGuide.layoutFrame.maxY - 4, accuracy: 0.5)
         XCTAssertFalse(manager.search.isHidden)
         XCTAssertGreaterThan(manager.search.searchTextField.bounds.width, manager.bounds.width / 2)
         manager.setSelection(["fixture"])
@@ -383,8 +513,9 @@ final class MusicSettingsPlatformTests: XCTestCase {
         let footer = try XCTUnwrap(views(manager).first {
             $0.accessibilityIdentifier == "management.selectAll"
         }?.superview)
-        XCTAssertLessThanOrEqual(footer.frame.maxY, manager.keyboardLayoutGuide.layoutFrame.minY - 12 + 0.5)
-        XCTAssertEqual(table.frame.maxY, manager.bounds.maxY, accuracy: 0.5)
+        XCTAssertLessThanOrEqual(footer.frame.maxY, manager.keyboardLayoutGuide.layoutFrame.minY - 8 + 0.5)
+        XCTAssertEqual(table.frame.maxY, manager.keyboardLayoutGuide.layoutFrame.minY - 4, accuracy: 0.5)
+        XCTAssertEqual(footer.frame.maxY, table.frame.maxY - 4, accuracy: 0.5)
         XCTAssertEqual(state.selected, ["fixture"])
         performAccountPageAction { window.endEditing(true) }
         manager.search.text = ""
@@ -1185,6 +1316,22 @@ final class MusicSettingsPlatformTests: XCTestCase {
     }
 }
 
+@MainActor
+private struct CompactToggleFixture: View {
+    let enabled: Bool
+    let changed: (Bool) -> Void
+    @State private var value = false
+
+    var body: some View {
+        List {
+            Toggle("紧凑开关", isOn: Binding(get: { value }, set: { value = $0; changed($0) }))
+                .accessibilityIdentifier("settings.compact-toggle")
+                .disabled(!enabled)
+                .modifier(SettingsListRowStyle(theme: PageTheme(), first: true, last: true))
+        }.modifier(SettingsListStyle(theme: PageTheme()))
+    }
+}
+
 private actor MusicSettingsServiceFixture: MusicServing, MusicAccountsServing, MusicAccountTransferring {
     private var transferPrepares = 0, transferCommits = 0
     private let importConflicts: [MusicAccountPlatform]
@@ -1346,6 +1493,14 @@ private actor MusicSettingsQRCheckGate {
         if !released { await withCheckedContinuation { waiter = $0 } }
     }
     func release() { released = true; waiter?.resume(); waiter = nil }
+}
+
+@MainActor
+private final class MusicSettingsTableGeometryFixture: NSObject, UITableViewDataSource {
+    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { 1 }
+    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        SettingsTableCell(title: "平台账号", theme: PageTheme(palette: .sky), first: true, last: true)
+    }
 }
 
 @MainActor

@@ -59,7 +59,10 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
                        "The real search-to-session handoff must reuse the same complete data-owner entry")
         XCTAssertEqual(fixture.reads("/tmdb-api/3/search/multi"), 1)
         XCTAssertEqual(fixture.seasonReads, [1])
-        XCTAssertEqual(episodeIDs(page), ["film.episode.season-1-episode-1", "film.episode.season-1-episode-2"])
+        XCTAssertEqual(episodeIDs(page), [
+            "film.episode.tmdb:tv:\(fixture.values.tvID):season:1:episode:1",
+            "film.episode.tmdb:tv:\(fixture.values.tvID):season:1:episode:2",
+        ])
         let cast = descendants(page.view).compactMap { $0 as? FilmCastView }
         XCTAssertEqual(cast.map(\.accessibilityLabel), ["合成导演，导演", "合成演员，主角"])
         let portraits = cast.flatMap { descendants($0).compactMap { $0 as? ArtworkView } }
@@ -92,7 +95,9 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         try await waitFor { model.snapshot?.previewEpisodes == true && self.episodeIDs(page).count == 3 }
         XCTAssertEqual(try menuAction("点映", in: more).state, .on)
         XCTAssertEqual(episodeIDs(page), [
-            "film.episode.season-1-episode-1", "film.episode.season-1-episode-2", "film.episode.season-1-episode-3",
+            "film.episode.tmdb:tv:\(fixture.values.tvID):season:1:episode:1",
+            "film.episode.tmdb:tv:\(fixture.values.tvID):season:1:episode:2",
+            "film.episode.tmdb:tv:\(fixture.values.tvID):season:1:episode:3",
         ], "Preview reveals only the real future episode, never the directory's maximum file number")
         XCTAssertEqual(model.snapshot?.episodes.last?.raw["air_date"], .string("2999-01-01"),
                        "Returning to the same metadata source must retain its already-read real future episode fields")
@@ -104,7 +109,7 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         invoke(try menuAction("特别篇", in: season))
         try await waitFor {
             model.snapshot?.browsing.season == 0 && model.snapshot?.browsing.loading == false &&
-                self.episodeIDs(page) == ["film.episode.season-0-episode-0"]
+                self.episodeIDs(page) == ["film.episode.tmdb:tv:\(fixture.values.tvID):season:0:episode:0"]
         }
         XCTAssertEqual(model.snapshot?.episodes.first?.position, .init(season: 0, episode: 0))
         XCTAssertEqual(fixture.seasonReads, [1, 0], "Selecting specials must not fetch all other seasons")
@@ -568,26 +573,29 @@ private final class FilmMetadataHostFixture {
         originalPlayback = try await client.call(module: .film, operation: "settings.get")
         var settings = try XCTUnwrap(originalPlayback).filmRequiredObject()
         settings["iosAutoPrepare"] = .bool(false)
-        _ = try await client.call(module: .film, operation: "settings.set", parameters: .object(settings))
+        try await NativeFilmFixture.preferences(.object(settings), resources: resources)
         try await upstream.start()
-        _ = try await client.call(module: .tmdb, operation: "settings.update", parameters: .object([
+        _ = try await resources.filmMetadata.updateSettings([
             "apiBase": .string(upstream.base + "/tmdb-api/3"),
             "imageBase": .string(upstream.base + "/tmdb-images"),
             "apiKey": .string(""), "accessToken": .string("synthetic-metadata-token"),
-        ]))
-        _ = try await client.call(module: .douban, operation: "settings.update", parameters: .object([
+        ])
+        try await NativeFilmFixture.waitForNativeRuntimeSettings(.tmdb, resources: resources)
+        _ = try await resources.filmDoubanSettings.updateSettings([
             "apiBase": .string(upstream.base + "/douban-api"), "searchBase": .string(upstream.base + "/douban-search"),
             "imageBase": .string(upstream.base + "/douban-images"), "apiProxy": .string(""), "imageProxy": .string(""),
             "cookie": .string("metadata-fixture=synthetic"),
-        ]))
+        ])
+        try await NativeFilmFixture.waitForNativeRuntimeSettings(.douban, resources: resources)
         assembly.filmSearch?.metadataSettingsChanged()
     }
 
     func installDirectory(title: String? = nil) async throws -> FilmCatSource {
         installedID = values.prefix
-        return try await resources.filmSourceSettings.importLocal(name: "Metadata directory",
+        _ = try await resources.filmSourceSettings.importLocal(name: "Metadata directory",
             source: filmMetadataHostCat.replacingOccurrences(of: "__TITLE__", with: title ?? values.title),
             installationId: values.prefix)
+        return try await NativeFilmFixture.waitForNativeCat(values.prefix, service: resources.filmSourceSettings)
     }
     func directoryCalls(_ installed: FilmCatSource) async throws -> [String] {
         let value = try await client.call(module: .cat, operation: "invoke", parameters: .object([
@@ -646,21 +654,21 @@ private final class FilmMetadataHostFixture {
         var failure: Error?
         if let installedID {
             do {
-                try await resources.filmSourceSettings.refresh()
-                let catalog = await resources.filmSourceSettings.snapshot
-                if catalog.cats.contains(where: { $0.installationId == installedID }) {
-                    try await resources.filmSourceSettings.deleteCat(installedID)
-                }
+                try await NativeFilmFixture.removeCat(installedID, resources: resources)
             }
             catch { failure = error }
         }
         if let originalPlayback {
-            do { _ = try await client.call(module: .film, operation: "settings.set", parameters: originalPlayback) }
+            do { try await NativeFilmFixture.preferences(originalPlayback, resources: resources) }
             catch { failure = failure ?? error }
         }
         for (module, settings) in [(RuntimeModule.tmdb, originalTMDB), (.douban, originalDouban)] {
             if let settings {
-                do { _ = try await client.call(module: module, operation: "settings.update", parameters: .object(settings)) }
+                do {
+                    if module == .tmdb { _ = try await resources.filmMetadata.updateSettings(settings) }
+                    else { _ = try await resources.filmDoubanSettings.updateSettings(settings) }
+                    try await NativeFilmFixture.waitForNativeRuntimeSettings(module == .tmdb ? .tmdb : .douban, resources: resources)
+                }
                 catch { failure = failure ?? error }
             }
         }

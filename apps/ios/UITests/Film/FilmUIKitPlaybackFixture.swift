@@ -29,11 +29,12 @@ enum FilmUIKitPlaybackFixture {
                             "overview": .string("分季资料")])
         }
     }
-    static func sourceTarget(source: RuntimeValue = source, candidateID: String? = nil) -> RuntimeValue {
+    static func sourceTarget(source: RuntimeValue = source, lineID: RuntimeValue = .number(0),
+                             candidateID: String? = nil) -> RuntimeValue {
         var pointer = RuntimeObject(uniqueKeysWithValues: source.filmObject!.filter {
             ["key", "engine", "installationId", "siteId", "detailId"].contains($0.key)
         })
-        pointer["lineId"] = .number(0)
+        pointer["lineId"] = lineID
         pointer["candidateId"] = candidateID.map(RuntimeValue.string)
         return .object(["id": .string("fixture-target"), "kind": .string("source"),
                         "title": .string("星海航线"), "source": .object(pointer)])
@@ -81,6 +82,9 @@ enum FilmUIKitPlaybackFixture {
         var fields: RuntimeObject = [
             "sessionId": .string(sessionID.uuidString.lowercased()), "sequence": .number(Double(sequence)),
             "target": target(kind: kind, provider: provider), "stage": .string(attemptID == nil ? "idle" : "pending"),
+            "workInfo": .object(["provider": .string(provider.rawValue), "metadataId": .number(provider == .tmdb ? 19 : 0),
+                "kind": .string(kind == .movie ? "movie" : "tv"), "title": .string("星海航线"),
+                "summary": .string(""), "seasonCount": .null, "episodeCount": .null]),
             "entryTarget": target(kind: kind, provider: provider), "entryResolution": .null,
             "error": .null, "metadata": .object(["name": .string("星海航线"),
                 "seasons": .array([.object(["businessId": .string("fixture-season-1"), "playbackTarget": target(kind: kind, provider: provider),
@@ -142,6 +146,8 @@ actor FilmUIKitPlaybackServer {
     }
     func reply(to action: String, with value: RuntimeValue) { replies[action] = value }
     func calls() -> [Call] { log }
+    func isObserving() -> Bool { receive != nil }
+    func snapshotValue() -> RuntimeValue { value }
     func blockedAttempts() -> [String] { blocked }
     func awaitObservation() async {
         if receive != nil { return }
@@ -197,6 +203,18 @@ actor FilmUIKitPlaybackServer {
         } onCancel: { Task { await self.cancel() } }
     }
     private func cancel() { waiter?.resume(throwing: CancellationError()); waiter = nil }
+}
+
+@MainActor
+final class FilmUIKitPlayerHost: UIViewController {
+    var player: FilmPlayerViewController?
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard let player else { return }
+        self.player = nil
+        player.present(from: self, animated: false)
+    }
 }
 
 @MainActor

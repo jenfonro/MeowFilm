@@ -6,13 +6,14 @@ import Combine
 /// Search presentation admission. All durable changes still use the existing
 /// collection/queue owner, including its revision and protection checks.
 @MainActor public final class MusicSearchActions: ObservableObject {
-    @Published private(set) var favorites: [MusicRemoteTrack] = []
+    @Published private(set) var favorites: Set<MusicReference> = []
     @Published private(set) var favoritesLoaded = false
     @Published private(set) var favoritesLoading = false
     @Published private(set) var busy = false
     @Published private(set) var error: MusicServiceError?
     @Published private(set) var actionError: String?
     private let model: MusicViewModel
+    private var favoriteCollection: MusicCollection?
     private var binding: MusicCollectionPageBinding?
     private var readTask: Task<Void, Never>?
     private var reads: [UUID: Task<Void, Never>] = [:]
@@ -46,11 +47,12 @@ import Combine
         readTask?.cancel(); actionTask?.cancel()
         readTask = nil
         needsRead = false
-        favorites = []; favoritesLoaded = false; favoritesLoading = false; busy = actionTask != nil
+        favorites = []; favoriteCollection = nil
+        favoritesLoaded = false; favoritesLoading = false; busy = actionTask != nil
         error = nil; actionError = nil
     }
     public func isFavorite(_ song: MusicSearchSong) -> Bool {
-        MusicSearchFusion.isFavorite(song, members: favorites)
+        song.variants.contains { favorites.contains(.init(kind: .library, id: $0.songId)) }
     }
     public func refreshFavorites() {
         guard active, let own = binding, own.matches(model), !busy else { return }
@@ -71,7 +73,8 @@ import Combine
                 let snapshot = try await self.favoriteSnapshot(own)
                 try own.check(self.model)
                 guard self.readID == token, self.active else { return }
-                self.favorites = snapshot.tracks; self.favoritesLoaded = true
+                self.favoriteCollection = snapshot.collection
+                self.favorites = snapshot.refs; self.favoritesLoaded = true
             } catch {
                 guard own.matches(self.model), self.readID == token, self.active, !Task.isCancelled else { return }
                 self.error = MusicServiceError.sanitized(error)
@@ -81,10 +84,12 @@ import Combine
     }
     @discardableResult public func toggleFavorite(_ song: MusicSearchSong,
         refresh: (@MainActor () async throws -> MusicRemoteTrack)? = nil) -> Task<Void, Never>? {
-        guard active, !busy, favoritesLoaded, let own = binding, own.matches(model) else { return nil }
+        guard active, !busy, favoritesLoaded, let collection = favoriteCollection,
+              let own = binding, own.matches(model) else { return nil }
         // Freeze both the recording and the user's intended state. A reload or
         // re-ranking cannot turn "remove" into "add" after the first suspension.
         let remove = isFavorite(song), token = UUID()
+        let ticket = MusicCollectionEditTicket(binding: own, collection: collection)
         actionID = token; busy = true; actionError = nil; error = nil
         readID = UUID(); readTask?.cancel(); readTask = nil; favoritesLoading = false
         let task = Task { [weak self] in
@@ -94,27 +99,26 @@ import Combine
                 if self.active, self.needsRead || self.binding !== own { self.refreshFavorites() }
             }
             do {
-                let snapshot = try await self.favoriteSnapshot(own)
+                let snapshot = try await self.favoriteSnapshot(own, collection: ticket.collection)
                 try own.check(self.model)
                 guard self.actionID == token, self.active else { return }
-                let matching = snapshot.tracks.filter { MusicSearchFusion.matchesFavorite($0, row: song) }
-                var tracks = snapshot.tracks
-                if remove { tracks.removeAll { matching.contains($0) } }
-                else if matching.isEmpty {
+                let matching = snapshot.refs.intersection(song.variants.map { MusicReference(kind: .library, id: $0.songId) })
+                if remove {
+                    if !matching.isEmpty {
+                        try await self.model.changeCollectionPageMembership(ticket, adding: [], removing: Array(matching))
+                    }
+                } else if matching.isEmpty {
                     let track: MusicRemoteTrack
                     if let refresh { track = try await refresh() } else { track = song.track }
                     try own.check(self.model)
                     guard self.actionID == token, self.active else { return }
-                    tracks.append(track)
-                }
-                if tracks != snapshot.tracks {
-                    let ticket = MusicCollectionEditTicket(binding: own, collection: snapshot.collection)
-                    try await self.model.editCollectionPage(ticket, name: nil, refs: tracks.map(\.ref), order: nil)
+                    try await self.model.changeCollectionPageMembership(ticket, adding: [track.ref], removing: [])
                 }
                 let updated = try await self.favoriteSnapshot(own)
                 try own.check(self.model)
                 guard self.actionID == token, self.active else { return }
-                self.favorites = updated.tracks; self.favoritesLoaded = true
+                self.favoriteCollection = updated.collection
+                self.favorites = updated.refs; self.favoritesLoaded = true
             } catch {
                 guard own.matches(self.model), self.actionID == token, self.active, !Task.isCancelled else { return }
                 self.error = MusicServiceError.sanitized(error)
@@ -196,13 +200,40 @@ import Combine
             await action?.value
         }
     }
-    private func favoriteSnapshot(_ binding: MusicCollectionPageBinding) async throws -> MusicCollectionPageSnapshot {
+    private func favoriteSnapshot(_ binding: MusicCollectionPageBinding,
+                                  collection requested: MusicCollection? = nil) async throws ->
+        (collection: MusicCollection, refs: Set<MusicReference>) {
         // Resolve the real catalogue entry, never infer membership from a title
         // or create a second private favorites list.
+        if let requested {
+            let refs = try await model.readCollectionReferences(requested, binding: binding)
+            return (requested, Set(refs))
+        }
         let id = model.collections.first(where: { $0.kind == "favorites" })?.id ?? "favorites"
-        guard let snapshot = try await model.readCollectionPage(id: id, binding: binding),
-              snapshot.collection.kind == "favorites" else { throw MusicServiceError.notFound }
-        return snapshot
+        if let current = model.collections.first(where: { $0.id == id && $0.kind == "favorites" }) {
+            do {
+                let refs = try await model.readCollectionReferences(current, binding: binding)
+                return (current, Set(refs))
+            } catch {
+                try binding.check(model)
+                guard [.notFound, .staleRevision].contains(MusicServiceError.sanitized(error)) else { throw error }
+            }
+        }
+        // Read-only catalogue reconciliation, never upgrade a captured write ticket.
+        try binding.check(model)
+        let epoch = try model.enter(), catalogueID = model.collectionCatalogueID
+        let values = try await model.requireService().collections()
+        try model.check(epoch); try binding.check(model)
+        guard values.count <= 2000, Set(values.map { Data($0.id.utf8) }).count == values.count else {
+            throw MusicServiceError.invalidResponse
+        }
+        guard let collection = values.first(where: { $0.id == id && $0.kind == "favorites" }) else {
+            if model.collectionCatalogueID == catalogueID { model.publishCollections(values, origin: binding.id) }
+            throw MusicServiceError.notFound
+        }
+        let refs = try await model.readCollectionReferences(collection, binding: binding)
+        if model.collectionCatalogueID == catalogueID { model.publishCollections(values, origin: binding.id) }
+        return (collection, Set(refs))
     }
     deinit { accountObservation?.cancel(); for read in reads.values { read.cancel() }; actionTask?.cancel() }
 }

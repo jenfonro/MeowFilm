@@ -56,7 +56,6 @@ extension NativeMusicService: MusicLibrarySyncing {
             // Metadata adoption does not advance the user's library revision.
             // Preserve its current facts rather than writing this round's older
             // display projection over concurrent metadata observations.
-            library["songs"] = d.library["library"]["songs"]
             d.library["library"] = library; d.library["sync"] = ledger; d.library["revision"] = .n(expected + 1)
         }
         round.library = library; round.revision = expected + 1
@@ -75,9 +74,50 @@ extension NativeMusicService: MusicLibrarySyncing {
         _ = try adoptSongs(songs, authoritative: true)
         return snapshot
     }
+    private func requireSyncBindings(_ library: MJ, selections: [MusicLibrarySyncSelection]) throws {
+        try musicRequire(library["collections"].isArray, .corruptDocument)
+        var targets = Set<String>()
+        let identities = Dictionary(grouping: library["collections"].array, by: { Data($0["id"].string.utf8) })
+        if selections.contains(where: { $0.kinds.contains(.favorites) }) {
+            let favorites = library["collections"].array.filter { $0["id"].string == "favorites" }
+            try musicRequire(favorites.count == 1 && favorites[0]["kind"].string == "favorites", .favoritesProtected)
+        }
+        for row in library["collections"].array {
+            let selected = selections.filter { $0.kinds.map(\.rawValue).contains(row["kind"].string) }
+            guard !selected.isEmpty else { continue }
+            try musicRequire(!row["id"].string.isEmpty && identities[Data(row["id"].string.utf8)]?.count == 1 &&
+                row["revision"].isInteger && row["bindings"].isArray && row["order"].isArray &&
+                row["intents"].isObject && row["manualOrder"].isBool &&
+                musicIDs(row["order"].strings).count == row["order"].array.count, .corruptDocument)
+            try musicRequire(row["kind"].string != "favorites" || row["id"].string == "favorites" && !row["deleted"].bool, .favoritesProtected)
+            for songID in row["order"].array {
+                try musicRequire(songID.isString && repositoryReader.containsSong(id: songID.string), .corruptDocument)
+            }
+            for (songID, intent) in row["intents"].fields {
+                try musicRequire(repositoryReader.containsSong(id: songID) && intent["present"].isBool &&
+                    intent["pending"].isBool && ["local", "remote"].contains(intent["origin"].string), .corruptDocument)
+            }
+            for binding in row["bindings"].array where selected.contains(where: { $0.platform.rawValue == binding["platform"].string }) {
+                try musicRequire(!binding["id"].string.isEmpty && !binding["accountId"].string.isEmpty &&
+                    binding["accountId"] == library["accounts"][binding["platform"].string] &&
+                    targets.insert(MusicNativeSyncLogic.bindingKey(binding)).inserted &&
+                    binding["baseline"].isArray && binding["map"].isObject && binding["writable"].bool &&
+                    musicIDs(binding["baseline"].strings).count == binding["baseline"].array.count, .corruptDocument)
+                for occurrence in binding["baseline"].array {
+                    try musicRequire(occurrence.isString && !occurrence.string.isEmpty &&
+                        repositoryReader.containsSong(id: binding["map"][occurrence.string].string), .corruptDocument)
+                }
+                for (_, songID) in binding["map"].fields {
+                    try musicRequire(songID.isString && repositoryReader.containsSong(id: songID.string), .corruptDocument)
+                }
+            }
+        }
+    }
     func performLibrarySync(_ request: MusicLibrarySyncRequest, port: any MusicNativeLibrarySyncProviding,
                             relationshipsOnly: Bool = false) async throws -> MusicLibrarySyncState {
         let initial = try read()
+        try initial.requireRevision("library")
+        if !relationshipsOnly { try requireSyncBindings(initial.library["library"], selections: request.selections) }
         var round = MusicNativeSyncRound(request: request, epoch: epoch, port: port,
             library: initial.library["library"], ledger: try MusicNativeSyncLedger.load(initial.library), revision: initial.library["revision"].int)
         round.relationshipsOnly = relationshipsOnly

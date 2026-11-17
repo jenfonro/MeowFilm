@@ -1,4 +1,5 @@
 import { isUtf8 } from 'node:buffer';
+import { isRawJSON, parseJSONText } from '@meowfilm/runtime-bridge/json';
 
 const imageRoute = '/v1/douban/images/';
 const browserUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36';
@@ -17,7 +18,7 @@ class Failure extends Error {
   constructor(code) { super(code); this.code = code; }
 }
 const requireValue = (value, code = 'INVALID_REQUEST') => { if (!value) throw new Failure(code); };
-const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const object = value => value !== null && typeof value === 'object' && !Array.isArray(value) && !isRawJSON(value);
 function httpURL(value, code) {
   requireValue(typeof value === 'string' && /^https?:\/\//i.test(value) &&
     !control.test(value) && !value.includes('#'), code);
@@ -111,7 +112,7 @@ function imageReference(value, config) {
 
 /** A pure projection: source image fields keep their positions; ordinary links keep their values. */
 export function rewriteDoubanImages(value, settings, path = '') {
-  const config = imageSettings(settings);
+  let config;
   function list(items, project) {
     const result = [];
     for (const item of items) {
@@ -124,7 +125,7 @@ export function rewriteDoubanImages(value, settings, path = '') {
     return result;
   }
   function image(item) {
-    if (typeof item === 'string') return imageReference(item, config);
+    if (typeof item === 'string') return imageReference(item, config ??= imageSettings(settings));
     if (Array.isArray(item)) return list(item, image);
     if (!object(item)) return item;
     // A photo entity's URL is a page; only its image descriptors are images.
@@ -312,7 +313,7 @@ async function fetchMetadata(initial, config, request, signal, search) {
     }
     if (response.status < 200 || response.status >= 300) {
       let payload;
-      try { payload = JSON.parse(body); } catch { /* Non-JSON failures still use the HTTP category. */ }
+      try { payload = parseJSONText(body); } catch { /* Non-JSON failures still use the HTTP category. */ }
       requireValue(!object(payload) || !requiresInteraction(payload), 'WEB_INTERACTION_REQUIRED');
       throw new Failure('UPSTREAM_HTTP');
     }
@@ -320,7 +321,7 @@ async function fetchMetadata(initial, config, request, signal, search) {
   }
 }
 function businessCode(payload) {
-  return typeof payload.code === 'number' ? payload.code :
+  return typeof payload.code === 'number' || isRawJSON(payload.code) ? payload.code :
     typeof payload.code === 'string' && /^-?[0-9]+$/.test(payload.code.trim()) ? Number(payload.code) : 0;
 }
 function requiresInteraction(payload) {
@@ -342,7 +343,7 @@ export async function requestDouban(input, { settings, request, signal }) {
   const query = queryString(input.query), config = apiSettings(settings, false);
   const body = await fetchMetadata(config.base + input.path + query, config, request, signal, false);
   let payload;
-  try { payload = JSON.parse(body); } catch { throw new Failure('UPSTREAM_FORMAT'); }
+  try { payload = parseJSONText(body); } catch { throw new Failure('UPSTREAM_FORMAT'); }
   requireValue(object(payload), 'UPSTREAM_FORMAT');
   businessError(payload);
   return rewriteDoubanImages(payload, settings, input.path);
@@ -366,7 +367,7 @@ function searchData(html) {
       else if (char === '}' || char === ']') {
         if (--depth !== 0) continue;
         requireValue(/^\s*;/.test(script.slice(index + 1)), 'UPSTREAM_FORMAT');
-        try { return JSON.parse(script.slice(start, index + 1)); }
+        try { return parseJSONText(script.slice(start, index + 1)); }
         catch { throw new Failure('UPSTREAM_FORMAT'); }
       }
     }

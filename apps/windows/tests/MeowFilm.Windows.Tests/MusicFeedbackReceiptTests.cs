@@ -254,7 +254,7 @@ public static partial class MusicUiTests
         private FeedbackReceiptFixture()
         {
             Store = new(backing);
-            Calls = new(new MusicNativeApplication(Store, runtime));
+            Calls = new(new MusicNativeApplication(Store, MusicTestStores.For(Store), runtime));
             Module = new(Calls, Store, new PlaybackProbe(), dialogs: new Dialogs());
         }
         public static async Task<FeedbackReceiptFixture> Create()

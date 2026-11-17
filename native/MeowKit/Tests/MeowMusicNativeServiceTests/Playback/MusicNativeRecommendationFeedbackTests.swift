@@ -4,7 +4,7 @@ import MeowMusicFeature
 
 final class MusicNativeRecommendationFeedbackTests: XCTestCase {
     func testHeartbeatProofOnlyBelongsToCommittedOccurrenceAndDoesNotSurviveColdRestore() async throws {
-        let store = NativeMusicMemoryDocument(try document(heartbeat: true))
+        let store = NativeMusicTestLibrary(try document(heartbeat: true))
         let owner = RecommendationFeedbackAccounts()
         let service = try await NativeMusicFixture.service(store, accounts: owner)
         let result = try await service.enterSimilarMode()
@@ -12,8 +12,8 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
         let saved = try MusicDocument(store.snapshot().0, runID: "fixture")
         let original = try XCTUnwrap(saved.queue["entries"].array.first)
         let recommended = try XCTUnwrap(saved.queue["entries"].array.last)
-        let originalSong = saved.library["library"]["songs"][original["songId"].string]
-        let recommendedSong = saved.library["library"]["songs"][recommended["songId"].string]
+        let originalSong = (try saved.fixtureSong(original["songId"].string))
+        let recommendedSong = (try saved.fixtureSong(recommended["songId"].string))
         let originalTargets = try await service.similarFeedbackTargets(entry: original, song: originalSong, context: original["context"])
         XCTAssertEqual(originalTargets.first?.source, "search")
         XCTAssertNil(originalTargets.first?.recommendationProof)
@@ -49,7 +49,7 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
         _ = try await cold.similarModeSnapshot()
         let coldDocument = try MusicDocument(store.snapshot().0, runID: "cold")
         let coldTargets = try await cold.similarFeedbackTargets(entry: recommended,
-            song: coldDocument.library["library"]["songs"][recommended["songId"].string], context: recommended["context"])
+            song: (try coldDocument.fixtureSong(recommended["songId"].string)), context: recommended["context"])
         XCTAssertNil(coldTargets.first?.recommendationProof)
         XCTAssertEqual(coldTargets.first?.source, "")
         XCTAssertEqual(coldTargets.first?.algorithm, "")
@@ -57,7 +57,7 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
     }
 
     func testQueuePreviewCannotAuthorizeFeedbackAndCommittedSourceMapKeepsOriginalSource() async throws {
-        let store = NativeMusicMemoryDocument(try document())
+        let store = NativeMusicTestLibrary(try document())
         let owner = RecommendationFeedbackAccounts()
         let service = try await NativeMusicFixture.service(store, accounts: owner)
         let bytes = store.snapshot().0
@@ -74,7 +74,7 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
         XCTAssertEqual(previewDocument.queue, before.queue)
         let original = try XCTUnwrap(before.queue["entries"].array.first)
         let originalTargets = try await service.similarFeedbackTargets(entry: original,
-            song: before.library["library"]["songs"][original["songId"].string], context: original["context"])
+            song: (try before.fixtureSong(original["songId"].string)), context: original["context"])
         XCTAssertEqual(originalTargets.first?.source, "search")
         XCTAssertNil(originalTargets.first?.recommendationProof)
         let chosen = try XCTUnwrap(preview.candidates.first)
@@ -83,7 +83,7 @@ final class MusicNativeRecommendationFeedbackTests: XCTestCase {
         XCTAssertEqual(saved.queue["source"]["sourceType"].string, "queue-recommendations")
         XCTAssertEqual(saved.queue["entries"].array.first?["context"], original["context"])
         let entry = try XCTUnwrap(saved.queue["entries"].array.last)
-        let song = saved.library["library"]["songs"][entry["songId"].string]
+        let song = (try saved.fixtureSong(entry["songId"].string))
         let targets = try await service.similarFeedbackTargets(entry: entry, song: song, context: entry["context"])
         let target = try XCTUnwrap(targets.first), proof = try XCTUnwrap(target.recommendationProof)
         XCTAssertEqual(target.source, "sourceMap-synthetic")

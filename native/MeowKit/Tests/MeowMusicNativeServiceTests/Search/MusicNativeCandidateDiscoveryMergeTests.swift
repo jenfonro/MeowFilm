@@ -37,7 +37,7 @@ final class MusicNativeCandidateDiscoveryMergeTests: XCTestCase {
         await peer.set(rows)
         return try await service.search(platform: rows.first?.platform ?? "tx", query: "fixture", page: 1, limit: 30).items
     }
-    private func setup(_ store: NativeMusicMemoryDocument = .init()) async throws -> (RepositorySongPeer, NativeMusicService) {
+    private func setup(_ store: NativeMusicTestLibrary = .init()) async throws -> (RepositorySongPeer, NativeMusicService) {
         let peer = RepositorySongPeer()
         return (peer, try await NativeMusicFixture.service(store, platform: peer))
     }
@@ -133,7 +133,7 @@ final class MusicNativeCandidateDiscoveryMergeTests: XCTestCase {
     }
 
     func testRepositoryUpdatesProjectIntoReferencesWithoutChangingOccurrenceQueueOrColdIdentity() async throws {
-        let store = NativeMusicMemoryDocument(), (peer, service) = try await setup(store)
+        let store = NativeMusicTestLibrary(), (peer, service) = try await setup(store)
         let original = try await observe([row("original")], peer: peer, service: service)[0]
         let collection = try await service.createPlaylist(name: "References", refs: [original.ref])
         _ = try await service.changeQueue(.replace([original.ref, original.ref], index: 1), expectedRevision: 0)
@@ -148,7 +148,7 @@ final class MusicNativeCandidateDiscoveryMergeTests: XCTestCase {
         let saved = try MusicDocument(store.read(), runID: "fixture")
         XCTAssertEqual(saved.queue["entries"].array.map { $0["songId"].string }, [original.songId, original.songId])
         XCTAssertTrue(saved.queue["entries"].array.allSatisfy { !$0.contains("song") })
-        XCTAssertEqual(saved.library["library"]["songs"].fields.count, 1)
+        XCTAssertEqual((try saved.fixtureSongs()).fields.count, 1)
         await service.close()
         let (coldPeer, cold) = try await setup(store)
         let restored = try await cold.queue()
@@ -159,7 +159,7 @@ final class MusicNativeCandidateDiscoveryMergeTests: XCTestCase {
     }
 
     func testFailedMetadataCASCannotPublishOrReplaceTheSavedRepository() async throws {
-        let store = NativeMusicMemoryDocument(), (peer, service) = try await setup(store)
+        let store = NativeMusicTestLibrary(), (peer, service) = try await setup(store)
         let original = try await observe([row("original")], peer: peer, service: service)[0]
         _ = try await service.changeQueue(.replace([original.ref], index: 0), expectedRevision: 0)
         let before = store.snapshot().0
@@ -175,7 +175,7 @@ final class MusicNativeCandidateDiscoveryMergeTests: XCTestCase {
     }
 
     func testNativeProjectionDoesNotPersistPlayableURLsOrCredentialFields() async throws {
-        let store = NativeMusicMemoryDocument(), (peer, service) = try await setup(store)
+        let store = NativeMusicTestLibrary(), (peer, service) = try await setup(store)
         var info = try MJ.parse(row("safe").data)
         info["url"] = .string("https://media.invalid/private?signature=synthetic")
         info["token"] = .string("synthetic-not-a-credential"); info["headers"] = .obj([("Cookie", .string("synthetic-not-a-cookie"))])

@@ -267,18 +267,21 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         songObservation = Task { [weak self] in
             let changes = await repository.songChanges()
             await self?.refreshSongProjections(repository, access: access)
-            for await _ in changes {
+            for await changed in changes {
                 guard !Task.isCancelled else { return }
-                await self?.refreshSongProjections(repository, access: access)
+                await self?.refreshSongProjections(repository, access: access, changed: changed)
             }
         }
     }
-    private func refreshSongProjections(_ repository: any MusicSongRepositoryReading, access: UUID) async {
+    private func refreshSongProjections(_ repository: any MusicSongRepositoryReading, access: UUID, changed: Set<String>? = nil) async {
         guard !Task.isCancelled, available, visible, generation == access else { return }
         let projection = UUID(), page = pageEpoch
-        songProjectionID = projection
         let songs: [String: MusicRemoteTrack]
-        let ids = sections.reduce(into: Set<String>()) { $0.formUnion($1.songIDs) }
+        let referenced = (sections + loadedPages.values.flatMap { $0.page.sections })
+            .reduce(into: Set<String>()) { $0.formUnion($1.songIDs) }
+        let ids = changed.map { referenced.intersection($0) } ?? referenced
+        guard !ids.isEmpty else { return }
+        songProjectionID = projection
         do { songs = try await repository.repositoryTracks(songIDs: ids) }
         catch { return } // A display read never reverses a committed mutation.
         guard !Task.isCancelled, available, visible, generation == access,

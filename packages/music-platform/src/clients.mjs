@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Anonymous client recipes from the pinned QQMusicApi / KuGouMusicApi sources.
 import { constants, publicEncrypt, randomInt, randomUUID } from 'node:crypto';
+import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { aes, decrypt, hex, kgPublicKey, kgRequest, kgSuccess, md5, responseCookies, txRequest, txSuccess } from './protocols.mjs';
-import { decodeJSON, object, required } from './model.mjs';
+import { decodeJSON, object, required, utf8 } from './model.mjs';
 import { fail, MusicPlatformError } from './errors.mjs';
 
 const qimeiPublicKey = `-----BEGIN PUBLIC KEY-----
@@ -71,11 +72,11 @@ export function createClientContexts({ documents, transport, clock }) {
     let bytes;
     try { bytes = documents.read('clients.json'); } catch { fail('STORAGE_ERROR'); }
     if (bytes) {
-      try { state = object(decodeJSON(bytes)); }
+      try { state = object(parseJSONText(utf8(bytes))); }
       catch { fail('CORRUPT_STORAGE'); }
     } else {
       const candidate = fresh(clock);
-      try { documents.write('clients.json', Buffer.from(JSON.stringify(candidate))); }
+      try { documents.write('clients.json', Buffer.from(stringifyJSONValue(candidate))); }
       catch { fail('COMMIT_UNKNOWN'); }
       state = candidate;
     }
@@ -84,7 +85,7 @@ export function createClientContexts({ documents, transport, clock }) {
   function save(platform, value) {
     lifetime.signal.throwIfAborted();
     const candidate = { ...load(), [platform]: value };
-    try { documents.write('clients.json', Buffer.from(JSON.stringify(candidate))); }
+    try { documents.write('clients.json', Buffer.from(stringifyJSONValue(candidate))); }
     catch { state = undefined; fail('COMMIT_UNKNOWN'); }
     state = candidate;
     return value;
@@ -100,7 +101,7 @@ export function createClientContexts({ documents, transport, clock }) {
       if (inner.code != null && required(inner.code) !== '0') fail('UPSTREAM_ERROR');
       const data = object(inner.data);
       signal.throwIfAborted();
-      client = save('tx', { ...client, qimei: { q16: required(data.q16), q36: required(data.q36), savedAt: now },
+      client = save('tx', { ...client, qimei: { q36: required(data.q36), savedAt: now },
         session: null });
     }
     if (!client.session || client.session.savedAt > clock() || chinaDay(client.session.savedAt) !== chinaDay(clock())) {

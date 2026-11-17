@@ -16,7 +16,7 @@ final class MusicNativeQueueReferenceCacheTests: XCTestCase {
         let old = track(title: "Original title", album: "Legacy album", artwork: "https://artwork.invalid/old.jpg")
         let current = track(title: "Current title")
         let peer = NativeMusicResultFixture([try MusicPlatformFixture.page([current], platform: "tx")])
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
         let pages = MusicAccountQueuePages(roots: [[
             .init(platform: old.platform, data: old.data, sourcePosition: 4),
             .init(platform: old.platform, data: old.data, sourcePosition: 8)
@@ -109,11 +109,11 @@ final class MusicNativeQueueReferenceCacheTests: XCTestCase {
             try MusicNativePublicBrowseFixture.page(["CacheMID", "CacheMID"], platform: "tx"),
             try MusicPlatformFixture.page([current], platform: "tx")
         ])
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
         let source = try await service.openPublicQueue(.init(collection: collection))
         let opened = try await service.read()
-        let id = try XCTUnwrap(opened.library["library"]["songs"].fields.first?.0)
-        XCTAssertEqual(opened.library["library"]["songs"].fields.count, 1)
+        let id = try XCTUnwrap((try opened.fixtureSongs()).fields.first?.0)
+        XCTAssertEqual((try opened.fixtureSongs()).fields.count, 1)
         XCTAssertEqual(opened.queue["revision"].int, 0); XCTAssertTrue(opened.queue["entries"].array.isEmpty)
         let update = try await service.search(platform: "tx", query: "current", page: 1, limit: 30)
         XCTAssertEqual(update.items.first?.songId, id)

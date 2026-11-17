@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Fixed LX public metadata/lyrics recipes; see LICENSES/NOTICE.md.
-import { durationSeconds, first, image, input, number, page, pageNumber, required, rows, scalar, song, text } from '../model.mjs';
+import { durationSeconds, first, image, input, number, optionalNumber, page, pageNumber, required, rows, scalar, song, text } from '../model.mjs';
 import { form } from '../protocols.mjs';
 import { entities, kuwoJSON, kuwoPage } from '../literal.mjs';
 import { kuwoLyrics } from '../lyrics.mjs';
@@ -34,7 +34,7 @@ export function kwSong(raw) {
 }
 function kwCollection(raw) {
   return { id: required(first(raw.playlistid, raw.id)), name: entities(text(first(raw.name, raw.title))),
-    cover: image(raw.pic), count: number(first(raw.songnum, raw.total), null),
+    cover: image(raw.pic), count: optionalNumber(first(raw.songnum, raw.total)),
     creator: entities(text(first(raw.nickname, raw.uname))), description: entities(text(first(raw.intro, raw.info))),
     source: 'kw', engine: 'Kuwo' };
 }

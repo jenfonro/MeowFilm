@@ -217,7 +217,7 @@ public static class FilmPlaybackSessionTests
                     else await rig.DisposeAsync();
                 }
             });
-        foreach (string action in new[] { "browse", "play", "select.episode" })
+        foreach (string action in new[] { "browse", "play", "select.target" })
             foreach (bool fails in new[] { false, true })
                 yield return Test($"retired {action} drains its late {(fails ? "STORAGE_ERROR" : "success")} without UI publication",
                     () => RetiredCommandAsync(action, fails));
@@ -299,8 +299,8 @@ public static class FilmPlaybackSessionTests
                 rig.Runtime.Calls.Count(call => call.Method == "film.session.command" && FilmJson.Text(call.Parameters, "action") == "play") == 1,
                 "the state transition, not seeing an id, gates its single native consumption");
         });
-        foreach (string action in new[] { "play", "select.episode", "select.candidate" })
-            yield return Test($"repeated {action} reaches Node and keeps an unchanged preparing receipt", async () =>
+        foreach (var (action, exactSource) in new[] { ("play", false), ("select.target", false), ("select.target", true) })
+            yield return Test($"repeated {action} source={exactSource} reaches Node and keeps an unchanged preparing receipt", async () =>
             {
                 await using var rig = new FilmPlaybackRig();
                 await rig.OpenAsync();
@@ -308,15 +308,14 @@ public static class FilmPlaybackSessionTests
                 rig.Native.Preparing = async token => { prepareToken = token; entered.TrySetResult(); await finish.Task; };
                 try
                 {
-                    var target = action == "select.candidate" ? new FilmPlaybackTarget(rig.Runtime.Target.Id, "source",
+                    var target = exactSource ? new FilmPlaybackTarget(rig.Runtime.Target.Id, "source",
                         rig.Runtime.Target.Title, Season: 1, Episode: 1, GlobalEpisode: 1,
                         Source: FilmJson.Encode(new { key = "cat:fixture:site:1", detailId = 0, lineId = 0, candidateId = "pending-play" })) :
                         rig.Runtime.Target;
                     rig.Runtime.Attempt("pending-play", Candidate("pending-play"), target: target); await entered.Task;
                     for (int index = 0; index < 2; index++)
                         if (action == "play") await rig.Page.PlayAsync();
-                        else await rig.Page.CommandAsync(action, action == "select.candidate"
-                            ? (object)new { candidateId = "pending-play" } : new { episode = new { season = 1, episode = 1, globalEpisode = 1 } });
+                        else await rig.Page.CommandAsync(action, new { target = target.Wire() });
                     Check(rig.Runtime.Calls.Count(call => call.Method == "film.session.command" &&
                         FilmJson.Text(call.Parameters, "action") == action) == 2 &&
                         !prepareToken.IsCancellationRequested && !rig.Runtime.Released.Contains("pending-play") &&
@@ -495,7 +494,7 @@ public static class FilmPlaybackSessionTests
                 foreach (string id in new[] { "movie-file", "movie-other-file", "movie-retry" })
                 {
                     string candidateId = id == "movie-retry" ? "movie-other-file" : id;
-                    string action = id == "movie-retry" ? "media.retry" : "select.candidate";
+                    string action = id == "movie-retry" ? "media.retry" : "select.target";
                     var sourceTarget = new FilmPlaybackTarget(movie.Id, "source", movie.Title,
                         Source: FilmJson.Encode(new { key = "cat:fixture:site:1", detailId = 0, lineId = 0, candidateId }));
                     var entered = Gate(); var finish = Gate();
@@ -510,7 +509,7 @@ public static class FilmPlaybackSessionTests
                     try
                     {
                         if (action == "media.retry") await rig.Page.RetryMediaAsync();
-                        else await rig.Page.CommandAsync(action, new { candidateId });
+                        else await rig.Page.CommandAsync(action, new { target = sourceTarget.Wire() });
                         await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
                         Check(rig.Native.Intents[^1].PreserveFrom == donor && rig.Page.ActiveTarget.Kind == "source" &&
                             rig.Page.ShowMovieCandidates && rig.Page.ActiveTarget.MetadataProvider is null,
@@ -982,7 +981,7 @@ public static class FilmPlaybackSessionTests
             }
             finally { rig.Page.RetainOwner(null); owner.Close(); }
         });
-        yield return Test("native direct output releases its exact receipt after music takeover and stale film controls cannot touch music", async () =>
+        yield return Test("native direct output releases its exact receipt after scope retirement and rejects stale controls", async () =>
         {
             var entered = Gate(); var finish = Gate();
             await using var rig = new FilmPlaybackRig();
@@ -993,24 +992,24 @@ public static class FilmPlaybackSessionTests
             {
                 if (method == "film.session.media.release")
                 {
-                    Check(FilmJson.Text(input, "attemptId") == "first", "takeover releases the exact Film occurrence");
+                    Check(FilmJson.Text(input, "attemptId") == "first", "scope retirement releases the exact Film occurrence");
                     entered.TrySetResult(); await finish.Task;
                 }
                 return rig.Runtime.Handle(method, input);
             };
             try
             {
-                await rig.Native.TakeMusicAsync();
+                await rig.Native.RetireScopeAsync();
                 await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 Check(!rig.Session.HasOutput && !rig.Runtime.Released.Contains("first"),
                     "retiring the old Film output does not fabricate its business receipt release");
                 finish.TrySetResult();
                 await Until(() => !rig.Session.HasSession);
-                int musicVolume = rig.Native.Volume, controls = rig.Native.Controls.Count;
+                int retiredVolume = rig.Native.Volume, controls = rig.Native.Controls.Count;
                 rig.Session.Volume = 12;
                 await Error("STALE_SESSION", () => rig.Session.SetPausedAsync(true));
                 await Error("STALE_SESSION", () => rig.Session.SeekAsync(81));
-                Check(rig.Native.Volume == musicVolume && rig.Native.Controls.Count == controls &&
+                Check(rig.Native.Volume == retiredVolume && rig.Native.Controls.Count == controls &&
                     !rig.Session.HasOutput && !rig.Session.CanRetainMedia && !Called(rig, "media.failed") &&
                     rig.Runtime.Calls.Count(call => call.Method == "film.session.media.release" &&
                         FilmJson.Text(call.Parameters, "attemptId") == "first") == 1,
@@ -1048,7 +1047,7 @@ public static class FilmPlaybackSessionTests
             object? parameters = action switch
             {
                 "browse" => new { sourceId = "cat:fixture:site:1" },
-                "select.episode" => new { episode = new { season = 1, episode = 2, globalEpisode = 2 } },
+                "select.target" => new { target = (rig.Runtime.Target with { Season = 1, Episode = 2, GlobalEpisode = 2 }).Wire() },
                 _ => null
             };
             var command = oldPage.CommandAsync(action, parameters);

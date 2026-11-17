@@ -77,6 +77,7 @@ def merge_kids(video, audio, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ffmpeg", required=True)
+    parser.add_argument("--rate-chapters-only", action="store_true")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent / "VideoKernelTests/Fixtures"
     root.mkdir(parents=True, exist_ok=True)
@@ -85,6 +86,31 @@ def main():
         command = [args.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", *map(str, values)]
         subprocess.run(command, cwd=root, check=True)
         commands.append(command[1:])
+    if args.rate_chapters_only:
+        # Reuse the existing public 24-second moving-pattern input, without
+        # rebuilding or replacing unrelated decoder fixtures.
+        metadata = root / "rate-chapters.ffmetadata"
+        metadata.write_text(";FFMETADATA1\n" + "".join(
+            f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}\ntitle={title}\n"
+            for start, end, title in [(0, 2000, "片头"), (2000, 22000, "Chapter 2"),
+                                      (22000, 24000, "片尾")]), encoding="utf-8")
+        run("-i", "seek-cancel-long.ts", "-f", "ffmetadata", "-i", metadata.name,
+            "-map", "0:v:0", "-map", "0:a:0", "-map_metadata", "1", "-map_chapters", "1",
+            "-c", "copy", "-movflags", "+faststart", "rate-audio-video.mp4")
+        run("-i", "rate-audio-video.mp4", "-map", "0:v:0", "-map_chapters", "-1",
+            "-c", "copy", "-movflags", "+faststart", "rate-video-only.mp4")
+        run("-i", "rate-audio-video.mp4", "-t", "8", "-i", "rate-audio-video.mp4",
+            "-map", "0:v:0", "-map", "1:a:0", "-map_metadata", "-1", "-map_chapters", "-1",
+            "-c", "copy", "-movflags", "+faststart", "rate-audio-tail.mp4")
+        names = ["rate-audio-video.mp4", "rate-video-only.mp4", "rate-audio-tail.mp4", metadata.name]
+        (root / "rate-chapters.json").write_text(json.dumps({
+            "purpose": "synthetic real rate and raw container chapter tests, not a production dependency",
+            "generator": subprocess.check_output([args.ffmpeg, "-version"], text=True).splitlines()[0],
+            "inputSHA256": hashlib.sha256((root / "seek-cancel-long.ts").read_bytes()).hexdigest(),
+            "commands": commands,
+            "sha256": {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in names}
+        }, indent=2) + "\n")
+        return
     run("-f", "lavfi", "-i", "testsrc2=size=96x64:rate=10:duration=3",
         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3",
         "-c:v", "libx264", "-threads", "2", "-pix_fmt", "yuv420p", "-g", "10",

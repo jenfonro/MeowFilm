@@ -112,7 +112,7 @@ public static partial class DesktopTests
                 "settings hide the retained global search");
             False(f.Search.IsEnabled, "settings disable search submission");
             var before = module.Calls.Count;
-            f.Search.Text = "blocked"; Click(f.Button("搜索")); await DrainAsync();
+            f.Search.Text = "blocked"; RaiseKey(f.Search, Key.Enter, ModifierKeys.None, false); await DrainAsync();
             Equal(before, module.Calls.Count, "settings cannot submit global search");
             var actions = f.HeaderElement<ItemsControl>("HeaderActions");
             Equal(1, actions.Items.Count, "settings-only page is exposed by the one header");
@@ -126,7 +126,7 @@ public static partial class DesktopTests
             Equal(Visibility.Collapsed, f.Element<Grid>("SearchInput").Visibility,
                 "settings-owned public pages also hide search");
             False(f.Search.IsEnabled, "settings-owned public pages cannot submit search");
-            Click(f.Button("搜索")); await DrainAsync();
+            RaiseKey(f.Search, Key.Enter, ModifierKeys.None, false); await DrainAsync();
             Equal(before, module.Calls.Count, "settings-owned public page cannot target the search owner");
             Click(f.Back); await DrainAsync();
             Equal("设置", AutomationProperties.GetName(f.Element<Grid>("ContentDeck")),
@@ -234,7 +234,7 @@ public static partial class DesktopTests
             f.Element<ListBox>("PublicNavigationList").SelectedItem = page; await UntilAsync(() => f.Status == "暂时无法完成操作", "failure");
             False(f.Status.Contains("private", StringComparison.Ordinal), "sanitized");
             page.Activate = _ => Task.CompletedTask; Click(f.Button("重试")); await UntilAsync(() => page.Activations == 2 && f.Status == "", "retry");
-            f.Search.Text = "test"; Click(f.Button("搜索"));
+            f.Search.Text = "test"; RaiseKey(f.Search, Key.Enter, ModifierKeys.None, false);
             await UntilAsync(() => module.Calls.Contains("search:test") && f.Status == "", "global search");
             True(LogicalTreeHelper.GetParent(page.View) is null, "global search retires the public page");
             Click(f.Element<Button>("SettingsButton")); await DrainAsync();
@@ -436,7 +436,7 @@ public static partial class DesktopTests
         yield return Case("search trims input restores query history and ignores whitespace", async () =>
         {
             var a = new ProbeModule("search-probe"); await using var f = new Fixture([a]); await f.LoadAsync();
-            f.Search.Text = "   "; Click(f.Button("搜索")); await DrainAsync();
+            f.Search.Text = "   "; RaiseKey(f.Search, Key.Enter, ModifierKeys.None, false); await DrainAsync();
             Equal(1, a.Calls.Count, "whitespace must not search");
             await f.SearchAsync(" first "); await f.SearchAsync("second");
             True(f.SelectedRoute is null, "search is not a fake sidebar route");
@@ -1132,7 +1132,7 @@ public static partial class DesktopTests
         public async Task SearchAsync(string query)
         {
             var before = Probes.Sum(probe => probe.Calls.Count(call => call.StartsWith("search:", StringComparison.Ordinal)));
-            Search.Text = query; Click(Button("搜索"));
+            Search.Text = query; RaiseKey(Search, Key.Enter, ModifierKeys.None, false);
             await UntilAsync(() => Status == "" && Search.Text == query.Trim() &&
                 Probes.Sum(probe => probe.Calls.Count(call => call.StartsWith("search:", StringComparison.Ordinal))) == before + 1,
                 "search completion");

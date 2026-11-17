@@ -280,7 +280,7 @@ private actor NeteaseSyncPeer: MusicPlatformFixtureResponding {
 }
 
 private struct NeteaseTokenSyncFixture {
-    let document: NativeMusicMemoryDocument
+    let document: NativeMusicTestLibrary
     let preparations: NeteaseSyncPreparations
     let peer: NeteaseSyncPeer
     let owner: NativeMusicAccountService
@@ -297,7 +297,7 @@ private struct NeteaseTokenSyncFixture {
         let owner = NativeMusicAccountService(accounts: .init(store: store), scopes: [.netease: identity],
             platformClient: client, clock: { NativeMusicFixture.date })
         _ = try await owner.setAccess(available: true, generation: 1)
-        let service = NativeMusicService(document: document, accounts: owner, platformClient: client, clock: { NativeMusicFixture.date })
+        let service = NativeMusicService(database: document, accounts: owner, platformClient: client, clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         self.document = document; self.preparations = preparations; self.peer = peer; self.owner = owner; self.service = service
     }

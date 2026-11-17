@@ -21,7 +21,7 @@ public static class MusicQqFeedbackIntegrationTests
             Check(f.Handler.Steps.SequenceEqual(["feedback.prepare", "feedback.send", "feedback.release"]) && f.Handler.Reports.Count == 1 && f.Feedback.LastError is null);
             Check(before == await f.Store.Fingerprint(AccountNamespace) && f.Store.Writes(AccountNamespace) == 1);
             var end = f.Handler.Reports.Single(); Check(end.GetProperty("listened").GetDouble() >= 1 && end.GetProperty("mediaListened").GetDouble() >= 1);
-            Check(f.Store.Writes(MusicFeedbackSettingsOwner.DocumentNamespace) == 1 && f.Store.Writes(MusicLibraryOwner.DocumentNamespace) == 0);
+            Check(f.Store.Writes(MusicFeedbackSettingsOwner.DocumentNamespace) == 1 && MusicTestStores.For(f.Store).Writes == 0);
         });
         yield return Case("wall time without native samples never fabricates listening credit", async () => {
             await using var f = new MusicQqFeedbackIntegrationFixture(); await f.Ready(); await f.Accepted(); await Task.Delay(1120); await f.Finish();

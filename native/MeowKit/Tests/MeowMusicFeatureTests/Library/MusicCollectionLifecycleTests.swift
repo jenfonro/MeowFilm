@@ -22,6 +22,16 @@ final class MusicCollectionLifecycleTests: XCTestCase {
         try XCTUnwrap(page.requestRename(presentationID: page.presentationID))
     }
 
+    @MainActor func testCollectionPageUsesReturnedMembersWithoutCountMirrorGate() async throws {
+        let track = MusicCollectionService.track("selected")
+        let collection = MusicCollection(id: "playlist:1", title: "Synthetic", count: 999, revision: 1)
+        let (_, model, page, _) = setup(rows: [.init(collection: collection, tracks: [track])])
+        await page.appear()?.value
+        XCTAssertEqual(page.tracks, [track])
+        XCTAssertEqual(try page.sourceTrack(track, presentationID: page.presentationID), track)
+        page.disappear(); await model.close()
+    }
+
     @MainActor func testSourceInspectionAdmitsExactDisplayedTrackWithoutWritingOrPlaying() async throws {
         let (service, model, page, player) = setup()
         await page.appear()?.value

@@ -9,7 +9,7 @@
 
 ## 当前持久格式
 
-两项数据都位于 `music.library.v2` 当前 scope 中。
+两项数据都位于原生音乐数据库当前 scope 的控制 area 中，与相关歌曲事务共用唯一 owner。
 
 ### `native-search-policy`
 
@@ -54,7 +54,7 @@
 
 - 关键词修剪后去重，新记录置顶，最多 60 项。
 - `kind` 只接受 `local`、`songs`、`playlists`。
-- 无效字符、控制字符、非法 Unicode、过长文本或未知字段明确失败。
+- 实际搜索文本的无效字符、控制字符、非法 Unicode 或过长文本明确失败；未消费字段不作为门禁，已有设置扩展保留。
 ## 原生协议
 
 - `music.search.settings.get {}`：读取唯一当前设置。

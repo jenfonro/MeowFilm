@@ -102,7 +102,7 @@ public static partial class MusicNativeSyncTests
             }
             return call.Operation == "qr.cancel" ? Task.FromResult(MusicPlatformRuntimeFixture.Json(new { cancelled = true })) : server.Respond(call, token);
         };
-        await using var app = new MusicNativeApplication(store, runtime); await app.InitializeAsync(); Ok(await app.ExecuteAsync("music.accounts.list"));
+        await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime); await app.InitializeAsync(); Ok(await app.ExecuteAsync("music.accounts.list"));
         Ok(await app.ExecuteAsync("music.accounts.import", new { platform = "wy", cookie = "MUSIC_U=synthetic-only; __csrf=synthetic" }));
         var before = Ok(await app.ExecuteAsync("music.librarySync.get")); Ok(await app.ExecuteAsync("music.librarySync.set", new { platform = "wy", favorites = false, playlists = true, ifRevision = before.GetProperty("revision").GetInt64(), confirm = true }));
         Check(server.Preparations == 0); server.Prepare = _ => throw new MusicPlatformException("SDK_FAILURE");

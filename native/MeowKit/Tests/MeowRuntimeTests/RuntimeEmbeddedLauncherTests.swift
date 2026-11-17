@@ -29,7 +29,7 @@ private struct RuntimeBootstrapPeer {
         }
     }
     func endpoint(_ address: String = "http://127.0.0.1:43210") {
-        let data = try! RuntimeJSON.encode(.object(["baseUrl": .string(address)])) + Data([10])
+        let data = try! RuntimeJSON.encode(.object(["baseUrl": .string(address), "extra": .array([])])) + Data([10])
         write(data)
     }
     func frame(_ value: RuntimeValue) {
@@ -89,7 +89,7 @@ final class RuntimeEmbeddedLauncherTests: XCTestCase {
                 XCTAssertEqual(configuration.count, 3); XCTAssertEqual(configuration["nativeSettings"], .bool(true))
                 for (index, block) in blocks.enumerated() {
                     let request = try! RuntimeJSON.encode(.object(["kind": .string("settings.read"),
-                        "id": .number(Double(index + 1)), "block": .string(block)])) + Data([10])
+                        "id": .number(Double(index + 1)), "block": .string(block), "extra": .array([])])) + Data([10])
                     // Exercise fragmentation without depending on transport packet boundaries.
                     peer.write(request.prefix(3)); peer.write(request.dropFirst(3))
                     guard let bytes = peer.readLine(), case .object(let result) = try? RuntimeJSON.decode(bytes) else {
@@ -103,7 +103,7 @@ final class RuntimeEmbeddedLauncherTests: XCTestCase {
                 }
                 peer.endpoint()
                 peer.frame(.object(["kind": .string("settings.write"), "id": .number(7),
-                    "block": .string("pan.accounts"), "document": .object(["version": .number(1)]), "expected": fingerprint]))
+                    "block": .string("pan.accounts"), "document": .object(["version": .number(1)]), "expected": fingerprint, "extra": .null]))
                 guard let bytes = peer.readLine(), case .object(let result) = try? RuntimeJSON.decode(bytes) else {
                     peer.close(); return 1
                 }

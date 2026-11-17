@@ -22,7 +22,7 @@ import Combine
         let (service, model, actions, player) = await setup(songs: ["kept"])
         let entered = expectation(description: "old physical read entered")
         let gate = MusicCollectionGate { entered.fulfill() }
-        await service.blockTracks(gate)
+        await service.blockReferences(gate)
         let old = try XCTUnwrap(actions.toggleFavorite(try song("new")))
         await fulfillment(of: [entered], timeout: 2)
         actions.suspend()
@@ -33,7 +33,7 @@ import Combine
         await old.value
         await actions.finishPending()
         XCTAssertFalse(actions.busy)
-        XCTAssertEqual(actions.favorites.map(\.songId), ["kept"])
+        XCTAssertEqual(Set(actions.favorites.map(\.id)), Set(["kept"]))
         let counts = await service.statistics()
         XCTAssertEqual(counts.writes, 0)
         XCTAssertEqual(counts.queueWrites, 0)
@@ -45,7 +45,7 @@ import Combine
         let (service, model, actions, player) = await setup(songs: ["kept"])
         let entered = expectation(description: "old account favorite read entered")
         let gate = MusicCollectionGate { entered.fulfill() }
-        await service.blockTracks(gate)
+        await service.blockReferences(gate)
         let old = try XCTUnwrap(actions.toggleFavorite(try song("new")))
         await fulfillment(of: [entered], timeout: 2)
         model.accountSessionsChanged(.netease)
@@ -55,7 +55,7 @@ import Combine
         let counts = await service.statistics()
         XCTAssertEqual(counts.writes, 0)
         XCTAssertEqual(counts.queueWrites, 0)
-        XCTAssertEqual(actions.favorites.map(\.songId), ["kept"])
+        XCTAssertEqual(Set(actions.favorites.map(\.id)), Set(["kept"]))
         XCTAssertTrue(player.resources.isEmpty)
         actions.suspend(); await model.close()
     }
@@ -67,7 +67,7 @@ import Combine
             let entered = expectation(description: "retired search favorites read \(index)")
             let gate = MusicCollectionGate { entered.fulfill() }
             gates.append(gate)
-            await service.blockTracks(gate)
+            await service.blockReferences(gate)
             if index == 0 { actions.refreshFavorites() } else { actions.setActive(true) }
             await fulfillment(of: [entered], timeout: 2)
             actions.suspend()
@@ -77,11 +77,11 @@ import Combine
         let observation = actions.$favoritesLoaded.dropFirst().filter { $0 }.prefix(1).sink { _ in loaded.fulfill() }
         actions.setActive(true)
         await fulfillment(of: [loaded], timeout: 2)
-        XCTAssertEqual(actions.favorites.map(\.songId), ["fresh"])
+        XCTAssertEqual(Set(actions.favorites.map(\.id)), Set(["fresh"]))
         XCTAssertFalse(actions.favoritesLoading); XCTAssertNil(actions.error)
         for gate in gates { await gate.release() }
         await actions.finishPending()
-        XCTAssertEqual(actions.favorites.map(\.songId), ["fresh"])
+        XCTAssertEqual(Set(actions.favorites.map(\.id)), Set(["fresh"]))
         let counts = await service.statistics()
         XCTAssertEqual(counts.writes, 0); XCTAssertEqual(counts.queueWrites, 0)
         XCTAssertTrue(player.resources.isEmpty)
@@ -121,8 +121,97 @@ import Combine
         XCTAssertTrue(actions.favorites.isEmpty)
         let counts = await service.statistics()
         XCTAssertEqual(counts.writes, 2)
+        XCTAssertEqual(counts.tracks, 0)
+        XCTAssertEqual(counts.membershipAdds, [[track.track.ref], []])
+        XCTAssertEqual(counts.membershipRemovals, [[], [track.track.ref]])
+        XCTAssertTrue(counts.requestedRefs.isEmpty)
         XCTAssertEqual(counts.queueWrites, 0)
         XCTAssertTrue(player.resources.isEmpty)
+        actions.suspend(); await model.close()
+    }
+    func testTenThousandFavoritesAddAndRemoveOnlyOneReferenceWithoutTrackReads() async throws {
+        let ids = (0..<10_000).map { "saved-\($0)" }
+        let (service, model, actions, player) = await setup(songs: ids)
+        let row = try song("new")
+        let target = try XCTUnwrap(model.collections.first { $0.kind == "favorites" })
+        XCTAssertEqual(actions.favorites.count, 10_000)
+        await actions.toggleFavorite(row)?.value
+        XCTAssertEqual(actions.favorites.count, 10_001)
+        XCTAssertTrue(actions.isFavorite(row))
+        await actions.toggleFavorite(row)?.value
+        XCTAssertEqual(actions.favorites, Set(ids.map { MusicReference(kind: .library, id: $0) }))
+        let counts = await service.statistics()
+        XCTAssertEqual(counts.tracks, 0)
+        XCTAssertEqual(counts.referenceReads, 5) // Initial plus before/after each delta.
+        XCTAssertEqual(counts.membershipAdds, [[row.track.ref], []])
+        XCTAssertEqual(counts.membershipRemovals, [[], [row.track.ref]])
+        XCTAssertEqual(counts.edited.map(\.revision), [target.revision, target.revision + 1])
+        XCTAssertEqual(counts.writes, 2)
+        XCTAssertTrue(counts.requestedRefs.isEmpty)
+        XCTAssertEqual(counts.queueWrites, 0); XCTAssertTrue(player.resources.isEmpty)
+        actions.suspend(); await model.close()
+    }
+
+    func testFavoriteVariantsUsePermanentReferencesAndRemoveOnlyMatchingMembers() async throws {
+        let (service, model, actions, _) = await setup(songs: ["saved", "other"])
+        let queued = MusicRemoteTrack(ref: .init(kind: .queue, id: "occurrence", occurrence: "scope"),
+            songId: "saved", title: "Changed title")
+        let primary = MusicCollectionService.track("saved")
+        let row = MusicSearchSong(id: primary.songId, track: primary, variants: [primary, queued],
+            matchedPlatforms: [], score: 0)
+        XCTAssertTrue(actions.isFavorite(row))
+        let live = MusicRemoteTrack(ref: .init(kind: .library, id: "live"),
+            songId: "live", title: queued.title)
+        let different = try XCTUnwrap(MusicSearchFusion.songs([.init(platform: .netease, items: [live])]).first)
+        XCTAssertFalse(actions.isFavorite(different))
+        var refreshes = 0
+        await actions.toggleFavorite(row, refresh: { refreshes += 1; return primary })?.value
+        XCTAssertFalse(actions.isFavorite(row))
+        XCTAssertEqual(actions.favorites, Set([MusicReference(kind: .library, id: "other")]))
+        let counts = await service.statistics()
+        XCTAssertEqual(counts.membershipAdds, [[]])
+        XCTAssertEqual(counts.membershipRemovals, [[MusicReference(kind: .library, id: "saved")]])
+        XCTAssertEqual(counts.tracks, 0); XCTAssertEqual(refreshes, 0)
+        XCTAssertTrue(counts.requestedRefs.isEmpty)
+        actions.suspend(); await model.close()
+    }
+
+    func testDelayedReferenceReadCannotUpgradeCapturedFavoriteRevision() async throws {
+        let (service, model, actions, _) = await setup(songs: ["kept"])
+        let entered = expectation(description: "captured favorite refs")
+        let gate = MusicCollectionGate { entered.fulfill() }
+        await service.blockReferences(gate)
+        let task = try XCTUnwrap(actions.toggleFavorite(try song("new")))
+        await fulfillment(of: [entered], timeout: 2)
+        let external = MusicCollectionService.Row(id: "favorites", revision: 2, kind: "favorites",
+            songs: ["kept", "external"])
+        await service.replace([external])
+        model.publishCollections([external.collection])
+        await gate.release(); await task.value
+        XCTAssertEqual(actions.error, .staleRevision)
+        let counts = await service.statistics(), rows = await service.snapshotRows()
+        XCTAssertEqual(counts.editCalls, 1); XCTAssertEqual(counts.writes, 0)
+        XCTAssertEqual(counts.tracks, 0); XCTAssertTrue(counts.requestedRefs.isEmpty)
+        XCTAssertEqual(rows.first?.tracks.map(\.songId), ["kept", "external"])
+        actions.refreshFavorites(); await actions.finishPending()
+        XCTAssertEqual(Set(actions.favorites.map(\.id)), Set(["kept", "external"]))
+        actions.suspend(); await model.close()
+    }
+
+    func testUnconfirmedFavoriteDeltaIsReadBackWithoutReplayingWrite() async throws {
+        let (service, model, actions, player) = await setup(songs: ["kept"])
+        let row = try song("new")
+        await service.failCommitAcknowledgement()
+        await actions.toggleFavorite(row)?.value
+        XCTAssertEqual(actions.error, .commitUnconfirmed)
+        XCTAssertEqual(Set(actions.favorites.map(\.id)), Set(["kept"]))
+        actions.refreshFavorites(); await actions.finishPending()
+        XCTAssertTrue(actions.isFavorite(row))
+        let counts = await service.statistics()
+        XCTAssertEqual(counts.editCalls, 1); XCTAssertEqual(counts.writes, 1)
+        XCTAssertEqual(counts.membershipAdds, [[row.track.ref]])
+        XCTAssertEqual(counts.tracks, 0); XCTAssertTrue(counts.requestedRefs.isEmpty)
+        XCTAssertEqual(counts.queueWrites, 0); XCTAssertTrue(player.resources.isEmpty)
         actions.suspend(); await model.close()
     }
     func testASecondTapWhileFavoriteWriteIsPendingCannotReverseTheIntendedState() async throws {
@@ -145,7 +234,7 @@ import Combine
         let (service, model, actions, player) = await setup(songs: ["kept"])
         let entered = expectation(description: "favorite refresh entered")
         let gate = MusicCollectionGate { entered.fulfill() }
-        await service.blockTracks(gate)
+        await service.blockReferences(gate)
         let task = try XCTUnwrap(actions.toggleFavorite(try song("new")))
         await fulfillment(of: [entered], timeout: 2)
         actions.suspend()
@@ -172,7 +261,7 @@ import Combine
         XCTAssertEqual(rows.first?.tracks.map(\.songId), ["kept", "external"])
         XCTAssertEqual(counts.writes, 0)
         actions.refreshFavorites(); await actions.finishPending()
-        XCTAssertEqual(actions.favorites.map(\.songId), ["kept", "external"])
+        XCTAssertEqual(Set(actions.favorites.map(\.id)), Set(["kept", "external"]))
         actions.suspend(); await model.close()
     }
     func testSingleRowActionPassesCurrentPermanentReferenceToExistingQueueOwner() async throws {
@@ -211,10 +300,29 @@ import Combine
         let counts = await service.statistics()
         XCTAssertEqual(counts.writes, 0)
         XCTAssertEqual(counts.queueWrites, 0)
-        XCTAssertEqual(actions.favorites.map(\.songId), ["kept"])
+        XCTAssertEqual(Set(actions.favorites.map(\.id)), Set(["kept"]))
         XCTAssertEqual(actions.error, .staleResult)
         XCTAssertTrue(player.resources.isEmpty)
         actions.suspend(); await model.close()
+    }
+    func testFavoriteRecordingRefreshCannotWriteAfterLeavingSearch() async throws {
+        let (service, model, actions, player) = await setup(songs: ["kept"])
+        let row = try song("new")
+        let entered = expectation(description: "favorite recording refresh entered")
+        let gate = MusicCollectionGate { entered.fulfill() }
+        let task = try XCTUnwrap(actions.toggleFavorite(row, refresh: {
+            await gate.wait()
+            return row.track
+        }))
+        await fulfillment(of: [entered], timeout: 2)
+        actions.suspend()
+        await gate.release(); await task.value; await actions.finishPending()
+        let counts = await service.statistics()
+        XCTAssertEqual(counts.editCalls, 0); XCTAssertEqual(counts.writes, 0)
+        XCTAssertEqual(counts.tracks, 0); XCTAssertEqual(counts.queueWrites, 0)
+        XCTAssertTrue(actions.favorites.isEmpty); XCTAssertFalse(actions.favoritesLoaded)
+        XCTAssertNil(actions.error); XCTAssertTrue(player.resources.isEmpty)
+        await model.close()
     }
     func testSearchActionCannotWriteAfterLeavingDuringPermanentRecordingRead() async throws {
         let (service, model, actions, player) = await setup()

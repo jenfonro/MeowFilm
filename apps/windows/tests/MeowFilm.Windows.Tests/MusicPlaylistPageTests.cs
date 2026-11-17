@@ -133,7 +133,7 @@ public static partial class MusicUiTests
     private static async Task NativePlaylistReorder()
     {
         await using var store = new DocumentProbe();
-        await using var library = new MusicLibraryOwner(store);
+        await using var library = new MusicLibraryOwner(MusicTestStores.For(store));
         var created = await library.ExecuteAsync("music.library.create", new
         {
             name = "排序",

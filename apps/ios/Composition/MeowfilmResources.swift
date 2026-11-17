@@ -11,7 +11,7 @@ import MeowNovelFeature
 /// Filesystem preparation is off MainActor. Music and Cat borrow the App's
 /// script session; their installations and private data belong to Node.
 struct MeowfilmResources: Sendable {
-    let musicDocument: MusicNativeLibraryDocument
+    let musicLibrary: MusicNativeLibraryDatabase
     let musicAccounts: NativeMusicAccountService?
     let musicAccountGate: MusicAccountAccessGate?
     let musicAudioCache: NativeMusicAudioFileCache?
@@ -34,8 +34,9 @@ struct MeowfilmResources: Sendable {
         // A sideloading host may rewrite the installed bundle identifier while
         // signing. Product storage identities are stable and never signer-derived.
         try Task.checkCancellation()
-        let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                                               appropriateFor: nil, create: true)
+        let root = try MusicNativeLibraryDatabase.canonicalSystemBaseURL(
+            FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                    appropriateFor: nil, create: true))
             .appendingPathComponent("meowfilm", isDirectory: true)
         let caches = try? FileManager.default.url(for: .cachesDirectory, in: .userDomainMask,
                                                   appropriateFor: nil, create: true)
@@ -44,8 +45,7 @@ struct MeowfilmResources: Sendable {
         let libraryRoot = root.appendingPathComponent("documents", isDirectory: true)
         let cacheRoot = caches?.appendingPathComponent("meowfilm", isDirectory: true)
             .appendingPathComponent("documents", isDirectory: true)
-        musicDocument = MusicNativeLibraryDocument(storeFactory: Self.documentFactory(
-            base: libraryRoot, namespace: MusicNativeLibraryDocument.namespace))
+        musicLibrary = MusicNativeLibraryDatabase(url: libraryRoot.appendingPathComponent("music-library-v1", isDirectory: true).appendingPathComponent(MusicNativeLibraryDatabase.filename))
         musicPresentationCache = MusicNativePresentationCache(storeFactory: Self.documentFactory(
             base: cacheRoot, namespace: MusicNativePresentationCache.namespace,
             maximumDocumentBytes: 16 * 1024 * 1024))
@@ -58,8 +58,7 @@ struct MeowfilmResources: Sendable {
             maximumDocumentBytes: 4 * 1024 * 1024))
         musicHomeSnapshot = MusicNativeHomeSnapshotDocument(storeFactory: Self.documentFactory(
             base: cacheRoot, namespace: MusicNativeHomeSnapshotDocument.namespace))
-        let filmSettings = try MeowfilmNativeSettings(documentsRoot: libraryRoot,
-            runtimeRoot: MeowfilmScriptRuntime.dataDirectory)
+        let filmSettings = try MeowfilmNativeSettings(documentsRoot: libraryRoot)
         self.filmSettings = filmSettings
         let scriptSession = RuntimeSession(launcher: MeowfilmScriptRuntime.launcher(settings: filmSettings.access))
         filmSettings.attach(scriptSession)

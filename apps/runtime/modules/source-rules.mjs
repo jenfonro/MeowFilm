@@ -1,5 +1,6 @@
 import { novelRuleSource } from '@meowfilm/novel-rules';
 import { NativeJsonProgram } from '@meowfilm/script-host/native-json';
+import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 
 const fault = code => Object.assign(new Error(code), { code });
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -67,7 +68,7 @@ export function createSourceRules() {
       if (!object(request) || typeof request.operation !== 'string' ||
           !Object.hasOwn(requests, request.operation)) throw fault('INVALID_REQUEST');
       const captured = { operation: request.operation, ...Object.fromEntries(requests[request.operation]
-        .filter(key => Object.hasOwn(request, key)).map(key => [key, structuredClone(request[key])])) };
+        .filter(key => Object.hasOwn(request, key)).map(key => [key, cloneJSONValue(request[key])])) };
       const work = process(captured, signal);
       jobs.add(work);
       try { return await work; }

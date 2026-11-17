@@ -33,11 +33,6 @@ extension MusicViewModel {
             do {
                 let tracks = try await service.tracks(in: current)
                 try check(epoch); try binding.check(self)
-                guard tracks.count == current.count, tracks.count <= 20_000,
-                      Set(tracks.map { Data($0.songId.utf8) }).count == tracks.count,
-                      tracks.allSatisfy({ $0.ref.kind == .library && $0.ref.id.utf8.elementsEqual($0.songId.utf8) }) else {
-                    throw MusicServiceError.invalidResponse
-                }
                 return .init(collection: current, tracks: tracks)
             } catch {
                 try check(epoch); try binding.check(self)
@@ -47,20 +42,12 @@ extension MusicViewModel {
         let catalogueID = collectionCatalogueID
         let values = try await service.collections()
         try check(epoch); try binding.check(self)
-        guard values.count <= 2000, Set(values.map { Data($0.id.utf8) }).count == values.count else {
-            throw MusicServiceError.invalidResponse
-        }
         guard let collection = values.first(where: { $0.id.utf8.elementsEqual(id.utf8) }) else {
             if collectionCatalogueID == catalogueID { publishCollections(values, origin: binding.id) }
             return nil
         }
         let tracks = try await service.tracks(in: collection)
         try check(epoch); try binding.check(self)
-        guard tracks.count == collection.count, tracks.count <= 20_000,
-              Set(tracks.map { Data($0.songId.utf8) }).count == tracks.count,
-              tracks.allSatisfy({ $0.ref.kind == .library && $0.ref.id.utf8.elementsEqual($0.songId.utf8) }) else {
-            throw MusicServiceError.invalidResponse
-        }
         if collectionCatalogueID == catalogueID { publishCollections(values, origin: binding.id) }
         return .init(collection: collection, tracks: tracks)
     }
@@ -78,16 +65,33 @@ extension MusicViewModel {
         let values = try await service.collections()
         try check(epoch); try ticket.check(self); publishCollections(values)
     }
-    func addCollectionPage(_ ticket: MusicCollectionEditTicket, ref: MusicReference, to target: MusicCollection) async throws {
+    func readCollectionReferences(_ collection: MusicCollection, binding: MusicCollectionPageBinding) async throws -> [MusicReference] {
+        try binding.check(self)
+        let epoch = try enter()
+        guard let membership = try requireService() as? any MusicCollectionMembershipServing else { throw MusicServiceError.unsupported }
+        let refs = try await membership.collectionReferences(in: collection)
+        try check(epoch); try binding.check(self)
+        guard refs.count == collection.count, refs.count <= 20_000, Set(refs).count == refs.count,
+              refs.allSatisfy({ $0.kind == .library && $0.occurrence == nil }) else { throw MusicServiceError.invalidResponse }
+        return refs
+    }
+    func changeCollectionPageMembership(_ ticket: MusicCollectionEditTicket, adding: [MusicReference], removing: [MusicReference]) async throws {
         try ticket.check(self)
         let epoch = try enter()
-        let service = try requireService(), tracks = try await service.tracks(in: target)
-        try check(epoch); try ticket.check(self)
+        guard let membership = try requireService() as? any MusicCollectionMembershipServing else { throw MusicServiceError.unsupported }
         loadID = UUID(); libraryState.isLoading = false
-        _ = try await service.editPlaylist(target, name: nil, refs: tracks.map(\.ref) + [ref], order: nil)
+        let changed = try await membership.changeCollectionMembership(ticket.collection, adding: adding, removing: removing)
         try check(epoch); try ticket.check(self)
-        let values = try await service.collections()
+        guard changed.id.utf8.elementsEqual(ticket.collection.id.utf8),
+              (changed.revision == ticket.collection.revision || changed.revision == ticket.collection.revision + 1) else { throw MusicServiceError.invalidResponse }
+        let values = try await requireService().collections()
         try check(epoch); try ticket.check(self); publishCollections(values)
+    }
+    func addCollectionPage(_ ticket: MusicCollectionEditTicket, ref: MusicReference, to target: MusicCollection) async throws {
+        try ticket.check(self)
+        let destination = MusicCollectionEditTicket(binding: ticket.binding, collection: target)
+        try await changeCollectionPageMembership(destination, adding: [ref], removing: [])
+        try ticket.check(self)
     }
     func queueCollectionPage(_ ticket: MusicCollectionEditTicket, change: MusicQueueChange, startPlayback: Bool) async throws {
         try ticket.check(self)

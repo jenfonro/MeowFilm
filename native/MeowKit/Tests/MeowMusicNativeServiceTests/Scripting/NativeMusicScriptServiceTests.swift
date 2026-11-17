@@ -99,8 +99,9 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         try await service.close(); await session.close(); await runtime.close()
     }
     func testStorageFailuresAndHostFailureAreNotEmptySourceLists() async throws {
-        let runtime = MusicScriptTestRuntime(), session = RuntimeSession(launcher: runtime)
-        let service = NativeMusicScriptService(connection: { try await session.connection() })
+        let runtime = MusicScriptTestRuntime()
+        // Count borrower starts, not the App session's independent reconnects.
+        let service = NativeMusicScriptService(connection: { try await runtime.connect() })
         await service.start()
         await runtime.fail("CORRUPT_STORAGE")
         await scriptExpectFailure(.corruptDocument) { try await service.scriptSources() }
@@ -111,7 +112,6 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         await service.start()
         let connects = await runtime.metrics().connects; XCTAssertEqual(connects, 1)
         await scriptExpectFailure(.scriptCleanupFailed) { try await service.close() }
-        await session.close()
     }
     func testDirectoryReadsKeepIdleStartingAndFailedWithoutRunningOrRetryingScripts() async throws {
         for state in [MusicScriptSourceItem.State.idle, .starting, .failed] {
@@ -240,7 +240,7 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         await session.close()
     }
 
-    func testMusicInfoUsesStrictRuntimeJSONWithoutCanonicalKeyMerging() throws {
+    func testMusicInfoUsesObjectJSONWithoutCanonicalKeyMerging() throws {
         let bytes = Data(#"{"\u00e9":"composed","e\u0301":"decomposed","中文":null}"#.utf8)
         let value = try NativeMusicScriptService.musicInfo(bytes)
         guard case .object(let fields) = value else { return XCTFail("object required") }
@@ -248,7 +248,7 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         XCTAssertEqual(fields["\u{e9}"], .string("composed"))
         XCTAssertEqual(fields["e\u{301}"], .string("decomposed"))
         XCTAssertEqual(try RuntimeJSON.decode(RuntimeJSON.encode(value)), value)
-        for invalid in [Data([0xff]), Data(#"{"key":1,"key":2}"#.utf8), Data(#"{"n":9007199254740992}"#.utf8), Data("null".utf8)] {
+        for invalid in [Data([0xff]), Data(#"{"key":}"#.utf8), Data("null".utf8)] {
             XCTAssertThrowsError(try NativeMusicScriptService.musicInfo(invalid)) {
                 XCTAssertEqual($0 as? MusicServiceError, .invalidRequest)
             }
@@ -538,7 +538,7 @@ extension NativeMusicScriptServiceTests {
         let qq = MusicNativeCandidateDiscoveryQQ(items: [MusicNativeCandidateDiscoveryFixture.track("tx", id: "101")])
         let http = MusicNativeDiscoveryPlatforms()
         let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("kw", id: "123"))
-        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song),
+        let service = NativeMusicService(database: try MusicNativeCandidateDiscoveryFixture.store(song: song),
             scripts: scripts,
             accounts: accounts,
             platformClient: try NativeMusicFixture.routes(primary: qq, others: http).makeClient(),

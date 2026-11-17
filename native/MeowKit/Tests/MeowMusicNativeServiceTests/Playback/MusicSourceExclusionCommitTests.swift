@@ -46,7 +46,7 @@ actor ExclusionTestScripts: MusicScriptResolving {
 }
 
 enum ExclusionTestFixture {
-    static func store(song: MJ? = nil) throws -> NativeMusicMemoryDocument {
+    static func store(song: MJ? = nil) throws -> NativeMusicTestLibrary {
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
         var document = try MusicDocument(store.read(), runID: "exclusion")
         let other = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track(id: "OtherMID", title: "Other recording"))
@@ -71,7 +71,7 @@ enum ExclusionTestFixture {
     }
 }
 
-private final class ExclusionCommitDocument: MusicNativeDocumentStoring, @unchecked Sendable {
+private final class ExclusionCommitDocument: NativeMusicTestLibraryWrapping, @unchecked Sendable {
     enum Receipt {
         case success, cancelAfterCommit, unconfirmedAfterCommit, failureBeforeCommit
         var failure: MusicServiceError? {
@@ -82,21 +82,23 @@ private final class ExclusionCommitDocument: MusicNativeDocumentStoring, @unchec
             }
         }
     }
-    let backing: NativeMusicMemoryDocument
+    let backing: NativeMusicTestLibrary
+    var backingLibrary: NativeMusicTestLibrary { backing }
     private let lock = NSLock()
     private var receipt = Receipt.success
-    init(_ backing: NativeMusicMemoryDocument) { self.backing = backing }
+    init(_ backing: NativeMusicTestLibrary) { self.backing = backing }
     func arm(_ receipt: Receipt) { lock.lock(); self.receipt = receipt; lock.unlock() }
-    func read() throws -> Data? { try backing.read() }
-    func compareAndSwap(expected: Data?, replacement: Data) throws {
+    func readSnapshot() throws -> MusicNativeLibrarySnapshot { try backing.readSnapshot() }
+    func withTransaction<T>(commit: (_ action: () throws -> Void) throws -> Void, _ body: (any MusicNativeLibraryWriting) throws -> T) throws -> T {
         lock.lock(); let receipt = self.receipt; self.receipt = .success; lock.unlock()
         if case .failureBeforeCommit = receipt { throw MusicServiceError.storageFailed }
-        try backing.compareAndSwap(expected: expected, replacement: replacement)
+        let value = try backing.withTransaction(commit: commit, body)
         switch receipt {
         case .cancelAfterCommit: withUnsafeCurrentTask { $0?.cancel() }
-        case .unconfirmedAfterCommit: throw MusicServiceError.commitUnconfirmed
+        case .unconfirmedAfterCommit: throw MusicNativeLibraryCommitError.receiptLost
         case .success, .failureBeforeCommit: break
         }
+        return value
     }
 }
 
@@ -154,14 +156,14 @@ private final class ExclusionCommitDocument: MusicNativeDocumentStoring, @unchec
         let store = try ExclusionTestFixture.store(), document = ExclusionCommitDocument(store)
         let scripts = ExclusionTestScripts(["a": ["128k"], "b": ["flac"]])
         let data = try MusicDocument(store.read(), runID: "exclusion")
-        let song = data.library["library"]["songs"][data.queue["entries"].array[0]["songId"].string], source = try XCTUnwrap(MusicModel.sources(song).first)
+        let song = (try data.fixtureSong(data.queue["entries"].array[0]["songId"].string)), source = try XCTUnwrap(MusicModel.sources(song).first)
         let file = MusicRecoveryTestFileCache(hit: .init(identity: .init(scope: "script-history",
             songID: song["songId"].string, sourceKey: source.sourceKey, platform: source.platform,
             nativeID: source.nativeId, requestedQuality: "flac",
             provider: "b"),
             fileURL: URL(fileURLWithPath: "/synthetic-cache/exclusion.flac"), duration: 180, measuredQuality: "flac",
             expiresAt: NativeMusicFixture.date.addingTimeInterval(3600)))
-        let service = NativeMusicService(document: document, scripts: scripts, platformClient: try NativeMusicFixture.client(),
+        let service = NativeMusicService(database: document, scripts: scripts, platformClient: try NativeMusicFixture.client(),
             enabledPlatforms: [.qq], audioFileCache: cached ? file : nil,
             clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
@@ -245,7 +247,7 @@ private final class ExclusionCommitDocument: MusicNativeDocumentStoring, @unchec
     private func restoreExhausted(_ receipt: ExclusionCommitDocument.Receipt) async throws {
         let document = ExclusionCommitDocument(try ExclusionTestFixture.store())
         let scripts = ExclusionTestScripts(["a": ["flac"]])
-        let service = NativeMusicService(document: document, scripts: scripts, platformClient: try NativeMusicFixture.client(),
+        let service = NativeMusicService(database: document, scripts: scripts, platformClient: try NativeMusicFixture.client(),
             enabledPlatforms: [.qq], clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         try await service.excludeSource(for: .init(kind: .queue, id: "entry-1"), provider: "a", platform: "tx")
@@ -317,7 +319,7 @@ extension MusicSourceExclusionCommitTests {
         let key = peer["sources"].array[0]["sourceKey"].string
         let backing = try MusicNativeCandidateDiscoveryFixture.store(song: song)
         let document = ExclusionCommitDocument(backing)
-        let service = NativeMusicService(document: document, platformClient: try NativeMusicFixture.client(),
+        let service = NativeMusicService(database: document, platformClient: try NativeMusicFixture.client(),
             clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let session = try await service.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)

@@ -5,6 +5,7 @@ import { Readable, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { BridgeError, HTTP_PROTOCOL } from './errors.js';
 import { checkJSON, encodeJSONValue, decodeJSONValue, parseJSON } from './json.js';
+import { stringifyJSONValue } from './json-value.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\s\S])/i;
 const publicCodes = new Set(['INVALID_REQUEST', 'METHOD_NOT_FOUND', 'PERMISSION_DENIED',
@@ -24,8 +25,7 @@ export function validateEndpoint(value) {
   return url;
 }
 function envelope(value, contract, codes) {
-  if (!object(value) || typeof value.ok !== 'boolean' || value.contract !== contract ||
-      Object.keys(value).length !== 3) throw new BridgeError('INVALID_RESPONSE');
+  if (!object(value) || typeof value.ok !== 'boolean' || value.contract !== contract) throw new BridgeError('INVALID_RESPONSE');
   if (value.ok) {
     if (!Object.hasOwn(value, 'value')) throw new BridgeError('INVALID_RESPONSE');
     checkJSON(value.value);
@@ -37,7 +37,7 @@ function envelope(value, contract, codes) {
 const failed = code => ({ ok: false, contract: HTTP_PROTOCOL, code });
 
 function streamHeaders(reply) {
-  if (!object(reply) || Object.keys(reply).length !== 4 ||
+  if (!object(reply) ||
       !['status', 'headers', 'body', 'dispose'].every(name => Object.hasOwn(reply, name)) ||
       reply.status !== 200 || !object(reply.headers) ||
       !(reply.body instanceof Readable) || reply.body.destroyed || reply.body.readableEnded ||
@@ -201,7 +201,7 @@ export function createHttpServer({ sessionId = randomUUID(), resolve: resolveRou
       response.writeHead(status, { 'content-type': 'application/json',
         ...(uuid.test(requestId ?? '') ? { 'x-meow-request-id': requestId } : {}),
         ...(status === 413 ? { connection: 'close' } : {}) });
-      response.end(Buffer.from(JSON.stringify(value)));
+      response.end(Buffer.from(stringifyJSONValue(value, -1)));
     };
     request.on('aborted', abort);
     response.on('close', abort);

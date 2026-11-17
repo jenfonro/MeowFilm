@@ -22,21 +22,22 @@ enum NativeSyncFixture {
         .init(id: id, name: name, kind: kind, writable: writable, canRename: writable && kind == .playlist,
               canDelete: writable && kind == .playlist, canOrder: writable && order, members: members, revision: revision)
     }
-    static func store(_ members: [MusicLibrarySyncMember] = [], platform: MusicAccountPlatform = .netease) throws -> NativeMusicMemoryDocument {
+    static func store(_ members: [MusicLibrarySyncMember] = [], platform: MusicAccountPlatform = .netease) throws -> NativeMusicTestLibrary {
         var document = try MusicDocument(nil, runID: "synthetic")
         for member in members {
             let song = try NativeMusicFixture.storedSong(.init(platform: platform.rawValue, data: member.track))
             let key = song["sources"].array[0]["sourceKey"]
-            if document.library["library"]["songs"].fields.contains(where: {
+            if (try document.fixtureSongs()).fields.contains(where: {
                 $0.1["sources"].array.contains { $0["sourceKey"] == key }
             }) { continue }
             document.library["library"]["songs"][song["songId"].string] = song
         }
-        return NativeMusicMemoryDocument(try document.encode(changed: ["library"]))
+        return NativeMusicTestLibrary(try document.encode(changed: ["library"]))
     }
     static func refs(_ members: [MusicLibrarySyncMember], platform: MusicAccountPlatform = .netease,
                      service: NativeMusicService) async throws -> [MusicReference] {
-        let songs = try await service.read().library["library"]["songs"].fields.map(\.1)
+        let state = try await service.read()
+        let songs = try state.songRows.allSongIDs().map { try state.song($0) }
         return try members.map { member in
             let key = try MusicModel.normalize(.init(platform: platform.rawValue, data: member.track))["sources"].array[0]["sourceKey"]
             guard let song = songs.first(where: { $0["sources"].array.contains { $0["sourceKey"] == key } }) else {
@@ -45,7 +46,7 @@ enum NativeSyncFixture {
             return .init(kind: .library, id: song["songId"].string)
         }
     }
-    static func document(_ store: NativeMusicMemoryDocument) throws -> MusicDocument {
+    static func document(_ store: NativeMusicTestLibrary) throws -> MusicDocument {
         try MusicDocument(store.snapshot().0, runID: "inspect")
     }
     static func request(_ platform: MusicAccountPlatform = .netease, favorites: Bool = false, playlists: Bool = true) -> MusicLibrarySyncRequest {
@@ -67,13 +68,13 @@ actor NativeSyncPeer: MusicNativeAccountProviding, MusicNativeLibrarySyncProvidi
     private var readFailure = false
     private var readGate: NativeMusicGate?
     private var writeGate: NativeMusicGate?
-    private var failDocument: NativeMusicMemoryDocument?
+    private var failDocument: NativeMusicTestLibrary?
     init(platform: MusicAccountPlatform = .netease, rows: [MusicLibrarySyncCollection] = [],
          subscriptions: [MusicLibrarySyncSubscription] = []) {
         self.platform = platform; self.rows = rows; self.subscriptions = subscriptions
     }
     func configure(fault: Fault = .none, gate: NativeMusicGate? = nil, writeGate: NativeMusicGate? = nil,
-                   failDocument: NativeMusicMemoryDocument? = nil) {
+                   failDocument: NativeMusicTestLibrary? = nil) {
         self.fault = fault; readGate = gate; self.writeGate = writeGate; self.failDocument = failDocument
     }
     func switchAccount(uid: String = "99", scope: String = "synthetic-install:other-account") {

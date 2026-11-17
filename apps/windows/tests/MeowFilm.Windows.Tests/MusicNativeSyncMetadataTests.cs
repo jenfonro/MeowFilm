@@ -26,6 +26,15 @@ public static partial class MusicNativeSyncTests
         yield return new("Music sync long canonical account collection and member IDs persist through an unknown write and cold read", LongCanonicalIds);
     }
 
+    private sealed record SyncDiagnostic(JsonElement Library, JsonElement State);
+    // Explicit test-only projection, not an optimistic token or a persistence protocol.
+    private static async Task<SyncDiagnostic> ReadSyncDiagnosticAsync(Fixture fixture)
+    {
+        var current = await fixture.Owner.ReadLibrarySyncAsync();
+        var library = JsonNode.Parse(current.Library.GetRawText())!.AsObject();
+        library["songs"] = MusicTestStores.For(fixture.Store).Root["songs"]!.DeepClone();
+        return new(E(library), current.State);
+    }
     private static JsonObject SongStore(JsonElement library) => JsonNode.Parse(library.GetRawText())!["songs"]!.AsObject();
     private static void SameMetadata(JsonObject before, JsonObject after) =>
         Check(JsonNode.DeepEquals(before, after), "KNOWN_METADATA_DOWNGRADED");
@@ -48,7 +57,7 @@ public static partial class MusicNativeSyncTests
         };
         await f.Enable();
         Ok(await f.Run());
-        var before = await f.Owner.ReadLibrarySyncAsync();
+        var before = await ReadSyncDiagnosticAsync(f);
         var binding = before.Library.GetProperty("collections")[0].GetProperty("bindings")[0];
         string songId = binding.GetProperty("map").GetProperty(memberKey).GetString()!;
         Check(Guid.TryParse(songId, out _) && S(binding, "accountId") == account &&
@@ -67,14 +76,14 @@ public static partial class MusicNativeSyncTests
             return Task.FromResult(MusicPlatformRuntimeFixture.Json(new { status = "unknown", errorCode = "NETWORK_ERROR" }));
         };
         Code(await f.Run(), "WRITE_UNCONFIRMED");
-        var pending = (await f.Owner.ReadLibrarySyncAsync()).State.GetProperty("pending");
+        var pending = (await ReadSyncDiagnosticAsync(f)).State.GetProperty("pending");
         Check(S(pending, "accountId") == account && S(pending, "remoteId") == remote &&
             pending.GetProperty("before")[0].GetString() == first &&
             pending.GetProperty("desired").EnumerateArray().Select(value => value.GetString()).SequenceEqual([first, second]) &&
             pending.GetProperty("ids")[0].GetString() == second && f.Server.Writes == 1);
         string savedPending = pending.GetRawText();
         await f.Restart();
-        var reopened = await f.Owner.ReadLibrarySyncAsync();
+        var reopened = await ReadSyncDiagnosticAsync(f);
         Check(reopened.State.GetProperty("pending").GetRawText() == savedPending &&
             reopened.Library.GetProperty("collections")[0].GetProperty("bindings")[0].GetProperty("map").GetProperty(memberKey).GetString() == songId &&
             reopened.Library.GetProperty("songs").GetProperty(songId).GetProperty("sources")[0].GetProperty("musicInfo").GetProperty("songmid").GetString() == first);
@@ -84,12 +93,12 @@ public static partial class MusicNativeSyncTests
     private static async Task MissingMetadata()
     {
         await using var f = new Fixture("wy"); f.Server.Favorite.Add(1); await f.Enable(); Ok(await f.Run());
-        var snapshot = await f.Owner.ReadLibrarySyncAsync(); var data = JsonNode.Parse(snapshot.Library.GetRawText())!.AsObject();
+        var snapshot = await ReadSyncDiagnosticAsync(f); var data = JsonNode.Parse(snapshot.Library.GetRawText())!.AsObject();
         var song = data["songs"]!.AsObject().First().Value!.AsObject();
         song["album"] = "Preserved Album"; song["sources"]![0]!["musicInfo"]!["albumName"] = "Preserved Album";
-        await f.Owner.CommitLibrarySyncAsync(snapshot, E(data), snapshot.State);
-        var before = await f.Owner.ReadLibrarySyncAsync();
-        f.Server.WyMissingTracks.Add(1); Ok(await f.Run()); var after = await f.Owner.ReadLibrarySyncAsync();
+        await f.Owner.AdoptLibrarySyncSongsAsync(await f.Owner.ReadLibrarySyncAsync(), [(song, true)], default);
+        var before = await ReadSyncDiagnosticAsync(f);
+        f.Server.WyMissingTracks.Add(1); Ok(await f.Run()); var after = await ReadSyncDiagnosticAsync(f);
         SameMetadata(SongStore(before.Library), SongStore(after.Library));
         Check(after.Library.GetProperty("collections")[0].GetProperty("bindings")[0].GetProperty("baseline")[0].GetString() == """["1001",0]""");
         Check(f.Server.WyDetailReads > 0 && f.Server.Writes == 0 && after.State.GetProperty("pending").ValueKind == JsonValueKind.Null);
@@ -100,25 +109,25 @@ public static partial class MusicNativeSyncTests
         var c = Ok(await f.Owner.ExecuteAsync("music.library.detail", new { id = "favorites" })).GetProperty("collection");
         Ok(await f.Owner.ExecuteAsync("music.library.addSongs", new { id = "favorites", ifRevision = c.GetProperty("revision").GetInt64(),
             songs = new[] { Song("wy", "1001"), Song("tx", "MID1") } }));
-        var initial = await f.Owner.ReadLibrarySyncAsync(); var songs = SongStore(initial.Library);
+        var initial = await ReadSyncDiagnosticAsync(f); var songs = SongStore(initial.Library);
         Check(songs.Count == 1 && Guid.TryParse(songs.Single().Key, out _) &&
             songs.Single().Value!["sources"]!.AsArray().Select(s => s!["source"]!.GetValue<string>())
                 .Order(StringComparer.Ordinal).SequenceEqual(["tx", "wy"]), "CANONICAL_SETUP");
         await f.Enable();
-        var before = await f.Owner.ReadLibrarySyncAsync(); SameMetadata(songs, SongStore(before.Library));
+        var before = await ReadSyncDiagnosticAsync(f); SameMetadata(songs, SongStore(before.Library));
         f.Server.Favorite.Add(1); f.Server.WyMissingTracks.Add(1); Ok(await f.Run());
-        var after = await f.Owner.ReadLibrarySyncAsync(); SameMetadata(SongStore(before.Library), SongStore(after.Library));
+        var after = await ReadSyncDiagnosticAsync(f); SameMetadata(SongStore(before.Library), SongStore(after.Library));
         Check(f.Server.Writes == 0 && after.Library.GetProperty("collections")[0].GetProperty("order").GetArrayLength() == 1);
     }
     private static async Task MissingThenAvailable()
     {
         await using var f = new Fixture("wy"); f.Server.Favorite.Add(1); f.Server.WyMissingTracks.Add(1); await f.Enable(); Ok(await f.Run());
-        var first = await f.Owner.ReadLibrarySyncAsync(); var initial = SongStore(first.Library); var item = initial.Single();
+        var first = await ReadSyncDiagnosticAsync(f); var initial = SongStore(first.Library); var item = initial.Single();
         Check(Guid.TryParse(item.Key, out _) && item.Value!["title"]!.GetValue<string>() == "" &&
             item.Value!["duration"] is null && item.Value!["baselineDuration"] is null &&
             MusicSongFixture.Info(item.Value)["songmid"]!.GetValue<string>() == "1001");
         f.Server.WyMissingTracks.Clear(); await f.Restart(); Ok(await f.Run());
-        var after = await f.Owner.ReadLibrarySyncAsync(); var actual = SongStore(after.Library);
+        var after = await ReadSyncDiagnosticAsync(f); var actual = SongStore(after.Library);
         Check(actual.Count == 1 && actual.ContainsKey(item.Key) && actual[item.Key]!["title"]!.GetValue<string>() == "Track 1");
         Check(actual[item.Key]!["artist"]!.GetValue<string>() == "Synthetic Artist" && actual[item.Key]!["duration"]!.GetValue<double>() == 200);
         Check(MusicSongFixture.Info(actual[item.Key]!)["name"]!.GetValue<string>() == "Track 1" &&
@@ -129,9 +138,9 @@ public static partial class MusicNativeSyncTests
     private static async Task MissingOccurrences()
     {
         await using var f = new Fixture("wy"); f.Server.Favorite.Add(1); f.Server.Favorite.Add(2); f.Server.Favorite.Add(1);
-        await f.Enable(); Ok(await f.Run()); var before = await f.Owner.ReadLibrarySyncAsync();
+        await f.Enable(); Ok(await f.Run()); var before = await ReadSyncDiagnosticAsync(f);
         f.Server.WyMissingTracks.Add(1); f.Server.WyDetailNetworkFailure = true; Ok(await f.Run());
-        var after = await f.Owner.ReadLibrarySyncAsync(); SameMetadata(SongStore(before.Library), SongStore(after.Library));
+        var after = await ReadSyncDiagnosticAsync(f); SameMetadata(SongStore(before.Library), SongStore(after.Library));
         var collection = after.Library.GetProperty("collections")[0]; var binding = collection.GetProperty("bindings")[0];
         Check(collection.GetProperty("order").GetArrayLength() == 2 &&
             binding.GetProperty("baseline").EnumerateArray().Select(n => n.GetString())
@@ -143,7 +152,7 @@ public static partial class MusicNativeSyncTests
     private static async Task MissingReadback(bool reopen)
     {
         await using var f = new Fixture("wy"); f.Server.Favorite.Add(1); await f.Enable(); Ok(await f.Run());
-        await f.AddFavorite(2); var before = await f.Owner.ReadLibrarySyncAsync();
+        await f.AddFavorite(2); var before = await ReadSyncDiagnosticAsync(f);
         f.Server.FavoriteTarget = 2;
         f.Server.AfterWrite = () =>
         {
@@ -153,10 +162,10 @@ public static partial class MusicNativeSyncTests
         if (reopen)
         {
             Code(await f.Run(), "UPSTREAM_ERROR");
-            Check((await f.Owner.ReadLibrarySyncAsync()).State.GetProperty("pending").ValueKind == JsonValueKind.Object);
+            Check((await ReadSyncDiagnosticAsync(f)).State.GetProperty("pending").ValueKind == JsonValueKind.Object);
             await f.Restart(); f.Server.FailReads = false;
         }
-        Ok(await f.Run()); var after = await f.Owner.ReadLibrarySyncAsync();
+        Ok(await f.Run()); var after = await ReadSyncDiagnosticAsync(f);
         SameMetadata(SongStore(before.Library), SongStore(after.Library));
         Check(f.Server.Writes == 1 && f.Server.Favorite.Songs.SequenceEqual([1, 2]) && f.Server.WyDetailReads > 0);
         Check(after.State.GetProperty("pending").ValueKind == JsonValueKind.Null);
@@ -165,17 +174,17 @@ public static partial class MusicNativeSyncTests
     private static async Task MissingFetched()
     {
         await using var f = new Fixture("wy"); f.Server.Favorite.Add(1); f.Server.WyMissingTracks.Add(1); f.Server.WyDetailsAvailable = true;
-        await f.Enable(); Ok(await f.Run()); var actual = SongStore((await f.Owner.ReadLibrarySyncAsync()).Library);
+        await f.Enable(); Ok(await f.Run()); var actual = SongStore((await ReadSyncDiagnosticAsync(f)).Library);
         Check(actual.Count == 1 && actual.First().Value!["title"]!.GetValue<string>() == "Track 1" && f.Server.WyDetailReads > 0 && f.Server.Writes == 0);
     }
     private static async Task MissingRejected(bool auth)
     {
         await using var f = new Fixture("wy"); f.Server.Favorite.Add(1); await f.Enable(); Ok(await f.Run());
-        var before = await f.Owner.ReadLibrarySyncAsync(); f.Server.WyMissingTracks.Add(1);
+        var before = await ReadSyncDiagnosticAsync(f); f.Server.WyMissingTracks.Add(1);
         if (auth) f.Server.WyDetailCode = 301;
         else f.Server.ChangeRemote = _ => throw new MusicPlatformException("NETWORK_ERROR");
         Code(await f.Run(), auth ? "AUTH_REQUIRED" : "NETWORK_ERROR");
-        var after = await f.Owner.ReadLibrarySyncAsync();
+        var after = await ReadSyncDiagnosticAsync(f);
         Check(JsonNode.DeepEquals(JsonNode.Parse(before.Library.GetRawText()), JsonNode.Parse(after.Library.GetRawText())));
         Check(f.Server.Writes == 0 && f.Server.WyDetailReads > 0);
     }
@@ -187,7 +196,7 @@ public static partial class MusicNativeSyncTests
                 member with { Song = MusicSongFixture.Online("wy", member.Id, "Updated metadata",
                     "Synthetic Artist", "Updated album", 201) }).ToArray()
         };
-        await f.Enable(); Ok(await f.Run()); var after = await f.Owner.ReadLibrarySyncAsync();
+        await f.Enable(); Ok(await f.Run()); var after = await ReadSyncDiagnosticAsync(f);
         var songs = SongStore(after.Library); var binding = after.Library.GetProperty("collections")[0].GetProperty("bindings")[0];
         Check(songs.Count == 1 && Guid.TryParse(songs.Single().Key, out _) && f.Server.Writes == 0 &&
             songs.Single().Value!["title"]!.GetValue<string>() == "Updated metadata" &&
@@ -236,7 +245,7 @@ public static partial class MusicNativeSyncTests
             f.Server.Release.TrySetResult(); Ok(await run);
             var after = Ok(await f.Owner.ExecuteAsync("music.queue.get"));
             Check(JsonElement.DeepEquals(after, current), "OLD_SYNC_METADATA_CANNOT_ROLL_BACK_CURRENT_DETAILS_OR_QUEUE_FACTS");
-            var snapshot = await f.Owner.ReadLibrarySyncAsync();
+            var snapshot = await ReadSyncDiagnosticAsync(f);
             var songs = snapshot.Library.GetProperty("songs");
             var song = songs.GetProperty(songId);
             var collection = snapshot.Library.GetProperty("collections")[0];
@@ -256,7 +265,7 @@ public static partial class MusicNativeSyncTests
                 "REAL_SYNC_MEMBERSHIP_MUST_REFERENCE_REGISTERED_UUIDS_WITHOUT_EXTRA_READS_OR_WRITES");
             await f.Restart();
             var cold = Ok(await f.Owner.ExecuteAsync("music.queue.get"));
-            var restored = await f.Owner.ReadLibrarySyncAsync();
+            var restored = await ReadSyncDiagnosticAsync(f);
             Check(S(cold, "currentId") == S(current, "currentId") &&
                 JsonElement.DeepEquals(cold.GetProperty("entries"), current.GetProperty("entries")) &&
                 JsonElement.DeepEquals(restored.Library.GetProperty("songs"), songs) &&
@@ -303,7 +312,7 @@ public static partial class MusicNativeSyncTests
                     "LATER_REAL_DETAILS_CANNOT_MERGE_TWO_REGISTERED_SOURCES");
             }
             var current = Ok(await f.Owner.ExecuteAsync("music.queue.get"));
-            var before = await f.Owner.ReadLibrarySyncAsync();
+            var before = await ReadSyncDiagnosticAsync(f);
             var currentSongs = before.Library.GetProperty("songs");
             Check(currentSongs.EnumerateObject().Count() == 2 &&
                 currentSongs.EnumerateObject().All(pair => pair.Value.GetProperty("baselineDuration").GetDouble() == 200 &&
@@ -314,7 +323,7 @@ public static partial class MusicNativeSyncTests
                 S(current, "currentId") == S(queued, "currentId"),
                 "DETAILS_MUST_KEEP_SOURCE_OWNERSHIP_AND_QUEUE_FACTS");
             f.Server.Release.TrySetResult(); Ok(await run);
-            var after = await f.Owner.ReadLibrarySyncAsync();
+            var after = await ReadSyncDiagnosticAsync(f);
             var collection = after.Library.GetProperty("collections")[0];
             var binding = collection.GetProperty("bindings")[0];
             Check(JsonElement.DeepEquals(after.Library.GetProperty("songs"), currentSongs) &&
@@ -329,7 +338,7 @@ public static partial class MusicNativeSyncTests
                 "EACH_REAL_KG_FILE_MEMBER_MUST_RETAIN_ITS_REGISTERED_HASH_OWNER");
             await f.Restart();
             var cold = Ok(await f.Owner.ExecuteAsync("music.queue.get"));
-            var restored = await f.Owner.ReadLibrarySyncAsync();
+            var restored = await ReadSyncDiagnosticAsync(f);
             Check(S(cold, "currentId") == S(current, "currentId") &&
                 JsonElement.DeepEquals(cold.GetProperty("entries"), current.GetProperty("entries")) &&
                 JsonElement.DeepEquals(restored.Library.GetProperty("songs"), currentSongs) &&

@@ -267,13 +267,15 @@ public static partial class MusicCatalogTests
         yield return Case("known account-owned playlist cannot be saved through the network consumer", async () =>
         {
             await using var f = await Fixture.Create();
+            f.Client.Transform("music.catalog.home", reply => Edit(reply, page =>
+                page["sections"]!.AsArray().Add(JsonSerializer.SerializeToNode(new {
+                    id = "owned-fixture", title = "Owned", type = "playlists", items = new[] {
+                        new { id = "500", name = "Owned", kind = "playlist", relationship = "owned", writable = true, count = 205 }
+                    }
+                }))));
             await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
-            var reply = JsonSerializer.SerializeToElement(new { platform = "wy", items = new[] {
-                new { id = "500", name = "Owned", kind = "playlist", relationship = "owned", writable = true, count = 205 }
-            } });
-            var card = MusicCatalogDto.Read(reply, "wy", "personalPlaylists", "Owned").Single().Items.Single();
+            var card = f.Module.CatalogSections.Single(section => section.Id == "owned-fixture").Items.Single();
             True(card.IsManagedPlaylist && !card.CanSavePlaylist, "account directory ownership is retained by the consumer");
-            f.Module.CatalogSections.Add(new("Owned", [card], "owned-fixture", "playlists"));
             var menu = new ContextMenu(); f.Module.PopulatePlaylistMenu(menu, card, () => true);
             True(!menu.Items.OfType<MenuItem>().Any(item => item.Header as string is "收藏" or "取消收藏"),
                 "owned card does not offer network subscription");

@@ -12,7 +12,7 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music lyric display independent cache preserves plain and true words across restart", LyricDisplayRestart);
         yield return new("Native music local lyrics current schema preserves plain and true words across restart", LocalLyricsRestart);
         yield return new("Native music current local lyric documents reject damaged schema fields without writes", LyricSnapshotSchemas);
-        yield return new("Native music lyric snapshots reject timing fields without writes", LyricSnapshotFields);
+        yield return new("Native music lyric snapshots ignore unused timing fields without rewriting source data", LyricSnapshotFields);
     }
 
     private const string PersistedLyricText =
@@ -100,7 +100,8 @@ public static partial class MusicNativeLibraryTests
         {
             var damaged = current.DeepClone().AsObject();
             if (missing) damaged.Remove("schema"); else damaged["schema"] = "invalid";
-            await RejectDocument(Document(("native-local-lyrics", damaged)));
+            var song = Online("42"); song["songId"] = current["items"]![0]!["songId"]!.DeepClone();
+            await RejectDocument(Document(("native-local-lyrics", damaged)), method: "music.lyrics.local.get", parameters: new { song });
         }
     }
 
@@ -110,12 +111,21 @@ public static partial class MusicNativeLibraryTests
         lines[0]!["timing"] = "word";
         var current = await CurrentLocalLyricState();
         current["items"]![0]!["lines"] = lines.DeepClone();
-        await RejectDocument(Document(("native-local-lyrics", current)));
+        await using (var stored = new Fixture())
+        {
+            stored.Store.Bytes = Document(("native-local-lyrics", current));
+            byte[] original = stored.Store.Bytes.ToArray();
+            var reference = Online("42"); reference["songId"] = current["items"]![0]!["songId"]!.DeepClone();
+            var local = await Ok(stored.Owner(), "music.lyrics.local.get", new { song = reference });
+            Check(local.GetProperty("lines")[0].GetProperty("timing").GetString() == "word");
+            Check(stored.Store.Writes == 0 && original.SequenceEqual(stored.Store.Bytes));
+        }
 
         await using var f = new Fixture(); var owner = f.Owner();
         var (song, sourceKey) = await SeedLyricSong(owner);
         byte[] bytes = f.Store.Bytes!.ToArray(); int writes = f.Store.Writes;
-        await Error(owner, "music.lyrics.display.save", new { song, sourceKey, lines }, "INVALID_REQUEST");
+        await Ok(owner, "music.lyrics.display.save", new { song, sourceKey, lines });
+        Check(!(await Ok(owner, "music.lyrics.display.get", new { song })).GetProperty("lines")[0].TryGetProperty("timing", out _));
         Check(f.Store.Writes == writes && bytes.SequenceEqual(f.Store.Bytes!));
     }
     private sealed class LyricCacheStore : IDocumentStore

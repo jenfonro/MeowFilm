@@ -245,7 +245,7 @@ final class MusicReferenceCollectionParityTests: XCTestCase {
         let draft = try XCTUnwrap(page.beginEditing(presentationID: page.presentationID))
         let entered = expectation(description: "old favorites")
         let gate = MusicCollectionGate { entered.fulfill() }
-        await service.library.blockTracks(gate)
+        await service.library.blockReferences(gate)
         let read = try XCTUnwrap(page.refreshFavorites())
         await fulfillment(of: [entered], timeout: 2)
         model.setAvailable(false)
@@ -279,6 +279,95 @@ final class MusicReferenceCollectionParityTests: XCTestCase {
         page.disappear(); await model.close()
     }
 
+    @MainActor func testSmallPlaylistReadsFavoriteReferencesAndAddsOneWithoutOldMetadata() async throws {
+        let favorites = MusicCollectionService.Row(id: "favorites", kind: "favorites", songs: (0..<10_000).map { "saved-\($0)" })
+        let (service, model, page) = setup(rows: [.init(songs: ["new"]), favorites])
+        await page.appear()?.value; await settle(page)
+        let before = await service.library.statistics()
+        XCTAssertEqual(before.tracks, 1); XCTAssertEqual(before.referenceReads, 1)
+        XCTAssertTrue(page.favoritesLoaded); XCTAssertFalse(page.isFavorite(page.tracks[0].ref))
+        await page.toggleFavorite(page.tracks[0].ref, presentationID: page.presentationID)?.value; await settle(page)
+        let after = await service.library.statistics()
+        XCTAssertTrue(page.isFavorite(page.tracks[0].ref))
+        XCTAssertEqual(after.tracks, before.tracks)
+        XCTAssertEqual(after.membershipAdds, [[page.tracks[0].ref]])
+        XCTAssertEqual(after.membershipRemovals, [[]]); XCTAssertTrue(after.requestedRefs.isEmpty)
+        XCTAssertEqual(after.edited, [favorites.collection])
+        let rows = await service.library.snapshotRows()
+        XCTAssertEqual(rows[1].tracks.count, 10_001)
+        page.disappear(); await model.close()
+    }
+
+    @MainActor func testLibraryAddAndPageAddUseOnlyRequestedDeltaAtCapturedRevision() async throws {
+        let favorites = MusicCollectionService.Row(id: "favorites", kind: "favorites", songs: (0..<10_000).map { "saved-\($0)" })
+        let service = MusicCollectionService(rows: [.init(songs: ["new", "other"]), favorites])
+        let model = MusicViewModel(service: service, player: MusicCollectionPlayer())
+        await model.load()
+        let before = await service.statistics()
+        await model.add([MusicCollectionService.track("new")], to: favorites.collection)
+        let after = await service.statistics()
+        XCTAssertEqual(after.tracks, before.tracks)
+        XCTAssertEqual(after.membershipAdds, [[MusicCollectionService.track("new").ref]])
+        XCTAssertEqual(after.edited, [favorites.collection]); XCTAssertTrue(after.requestedRefs.isEmpty)
+        let page = MusicCollectionViewModel(model: model, collectionID: "playlist:1")
+        await page.appear()?.value; await settle(page)
+        let source = try XCTUnwrap(page.collection), pageID = page.presentationID
+        let draft = try XCTUnwrap(page.beginEditing(presentationID: pageID))
+        draft.move(from: IndexSet(integer: 1), to: 0)
+        let target = try XCTUnwrap(model.collections.first { $0.kind == "favorites" })
+        XCTAssertEqual(target.revision, favorites.collection.revision + 1)
+        let pageBefore = await service.statistics()
+        let add = try XCTUnwrap(page.add(at: 1, to: target, presentationID: pageID))
+        await add.value; await settle(page)
+        let pageAfter = await service.statistics()
+        XCTAssertEqual(pageAfter.tracks, pageBefore.tracks)
+        XCTAssertEqual(pageAfter.membershipAdds.last, [MusicCollectionService.track("other").ref])
+        XCTAssertEqual(pageAfter.edited.last, target)
+        XCTAssertEqual(pageAfter.writes, pageBefore.writes + 1)
+        XCTAssertTrue(pageAfter.requestedRefs.isEmpty); XCTAssertTrue(pageAfter.requestedOrders.isEmpty)
+        XCTAssertEqual(page.presentationID, pageID); XCTAssertEqual(page.collection, source)
+        XCTAssertEqual(page.tracks.map(\.songId), ["new", "other"])
+        XCTAssertTrue(page.editor === draft); XCTAssertTrue(draft.canEdit)
+        XCTAssertEqual(draft.tracks.map(\.songId), ["other", "new"])
+        XCTAssertTrue(page.isFavorite(MusicCollectionService.track("other").ref)); XCTAssertNil(page.error)
+        let rows = await service.snapshotRows()
+        XCTAssertEqual(rows[1].tracks.map(\.songId), favorites.tracks.map(\.songId) + ["new", "other"])
+        XCTAssertEqual(rows[1].collection.revision, target.revision + 1)
+        let save = try XCTUnwrap(page.saveEditing(draft))
+        await save.value; await settle(page)
+        let saved = await service.statistics()
+        XCTAssertEqual(saved.edited.last, source)
+        XCTAssertEqual(saved.requestedRefs.compactMap { $0 }.last?.map(\.id), ["other", "new"])
+        XCTAssertEqual(saved.requestedOrders.compactMap { $0 }.last, ["other", "new"])
+        XCTAssertEqual(page.tracks.map(\.songId), ["other", "new"]); XCTAssertNil(page.editor)
+        page.disappear(); await model.close()
+    }
+
+    @MainActor func testSameCollectionNoOpAddDoesNotReadTracksButFavoriteRemovalReloadsChangedScope() async throws {
+        let favorites = MusicCollectionService.Row(id: "favorites", kind: "favorites", songs: ["a", "b"])
+        let (service, model, page) = setup(rows: [favorites])
+        await page.appear()?.value; await settle(page)
+        let pageID = page.presentationID, before = await service.library.statistics()
+        let add = try XCTUnwrap(page.add(at: 0, to: favorites.collection, presentationID: pageID))
+        await add.value; await settle(page)
+        let afterAdd = await service.library.statistics()
+        XCTAssertEqual(afterAdd.tracks, before.tracks); XCTAssertEqual(afterAdd.writes, 0)
+        XCTAssertEqual(afterAdd.membershipAdds, [[MusicCollectionService.track("a").ref]])
+        XCTAssertEqual(page.presentationID, pageID); XCTAssertEqual(page.collection, favorites.collection)
+        XCTAssertEqual(page.tracks.map(\.songId), ["a", "b"]); XCTAssertNil(page.error)
+        let remove = try XCTUnwrap(page.toggleFavorite(page.tracks[0].ref, presentationID: pageID))
+        await remove.value; await settle(page)
+        let afterRemove = await service.library.statistics()
+        XCTAssertEqual(afterRemove.tracks, afterAdd.tracks + 1); XCTAssertEqual(afterRemove.writes, 1)
+        XCTAssertEqual(afterRemove.edited, [favorites.collection])
+        XCTAssertEqual(afterRemove.membershipRemovals.last, [MusicCollectionService.track("a").ref])
+        XCTAssertTrue(afterRemove.requestedRefs.isEmpty); XCTAssertTrue(afterRemove.requestedOrders.isEmpty)
+        XCTAssertNotEqual(page.presentationID, pageID)
+        XCTAssertEqual(page.collection?.revision, favorites.collection.revision + 1)
+        XCTAssertEqual(page.tracks.map(\.songId), ["b"]); XCTAssertNil(page.error)
+        page.disappear(); await model.close()
+    }
+
     @MainActor func testBatchNextUsesDraftOrderWithoutSavingMembership() async throws {
         let (service, model, page) = setup()
         await page.appear()?.value
@@ -302,7 +391,8 @@ final class MusicReferenceCollectionParityTests: XCTestCase {
         XCTAssertTrue(page.editor === draft); XCTAssertEqual(draft.selected.count, 2)
         let counts = await service.library.statistics()
         XCTAssertEqual(counts.writes, 1); XCTAssertEqual(counts.edited.first, target.collection)
-        XCTAssertEqual(counts.requestedRefs.compactMap { $0 }.first?.map(\.id), ["z", "a", "c"])
+        XCTAssertEqual(counts.membershipAdds.first?.map(\.id), ["a", "c"])
+        XCTAssertTrue(counts.requestedRefs.isEmpty)
         let rows = await service.library.snapshotRows()
         XCTAssertEqual(rows[1].tracks.map(\.songId), ["z", "a", "c"])
         page.disappear(); await model.close()
@@ -387,7 +477,7 @@ final class MusicReferenceCollectionParityTests: XCTestCase {
 /// Dedicated fixture for metadata, filtered replace and queue command capture.
 /// Conditional library writes reuse the existing deterministic native-CAS
 /// fixture, not a second production storage/player implementation.
-private actor ReferenceCollectionParityService: MusicServing {
+private actor ReferenceCollectionParityService: MusicServing, MusicCollectionMembershipServing {
     struct Command: Sendable {
         let kind: String
         let ids: [String]
@@ -411,6 +501,12 @@ private actor ReferenceCollectionParityService: MusicServing {
     func collections() async -> [MusicCollection] { await library.collections() }
     func tracks(in collection: MusicCollection) async throws -> [MusicRemoteTrack] {
         try await library.tracks(in: collection).map { metadata[$0.ref] ?? $0 }
+    }
+    func collectionReferences(in collection: MusicCollection) async throws -> [MusicReference] {
+        try await library.collectionReferences(in: collection)
+    }
+    func changeCollectionMembership(_ collection: MusicCollection, adding: [MusicReference], removing: [MusicReference]) async throws -> MusicCollection {
+        try await library.changeCollectionMembership(collection, adding: adding, removing: removing)
     }
     func editPlaylist(_ collection: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) async throws -> MusicCollection {
         try await library.editPlaylist(collection, name: name, refs: refs, order: order)

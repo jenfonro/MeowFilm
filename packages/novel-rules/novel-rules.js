@@ -101,10 +101,12 @@
 
   function matchChapter(chapters, anchor) {
     if (!Array.isArray(chapters) || !object(anchor)) throw fault('INVALID_CHAPTERS');
+    if (chapters.length && !chapters.some(chapter => object(chapter) &&
+        (chapter.isVolume || text(chapter.chapterUrl || chapter.url) ||
+          text(chapter.name || chapter.title)))) throw fault('INVALID_CHAPTER');
     const url = text(anchor.chapterUrl), title = chapterName(anchor.chapterTitle);
     const select = predicate => chapters.reduce((indices, chapter, index) => {
-      if (!object(chapter)) throw fault('INVALID_CHAPTER');
-      if (!chapter.isVolume && predicate(chapter)) indices.push(index);
+      if (object(chapter) && !chapter.isVolume && predicate(chapter)) indices.push(index);
       return indices;
     }, []);
     if (url) {
@@ -132,18 +134,13 @@
       throw fault('INVALID_CHAPTER');
     }
     let title = input.title;
-    let blocks = input.blocks.map(block => {
-      if (!object(block) || block.type === 'text' && typeof block.text !== 'string') {
-        throw fault('INVALID_BLOCK');
-      }
-      return { ...block };
-    });
+    let blocks = input.blocks.slice();
     for (const { rule } of input.rules.map((rule, index) => {
       if (!object(rule)) throw fault('INVALID_RULE');
       return { rule, index };
     }).filter(({ rule }) => rule.isEnabled !== false)
       .sort((left, right) => (left.rule.order ?? 0) - (right.rule.order ?? 0) || left.index - right.index)) {
-      const content = rule.scopeContent !== false && blocks.some(block => block.type === 'text');
+      const content = rule.scopeContent !== false && blocks.some(block => block?.type === 'text');
       if (rule.scopeTitle !== true && !content) continue;
       const scope = rule.scope ?? '';
       if (typeof scope !== 'string') throw fault('INVALID_RULE');
@@ -174,12 +171,15 @@
       if (content) {
         const next = [];
         for (let index = 0; index < blocks.length;) {
-          if (blocks[index].type !== 'text') {
+          if (blocks[index]?.type !== 'text') {
             next.push(blocks[index++]);
             continue;
           }
           const run = [];
-          while (index < blocks.length && blocks[index].type === 'text') run.push(blocks[index++]);
+          while (index < blocks.length && blocks[index]?.type === 'text') {
+            if (typeof blocks[index].text !== 'string') throw fault('INVALID_BLOCK');
+            run.push(blocks[index++]);
+          }
           const original = run.map(block => block.text).join('\n');
           const result = replace(original);
           if (result === original) next.push(...run);
@@ -192,9 +192,12 @@
     if (!['none', 'simplified', 'traditional'].includes(conversion)) throw fault('INVALID_CONVERSION');
     if (conversion !== 'none') {
       const map = conversion === 'traditional' ? simplifiedToTraditional : traditionalToSimplified;
-      const convert = value => [...value].map(character => map[character] || character).join('');
+      const convert = value => {
+        if (typeof value !== 'string') throw fault('INVALID_BLOCK');
+        return [...value].map(character => map[character] || character).join('');
+      };
       title = convert(title);
-      blocks = blocks.map(block => block.type === 'text' ? { ...block, text: convert(block.text) } : block);
+      blocks = blocks.map(block => block?.type === 'text' ? { ...block, text: convert(block.text) } : block);
     }
     return { title, blocks };
   }

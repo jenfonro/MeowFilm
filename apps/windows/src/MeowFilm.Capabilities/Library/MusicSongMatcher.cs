@@ -46,9 +46,9 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
         try
         {
             if (loaded) return;
-            var current = (await library.ReadMatchingSongsAsync(token).ConfigureAwait(false))
-                .Select(song => LJ.S(song["songId"])).ToHashSet(StringComparer.Ordinal);
             var saved = await store.ReadAsync(token).ConfigureAwait(false);
+            var current = await library.ReadMatchingSongIdsAsync(saved.Select(entry => LJ.S(entry["songId"])), token)
+                .ConfigureAwait(false);
             lock (gate)
             {
                 foreach (var entry in saved)
@@ -189,7 +189,7 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
                 Apply(id, platform, context, query, at, order, null, true);
             }
         if (page != 1) return;
-        foreach (var song in library.SongSnapshots())
+        foreach (var song in library.SongSnapshots(query))
         {
             string id = LJ.S(song["songId"]);
             if (!found.Contains(id) && Query(song) == query)
@@ -227,12 +227,16 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
         await storage.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            var songs = await library.ReadMatchingSongsAsync(token).ConfigureAwait(false);
+            string[] ids;
+            lock (gate)
+                ids = states.Keys.Select(key => LJ.S(JsonNode.Parse(key)![0])).Concat(excluded.Keys)
+                    .Distinct(StringComparer.Ordinal).ToArray();
+            var songs = await library.ReadMatchingSongIdsAsync(ids, token).ConfigureAwait(false);
             JsonObject[] snapshot;
             lock (gate)
-                snapshot = songs.Select(song =>
+                snapshot = songs.Select(id =>
                 {
-                    string id = LJ.S(song["songId"]); var platforms = new JsonObject();
+                    var platforms = new JsonObject();
                     foreach (string platform in NativeMusicSong.Platforms)
                         if (states.TryGetValue(Key(id, platform), out var state)) platforms[platform] = state.DeepClone();
                     return LJ.Obj(("songId", id), ("platforms", platforms), ("excluded", LJ.Arr(excluded.GetValueOrDefault(id) ?? [])));

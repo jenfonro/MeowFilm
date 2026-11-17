@@ -96,29 +96,19 @@ private struct MusicMetadataPlatformsContent: View {
 
     var body: some View {
         List {
-            Section {
-                ForEach(state.value?.platforms ?? [], id: \.rawValue) { platform in
+            SettingsOrderingSection(title: "平台优先级", items: state.value?.platforms ?? [],
+                                    theme: theme, enabled: !state.busy) { platform in
                     Toggle(isOn: Binding(
                         get: { state.value?.enabledPlatforms.contains(platform) == true },
                         set: { state.setEnabled(platform, $0) }
                     )) {
                         MusicPlatformLabel(platform: platform, theme: theme)
                     }
-                    .disabled(state.busy)
-                    .moveDisabled(state.busy)
-                    .modifier(MusicSettingsRowStyle(theme: theme,
-                        first: platform == state.value?.platforms.first,
-                        last: platform == state.value?.platforms.last))
-                }
-                .onMove { offsets, destination in
+            } move: { offsets, destination in
                     guard var platforms = state.value?.platforms else { return }
                     platforms.move(fromOffsets: offsets, toOffset: destination)
                     state.reorder(platforms)
-                }
-            } header: {
-                MusicSettingsSectionHeader(title: "平台优先级", theme: theme)
             }
-            .listSectionSeparator(.hidden)
         }
         .environment(\.editMode, .constant(.active))
         .modifier(MusicSettingsListStyle(theme: theme))

@@ -93,7 +93,7 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
     private sealed class VideoSource(FilmPlayback native) : ISystemPlayback
     {
         public SystemPlaybackState State => new("film", native.Identity, "", native.HasOutput,
-            native.HasOutput && !native.PauseRequested, native.PositionSeconds, native.DurationSeconds,
+            native.HasOutput && !native.IsPaused, native.PositionSeconds, native.DurationSeconds,
             Kind: SystemPlaybackKind.Video);
         public event PropertyChangedEventHandler? PropertyChanged
         {

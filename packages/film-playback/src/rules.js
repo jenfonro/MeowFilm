@@ -46,7 +46,7 @@ export async function invokeFilmRules(rules, request, { signal } = {}) {
   if (invoke) return invoke({ ...request, rules: rules.rules }, { signal });
   const draft = rules?.rules ?? rules;
   const program = new NativeJsonProgram(filmRuleSource);
-  try { return await program.invoke({ ...request, rules: draft }, { signal }); }
+  try { return await program.invoke({ ...request, ...(draft === undefined ? {} : { rules: draft }) }, { signal }); }
   catch (error) { throw filmRuleFailure(error); }
   finally { await program.close(); }
 }
@@ -75,8 +75,6 @@ export function createRecognitionRules(rules) {
 
 export function providerFamily(provider) {
   switch (provider) {
-    case 'quark_tv': return 'quark';
-    case 'uc_tv': return 'uc';
     case 'yidong':
     case 'tianyi':
     case 'quark':

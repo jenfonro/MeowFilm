@@ -95,7 +95,7 @@ import MeowMusicFeature
         let valid = try NativeSyncFixture.store()
         var document = try NativeSyncFixture.document(valid), ledger = try MusicNativeSyncLedger().json()
         ledger.remove("automatic"); document.library["sync"] = ledger
-        let bytes = try document.encode(changed: ["library"]), store = NativeMusicMemoryDocument(bytes)
+        let bytes = try document.encode(changed: ["library"]), store = NativeMusicTestLibrary(bytes)
         let peer = NativeSyncPeer(), service = try await NativeMusicFixture.service(store, accounts: peer)
         do { _ = try await service.automaticLibrarySyncPreferences(); XCTFail("Missing current settings") }
         catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
@@ -357,6 +357,31 @@ import MeowMusicFeature
         catch { XCTAssertEqual(error as? MusicServiceError, .revisionConflict) }
         let calls = await peer.calls(); XCTAssertTrue(calls.isEmpty)
         await service.close()
+    }
+
+    func testPureOrderRejectsAmbiguousTargetOrBrokenConsumedMapBeforeAnyWrite() async throws {
+        for duplicate in [false, true] {
+            let members = [NativeSyncFixture.member("101"), NativeSyncFixture.member("102")]
+            let peer = NativeSyncPeer(rows: [NativeSyncFixture.collection(members: members)])
+            let store = try NativeSyncFixture.store(), service = try await NativeMusicFixture.service(store, accounts: peer)
+            _ = try await enable(service)
+            let rows = try await service.collections(), local = try XCTUnwrap(rows.first { $0.kind == "playlist" })
+            let tracks = try await service.tracks(in: local)
+            _ = try await service.editPlaylist(local, name: nil, refs: nil, order: tracks.reversed().map(\.ref.id))
+            var document = try NativeSyncFixture.document(store)
+            var collections = document.library["library"]["collections"].array
+            let index = try XCTUnwrap(collections.firstIndex { $0["id"].string == local.id })
+            var bindings = collections[index]["bindings"].array
+            if duplicate { bindings.append(bindings[0]) }
+            else { bindings[0]["map"] = .obj() }
+            collections[index]["bindings"] = .array(bindings)
+            document.library["library"]["collections"] = .array(collections)
+            store.replace(try document.encode(changed: ["library"]))
+            do { _ = try await run(service); XCTFail("Unsafe order target was accepted") }
+            catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
+            let calls = await peer.calls(); XCTAssertTrue(calls.isEmpty)
+            await service.close()
+        }
     }
 }
 

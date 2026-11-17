@@ -98,7 +98,8 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
                 old.revision < 9_007_199_254_740_991, .limit)
             var stored = draft.playback["feedback"]
             if stored == .null { stored = .obj([("schema", .n(1)), ("platforms", .obj())]) }
-            stored["platforms"][platform.rawValue] = .obj([("enabled", .bool(enabled)), ("generation", .n(setting.generation + 1))])
+            stored["platforms"][platform.rawValue]["enabled"] = .bool(enabled)
+            stored["platforms"][platform.rawValue]["generation"] = .n(setting.generation + 1)
             draft.playback["feedback"] = stored
             draft.playback["revision"] = .n(old.revision + 1)
             return try MusicNativeFeedbackSettings.decode(draft.playback)
@@ -149,7 +150,7 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
                 prepared?.armed == true && prepared?.candidate.resourceId == sample.resourceID ||
                 cached?.armed == true && cached?.playback.candidate.resourceId == sample.resourceID else { return }
             if ![.failed, .unavailable, .stopped].contains(sample.kind),
-               !MusicMediaDuration.matches(expected: draft.library["library"]["songs"][entry["songId"].string]["duration"].number, actual: sample.duration) {
+               !MusicMediaDuration.matches(expected: try draft.song(entry["songId"].string)["duration"].number, actual: sample.duration) {
                 playbackFeedback.invalidate(); playbackFeedbackAdmission = nil
                 return
             }
@@ -236,17 +237,15 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
 
 enum MusicNativeFeedbackSettings {
     static func decode(_ playback: MJ) throws -> MusicPlaybackFeedbackSettings {
+        try musicRequire(playback["revision"].isInteger, .corruptDocument)
         var result: [MusicAccountPlatform: MusicPlaybackFeedbackSetting] = [:]
         let data = playback["feedback"]
         if data != .null {
-            try data.requireFields(["schema", "platforms"], required: ["schema", "platforms"])
-            try musicRequire(data["schema"] == .n(1) && data["platforms"].isObject &&
-                data["platforms"].fields.allSatisfy { ["wy", "tx", "kg"].contains($0.0) }, .corruptDocument)
+            try musicRequire(data["schema"] == .n(1) && data["platforms"].isObject, .corruptDocument)
         }
         for platform in [MusicAccountPlatform.netease, .qq, .kugou] {
             let row = data["platforms"][platform.rawValue]
             if row == .null { result[platform] = .init(); continue }
-            try row.requireFields(["enabled", "generation"], required: ["enabled", "generation"])
             try musicRequire(row["enabled"].isBool && row["generation"].isInteger, .corruptDocument)
             result[platform] = .init(enabled: row["enabled"].bool, generation: row["generation"].int)
         }

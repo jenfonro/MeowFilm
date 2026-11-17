@@ -149,7 +149,7 @@ actor MusicRecoveryTestAccounts: MusicNativeAccountProviding, MusicNativePlaybac
 }
 
 struct MusicRecoveryTestFixture {
-    let store: NativeMusicMemoryDocument
+    let store: NativeMusicTestLibrary
     let accounts: MusicRecoveryTestAccounts
     let clock: MusicRecoveryTestClock
     let service: NativeMusicService
@@ -171,7 +171,7 @@ struct MusicRecoveryTestFixture {
             provider: "official:recovery-synthetic"),
             fileURL: URL(fileURLWithPath: "/synthetic-cache/recording.flac"), duration: Double(duration),
             measuredQuality: "flac", expiresAt: clock.now().addingTimeInterval(3600)))
-        let service = NativeMusicService(document: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
+        let service = NativeMusicService(database: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
             audioFileCache: cached ? file : nil,
             clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)

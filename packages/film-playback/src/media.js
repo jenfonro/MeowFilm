@@ -3,6 +3,7 @@ import https from 'node:https';
 import { randomBytes } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip, createInflate, createBrotliDecompress } from 'node:zlib';
+import { cloneJSONValue, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { compileDASHTemplate, dashPrefetchPlan, decodeManifest, hlsPrefetchPlan, manifestFormat, rewriteDASH, rewriteHLS } from './manifests.js';
 import { cacheCoverage, cacheGaps, createMediaCachePool, firstDASHRange, progressivePrefetchBytes } from './media-cache.js';
 
@@ -96,7 +97,7 @@ function descriptorInput(descriptor, scope) {
   if (descriptor.drm !== undefined) {
     // This transport passes initialization metadata; the decoder decides which
     // schemes it supports. Merely carrying a license URL does not request it.
-    try { drm = structuredClone(descriptor.drm); } catch { throw failure('MEDIA_INVALID_DESCRIPTOR'); }
+    try { drm = cloneJSONValue(descriptor.drm); } catch { throw failure('MEDIA_INVALID_DESCRIPTOR'); }
   }
   return { url: url.href, headers: requestHeaders, scope: Object.freeze(identity), format: descriptor.format, drm };
 }
@@ -178,7 +179,11 @@ export function createMediaService() {
 
   function register(owner, specification, added) {
     if (owner.revoked) throw failure('MEDIA_CANCELLED');
-    const key = JSON.stringify(specification);
+    if (specification.format === undefined) {
+      specification = { ...specification };
+      delete specification.format;
+    }
+    const key = stringifyJSONValue(specification);
     const existing = owner.keys.get(key);
     if (existing) return existing.url;
     const group = specification.resources !== undefined;
@@ -441,7 +446,7 @@ export function createMediaService() {
   }
 
   function documentKey(resource) {
-    return JSON.stringify([resource.url, resource.hlsVariables ?? null]);
+    return stringifyJSONValue([resource.url, resource.hlsVariables ?? null]);
   }
 
   function responseRange(incoming) {
@@ -831,18 +836,20 @@ export function createMediaService() {
       if (useStream) await start();
       if (closed) throw failure('MEDIA_CLOSED');
       const id = randomBytes(24).toString('base64url');
-      const bytes = 1024 + Buffer.byteLength(JSON.stringify({
-        url: input.url, headers: input.headers, scope: input.scope, drm: input.drm,
+      const bytes = 1024 + Buffer.byteLength(stringifyJSONValue({
+        url: input.url, headers: input.headers, scope: input.scope,
+        ...(input.drm === undefined ? {} : { drm: input.drm }),
       })) * 2;
       reserve(bytes);
       const owner = { ...input, id, bytes, keys: new Map(), tokens: new Map(), operations: new Set(), revoked: false,
         root: { url: input.url, format: input.format }, cache: cache ? cachePool.create() : undefined };
       owners.set(id, owner);
       try {
-        const url = useStream ? register(owner, { url: input.url, format: input.format }) : input.url;
+        const url = useStream ? register(owner, { url: input.url,
+          ...(input.format === undefined ? {} : { format: input.format }) }) : input.url;
         return { id, url, ...(useStream ? { mediaOrigin: `${baseUrl}/` } : {}),
           ...(input.format === undefined ? {} : { format: input.format }),
-          ...(input.drm === undefined ? {} : { drm: structuredClone(input.drm) }) };
+          ...(input.drm === undefined ? {} : { drm: cloneJSONValue(input.drm) }) };
       } catch (error) { await revoke(owner); throw error; }
     },
     async prefetch(id) {

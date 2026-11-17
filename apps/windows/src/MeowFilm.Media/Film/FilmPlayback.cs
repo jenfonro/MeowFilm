@@ -57,7 +57,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
     public string? Identity => scope?.Identity;
     public bool HasOutput => hasOutput;
     public bool IsBuffering => buffering;
-    public bool PauseRequested => paused;
+    public bool IsPaused => paused;
     public double PositionSeconds => position;
     public double DurationSeconds => duration;
     public string? LastErrorCode => lastError;
@@ -253,7 +253,6 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
             published = true;
             Set(ref tracks, null, nameof(Tracks));
             Set(ref scope, session.Scope, nameof(Scope)); Changed(nameof(Identity));
-            Set(ref paused, startPaused, nameof(PauseRequested));
             Set(ref hasOutput, true, nameof(HasOutput)); Set(ref lastError, null, nameof(LastErrorCode));
             Publish(snapshot);
             timer.Start();
@@ -326,7 +325,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
     public Task SetPausedAsync(NativePlaybackScope scope, bool value) => Command(scope, session =>
     {
         FilmKernelNative.Check(kernel.Pause(session.Handle, value ? 1 : 0));
-    }, value);
+    });
     public Task SeekAsync(NativePlaybackScope scope, double seconds) => Command(scope, session =>
     {
         if (!double.IsFinite(seconds) || seconds < 0) throw new PlaybackException(PlaybackError.InvalidSeek);
@@ -351,7 +350,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         FilmKernelNative.Check(kernel.Aspect(session.Handle, ratio));
     });
 
-    private Task Command(NativePlaybackScope expected, Action<Session> action, bool? pauseIntent = null) => Dispatch(async () =>
+    private Task Command(NativePlaybackScope expected, Action<Session> action) => Dispatch(async () =>
     {
         ThrowIfClosed();
         var session = current;
@@ -365,7 +364,6 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
             session.Token.ThrowIfCancellationRequested();
             if (!ReferenceEquals(current, session) || disposing)
                 throw new PlaybackException(PlaybackError.Superseded);
-            if (pauseIntent is { } value) Set(ref paused, value, nameof(PauseRequested));
             Publish(kernel.Read(session.Handle));
         }
         catch (Exception error)
@@ -462,6 +460,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         Set(ref position, double.IsFinite(value.Position) ? Math.Max(0, value.Position) : 0, nameof(PositionSeconds));
         Set(ref duration, double.IsFinite(value.Duration) ? Math.Max(0, value.Duration) : 0, nameof(DurationSeconds));
         Set(ref buffering, value.State == 4, nameof(IsBuffering));
+        Set(ref paused, value.State == 3, nameof(IsPaused));
     }
     private void ClearOutput()
     {
@@ -470,7 +469,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         Set(ref tracks, null, nameof(Tracks));
         Set(ref scope, null, nameof(Scope)); Changed(nameof(Identity));
         Set(ref hasOutput, false, nameof(HasOutput)); Set(ref buffering, false, nameof(IsBuffering));
-        Set(ref paused, false, nameof(PauseRequested));
+        Set(ref paused, false, nameof(IsPaused));
         Set(ref position, 0, nameof(PositionSeconds)); Set(ref duration, 0, nameof(DurationSeconds));
     }
     private void RequirePending(Session session)

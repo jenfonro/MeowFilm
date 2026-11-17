@@ -9,6 +9,7 @@
     <Resource Include="Film/Presentation/Assets/*.jpg" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="[10.0.15]" />
     <PackageReference Include="ZXing.Net" Version="[0.16.11]" />
     <PackageReference Include="Net.Codecrete.QrCodeGenerator" Version="[3.2.1]" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="[1.0.4314.35]" />

@@ -363,7 +363,7 @@ public static class MusicSearchGroupTests
         internal readonly MusicOfficialAudioTests.MemoryStore Store = new();
         internal readonly MusicLibraryOwner Library;
         internal Fixture(Func<MusicSearchRequest, Task<JsonElement>> handler)
-        { Catalog = new(handler); Library = new(Store); }
+        { Catalog = new(handler); Library = new(MusicTestStores.For(Store)); }
         private MusicSearchCoordinator? search;
         internal MusicSearchCoordinator Search => search ??= new(Catalog, searchAsync: async (request, token) =>
         {

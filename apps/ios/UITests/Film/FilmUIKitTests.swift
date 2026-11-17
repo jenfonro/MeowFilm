@@ -702,9 +702,9 @@ final class FilmUIKitTests: XCTestCase {
         episode.sendActions(for: .touchUpInside)
         await model.waitForPendingWork()
         var commands = await server.calls().filter { $0.operation == "session.command" }
-        XCTAssertEqual(commands.map(\.action), ["play", "select.episode"])
-        XCTAssertEqual(commands.last?.input.filmObject?["episode"],
-                       .object(["season": .number(1), "episode": .number(2)]))
+        XCTAssertEqual(commands.map(\.action), ["select.target", "select.target"])
+        XCTAssertEqual(commands.last?.input.filmObject?["target"],
+                       FilmUIKitPlaybackFixture.episodes(numbers: [2]).first?.filmObject?["playbackTarget"])
 
         await server.reply(to: "browse.season", with: FilmUIKitPlaybackFixture.snapshot(
             browsing: FilmUIKitPlaybackFixture.browsing(season: 2),
@@ -718,12 +718,12 @@ final class FilmUIKitTests: XCTestCase {
         try button("film.episode.fixture-season-2-episode-7", in: page.view).sendActions(for: .touchUpInside)
         await model.waitForPendingWork()
         commands = await server.calls().filter { $0.operation == "session.command" }
-        XCTAssertEqual(commands.suffix(3).map(\.action), ["browse.season", "select.episode", "select.episode"])
-        XCTAssertEqual(commands[3].input.filmObject?["episode"],
-                       .object(["season": .number(2), "episode": .number(4)]),
+        XCTAssertEqual(commands.suffix(3).map(\.action), ["browse.season", "select.target", "select.target"])
+        XCTAssertEqual(commands[3].input.filmObject?["target"],
+                       FilmUIKitPlaybackFixture.episodes(season: 2, numbers: [4]).first?.filmObject?["playbackTarget"],
                        "Primary play selects Node's actual first episode, never an invented S2E1")
-        XCTAssertEqual(commands[4].input.filmObject?["episode"],
-                       .object(["season": .number(2), "episode": .number(7)]))
+        XCTAssertEqual(commands[4].input.filmObject?["target"],
+                       FilmUIKitPlaybackFixture.episodes(season: 2, numbers: [7]).first?.filmObject?["playbackTarget"])
         XCTAssertEqual(presentations, 4)
         XCTAssertTrue(media.inputs.isEmpty)
 
@@ -740,8 +740,8 @@ final class FilmUIKitTests: XCTestCase {
         try button("film.candidate.opaque-movie", in: filmPage.view).sendActions(for: .touchUpInside)
         await filmModel.waitForPendingWork()
         let filmCommands = await filmServer.calls().filter { $0.operation == "session.command" }
-        XCTAssertEqual(filmCommands.map(\.action), ["select.candidate"])
-        XCTAssertEqual(filmCommands.last?.input.filmObject?["candidateId"], .string("opaque-movie"))
+        XCTAssertEqual(filmCommands.map(\.action), ["select.target"])
+        XCTAssertEqual(filmCommands.last?.input.filmObject?["target"]?.filmObject?["source"]?.filmObject?["candidateId"], .string("opaque-movie"))
         XCTAssertNil(filmCommands.last?.input.filmObject?["episode"])
     }
 
@@ -822,7 +822,8 @@ final class FilmUIKitTests: XCTestCase {
 
     func testFavoriteButtonsStayInSyncAcrossDetailInstances() async throws {
         let library = try isolatedLibrary()
-        let detail = FilmDetail(item: .init(sourceID: "fixture", id: "shared", title: "共同影片"))
+        let detail = FilmDetail(item: .init(sourceID: "fixture", id: "shared", title: "共同影片",
+            businessID: "fixture:shared", playbackTarget: .init(id: "fixture:shared", kind: .movie, title: "共同影片")))
         let first = FilmDetailViewController(detail: detail, library: library,
                                              images: artworkImages(), themeProvider: FilmUIKitTheme())
         let second = FilmDetailViewController(detail: detail, library: library,

@@ -25,25 +25,25 @@
 
 native owner 拒绝 `library.import/save/update/remove`，返回 `PERMISSION_DENIED`；配置写入不走这些运行器方法。`library.list/get/export` 只投影本次已接收的内存配置；启动不会仅凭私有状态恢复书源。
 
-`SourceConfiguration` 只含 `installationId,revision,name,sourceUrl,group,order,enabled,enabledExplore,protocol,definition`，不含 actions、Cookie、变量或 generation。`sources` 是含启用和禁用源的完整集合，可以为空；相对上次快照缺失的源视为移除，不按增量 patch 合并。快照 revision 与每源 revision 均为正安全整数；重复身份／URL、缺失或错误类型、协议／定义不匹配、JSON 与大小错误在撤销任何旧实例前拒绝。全局旧 revision 返回 `STALE_SOURCE`，同 revision 不同内容返回 `SOURCE_INTEGRITY`；每源租约也不得倒退或在同 revision 改写内容。
+`SourceConfiguration` 只消费 `installationId,revision,name,sourceUrl,group,order,enabled,enabledExplore,protocol,definition`，附加成员不参与配置，也不授予 actions、Cookie、变量或 generation 的写入权限。`sources` 是含启用和禁用源的完整集合，可以为空；相对上次快照缺失的源视为移除，不按增量 patch 合并。快照 revision 与每源 revision 均为正安全整数；重复身份／URL、必需配置成员缺失或错误类型、未知协议与源码大小错误在撤销任何旧实例前拒绝。定义解析、协议与定义匹配及初始化仅在该源实际执行时检查，失败不阻断健康兄弟；禁用源不预检未执行定义。全局旧 revision 返回 `STALE_SOURCE`，同 revision 不同内容返回 `SOURCE_INTEGRITY`；每源租约也不得倒退或在同 revision 改写内容。
 
 `library.apply` 只处理真实变化、失败重试和移除项；相同快照幂等，成功源不重复初始化，禁用源不执行。替换或移除会撤销旧调用、Web 与图片并等待实际清理。初始化失败在当前已保存 revision 上返回该源 `errorCode`，关闭执行准入，不回写配置或恢复旧定义；清理失败仍为 `SOURCE_CLEANUP`。精确快照可重试失败项，后继快照使旧应用结果失效。运行器恢复后须重新接收最新原生快照才能执行。
 
 native owner 的私有文档为 `{schema:1,sources:[{installationId,private:{cookies,storage}}]}`，定义不落盘。当前 generation 的私有写入只更新这个文档，不产生第二份配置；损坏或写入失败不以空数据覆盖。本会话已登记的源移除时，在真实资源清理成功后删除相应私有项；尚未在本会话登记的磁盘私有项不会因快照缺项自动移除。
 
-`SourceRecord` 为 `installationId,revision,name,sourceUrl,group,order,enabled,enabledExplore,protocol,actions:[string]`，另投影用于管理排序／操作的 `weight,lastUpdateTime,respondTime,hasExplore`；恢复或应用失败时带 `errorCode`。generation 不属于公开记录。revision 为正整数，每次接受的定义或管理修改递增，旧 revision 返回 `STALE_SOURCE`。order 是有符号安全整数，`library.list` 按 order、名称、installationId 排序。无源返回空列表。
+`SourceRecord` 为 `installationId,revision,name,sourceUrl,group,order,enabled,enabledExplore,protocol,actions:[string]`，另投影用于管理排序／操作的 `weight,lastUpdateTime,respondTime,hasExplore`；恢复或应用失败时带 `errorCode`。generation 不属于公开记录。revision 为正整数，每次接受的定义或管理修改递增，旧 revision 返回 `STALE_SOURCE`。名称可为空，order 是用于排序的有限数值，不要求整数；`library.list` 按 order、名称、installationId 排序。无源返回空列表。
 
 以下导入、试运行与保存流程属于 runtime owner。导入接受当前 Legado JSON 对象或数组、`sources/bookSources/data` 数组容器、逐行 JSON，以及轻悦时光 HTML／HTML 对象。每个文件或 URL 由客户端各调用一次，定义数组由运行器逐项解析与试运行；结果的 index 从 0 起，失败不抹掉已成功项。同 `bookSourceUrl` 更新原 installationId；无此字段的独立 HTML 使用导入 URL 或文件名建立稳定来源身份。URL 导入使用运行器 HTTP，按最终响应文本解析，不把文件来源视为脚本权限。源码继续遵循现有 16 MiB 格式边界。管理字段使用 `enabled`、`customOrder` 和 `enabledExplore/exploreUrl`；其他普通键不回填这些字段。
 
 `library.previewImport` 仅下载、解析和识别定义，不安装、不执行候选、不修改永久库或创建私有源数据。URL 只下载一次；返回的定义包含来源身份和当前管理元数据，客户端确认所选条目后将这些定义一次性传给 `library.import`，不再下载。预览也受取消／关闭排空约束，失败条目不隐藏有效项。
 
-runtime owner 的 URL 导入和预览使用同一 HTTP(S) 下载，初始地址及每次重定向均拒绝非 HTTP(S) 或内嵌凭据；不按来源域名设白名单。既定 60 秒下载截止直接取消网络，等待真实交换收口后返回 `TIMEOUT`；取消或关闭不发布候选或写入永久库。iOS 继续使用这个公共 source owner；Windows native owner 的配置导入由原生服务提供，采用相同的地址、取消和保存边界，不调用运行器库导入，见[Windows 小说](../windows/novel.md#书源配置与设置保存)。
+runtime owner 的 URL 导入和预览使用同一 HTTP(S) 下载，初始地址及每次重定向均要求 HTTP(S)，userinfo 交给实际传输处理；不按来源域名设白名单。既定 60 秒下载截止直接取消网络，等待真实交换收口后返回 `TIMEOUT`；取消或关闭不发布候选或写入永久库。iOS 继续使用这个公共 source owner；Windows native owner 的配置导入由原生服务提供，采用相同的地址、取消和保存边界，不调用运行器库导入，见[Windows 小说](../windows/novel.md#书源配置与设置保存)。
 
-`library.get` 返回原协议定义加上当前管理的名称、分组、启停和排序，未改规则与扩展值保留原类型；编辑保存不能把列表操作恢复为旧元数据。
+`library.get` 返回原协议定义加上当前管理的名称、分组、启停和排序，未改规则与扩展值保留原类型和精确数值；编辑保存不能把列表操作恢复为旧元数据。
 
 runtime owner 的 save 先试运行完整候选，随后原子替换仓库；语法、初始化、取消或写盘失败保留原定义及 revision，并恢复可用的旧运行实例。禁用不删除定义或私有状态，重新启用恢复；remove 删除该源及其私有值，撤销 Web、图片和运行任务。该模式下客户端不保存原始定义用来恢复安装；get 仅供编辑，export 仅包含定义和管理字段，不导出 Cookie、缓存和私有变量。
 
-仓库文件整体写入临时文件、fsync、rename，沿用 `PrivateDocuments` 的私有权限与链接校验。损坏文件返回 `CORRUPT_STORAGE`，不可读／不可写返回 `STORAGE_ERROR`，均不以空库覆写。运行器关闭前排空已接受的写入和真实宿主资源；仅取消信号不算清理完成。
+仓库文件整体写入临时文件、fsync、rename，沿用 `PrivateDocuments` 的私有权限与链接校验。根解码失败、非空全不可用列表和歧义身份返回 `CORRUPT_STORAGE`，不可读／不可写返回 `STORAGE_ERROR`，均不以空库覆写。逐项投影可用身份，管理展示或未接纳 private 记录不封锁健康来源；实际执行的来源／profile 失败只关闭该源准入。无关保存保留未接纳条目、根与记录封套扩展，通过公共 Node 无关 JSON 入口保留会失真的数字原文。运行器关闭前排空已接受的写入和真实宿主资源；仅取消信号不算清理完成。
 
 ## 小说纯规则
 
@@ -63,7 +63,9 @@ runtime owner 的 save 先试运行完整候选，随后原子替换仓库；语
 
 JS 公开 `createRuntimeClient().call("source.runtime.rules.process",...)` 使用共享 `requestWithoutDeadline()`，不以客户端默认 30000ms 或单次 `options.timeout` 截断排队及多规则执行；调用方用 `signal` 取消，客户端关闭撤销本地交换，Node owner 继续负责真实资源排空。其他 RPC 的默认及显式 timeout 不变。
 
-净化只消费实际执行规则的 pattern、replacement、scope 和预算，不检查 name/group 等管理字段或非文本块的图片成员；禁用、scope 不匹配或没有目标文本的规则不编译正则，也不因无效规则材料阻断正文。
+章节匹配忽略没有可消费身份的条目，返回原数组下标，不压缩目录；非空全不可用列表明确失败，重复 URL／标题仍需选择。
+
+净化只消费实际执行规则的 pattern、replacement、scope 和预算，不检查 name/group 等管理字段或非文本块的图片成员；禁用、scope 不匹配或没有目标文本的规则不编译正则，也不因无效规则材料阻断正文。仅标题净化和不转换时原样保留未消费的正文块；正文文本只在实际替换或简繁转换时检查，不能将坏值改为空文本。
 
 只在全部步骤成功后返回完整正文；异常、超时或取消不返回中间正文。无法消费实际输入、实际执行的坏正则／规则或转换参数返回 `INVALID_REQUEST`，原生执行超时为 `TIMEOUT`，取消为 `CANCELLED`，关闭为 `CLOSED`，原生资源预算失败为 `LIMIT`，载体身份或 ABI 不符为 `CAPABILITY_UNAVAILABLE`，其他执行异常为 `SOURCE_FAILURE`，不携带规则或正文。失败调用等待实际原生线程和 Runtime 释放，后续调用才重建同一程序；关闭拒绝排队工作并等待全部已接受的 transform 和真实资源排空。
 
@@ -71,11 +73,13 @@ JS 公开 `createRuntimeClient().call("source.runtime.rules.process",...)` 使�
 
 ## Reader 调用上下文
 
-payload 显式传 `book`、`chapter` 和稳定 `bookUrl`，缺省顶层 URL 可从相应对象补齐。正文应同时传 `nextChapterUrl`，或在 `book.catalog/book.chapters`（也可顶层 catalog）和 chapter.index 中提供下一章；分页不会跟随此章地址。目录支持 `preUpdateJs`、`book.tocHtml`、多 nextTocUrl 和字段规则；正文支持多 nextContentUrl、title、imageStyle、合并后 replaceRegex 和有序块。重复页去重，循环结束，不设置固定页数截断；超时、取消及已有 DOM／解析预算仍生效。
+payload 显式传 `book`、`chapter` 和稳定 `bookUrl`，缺省顶层 URL 可从相应对象补齐。正文应同时传 `nextChapterUrl`，或在 `book.catalog/book.chapters`（也可顶层 catalog）和 chapter.index 中提供下一章；分页不会跟随此章地址。目录原始数组的空项或没有名称／地址的条目明确失败，不以目录页补造可读章节或删除后重编号；合法具名无 URL 章节和卷仍沿现有语义解析。目录支持 `preUpdateJs`、`book.tocHtml`、多 nextTocUrl 和字段规则；正文支持多 nextContentUrl、title、imageStyle、合并后 replaceRegex 和有序块。重复页去重，循环结束，不设置固定页数截断；超时、取消及已有 DOM／解析预算仍生效。
 
-content 返回 `{title,chapter,chapterUrl,content,blocks,imageStyle,nextUrls,type}`，`blocks` 的公开结构只有 `{type:"text",text}` 或 `{type:"image",src,alt}`，图片地址按所属页面最终 URL 解析。Legado 在实际变量读取或结果写回时导入 book／chapter.variable，各并行动作隔离；content 写回 chapter.variable 本身就是消费者，导入失败在 HTTP 前终止并释放本次上下文。Cat 和纯 Cookie loginStatus 不解析 Reader 变量；loginCheckJs 实际读取变量时仍执行导入并传播失败。`source.get/put/setVariable`、cache 和 Cookie 由源仓库持久化；只恢复源私有数据，不恢复 QuickJS 执行内存。jsLib 的 JSON 库名→HTTP URL 映射在每个 generation 初始化时获取并缓存，普通 jsLib 字符串继续作为内联脚本。
+content 返回 `{title,chapter,chapterUrl,content,blocks,imageStyle,nextUrls,type}`，`blocks` 的公开结构只有 `{type:"text",text}` 或 `{type:"image",src,alt}`，图片地址按所属页面最终 URL 解析。Legado 在实际变量读取或结果写回时导入 book／chapter.variable，各并行动作隔离；content 写回 chapter.variable 本身就是消费者，导入失败在 HTTP 前终止并释放本次上下文。Cat 和纯 Cookie loginStatus 不解析 Reader 变量；loginCheckJs 实际读取变量时仍执行导入并传播失败。`source.get/put/getVariable/setVariable`、cache 和 Cookie 由源仓库持久化；Reader 永久变量启动时只捕获存储材料，解析和字段消费延后到实际 get／put。values 与 variable 分别读取，修改其一不校验或重写另一项；未改键和封套扩展精确保留。实际解析／读取／提交失败仍报错，串行提交、取消和回滚不变；只恢复源私有数据，不恢复 QuickJS 执行内存。jsLib 的 JSON 库名→HTTP URL 映射在每个 generation 初始化时获取并缓存，普通 jsLib 字符串继续作为内联脚本。
 
 源私有数据在实际 generation 的 profile 中读写，候选执行使用隔离副本。只有当前已发布且未取消的 generation 可写回仓库。失败候选、退休请求、停用、删除及关闭后的迟到写入被拒绝；重启和启用会从持久状态向新 generation 注入副本。
+
+`source.get`、Reader cache／登录信息、CatVod local 及轻悦时光 storage helper 在实际交给脚本时，将选中的 JSON 值投影为脚本 Number／字符串／对象；原持久值和未读取键仍保持精确材料。读取、修改返回对象或写入另一键不会将该投影回写覆盖原值；仅显式写入该键才替换它。Reader 永久封套的恢复不走脚本投影，后续变量写入仍保留未编辑材料。
 
 ## 受信图片
 
@@ -95,7 +99,7 @@ mode/request 严格沿用 [capability ABI](source-capability-abi.md)，没有第
 - Legado `login/browser/openUrl/verificationCode/webview/rule` 保持各自请求字段，如 `url,title,headers,html,script,sourceRegex,overrideUrlRegex,delayTime`。
 - 轻悦时光 bridge 使用对应方法名为 mode，request 为 `{arguments:[...]}`；原始槽位（包括 `null`）保持不变，不能压缩参数后再判断 URL。运行器可另补 `headers`，平台应按来源 ABI 解释参数。
 
-owner 覆盖 `request.cookies` 为当前源 HTTP profile 全部未过期 Cookie，每项为 `{name,value,domain,hostOnly,path,secure,httpOnly,sameSite,expires}`。domain 没有前导点；sameSite 为 `null` 或 `Lax`／`Strict`／`None`，expires 为 `null` 或 Unix 毫秒。jar 持久化这些属性，旧记录缺少 httpOnly／sameSite 时分别恢复为 false／null。原生以 cookies 为权威种子初始化隔离临时 Web store，并剔除大小写无关的 Cookie 请求头；不得从 Cookie 字符串重建根路径 Cookie。源代码传入的 cookies 数组不能覆盖 owner 状态。
+owner 覆盖 `request.cookies` 为当前源 HTTP profile 全部未过期 Cookie，每项为 `{name,value,domain,hostOnly,path,secure,httpOnly,sameSite,expires}`。domain 没有前导点；sameSite 为 `null` 或 `Lax`／`Strict`／`None`，expires 为 `null` 或 Unix 毫秒。jar 持久化这些当前属性，不补写旧记录缺失的 httpOnly／sameSite。原生以 cookies 为权威种子初始化隔离临时 Web store，并剔除大小写无关的 Cookie 请求头；不得从 Cookie 字符串重建根路径 Cookie。源代码传入的 cookies 数组不能覆盖 owner 状态。
 
 已有 Cookie 仍可注入受信 `request.headers.Cookie`，不写日志。源显式 Cookie 请求头由 owner 大小写无关地合并到本次临时种子：当前 URL 已匹配的同名同值 Cookie 保持原作用域和属性；同名不同值复用匹配作用域；没有匹配项才生成当前 host-only、URL 默认目录路径的 Cookie，HTTPS 时带 Secure。临时种子不会提前落盘，也不会扩大已有同值 Cookie 的作用域。HTML-first 的 `webview`／`webViewGetSource` 取原 arguments[1] 为 URL，不把 HTML 或后面的脚本误作地址；未定义的 QYSG 方法不推测额外参数布局。
 

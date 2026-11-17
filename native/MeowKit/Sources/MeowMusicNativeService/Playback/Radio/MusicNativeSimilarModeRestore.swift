@@ -7,6 +7,8 @@ extension NativeMusicService {
         guard !similarMode.restored else { return }
         let d = try read(), saved = d.queue["similar"]
         guard saved != .null else { similarMode.restored = true; return }
+        try d.requireQueue()
+        try MusicNativeSimilarData.validateSession(saved, serial: d.queue["serial"].int, songs: d.queueSongs())
         try musicRequire(similarMode.restoring == nil, .busy)
         let restoration = UUID(), own = epoch
         similarMode.restoring = restoration

@@ -7,13 +7,12 @@ import { createPanService, PanError } from '../src/index.js';
 
 const now = 1_800_000_000_000;
 const turn = () => new Promise(resolve => setImmediate(resolve));
-const providerIds = ['baidu', 'quark', 'uc', 'tianyi', 'yidong', 'quark_tv', 'uc_tv'];
+const providerIds = ['baidu', 'quark', 'uc', 'tianyi', 'yidong'];
 const cookies = { cookie: 'session=synthetic-account' };
-const tokens = { refreshToken: 'synthetic-refresh', deviceId: 'synthetic-device' };
 const authorization = Buffer.from('synthetic-prefix:synthetic-account:synthetic-token').toString('base64');
 const credentials = {
   baidu: cookies, quark: cookies, uc: cookies, tianyi: { username: 'synthetic-user', password: 'synthetic-password' },
-  yidong: { authorization }, quark_tv: tokens, uc_tv: tokens,
+  yidong: { authorization },
 };
 const refreshCredentials = { ...credentials, tianyi: cookies };
 const response = (value, status = 200, headers = {}) => ({
@@ -25,8 +24,8 @@ function valid(provider) {
     return response({ code: 'OK', success: true, data: { nickname: 'synthetic-display-name' } });
   }
   if (provider === 'tianyi') return response('', 302, { location: 'https://cloud.189.cn/web/main' });
-  if (provider === 'yidong') return response('<root><return>0</return><token>synthetic-next-token</token></root>');
-  return response({ code: 200, data: { access_token: 'synthetic-next-access', refresh_token: 'synthetic-next-refresh' } });
+  assert.equal(provider, 'yidong');
+  return response('<root><return>0</return><token>synthetic-next-token</token></root>');
 }
 function invalid(provider) {
   if (provider === 'baidu') return response('', 401);
@@ -34,10 +33,10 @@ function invalid(provider) {
   if (provider === 'tianyi') {
     return response('', 302, { location: 'https://open.e.189.cn/api/logbox/separate/web/index.html' });
   }
-  if (provider === 'yidong') return response('<root><return>1</return></root>');
-  return response({ code: 200, data: { status: -1, errno: 11000 } });
+  assert.equal(provider, 'yidong');
+  return response('<root><return>1</return></root>');
 }
-const authCode = provider => ['yidong', 'quark_tv', 'uc_tv'].includes(provider) ? 'AUTH_FAILED' : 'AUTH_REQUIRED';
+const authCode = provider => provider === 'yidong' ? 'AUTH_FAILED' : 'AUTH_REQUIRED';
 function reply(provider, input, value) {
   if (provider === 'tianyi') {
     const path = new URL(input.url).pathname;
@@ -68,7 +67,7 @@ async function account(service, provider) {
   return (await service.invoke('settings.get')).accounts.find(item => item.provider === provider);
 }
 
-test('seven account snapshots project saved facts and three states without requiring freshness timestamps', async t => {
+test('five account snapshots project saved facts and three states without requiring freshness timestamps', async t => {
   const { service, path, requests } = setup(t);
   assert.deepEqual((await service.invoke('settings.get')).accounts, providerIds.map(provider => ({
     provider, revision: 0, configured: false, fields: [], status: 'signedOut',
@@ -85,11 +84,11 @@ test('seven account snapshots project saved facts and three states without requi
       assert.equal(JSON.stringify(saved).includes(value), false);
     }
   }
-  const replaced = await service.invoke('settings.set', { provider: 'quark_tv', credentials: { refreshToken: 'synthetic-replacement' } });
-  assert.deepEqual(replaced.fields, ['refreshToken']);
-  assert.deepEqual(JSON.parse(readFileSync(path)).accounts.quark_tv.credentials, { refreshToken: 'synthetic-replacement' });
-  const empty = await service.invoke('settings.set', { provider: 'quark_tv', credentials: {} });
-  assert.deepEqual(empty, { provider: 'quark_tv', revision: 3, configured: false, fields: [], status: 'signedOut' });
+  const replaced = await service.invoke('settings.set', { provider: 'quark', credentials: { cookie: 'session=synthetic-replacement' } });
+  assert.deepEqual(replaced.fields, ['cookie']);
+  assert.deepEqual(JSON.parse(readFileSync(path)).accounts.quark.credentials, { cookie: 'session=synthetic-replacement' });
+  const empty = await service.invoke('settings.set', { provider: 'quark', credentials: {} });
+  assert.deepEqual(empty, { provider: 'quark', revision: 3, configured: false, fields: [], status: 'signedOut' });
   for (const provider of providerIds) {
     const previous = await account(service, provider);
     assert.deepEqual(await service.invoke('settings.clear', { provider }), {
@@ -379,20 +378,6 @@ test('Tianyi cancels an off-domain confirmation before a late redirect can reque
   assert.deepEqual(readFileSync(path), saved);
 });
 
-test('TV business error envelopes alone do not establish rejected authentication', async t => {
-  for (const provider of ['quark_tv', 'uc_tv']) await t.test(provider, async t => {
-    let value;
-    const { service, path } = setup(t, () => response(value));
-    await service.invoke('settings.set', { provider, credentials: tokens });
-    const snapshot = await account(service, provider), before = readFileSync(path);
-    for (value of [{ code: 401 }, { code: 429 }, { code: 500 }, { code: 500, data: { status: -1, errno: 11000 } }]) {
-      await assert.rejects(service.invoke('refresh', { provider }), { code: 'UPSTREAM_ERROR' });
-      assert.deepEqual(await account(service, provider), snapshot);
-      assert.deepEqual(readFileSync(path), before);
-    }
-  });
-});
-
 test('missing or unknown account replies are not evidence of authentication failure', async t => {
   for (const provider of providerIds) await t.test(provider, async t => {
     let value;
@@ -405,8 +390,7 @@ test('missing or unknown account replies are not evidence of authentication fail
         ? [{}, { code: 'OK', success: true }, { code: 'OK', success: true, data: null },
           { code: 'OK', success: true, data: [] }, { code: 'OK', success: true, data: 'unknown' }]
       : provider === 'tianyi' ? ['unknown page']
-      : provider === 'yidong' ? ['<root><return>invalid</return></root>']
-        : [{}, { data: {} }, { code: 200, data: {} }];
+      : ['<root><return>invalid</return></root>'];
     for (value of values) {
       await assert.rejects(service.invoke('refresh', { provider }), { code: 'UPSTREAM_FORMAT' });
       assert.deepEqual(await account(service, provider), snapshot);
@@ -429,7 +413,7 @@ test('share password and share authorization errors never expire a saved account
   });
 });
 
-for (const provider of ['baidu', 'quark_tv']) {
+for (const provider of ['baidu', 'quark']) {
   for (const action of ['replace', 'clear']) {
     for (const late of ['success', 'authFailure']) {
       test(`${provider}: ${action} fences a late ${late} without changing the new status`, async t => {
@@ -519,7 +503,7 @@ test('failed manual replacement and sign-out writes retain the existing expired 
   assert.equal((await service.invoke('settings.clear', { provider: 'baidu' })).status, 'signedOut');
 });
 
-for (const provider of ['baidu', 'quark_tv']) {
+for (const provider of ['baidu', 'quark']) {
   test(`${provider}: a failed rotated-credential write preserves expiry until the credentials are durably saved`, async t => {
     let result = invalid(provider);
     const { service, path } = setup(t, () => result);
@@ -528,8 +512,7 @@ for (const provider of ['baidu', 'quark_tv']) {
     const expired = await account(service, provider), saved = readFileSync(path), backup = path + '.held';
     renameSync(path, backup);
     mkdirSync(path);
-    result = provider === 'baidu' ? response({ login_info: { bdstoken: 'synthetic-confirmation' } }, 200,
-      { 'set-cookie': ['session=synthetic-rotated; Path=/'] }) : valid(provider);
+    result = { ...valid(provider), headers: { 'set-cookie': ['session=synthetic-rotated; Path=/'] } };
     await assert.rejects(service.invoke('refresh', { provider }), { code: 'STORAGE_ERROR' });
     assert.deepEqual(await account(service, provider), expired);
     assert.deepEqual(readFileSync(backup), saved);

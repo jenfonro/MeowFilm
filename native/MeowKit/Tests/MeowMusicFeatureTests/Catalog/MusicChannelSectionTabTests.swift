@@ -16,7 +16,7 @@ private actor SectionTabBrowser: MusicPublicBrowsing, MusicSongRepositoryReading
         guard let currentSong, songIDs.contains(currentSong.songId) else { return [:] }
         return [currentSong.songId: currentSong]
     }
-    func songChanges() -> AsyncStream<Void> { .init { $0.finish() } }
+    func songChanges() -> AsyncStream<Set<String>> { .init { $0.finish() } }
     func loadSecond() async -> [MusicPublicBrowseItem] {
         tabCalls += 1
         if let gate { await gate.wait() }

@@ -11,7 +11,6 @@ func panProviderValue(_ id: PanProviderID) -> RuntimeValue {
     case .baidu, .quark, .uc: fields = ["cookie"]
     case .tianyi: fields = ["cookie", "username", "password"]
     case .yidong: fields = ["authorization", "refreshedAt"]
-    case .quarkTV, .ucTV: fields = ["refreshToken", "deviceId", "accessToken", "expiresAt"]
     }
     return .object(["provider": .string(id.rawValue), "credentialFields": .array(fields.map(RuntimeValue.string)),
                     "list": .bool(true), "prepare": .bool(false), "modes": .array([.string("streaming")]),
@@ -30,7 +29,6 @@ func panSyntheticCredentials(_ id: PanProviderID) -> RuntimeValue {
     switch id {
     case .baidu, .quark, .uc, .tianyi: return .object(["cookie": .string("synthetic-cookie")])
     case .yidong: return .object(["authorization": .string("synthetic-authorization")])
-    case .quarkTV, .ucTV: return .object(["refreshToken": .string("synthetic-refresh"), "deviceId": .string("synthetic-device")])
     }
 }
 

@@ -988,7 +988,7 @@ export class ScriptServices {
       response.setHeader('Access-Control-Allow-Headers', request.headers['access-control-request-headers'] ?? '*');
       response.setHeader('Access-Control-Expose-Headers', '*');
       response.setHeader('Vary', 'Origin');
-      if (request.method === 'OPTIONS') {
+      if (request.method === 'OPTIONS' && request.headers['access-control-request-method']) {
         response.writeHead(204); response.end(); return false;
       }
     }

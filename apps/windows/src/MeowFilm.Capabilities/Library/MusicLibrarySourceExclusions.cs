@@ -12,8 +12,14 @@ public sealed partial class MusicLibraryOwner
 {
     private const string SourceExclusionsArea = "native-source-exclusions";
     internal const string OfficialProvider = "official";
-    private JsonObject SourceExclusions(JsonObject doc) => Value(doc, SourceExclusionsArea) as JsonObject ??
+    private JsonObject SourceExclusions(MusicLibraryData doc)
+    {
+        var value = Area(doc, SourceExclusionsArea) ??
         LJ.Obj(("schema", 1), ("revision", 0), ("items", new JsonArray()));
+        try { ValidateSourceExclusions(value); }
+        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
+        return value;
+    }
     private static bool IsProvider(string value) => value == OfficialProvider ||
         Regex.IsMatch(value, "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             RegexOptions.CultureInvariant, NativeMusicSong.RegexTimeout);
@@ -36,14 +42,13 @@ public sealed partial class MusicLibraryOwner
         foreach (var item in items) ValidateSourceExclusion(LJ.Object(item, "CORRUPT_STORAGE"));
         LJ.Require(items.Select(ExclusionKey).Distinct(StringComparer.Ordinal).Count() == items.Count, "CORRUPT_STORAGE");
     }
-    private (JsonObject Result, bool Mutate) SourceExclusionsCommand(string method, JsonObject p, JsonObject doc)
+    private (JsonObject Result, bool Mutate) SourceExclusionsCommand(string method, JsonObject p, MusicLibraryData doc)
     {
         LJ.Require(pending is null, "PENDING_WRITE");
         var saved = SourceExclusions(doc);
         var items = LJ.Array(saved["items"]);
         if (method == "music.sourceExclusions.list")
         {
-            LJ.Fields(p, "songId", "");
             var listed = p["songId"] is { } song
                 ? LJ.Arr(items.Where(item => LJ.S(item?["songId"]) == LJ.Text(song, 512)))
                 : items.DeepClone().AsArray();

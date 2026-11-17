@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
 import { isUtf8 } from 'node:buffer';
+import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { canonicalMetadataRequest, dueComponents, failedMetadata, mergeMetadata, metadataKind,
   metadataRecord, requestedComponents } from './metadata-policy.js';
 import { fail, identity, object, requireValue } from './identity.js';
@@ -44,7 +45,7 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
       await fs.mkdir(parent, { recursive: true });
       const temporary = join(parent, `.${randomUUID()}.tmp`);
       try {
-        await fs.writeFile(temporary, JSON.stringify({ key: keyOf(request), state: durable }) + '\n',
+        await fs.writeFile(temporary, stringifyJSONValue({ key: keyOf(request), state: durable }) + '\n',
           { flag: 'wx', mode: 0o600 });
         if (current(provider, epoch)) await fs.rename(temporary, path);
       } finally {
@@ -61,7 +62,7 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
         const path = join(root, filename(request));
         const bytes = await fs.readFile(path);
         requireValue(isUtf8(bytes));
-        const document = JSON.parse(bytes.toString('utf8'));
+        const document = parseJSONText(bytes.toString('utf8'));
         const state = { ...document.state, request: canonicalMetadataRequest(request) };
         // These are the fields consumed by metadata policy, not a separate
         // format/version probe. An unusable decoded object is simply a miss.

@@ -848,7 +848,7 @@ public static partial class MusicCatalogPersonalTests
         var snapshot = await f.App.Library.ReadLibrarySyncAsync();
         Equal(0, snapshot.Library.GetProperty("networkPlaylists").GetArrayLength());
         Equal(0, snapshot.Library.GetProperty("collections").EnumerateArray().Count(c => S(c, "kind") == "playlist"));
-        Equal(100, snapshot.Library.GetProperty("songs").EnumerateObject().Count());
+        Equal(100, MusicTestStores.For(f.Store).SongIds().Count);
         Equal(1, f.Store.LibraryWrites);
     }
     private static async Task QqPublicPlaylistSavesNetworkReference()
@@ -868,7 +868,7 @@ public static partial class MusicCatalogPersonalTests
         Equal(0, Calls(f, "music.catalog.playlist.prepare")); Equal(0, Calls(f, "music.catalog.playlist.commit"));
         var snapshot = await f.App.Library.ReadLibrarySyncAsync();
         Equal(0, snapshot.Library.GetProperty("collections").EnumerateArray().Count(c => S(c, "kind") == "playlist"));
-        Equal(100, snapshot.Library.GetProperty("songs").EnumerateObject().Count());
+        Equal(100, MusicTestStores.For(f.Store).SongIds().Count);
     }
     private static async Task LongKg()
     {
@@ -2608,7 +2608,7 @@ public static partial class MusicCatalogPersonalTests
         private readonly Dictionary<string, string> failures = [];
         public Application(Store store, Platform platform, CacheDocumentStore cache)
         {
-            Library = new(store, cacheStore: cache);
+            Library = new(MusicTestStores.For(store), cacheStore: cache);
             Catalog = new(platform, Library);
             recommendationQueue = new(Library);
             recommendations = new(platform, recommendationQueue, SelectRecommendationAsync, readAsync: async (request, token) =>
@@ -2872,6 +2872,28 @@ public static partial class MusicCatalogPersonalTests
         private readonly Dictionary<string, byte[]> data = [];
         private Store? cacheBacking;
         public Store CacheBacking => cacheBacking ??= new();
+        internal Store()
+        {
+            var records = MusicTestStores.For(this);
+            records.AfterReadAsync = (_, _) =>
+            {
+                Reads.Enqueue("music-records");
+                if (FailReads) throw new DocumentStoreException(DocumentStoreError.Storage);
+                return Task.CompletedTask;
+            };
+            records.BeforeCommit = async (_, _) =>
+            {
+                if (HoldWrites) { WriteEntered.TrySetResult(); await ReleaseWrite.Task; }
+                if (FailWrites) throw new DocumentStoreException(DocumentStoreError.Storage);
+            };
+            records.AfterCommit = (changes, _) =>
+            {
+                LibraryWrites++; if (changes.Areas.ContainsKey("queue")) QueueWrites++;
+                if (UnknownAfterNextLibraryWrite)
+                { UnknownAfterNextLibraryWrite = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
+                return Task.CompletedTask;
+            };
+        }
         public ConcurrentQueue<string> Reads { get; } = new();
         public int LibraryWrites, QueueWrites;
         public bool UnknownAfterNextLibraryWrite;
@@ -2896,19 +2918,7 @@ public static partial class MusicCatalogPersonalTests
             {
                 var previous = data.TryGetValue(ns, out var bytes) ? DocumentFingerprint.FromBytes(bytes) : DocumentFingerprint.Missing;
                 if (previous != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-                if (ns == MusicLibraryOwner.DocumentNamespace)
-                {
-                    static JsonNode? Queue(byte[]? document) => document is null ? null :
-                        JsonNode.Parse(document)!["entries"]!.AsArray().Select(entry => entry!["value"])
-                            .FirstOrDefault(area => area is JsonObject obj && obj.ContainsKey("currentId") && obj.ContainsKey("priority"));
-                    if (!JsonNode.DeepEquals(Queue(bytes), Queue(value.ToArray()))) QueueWrites++;
-                }
                 data[ns] = value.ToArray();
-                if (ns == MusicLibraryOwner.DocumentNamespace)
-                {
-                    LibraryWrites++;
-                    if (UnknownAfterNextLibraryWrite) { UnknownAfterNextLibraryWrite = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
-                }
                 return DocumentFingerprint.FromBytes(value.Span);
             }
         }

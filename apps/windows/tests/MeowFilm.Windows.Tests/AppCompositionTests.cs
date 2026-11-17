@@ -81,7 +81,7 @@ public static class AppCompositionTests
                     AppIdentity.RuntimeId, AppIdentity.ScriptModules), AppIdentity.ScriptModules,
                 Path.Combine(data, "script-runtime"), token));
         await using var playback = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
-        await using var music = new MusicCapability(runtime, store, playback);
+        await using var music = new MusicCapability(runtime, store, MusicTestStores.For(store), playback);
         var lifecycle = new AppShutdown([music], []);
         try
         {
@@ -113,7 +113,7 @@ public static class AppCompositionTests
             await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
             await using var runtime = new AppRuntimeClient(_ => throw new InvalidOperationException("Node unavailable"));
             runtime.Start();
-            await using var owner = new MusicNativeApplication(store, runtime);
+            await using var owner = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             if (pass == 0)
             {
                 var playlist = await owner.ExecuteAsync("music.library.create", new { name = "合成歌单" });
@@ -139,7 +139,7 @@ public static class AppCompositionTests
             await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
             await using var runtime = StartupRuntime();
             await using var playback = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
-            var application = new MusicNativeApplication(store, runtime);
+            var application = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             await using var music = new MusicCapability(application, store, playback);
             var lifecycle = new AppShutdown([music], []);
             var shell = new ShellWindow([music], [], lifecycle.CloseAsync, lifecycle.ForceReleaseAsync);
@@ -210,13 +210,12 @@ public static class AppCompositionTests
     {
         string data = DataRoot();
         await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
-        var document = LJ.Obj(("version", 1), ("entries", new JsonArray(LJ.Obj(
-            ("key", LJ.Stringify(new JsonArray("meowfilm", "music", 1, "local", area))),
-            ("value", JsonNode.Parse(value))))));
-        var fingerprint = await store.WriteAsync(MusicLibraryOwner.DocumentNamespace, LJ.Bytes(document), DocumentFingerprint.Missing);
+        var records = MusicTestStores.For(store);
+        records.SetArea(area, JsonNode.Parse(value));
+        var before = records.Root.ToJsonString();
         await using var runtime = StartupRuntime();
         await using var playback = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
-        var application = new MusicNativeApplication(store, runtime);
+        var application = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
         await using var music = new MusicCapability(application, store, playback);
         var messages = new List<string>();
         music.PropertyChanged += (_, args) =>
@@ -241,9 +240,7 @@ public static class AppCompositionTests
                 "Shell-owned failure must not publish a second module notification");
             Check(runtime.Requests.Count == 0 && !playback.HasMedia,
                 "rejected startup must not start unrelated work");
-            var saved = await store.ReadAsync(MusicLibraryOwner.DocumentNamespace);
-            try { Check(saved.Fingerprint == fingerprint, "corrupt current data must remain unchanged"); }
-            finally { if (saved.Data is not null) CryptographicOperations.ZeroMemory(saved.Data); }
+            Check(records.Root.ToJsonString() == before, "corrupt current records must remain unchanged");
         }
         finally
         {

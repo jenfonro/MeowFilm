@@ -6,7 +6,7 @@ import MeowMusicFeature
 final class MusicNativePublicBrowseFivePlatformQueueTests: XCTestCase {
     func testBothWholeQueuesRetainOver600OccurrencesAndCASRejectsWithoutChangingOldQueue() async throws {
         for platform in MusicNativePublicBrowseFiveFixture.platforms {
-            let peer = MusicNativePublicBrowseFivePeer(platform, total: 650, repeats: true), store = NativeMusicMemoryDocument()
+            let peer = MusicNativePublicBrowseFivePeer(platform, total: 650, repeats: true), store = NativeMusicTestLibrary()
             let service = try await NativeMusicFixture.service(store, platform: peer)
             let old = try await MusicAccountQueueFixture.seed(service)
             let detail = try await service.publicDetail(MusicNativePublicBrowseFiveFixture.collection(platform), cursor: nil)
@@ -44,7 +44,7 @@ final class MusicNativePublicBrowseFivePlatformQueueTests: XCTestCase {
 
     func testWholeQueueKeepsMoreThanFormerTwoThousandOccurrences() async throws {
         for platform in MusicNativePublicBrowseFiveFixture.platforms {
-            let peer = MusicNativePublicBrowseFivePeer(platform, total: 2001), store = NativeMusicMemoryDocument()
+            let peer = MusicNativePublicBrowseFivePeer(platform, total: 2001), store = NativeMusicTestLibrary()
             let service = try await NativeMusicFixture.service(store, platform: peer)
             let detail = try await service.publicDetail(MusicNativePublicBrowseFiveFixture.collection(platform), cursor: nil)
             let source = try await service.openPublicQueue(.init(collection: detail.collection))
@@ -65,7 +65,7 @@ final class MusicNativePublicBrowseFivePlatformQueueTests: XCTestCase {
     func testQueueOpenConsumesCurrentChangedCollectionWithoutRecheckingOldDetail() async throws {
         for platform in MusicNativePublicBrowseFiveFixture.platforms {
             for fault in ["tail", "reorder", "owner", "wrongID"] {
-                let peer = MusicNativePublicBrowseFivePeer(platform, fault: fault), store = NativeMusicMemoryDocument()
+                let peer = MusicNativePublicBrowseFivePeer(platform, fault: fault), store = NativeMusicTestLibrary()
                 let service = try await NativeMusicFixture.service(store, platform: peer)
                 let old = try await MusicAccountQueueFixture.seed(service)
                 let first = try await service.publicDetail(MusicNativePublicBrowseFiveFixture.collection(platform), cursor: nil)
@@ -85,7 +85,7 @@ final class MusicNativePublicBrowseFivePlatformQueueTests: XCTestCase {
     func testCancelledOrRevokedNonCooperativeDetailCannotPublishAndPhysicalWorkerEnds() async throws {
         for platform in MusicNativePublicBrowseFiveFixture.platforms {
             for revoke in [false, true] {
-                let peer = MusicNativePublicBrowseFivePeer(platform), store = NativeMusicMemoryDocument(), gate = NativeMusicGate()
+                let peer = MusicNativePublicBrowseFivePeer(platform), store = NativeMusicTestLibrary(), gate = NativeMusicGate()
                 await peer.hold(call: 1, gate: gate)
                 let service = try await NativeMusicFixture.service(store, platform: peer)
                 let task = Task { try await service.publicDetail(MusicNativePublicBrowseFiveFixture.collection(platform), cursor: nil) }
@@ -102,7 +102,7 @@ final class MusicNativePublicBrowseFivePlatformQueueTests: XCTestCase {
 
     func testLaterPageFailureDoesNotReplaceQueueOrAutomaticallyRetry() async throws {
         for platform in MusicNativePublicBrowseFiveFixture.platforms {
-            let peer = MusicNativePublicBrowseFivePeer(platform), store = NativeMusicMemoryDocument()
+            let peer = MusicNativePublicBrowseFivePeer(platform), store = NativeMusicTestLibrary()
             let service = try await NativeMusicFixture.service(store, platform: peer)
             let old = try await MusicAccountQueueFixture.seed(service)
             let first = try await service.publicDetail(MusicNativePublicBrowseFiveFixture.collection(platform), cursor: nil)
@@ -122,7 +122,7 @@ final class MusicNativePublicBrowseFivePlatformQueueTests: XCTestCase {
 
     func testProtectionRevokesOpenedNewPlatformSourceSynchronouslyBeforeCAS() async throws {
         for platform in MusicNativePublicBrowseFiveFixture.platforms {
-            let peer = MusicNativePublicBrowseFivePeer(platform), store = NativeMusicMemoryDocument()
+            let peer = MusicNativePublicBrowseFivePeer(platform), store = NativeMusicTestLibrary()
             let service = try await NativeMusicFixture.service(store, platform: peer)
             let detail = try await service.publicDetail(MusicNativePublicBrowseFiveFixture.collection(platform), cursor: nil)
             let source = try await service.openPublicQueue(.init(collection: detail.collection))

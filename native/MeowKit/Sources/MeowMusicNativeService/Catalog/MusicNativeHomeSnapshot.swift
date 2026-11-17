@@ -44,13 +44,11 @@ public final class MusicNativeHomeSnapshotDocument: MusicHomeSnapshotStoring, @u
 enum MusicNativeHomeSnapshot {
     static let maximumBytes = 8 * 1024 * 1024
 
-    static func references(_ page: MusicNativePublicBrowseDiscovery, songs: MJ) throws -> MusicNativePublicBrowseDiscovery {
-        let owners = Dictionary(songs.fields.flatMap { id, song in
-            song["sources"].array.map { ($0["sourceKey"].string, id) }
-        }, uniquingKeysWith: { first, _ in first })
+    static func references(_ page: MusicNativePublicBrowseDiscovery, sourceOwner: (String) throws -> String?) throws -> MusicNativePublicBrowseDiscovery {
         func id(_ track: MusicNativeTrackData) throws -> String {
-            let key = try MusicModel.normalize(track)["sources"].array[0]["sourceKey"].string
-            guard let id = owners[key] else { throw MusicServiceError.notFound }
+            var info = try MJ.parse(track.data); info["source"] = .string(track.platform)
+            let key = try MusicModel.sourceKey(info)
+            guard let id = try sourceOwner(key) else { throw MusicServiceError.notFound }
             return id
         }
         func items(_ rows: [MusicNativePublicBrowseItem]) throws -> [MusicNativePublicBrowseItem] {
@@ -74,7 +72,7 @@ enum MusicNativeHomeSnapshot {
         var result = page
         result.sections = try page.sections.map { row in
             var section = row
-            section.items = try items(row.items)
+            section.items = row.tabs.isEmpty ? try items(row.items) : []
             section.tabs = try row.tabs.map { .init(id: $0.id, title: $0.title, items: try items($0.items)) }
             return section
         }

@@ -19,7 +19,7 @@ public static class MusicOfficialSelectionTests
         yield return new("Official selection uses the fixed recording basis including non-official mappings", async () =>
         {
             await using var store = new MemoryStore();
-            await using var library = new MusicLibraryOwner(store);
+            await using var library = new MusicLibraryOwner(MusicTestStores.For(store));
             JsonObject Track(string platform, string id, double duration) =>
                 MusicSongFixture.Online(platform, id, "Pairwise", "Artist", duration: duration);
             var song = Track("wy", "root", 103);
@@ -88,7 +88,7 @@ public static class MusicOfficialSelectionTests
         yield return new("Official selection recordings reject other editions and duration conflicts", async () =>
         {
             await using var store = new MemoryStore();
-            await using var library = new MusicLibraryOwner(store);
+            await using var library = new MusicLibraryOwner(MusicTestStores.For(store));
             var song = await MusicSongFixture.AdoptAsync(library, SongObject("wy", "1"));
             var merged = Merged(song, SongObject("tx", "FixtureMID"), SongObject("tx", "Live", title: "Same Song (Live)"),
                 SongObject("tx", "Long", duration: 160), SongObject("tx", "Unknown", duration: 0));
@@ -128,7 +128,7 @@ public static class MusicOfficialSelectionTests
         yield return new("Official selection remembers compatible confirmed source before primary but not foreign history", async () =>
         {
             await using var store = new MemoryStore();
-            await using var library = new MusicLibraryOwner(store);
+            await using var library = new MusicLibraryOwner(MusicTestStores.For(store));
             var song = await MusicSongFixture.AdoptAsync(library, SongObject("wy", "1")); var other = SongObject("tx", "FixtureMID");
             var row = other["sources"]![0]!.AsObject();
             var history = new JsonObject { ["platform"] = "tx", ["sourceKey"] = row["sourceKey"]!.DeepClone(),
@@ -143,18 +143,18 @@ public static class MusicOfficialSelectionTests
             await using var scene = await Scene.CreateAsync();
             await scene.Login();
             var policy = await scene.Ok("music.quality.settings.get");
-            int calls = scene.Handler.Calls, writes = scene.Store.Writes;
+            int calls = scene.Handler.Calls, writes = (scene.Store.Writes + MusicTestStores.For(scene.Store).Writes);
             var input = SongObject("wy", "1");
             var local = await scene.Candidates(input, policy, false);
             Check(local.GetProperty("candidates").GetArrayLength() == 0 && scene.Handler.Calls == calls &&
-                scene.Store.Writes > writes);
+                (scene.Store.Writes + MusicTestStores.For(scene.Store).Writes) > writes);
             string identity = local.GetProperty("song").GetProperty("songId").GetString()!;
             Check(Guid.TryParse(identity, out _));
             var discovered = await scene.Candidates(input, policy, true);
             Check(discovered.GetProperty("candidates").GetArrayLength() == 1 &&
                 discovered.GetProperty("candidates")[0].GetProperty("platform").GetString() == "tx");
             Check(discovered.GetProperty("song").GetProperty("songId").GetString() == identity);
-            Check(scene.Handler.Searches == 1 && scene.ScriptCalls == 0 && scene.Store.Writes > writes);
+            Check(scene.Handler.Searches == 1 && scene.ScriptCalls == 0 && (scene.Store.Writes + MusicTestStores.For(scene.Store).Writes) > writes);
         });
         yield return new("Disabled official QQ is excluded from discovery and rejects every audio and cache entry without HTTP", async () =>
         {
@@ -171,14 +171,14 @@ public static class MusicOfficialSelectionTests
                 new { ifRevision = 0, enabled = new[] { "wy", "kg" } });
             Check(!scene.App.IsOfficialPlaybackCurrent("tx", scope, generation));
             var policy = await scene.Ok("music.quality.settings.get");
-            int calls = scene.Handler.Calls, writes = scene.Store.Writes, vkeys = scene.Handler.Vkeys;
+            int calls = scene.Handler.Calls, writes = (scene.Store.Writes + MusicTestStores.For(scene.Store).Writes), vkeys = scene.Handler.Vkeys;
             byte[] cached = scene.CacheBacking.Data[MusicSourceCache.Namespace].ToArray();
             var candidates = await scene.Candidates(song, policy, true);
             Check(candidates.GetProperty("candidates").GetArrayLength() == 0 && scene.Handler.Searches == 0);
             foreach (string method in new[] { "resolve", "cacheContext", "confirm" })
                 Code(await scene.App.ExecuteAsync("music.official." + method, input), "OFFICIAL_SOURCE_DISABLED");
             await scene.CacheStore.DrainAsync();
-            Check(scene.Handler.Calls == calls && scene.Handler.Vkeys == vkeys && scene.Store.Writes == writes);
+            Check(scene.Handler.Calls == calls && scene.Handler.Vkeys == vkeys && (scene.Store.Writes + MusicTestStores.For(scene.Store).Writes) == writes);
             Check(scene.CacheBacking.Data[MusicSourceCache.Namespace].SequenceEqual(cached),
                 "disabled cache entry points cannot create candidates, authorization or confirmation");
             await scene.Ok("music.officialSources.settings.save",
@@ -262,10 +262,10 @@ public static class MusicOfficialSelectionTests
             var input = new { platform = "tx", song, quality = "320k" };
             var context = await scene.Ok("music.official.cacheContext", input);
             var policy = await scene.Ok("music.quality.settings.get");
-            scene.Store.WriteReceipt = new DocumentFingerprint(true, 1, new string('0', 64));
+            MusicTestStores.For(scene.Store).WriteReceipt = new MusicLibraryRevision(1, Guid.NewGuid().ToString("D"));
             Code(await scene.App.ExecuteAsync("music.officialSources.settings.save",
                 new { ifRevision = 0, enabled = new[] { "wy", "kg" } }), "COMMIT_UNKNOWN");
-            int calls = scene.Handler.Calls, writes = scene.Store.Writes;
+            int calls = scene.Handler.Calls, writes = MusicTestStores.For(scene.Store).Writes;
             Check(!scene.App.IsOfficialPlaybackCurrent("tx", context.GetProperty("scope").GetString()!,
                 context.GetProperty("generation").GetInt64()));
             Code(await scene.App.ExecuteAsync("music.official.candidates", new {
@@ -273,15 +273,15 @@ public static class MusicOfficialSelectionTests
             }), "PENDING_WRITE");
             foreach (string method in new[] { "resolve", "cacheContext", "confirm" })
                 Code(await scene.App.ExecuteAsync("music.official." + method, input), "PENDING_WRITE");
-            Check(scene.Handler.Calls == calls && scene.Store.Writes == writes,
+            Check(scene.Handler.Calls == calls && MusicTestStores.For(scene.Store).Writes == writes,
                 "native readers must neither reconcile nor replay an unknown settings write");
-            scene.Store.WriteReceipt = null;
+            MusicTestStores.For(scene.Store).WriteReceipt = null;
             var settings = (await scene.Ok("music.officialSources.settings.get")).GetProperty("settings");
             Check(settings.GetProperty("revision").GetInt64() == 1 &&
                 settings.GetProperty("enabled").EnumerateArray().All(value => value.GetString() != "tx"));
             foreach (string method in new[] { "resolve", "cacheContext", "confirm" })
                 Code(await scene.App.ExecuteAsync("music.official." + method, input), "OFFICIAL_SOURCE_DISABLED");
-            Check(scene.Handler.Calls == calls && scene.Store.Writes == writes && scene.ScriptCalls == 0);
+            Check(scene.Handler.Calls == calls && MusicTestStores.For(scene.Store).Writes == writes && scene.ScriptCalls == 0);
         });
         yield return new("Official candidate lookup treats damaged cache as absent without network fallback", async () =>
         {
@@ -292,14 +292,14 @@ public static class MusicOfficialSelectionTests
             scene.CacheStore.Save(MusicSourceCache.Namespace, incompatible);
             await scene.CacheStore.DrainAsync();
             var song = await MusicSongFixture.AdoptAsync(scene.App, SongObject("wy", "1"));
-            int calls = scene.Handler.Calls, writes = scene.Store.Writes;
+            int calls = scene.Handler.Calls, writes = (scene.Store.Writes + MusicTestStores.For(scene.Store).Writes);
             var result = await scene.App.ExecuteAsync("music.official.candidates", new {
                 song, quality = "320k",
                 qualityPolicySignature = policy.GetProperty("signature").GetString()
             });
             Check(result.GetProperty("ok").GetBoolean());
             await scene.CacheStore.DrainAsync();
-            Check(scene.Handler.Calls == calls && scene.Store.Writes == writes &&
+            Check(scene.Handler.Calls == calls && (scene.Store.Writes + MusicTestStores.For(scene.Store).Writes) == writes &&
                 scene.CacheBacking.Data[MusicSourceCache.Namespace].SequenceEqual(incompatible));
         });
         yield return new("Shared supplementary matching isolates each requested platform account frame", async () =>
@@ -493,7 +493,7 @@ public static class MusicOfficialSelectionTests
             Runtime.OnOtherCall = (call, _) => call.Method == "music.script.sources.list"
                 ? Task.FromResult(MusicPlatformRuntimeFixture.Json(new { ok = true, contract = "music.script.v3", value = new { items = Array.Empty<object>() } }))
                 : throw new InvalidOperationException(call.Method);
-            App = new(Store, Runtime, CacheStore);
+            App = new(Store, MusicTestStores.For(Store), Runtime, CacheStore);
         }
         internal static Task<Scene> CreateAsync(MemoryStore? store = null, MemoryStore? cacheBacking = null)
         {

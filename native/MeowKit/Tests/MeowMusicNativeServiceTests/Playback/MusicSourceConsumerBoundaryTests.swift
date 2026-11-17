@@ -281,7 +281,7 @@ private struct ConsumerBoundaryEmptyCache: MusicAudioFileCaching {
     func testBusyOfficialCacheScopeDoesNotPreventScriptSelection() async throws {
         let clock = MusicRecoveryTestClock(), scripts = ConsumerBoundaryScripts(clock), accounts = ConsumerBoundaryAccounts(clock)
         await accounts.failScope(.busy); await accounts.fail(.busy)
-        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song()),
+        let service = NativeMusicService(database: try MusicNativeCandidateDiscoveryFixture.store(song: song()),
             scripts: scripts, accounts: accounts, platformClient: try NativeMusicFixture.client(), audioFileCache: ConsumerBoundaryEmptyCache(),
             clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)

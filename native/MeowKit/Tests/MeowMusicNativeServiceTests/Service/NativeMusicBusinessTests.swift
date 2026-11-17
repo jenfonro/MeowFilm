@@ -5,7 +5,7 @@ import MeowStorage
 
 final class NativeMusicBusinessTests: XCTestCase {
     func testOfficialAvailabilityConsumesDeclaredQualitiesWithoutAnotherPlatformSchema() async throws {
-        let account = NativeMusicAccountFixture(), store = NativeMusicMemoryDocument()
+        let account = NativeMusicAccountFixture(), store = NativeMusicTestLibrary()
         let qualities = ["128k", "192k", "320k", "flac", "flac24bit", "master",
                          "jyeffect", "dolby", "sky", "vivid", "current-upstream-quality", "128k"]
         await account.configureQualities(qualities)
@@ -91,8 +91,8 @@ final class NativeMusicBusinessTests: XCTestCase {
             func count() -> Int { lock.lock(); defer { lock.unlock() }; return value }
         }
         let counter = Counter()
-        let document = MusicNativeLibraryDocument(storeFactory: { counter.hit(); throw MusicServiceError.accessUnavailable })
-        let service = NativeMusicService(document: document, platformClient: try NativeMusicFixture.client())
+        let document = MusicNativeLibraryDatabase(urlFactory: { counter.hit(); throw MusicServiceError.accessUnavailable })
+        let service = NativeMusicService(database: document, platformClient: try NativeMusicFixture.client())
         XCTAssertEqual(counter.count(), 0)
         do { _ = try await service.state(); XCTFail("locked") } catch { XCTAssertEqual(error as? MusicServiceError, .accessUnavailable) }
         XCTAssertEqual(counter.count(), 0)
@@ -104,7 +104,7 @@ final class NativeMusicBusinessTests: XCTestCase {
         XCTAssertEqual(counter.count(), 2)
     }
     func testNativeCompleteLocalChainAndColdQueueRestoration() async throws {
-        let store = NativeMusicMemoryDocument(), scripts = NativeMusicScriptFixture()
+        let store = NativeMusicTestLibrary(), scripts = NativeMusicScriptFixture()
         let service = try await NativeMusicFixture.service(store, scripts: scripts)
         let page = try await service.search(platform: "tx", query: "SyntheticMID", page: 1, limit: 30)
         let created = try await service.createPlaylist(name: "Synthetic playlist", refs: page.items.map(\.ref))
@@ -126,7 +126,6 @@ final class NativeMusicBusinessTests: XCTestCase {
         XCTAssertTrue(accepted)
         let played = try await service.playedSongs(); XCTAssertEqual(played.count, 1)
         let saved = try MJ.parse(XCTUnwrap(store.snapshot().0))
-        XCTAssertEqual(saved["version"].int, 1)
         XCTAssertFalse(saved.json.contains("media.invalid"))
         XCTAssertFalse(saved.json.contains("Cookie"))
         XCTAssertEqual(state.total, 2)
@@ -138,7 +137,7 @@ final class NativeMusicBusinessTests: XCTestCase {
         let restoredPlayed = try await restored.playedSongs(); XCTAssertEqual(restoredPlayed.count, 1)
     }
     func testWriteFailureDoesNotPublishPlayedOrDestroyCurrentAttempt() async throws {
-        let store = NativeMusicMemoryDocument(), scripts = NativeMusicScriptFixture()
+        let store = NativeMusicTestLibrary(), scripts = NativeMusicScriptFixture()
         let service = try await NativeMusicFixture.service(store, scripts: scripts)
         let page = try await service.search(platform: "tx", query: "A", page: 1, limit: 30)
         let state = try await service.changeQueue(.replace([page.items[0].ref], index: 0), expectedRevision: 0)
@@ -156,7 +155,7 @@ final class NativeMusicBusinessTests: XCTestCase {
         let played = try await service.playedSongs(); XCTAssertEqual(played.count, 1)
     }
     func testLockRejectsLateSearchAndKeepsPermanentReference() async throws {
-        let store = NativeMusicMemoryDocument(), qq = NativeMusicPlatformFixture(), gate = NativeMusicGate()
+        let store = NativeMusicTestLibrary(), qq = NativeMusicPlatformFixture(), gate = NativeMusicGate()
         let service = try await NativeMusicFixture.service(store, platform: qq)
         let old = try await service.search(platform: "tx", query: "Old", page: 1, limit: 30)
         let before = store.snapshot().0
@@ -176,7 +175,7 @@ final class NativeMusicBusinessTests: XCTestCase {
         await service.close()
     }
     func testSynchronousProtectionFenceRejectsQueuedOldGrantWithoutReadingStorage() async throws {
-        let store = NativeMusicMemoryDocument()
+        let store = NativeMusicTestLibrary()
         let service = try await NativeMusicFixture.service(store)
         service.revokeAccess(generation: 2)
         do { _ = try await service.state(); XCTFail("revoked before async access ACK") }
@@ -202,7 +201,7 @@ final class NativeMusicBusinessTests: XCTestCase {
         await service.close()
     }
     func testExplicitCancelRejectsNoncooperativeResolverWithoutPlaybackFacts() async throws {
-        let scripts = NativeMusicScriptFixture(), gate = NativeMusicGate(), store = NativeMusicMemoryDocument()
+        let scripts = NativeMusicScriptFixture(), gate = NativeMusicGate(), store = NativeMusicTestLibrary()
         let service = try await NativeMusicFixture.service(store, scripts: scripts)
         let page = try await service.search(platform: "tx", query: "A", page: 1, limit: 30)
         let state = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)

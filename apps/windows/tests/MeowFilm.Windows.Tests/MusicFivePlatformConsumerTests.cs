@@ -76,7 +76,7 @@ public static partial class MusicUiTests
         private PublicSearchScene()
         {
             Runtime.Platform.OnRequest = Http.Read;
-            App = new(store, Runtime);
+            App = new(store, MusicTestStores.For(store), Runtime);
             App.SearchChanged += snapshot =>
             {
                 if (snapshot.GetProperty("kind").GetString() == "songs")

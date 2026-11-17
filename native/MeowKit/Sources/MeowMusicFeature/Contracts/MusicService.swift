@@ -512,6 +512,13 @@ public struct MusicPlayedPlaylist: Codable, Sendable, Identifiable {
     public let at: Double
     public init(id: String, title: String, count: Int, at: Double) { self.id = id; self.title = title; self.count = count; self.at = at }
 }
+/// Saved membership and conditional reference deltas; never a metadata replacement.
+public protocol MusicCollectionMembershipServing: Sendable {
+    func collectionReferences(in collection: MusicCollection) async throws -> [MusicReference]
+    func changeCollectionMembership(_ collection: MusicCollection, adding: [MusicReference],
+                                    removing: [MusicReference]) async throws -> MusicCollection
+}
+
 /// A single injected business port. No runtime connection, storage authority,
 /// player, credential lookup or periodic polling is created by this protocol.
 public protocol MusicServing: MusicSourceAvailabilityProviding, MusicMetadataPreferencesServing {

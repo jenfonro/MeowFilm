@@ -70,6 +70,33 @@ The new runtime implementation remains application source under GPL-3.0-only.
   the application uses an installed compatible Runtime and does not bundle or
   silently install that browser runtime.
 
+## Microsoft.Data.Sqlite — MIT
+
+- NuGet packages: `Microsoft.Data.Sqlite` and `Microsoft.Data.Sqlite.Core`
+  `10.0.15`, locked in the Windows capability project and affected consumer locks.
+- Copyright (c) .NET Foundation and Contributors. The upstream MIT text is
+  identical to the existing `dotnet-runtime-MIT.txt`, which is reused.
+- Source: `https://github.com/dotnet/dotnet`, package repository commit
+  `8e0f8ed2312954727f8919d7d1c2f78b483b4ee7`.
+- Used as the Windows native music repository's ADO.NET SQLite provider;
+  no ORM or system SQLite installation is included.
+
+## SQLitePCLRaw / SQLite — Apache-2.0 / public domain
+
+- NuGet packages: `SQLitePCLRaw.bundle_e_sqlite3`, `SQLitePCLRaw.core`,
+  `SQLitePCLRaw.provider.e_sqlite3` and `SQLitePCLRaw.lib.e_sqlite3` `2.1.13`.
+- Copyright 2014-2024 SourceGear, LLC. Package license: `Apache-2.0.txt`.
+  Source: `https://github.com/ericsink/SQLitePCL.raw`.
+- The Windows `win-x64` publish uses the package's
+  `runtimes/win-x64/native/e_sqlite3.dll`; other platform assets are not
+  application runtime dependencies.
+- The SQLite engine source is public domain. Its upstream license information
+  is preserved in `sqlite-LICENSE.md`, from
+  `https://github.com/sqlite/sqlite/blob/version-3.53.3/LICENSE.md`.
+  SQLite's build-only third-party configuration scripts are not distributed.
+- iOS uses the operating system's sqlite3 through the SwiftPM `CSQLite`
+  system-library module; it does not bundle SQLitePCLRaw or another SQLite binary.
+
 ## iWebPlus / iWebPlayer — Apache-2.0
 
 - Source: `songloft-plugin-iwebplus` `b900c259d991a73768cc36a28b48539b31961668`.
@@ -302,10 +329,6 @@ contract, after consulting `jenfonro/meowfilm-server` snapshot
   the existing `catpawrunner-MIT.txt` attribution applies to those adapted portions.
   The snapshot above identifies the reference aggregation repository, not an
   independently verified CatPawRunner upstream commit.
-- The consulted `panUc.js` attributes its TV configuration to OpenList
-  `drivers/quark_uc_tv`; that secondary source revision and license chain were not
-  verified here. No OpenList library or source file is bundled, and this notice
-  does not relabel that reference as MIT.
 - Provider endpoint paths, client/device constants, request/response fields, QR
   authentication sequences, necessary selected-file transfers and playback mappings
   follow those references. Mobile AES-CBC framing, the MD5 request-signing formula
@@ -334,13 +357,8 @@ This records the actual protocol references, not a completed redistribution audi
 The pan runtime adds no npm or native dependency and does not alter the licensing
 of existing components.
 
-Quark TV and UC TV token refresh intentionally uses the reference third-party
-`http://api.extscreen.com/{quarkdrive,ucdrive}/token` service. Long-lived credentials
-are sent to that service over cleartext HTTP; the official file APIs use HTTPS.
-This is an explicitly selected interoperability path, not an endorsement of the
-third party or a claim of secure credential transport. Local account files are
-also intentionally plaintext. See `docs/runtime/pan-runtime.md` for the complete
-operational and verification boundaries.
+Local account files are intentionally plaintext. See `docs/runtime/pan-runtime.md`
+for the complete operational and verification boundaries.
 
 ## Node.js
 
@@ -809,6 +827,53 @@ BSD-style notice, and the additional 2011–2016 notice from `src/misc.c`.
 The native build receipt records the actual static archive identities; the
 upstream attribution alone does not establish absence of toolchain patches.
 These Windows support libraries are not included in the iOS kernel.
+
+## AetherEngine — Apple video kernel
+
+`native/AetherKernel` prepares AetherEngine 7.68.0 at
+[`0de31d0b9478b99dd49baa2bd8318604a49f99a3`](https://github.com/superuser404notfound/AetherEngine/tree/0de31d0b9478b99dd49baa2bd8318604a49f99a3),
+archive SHA-256 `ed70939a9af2e55959998f8f245d2780075ab17446f8bc67b2a5c3c81fab070e`.
+Copyright (C) 2026 Vincent Herbst. LGPL version 3 with the upstream App Store /
+DRM additional permission. `AetherEngine-EXCEPTION.txt` preserves that permission;
+the existing `LGPL-3.0-only.txt` and incorporated `GPL-3.0-only.txt` supply the
+license bodies without a second copy. The permission does not waive source
+obligations or grant an exception for dependencies owned by other authors.
+Reviewed local source changes are recorded in `scripts/ios-aether-kernel.json`.
+The `runtime-host.patch` keeps application lifecycle, audio activation and
+system media commands with the host, forwards explicit native PiP transport
+intent, waits for real reader/output teardown, and disables upstream diagnostic
+delivery. It does not add DASH template/list support or encrypted-media decoding.
+
+The pinned FFmpegBuild 3.15.0 package is
+[`d445e6daa180db73f12d47606a00c914f682e278`](https://github.com/superuser404notfound/FFmpegBuild/tree/d445e6daa180db73f12d47606a00c914f682e278),
+archive SHA-256 `a5a2a03e39d938fa900789c65ab4c1c2b8f3001d0bc82c557cbb74455df2eec1`.
+Its build record identifies FFmpeg 8.1.3
+`1041abdc962f4cc4f394aa8de9dc5236c0c3b9e7` with published local patches,
+dav1d 1.5.4 `54706fc6bc0cdecab7e9593974a4039cc038fca7`, zimg 3.0.6
+`f819b14e8f39d1282400b0d9543e8ef73c1b2bbd`, and libzvbi 0.2.46
+`34bb6f660c5c1bacd4a66cc7b22311e4ca3c1ab5` with its published LGPL stub
+adaptation. Nine dynamic AetherLib frameworks are consumed, not the KSPlayer
+FFmpeg build. Prefixes alone do not isolate C symbols: Aether source and its
+FFmpeg references stay in the dynamic `MeowAetherKernel` wrapper. App linkage
+checks must verify the actual imported symbol libraries and binary closure.
+
+LibDovi 2.2.0 is
+[`caff700968700467c089a3f38c8b4180620518b5`](https://github.com/superuser404notfound/LibDovi/tree/caff700968700467c089a3f38c8b4180620518b5),
+archive SHA-256 `84af1b63a2af380bab3390e584cb4a44dfcc93b3d17b91478c1171a049033901`.
+Its record identifies dolby_vision/libdovi 3.4.0 from dovi_tool
+`d1abe0e27ff2c7ab3339614d06db9f8a058af6b2`; the MIT alternative is selected.
+It is static only inside the wrapper. SMB, LibTrueHD and optional FEL/object
+audio traits are not enabled by this package.
+
+`Aether-THIRD-PARTY-NOTICES.txt`, `Aether-libzvbi-ure-MIT.txt` and
+`WTFPL-2.0.txt` preserve the additional notices, while reusing the existing
+GNU/MIT/BSD bodies in `LGPL-2.1-only.txt`, `libxml2-MIT.txt` and the dav1d section
+of `FilmKernel-THIRD-PARTY-NOTICES.txt`. The iOS resource list includes those
+shared texts; their reuse does not add Windows or system libxml2 binaries.
+The upstream framework metadata correction, precise inputs and accepted
+device/simulator/macOS slices are documented in `native/AetherKernel/README.md`.
+Prepared binaries and metadata checks are not a reproduced source build,
+verified playback result or a declaration of redistribution compliance.
 
 ## Windows film playback kernel — independent KSPlayer-derived native implementation
 

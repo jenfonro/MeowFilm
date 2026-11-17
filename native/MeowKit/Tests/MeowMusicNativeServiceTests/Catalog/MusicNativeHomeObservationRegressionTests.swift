@@ -132,7 +132,7 @@ private actor HomeObservationAccount: MusicNativeAccountProviding, MusicNativeHo
         let owner = NativeMusicAccountService(accounts: accounts, scopes: [.netease: identity],
             platformClient: client, clock: { NativeMusicFixture.date })
         _ = try await owner.setAccess(available: true, generation: 1)
-        let value = NativeMusicService(document: NativeMusicMemoryDocument(),
+        let value = NativeMusicService(database: NativeMusicTestLibrary(),
             accounts: owner,
             platformClient: client,
             clock: { NativeMusicFixture.date })
@@ -175,8 +175,8 @@ private actor HomeObservationAccount: MusicNativeAccountProviding, MusicNativeHo
     }
 
     private func service(_ account: HomeObservationAccount, _ store: HomeObservationStore,
-                         document: NativeMusicMemoryDocument = .init()) async throws -> NativeMusicService {
-        let service = NativeMusicService(document: document,
+                         document: NativeMusicTestLibrary = .init()) async throws -> NativeMusicService {
+        let service = NativeMusicService(database: document,
             accounts: account,
             platformClient: try NativeMusicPlatformFixture().makeClient(),
             homeSnapshot: store,
@@ -185,7 +185,7 @@ private actor HomeObservationAccount: MusicNativeAccountProviding, MusicNativeHo
         return service
     }
     func testInitialReplayPreservesRestoredPageThroughOfflineRefresh() async throws {
-        let account = HomeObservationAccount(), store = HomeObservationStore(), document = NativeMusicMemoryDocument()
+        let account = HomeObservationAccount(), store = HomeObservationStore(), document = NativeMusicTestLibrary()
         let first = try await service(account, store, document: document)
         _ = try await first.homePage(cursor: nil, refresh: true)
         let saved = try XCTUnwrap(store.read())

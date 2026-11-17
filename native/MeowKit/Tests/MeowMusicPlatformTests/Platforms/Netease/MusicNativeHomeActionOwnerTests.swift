@@ -1,8 +1,8 @@
 import XCTest
 import Foundation
+import MeowRuntime
 import MeowAccounts
 import MeowMusicFeature
-import MeowJSON
 @testable import MeowMusicPlatform
 
 @MainActor final class MusicNativeHomeActionOwnerTests: XCTestCase {
@@ -20,12 +20,12 @@ import MeowJSON
         XCTAssertTrue(first.items.allSatisfy { $0.platform == "wy" })
         let fresh = try await f.owner.homeActionPage(lease, action: fm, cursor: nil)
         XCTAssertNotEqual(fresh.items.first?.data, first.items.first?.data)
-        let originalRows = try first.items.map { try JSONDecoder().decode(JSONValue.self, from: $0.data) }
-        let freshRows = try fresh.items.map { try JSONDecoder().decode(JSONValue.self, from: $0.data) }
+        let originalRows = try first.items.map { try RuntimeJSON.decode($0.data) }
+        let freshRows = try fresh.items.map { try RuntimeJSON.decode($0.data) }
         XCTAssertNotEqual(freshRows, originalRows, "A new FM batch must change content, not only JSON key order")
         let replay = try await f.owner.homeActionPage(lease, action: fm, cursor: XCTUnwrap(first.cursor))
-        let savedRows = try second.items.map { try JSONDecoder().decode(JSONValue.self, from: $0.data) }
-        let replayedRows = try replay.items.map { try JSONDecoder().decode(JSONValue.self, from: $0.data) }
+        let savedRows = try second.items.map { try RuntimeJSON.decode($0.data) }
+        let replayedRows = try replay.items.map { try RuntimeJSON.decode($0.data) }
         XCTAssertEqual(replayedRows, savedRows, "Old cursor must retain every field and row in the original snapshot")
         XCTAssertEqual(replay.items.map(\.data), second.items.map(\.data))
         XCTAssertEqual(replay.cursor, second.cursor)
@@ -231,7 +231,7 @@ private actor MusicHomeActionOwnerProvider: MusicAccountProvider, MusicAccountHo
         verifies += 1; return try await account.verify(credential)
     }
     func refresh(_ credential: AccountCredential) async throws -> MusicAccountVerified { try await account.refresh(credential) }
-    private func rows(batch: Int) -> [JSONValue] {
+    private func rows(batch: Int) -> [RuntimeValue] {
         (0..<65).map { i in .object([
             "songmid": .string(String(batch * 1000 + i + 1)),
             "name": .string(nameLength > 0 ? String(repeating: "x", count: nameLength) : "Synthetic \(batch) \(i)"),
@@ -259,10 +259,10 @@ private actor MusicHomeActionOwnerProvider: MusicAccountProvider, MusicAccountHo
     func pollQR(id: UUID) throws -> MusicAccountLoginResult { throw MusicServiceError.unsupported }
     func cancelQR(_ id: UUID) {}
     func revoke() {}
-    func collectionRows() throws -> [JSONValue] { throw MusicServiceError.unsupported }
-    func tracks(collectionID: String) throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func collectionRows() throws -> [RuntimeValue] { throw MusicServiceError.unsupported }
+    func tracks(collectionID: String) throws -> [RuntimeValue] { throw MusicServiceError.unsupported }
     func capabilities(mid: String) throws -> [String] { throw MusicServiceError.unsupported }
-    func resolve(mid: String, quality: String) throws -> JSONValue { throw MusicServiceError.unsupported }
+    func resolve(mid: String, quality: String) throws -> RuntimeValue { throw MusicServiceError.unsupported }
 }
 
 private struct MusicHomeActionOwnerFixture {

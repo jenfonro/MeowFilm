@@ -46,8 +46,8 @@ extension NativeMusicService: MusicHomeBrowsing {
             let revision = document.catalogSource["revision"].int
             try musicRequire(revision == ifRevision, .staleRevision)
             try musicRequire(revision < 9_007_199_254_740_991, .limit)
-            document.catalogSource = .obj([("schema", .n(1)), ("revision", .n(revision + 1)),
-                                           ("platform", .string(source.rawValue))])
+            document.catalogSource["revision"] = .n(revision + 1)
+            document.catalogSource["platform"] = .string(source.rawValue)
             return (platform: source, revision: revision + 1)
         }
         adoptHomeSource(saved)
@@ -57,7 +57,8 @@ extension NativeMusicService: MusicHomeBrowsing {
     /// never becomes a request against a default platform.
     func loadHomeSource() throws -> (platform: MusicPublicBrowsePlatform, revision: Int) {
         let value = try read().catalogSource
-        guard let platform = MusicPublicBrowsePlatform(rawValue: value["platform"].string) else {
+        guard value["schema"] == .n(1), value["revision"].isInteger,
+              let platform = MusicPublicBrowsePlatform(rawValue: value["platform"].string), Self.homeSources.contains(platform) else {
             throw MusicServiceError.corruptDocument
         }
         let result = (platform: platform, revision: value["revision"].int)
@@ -468,14 +469,12 @@ extension NativeMusicService: MusicHomeBrowsing {
             // the non-recursive access commit lock.
             let page = try finishHome(value, destination: .home, position: position, key: key,
                                       source: load.source, epoch: own, songs: songs)
+            if value.sections.contains(where: { $0.error != nil }) { return try access.perform { page } }
             current.nextCursor = page.cursor
             current.sections = cursor == nil ? value.sections : mergeHomeSections(current.sections, value.sections)
-            let repository = try read().library["library"]["songs"]
-            let display = try MusicNativeHomeSnapshot.references(.init(sections: current.sections), songs: repository)
-            let cachedDisplay = try MusicNativeHomeSnapshot.references(value, songs: repository)
+            let display = try MusicNativeHomeSnapshot.references(.init(sections: current.sections), sourceOwner: { try repositoryReader.sourceOwner(key: $0) })
+            let cachedDisplay = try MusicNativeHomeSnapshot.references(value, sourceOwner: { try repositoryReader.sourceOwner(key: $0) })
             return try access.perform {
-                // Section errors are failed reads, never a new empty snapshot.
-                guard value.sections.allSatisfy({ $0.error == nil }) else { return page }
                 homeLoad = current
                 // Reusing the real first-response cache is not a newer
                 // successful network batch; keep the display, but seed only

@@ -436,7 +436,7 @@ public static partial class MusicUiTests
             await using var store = new DocumentProbe();
             await using var runtime = new NativeMusicScriptTestRuntime();
             var output = new PlaybackProbe();
-            await using var module = new MusicCapability(runtime, store, output, new Dialogs());
+            await using var module = new MusicCapability(runtime, store, MusicTestStores.For(store), output, new Dialogs());
             Equal("0.4.0", module.Version);
             await module.InitializeAsync(default);
             await module.CreatePlaylistAsync("原生构造");
@@ -444,7 +444,7 @@ public static partial class MusicUiTests
             await module.ReadAccountsAsync(); Equal("none", module.Accounts[0].State);
             await module.ChangeModeAsync(2); await module.PrepareShutdownAsync();
             Equal(0, runtime.Calls.Count); True(!runtime.HasStarted, "ordinary business never starts the script runtime");
-            True((await store.ReadAsync(MusicLibraryOwner.DocumentNamespace)).Fingerprint.Exists, "native CAS persisted");
+            True((await MusicTestStores.For(store).ReadAsync("local")).Revision.Generation > 0, "native CAS persisted");
             Equal(0, runtime.DisposeCalls);
         });
         yield return Case("local playlist creation uses the sidebar action and an in-view modal", async () =>
@@ -770,16 +770,27 @@ public static partial class MusicUiTests
             Equal(100, f.Module.Songs.Count); Equal("210", f.Module.DetailCountText);
             await f.Module.LoadMoreCollectionAsync(); Equal(200, f.Module.Songs.Count);
             f.Module.SelectedSong = f.Module.Songs[12]; var selected = f.Module.SelectedSong.Id;
-            Render(f.Module.View, 640, 420);
-            await Drain(); // Let the successful navigation's initial restore complete first.
-            var scroll = Visuals((DataGrid)f.Module.View.FindName("SongsGrid")).OfType<ScrollViewer>().First();
-            scroll.ScrollToVerticalOffset(10); await Drain(); var offset = scroll.VerticalOffset; True(offset > 0, "real grid scroll");
-            await f.Module.NavigateAsync("favorites", default); await f.Module.NavigateAsync(route, default); await Drain();
-            Equal(100, f.Module.Songs.Count); Equal("210", f.Module.DetailCountText);
-            Equal(selected, f.Module.SelectedSong?.Id); Equal(offset, scroll.VerticalOffset);
-            await f.Module.SearchAsync("曲目", default); await f.Module.PageAsync(1); f.Module.SelectedSong = f.Module.Songs[4]; selected = f.Module.SelectedSong.Id;
-            await f.Module.NavigateAsync("favorites", default); await f.Module.SearchAsync("曲目", default);
-            Equal("101–200 / 210", f.Module.PageText); Equal(selected, f.Module.SelectedSong?.Id);
+            var view = f.Module.View;
+            var window = new Window
+            {
+                Content = view, Width = 640, Height = 420, Left = -10000, Top = -10000,
+                ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None
+            };
+            try
+            {
+                window.Show(); window.UpdateLayout();
+                await Until(() => view.IsLoaded && view.IsVisible);
+                await Drain(); // Let the loaded page's initial restore complete first.
+                var scroll = Visuals((DataGrid)view.FindName("SongsGrid")).OfType<ScrollViewer>().First();
+                scroll.ScrollToVerticalOffset(10); await Drain(); var offset = scroll.VerticalOffset; True(offset > 0, "real grid scroll");
+                await f.Module.NavigateAsync("favorites", default); await f.Module.NavigateAsync(route, default); await Drain();
+                Equal(100, f.Module.Songs.Count); Equal("210", f.Module.DetailCountText);
+                Equal(selected, f.Module.SelectedSong?.Id); Equal(offset, scroll.VerticalOffset);
+                await f.Module.SearchAsync("曲目", default); await f.Module.PageAsync(1); f.Module.SelectedSong = f.Module.Songs[4]; selected = f.Module.SelectedSong.Id;
+                await f.Module.NavigateAsync("favorites", default); await f.Module.SearchAsync("曲目", default);
+                Equal("101–200 / 210", f.Module.PageText); Equal(selected, f.Module.SelectedSong?.Id);
+            }
+            finally { window.Content = null; window.Close(); }
         });
         yield return Case("retired library refresh cannot erase new cards; internal navigation uses shell contract", async () =>
         {
@@ -1010,7 +1021,7 @@ public static partial class MusicUiTests
             Equal(1, f.Calls.Count("application.prepare")); True(token.IsCancellationRequested, "final disposal cancels lifetime");
             Equal(1, f.Calls.DisposeCalls); Equal(0, f.Runtime.DisposeCalls);
             Equal(3, await f.SavedMode());
-            True((await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace)).Fingerprint.Exists, "product still owns the store");
+            True((await MusicTestStores.For(f.Store).ReadAsync("local")).Revision.Generation > 0, "product still owns the store");
         });
         yield return Case("failed prepare preserves runtime/store and final disposal observes its cached failure", async () =>
         {
@@ -1020,7 +1031,7 @@ public static partial class MusicUiTests
             {
                 await f.Module.ChangeModeAsync(2);
                 var token = f.Calls.Log.Last(call => call.Method == "music.queue.mode").Token;
-                var before = (await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace)).Fingerprint;
+                var before = (await MusicTestStores.For(f.Store).ReadAsync("local")).Revision;
                 var preparation = f.Module.PrepareShutdownAsync();
                 await Failure(() => preparation, "STORAGE_UNAVAILABLE");
                 await Failure(() => f.Module.PrepareShutdownAsync(), "STORAGE_UNAVAILABLE");
@@ -1033,7 +1044,7 @@ public static partial class MusicUiTests
                 await f.Module.InitializeAsync(default); await f.Module.NavigateAsync("favorites", default); await f.Module.SearchAsync("ignored", default);
                 await f.Module.OpenPlayQueueAsync(); f.Playback.Start(); f.Playback.End();
                 Equal(count, f.Calls.Log.Count);
-                Equal(before, (await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace)).Fingerprint);
+                Equal(before, (await MusicTestStores.For(f.Store).ReadAsync("local")).Revision);
                 Equal(2, await f.SavedMode());
                 // The host may now offer explicit force-exit. Final cleanup must
                 // observe the same failed task and still release module resources.
@@ -1041,7 +1052,7 @@ public static partial class MusicUiTests
                 await Failure(() => f.Module.DisposeAsync().AsTask(), "STORAGE_UNAVAILABLE");
                 True(token.IsCancellationRequested, "failed finalization still cleans up lifetime");
                 Equal(1, f.Calls.Count("application.prepare")); Equal(1, f.Calls.DisposeCalls); Equal(0, f.Runtime.DisposeCalls);
-                Equal(before, (await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace)).Fingerprint);
+                Equal(before, (await MusicTestStores.For(f.Store).ReadAsync("local")).Revision);
                 Equal(2, await f.SavedMode());
             }
             finally { await Failure(() => f.DisposeAsync().AsTask(), "STORAGE_UNAVAILABLE"); }
@@ -1407,7 +1418,8 @@ public static partial class MusicUiTests
                 : new DocumentProbe();
             var cache = new CacheDocumentStore(cacheBacking);
             var runtime = new NativeMusicScriptTestRuntime(); MusicCapability? module = null;
-            var application = new MusicNativeApplication(store, runtime, cache);
+            if (persistent) MusicTestStores.Use(store, Path.Combine(root, "music-library"));
+            var application = new MusicNativeApplication(store, MusicTestStores.For(store), runtime, cache);
             try
             {
                 var calls = new ObservedApplication(application, feedback); var playback = new PlaybackProbe(); var dialogs = new Dialogs();
@@ -1436,18 +1448,9 @@ public static partial class MusicUiTests
             var result = await Application.ExecuteAsync(method, parameters ?? new { });
             True(result.GetProperty("ok").GetBoolean(), "fixture native command failed: " + method + ": " + result.GetRawText()); return result;
         }
-        public async Task<int> SavedMode()
-        {
-            var saved = await Store.ReadAsync(MusicLibraryOwner.DocumentNamespace);
-            using var document = JsonDocument.Parse(saved.Data!);
-            foreach (var entry in document.RootElement.GetProperty("entries").EnumerateArray())
-            {
-                using var key = JsonDocument.Parse(entry.GetProperty("key").GetString()!);
-                if (key.RootElement.EnumerateArray().Last().GetString() == "playback-settings")
-                    return entry.GetProperty("value").GetProperty("mode").GetInt32();
-            }
-            return 1;
-        }
+        public Task<int> SavedMode() => Task.FromResult(
+            MusicTestStores.For(Store).Snapshot().Areas.TryGetValue("playback-settings", out var state)
+                ? state!["mode"]!.GetValue<int>() : 1);
         public async Task<string> Collection(string name, int count)
         {
             var result = await Rpc("music.library.create", new { name, songs = Enumerable.Range(0, count).Select(i => Song("fixture:" + i, $"曲目{i:0000}")).ToArray() });
@@ -1471,7 +1474,7 @@ public static partial class MusicUiTests
         {
             Calls.ReleaseAll();
             try { await Module.DisposeAsync(); }
-            finally { try { await Cache.DisposeAsync(); await CacheBacking.DisposeAsync(); await Runtime.DisposeAsync(); } finally { await Store.DisposeAsync(); } }
+            finally { try { await Cache.DisposeAsync(); await CacheBacking.DisposeAsync(); await Runtime.DisposeAsync(); } finally { await MusicTestStores.For(Store).DisposeAsync(); await Store.DisposeAsync(); } }
         }
     }
     private sealed class DocumentProbe : IDocumentStore

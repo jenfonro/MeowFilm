@@ -57,3 +57,18 @@ extension NativeMusicService {
         access.revoke(generation: generation)
     }
 }
+
+/// The same access fence protects lazy row reads as control-state admission.
+/// It owns neither records nor indexes; all facts remain in the SQLite owner.
+final class MusicNativeLibraryAccessReader: MusicNativeLibraryReading, @unchecked Sendable {
+    let database: any MusicNativeLibraryReading
+    let access: MusicNativeAccess
+    init(database: any MusicNativeLibraryReading, access: MusicNativeAccess) { self.database = database; self.access = access }
+    func readSnapshot() throws -> MusicNativeLibrarySnapshot { try access.perform { try database.readSnapshot() } }
+    func songData(id: String) throws -> Data? { try access.perform { try database.songData(id: id) } }
+    func containsSong(id: String) throws -> Bool { try access.perform { try database.containsSong(id: id) } }
+    func sourceOwner(key: String) throws -> String? { try access.perform { try database.sourceOwner(key: key) } }
+    func candidateIDs(lookupKey: String) throws -> [String] { try access.perform { try database.candidateIDs(lookupKey: lookupKey) } }
+    func querySongIDs(query: String) throws -> [String] { try access.perform { try database.querySongIDs(query: query) } }
+    func allSongIDs() throws -> [String] { try access.perform { try database.allSongIDs() } }
+}

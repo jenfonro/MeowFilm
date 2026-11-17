@@ -33,6 +33,7 @@ arch="$(uname -m)"
 if [ "$phase" = test ]; then
   logged audio-kernel python3 -I -B scripts/prepare-ios-audio-kernel.py --target "macos-$arch" || exit 4
   logged video-kernel python3 -I -B scripts/prepare-ios-video-kernel.py --target "macos-$arch" || exit 4
+  logged aether-kernel python3 -I -B scripts/prepare-ios-aether-kernel.py --target "macos-$arch" || exit 4
   logged swift-test swift test --package-path native/MeowKit -j 2 --filter "$2" || status=4
   check_tests
   exit "$status"
@@ -43,6 +44,7 @@ settings=(-configuration Debug -sdk iphonesimulator -destination 'generic/platfo
 logged source-scope python3 -I -B scripts/check-source-scope.py || status=4
 logged audio-kernel python3 -I -B scripts/prepare-ios-audio-kernel.py --target "macos-$arch" --target "ios-simulator-$arch" || exit 4
 logged video-kernel python3 -I -B scripts/prepare-ios-video-kernel.py --target "macos-$arch" --target "ios-simulator-$arch" || exit 4
+logged aether-kernel python3 -I -B scripts/prepare-ios-aether-kernel.py --target "macos-$arch" --target "ios-simulator-$arch" || exit 4
 logged swift-build swift build --build-tests --package-path native/MeowKit -j 2 || status=4
 # The App targets cannot build against absent or stale runtime inputs.
 logged runtime-inputs python3 -I -B scripts/prepare-ios-runtime.py --sdk iphonesimulator --arch "$arch" || exit 4
@@ -53,7 +55,9 @@ app="$(xcodebuild -project apps/ios/Meowfilm.xcodeproj -scheme Meowfilm "${setti
     /^[[:space:]]+FULL_PRODUCT_NAME = /{name=$2}
     END {if (directory != "" && name != "") print directory "/" name}')"
 if [ -z "$app" ]; then status=4
-else logged simulator-signing python3 -I -B scripts/check-simulator-signing.py "$app" || status=4
+else
+  logged aether-linkage python3 -I -B scripts/prepare-ios-aether-kernel.py --target "ios-simulator-$arch" --verify-app "$app" || status=4
+  logged simulator-signing python3 -I -B scripts/check-simulator-signing.py "$app" || status=4
 fi
 [ "$status" -eq 0 ] || exit "$status"
 if [ "$phase" = all ]; then

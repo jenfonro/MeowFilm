@@ -49,12 +49,10 @@ public static class MusicOfficialSourcesPolicyTests
         {
             Ok(await owner.ExecuteAsync("music.officialSources.settings.save",
                 new { ifRevision = 0, enabled = new[] { "wy", "kg" } }));
-            var entry = JsonNode.Parse(store.Data!)!["entries"]!.AsArray().Single()!;
-            Equal("""["meowfilm","music",1,"local","native-official-sources"]""",
-                entry["key"]!.GetValue<string>());
-            Equal(1, entry["value"]!["schema"]!.GetValue<int>());
+            var entry = store.State("native-official-sources");
+            Equal(1, entry["schema"]!.GetValue<int>());
             await owner.AbortAsync();
-            await using (var reopened = new MusicLibraryOwner(store))
+            await using (var reopened = new MusicLibraryOwner(MusicTestStores.For(store)))
             {
                 var settings = Ok(await reopened.ExecuteAsync("music.officialSources.settings.get")).GetProperty("settings");
                 Enabled(settings, ["wy", "kg"]);
@@ -64,7 +62,7 @@ public static class MusicOfficialSourcesPolicyTests
                 Enabled(empty, []);
                 Equal(2L, empty.GetProperty("revision").GetInt64());
             }
-            await using var finalOwner = new MusicLibraryOwner(store);
+            await using var finalOwner = new MusicLibraryOwner(MusicTestStores.For(store));
             var final = Ok(await finalOwner.ExecuteAsync("music.officialSources.settings.get")).GetProperty("settings");
             Enabled(final, []);
             Equal(2L, final.GetProperty("revision").GetInt64());
@@ -89,17 +87,16 @@ public static class MusicOfficialSourcesPolicyTests
                 """{"ifRevision":"0","enabled":[]}""",
                 """{"ifRevision":-1,"enabled":[]}""",
                 """{"ifRevision":0.5,"enabled":[]}""",
-                """{"ifRevision":0,"enabled":[],"extra":true}"""
             })
                 Code(await owner.ExecuteAsync("music.officialSources.settings.save", JsonNode.Parse(input)), "INVALID_REQUEST");
             using var duplicate = JsonDocument.Parse("""{"ifRevision":0,"enabled":["wy"],"enabled":[]}""");
             Code(await owner.ExecuteAsync("music.officialSources.settings.save", duplicate.RootElement), "INVALID_REQUEST");
-            Code(await owner.ExecuteAsync("music.officialSources.settings.get", new { extra = true }), "INVALID_REQUEST");
+            Enabled(Ok(await owner.ExecuteAsync("music.officialSources.settings.get", new { extra = true })).GetProperty("settings"), Platforms);
             Equal(0, store.Writes);
             var unchanged = Ok(await owner.ExecuteAsync("music.officialSources.settings.get")).GetProperty("settings");
             Enabled(unchanged, Platforms);
             Equal(0L, unchanged.GetProperty("revision").GetInt64());
-            Ok(await owner.ExecuteAsync("music.officialSources.settings.save", new { ifRevision = 0, enabled = new[] { "wy" } }));
+            Ok(await owner.ExecuteAsync("music.officialSources.settings.save", new { ifRevision = 0, enabled = new[] { "wy" }, extra = true }));
             Code(await owner.ExecuteAsync("music.officialSources.settings.save",
                 new { ifRevision = 0, enabled = Platforms }), "REVISION_CONFLICT");
             Enabled(Ok(await owner.ExecuteAsync("music.officialSources.settings.get")).GetProperty("settings"), ["wy"]);
@@ -122,19 +119,47 @@ public static class MusicOfficialSourcesPolicyTests
                 """{"schema":1,"revision":1,"enabled":[false]}""",
                 """{"schema":1,"revision":1,"enabled":null}""",
                 """{"schema":1,"revision":1}""",
-                """{"schema":1,"revision":1,"enabled":[],"extra":true}"""
             })
             {
                 var document = JsonNode.Parse(original)!.AsObject();
-                document["entries"]!.AsArray().OfType<JsonObject>().Single()["value"] = JsonNode.Parse(value);
+                document["areas"]!["native-official-sources"] = JsonNode.Parse(value);
                 // Keep the outer document canonical, so the policy itself is what must fail.
                 store.Data = LJ.Bytes(document);
-                await using var reopened = new MusicLibraryOwner(store);
+                await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
                 Code(await reopened.ExecuteAsync("music.officialSources.settings.get"), "CORRUPT_STORAGE");
                 Code(await reopened.ExecuteAsync("music.officialSources.settings.save",
                     new { ifRevision = 1, enabled = Platforms }), "CORRUPT_STORAGE");
                 Equal(1, store.Writes);
             }
+        });
+        yield return Case("durable policy extensions survive edits", async (owner, store) =>
+        {
+            Ok(await owner.ExecuteAsync("music.officialSources.settings.save", new { ifRevision = 0, enabled = new[] { "wy" } }));
+            await owner.AbortAsync();
+            var document = JsonNode.Parse(store.Data!)!.AsObject();
+            document["areas"]!["native-official-sources"]!["extra"] = true;
+            store.Data = LJ.Bytes(document);
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+            Enabled(Ok(await reopened.ExecuteAsync("music.officialSources.settings.get")).GetProperty("settings"), ["wy"]);
+            Ok(await reopened.ExecuteAsync("music.officialSources.settings.save", new { ifRevision = 1, enabled = Platforms }));
+            Equal(true, store.State("native-official-sources")["extra"]!.GetValue<bool>());
+        });
+        yield return Case("reconciliation preserves unchanged active source authority and revokes unusable policy", async (owner, store) =>
+        {
+            Ok(await owner.ExecuteAsync("music.officialSources.settings.save", new { ifRevision = 0, enabled = Platforms }));
+            using var lease = await owner.AcquireOfficialSourcesAsync(default);
+            var document = JsonNode.Parse(store.Data!)!.AsObject();
+            document["areas"]!["future-area"] = new JsonObject { ["extra"] = true };
+            store.Data = LJ.Bytes(document);
+            await owner.ReconcileAsync();
+            Equal(false, lease.Token.IsCancellationRequested);
+            lease.Check("wy");
+            document["areas"]!["native-official-sources"] = null;
+            store.Data = LJ.Bytes(document);
+            await owner.ReconcileAsync();
+            Equal(true, lease.Token.IsCancellationRequested);
+            Code(await owner.ExecuteAsync("music.officialSources.settings.get"), "CORRUPT_STORAGE");
+            Equal(1, store.Writes);
         });
         yield return Case("unknown official source settings CAS reconciles on its authoritative current read", async (owner, store) =>
         {
@@ -174,7 +199,7 @@ public static class MusicOfficialSourcesPolicyTests
         yield return Case("official source storage conflict never becomes an authoritative-read success", async (owner, store) =>
         {
             Ok(await owner.ExecuteAsync("music.officialSources.settings.get"));
-            store.Data = LJ.Bytes(LJ.Obj(("version", 1), ("entries", new JsonArray())));
+            store.SetArea("native-official-sources", new JsonObject { ["schema"] = 1, ["revision"] = 0, ["enabled"] = new JsonArray("wy", "tx", "kg") });
             Code(await owner.ExecuteAsync("music.officialSources.settings.save",
                 new { ifRevision = 0, enabled = Array.Empty<string>() }), "STORAGE_CONFLICT");
             Code(await owner.ExecuteAsync("music.officialSources.settings.get"), "STORAGE_CONFLICT");
@@ -197,7 +222,7 @@ public static class MusicOfficialSourcesPolicyTests
         new(name, async () =>
         {
             await using var store = new PolicyStore();
-            var owner = new MusicLibraryOwner(store);
+            var owner = new MusicLibraryOwner(MusicTestStores.For(store));
             try { await run(owner, store); }
             finally { await owner.AbortAsync(); }
         });
@@ -224,45 +249,8 @@ public static class MusicOfficialSourcesPolicyTests
             throw new InvalidOperationException($"{expected}: {result.GetRawText()}");
     }
 
-    private sealed class PolicyStore : IDocumentStore
+    private sealed class PolicyStore : MusicRecordTestStore
     {
-        internal byte[]? Data;
-        internal int Writes;
-        internal bool FailAfterWrite, FailBeforeWrite, FailRead;
-
-        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            Equal(MusicLibraryOwner.DocumentNamespace, documentNamespace);
-            if (FailRead) throw new DocumentStoreException(DocumentStoreError.Unavailable);
-            byte[]? copy = Data?.ToArray();
-            return Task.FromResult(new DocumentSnapshot(copy,
-                copy is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(copy)));
-        }
-
-        public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> value,
-            DocumentFingerprint expected, CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            Equal(MusicLibraryOwner.DocumentNamespace, documentNamespace);
-            var actual = Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data);
-            if (actual != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-            Writes++;
-            if (FailBeforeWrite)
-            {
-                FailBeforeWrite = false;
-                throw new IOException("synthetic failure before physical write");
-            }
-            Data = value.ToArray();
-            var next = DocumentFingerprint.FromBytes(Data);
-            if (FailAfterWrite)
-            {
-                FailAfterWrite = false;
-                throw new IOException("synthetic receipt loss");
-            }
-            return Task.FromResult(next);
-        }
-
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        internal PolicyStore() { ReadError = DocumentStoreError.Unavailable; }
     }
 }

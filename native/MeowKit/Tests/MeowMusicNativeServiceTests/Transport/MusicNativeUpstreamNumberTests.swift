@@ -13,7 +13,7 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
             info["albumId"] = .string("18446744073709551615")
             if platform == "kg" { info["hash"] = .string("1234567890ABCDEF1234567890ABCDEF"); info["albumAudioId"] = .string("9007199254740995") }
             let peer = NativeMusicResultFixture([try MusicPlatformFixture.page([.init(platform: platform, data: info.bytes)], platform: platform)])
-            let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+            let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
             let page = try await service.search(platform: platform, query: "Synthetic", page: 1, limit: 30)
             let track = try XCTUnwrap(page.items.first)
             let collection = try await service.createPlaylist(name: "Long locators", refs: [track.ref])
@@ -22,7 +22,7 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
             let restored = try await reopened.tracks(in: collection)
             XCTAssertEqual(restored[0].songId, track.songId); XCTAssertEqual(restored[0].sources[0].nativeId, nativeID)
             let document = try MusicDocument(store.snapshot().0, runID: "inspect")
-            let saved = try XCTUnwrap(document.library["library"]["songs"][track.songId]["sources"].array.first)["musicInfo"]
+            let saved = try XCTUnwrap((try document.fixtureSong(track.songId))["sources"].array.first)["musicInfo"]
             XCTAssertEqual(saved["albumId"].string, "18446744073709551615")
             if platform == "kg" { XCTAssertEqual(saved["albumAudioId"].string, "9007199254740995") }
             await reopened.close()
@@ -42,7 +42,7 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
     func testMissingCanonicalRequiredLocatorFailsWithoutPublishingPartialRepository() async throws {
         let valid = try MusicPlatformFixture.song(NativeMusicFixture.track())
         let peer = NativeMusicResultFixture([.object(["items": .array([valid, .object(["sources": .array([])])]), "total": .number(2)])])
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
         await assertMusicFailure(.upstreamInvalid) { _ = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30) }
         XCTAssertEqual(store.snapshot().2, 0)
         await service.close()
@@ -50,13 +50,13 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
 
     func testUnconsumedNestedCanonicalMetadataDoesNotRejectRequiredSearchFields() async throws {
         var extra = RuntimeValue.string("not consumed")
-        // The canonical response still obeys the runtime's 64-depth JSON contract.
+        // Unconsumed metadata stays within the runtime's recursive I/O bound.
         for _ in 0..<60 { extra = .object(["extra": extra]) }
         var song = try MusicPlatformFixture.song(NativeMusicFixture.track())
         let ordinary = RuntimeValue.object(["items": .array([song]), "total": .number(1)])
         if case .object(var fields) = song { fields["unused"] = extra; song = .object(fields) }
         let peer = NativeMusicResultFixture([ordinary, .object(["items": .array([song]), "total": .number(1)])])
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
         let first = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
         let baseline = try await service.read(), writes = store.snapshot().2
         let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
@@ -71,10 +71,12 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
     }
 
     func testNativeJSONPersistencePreservesLargeNumbersDuplicateLastValueAndSyntaxBoundaries() throws {
-        let raw = #"{"id":9007199254740993,"unused":1e400,"name":"first","name":"last"}"#
+        let raw = #"{"id":9007199254740993,"unused":1e400,"precise":1.234567890123456789,"name":"first","name":"last"}"#
         let value = try MJ.parse(Data(raw.utf8))
         XCTAssertEqual(value["id"].id, "9007199254740993"); XCTAssertEqual(value["name"].string, "last")
         XCTAssertEqual(value["unused"].json, "1e400"); XCTAssertEqual(try MJ.parse(value.bytes), value)
+        XCTAssertEqual(value["precise"].json, "1.234567890123456789")
+        XCTAssertEqual(value.fields.map(\.0), ["id", "unused", "precise", "name"])
         let nested = String(repeating: "[", count: 80) + "0" + String(repeating: "]", count: 80)
         XCTAssertEqual(try MJ.parse(Data(nested.utf8)).json, nested)
         for bad in ["01", "+1", "1.", "1e", "NaN", "Infinity", "[1,]", "1 2"] { XCTAssertThrowsError(try MJ.parse(Data(bad.utf8))) }

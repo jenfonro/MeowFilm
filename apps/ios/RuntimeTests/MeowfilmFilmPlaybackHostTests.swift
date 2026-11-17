@@ -47,7 +47,7 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
         let selected = FilmEpisodePosition(season: 1, episode: 2, globalEpisode: 2)
         let model = try await fixture.makeModel(position: selected)
         await model.open()?.value
-        try await waitForPreparation(model, autoPrepare: true)
+        try await waitForPreparation(model, expectPrepared: true)
         XCTAssertEqual(model.snapshot?.target.position, selected)
         XCTAssertEqual(model.snapshot?.attempt?.candidate.position, selected)
         XCTAssertNil(assembly.playback.currentAttempt)
@@ -76,7 +76,7 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
         let stopped = try await fixture.sourceState()
         let reads = stopped["mediaReads"]
         await model.open()?.value
-        try await waitForPreparation(model, autoPrepare: true, previousSessionID: firstSession)
+        try await waitForPreparation(model, expectPrepared: false, previousSessionID: firstSession)
         await model.waitForPendingWork()
         XCTAssertEqual(model.snapshot?.target.position, selected, "Reentry keeps the explicit target, not the initial default")
         XCTAssertNil(assembly.playback.currentAttempt)
@@ -86,7 +86,7 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
         await model.close()
         let fresh = try await fixture.makeModel()
         await fresh.open()?.value
-        try await waitForPreparation(fresh, autoPrepare: true)
+        try await waitForPreparation(fresh, expectPrepared: true)
         XCTAssertEqual(fresh.snapshot?.target.position, .init(season: 1, episode: 1, globalEpisode: 1),
                        "A new coordinate-free card starts at the first regular episode, ignoring iOS viewing history")
         XCTAssertEqual(fresh.snapshot?.attempt?.position, 0)
@@ -118,7 +118,7 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
         }
 
         await model.open()?.value
-        try await waitForPreparation(model, autoPrepare: autoPrepare)
+        try await waitForPreparation(model, expectPrepared: autoPrepare)
         XCTAssertEqual(model.snapshot?.target.position, .init(season: 1, episode: 1, globalEpisode: 1),
                        "A new coordinate-free card starts at the real first regular episode")
         XCTAssertEqual(assembly.playback.currentAttempt, music)
@@ -269,9 +269,15 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
             XCTAssertEqual(rejected.candidate.id, broken.id)
             XCTAssertEqual(nativeFailure?.code, "MEDIA_FORMAT_UNSUPPORTED")
             try await waitForHost {
-                model.snapshot?.stage == "unavailable" && model.snapshot?.error == "NO_MATCH" &&
+                model.snapshot?.stage == "unavailable" &&
                     model.snapshot?.attempt == nil && model.snapshot?.current?.attemptID == healthy
             }
+            XCTAssertEqual(model.snapshot?.error, "MEDIA_FORMAT_UNSUPPORTED")
+            let rejectedSnapshot = try await client.call(module: .film, operation: "session.snapshot", parameters: .object([
+                "sessionId": .string(try XCTUnwrap(model.sessionID).uuidString.lowercased()),
+            ]))
+            XCTAssertEqual(rejectedSnapshot.filmObject?["error"], .string("MEDIA_FORMAT_UNSUPPORTED"))
+            XCTAssertEqual(rejectedSnapshot.filmObject?["errorStage"], .string("prepare"))
             XCTAssertEqual(brokenState["missingCookie"], .number(0))
             XCTAssertEqual(model.mediaState.attemptID, healthy)
             XCTAssertEqual(assembly.playback.currentAttempt, donor,
@@ -306,7 +312,7 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
 
         let beforeReopen = try await fixture.sourceState()["mediaReads"]
         await model.open()?.value
-        try await waitForPreparation(model, autoPrepare: autoPrepare, previousSessionID: session)
+        try await waitForPreparation(model, expectPrepared: false, previousSessionID: session)
         await model.waitForPendingWork()
         XCTAssertNil(assembly.playback.currentAttempt, "returning to the page is not consent to resume playback")
         XCTAssertFalse(assembly.playback.wantsPlayback)
@@ -355,12 +361,19 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
                                   searchTitle: searchTitle)
         let model = try await fixture.makeModel()
         await model.open()?.value
-        try await waitForPreparation(model, autoPrepare: true)
+        try await waitForPreparation(model, expectPrepared: true)
         let prepared = try await fixture.sourceState()
+        let rootPath = format == "hls" ? "/proxy/manifest.m3u8" : "/proxy/manifest.mpd"
+        let rootRead: RuntimeValue = .object(["path": .string(rootPath), "method": .string("GET")])
+        // Cat variant discovery reads the HLS control document; DASH stays cold.
+        // Neither path reads binary media or starts native playback.
+        let discoveryReads: [RuntimeValue] = format == "hls" ? [rootRead] : []
         XCTAssertEqual(operations(prepared), ["search", "detail", "play"])
-        XCTAssertEqual(prepared["mediaReads"], .number(0))
-        XCTAssertEqual(prepared["manifestReads"], .array([]))
+        XCTAssertEqual(prepared["mediaReads"], .number(Double(discoveryReads.count)))
+        XCTAssertEqual(prepared["manifestReads"], .array(discoveryReads))
         XCTAssertEqual(prepared["binaryReads"], .array([]))
+        XCTAssertEqual(prepared["missingCookie"], .number(0))
+        XCTAssertEqual(prepared["reports"], .array([]))
         let sessionID = try XCTUnwrap(model.sessionID)
         let attempt = try XCTUnwrap(model.snapshot?.attempt)
         XCTAssertTrue(attempt.prepareOnly)
@@ -377,7 +390,9 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
         XCTAssertEqual(mediaURL.port, origin.port)
         XCTAssertTrue(mediaURL.path.hasPrefix("/media/"))
         let beforeRead = try await fixture.sourceState()
-        XCTAssertEqual(beforeRead["mediaReads"], .number(0), "A prepared receipt must not warm media")
+        XCTAssertEqual(beforeRead["mediaReads"], prepared["mediaReads"], "Reading a receipt does not request media")
+        XCTAssertEqual(beforeRead["manifestReads"], prepared["manifestReads"])
+        XCTAssertEqual(beforeRead["binaryReads"], .array([]))
 
         // URLSession consumes the real NodeMobile receipt without a native decoder
         // or a client-side copy of the source's Cookie.
@@ -385,11 +400,10 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
         defer { httpSession.invalidateAndCancel() }
         let (root, response) = try await httpSession.data(from: mediaURL)
         let http = try XCTUnwrap(response as? HTTPURLResponse)
-        let rootPath = format == "hls" ? "/proxy/manifest.m3u8" : "/proxy/manifest.mpd"
-        let rootReads: RuntimeValue = .array([.object(["path": .string(rootPath), "method": .string("GET")])])
+        let rootReads: RuntimeValue = .array(discoveryReads + [rootRead])
         let rooted = try await fixture.sourceState()
         XCTAssertEqual(rooted["manifestReads"], rootReads)
-        XCTAssertEqual(rooted["mediaReads"], .number(1))
+        XCTAssertEqual(rooted["mediaReads"], .number(Double(discoveryReads.count + 1)))
         XCTAssertEqual(rooted["binaryReads"], .array([]))
         XCTAssertEqual(rooted["missingCookie"], .number(0))
         if invalidUTF8 {
@@ -433,7 +447,7 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
             .object(["path": .string($0), "method": .string("GET"), "bytes": .number(Double(movieBytes.count))])
         }
         XCTAssertEqual(finished["manifestReads"], rootReads)
-        XCTAssertEqual(finished["mediaReads"], .number(invalidUTF8 ? 1 : 3))
+        XCTAssertEqual(finished["mediaReads"], .number(Double(discoveryReads.count + 1 + binaryReads.count)))
         XCTAssertEqual(finished["binaryReads"], .array(binaryReads))
         XCTAssertEqual(finished["missingCookie"], .number(0), "The runtime attaches the source header to root and children")
         XCTAssertEqual(finished["reports"], .array([]), "Network parsing is not playback or a watch report")
@@ -459,14 +473,14 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
         value["calls"]?.filmArray?.compactMap(\.filmText) ?? []
     }
 
-    private func waitForPreparation(_ model: FilmPlaybackModel, autoPrepare: Bool,
+    private func waitForPreparation(_ model: FilmPlaybackModel, expectPrepared: Bool,
                                     previousSessionID: UUID? = nil) async throws {
         do {
             try await waitForHost {
                 guard let snapshot = model.snapshot, snapshot.sessionID != previousSessionID,
                       snapshot.error == nil, snapshot.current == nil, !snapshot.browsing.loading,
                       snapshot.browsing.error == nil, model.actionError == nil, model.observationError == nil else { return false }
-                return autoPrepare
+                return expectPrepared
                     ? snapshot.stage == "prepared" && snapshot.attempt?.prepareOnly == true
                     : snapshot.stage == "idle" && snapshot.attempt == nil
             }
@@ -486,7 +500,7 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
         XCTAssertNil(model.snapshot?.error)
         XCTAssertNil(model.snapshot?.browsing.error)
         XCTAssertNil(model.snapshot?.current)
-        XCTAssertEqual(model.snapshot?.attempt?.prepareOnly, autoPrepare ? true : nil)
+        XCTAssertEqual(model.snapshot?.attempt?.prepareOnly, expectPrepared ? true : nil)
     }
 
     private func waitForHost(_ predicate: @escaping @MainActor () -> Bool) async throws {
@@ -555,7 +569,9 @@ final class FilmPlaybackHostFixture {
         // changing the container's original settings after teardown.
         var changed = try FilmPlaybackPreferences.defaults.value.filmRequiredObject()
         changed["iosAutoPrepare"] = .bool(autoPrepare)
-        let saved = try FilmPlaybackPreferences(await client.call(module: .film, operation: "settings.set", parameters: .object(changed)))
+        let resources = try XCTUnwrap(assembly.resources)
+        try await NativeFilmFixture.preferences(.object(changed), resources: resources)
+        let saved = try FilmPlaybackPreferences(XCTUnwrap(try resources.filmSettings[.preferences].read()?.filmObject?["preferences"]))
         XCTAssertEqual(saved.iosAutoPrepare, autoPrepare)
         let loaded = try FilmPlaybackPreferences(await client.call(module: .film, operation: "settings.get"))
         XCTAssertEqual(loaded.iosAutoPrepare, autoPrepare)
@@ -572,17 +588,9 @@ final class FilmPlaybackHostFixture {
                 .object(["format": .string($0.format), "body": .string($0.body.base64EncodedString())])
             } ?? .null), as: UTF8.self))
             .replacingOccurrences(of: "__MEDIA_QUERY__", with: signMediaURL ? "?signature=film-host-synthetic-signature" : "")
-        _ = try await client.upload(module: .cat, installationID: id, sourceRevision: 1,
-                                    source: Data(script.utf8))
-        _ = try await client.call(module: .cat, operation: "install", parameters: .object([
-            "installationId": .string(id), "sourceRevision": .number(1), "enabled": .bool(true),
-        ]))
-        let status = try await client.call(module: .cat, operation: "status")
-        let instance = try XCTUnwrap(status.filmObject?["instances"]?.filmArray?.first {
-            $0.filmObject?["installationId"] == .string(id)
-        }?.filmObject)
-        XCTAssertEqual(instance["state"], .string("ready"))
-        let generation = try XCTUnwrap(instance["generation"]?.filmInteger)
+        _ = try await resources.filmSourceSettings.importLocal(name: "Host fixture", source: script, installationId: id)
+        let instance = try await NativeFilmFixture.waitForNativeCat(id, service: resources.filmSourceSettings)
+        let generation = instance.generation
         source = .init(key: id, engine: "cat", installationID: id, siteID: "host",
                        generation: Int64(generation), name: "Host fixture")
     }
@@ -675,7 +683,7 @@ final class FilmPlaybackHostFixture {
 
     func restorePreferences() async throws {
         if let originalSettings {
-            _ = try await client.call(module: .film, operation: "settings.set", parameters: originalSettings)
+            try await NativeFilmFixture.preferences(originalSettings, resources: XCTUnwrap(assembly.resources))
         }
     }
 
@@ -694,13 +702,7 @@ final class FilmPlaybackHostFixture {
             ]))
         } catch { first = first ?? error }
         do {
-            let status = try await client.call(module: .cat, operation: "status")
-            if status.filmObject?["instances"]?.filmArray?.contains(where: {
-                $0.filmObject?["installationId"] == .string(id)
-            }) == true {
-                _ = try await client.call(module: .cat, operation: "uninstall",
-                                          parameters: .object(["installationId": .string(id)]))
-            }
+            try await NativeFilmFixture.removeCat(id, resources: XCTUnwrap(assembly.resources))
         } catch { first = first ?? error }
         do { try await restorePreferences() } catch { first = first ?? error }
         if let first { throw first }

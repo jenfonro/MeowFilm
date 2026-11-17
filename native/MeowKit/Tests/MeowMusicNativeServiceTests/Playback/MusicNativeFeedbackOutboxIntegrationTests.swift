@@ -4,7 +4,6 @@ import MeowAccounts
 import MeowContracts
 import MeowMusicFeature
 import MeowMusicTestSupport
-import MeowJSON
 import MeowRuntime
 import MeowStorage
 @testable import MeowMusicNativeService
@@ -15,7 +14,7 @@ final class MusicNativeFeedbackOutboxIntegrationTests: XCTestCase {
     private struct Fixture {
         let owner: NativeMusicAccountService
         let native: NativeMusicService
-        let settingsDocument: NativeMusicMemoryDocument
+        let settingsDocument: NativeMusicTestLibrary
         let outbox: DocumentStore
         let peer: NativeFeedbackOfflinePeer
         let clock: NativeMusicFixtureClock
@@ -43,8 +42,8 @@ final class MusicNativeFeedbackOutboxIntegrationTests: XCTestCase {
                 platformClient: client, feedbackOutboxStoreFactory: { outbox }, clock: { clock.now() })
         }
         _ = try await owner.setAccess(available: true, generation: 1)
-        let settingsDocument = NativeMusicMemoryDocument()
-        let native = NativeMusicService(document: settingsDocument, accounts: owner, platformClient: client,
+        let settingsDocument = NativeMusicTestLibrary()
+        let native = NativeMusicService(database: settingsDocument, accounts: owner, platformClient: client,
             clock: { clock.now() }, monotonicClock: { clock.now().timeIntervalSince(NativeMusicFixture.date) })
         addTeardownBlock {
             if let heldUpload { await heldUpload.gate.release() }
@@ -223,8 +222,8 @@ private struct NativeFeedbackHeldUploadProvider: MusicAccountFeedbackProvider,
     func recommendations(kind: String, page: Int) async throws -> MusicAccountRecommendation {
         try await node.recommendations(kind: kind, page: page)
     }
-    func collectionRows() async throws -> [JSONValue] { try await node.collectionRows() }
-    func tracks(collectionID: String) async throws -> [JSONValue] { try await node.tracks(collectionID: collectionID) }
+    func collectionRows() async throws -> [RuntimeValue] { try await node.collectionRows() }
+    func tracks(collectionID: String) async throws -> [RuntimeValue] { try await node.tracks(collectionID: collectionID) }
     func capabilities(mid: String) async throws -> [String] { try await node.capabilities(mid: mid) }
-    func resolve(mid: String, quality: String) async throws -> JSONValue { try await node.resolve(mid: mid, quality: quality) }
+    func resolve(mid: String, quality: String) async throws -> RuntimeValue { try await node.resolve(mid: mid, quality: quality) }
 }

@@ -21,12 +21,12 @@ final class NativeMusicImportModelTests: XCTestCase {
             ("networkReferences", .array([])),
             ("status", .obj([("phase", .string("synced")), ("at", .n(42)), ("issues", .array([]))]))])
     }
-    /// The fixture library as the persisted device document's library area.
+    /// Synthetic row/control fixture, not a retired library document.
     private func stored(_ library: MJ) -> Data {
         var library = library; library["ownerId"] = .string("device")
+        let songs = library["songs"]; library.remove("songs")
         let area = MJ.obj([("schema", .n(2)), ("scope", .string("device")), ("revision", .n(1)), ("library", library)])
-        return MJ.obj([("version", .n(1)), ("scope", .string("device")), ("revision", .n(1)),
-            ("records", .obj([(MusicModel.key("library"), area)]))]).bytes
+        return MJ.obj([("revision", .n(1)), ("areas", .obj([("library", area)])), ("songs", songs)]).bytes
     }
     func testCompactSongCleaningKeepsIDsAndDeclaredQualitiesButDropsUnusedFields() throws {
         let expected = try fixture()
@@ -61,7 +61,7 @@ final class NativeMusicImportModelTests: XCTestCase {
     }
     func testStoredCurrentLibraryLoadsWithoutRewriteOrVisibleTombstone() async throws {
         let bytes = stored(try fixture())
-        let store = NativeMusicMemoryDocument(bytes), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(bytes), service = try await NativeMusicFixture.service(store)
         let collections = try await service.collections()
         XCTAssertEqual(collections.count, 2, "tombstone remains stored, not visible")
         let tracks = try await service.tracks(in: collections[1])
@@ -80,7 +80,7 @@ final class NativeMusicImportModelTests: XCTestCase {
         for (label, song, expected) in cases {
             var library = current; library["songs"]["20000000-0000-4000-8000-000000000002"] = song
             let bytes = stored(library)
-            let store = NativeMusicMemoryDocument(bytes), service = try await NativeMusicFixture.service(store)
+            let store = NativeMusicTestLibrary(bytes), service = try await NativeMusicFixture.service(store)
             do { _ = try await service.collections(); XCTFail("Stored song accepted: \(label)") }
             catch { XCTAssertEqual(error as? MusicServiceError, expected, label) }
             XCTAssertEqual(store.snapshot().0, bytes, label); XCTAssertEqual(store.snapshot().2, 0, label)
@@ -94,7 +94,7 @@ final class NativeMusicImportModelTests: XCTestCase {
                 song["sources"] = .array(sources)
             } else { song.remove(field) }
             library["songs"]["20000000-0000-4000-8000-000000000002"] = song
-            let bytes = stored(library), store = NativeMusicMemoryDocument(bytes)
+            let bytes = stored(library), store = NativeMusicTestLibrary(bytes)
             let service = try await NativeMusicFixture.service(store)
             let collections = try await service.collections(), tracks = try await service.tracks(in: collections[1])
             XCTAssertEqual(tracks.last?.songId, "20000000-0000-4000-8000-000000000002")
@@ -108,7 +108,7 @@ final class NativeMusicImportModelTests: XCTestCase {
         sources[0]["musicInfo"]["accessToken"] = .string("synthetic-private")
         sources[0]["musicInfo"]["img"] = .string("https://artwork.invalid/a.jpg?access_token=synthetic-private")
         song["sources"] = .array(sources)
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let acquired = try await service.adoptSongs([song], authoritative: true)
         XCTAssertNotNil(UUID(uuidString: acquired[0]["songId"].string))
         XCTAssertFalse(acquired[0].json.contains("synthetic-private"))
@@ -152,9 +152,7 @@ final class NativeMusicImportModelTests: XCTestCase {
         let source = try XCTUnwrap(song["sources"].array.first)
         var duplicate = song
         duplicate["sources"] = .array([source, source])
-        var library = MusicModel.emptyLibrary
-        library["songs"][song["songId"].string] = duplicate
-        XCTAssertThrowsError(try MusicLibraryValidation.validate(library, owner: "device")) {
+        XCTAssertThrowsError(try MusicModel.sources(duplicate)) {
             XCTAssertEqual($0 as? MusicServiceError, .nativeIDConflict)
         }
     }

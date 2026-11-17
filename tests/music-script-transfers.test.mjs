@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ScriptHostError } from '@meowfilm/script-host';
 import { encodeJSONValue } from '@meowfilm/runtime-bridge';
+import { parseJSONText, stringifyJSONValue, cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 import { createMusicScriptModule, musicScriptContract } from '../apps/runtime/modules/music-script.mjs';
 import { moduleHttp } from './runtime-http-fixture.mjs';
 import { rawRequest, deferred, until, turn } from '../packages/runtime-bridge/test/http-fixture.js';
@@ -26,7 +27,7 @@ function setup(t, options = {}) {
     captureInitialization: () => null,
     observe(id) {
       const record = state.records.find(value => value.installationId === id);
-      return () => structuredClone(record);
+      return () => cloneJSONValue(record);
     },
     async install(spec, context) {
       state.installs++; await options.install?.(spec, context);
@@ -41,11 +42,11 @@ function setup(t, options = {}) {
     async uninstall(id) { state.records = state.records.filter(value => value.installationId !== id); },
     async close() { state.closed++; state.records = []; await options.close?.(); return { cleanupComplete: true }; },
   };
-  const dataRoot = mkdtempSync(join(tmpdir(), 'music-http-values-'));
-  t.after(() => rmSync(dataRoot, { recursive: true, force: true }));
+  const dataRoot = options.dataRoot ?? mkdtempSync(join(tmpdir(), 'music-http-values-'));
+  if (!options.dataRoot) t.after(() => rmSync(dataRoot, { recursive: true, force: true }));
   const module = createMusicScriptModule({ dataRoot, hostFactory: () => host });
   const rpc = moduleHttp(t, module);
-  return { state, module, rpc };
+  return { state, module, rpc, dataRoot };
 }
 async function load(rpc, params = input(), source = '/* complete source */') {
   success(await rpc.upload(params.installationId, params.sourceRevision, Buffer.from(source), { basename: 'fixture.js' }));
@@ -91,15 +92,52 @@ test('B2 UTF-8 scalars and Unicode keys survive HTTP byte boundaries without nor
   assert.deepEqual(state.invokes.at(-1).payload, output);
 });
 
+test('exact declaration extensions survive HTTP snapshots, canonical comparison and cold catalog edits', async t => {
+  const text = '{"kw":{"actions":["musicUrl"],"extra":{"id":9007199254740993,' +
+    '"fraction":0.123456789012345678901,"huge":1e400}}}';
+  const capabilities = parseJSONText(text);
+  const first = setup(t, { capabilities });
+  const item = await load(first.rpc);
+  assert.equal(stringifyJSONValue(item.capabilities), text);
+  const path = join(first.dataRoot, 'music', 'catalog.json');
+  const stored = () => parseJSONText(readFileSync(path, 'utf8')).installations[0].declared.capabilities;
+  assert.equal(stringifyJSONValue(stored()), text);
+  const revision = success(await first.rpc('sources.list')).revision;
+  first.state.records[0].capabilities = parseJSONText('{"kw":{"extra":{"huge":1e400,' +
+    '"fraction":0.123456789012345678901,"id":9007199254740993},"actions":["musicUrl"]}}');
+  success(await first.rpc('sources.enable', { installationId: item.installationId }));
+  assert.equal(success(await first.rpc('sources.list')).revision, revision);
+  first.state.records[0].capabilities.kw.extra.id = { rawJSON: '9007199254740993' };
+  success(await first.rpc('sources.enable', { installationId: item.installationId }));
+  assert.equal(success(await first.rpc('sources.list')).revision, revision + 1);
+  assert.deepEqual(stored().kw.extra.id, { rawJSON: '9007199254740993' });
+  first.state.records[0].capabilities = capabilities;
+  success(await first.rpc('sources.enable', { installationId: item.installationId }));
+  success(await first.rpc('sources.edit', { installationId: item.installationId, name: 'edited' }));
+  assert.equal(stringifyJSONValue(stored()), text);
+  success(await first.module.close());
+  const reopened = setup(t, { dataRoot: first.dataRoot });
+  const cold = success(await reopened.rpc('sources.detail', { installationId: item.installationId })).item;
+  assert.equal(stringifyJSONValue(cold.capabilities), text);
+  success(await reopened.rpc('sources.edit', { installationId: item.installationId, name: 'cold edit' }));
+  assert.equal(stringifyJSONValue(stored()), text);
+  assert.equal(stringifyJSONValue(capabilities), text);
+});
+
 test('B4 malformed and incomplete HTTP inputs never execute or replace a complete candidate', async t => {
   const { rpc, state } = setup(t); await load(rpc);
   const { runtime, identity } = rpc.transport;
   for (const body of [Buffer.from([0xff]), Buffer.from([0xc3, 0x28]), Buffer.from('{'),
-    Buffer.from('{"x":1,"x":2}'), Buffer.from('{"x":0,"\\u0078":1}'),
-    Buffer.from('{"x":"\\ud800"}'), Buffer.from('{"x":1e400}'), Buffer.from('{"x":9007199254740992}'),
-    Buffer.from('['.repeat(66) + '0' + ']'.repeat(66)), Buffer.from('9007199254740992')]) {
+    Buffer.from('['.repeat(66) + '0' + ']'.repeat(66))]) {
     const result = await rawRequest(runtime.baseUrl, identity, { path: '/v1/music/invoke', body }).response;
     assert.equal(result.status, 400);
+  }
+  // Valid JSON reaches the unchanged business root/field checks, not a syntax rejection.
+  for (const body of ['{"x":1,"x":2}', '{"x":0,"\\u0078":1}', '{"x":"\\ud800"}',
+    '{"x":1e400}', '{"x":9007199254740992}', '9007199254740992']) {
+    const result = await rawRequest(runtime.baseUrl, identity, { path: '/v1/music/invoke', body }).response;
+    assert.equal(result.status, 200);
+    failure(result.value, 'INVALID_REQUEST');
   }
   for (const value of [null, false, [], { 非ASCII: 1 }])
     failure(await rpc('invoke', value), 'INVALID_REQUEST');
@@ -140,9 +178,13 @@ test('B3 enable/list return complete large declarations and fence retired genera
 test('B4 invalid results fail strict JSON validation while Unicode dictionaries succeed', async t => {
   let output;
   const { rpc } = setup(t, { invoke: () => output }); const instance = await load(rpc);
-  for (const invalid of [NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '\ud800', 1n]) {
+  for (const invalid of [NaN, Infinity, 1n]) {
     output = { padding: 'x'.repeat(65536), invalid }; failure(await rpc('invoke', request(instance, {})), 'INVALID_REQUEST');
   }
+  output = parseJSONText('{"integer":9007199254740993,"fraction":0.123456789012345678901,"huge":1e400}');
+  assert.equal(stringifyJSONValue(success(await rpc('invoke', request(instance, {})))), stringifyJSONValue(output));
+  output = { integer: Number.MAX_SAFE_INTEGER + 1, surrogate: '\ud800' };
+  assert.deepEqual(success(await rpc('invoke', request(instance, {}))), output);
   output = { 猫: false, é: 1, 'e\u0301': 2 };
   assert.deepEqual(success(await rpc('invoke', request(instance, {}))), output);
   output = false;

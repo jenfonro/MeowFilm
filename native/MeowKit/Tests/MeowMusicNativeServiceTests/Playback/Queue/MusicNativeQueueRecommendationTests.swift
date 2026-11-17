@@ -13,7 +13,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         let cache = MusicNativePersistentSourceDiscoveryCache(storeFactory: { metadataDocument })
         let owner = SimilarModeAccountFixture([["301"]])
         let peer = NativeMusicResultFixture([try MusicPlatformFixture.page([SimilarModeAccountFixture.track("100")], platform: "wy")])
-        let store = NativeMusicMemoryDocument(try document(["100"]))
+        let store = NativeMusicTestLibrary(try document(["100"]))
         let service = try await NativeMusicFixture.service(store, accounts: owner, platform: peer, sourceDiscovery: cache)
         let searched = try await service.search(platform: "wy", query: "Song 100 Synthetic", page: 1, limit: 30)
         let localID = try XCTUnwrap(searched.items.first).songId
@@ -29,7 +29,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         let previewValue = try await preview(service), preview = try XCTUnwrap(previewValue)
         XCTAssertEqual(preview.candidates.map(\.song.title), ["Song 301"])
         let state = try await service.read()
-        let recommended = try XCTUnwrap(state.library["library"]["songs"].fields.map(\.1).first {
+        let recommended = try XCTUnwrap((try state.fixtureSongs()).fields.map(\.1).first {
             $0["sources"].array.contains { $0["source"].string == "wy" && $0["musicInfo"]["songmid"].id == "301" }
         })
         let id = recommended["songId"].string
@@ -76,7 +76,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
             let song = try NativeMusicFixture.storedSong(.init(platform: "wy", data: track.bytes))
             initial.library["library"]["songs"][song["songId"].string] = song
         }
-        let store = NativeMusicMemoryDocument(try initial.encode(changed: ["library", "queue", "playback", "history"]))
+        let store = NativeMusicTestLibrary(try initial.encode(changed: ["library", "queue", "playback", "history"]))
         let service = try await NativeMusicFixture.service(store, accounts: owner)
         let initialQueue = try await service.queue()
         _ = try await startPlaying(service)
@@ -144,7 +144,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
             d.library["library"]["songs"][foreign["songId"].string] = foreign
             rows[eligible ? 1 : 0]["songId"] = foreign["songId"]
             d.queue["entries"] = .array(rows)
-            let store = NativeMusicMemoryDocument(try d.encode(changed: ["library", "queue", "playback", "history"]))
+            let store = NativeMusicTestLibrary(try d.encode(changed: ["library", "queue", "playback", "history"]))
             let owner = SimilarModeAccountFixture([["301"]])
             let service = try await NativeMusicFixture.service(store, accounts: owner)
             let snapshot = try await service.queueRecommendationSnapshot()
@@ -155,7 +155,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         var d = try MusicDocument(document(["100"]), runID: "fixture")
         d.queue["source"] = .obj([("sourceType", .string("playlist"))])
         let owner = SimilarModeAccountFixture([["301"]])
-        let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try d.encode(changed: ["queue", "playback", "history"])), accounts: owner)
+        let service = try await NativeMusicFixture.service(NativeMusicTestLibrary(try d.encode(changed: ["queue", "playback", "history"])), accounts: owner)
         let snapshot = try await service.previewQueueRecommendations()
         XCTAssertNil(snapshot)
         let allowed = try await service.canEnterSongRecommendations(); XCTAssertTrue(allowed)
@@ -164,7 +164,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
 
     func testContinuationUsesFixedSeedAndServerOffsetAndOnlyRealTailPlayback() async throws {
         let owner = SimilarModeAccountFixture([["301", "302"], ["401", "402"]], hasMore: [true, false])
-        let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try document(["100"])), accounts: owner)
+        let service = try await NativeMusicFixture.service(NativeMusicTestLibrary(try document(["100"])), accounts: owner)
         let value = try await preview(service), first = try XCTUnwrap(value)
         let chosen = try await service.playQueueRecommendation(snapshotID: first.id, candidateID: first.candidates[0].id)
         let queue = try await service.queue()
@@ -191,7 +191,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
     func testNextAndEndedDoNotWaitForPendingCandidatesOrNavigateOnLateResponse() async throws {
         for ended in [false, true] {
             let owner = SimilarModeAccountFixture([["301", "302"]])
-            let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try document(["100"])), accounts: owner)
+            let service = try await NativeMusicFixture.service(NativeMusicTestLibrary(try document(["100"])), accounts: owner)
             let gate = NativeMusicGate(); await owner.suspendNext(gate)
             let tail = try await startPlaying(service)
             await gate.started()
@@ -211,7 +211,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
 
     func testOrdinaryModePreservesInFlightCandidatesForExplicitSelectionOnly() async throws {
         let owner = SimilarModeAccountFixture([["301"]])
-        let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try document(["100"])), accounts: owner)
+        let service = try await NativeMusicFixture.service(NativeMusicTestLibrary(try document(["100"])), accounts: owner)
         let value = try await service.queueRecommendationSnapshot(), snapshot = try XCTUnwrap(value)
         let gate = NativeMusicGate(); await owner.suspendNext(gate)
         _ = try await startPlaying(service); await gate.started()
@@ -236,7 +236,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
     func testEveryOrdinaryModeStopsInFlightRecommendationAppendAndManualNextKeepsExistingQueue() async throws {
         for mode in [MusicPlaybackMode.loop, .single, .shuffle] {
             let owner = SimilarModeAccountFixture([["301", "302"], ["401", "402"]])
-            let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try document(["100"])), accounts: owner)
+            let service = try await NativeMusicFixture.service(NativeMusicTestLibrary(try document(["100"])), accounts: owner)
             let initial = try await preview(service), snapshot = try XCTUnwrap(initial)
             let selected = try await service.playQueueRecommendation(snapshotID: snapshot.id,
                 candidateID: snapshot.candidates[0].id)
@@ -271,7 +271,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
     func testEmptyDuplicateAndTerminalResponseStopAutomaticRequestsAndExplicitRetryKeepsCandidates() async throws {
         for ids in [[], ["100", "100"], ["301", "302"]] {
             let owner = SimilarModeAccountFixture([ids, ["401"]], hasMore: [false, true])
-            let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try document(["100"])), accounts: owner)
+            let service = try await NativeMusicFixture.service(NativeMusicTestLibrary(try document(["100"])), accounts: owner)
             let first = try await preview(service), terminal = try XCTUnwrap(first)
             XCTAssertTrue(terminal.exhausted); XCTAssertNil(terminal.error)
             let queue = try await service.queue(); XCTAssertEqual(queue.entries.count, 1)
@@ -295,7 +295,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
     func testFailedPreviewRetainsQueueAndExplicitRetryReturnsCandidates() async throws {
         let owner = SimilarModeAccountFixture([[], ["301", "302", "303", "304"]])
         await owner.failNext(.upstreamFailed)
-        let store = NativeMusicMemoryDocument(try document(["100"]))
+        let store = NativeMusicTestLibrary(try document(["100"]))
         let service = try await NativeMusicFixture.service(store, accounts: owner)
         _ = try await startPlaying(service)
         let before = try await service.read()
@@ -314,7 +314,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
 
     func testSheetCancellationPreservesLeaseCandidatesAndDoesNotChangeQueue() async throws {
         let owner = SimilarModeAccountFixture([["301", "302"]])
-        let store = NativeMusicMemoryDocument(try document(["100"]))
+        let store = NativeMusicTestLibrary(try document(["100"]))
         let service = try await NativeMusicFixture.service(store, accounts: owner), gate = NativeMusicGate()
         await owner.suspendNext(gate)
         _ = try await startPlaying(service); await gate.started()
@@ -336,7 +336,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
     func testSelectionAndReorderRetainSeedWhileReplacementAndAccountRevocationRejectOldResponse() async throws {
         for change in ["select", "reorder", "replace", "account"] {
             let owner = SimilarModeAccountFixture([["301", "302"]], metadata: true)
-            let store = NativeMusicMemoryDocument(try document(["100", "200"]))
+            let store = NativeMusicTestLibrary(try document(["100", "200"]))
             let service = try await NativeMusicFixture.service(store, accounts: owner)
             let gate = NativeMusicGate(); await owner.suspendNext(gate)
             _ = try await startPlaying(service); await gate.started()
@@ -370,9 +370,9 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
 
     func testCandidateCASConflictAndUnknownCommitNeverRollBackOrPublishProof() async throws {
         let owner = SimilarModeAccountFixture([["301", "302", "303", "304"]], metadata: true)
-        let store = NativeMusicMemoryDocument(try document(["100"]))
+        let store = NativeMusicTestLibrary(try document(["100"]))
         let controlled = SimilarModeControlledDocument(store)
-        let service = NativeMusicService(document: controlled, accounts: owner,
+        let service = NativeMusicService(database: controlled, accounts: owner,
             platformClient: try NativeMusicFixture.client(), clock: { NativeMusicFixture.date })
         try await service.setAccess(available: true, generation: 1)
         let previewValue = try await preview(service), preview = try XCTUnwrap(previewValue)
@@ -402,7 +402,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
 
     func testCloseRevokesProofAndWaitsForRecommendationWorkerToPhysicallyFinish() async throws {
         let owner = SimilarModeAccountFixture([["301"]])
-        let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try document(["100"])), accounts: owner)
+        let service = try await NativeMusicFixture.service(NativeMusicTestLibrary(try document(["100"])), accounts: owner)
         let gate = NativeMusicGate(); await owner.suspendNext(gate)
         let loading = Task { try await preview(service) }
         await gate.started()
@@ -424,7 +424,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
     func testPlayNextKeepsReadyOrInFlightCandidatesSeedAndPriorityAcrossLoopChanges() async throws {
         for inFlight in [false, true] {
             let owner = SimilarModeAccountFixture([["301", "302"], ["401"]])
-            let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try document(["100"])), accounts: owner)
+            let service = try await NativeMusicFixture.service(NativeMusicTestLibrary(try document(["100"])), accounts: owner)
             let gate = NativeMusicGate()
             if inFlight { await owner.suspendNext(gate) }
             _ = try await startPlaying(service)
@@ -468,7 +468,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
     func testOrdinaryAppendBeforeActivationRevokesReadyOrInFlightCandidateOwnership() async throws {
         for inFlight in [false, true] {
             let owner = SimilarModeAccountFixture([["301", "302"]])
-            let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try document(["100"])), accounts: owner)
+            let service = try await NativeMusicFixture.service(NativeMusicTestLibrary(try document(["100"])), accounts: owner)
             let gate = NativeMusicGate()
             if inFlight { await owner.suspendNext(gate) }
             _ = try await startPlaying(service)
@@ -486,7 +486,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
 
     func testSingleTailFetchOnlyPreparesCandidatesAndNaturalEndRepeatsSeed() async throws {
         let owner = SimilarModeAccountFixture([["301", "302"]])
-        let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try document(["100"])), accounts: owner)
+        let service = try await NativeMusicFixture.service(NativeMusicTestLibrary(try document(["100"])), accounts: owner)
         _ = try await service.updateSettings(.init(ifRevision: 0, mode: .single))
         let audio = try await startPlaying(service)
         let value = try await service.previewQueueRecommendations(), snapshot = try XCTUnwrap(value)
@@ -502,7 +502,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
     func testSearchFirstCandidatesWaitForStartedInEveryOrdinaryMode() async throws {
         for mode in [MusicPlaybackMode.loop, .single, .shuffle] {
             let owner = SimilarModeAccountFixture([["301", "302"]])
-            let service = NativeMusicService(document: NativeMusicMemoryDocument(try document(["100"])),
+            let service = NativeMusicService(database: NativeMusicTestLibrary(try document(["100"])),
                 accounts: owner, platformClient: try NativeMusicFixture.client(),
                 clock: { NativeMusicFixture.date })
             try await service.setAccess(available: true, generation: 1)
@@ -531,7 +531,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
     func testOrdinarySearchCandidatesDoNotEnableContinuationAndSpecialSelectionUsesLoop() async throws {
         for mode in [MusicPlaybackMode.loop, .single, .shuffle] {
             let owner = SimilarModeAccountFixture([["301"]])
-            let service = try await NativeMusicFixture.service(NativeMusicMemoryDocument(try document(["100"])), accounts: owner)
+            let service = try await NativeMusicFixture.service(NativeMusicTestLibrary(try document(["100"])), accounts: owner)
             _ = try await service.updateSettings(.init(ifRevision: 0, mode: mode))
             let initial = try await service.queueRecommendationSnapshot(), id = try XCTUnwrap(initial).id
             _ = try await startPlaying(service)
@@ -553,7 +553,7 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
 
     func testShuffleOnlyDrawsForQueueNavigationAndNeverForPlaybackFacts() async throws {
         let owner = SimilarModeAccountFixture([["301", "302"]]), random = RecommendationRandom(0.75)
-        let service = NativeMusicService(document: NativeMusicMemoryDocument(try document(["100", "200"])),
+        let service = NativeMusicService(database: NativeMusicTestLibrary(try document(["100", "200"])),
             accounts: owner, platformClient: try owner.makeClient(),
             clock: { NativeMusicFixture.date }, random: { random.draw() })
         try await service.setAccess(available: true, generation: 1)

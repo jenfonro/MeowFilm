@@ -8,7 +8,7 @@ extension NativeMusicService: MusicHistoryManaging {
         let own = epoch
         let state = try read()
         let raw = try historySnapshot(id: id, in: state)
-        let snapshot = try MusicNativeHistorySnapshot(raw, songs: state.library["library"]["songs"])
+        let snapshot = try MusicNativeHistorySnapshot(raw, songs: state.referenceSongs(raw["entries"].array.map { $0["songId"].string }))
         let result = MusicHistoryDetail(
             summary: snapshot.summary, entries: snapshot.displayEntries,
             selectedIndex: snapshot.selectedIndex, sourceLabel: snapshot.sourceLabel,
@@ -45,14 +45,14 @@ extension NativeMusicService: MusicHistoryManaging {
                 try musicRequire(d.queue["revision"].int == expectedRevision, .staleRevision)
                 try musicRequire(expectedRevision < 9_007_199_254_740_991, .limit)
                 let raw = try boundHistorySnapshot(detail, in: d)
-                let snapshot = try MusicNativeHistorySnapshot(raw, songs: d.library["library"]["songs"])
+                let snapshot = try MusicNativeHistorySnapshot(raw, songs: d.referenceSongs(raw["entries"].array.map { $0["songId"].string }))
                 guard let index = startIndex ?? snapshot.selectedIndex else { throw MusicServiceError.notFound }
                 try musicRequire(snapshot.entries.indices.contains(index))
 
                 let old = d.queue
                 let rows = snapshot.entries
                 d.queue["serial"] = .n(max(d.queue["serial"].int, snapshot.maximumSerial))
-                archive(old, into: &d)
+                try archive(old, into: &d)
                 let selected = rows[index]["id"].string
                 d.queue["entries"] = .array(rows)
                 d.queue["currentId"] = .string(selected)

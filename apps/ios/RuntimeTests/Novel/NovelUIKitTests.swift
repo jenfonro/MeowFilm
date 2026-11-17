@@ -129,7 +129,8 @@ final class NovelUIKitTests: XCTestCase {
                     XCTAssertEqual(table.separatorStyle, .singleLine)
                     XCTAssertEqual(table.separatorColor, UIColor(settings.separator))
                     XCTAssertEqual(table.frame.minX, 24, accuracy: 0.5)
-                    XCTAssertEqual(table.convert(table.bounds, to: page.view).maxY, page.view.bounds.maxY, accuracy: 0.5)
+                    XCTAssertEqual(table.convert(table.bounds, to: page.view).maxY,
+                        page.view.safeAreaLayoutGuide.layoutFrame.maxY - 4, accuracy: 0.5)
                     XCTAssertEqual(table.layer.cornerRadius, 22)
                     XCTAssertTrue(table.clipsToBounds)
                     XCTAssertEqual(manager.manager.search.searchTextField.backgroundColor, UIColor(settings.input))
@@ -146,10 +147,14 @@ final class NovelUIKitTests: XCTestCase {
                     for input in descendants(form) {
                         if let field = input as? UITextField {
                             XCTAssertEqual(field.textColor, UIColor(settings.ink))
-                            if form.boxedInputs { XCTAssertEqual(field.backgroundColor, UIColor(settings.input)); XCTAssertEqual(field.layer.borderColor, UIColor(settings.inputBorder).cgColor) }
+                            XCTAssertEqual(field.backgroundColor, UIColor(settings.input))
+                            XCTAssertEqual(field.layer.borderColor, UIColor(settings.inputBorder).cgColor)
+                            XCTAssertEqual(field.layer.cornerRadius, min(field.bounds.width, field.bounds.height) / 2, accuracy: 0.5)
                         } else if let field = input as? UITextView {
                             XCTAssertEqual(field.textColor, UIColor(settings.ink))
-                            if form.boxedInputs { XCTAssertEqual(field.backgroundColor, UIColor(settings.input)); XCTAssertEqual(field.layer.borderColor, UIColor(settings.inputBorder).cgColor) }
+                            XCTAssertEqual(field.backgroundColor, UIColor(settings.input))
+                            XCTAssertEqual(field.layer.borderColor, UIColor(settings.inputBorder).cgColor)
+                            XCTAssertEqual(field.layer.cornerRadius, min(field.bounds.width, field.bounds.height) / 2, accuracy: 0.5)
                         }
                     }
                 }

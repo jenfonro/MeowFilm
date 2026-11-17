@@ -142,7 +142,7 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IDocumentStore s
     public Task LogoutAsync(PanAccountRow row)
     {
         if (!active || stopping || !Rows.Contains(row) || !row.CanLogout) return Task.CompletedTask;
-        long revision = row.Revision;
+        var revision = row.Revision;
         var before = nativeWrites;
         return nativeWrites = RunRow(row, async (request, current) =>
         {
@@ -150,7 +150,8 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IDocumentStore s
             await before;
             if (!current()) return;
             var account = await settings.ClearAsync(row.Provider, request.Token);
-            if (account.Revision <= revision || account.Configured || account.Status != "signedOut")
+            if (account.Revision is null || revision is null || account.Revision <= revision ||
+                account.Configured != false || account.Status != "signedOut")
                 throw new BridgeException("INVALID_RESPONSE");
             if (current()) { row.Publish(account); Notify("已退出网盘账号"); }
         });
@@ -158,7 +159,8 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IDocumentStore s
 
     private Task RunRow(PanAccountRow row, Func<CancellationTokenSource, Func<bool>, Task> execute)
     {
-        long revision = row.Revision, generation = ++row.Generation, ticket = epoch;
+        var revision = row.Revision;
+        long generation = ++row.Generation, ticket = epoch;
         var request = new CancellationTokenSource();
         row.Request = request; row.Changed();
         Notify("");
@@ -180,7 +182,7 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IDocumentStore s
                             var saved = await settings.ReadAsync(row.Provider, request.Token);
                             if (!Current()) return;
                             bool expired = error is PanAccountException { Code: "AUTH_REQUIRED" or "AUTH_FAILED" } &&
-                                saved.Configured && saved.Revision == revision;
+                                saved.Configured == true && saved.Revision == revision;
                             row.Publish(expired ? saved with { Status = "expired" } : saved);
                         }
                         catch (OperationCanceledException) when (request.IsCancellationRequested) { return; }
@@ -201,9 +203,13 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IDocumentStore s
     private static void ValidateOnlineAccount(string provider, PanAccountSnapshot reported, PanAccountSnapshot saved)
     {
         if (reported.Provider != provider) throw new BridgeException("INVALID_RESPONSE");
+        if (reported.ErrorCode is { } code) throw new PanAccountException(code);
+        if (saved.ErrorCode is { } savedCode) throw new PanAccountException(savedCode);
+        if (reported.Revision is null || saved.Revision is null || reported.Fields is null || saved.Fields is null)
+            throw new BridgeException("INVALID_RESPONSE");
         if (reported.Revision != saved.Revision) throw new PanAccountException("STALE_ACCOUNT");
         if (reported.Configured != saved.Configured || !reported.Fields.Order().SequenceEqual(saved.Fields.Order()) ||
-            reported.Status != "signedIn" || !saved.Configured)
+            reported.Status != "signedIn" || saved.Configured != true)
             throw new BridgeException("INVALID_RESPONSE");
     }
 

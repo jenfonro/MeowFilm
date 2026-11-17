@@ -106,7 +106,7 @@ public static partial class MusicNativeCatalogTests
     {
         await using var f = new Fixture(); f.Platform.Total = 2;
         string token = S(await f.Prepare(), "token");
-        f.Store.Block();
+        f.Store.HoldCommit();
         var other = f.Library.CreatePlaylistAsync("Unrelated", [Song("wy", 999)]);
         await f.Store.Entered!.Task;
         using var cancel = new CancellationTokenSource();
@@ -123,7 +123,7 @@ public static partial class MusicNativeCatalogTests
     private static async Task NextAdmittedCancellation()
     {
         await using var f = new Fixture(); f.Platform.Total = 2;
-        string token = S(await f.Prepare(), "token"); f.Store.Block();
+        string token = S(await f.Prepare(), "token"); f.Store.HoldCommit();
         using var cancel = new CancellationTokenSource();
         var writing = f.Run("playlist.commit", new { token, action = "next", expectedVersion = 0 }, cancel.Token);
         await f.Store.Entered!.Task; cancel.Cancel(); f.Store.Release!.TrySetResult();
@@ -137,7 +137,7 @@ public static partial class MusicNativeCatalogTests
         await using var f = new Fixture(); f.Platform.Total = 1;
         string token = S(await f.Prepare(), "token");
         var before = await f.Queue();
-        f.Store.Block();
+        f.Store.HoldCommit();
         var other = f.Library.CreatePlaylistAsync("Unrelated", [Song("wy", 999)]);
         try
         {

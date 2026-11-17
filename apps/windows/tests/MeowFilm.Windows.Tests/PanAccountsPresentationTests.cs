@@ -20,6 +20,7 @@ public static class PanAccountsPresentationTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("three-column table binds exact states and actions at wide and narrow widths", Table);
+        yield return Case("corrupt account status is visible without enabling actions or hiding healthy siblings", CorruptRows);
         yield return Case("real login button uses shared chrome, masked fields and replacement save binding", Manual);
         yield return Case("real QR controls switch methods retry and close while cancelling challenges", Qr);
         yield return Case("hide minimize unload and owner replacement cancel login without leaking a new popup", Lifetime);
@@ -28,6 +29,21 @@ public static class PanAccountsPresentationTests
     }
     private static TestCase Case(string name, Func<Task> run) =>
         new("pan-accounts-ui: " + name, () => MusicQualityConsumerTests.Sta(run));
+    private static async Task CorruptRows()
+    {
+        await using var scene = await Scene.Create(runtime => runtime.SetDocument("""
+            {"version":1,"accounts":{"baidu":{"revision":"broken","credentials":false},
+             "tianyi":{"revision":4,"credentials":{"cookie":"synthetic"}}}}
+            """));
+        var broken = scene.Model.Rows[0];
+        var healthy = scene.Model.Rows.Single(row => row.Provider == "tianyi");
+        Check(Visuals(scene.View).OfType<TextBlock>().Any(text => ReferenceEquals(text.DataContext, broken) &&
+            text.IsVisible && text.Text == "凭据损坏") && !Action(scene.View, broken, "登录").IsEnabled,
+            "the existing status column shows an explicit item error, not signed-out or retained success");
+        Check(Action(scene.View, healthy, "编辑").IsEnabled && Action(scene.View, healthy, "退出登录").IsEnabled &&
+            !scene.Model.LoadFailed && scene.Notices.Count == 0 && scene.Runtime.Calls.Count == 0 &&
+            scene.BindingErrors.ToString().Length == 0, "healthy rows and bindings remain available without a page-level failure");
+    }
     private static async Task Table()
     {
         await using var scene = await Scene.Create(runtime =>
@@ -48,7 +64,7 @@ public static class PanAccountsPresentationTests
             header.Children.OfType<TextBlock>().Select(text => text.Text).SequenceEqual(["平台", "状态", "操作"]),
             "table has exactly platform/status/action columns");
         var cells = Visuals(scene.View).OfType<Grid>().Where(grid => grid.Name == "AccountCells").ToArray();
-        Check(cells.Length == 7 && cells.All(grid => grid.ColumnDefinitions.Count == 3), "all seven rows share the three-column contract");
+        Check(cells.Length == 5 && cells.All(grid => grid.ColumnDefinitions.Count == 3), "all five rows share the three-column contract");
         Check(VisibleActions(scene.View, scene.Model.Rows[0]).SequenceEqual(["编辑", "退出登录"]), "signed-in row actions bind");
         Check(VisibleActions(scene.View, scene.Model.Rows[1]).SequenceEqual(["重新登录", "退出登录"]), "expired row actions bind");
         Check(VisibleActions(scene.View, scene.Model.Rows[2]).SequenceEqual(["登录"]), "signed-out row action binds");
@@ -201,7 +217,7 @@ public static class PanAccountsPresentationTests
             window.Show(); await Drain();
             var pan = (PanAccountsView)view.FindName("PanPage");
             var model = (PanAccounts)pan.DataContext;
-            await Until(() => model.Rows.Count == 7 && !model.IsLoading);
+            await Until(() => model.Rows.Count == 5 && !model.IsLoading);
             Check(pan.IsVisible && !((Grid)view.FindName("BusinessPage")).IsVisible &&
                 runtime.Calls.All(call => !call.Method.StartsWith("pan.")), "film settings reads pan settings without its existing runtime");
             Click(Action(pan, model.Rows[0], "登录"));
@@ -283,7 +299,7 @@ public static class PanAccountsPresentationTests
             try
             {
                 scene.Window.Show();
-                await Until(() => scene.Model.Rows.Count == 7 && !scene.Model.IsLoading);
+                await Until(() => scene.Model.Rows.Count == 5 && !scene.Model.IsLoading);
                 return scene;
             }
             catch { await scene.DisposeAsync(); throw; }

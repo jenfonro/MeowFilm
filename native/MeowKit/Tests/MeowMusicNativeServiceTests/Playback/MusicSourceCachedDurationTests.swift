@@ -1,6 +1,5 @@
 import Foundation
 import XCTest
-import MeowJSON
 import MeowMusicFeature
 import MeowMusicTestSupport
 import MeowRuntime
@@ -46,7 +45,7 @@ final class MusicSourceCachedDurationTests: XCTestCase {
             let after = try await service.read()
             XCTAssertEqual(after.queue, before.queue)
             XCTAssertEqual(after.playback, before.playback)
-            XCTAssertEqual(after.library["library"]["songs"][first.track.songId]["baselineDuration"].number, 100)
+            XCTAssertEqual((try after.fixtureSong(first.track.songId))["baselineDuration"].number, 100)
             let resolutions = await accounts.resolutions, searches = await qq.queries
             XCTAssertEqual(resolutions, 2, "Cached options and the rejected old URL require no extra resolution")
             XCTAssertEqual(searches, ["100", "130"])
@@ -232,7 +231,7 @@ private actor DurationHistoryAccounts: MusicNativeAccountProviding {
     func nativeResolve(platform: MusicAccountPlatform, nativeID: String,
                        selection: MusicPlaybackSelection) throws -> MusicNativeAudio {
         resolutions += 1
-        var fields: [String: JSONValue] = ["url": .string(Self.url.absoluteString), "expiresAt": .null,
+        var fields: RuntimeObject = ["url": .string(Self.url.absoluteString), "expiresAt": .null,
                                           "qualityVerified": .bool(verifiedQuality)]
         if verifiedQuality { fields["actualQuality"] = .string(selection.quality) }
         if let duration { fields["duration"] = .number(duration) }

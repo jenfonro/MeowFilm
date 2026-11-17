@@ -75,7 +75,7 @@ final class MusicNativeSongMetadataTests: XCTestCase {
                        cache: (any MusicSourceDiscoveryCaching)? = nil,
                        scripts: (any MusicScriptResolving)? = nil,
                        enabledPlatforms: Set<MusicPublicBrowsePlatform> = [.netease, .qq]) async throws -> NativeMusicService {
-        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: seed),
+        let service = NativeMusicService(database: try MusicNativeCandidateDiscoveryFixture.store(song: seed),
             scripts: scripts, platformClient: try qq.makeClient(), sourceDiscovery: cache, enabledPlatforms: enabledPlatforms,
             clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)
@@ -485,7 +485,7 @@ final class MusicNativeSongMetadataTests: XCTestCase {
         var favorites = document.library["library"]["collections"].array[0]
         favorites["order"] = .strings([seed["songId"].string])
         document.library["library"]["collections"] = .array([favorites])
-        let store = NativeMusicMemoryDocument(try document.encode(changed: ["library"]))
+        let store = NativeMusicTestLibrary(try document.encode(changed: ["library"]))
         let qq = SongMetadataQQ([.init(items: [native()])])
         let service = try await NativeMusicFixture.service(store, platform: qq)
         _ = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
@@ -510,7 +510,7 @@ final class MusicNativeSongMetadataTests: XCTestCase {
         XCTAssertTrue(recording.sources.contains { $0.platform == "wy" && $0.nativeId == "later" })
         _ = try await service.replaceSearchBatch(request, expectedRevision: 1, intent: .init())
         let document = try await service.read()
-        let saved = document.library["library"]["songs"][document.queue["entries"].array[0]["songId"].string]
+        let saved = (try document.fixtureSong(document.queue["entries"].array[0]["songId"].string))
         XCTAssertTrue(saved["sources"].array.contains { MusicModel.sourceData($0)["songmid"].string == "later" })
         let calls = await qq.calls()
         XCTAssertEqual(calls, 1, "batch adoption never discovers unrelated platforms")

@@ -234,7 +234,7 @@ private struct ManualExplorationFileCache: MusicAudioFileCaching {
             let store = try MusicNativeCandidateDiscoveryFixture.store(song: song())
             let document = try MusicDocument(store.read(), runID: "manual-file")
             let entry = try XCTUnwrap(document.queue["entries"].array.first)
-            let recording = document.library["library"]["songs"][entry["songId"].string]
+            let recording = (try document.fixtureSong(entry["songId"].string))
             let source = try XCTUnwrap(MusicModel.sources(recording).first)
             let scope: String
             if official { scope = try await accounts.nativeCacheScope().scope }
@@ -245,7 +245,7 @@ private struct ManualExplorationFileCache: MusicAudioFileCaching {
             let cache = ManualExplorationFileCache(hit: .init(identity: identity,
                 fileURL: URL(fileURLWithPath: "/synthetic/manual-master.flac"), duration: 180,
                 measuredQuality: "master", expiresAt: clock.now().addingTimeInterval(3600)))
-            let service = NativeMusicService(document: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
+            let service = NativeMusicService(database: store, accounts: accounts, platformClient: try NativeMusicFixture.client(),
                 audioFileCache: cache, clock: { clock.now() })
             try await service.setAccess(available: true, generation: 1)
             try await policy(service)

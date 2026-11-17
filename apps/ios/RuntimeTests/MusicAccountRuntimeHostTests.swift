@@ -128,7 +128,7 @@ private final class MusicAccountHostFixture {
         self.identity = identity; self.store = store; self.peer = peer; self.runtime = runtime
         self.platform = platform; self.owner = owner
         gate = MusicAccountAccessGate(service: owner)
-        service = NativeMusicService(document: MusicStartupDocument(failure: nil), accounts: owner,
+        service = NativeMusicService(database: MusicStartupLibrary(failure: nil), accounts: owner,
             platformClient: platform, clock: { MusicAccountHostPeer.now })
     }
 

@@ -30,7 +30,7 @@ import MeowContracts
     }
 
     func testFeedbackWriteUpdatesSharedSettingsBeforeNextQualityCAS() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let owner = MusicViewModel(service: service, player: FeedbackSettingsPlayer())
         let (page, feedback) = try await settings(owner)
         let writes = store.snapshot().2
@@ -50,7 +50,7 @@ import MeowContracts
     }
 
     func testRetainedAccountsObserveQualityWriteBeforeSingleFeedbackCAS() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let owner = MusicViewModel(service: service, player: FeedbackSettingsPlayer())
         let page = MusicAccountsSettingsState(owner: owner)
         let feedback = try XCTUnwrap(page.feedback)
@@ -86,7 +86,7 @@ import MeowContracts
     }
 
     func testFeedbackConflictReadsSharedAuthorityWithoutReplaying() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let owner = MusicViewModel(service: service, player: FeedbackSettingsPlayer())
         let (page, feedback) = try await settings(owner)
         let changed = try await service.updateSettings(.init(ifRevision: 0, qualityEnabled: ["standard"]))
@@ -107,7 +107,7 @@ import MeowContracts
     }
 
     func testSettingsReadbackKeepsQueueFactsSurvivesCallerCancellationAndRejectsOldAccessOrRevision() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let owner = MusicViewModel(service: service, player: FeedbackSettingsPlayer())
         let generation = owner.accountAccessGeneration
         _ = try await service.setPlaybackFeedback(platform: .qq, enabled: true, expectedRevision: 0)

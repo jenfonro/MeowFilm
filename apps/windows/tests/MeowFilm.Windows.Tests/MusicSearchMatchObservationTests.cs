@@ -526,7 +526,7 @@ public static class MusicSearchMatchObservationTests
         internal readonly MusicSearchCoordinator Search;
         internal Fixture()
         {
-            Library = new(Store);
+            Library = new(MusicTestStores.For(Store));
             Search = new(Catalog, Clock, async (request, token) =>
             {
                 long observation = Library.BeginSongObservation();

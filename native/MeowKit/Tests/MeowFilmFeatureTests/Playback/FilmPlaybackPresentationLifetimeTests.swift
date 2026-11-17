@@ -31,7 +31,7 @@ final class FilmPlaybackPresentationLifetimeTests: XCTestCase {
         XCTAssertNil(opens[0].1.filmObject?["restoreOnly"])
         XCTAssertEqual(opens[1].1.filmObject?["restoreOnly"], .bool(true))
         XCTAssertTrue(media.prepared.isEmpty)
-        XCTAssertFalse(calls.contains { ["play", "prepare", "select.episode", "select.candidate"]
+        XCTAssertFalse(calls.contains { ["play", "prepare", "select.target"]
             .contains($0.1.filmObject?["action"]?.filmText ?? "") })
         await model.close()
     }

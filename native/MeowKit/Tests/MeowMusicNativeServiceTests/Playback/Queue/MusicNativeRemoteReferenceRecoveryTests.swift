@@ -12,8 +12,8 @@ private final class ActionRecoveryClock: @unchecked Sendable {
 final class MusicNativeRemoteReferenceRecoveryTests: XCTestCase {
     func testDisplayedPermanentReferenceSurvivesLaterPagesAndOwnerRecreation() async throws {
         let clock = ActionRecoveryClock()
-        let document = NativeMusicMemoryDocument()
-        let service = NativeMusicService(document: document, platformClient: try NativeMusicFixture.client(),
+        let document = NativeMusicTestLibrary()
+        let service = NativeMusicService(database: document, platformClient: try NativeMusicFixture.client(),
             clock: { clock.now() })
         try await service.setAccess(available: true, generation: 1)
         let source = MusicRemoteQueueSource(context: .init(kind: .playlist, id: "synthetic-660",

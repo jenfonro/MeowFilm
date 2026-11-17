@@ -13,7 +13,9 @@ SHARED_TARGETS = {"MeowContracts", "MeowJSON", "MeowStorage", "MeowAccounts", "M
 LOCAL_PRODUCTS = {
     "MeowVideoKernel": ("videokernel", "../VideoKernel"),
     "CMeowAudioKernel": ("audiokernel", "../AudioKernel"),
+    "MeowAetherKernel": ("aetherkernel", "../AetherKernel"),
 }
+SYSTEM_TARGETS = {"CSQLite": {"MeowMusicNativeService"}}
 
 def application_membership(base, project_text):
     """Exact source closure in each target, not just PBXFileReference presence."""
@@ -109,6 +111,35 @@ def evaluate_package(package):
     return json.loads(result.stdout)
 
 
+def aether_membership(root):
+    """Aether and its FFmpeg references must stay behind one dynamic product."""
+    failures = []
+    manifest = evaluate_package(root / "native/AetherKernel")
+    products = manifest["products"]
+    if (len(products) != 1 or products[0]["name"] != "MeowAetherKernel"
+            or products[0]["type"] != {"library": ["dynamic"]}
+            or products[0]["targets"] != ["MeowAetherKernel"]):
+        failures.append("Aether must expose only the dynamic MeowAetherKernel product")
+    if manifest["dependencies"]:
+        failures.append("Aether package must not resolve remote or secondary packages")
+    declarations = {item["name"]: item for item in manifest["targets"]}
+    binary = {name for name, item in declarations.items() if item["type"] == "binary"}
+    lock = json.loads((root / "scripts/ios-aether-kernel.json").read_text())
+    if binary != set(lock["libraries"]) | {"Dovi"}:
+        failures.append("Aether binary closure differs from the lock")
+    regular = {name for name, item in declarations.items() if item["type"] == "regular"}
+    if regular != {"MeowAetherKernel", "AetherEngine", "AetherFFmpegBuild"}:
+        failures.append("Unexpected Aether source target")
+    for name, path in (("AetherEngine", ".cache/AetherEngine"),
+                       ("AetherFFmpegBuild", ".cache/AetherFFmpegBuild")):
+        if declarations.get(name, {}).get("path") != path:
+            failures.append("Aether source must use the locked preparation: " + name)
+    for name in binary:
+        if declarations[name].get("path") != ".cache/binaries/" + name + ".xcframework":
+            failures.append("Aether binary must use the locked preparation: " + name)
+    return failures
+
+
 def check(root):
     # macOS exposes temporary directories through /var while their canonical
     # location is /private/var. Anchor every traversal to one canonical root so
@@ -153,15 +184,33 @@ def check(root):
         kinds[name] = kind
     sources = {name for name, kind in kinds.items() if kind == "regular"}
     tests = {name for name, kind in kinds.items() if kind == "test"}
+    systems = {name for name, kind in kinds.items() if kind == "system"}
+    if not systems <= SYSTEM_TARGETS.keys():
+        failures.append("Unapproved system target")
+    for declaration in manifest["targets"]:
+        name = declaration["name"]
+        if name not in systems:
+            continue
+        if (name != "CSQLite" or declaration.get("pkgConfig") != "sqlite3" or targets[name]
+                or declaration.get("providers") or declaration.get("path") is not None):
+            failures.append("Invalid system target: " + name)
+            continue
+        directory = package / "Sources" / name
+        modulemap, shim = directory / "module.modulemap", directory / "shim.h"
+        expected_module = r'module\s+CSQLite\s+\[system\]\s*\{\s*header\s+"shim\.h"\s+link\s+"sqlite3"\s+export\s+\*\s*\}'
+        if (not directory.is_dir() or {path.name for path in directory.iterdir()} != {"module.modulemap", "shim.h"}
+                or not modulemap.is_file() or not re.fullmatch(expected_module, modulemap.read_text(encoding="utf-8").strip())
+                or not shim.is_file() or shim.read_text(encoding="utf-8").strip() != "#include <sqlite3.h>"):
+            failures.append("Invalid system module: " + name)
     if not sources:
         failures.append("No package source targets")
-    for folder, expected in (("Sources", sources), ("Tests", tests)):
+    for folder, expected in (("Sources", sources | systems), ("Tests", tests)):
         parent = package / folder
         actual = {p.name for p in parent.iterdir() if p.is_dir()} if parent.exists() else set()
         if actual != expected:
             failures.append("{} directories: missing={}, extra={}".format(folder, sorted(expected - actual), sorted(actual - expected)))
         for target in sorted(expected):
-            if not list((parent / target).rglob("*.swift")):
+            if target not in systems and not list((parent / target).rglob("*.swift")):
                 failures.append("Empty target: " + target)
     product_targets = [(item["name"], item["targets"]) for item in manifest["products"]]
     products = {name for name, _ in product_targets}
@@ -172,16 +221,19 @@ def check(root):
         if not linked or not linked <= sources:
             failures.append("Invalid package product targets: " + name)
     for target, dependencies in targets.items():
-        if not dependencies <= sources | external:
+        if not dependencies <= sources | external | systems:
             failures.append("Non-source dependency: " + target)
-        folder = "Sources" if target in sources else "Tests"
+        for system in dependencies & systems:
+            if target not in SYSTEM_TARGETS.get(system, set()):
+                failures.append("Unapproved system dependency: " + target)
+        folder = "Sources" if target in sources | systems else "Tests"
         imported = set()
         for path in (package / folder / target).rglob("*.swift"):
             if path.is_symlink() or not path.resolve().is_relative_to((package / folder / target).resolve()):
                 failures.append("Linked source: " + str(path.relative_to(root)))
                 continue
             text = path.read_text(encoding="utf-8")
-            imported.update(re.findall(r"^(?:@testable )?import (Meow\w+)", text, re.M))
+            imported.update(re.findall(r"^(?:@testable )?import (Meow\w+|CSQLite)", text, re.M))
         if not imported <= dependencies:
             failures.append("Undeclared imports for {}: {}".format(target, sorted(imported - dependencies)))
         if target in SHARED_TARGETS:
@@ -205,14 +257,24 @@ def check(root):
             closure(dependency, seen)
         return seen
     for name in ("MeowAudio", "MeowPlayback", "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicNativeService"):
-        if name in sources and closure(name) & {"MeowVideoKernel", "MeowPlaybackVideo"}:
+        if name in sources and closure(name) & {"MeowVideoKernel", "MeowPlaybackVideo", "MeowAetherKernel"}:
             failures.append("Music/audio closure depends on video: " + name)
+    if "MeowAetherKernel" in external:
+        try:
+            failures.extend(aether_membership(root))
+        except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
+            failures.append("Cannot evaluate Aether package boundary: " + str(error))
     for parent in (root / "apps/ios", package / "Sources", package / "Tests"):
         for path in parent.rglob("*"):
             if parent == root / "apps/ios" and path.relative_to(parent).parts[0] == ".cache":
                 continue
             if path.is_symlink() or path.resolve() != path.absolute():
                 failures.append("Linked source: " + str(path.relative_to(root)))
+            if path.is_file() and path.suffix == ".swift":
+                if re.search(r"^\s*(?:(?:@testable|@preconcurrency|public|internal|package|fileprivate|private)\s+)*"
+                             r"import (?:AetherEngine|AetherFFmpegBuild|AetherLib\w+|Dovi)\b",
+                             path.read_text(encoding="utf-8"), re.M):
+                    failures.append("Aether raw imports bypass dynamic boundary: " + str(path.relative_to(root)))
     project = root / "apps/ios/Meowfilm.xcodeproj/project.pbxproj"
     if project.exists():
         text = project.read_text(encoding="utf-8")

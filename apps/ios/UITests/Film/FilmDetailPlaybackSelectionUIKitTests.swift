@@ -72,8 +72,8 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             await model.waitForPendingWork()
 
             let commands = await server.calls().filter { $0.operation == "session.command" }
-            XCTAssertEqual(commands.compactMap(\.action), ["select.candidate"], "\(proof)")
-            XCTAssertEqual(commands.last?.input.filmObject?["candidateId"], .string(secondID), "\(proof)")
+            XCTAssertEqual(commands.compactMap(\.action), ["select.target"], "\(proof)")
+            XCTAssertEqual(commands.last?.input.filmObject?["target"]?.filmObject?["source"]?.filmObject?["candidateId"], .string(secondID), "\(proof)")
             XCTAssertEqual(model.snapshot?.current, before.current, "The page must not manufacture a new current")
             XCTAssertEqual(model.snapshot?.target, before.target)
             XCTAssertTrue(media.inputs.isEmpty, "Prepared receipts remain with the existing model/owner")
@@ -140,8 +140,8 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             play.sendActions(for: .touchUpInside)
             await model.waitForPendingWork()
             let commands = await server.calls().filter { $0.operation == "session.command" }
-            XCTAssertEqual(commands.compactMap(\.action), ["browse", "select.candidate"])
-            XCTAssertEqual(commands.last?.input.filmObject?["candidateId"], .string(expectedID))
+            XCTAssertEqual(commands.compactMap(\.action), ["browse", "select.target"])
+            XCTAssertEqual(commands.last?.input.filmObject?["target"]?.filmObject?["source"]?.filmObject?["candidateId"], .string(expectedID))
             XCTAssertEqual(model.snapshot?.current, before.current)
             XCTAssertTrue(media.inputs.isEmpty)
             XCTAssertEqual(presentations, 1)
@@ -181,8 +181,8 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
 
         let calls = await server.calls()
         XCTAssertEqual(calls.map(\.operation), ["session.open", "session.command"])
-        XCTAssertEqual(calls.compactMap(\.action), ["select.candidate"])
-        XCTAssertEqual(calls.last?.input.filmObject?["candidateId"], .string(firstID))
+        XCTAssertEqual(calls.compactMap(\.action), ["select.target"])
+        XCTAssertEqual(calls.last?.input.filmObject?["target"]?.filmObject?["source"]?.filmObject?["candidateId"], .string(firstID))
         XCTAssertNil(calls.last?.input.filmObject?["episode"])
         XCTAssertNil(model.snapshot?.current)
         XCTAssertTrue(media.inputs.isEmpty)
@@ -234,7 +234,10 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             XCTAssertFalse(browsed.browsing.files.contains { $0.candidateID == secondID })
             XCTAssertTrue(browsed.browsing.originalFiles.contains { $0.candidateID == secondID })
             XCTAssertEqual(find("film.file.season-two-first", page.view) != nil, hasSeasonTwoFile)
-            XCTAssertNil(find("film.file.second", page.view))
+            if let previous = find("film.file.second", page.view) {
+                XCTAssertTrue(sequence(first: previous, next: { $0.superview }).contains(where: \.isHidden))
+                XCTAssertFalse((previous as? UIButton)?.isEnabled ?? true)
+            }
             XCTAssertTrue(media.inputs.isEmpty)
             XCTAssertEqual(presentations, 0)
             let browseCalls = await server.calls()
@@ -249,8 +252,8 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
 
             let commands = await server.calls().filter { $0.operation == "session.command" }
             XCTAssertEqual(commands.compactMap(\.action), hasSeasonTwoFile
-                ? ["browse.season", "select.candidate"] : ["browse.season"])
-            XCTAssertEqual(commands.last?.input.filmObject?["candidateId"],
+                ? ["browse.season", "select.target"] : ["browse.season"])
+            XCTAssertEqual(commands.last?.input.filmObject?["target"]?.filmObject?["source"]?.filmObject?["candidateId"],
                            hasSeasonTwoFile ? .string(seasonTwoID) : nil)
             XCTAssertEqual(model.snapshot?.current, before.current)
             XCTAssertEqual(model.snapshot?.target, before.target)
@@ -308,12 +311,13 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         try button("film.episode.fixture-season-2-episode-2", page.view).sendActions(for: .touchUpInside)
         await model.waitForPendingWork()
         let commands = await server.calls().filter { $0.operation == "session.command" }
-        XCTAssertEqual(commands.compactMap(\.action), ["browse.season", "play", "select.episode"])
+        XCTAssertEqual(commands.compactMap(\.action), ["browse.season", "select.target", "select.target"])
         XCTAssertEqual(commands[0].input.filmObject?["season"], .number(2))
-        XCTAssertNil(commands[1].input.filmObject?["candidateId"])
-        XCTAssertNil(commands[1].input.filmObject?["episode"], "Node resolves the current browse for page play")
-        XCTAssertEqual(commands[2].input.filmObject?["episode"],
-            .object(["season": .number(2), "episode": .number(2), "globalEpisode": .number(4)]))
+        XCTAssertNil(commands[1].input.filmObject?["target"]?.filmObject?["source"]?.filmObject?["candidateId"])
+        XCTAssertEqual(commands[1].input.filmObject?["target"],
+            changed["episodes"]?.filmArray?.first?.filmObject?["playbackTarget"])
+        XCTAssertEqual(commands[2].input.filmObject?["target"],
+            changed["episodes"]?.filmArray?[1].filmObject?["playbackTarget"])
         XCTAssertEqual(model.snapshot?.target, exact)
         XCTAssertEqual(model.snapshot?.current, before.current)
         XCTAssertEqual(presentations, 2)
@@ -333,7 +337,7 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         var selected = fields
         selected["target"] = .object(exact.value)
         let server = FilmUIKitPlaybackServer(.object(fields)), media = FilmUIKitPlaybackMedia()
-        await server.reply(to: "select.candidate", with: .object(selected))
+        await server.reply(to: "select.target", with: .object(selected))
         let model = try makeModel(server, media, fields: fields)
         await model.open()?.value
         let page = try detailPage(model), window = try mount(page)
@@ -348,8 +352,8 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         candidate.sendActions(for: .touchUpInside)
         await model.waitForPendingWork()
         let calls = await server.calls()
-        XCTAssertEqual(calls.compactMap(\.action), ["select.candidate"])
-        XCTAssertEqual(calls.last?.input.filmObject?["candidateId"], .string(secondID))
+        XCTAssertEqual(calls.compactMap(\.action), ["select.target"])
+        XCTAssertEqual(calls.last?.input.filmObject?["target"]?.filmObject?["source"]?.filmObject?["candidateId"], .string(secondID))
         XCTAssertNil(calls.last?.input.filmObject?["episode"])
         XCTAssertEqual(model.snapshot?.target, exact)
         XCTAssertEqual(model.snapshot?.metadataSources.first?.kind, .movie)
@@ -405,7 +409,8 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             XCTAssertTrue(before.browsing.files.compactMap(\.candidateID).isEmpty)
             XCTAssertEqual(before.current?.candidate.id, secondID, "An old output does not authorize page play outside the current browse")
             if unavailable == .unselectable {
-                XCTAssertFalse(try button("film.file.unavailable", page.view).isEnabled)
+                XCTAssertEqual((find("film.detail.episodes-state", page.view) as? UILabel)?.text, "无可用视频源")
+                XCTAssertTrue(try XCTUnwrap(find("film.detail.episode-cards", page.view)).isHidden)
             }
             let play = try button("film.detail.play", page.view)
             XCTAssertFalse(play.isEnabled, "\(unavailable)")
@@ -434,7 +439,7 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         await model.waitForPendingWork()
         var rejected = fields
         rejected["stage"] = .string("unavailable"); rejected["error"] = .string("MEDIA_UNAVAILABLE")
-        await server.reply(to: "select.candidate", with: .object(rejected))
+        await server.reply(to: "select.target", with: .object(rejected))
 
         let play = try button("film.detail.play", page.view)
         XCTAssertTrue(play.isEnabled)
@@ -443,8 +448,8 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
 
         let calls = await server.calls()
         XCTAssertEqual(calls.map(\.operation), ["session.open", "session.command"])
-        XCTAssertEqual(calls.compactMap(\.action), ["select.candidate"])
-        XCTAssertEqual(calls.last?.input.filmObject?["candidateId"], .string(secondID))
+        XCTAssertEqual(calls.compactMap(\.action), ["select.target"])
+        XCTAssertEqual(calls.last?.input.filmObject?["target"]?.filmObject?["source"]?.filmObject?["candidateId"], .string(secondID))
         XCTAssertEqual(model.snapshot?.stage, "unavailable")
         XCTAssertEqual(model.snapshot?.error, "MEDIA_UNAVAILABLE")
         XCTAssertNil(model.snapshot?.attempt)
@@ -471,6 +476,7 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         fields["browsing"] = browsing(files: seasonOne, original: original, season: 1)
         fields["current"] = current(secondID, episode: second); fields["stage"] = .string("playing")
         fields["sources"] = .array([.object([
+            "businessId": .string("source-fixture-a"), "playbackTarget": FilmUIKitPlaybackFixture.sourceTarget(),
             "id": .string("result-a"), "title": .string("星海航线"), "source": FilmUIKitPlaybackFixture.source,
             "state": .string("ready"), "error": .null,
         ])])
@@ -483,16 +489,22 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         fields["metadata"] = .object([
             "name": .string("星海航线"), "status": .string("Ended"),
             "seasons": .array([
-                .object(["id": .number(1), "season_number": .number(1), "name": .string("第一季"),
+                .object(["businessId": .string("fixture-season-1"), "playbackTarget": FilmUIKitPlaybackFixture.target(),
+                         "id": .number(1), "season_number": .number(1), "name": .string("第一季"),
                          "episode_count": .number(2), "episodes": .array(seasonOneEpisodes)]),
-                .object(["id": .number(2), "season_number": .number(2), "name": .string("第二季"),
+                .object(["businessId": .string("fixture-season-2"), "playbackTarget": FilmUIKitPlaybackFixture.target(),
+                         "id": .number(2), "season_number": .number(2), "name": .string("第二季"),
                          "episode_count": .number(3), "episodes": .array(seasonTwoEpisodes)]),
             ]),
         ])
         return fields
     }
     private func seasonEpisode(season: Int, episode: Int, globalEpisode: Int) -> RuntimeValue {
-        .object(["season": .number(Double(season)), "episode": .number(Double(episode)),
+        var target = FilmUIKitPlaybackFixture.target().filmObject!
+        target["season"] = .number(Double(season)); target["episode"] = .number(Double(episode))
+        target["globalEpisode"] = .number(Double(globalEpisode))
+        return .object(["businessId": .string("fixture-season-\(season)-episode-\(episode)"),
+                 "playbackTarget": .object(target), "season": .number(Double(season)), "episode": .number(Double(episode)),
                  "season_number": .number(Double(season)), "episode_number": .number(Double(episode)),
                  "globalEpisode": .number(Double(globalEpisode)), "air_date": .string("2020-01-01"),
                  "name": .string("真实第 \(episode) 集")])
@@ -513,21 +525,21 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
             }
             fields["target"] = .object(target)
             fields["metadata"] = .null; fields["metadataSources"] = .array([])
-            fields["metadataSourceId"] = .null
+            fields["metadataSourceId"] = .null; fields["workInfo"] = .null
         } else {
             fields["metadata"] = .object(["title": .string("星海航线")])
-            fields["metadataSources"] = .array([.object([
-                "id": .string("confirmed-tmdb"), "provider": .string("tmdb"), "metadataId": .number(19),
-                "kind": .string("movie"), "title": .string("星海航线"),
-            ])])
+            fields["metadataSources"] = .array(FilmUIKitPlaybackFixture.metadataSources([.tmdb], kind: .movie))
         }
         fields["episodes"] = .array([]); fields["stage"] = .string("idle")
         var sources: [RuntimeValue] = [
-            .object(["id": .string("result-a"), "title": .string("星海航线"),
+            .object(["businessId": .string("source-fixture-a"), "playbackTarget": FilmUIKitPlaybackFixture.sourceTarget(),
+                     "id": .string("result-a"), "title": .string("星海航线"),
                      "source": FilmUIKitPlaybackFixture.source, "state": .string("ready"), "error": .null]),
         ]
         if kind != .source {
-            sources.append(.object(["id": .string("result-other"), "title": .string("另一详情"),
+            sources.append(.object(["businessId": .string("source-fixture-other"),
+                "playbackTarget": FilmUIKitPlaybackFixture.sourceTarget(source: try otherSource()),
+                "id": .string("result-other"), "title": .string("另一详情"),
                 "source": try otherSource(), "state": .string("ready"), "error": .null]))
         }
         fields["sources"] = .array(sources)
@@ -549,6 +561,9 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
                            lineID: RuntimeValue = .number(0), position: FilmEpisodePosition = .init()) -> RuntimeValue {
         var fields: RuntimeObject = ["id": .string(id), "source": source, "lineId": lineID,
                                      "lineLabel": .string("原标签"), "name": .string("同名正片")]
+        var target = FilmUIKitPlaybackFixture.sourceTarget(source: source, lineID: lineID, candidateID: id).filmObject!
+        for (key, value) in position.value { target[key] = value }
+        fields["businessId"] = .string(id); fields["playbackTarget"] = .object(target)
         for (key, value) in position.value { fields[key] = value }
         return .object(fields)
     }
@@ -558,17 +573,33 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
     }
     private func file(_ id: String, candidateID: String?, position: FilmEpisodePosition = .init()) -> RuntimeValue {
         var fields: RuntimeObject = ["id": .string(id), "name": .string("同名正片")]
+        var target = FilmUIKitPlaybackFixture.sourceTarget(candidateID: candidateID).filmObject!
+        for (key, value) in position.value { target[key] = value }
+        fields["businessId"] = .string(candidateID ?? id); fields["playbackTarget"] = .object(target)
         fields["candidateId"] = candidateID.map(RuntimeValue.string)
         for (key, value) in position.value { fields[key] = value }
         return .object(fields)
     }
     private func browsing(sourceID: String = "result-a", lineID: RuntimeValue = .number(0),
                           files: [RuntimeValue], original: [RuntimeValue]? = nil, season: Int? = nil) -> RuntimeValue {
+        func scoped(_ file: RuntimeValue) -> RuntimeValue {
+            var row = file.filmObject!, target = row["playbackTarget"]!.filmObject!, source = target["source"]!.filmObject!
+            source["lineId"] = lineID
+            if sourceID == "result-other" {
+                source["key"] = .string("another-source-key"); source["siteId"] = .string("another-site")
+                source["detailId"] = .string("0")
+            }
+            target["source"] = .object(source); row["playbackTarget"] = .object(target)
+            return .object(row)
+        }
         var fields: RuntimeObject = [
             "sourceId": .string(sourceID), "lineId": lineID, "loading": .bool(false), "error": .null,
-            "lines": .array([.object(["id": .number(0), "label": .string("原线路")]),
-                             .object(["id": .string("0"), "label": .string("另一线路")])]),
-            "episodes": .array(files), "originalEpisodes": .array(original ?? files),
+            "lines": .array([.object(["businessId": .string("fixture-numeric-line"),
+                "playbackTarget": FilmUIKitPlaybackFixture.sourceTarget(), "id": .number(0), "label": .string("原线路")]),
+                .object(["businessId": .string("fixture-string-line"),
+                "playbackTarget": FilmUIKitPlaybackFixture.sourceTarget(lineID: .string("0")),
+                "id": .string("0"), "label": .string("另一线路")])]),
+            "episodes": .array(files.map(scoped)), "originalEpisodes": .array((original ?? files).map(scoped)),
         ]
         fields["season"] = season.map { .number(Double($0)) }
         return .object(fields)

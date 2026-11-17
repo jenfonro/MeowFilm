@@ -19,7 +19,7 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
         document.queue["entries"] = .array(entries)
         document.queue["currentId"] = .string("entry-2")
         document.queue["serial"] = .n(5); document.queue["revision"] = .n(1)
-        let store = NativeMusicMemoryDocument(try document.encode(changed: ["library", "queue"]))
+        let store = NativeMusicTestLibrary(try document.encode(changed: ["library", "queue"]))
         let service = try await NativeMusicFixture.service(store)
         let queue = try await service.queue()
         let expectedSources = try songs.map(MusicModel.sources)
@@ -35,9 +35,8 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
         XCTAssertEqual(queue.entries.map { $0.displayIdentity?.sourceID },
                        (1...5).map { "Occurrence \($0)" })
         let oldQueue = try await service.read().queue
-        try await service.transaction(["library"]) { d in
-            d.library["library"]["songs"][first["songId"].string]["title"] = .string("Current A")
-        }
+        var updated = first; updated["title"] = .string("Current A")
+        try await service.seedRepositorySongs([updated])
         let current = try await service.queue(), state = try await service.read()
         XCTAssertEqual(current.entries.map(\.track.title), ["Current A", "Current A", "Synthetic B", "Synthetic B", "Current A"])
         XCTAssertEqual(state.queue, oldQueue)
@@ -57,14 +56,14 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
             document.queue["currentId"] = .string("entry-1")
             document.queue["serial"] = .n(2); document.queue["revision"] = .n(1)
             let bytes = try document.encode(changed: ["library", "queue"])
-            XCTAssertThrowsError(try MusicDocument(bytes, runID: "fixture")) {
+            XCTAssertThrowsError(try MusicDocument(bytes, runID: "fixture").requireQueue()) {
                 XCTAssertEqual($0 as? MusicServiceError, .corruptDocument)
             }
         }
     }
 
     func testRemovingCurrentConsumesItsPrioritySuccessorBeforeColdRead() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let page = try await service.search(platform: "tx", query: "Queue priority", page: 1, limit: 30)
         let ref = try XCTUnwrap(page.items.first).ref
         var state = try await service.changeQueue(.replace([ref, ref], index: 0), expectedRevision: 0)
@@ -82,7 +81,7 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
     }
 
     func testReplaceAppendAndColdReadKeepMoreThanFormerTwoThousandOccurrences() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let page = try await service.search(platform: "tx", query: "Large queue", page: 1, limit: 30)
         let ref = try XCTUnwrap(page.items.first).ref
         let state = try await service.changeQueue(.replace(Array(repeating: ref, count: 2001), index: 2000),
@@ -103,7 +102,7 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
     }
 
     func testQueueSerialUsesActualBatchSizeAndRejectsUnrepresentableIDsWithoutWriting() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let page = try await service.search(platform: "tx", query: "Serial", page: 1, limit: 30)
         let ref = try XCTUnwrap(page.items.first).ref, maximum = 9_007_199_254_740_991
         try await service.transaction(["queue"]) { $0.queue["serial"] = .n(maximum - 1) }
@@ -136,7 +135,7 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
     }
 
     func testSessionPausePreservesTimeButColdQueueRestoresAtZeroWithoutResolving() async throws {
-        let store = NativeMusicMemoryDocument(), scripts = NativeMusicScriptFixture()
+        let store = NativeMusicTestLibrary(), scripts = NativeMusicScriptFixture()
         let service = try await NativeMusicFixture.service(store, scripts: scripts)
         let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
         let queued = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
@@ -150,7 +149,7 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
         let paused = try await service.state()
         XCTAssertEqual(paused.position, 37)
         let bytes = try XCTUnwrap(store.snapshot().0), durable = try MJ.parse(bytes)
-        XCTAssertEqual(durable["records"][MusicModel.key("playback")]["position"]["seconds"], .n(0))
+        XCTAssertEqual(durable["areas"]["playback"]["position"]["seconds"], .n(0))
         let callsBefore = await scripts.calls().count
         await service.close()
         let cold = try await NativeMusicFixture.service(store, scripts: scripts)
@@ -164,7 +163,7 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
     }
 
     func testReselectSameOccurrenceResetsPositionAndRejectsOldAttemptOnlyAfterCommit() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, scripts: NativeMusicScriptFixture())
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, scripts: NativeMusicScriptFixture())
         let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
         let state = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
         let id = try XCTUnwrap(state.currentId), options = (try await service.sourceAvailability(for: page.items[0].ref)).options
@@ -202,7 +201,7 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
         let history = try await service.playedSongs(); XCTAssertTrue(history.isEmpty)
     }
     func testListBoundaryWrapsAndResetsPosition() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, scripts: NativeMusicScriptFixture())
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, scripts: NativeMusicScriptFixture())
         let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
         let state = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
         _ = try await service.updateSettings(.init(ifRevision: 0, mode: .loop))

@@ -3549,7 +3549,7 @@ test('Cat creates internal scope tokens only after request payload serialization
     const before = session.services.scopes.size;
     const cyclic = {};
     cyclic.self = cyclic;
-    await assert.rejects(session.read('/api/site-a/home', cyclic, session.root), TypeError);
+    await assert.rejects(session.read('/api/site-a/home', cyclic, session.root), { code: 'INVALID_REQUEST' });
     assert.equal(session.services.scopes.size, before);
   });
 
@@ -3847,7 +3847,8 @@ test('Cat listeners and aggregate accept external callers while preserving paths
     assert.deepEqual(JSON.parse(home.text), { opened: true });
     for (const origin of [instance.endpoints[0].origin, state.aggregate.origin]) {
       const preflight = await request(external(origin + '/website'), {
-        method: 'OPTIONS', headers: { ...headers, 'Access-Control-Request-Headers': 'x-source-header' },
+        method: 'OPTIONS', headers: { ...headers, 'Access-Control-Request-Method': 'GET',
+          'Access-Control-Request-Headers': 'x-source-header' },
       });
       assert.equal(preflight.status, 204);
       assert.equal(preflight.headers['access-control-allow-origin'], headers.Origin);
@@ -8434,7 +8435,7 @@ test('Cat rejects malformed settings and a non-file source without replacing the
   assert.equal(fs.statSync(path).isDirectory(), true);
 });
 
-test('Cat applies the persisted JSON config shape and rejects oversized versions before installation',
+test('Cat applies JSON config material and rejects oversized versions before installation',
   { timeout: 30000 }, async t => {
     const root = rootFor(t);
     const runtime = createCatRuntime({ dataRoot: root });
@@ -8445,7 +8446,7 @@ test('Cat applies the persisted JSON config shape and rejects oversized versions
       config: {
         id: 'json-shape',
         protocol: 'old',
-        jsonValue: { when: new Date(0), map: new Map([['private', 'value']]) },
+        jsonValue: { when: '1970-01-01T00:00:00.000Z', map: {} },
       },
       version: '1',
       enabled: true,
