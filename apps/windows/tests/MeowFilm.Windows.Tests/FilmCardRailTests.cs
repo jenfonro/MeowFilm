@@ -75,7 +75,7 @@ public static class FilmCardRailTests
                     "home realizes nearby cards rather than the complete source");
                 ((Button)shelf.FindName("Next")).Focus();
                 await Drain();
-                Snapshot(view, $"home-{width:0}");
+                await Snapshot(view, $"home-{width:0}");
             }
             Check(counts.Count > 1, "the viewport changes the number of complete posters");
             Click(shelf, "Next");
@@ -126,7 +126,7 @@ public static class FilmCardRailTests
                 window.UpdateLayout();
                 shelf.ScrollToIndex(0);
                 await Drain();
-                counts.Add(CheckCards<Button>(shelf, EpisodeFrame, 260d / 144, 208, 260,
+                counts.Add(CheckCards<Button>(shelf, EpisodeFrame, 16d / 9, 240, 336,
                     button => button.Tag is FilmEpisodeItem));
                 var next = (Button)shelf.FindName("Next");
                 Check(next.ActualWidth == 48 && next.ActualHeight == 48 &&
@@ -136,10 +136,10 @@ public static class FilmCardRailTests
                 next.Focus();
                 shelf.BringIntoView();
                 await Drain();
-                Snapshot(view, $"playback-{width:0}");
+                await Snapshot(view, $"playback-{width:0}");
                 Click(shelf, "Next");
                 await Until(() => shelf.IsSettled && shelf.PresentedOffset > .5);
-                CheckCards<Button>(shelf, EpisodeFrame, 260d / 144, 208, 260, button => button.Tag is FilmEpisodeItem);
+                CheckCards<Button>(shelf, EpisodeFrame, 16d / 9, 240, 336, button => button.Tag is FilmEpisodeItem);
                 Click(shelf, "Previous");
                 await Until(() => shelf.IsSettled && shelf.PresentedOffset < .5);
             }
@@ -148,17 +148,18 @@ public static class FilmCardRailTests
                 "resizing and paging change complete visible card count without selecting or requesting data");
             shelf.ScrollToIndex(rig.Page.Episodes.Count - 1);
             await Drain();
-            CheckCards<Button>(shelf, EpisodeFrame, 260d / 144, 208, 260, button => button.Tag is FilmEpisodeItem);
+            CheckCards<Button>(shelf, EpisodeFrame, 16d / 9, 240, 336, button => button.Tag is FilmEpisodeItem);
             Check(((Button)shelf.FindName("Next")).Visibility == Visibility.Collapsed,
                 "the short last page finishes with complete cards");
+            double savedOffset = shelf.PresentedOffset;
             ClickView(view, "ListLayout");
             await Until(() => rig.Page.IsListLayout && !shelf.IsVisible);
             ClickView(view, "HorizontalLayout");
             await Until(() => rig.Page.IsHorizontalLayout && shelf.IsVisible);
             await Drain();
-            CheckCards<Button>(shelf, EpisodeFrame, 260d / 144, 208, 260, button => button.Tag is FilmEpisodeItem);
-            Check(shelf.PresentedOffset < .5 && ReferenceEquals(selected, rig.Page.SelectedEpisode),
-                "returning from the list locates the selected first episode without changing it");
+            CheckCards<Button>(shelf, EpisodeFrame, 16d / 9, 240, 336, button => button.Tag is FilmEpisodeItem);
+            Check(Math.Abs(shelf.PresentedOffset - savedOffset) < .5 && ReferenceEquals(selected, rig.Page.SelectedEpisode),
+                "returning from the list restores the directory's previous card position without changing the selected episode");
             rig.Runtime.Change(root => root["episodes"] = new System.Text.Json.Nodes.JsonArray());
             await Until(() => rig.Page.Episodes.Count == 0);
             await Drain();
@@ -218,12 +219,13 @@ public static class FilmCardRailTests
     {
         var window = new DesktopWindow { Content = view, Width = 1150, Height = 850, Left = 24, Top = 24,
             ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None,
+            Topmost = Environment.GetEnvironmentVariable("MEOWFILM_FILM_RAIL_PREVIEW_ROOT") is not null,
             Background = Brushes.White, SizeToContent = SizeToContent.Manual };
         window.Show();
         window.UpdateLayout();
         return window;
     }
-    private static void Snapshot(FrameworkElement view, string name)
+    private static async Task Snapshot(FrameworkElement view, string name)
     {
         if (Environment.GetEnvironmentVariable("MEOWFILM_FILM_RAIL_PREVIEW_ROOT") is not { } root) return;
         TestWorkspace.ValidatePath(TestWorkspace.DataRoot, root);
@@ -236,6 +238,8 @@ public static class FilmCardRailTests
         encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using var stream = File.Create(Path.Combine(root, name + ".png"));
         encoder.Save(stream);
+        if (Environment.GetEnvironmentVariable("MEOWFILM_TEST_DESKTOP_EXPECTED_USER") is not null)
+            await NativeDesktopCapture.SaveAsync(view, name);
     }
     private static IEnumerable<DependencyObject> Visuals(DependencyObject root)
     {

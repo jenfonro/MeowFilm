@@ -313,7 +313,7 @@
     </Style.Triggers>
    </Style>
    <DataTemplate x:Key="Film.EpisodeCard">
-     <Button x:Name="Tile" Style="{StaticResource Film.EpisodeTile}" MaxWidth="260"
+     <Button x:Name="Tile" Style="{StaticResource Film.EpisodeTile}" MaxWidth="336"
              Margin="0,0,16,0" HorizontalAlignment="Left"
              local:CardMotion.Enabled="True" Tag="{Binding}" Click="Episode_Click" IsEnabled="{Binding CanSelect}"
              AutomationProperties.Name="{Binding Label}">
@@ -322,7 +322,7 @@
        ScaleY="{Binding Path=(local:CardMotion.Progress),ElementName=Tile,Converter={StaticResource Film.Scale},ConverterParameter=0.03}"/>
       </Button.RenderTransform>
       <StackPanel>
-       <local:AspectRatioDecorator AspectRatio="260,144">
+       <local:AspectRatioDecorator AspectRatio="16,9">
        <Grid local:CardClip.Radius="10">
         <local:FilmPlaybackPoster Address="{Binding Image}" AutomationProperties.Name="{Binding Label}"
                RenderTransformOrigin=".5,.5">
@@ -391,7 +391,7 @@
       </Button>
      </DataTemplate></ItemsControl.ItemTemplate>
     </ItemsControl>
-    <local:Shelf x:Name="EpisodeShelf" ItemsSource="{Binding Episodes}" MinimumCardWidth="208"
+    <local:Shelf x:Name="EpisodeShelf" ItemsSource="{Binding Episodes}" MinimumCardWidth="240"
                  HorizontalOffset="{Binding EpisodeDirectory.HorizontalOffset,Mode=TwoWay}"
                  NavigationButtonStyle="{StaticResource Film.ShelfArrow}"
                  Visibility="{Binding ShowEpisodeCards,Converter={StaticResource MeowFilm.BoolToVisibility}}"
