@@ -43,7 +43,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         SongMetadata,
         Sync
     }
-    private sealed record QueueNavigation(long Version, string[] History, string[] Failed);
+    private sealed record QueueNavigation(long Version, string[] History, string[] Failed, bool Loaded);
     private sealed record Pending(MusicLibraryData Candidate, MusicLibraryRevision Before, MusicLibraryRevision After, string Code,
         PendingOwner Owner, RecommendationCommit? Recommendation = null,
         IReadOnlyDictionary<(string SongId, string Platform), long>? Observations = null,
@@ -73,6 +73,8 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         long expectedVersion, CancellationToken cancellationToken = default) =>
         ExecuteCoreAsync("music.queue.append", new { songs, context, next = true, expectedVersion }, cancellationToken, true);
     private static JsonNode? Value(MusicLibraryData doc, string area) => doc.Value(area);
+    private static JsonObject? Area(MusicLibraryData doc, string area) =>
+        doc.HasValue(area) ? LJ.Object(doc.Value(area), "CORRUPT_STORAGE") : null;
     private static bool HasValue(MusicLibraryData doc, string area) => doc.HasValue(area);
     private static void Set(MusicLibraryData doc, string area, JsonNode value) => doc.Set(area, LJ.Object(value));
     private async Task EnterAsync(CancellationToken token) =>
@@ -83,21 +85,18 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         {
             var saved = await store.ReadAsync(scope, token).ConfigureAwait(false);
             var candidate = new MusicLibraryData(store, saved.Areas);
-            ValidateDocument(candidate, all: true);
             if (force && (pending ?? recommendationUnknown) is { } attempt)
                 LJ.Require(saved.Revision == attempt.Before || saved.Revision == attempt.After, "STORAGE_CONFLICT");
-            if (document is null)
-            {
-                if (Value(candidate, "queue") is JsonObject q) RestoreRuntime(q, false);
-            }
-            else if (!JsonNode.DeepEquals(Queue(document), Queue(candidate)))
-                RestoreRuntime(Queue(candidate), false);
+            if (document is null || !JsonNode.DeepEquals(Value(document, "queue"), Value(candidate, "queue")))
+                queueLoaded = document is null && !HasValue(candidate, "queue");
             lock (repositoryGate)
             {
                 document = candidate; revision = saved.Revision;
                 visibleSongs = new(store, cacheReads: false);
             }
-            if (pending is null && recommendationUnknown is null) RefreshOfficialSources(candidate);
+            if (officialSourcesLease is not null)
+                try { RefreshOfficialSources(candidate); }
+                catch (MusicLibraryException) { InvalidateOfficialSources(); }
         }
     }
     private static PendingOwner CommandOwner(string method)
@@ -152,11 +151,11 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
         var changes = candidate.Changes();
         if (changes.Areas.Count == 0 && changes.Songs.Count == 0) { AcceptSongObservations(observations); return; }
-        ValidateDocument(candidate);
+        ValidateChangedSongs(candidate);
         foreach (var area in changes.Areas.Values)
             LJ.Require(LJ.Bytes(area).Length <= 8 * 1024 * 1024, "LIMIT");
         var expected = new MusicLibraryRevision(checked(revision.Generation + 1), Guid.NewGuid().ToString("D"));
-        bool artworkPolicyChanged = document is not null && !JsonNode.DeepEquals(MetadataPolicy(document), MetadataPolicy(candidate));
+        bool artworkPolicyChanged = document is not null && !JsonNode.DeepEquals(Value(document, MetadataPolicyArea), Value(candidate, MetadataPolicyArea));
         // A physical commit may precede its receipt. Until it settles, readers
         // retain only the previous versions of the affected records.
         lock (repositoryGate) visibleSongs = new(store, candidate.Songs.BeforeChanges, cacheReads: false);
@@ -167,7 +166,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             LJ.Require(result == expected, "COMMIT_UNKNOWN");
             lock (repositoryGate)
             {
-                document = new(store, candidate.PublishedAreas()); revision = result;
+                document = candidate.Published(); revision = result;
                 visibleSongs = new(store, cacheReads: false);
             }
             if (owner == PendingOwner.OfficialSources) RefreshOfficialSources(candidate);
@@ -176,7 +175,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         {
             string code = error is DocumentStoreException { Error: DocumentStoreError.Conflict } ? "STORAGE_CONFLICT" : "COMMIT_UNKNOWN";
             pending = new(candidate, revision, expected, code, owner, recommendationStage, observations, beforeQueue,
-                beforeQueue is null ? null : new(queueVersion, shuffleHistory.ToArray(), failedEntries.ToArray()));
+                beforeQueue is null ? null : new(queueVersion, shuffleHistory.ToArray(), failedEntries.ToArray(), queueLoaded));
             if (recommendationStage is not null) recommendationUnknown = pending;
             InvalidateOfficialSources();
             throw new MusicLibraryException(code);
@@ -189,6 +188,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     {
         var previous = document; var previousRevision = revision; var previousSongs = visibleSongs;
         var attempt = pending ?? recommendationUnknown;
+        bool previousQueueLoaded = queueLoaded;
         long previousVersion = queueVersion; var previousHistory = shuffleHistory.ToList(); var failures = failedEntries.ToArray();
         try
         {
@@ -199,22 +199,21 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             if (attempt is { BeforeQueue: not null, AfterQueue: not null })
             {
                 var navigation = revision == attempt.After ? attempt.AfterQueue : attempt.BeforeQueue;
-                queueVersion = navigation.Version; shuffleHistory = navigation.History.ToList();
+                queueLoaded = navigation.Loaded; queueVersion = navigation.Version; shuffleHistory = navigation.History.ToList();
                 failedEntries.Clear(); failedEntries.UnionWith(navigation.Failed);
             }
             pending = null;
-            RefreshOfficialSources(document!);
         }
         catch
         {
             lock (repositoryGate) { document = previous; revision = previousRevision; visibleSongs = previousSongs; }
-            queueVersion = previousVersion; shuffleHistory = previousHistory;
+            queueLoaded = previousQueueLoaded; queueVersion = previousVersion; shuffleHistory = previousHistory;
             failedEntries.Clear(); failedEntries.UnionWith(failures);
             InvalidateOfficialSources();
             throw;
         }
         if (attempt is not null && revision == attempt.After) AcceptSongObservations(attempt.Observations);
-        if (previous is not null && !JsonNode.DeepEquals(MetadataPolicy(previous), MetadataPolicy(document!)))
+        if (previous is not null && !JsonNode.DeepEquals(Value(previous, MetadataPolicyArea), Value(document!, MetadataPolicyArea)))
             failedArtwork.Clear();
         if (revision != previousRevision)
         {
@@ -231,7 +230,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     }
     private async Task<JsonElement> ExecuteCoreAsync(string method, object? parameters, CancellationToken token, bool full)
     {
-        bool entered = false, captured = false, success = false; long previousVersion = 0; List<string>? previousHistory = null; string[] previousFailures = [];
+        bool entered = false, captured = false, success = false, previousQueueLoaded = false; long previousVersion = 0; List<string>? previousHistory = null; string[] previousFailures = [];
         try
         {
             JsonObject p;
@@ -253,7 +252,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             }
             await LoadAsync(token).ConfigureAwait(false);
             await AdmitCommandLockedAsync(method, token).ConfigureAwait(false);
-            captured = true; previousVersion = queueVersion; previousHistory = shuffleHistory.ToList(); previousFailures = failedEntries.ToArray();
+            captured = true; previousQueueLoaded = queueLoaded; previousVersion = queueVersion; previousHistory = shuffleHistory.ToList(); previousFailures = failedEntries.ToArray();
             var candidate = document!.Candidate(!IsReadCommand(method));
             var outcome = await DispatchAsync(method, p, candidate, token, full).ConfigureAwait(false);
             var response = LJ.Merge(LJ.Obj(("ok", true)), outcome.Result);
@@ -262,7 +261,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             {
                 var owner = CommandOwner(method);
                 await CommitAsync(candidate, owner, token, beforeQueue: owner == PendingOwner.Queue
-                    ? new(previousVersion, previousHistory!.ToArray(), previousFailures) : null).ConfigureAwait(false);
+                    ? new(previousVersion, previousHistory!.ToArray(), previousFailures, previousQueueLoaded) : null).ConfigureAwait(false);
             }
             if (outcome.Mutate && recommendationStage is { } recommendation)
                 AcceptRecommendation(recommendation, true);
@@ -289,7 +288,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             // A rejected command cannot change shuffle navigation/version. An admitted
             // unknown CAS deliberately retains its candidate until explicit reconciliation.
             if (captured && !success && pending is null && previousHistory is not null)
-            { queueVersion = previousVersion; shuffleHistory = previousHistory; failedEntries.Clear(); failedEntries.UnionWith(previousFailures); }
+            { queueLoaded = previousQueueLoaded; queueVersion = previousVersion; shuffleHistory = previousHistory; failedEntries.Clear(); failedEntries.UnionWith(previousFailures); }
             if (entered) { recommendationStage = null; gate.Release(); }
         }
     }

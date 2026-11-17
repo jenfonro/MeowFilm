@@ -8,11 +8,7 @@ public static class PlaybackError
     public const string UnsupportedHeaders = "MEDIA_UNSUPPORTED_HEADERS";
     public const string InvalidHeaders = "MEDIA_INVALID_HEADERS";
     public const string UnsupportedAdaptive = "MEDIA_UNSUPPORTED_ADAPTIVE_HEADERS";
-    public const string AdaptiveInvalid = "MEDIA_ADAPTIVE_INVALID";
-    public const string AdaptiveUnsupported = "MEDIA_ADAPTIVE_VARIANT_UNSUPPORTED";
     public const string AdaptiveDrmUnsupported = "MEDIA_ADAPTIVE_DRM_UNSUPPORTED";
-    public const string AdaptiveEncryptionUnsupported = "MEDIA_ADAPTIVE_ENCRYPTION_UNSUPPORTED";
-    public const string AdaptiveBudget = "MEDIA_ADAPTIVE_BUDGET";
     public const string HttpRedirectFailed = "MEDIA_HTTP_REDIRECT_FAILED";
     public const string HttpInvalidRange = "MEDIA_HTTP_INVALID_RANGE";
     public const string HttpRangeRejected = "MEDIA_HTTP_RANGE_REJECTED";
@@ -40,14 +36,11 @@ public static class PlaybackError
     public const string ReadSeekFailed = "MEDIA_READ_SEEK_FAILED";
     public const string InvalidSeek = "MEDIA_INVALID_SEEK";
     public const string NotSeekable = "MEDIA_NOT_SEEKABLE";
-    public const string NotPausable = "MEDIA_NOT_PAUSABLE";
     public const string InvalidTrack = "MEDIA_INVALID_TRACK";
     public const string TrackMetadataInvalid = "MEDIA_TRACK_METADATA_INVALID";
     public const string TrackSelectionFailed = "MEDIA_TRACK_SELECTION_FAILED";
     public const string InvalidRate = "MEDIA_INVALID_RATE";
     public const string RateUnsupported = "MEDIA_RATE_UNSUPPORTED";
-    public const string InvalidSubtitleDelay = "MEDIA_INVALID_SUBTITLE_DELAY";
-    public const string SubtitleUnavailable = "MEDIA_SUBTITLE_UNAVAILABLE";
     public const string NativeUnavailable = "MEDIA_NATIVE_UNAVAILABLE";
     public const string OpenFailed = "MEDIA_OPEN_FAILED";
     public const string PlaybackFailed = "MEDIA_PLAYBACK_FAILED";

@@ -139,7 +139,7 @@ export function seedClients(f) {
       WNMCID: 'abcdef.1800000000000.01.0', __remember_me: 'true' } },
     kg: { seed: '0123456789abcdef0123456789abcdef', mid: '176905054734845483393488264506404844848', dfid: 'synthetic-dfid' },
     tx: { installationId: '11111111-1111-4111-8111-111111111111', androidId: 'synthetic-android', openUdid: 'synthetic-open',
-      openUdid2: 'synthetic-open-2', imei: '123456789012345', qimei: { q16: 'synthetic-q16', q36: 'synthetic-q36', savedAt: now },
+      openUdid2: 'synthetic-open-2', imei: '123456789012345', qimei: { q36: 'synthetic-q36', savedAt: now },
       session: { uid: 'synthetic-uid', sid: 'synthetic-sid', savedAt: now } },
   })));
 }

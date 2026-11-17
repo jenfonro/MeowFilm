@@ -2,7 +2,7 @@ import Foundation
 import MeowRuntime
 
 public enum PanProviderID: String, CaseIterable, Sendable, Hashable, Identifiable {
-    case baidu, quark, uc, tianyi, yidong, quarkTV = "quark_tv", ucTV = "uc_tv"
+    case baidu, quark, uc, tianyi, yidong
     public var id: String { rawValue }
     public var title: String {
         switch self {
@@ -11,14 +11,12 @@ public enum PanProviderID: String, CaseIterable, Sendable, Hashable, Identifiabl
         case .uc: return "UC 网盘"
         case .tianyi: return "天翼云盘"
         case .yidong: return "移动云盘"
-        case .quarkTV: return "夸克 TV"
-        case .ucTV: return "UC TV"
         }
     }
 }
 
 public enum PanCredentialField: String, Sendable, Equatable, Identifiable {
-    case cookie, username, password, authorization, refreshedAt, refreshToken, deviceId, accessToken, expiresAt
+    case cookie, username, password, authorization, refreshedAt
     public var id: String { rawValue }
     public var title: String {
         switch self {
@@ -27,14 +25,10 @@ public enum PanCredentialField: String, Sendable, Equatable, Identifiable {
         case .password: return "密码"
         case .authorization: return "Authorization"
         case .refreshedAt: return "刷新时间（毫秒）"
-        case .refreshToken: return "Refresh Token"
-        case .deviceId: return "设备 ID"
-        case .accessToken: return "Access Token"
-        case .expiresAt: return "过期时间（毫秒）"
         }
     }
-    public var isNumber: Bool { self == .refreshedAt || self == .expiresAt }
-    public var isSecret: Bool { !isNumber && self != .username && self != .deviceId }
+    public var isNumber: Bool { self == .refreshedAt }
+    public var isSecret: Bool { !isNumber && self != .username }
 }
 
 public struct PanProvider: Equatable, Sendable, Identifiable {
@@ -48,7 +42,6 @@ public struct PanProvider: Equatable, Sendable, Identifiable {
         case .baidu, .quark, .uc: fields = [.cookie]
         case .tianyi: fields = [.cookie, .username, .password]
         case .yidong: fields = [.authorization, .refreshedAt]
-        case .quarkTV, .ucTV: fields = [.refreshToken, .deviceId, .accessToken, .expiresAt]
         }
         return PanProvider(id: id, credentialFields: fields,
                            login: [.baidu, .quark, .uc].contains(id), refresh: true)
@@ -70,6 +63,9 @@ public struct PanProvider: Equatable, Sendable, Identifiable {
         }
     }
     public func credentials(from draft: [String: String]) throws -> RuntimeValue {
+        guard Set(draft.keys).isSubset(of: Set(credentialFields.map(\.rawValue))) else {
+            throw RuntimeHTTPError.remote("INVALID_REQUEST")
+        }
         var fields = RuntimeObject()
         for field in credentialFields {
             let text = draft[field.rawValue] ?? ""
@@ -112,32 +108,47 @@ public enum PanAccountAction: Sendable, Equatable { case login, refresh, logout 
 /// A display snapshot only. Native credentials imply `unverified`, never a
 /// successful login. Only an online receipt can publish signedIn or expired.
 public struct PanAccount: Equatable, Sendable {
+    public enum ErrorCode: String, Equatable, Sendable {
+        case corruptStorage = "CORRUPT_STORAGE"
+    }
     public let provider: PanProviderID
-    public let revision: Int64
-    public let configured: Bool
-    public let fields: [String]
-    public let status: PanAccountStatus
+    public let revision: Int64?
+    public let configured: Bool?
+    public let fields: [String]?
+    public let status: PanAccountStatus?
+    public let errorCode: ErrorCode?
     init(provider: PanProviderID, revision: Int64, fields: [String], status: PanAccountStatus) {
         self.provider = provider; self.revision = revision; self.fields = fields
-        configured = !fields.isEmpty; self.status = status
+        configured = !fields.isEmpty; self.status = status; errorCode = nil
+    }
+    init(corrupt provider: PanProviderID) {
+        self.provider = provider; errorCode = .corruptStorage
+        revision = nil; configured = nil; fields = nil; status = nil
     }
     init(_ value: RuntimeValue) throws {
-        guard let provider = value.panField("provider")?.panString.flatMap(PanProviderID.init(rawValue:)),
-              let revision = value.panField("revision")?.panInteger,
+        guard let provider = value.panField("provider")?.panString.flatMap(PanProviderID.init(rawValue:)) else {
+            throw PanAccountError.invalidResponse
+        }
+        if let error = value.panField("errorCode") {
+            guard error == .string(ErrorCode.corruptStorage.rawValue) else { throw PanAccountError.invalidResponse }
+            self.init(corrupt: provider)
+            return
+        }
+        guard let revision = value.panField("revision")?.panInteger,
               let configured = value.panField("configured")?.panBool,
               let status = value.panField("status")?.panString.flatMap(PanAccountStatus.init(rawValue:)),
               status != .unverified,
               let fields = value.panField("fields")?.panArray else { throw PanAccountError.invalidResponse }
-        self.provider = provider; self.revision = revision; self.configured = configured; self.status = status
-        self.fields = try fields.map {
+        let names = try fields.map {
             guard let field = $0.panString else { throw PanAccountError.invalidResponse }
             return field
         }
         let allowed = PanProvider.all.first { $0.id == provider }!.credentialFields.map(\.rawValue)
-        guard Set(self.fields).count == self.fields.count, self.fields.allSatisfy(allowed.contains),
-              configured == !self.fields.isEmpty, configured || status == .signedOut else {
+        guard Set(names).count == names.count, names.allSatisfy(allowed.contains),
+              configured == !names.isEmpty, configured || status == .signedOut else {
             throw PanAccountError.invalidResponse
         }
+        self.init(provider: provider, revision: revision, fields: names, status: status)
     }
 }
 

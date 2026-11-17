@@ -3,6 +3,7 @@ import CoreFoundation
 import MeowAccounts
 import MeowMusicFeature
 import MeowRuntime
+import MeowJSON
 
 /// File-only representation; never used by account presentation or diagnostics.
 struct MusicAccountTransferEntry: Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
@@ -24,8 +25,7 @@ enum MusicAccountTransferCodec {
             try scanner.value(depth: 0)
             scanner.space()
             guard scanner.offset == scanner.bytes.count,
-                  let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  Set(root.keys) == ["format", "version", "accounts"],
+                  let root = try? JSONObject.decode(data),
                   root["format"] as? String == "meowfilm.music-accounts",
                   let version = root["version"] as? NSNumber,
                   CFGetTypeID(version) != CFBooleanGetTypeID(), version == 1,
@@ -34,12 +34,13 @@ enum MusicAccountTransferCodec {
             }
             var seen = Set<MusicAccountPlatform>()
             let entries = try rows.map { row -> MusicAccountTransferEntry in
-                guard Set(row.keys) == ["platform", "userId", "credentials"],
-                      let name = row["platform"] as? String, let platform = MusicAccountPlatform(rawValue: name),
+                guard let name = row["platform"] as? String, let platform = MusicAccountPlatform(rawValue: name),
                       seen.insert(platform).inserted, let id = row["userId"] as? String,
-                      let fields = row["credentials"] as? [String: String] else {
+                      let credentials = row["credentials"] as? [String: Any] else {
                     throw MusicAccountTransferError.invalidFile
                 }
+                let projected = credentials.filter { allowed[platform]!.contains($0.key) || platform == .qq && qqAliases[$0.key] != nil }
+                guard let fields = projected as? [String: String] else { throw MusicAccountTransferError.invalidFile }
                 return .init(platform: platform, userID: id, fields: fields)
             }
             return MusicAccountPlatform.allCases.compactMap { p in entries.first { $0.platform == p } }
@@ -69,7 +70,7 @@ enum MusicAccountTransferCodec {
     private static let qqAliases = ["musickeyCreateTime": "musickey_create_time", "keyExpiresIn": "key_expires_in",
         "loginType": "login_type", "encryptUin": "encrypt_uin"]
     private static func canonical(_ fields: [String: String], platform: MusicAccountPlatform) throws -> [String: String] {
-        var result = fields
+        var result = fields.filter { allowed[platform]!.contains($0.key) || platform == .qq && qqAliases[$0.key] != nil }
         if platform == .qq {
             for (alias, key) in qqAliases {
                 if let value = result.removeValue(forKey: alias) {
@@ -100,7 +101,6 @@ enum MusicAccountTransferCodec {
         let fields = try canonical(row.fields, platform: row.platform)
         guard !row.userID.isEmpty, row.userID.utf8.count <= 20, !row.userID.hasPrefix("0"),
               row.userID.utf8.allSatisfy({ (48...57).contains($0) }),
-              Set(fields.keys).isSubset(of: allowed[row.platform]!),
               fields.allSatisfy({ key, value in
                   value.utf8.allSatisfy { $0 >= 33 && $0 <= 126 && ![34, 59, 92].contains($0) &&
                       ($0 != 44 || key == "_ntes_nnid") }
@@ -147,7 +147,7 @@ enum MusicAccountTransferCodec {
         return result
     }
 
-    /// Foundation rejects invalid JSON; this pass additionally rejects repeated decoded keys.
+    /// The shared decoder rejects invalid JSON; this pass rejects repeated decoded keys.
     private struct UniqueKeys {
         let bytes: [UInt8]
         var offset = 0
@@ -171,10 +171,10 @@ enum MusicAccountTransferCodec {
             space(); guard offset < bytes.count else { throw MusicAccountTransferError.invalidFile }
             if bytes[offset] == 34 { _ = try string() }
             else if take(123) {
-                var keys = Set<String>()
+                var keys = Set<Data>()
                 if take(125) { return }
                 repeat {
-                    guard keys.insert(try string()).inserted, take(58) else { throw MusicAccountTransferError.invalidFile }
+                    guard keys.insert(Data(try string().utf8)).inserted, take(58) else { throw MusicAccountTransferError.invalidFile }
                     try value(depth: depth + 1)
                 } while take(44)
                 guard take(125) else { throw MusicAccountTransferError.invalidFile }

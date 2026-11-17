@@ -29,29 +29,32 @@ final class MusicOfficialSourceSettingsTests: XCTestCase {
         await service.close()
     }
 
-    func testMalformedStoredOfficialSourcesAreRejectedNotDefaultedOrSilentlyDisabled() async throws {
-        for value in [MJ.null, .string("tx"), .strings(["wy", "wy"]), .strings(["kw"]), .array([.n(1)])] {
+    func testOfficialSourceStateConsumesOnlyKnownSwitchesWithoutRewritingStoredExtras() async throws {
+        for value in [MJ.strings(["wy", "wy"]), .strings(["wy", "future"]), .array([.n(1), .string("wy")])] {
             var document = try MusicDocument(nil, runID: "test")
             document.playback["officialSources"] = value
-            let store = NativeMusicTestLibrary(try document.encode(changed: ["playback"]))
+            let bytes = try document.encode(changed: ["playback"]), store = NativeMusicTestLibrary(bytes)
             let service = try await NativeMusicFixture.service(store)
-            await scriptExpectFailure(.corruptDocument) { try await service.state() }
+            let state = try await service.state()
+            XCTAssertEqual(state.officialSources, [.netease])
+            XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
             await service.close()
         }
     }
 
-    func testMissingStoredOfficialSourcesIsRejectedWithoutRepairingOriginalBytes() async throws {
-        var document = try MusicDocument(nil, runID: "test")
-        XCTAssertEqual(document.playback["officialSources"].strings, MusicAccountPlatform.allCases.map(\.rawValue))
-        document.playback.remove("officialSources")
-        let bytes = try document.encode(changed: ["playback"]), store = NativeMusicTestLibrary(bytes)
-        let service = try await NativeMusicFixture.service(store)
-        await scriptExpectFailure(.corruptDocument) { try await service.state() }
-        await scriptExpectFailure(.corruptDocument) {
-            try await service.updateSettings(.init(ifRevision: 0, officialSources: [.qq]))
+    func testUnreadableOfficialSwitchesFailWhenReadButExplicitReplacementCanRepairThem() async throws {
+        for value in [MJ.null, .string("tx")] {
+            var document = try MusicDocument(nil, runID: "test")
+            document.playback["officialSources"] = value
+            let bytes = try document.encode(changed: ["playback"]), store = NativeMusicTestLibrary(bytes)
+            let service = try await NativeMusicFixture.service(store)
+            await scriptExpectFailure(.corruptDocument) { try await service.state() }
+            let collections = try await service.collections(); XCTAssertEqual(collections.count, 1)
+            XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
+            let changed = try await service.updateSettings(.init(ifRevision: 0, officialSources: [.qq]))
+            XCTAssertEqual(changed.officialSources, [.qq]); XCTAssertEqual(store.snapshot().2, 1)
+            await service.close()
         }
-        XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
-        await service.close()
     }
 
     func testDisabledOfficialPlatformIsRejectedByOptionsAutomaticManualDirectAndRecoveryWhileScriptsStillWork() async throws {

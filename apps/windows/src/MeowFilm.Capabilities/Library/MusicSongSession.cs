@@ -1,10 +1,11 @@
 using System.Text.Json.Nodes;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Library;
 
 /// <summary>Record-sized working set. SQL owns the persistent indexes; a command owns only its changes.</summary>
 internal sealed class MusicSongSession(IMusicLibraryStore store,
-    IReadOnlyDictionary<string, JsonObject?>? before = null, bool cacheReads = true)
+    IReadOnlyDictionary<string, JsonObject?>? before = null, bool cacheReads = true, HashSet<string>? knownSongs = null)
 {
     internal IMusicLibraryStore Store { get; } = store;
     private readonly Dictionary<string, JsonObject?> original = new(StringComparer.Ordinal);
@@ -23,7 +24,11 @@ internal sealed class MusicSongSession(IMusicLibraryStore store,
         if (before is not null && before.TryGetValue(id, out var saved)) return saved;
         if (original.TryGetValue(id, out saved)) return saved;
         saved = Store.ReadSong(id);
-        if (cacheReads) original[id] = saved;
+        if (cacheReads)
+        {
+            original[id] = saved;
+            if (saved is not null) knownSongs?.Add(id);
+        }
         return saved;
     }
     internal JsonObject? Read(string id) =>
@@ -33,14 +38,20 @@ internal sealed class MusicSongSession(IMusicLibraryStore store,
         if (changed.ContainsKey(id)) return true;
         if (before is not null && before.TryGetValue(id, out var previous)) return previous is not null;
         if (original.TryGetValue(id, out var song)) return song is not null;
+        if (cacheReads && knownSongs?.Contains(id) == true) return true;
         if (existence.TryGetValue(id, out bool found)) return found;
         found = Store.ContainsSong(id);
-        if (cacheReads) existence[id] = found;
+        if (cacheReads)
+        {
+            existence[id] = found;
+            if (found) knownSongs?.Add(id);
+        }
         return found;
     }
     internal void Set(JsonObject song)
     {
         string id = LJ.S(song["songId"]);
+        song = MergeStoredSong(changed.GetValueOrDefault(id) ?? Original(id), song);
         if (changed.Remove(id, out var previous))
         {
             foreach (var source in Sources(previous)) stagedSources.Remove(LJ.S(source["sourceKey"]));
@@ -112,8 +123,13 @@ internal sealed class MusicSongSession(IMusicLibraryStore store,
         foreach (string id in ids)
         {
             if (allowed is not null && !allowed.Contains(id)) continue;
-            if (Read(id) is not { } candidate || !NativeMusicSong.IsOnline(candidate) ||
-                !NativeMusicSong.ReadIdentity(candidate).Compatible(identity)) continue;
+            try
+            {
+                if (Read(id) is not { } candidate || !NativeMusicSong.IsOnline(candidate) ||
+                    !NativeMusicSong.ReadIdentity(candidate).Compatible(identity)) continue;
+            }
+            catch (MusicLibraryException) { continue; }
+            catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Corrupt) { continue; }
             if (match is not null) return null;
             match = id;
         }
@@ -167,4 +183,29 @@ internal sealed class MusicSongSession(IMusicLibraryStore store,
     internal IEnumerable<string> Ids() => Store.SongIds().Concat(changed.Keys).Distinct(StringComparer.Ordinal);
     private static IEnumerable<JsonObject> Sources(JsonObject song) =>
         (song["sources"] as JsonArray ?? []).OfType<JsonObject>();
+    private static JsonObject MergeStoredSong(JsonObject? previous, JsonObject song)
+    {
+        if (previous is null) return song;
+        var projection = NativeMusicSong.Normalize(previous);
+        // Missing projected fields belong to the current observation, not to stored extensions.
+        static void KeepExtensions(JsonObject raw, JsonObject projected, JsonObject current)
+        {
+            foreach (var field in raw)
+                if (!projected.ContainsKey(field.Key) && !current.ContainsKey(field.Key))
+                    current[field.Key] = field.Value?.DeepClone();
+        }
+        foreach (var source in LJ.Array(song["sources"]).OfType<JsonObject>())
+        {
+            var old = (previous["sources"] as JsonArray)?.OfType<JsonObject>()
+                .SingleOrDefault(item => LJ.S(item["sourceKey"]) == LJ.S(source["sourceKey"]));
+            if (old is null) continue;
+            var projected = LJ.Array(projection["sources"]).OfType<JsonObject>()
+                .Single(item => LJ.S(item["sourceKey"]) == LJ.S(source["sourceKey"]));
+            if (old["musicInfo"] is JsonObject oldInfo && source["musicInfo"] is JsonObject info)
+                KeepExtensions(oldInfo, LJ.Object(projected["musicInfo"]), info);
+            KeepExtensions(old, projected, source);
+        }
+        KeepExtensions(previous, projection, song);
+        return song;
+    }
 }

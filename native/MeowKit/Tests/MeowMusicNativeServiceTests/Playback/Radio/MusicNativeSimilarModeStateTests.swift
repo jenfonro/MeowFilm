@@ -403,8 +403,8 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
             let service = try await NativeMusicFixture.service(store, accounts: owner)
             do { _ = try await service.similarModeSnapshot(); XCTFail("Must reject \(invalid)") }
             catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
-            do { _ = try await service.queue(); XCTFail("Invalid state must not be hidden") }
-            catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
+            let queue = try await service.queue()
+            XCTAssertEqual(queue.entries.map(\.id), entries.map { $0["id"].string })
             XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
             let openings = await owner.openings, requests = await owner.count()
             XCTAssertEqual(openings, 0); XCTAssertEqual(requests, 0)

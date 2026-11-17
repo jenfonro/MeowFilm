@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseJSONText, stringifyJSONValue, rawJSON } from '@meowfilm/runtime-bridge/json';
 import { createPanService } from '../src/index.js';
 
 const area = fileURLToPath(new URL('../../../tmp/test-results/pan-runtime/', import.meta.url));
@@ -27,19 +28,18 @@ function setup(t, handler = () => assert.fail('passive state must not use the ne
   t.after(async () => { await service.close(); rmSync(root, { recursive: true, force: true }); });
   return { service, root, requests, transport, get closes() { return closes; } };
 }
-const credentials = { accessToken: 'synthetic-access', refreshToken: 'synthetic-refresh',
-  deviceId: 'synthetic-device', expiresAt: Date.now() + 3600000 };
-const stored = (revision = 1, provider = 'quark_tv') =>
+const credentials = { cookie: 'session=synthetic-account' };
+const stored = (revision = 1, provider = 'quark') =>
   ({ kind: 'stored', fileId: 'exact-fid', provider, accountRevision: revision });
 
-test('seven providers expose actual capabilities and configurations persist in plaintext without secret readback', async t => {
+test('five providers expose actual capabilities and configurations persist in plaintext without secret readback', async t => {
   const { service, root, transport } = setup(t);
   const available = (await service.invoke('providers')).providers;
   assert.deepEqual(available.map(item => item.provider),
-    ['baidu', 'quark', 'uc', 'tianyi', 'yidong', 'quark_tv', 'uc_tv']);
+    ['baidu', 'quark', 'uc', 'tianyi', 'yidong']);
   assert.equal(available.every(item => item.refresh), true);
-  assert.equal(available.find(item => item.provider === 'quark_tv').list, false);
-  assert.equal(available.find(item => item.provider === 'uc_tv').prepare, false);
+  assert.equal(available.find(item => item.provider === 'quark').list, true);
+  assert.equal(available.find(item => item.provider === 'uc').prepare, true);
   const secret = ' cookie=synthetic-private-value ';
   const saved = await service.invoke('settings.set', { provider: 'baidu', credentials: { cookie: secret } });
   assert.equal(saved.revision, 1);
@@ -66,19 +66,23 @@ test('invalid credentials, unsupported operations and stale references reject be
   for (const input of [
     { provider: 'unknown', credentials: {} },
     { provider: 'baidu', credentials: null },
+    { provider: 'baidu', credentials: rawJSON('9007199254740993') },
     { provider: 'baidu', credentials: { cookie: 42 } },
     { provider: 'quark', credentials: { cookie: 'x\r\nInjected: yes' } },
-    { provider: 'uc_tv', credentials: { expiresAt: -1 } },
+    { provider: 'yidong', credentials: { refreshedAt: -1 } },
   ]) await assert.rejects(service.invoke('settings.set', input), { code: 'INVALID_REQUEST' });
-  await service.invoke('settings.set', { provider: 'quark_tv', credentials });
-  await assert.rejects(service.invoke('list', { provider: 'quark_tv', share: { url: 'https://pan.quark.cn/s/abcd' } }),
+  await service.invoke('settings.set', { provider: 'quark', credentials });
+  await assert.rejects(service.invoke('prepare', { provider: 'tianyi', file: stored(0, 'tianyi') }),
     { code: 'UNSUPPORTED_OPERATION' });
-  await assert.rejects(service.invoke('play', { provider: 'quark_tv', file: stored(0), mode: 'streaming' }),
+  await assert.rejects(service.invoke('play', { provider: 'quark', file: stored(0), mode: 'streaming' }),
     { code: 'STALE_ACCOUNT' });
-  await assert.rejects(service.invoke('play', { provider: 'quark_tv', file: { ...stored(), kind: 'share' }, mode: 'streaming' }),
+  await assert.rejects(service.invoke('play', { provider: 'quark', file: { ...stored(), kind: 'unknown' }, mode: 'streaming' }),
     { code: 'INVALID_REQUEST' });
-  await assert.rejects(service.invoke('play', { provider: 'quark_tv', file: stored(), mode: 'automatic' }),
+  await assert.rejects(service.invoke('play', { provider: 'quark', file: stored(), mode: 'automatic' }),
     { code: 'UNSUPPORTED_OPERATION' });
+  await service.invoke('settings.set', { provider: 'uc', credentials });
+  await assert.rejects(service.invoke('play', { provider: 'uc', file: stored(), mode: 'download' }),
+    { code: 'INVALID_REQUEST' });
   assert.equal(requests.length, 0);
 });
 
@@ -146,28 +150,73 @@ test('failed atomic configuration write does not publish new account state; dama
   assert.equal((await service.invoke('settings.get')).accounts.find(item => item.provider === 'baidu').revision, 1);
   rmSync(path, { recursive: true }); renameSync(backup, path);
   await service.close();
-  writeFileSync(path, '{"version":1,"accounts":{"baidu":{"revision":0,"credentials":{}}}}');
+  writeFileSync(path, '{"version":1,"accounts":[]}');
   const before = readFileSync(path);
   assert.throws(() => createPanService({ dataRoot: root }), { code: 'CORRUPT_STORAGE' });
   assert.deepEqual(readFileSync(path), before);
 });
 
-test('parallel token refreshes share one upstream request and persist rotation before reporting completion', async t => {
+test('file store preserves exact numeric extensions and bad siblings across Cookie writes and restart', async t => {
+  const { service, root, transport } = setup(t, input => {
+    assert.equal(input.url, 'https://pan.quark.cn/account/info?fr=pc&platform=pc');
+    assert.equal(input.method, 'GET');
+    assert.equal(input.headers.Cookie, credentials.cookie);
+    assert.equal(input.headers.Authorization, undefined);
+    assert.equal(input.body, undefined);
+    return response({ code: 'OK', success: true, data: { nickname: 'synthetic' } },
+      { 'set-cookie': ['session=synthetic-rotated; Path=/'] });
+  });
+  const material = '{"large":9007199254740993,"decimal":1.00000000000000001,"tiny":1e-400,"huge":1e400,"zero":-0}';
+  const source = `{"version":1,"extra":${material},"accounts":{
+    "baidu":{"revision":7,"credentials":{"cookie":2},"extra":${material}},
+    "future":{"data":${material}},
+    "quark":{"revision":1,"extra":${material},"credentials":{
+      "cookie":"${credentials.cookie}","extra":${material}
+    }}}}`;
+  mkdirSync(join(root, 'pan'));
+  const path = join(root, 'pan/accounts.json');
+  writeFileSync(path, source);
+  await service.settingsChanged();
+  const result = await service.invoke('refresh', { provider: 'quark' });
+  assert.equal(result.account.status, 'signedIn');
+  const written = readFileSync(path, 'utf8'), saved = parseJSONText(written), original = parseJSONText(source);
+  for (const value of [saved.extra, saved.accounts.quark.extra, saved.accounts.quark.credentials.extra])
+    assert.equal(stringifyJSONValue(value), material);
+  assert.equal(stringifyJSONValue(saved.accounts.baidu), stringifyJSONValue(original.accounts.baidu));
+  assert.equal(stringifyJSONValue(saved.accounts.future), stringifyJSONValue(original.accounts.future));
+  assert.equal(saved.accounts.quark.credentials.cookie, 'session=synthetic-rotated');
+  await service.close();
+  const restarted = createPanService({ dataRoot: root, transport });
+  try {
+    const accounts = (await restarted.invoke('settings.get')).accounts;
+    assert.deepEqual(accounts.find(item => item.provider === 'baidu'),
+      { provider: 'baidu', errorCode: 'CORRUPT_STORAGE' });
+    assert.equal(accounts.find(item => item.provider === 'quark').revision, 1);
+    await restarted.invoke('settings.clear', { provider: 'uc' });
+    const next = parseJSONText(readFileSync(path, 'utf8'));
+    assert.equal(stringifyJSONValue(next.extra), material);
+    assert.equal(stringifyJSONValue(next.accounts.quark), stringifyJSONValue(saved.accounts.quark));
+  } finally { await restarted.close(); }
+});
+
+test('parallel Cookie refreshes share one upstream request and persist rotation before reporting completion', async t => {
   const entered = deferred(), release = deferred();
   const { service, requests, root } = setup(t, async input => {
-    assert.equal(new URL(input.url).href, 'http://api.extscreen.com/quarkdrive/token');
-    assert.equal(JSON.parse(input.body.toString()).refresh_token, 'synthetic-refresh');
+    assert.equal(new URL(input.url).href, 'https://pan.quark.cn/account/info?fr=pc&platform=pc');
+    assert.equal(input.headers.Cookie, credentials.cookie);
+    assert.equal(input.method, 'GET');
+    assert.equal(input.body, undefined);
     entered.resolve(); await release.promise;
-    return response({ code: 200, data: { access_token: 'rotated-access', refresh_token: 'rotated-refresh', expires_in: 7200 } });
+    return response({ code: 'OK', success: true, data: { nickname: 'synthetic' } },
+      { 'set-cookie': ['session=synthetic-rotated; Path=/'] });
   });
-  await service.invoke('settings.set', { provider: 'quark_tv', credentials });
-  const calls = Array.from({ length: 8 }, () => service.invoke('refresh', { provider: 'quark_tv' }));
+  await service.invoke('settings.set', { provider: 'quark', credentials });
+  const calls = Array.from({ length: 8 }, () => service.invoke('refresh', { provider: 'quark' }));
   await entered.promise; release.resolve();
   for (const value of await Promise.all(calls)) assert.equal(value.refreshed, true);
   assert.equal(requests.length, 1);
-  const saved = JSON.parse(readFileSync(join(root, 'pan/accounts.json'), 'utf8')).accounts.quark_tv;
-  assert.equal(saved.credentials.refreshToken, 'rotated-refresh');
-  assert.equal(saved.credentials.accessToken, 'rotated-access');
+  const saved = JSON.parse(readFileSync(join(root, 'pan/accounts.json'), 'utf8')).accounts.quark;
+  assert.equal(saved.credentials.cookie, 'session=synthetic-rotated');
   assert.equal(saved.revision, 1);
 });
 
@@ -177,13 +226,13 @@ test('cancelling one refresh waiter preserves work required by another', async t
   const { service, requests } = setup(t, async input => {
     upstreamSignal = input.signal;
     entered.resolve(); await release.promise;
-    return response({ code: 200, data: { access_token: 'next-access', expires_in: 7200 } });
+    return response({ code: 'OK', success: true, data: { nickname: 'synthetic' } });
   });
-  await service.invoke('settings.set', { provider: 'uc_tv', credentials });
+  await service.invoke('settings.set', { provider: 'uc', credentials });
   const controller = new AbortController();
-  const first = service.invoke('refresh', { provider: 'uc_tv' }, { signal: controller.signal });
+  const first = service.invoke('refresh', { provider: 'uc' }, { signal: controller.signal });
   const rejected = assert.rejects(first, { code: 'CANCELLED' });
-  const second = service.invoke('refresh', { provider: 'uc_tv' });
+  const second = service.invoke('refresh', { provider: 'uc' });
   await entered.promise; controller.abort(); await rejected;
   assert.equal(upstreamSignal.aborted, false);
   release.resolve();
@@ -191,46 +240,48 @@ test('cancelling one refresh waiter preserves work required by another', async t
   assert.equal(requests.length, 1);
 });
 
-test('account replacement fences an old token response and never overwrites the new account', async t => {
+test('account replacement fences an old Cookie response and never overwrites the new account', async t => {
   const entered = deferred(), release = deferred();
   const { service, root } = setup(t, async () => {
     entered.resolve(); await release.promise;
-    return response({ code: 200, data: { access_token: 'old-late-access', refresh_token: 'old-late-refresh', expires_in: 60 } });
+    return response({ code: 'OK', success: true, data: { nickname: 'synthetic' } },
+      { 'set-cookie': ['session=synthetic-old-late; Path=/'] });
   });
-  await service.invoke('settings.set', { provider: 'quark_tv', credentials });
-  const refresh = service.invoke('refresh', { provider: 'quark_tv' });
+  await service.invoke('settings.set', { provider: 'quark', credentials });
+  const refresh = service.invoke('refresh', { provider: 'quark' });
   const rejected = assert.rejects(refresh, error => ['STALE_ACCOUNT', 'CANCELLED'].includes(error.code));
   await entered.promise;
-  await service.invoke('settings.set', { provider: 'quark_tv',
-    credentials: { ...credentials, accessToken: 'new-account-access', refreshToken: 'new-account-refresh' } });
+  await service.invoke('settings.set', { provider: 'quark',
+    credentials: { cookie: 'session=synthetic-new-account' } });
   release.resolve(); await rejected;
-  const current = JSON.parse(readFileSync(join(root, 'pan/accounts.json'), 'utf8')).accounts.quark_tv;
+  const current = JSON.parse(readFileSync(join(root, 'pan/accounts.json'), 'utf8')).accounts.quark;
   assert.equal(current.revision, 2);
-  assert.equal(current.credentials.accessToken, 'new-account-access');
-  assert.equal(current.credentials.refreshToken, 'new-account-refresh');
+  assert.deepEqual(current.credentials, { cookie: 'session=synthetic-new-account' });
 });
 
 test('different providers resolve concurrently and receive only their own credential and selected mode', async t => {
   const entered = deferred(), release = deferred(), seen = [];
   const { service } = setup(t, async input => {
     const url = new URL(input.url);
-    seen.push(url);
+    seen.push({ url, cookie: input.headers.cookie });
     if (seen.length === 2) entered.resolve();
     await release.promise;
-    return response({ status: 200, data: { download_url: `https://media.example/${url.hostname}/download`,
-      video_info: [{ url: `https://media.example/${url.hostname}/stream` }] } });
+    return response({ code: 0, data: [{ fid: 'exact-fid', download_url: `https://media.example/${url.hostname}/download`,
+      play_url: `https://media.example/${url.hostname}/stream` }] });
   });
-  await service.invoke('settings.set', { provider: 'quark_tv', credentials });
-  await service.invoke('settings.set', { provider: 'uc_tv', credentials: { ...credentials, accessToken: 'uc-only' } });
-  const quarkCall = service.invoke('play', { provider: 'quark_tv', file: stored(), mode: 'streaming' });
-  const ucCall = service.invoke('play', { provider: 'uc_tv', file: stored(1, 'uc_tv'), mode: 'download' });
+  await service.invoke('settings.set', { provider: 'quark', credentials });
+  await service.invoke('settings.set', { provider: 'uc', credentials: { cookie: 'session=synthetic-uc-only' } });
+  const quarkCall = service.invoke('play', { provider: 'quark', file: stored(), mode: 'streaming' });
+  const ucCall = service.invoke('play', { provider: 'uc', file: stored(1, 'uc'), mode: 'download' });
   await entered.promise; release.resolve();
   const results = await Promise.all([quarkCall, ucCall]);
   assert.equal(results[0].mode, 'streaming');
   assert.equal(results[1].mode, 'download');
   assert.equal(seen.length, 2);
-  assert.equal(seen.find(url => url.hostname.endsWith('quark.cn')).searchParams.get('access_token'), credentials.accessToken);
-  assert.equal(seen.find(url => url.hostname.endsWith('uc.cn')).searchParams.get('access_token'), 'uc-only');
+  assert.equal(seen.find(item => item.url.hostname.endsWith('quark.cn')).cookie, credentials.cookie);
+  assert.equal(seen.find(item => item.url.hostname.endsWith('uc.cn')).cookie, 'session=synthetic-uc-only');
+  assert.equal(results[0].url, 'https://media.example/drive.quark.cn/stream');
+  assert.equal(results[1].url, 'https://media.example/pc-api.uc.cn/download');
 });
 
 test('close cancels work, drains even a non-cooperative transport and is idempotent', async t => {
@@ -238,10 +289,11 @@ test('close cancels work, drains even a non-cooperative transport and is idempot
   let upstreamSignal;
   const fixture = setup(t, async input => {
     upstreamSignal = input.signal; entered.resolve(); await release.promise;
-    return response({ code: 200, data: { access_token: 'late-after-close', expires_in: 60 } });
+    return response({ code: 'OK', success: true, data: { nickname: 'synthetic' } },
+      { 'set-cookie': ['session=synthetic-late-after-close; Path=/'] });
   });
-  await fixture.service.invoke('settings.set', { provider: 'quark_tv', credentials });
-  const refresh = fixture.service.invoke('refresh', { provider: 'quark_tv' });
+  await fixture.service.invoke('settings.set', { provider: 'quark', credentials });
+  const refresh = fixture.service.invoke('refresh', { provider: 'quark' });
   const rejected = assert.rejects(refresh, error => ['CLOSED', 'CANCELLED'].includes(error.code));
   await entered.promise;
   let drained = false;
@@ -264,36 +316,37 @@ test('all cancelled refresh waiters abort their work; a new caller starts a fres
       firstSignal = input.signal;
       entered.resolve();
       await releaseOld.promise;
-      return response({ code: 200, data: { access_token: 'cancelled-old', expires_in: 60 } });
+      return response({ code: 'OK', success: true, data: { nickname: 'synthetic' } },
+        { 'set-cookie': ['session=synthetic-cancelled-old; Path=/'] });
     }
-    return response({ code: 200, data: { access_token: 'active-new', expires_in: 60 } });
+    return response({ code: 'OK', success: true, data: { nickname: 'synthetic' } },
+      { 'set-cookie': ['session=synthetic-active-new; Path=/'] });
   });
-  await service.invoke('settings.set', { provider: 'quark_tv', credentials });
+  await service.invoke('settings.set', { provider: 'quark', credentials });
   const controllers = [new AbortController(), new AbortController()];
   const cancelled = controllers.map(controller =>
-    assert.rejects(service.invoke('refresh', { provider: 'quark_tv' }, { signal: controller.signal }),
+    assert.rejects(service.invoke('refresh', { provider: 'quark' }, { signal: controller.signal }),
       { code: 'CANCELLED' }));
   await entered.promise;
   controllers.forEach(controller => controller.abort());
   await Promise.all(cancelled);
   assert.equal(firstSignal.aborted, true);
-  assert.equal((await service.invoke('refresh', { provider: 'quark_tv' })).refreshed, true);
+  assert.equal((await service.invoke('refresh', { provider: 'quark' })).refreshed, true);
   releaseOld.resolve();
   await turn();
   assert.equal(count, 2);
-  assert.equal(JSON.parse(readFileSync(join(root, 'pan/accounts.json'))).accounts.quark_tv.credentials.accessToken, 'active-new');
+  assert.equal(JSON.parse(readFileSync(join(root, 'pan/accounts.json'))).accounts.quark.credentials.cookie, 'session=synthetic-active-new');
 });
 
-test('switching the ordinary account cancels a TV resolution using its stored-file reference', async t => {
+test('switching an account cancels resolution of its stored-file reference', async t => {
   const entered = deferred(), release = deferred();
   let upstreamSignal;
   const { service } = setup(t, async input => {
     upstreamSignal = input.signal; entered.resolve(); await release.promise;
-    return response({ errno: 0, data: { download_url: 'https://media.example/synthetic' } });
+    return response({ code: 0, data: [{ fid: 'exact-fid', download_url: 'https://media.example/synthetic' }] });
   });
   await service.invoke('settings.set', { provider: 'quark', credentials: { cookie: 'synthetic-one' } });
-  await service.invoke('settings.set', { provider: 'quark_tv', credentials });
-  const call = service.invoke('play', { provider: 'quark_tv', file: stored(1, 'quark'), mode: 'download' });
+  const call = service.invoke('play', { provider: 'quark', file: stored(1, 'quark'), mode: 'download' });
   const rejected = assert.rejects(call, error => ['CANCELLED', 'STALE_ACCOUNT'].includes(error.code));
   await entered.promise;
   await service.invoke('settings.set', { provider: 'quark', credentials: { cookie: 'synthetic-two' } });

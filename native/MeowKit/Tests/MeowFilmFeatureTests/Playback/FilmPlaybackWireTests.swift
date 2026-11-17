@@ -587,10 +587,10 @@ final class FilmPlaybackWireTests: XCTestCase {
             XCTAssertEqual(partial.item.largePosterURL, original.item.largePosterURL)
             XCTAssertEqual(partial.backdropURL, original.backdropURL)
             XCTAssertEqual(partial.logoURL, original.logoURL)
-            XCTAssertEqual(partial.summary, original.summary)
+            XCTAssertTrue(partial.summary.isEmpty)
             XCTAssertEqual(partial.releaseDate, original.releaseDate)
-            XCTAssertEqual(partial.seasonCount, original.seasonCount)
-            XCTAssertEqual(partial.episodeCount, original.episodeCount)
+            XCTAssertNil(partial.seasonCount)
+            XCTAssertNil(partial.episodeCount)
             XCTAssertEqual(partial.seasons, original.seasons)
             XCTAssertEqual(partial.cast, original.cast)
             XCTAssertEqual(partial.similarItems, original.similarItems)
@@ -648,7 +648,10 @@ final class FilmPlaybackWireTests: XCTestCase {
             let episode: RuntimeValue = .object(["season": .number(0), "episode": .number(0), "name": .string("真实特别集")])
             let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
                 metadata: .object(["name": .string("可靠作品")]), episodes: kind == .tv ? [episode] : [],
-                target: .object(target.value), metadataSources: [confirmed], metadataSourceID: "confirmed-tmdb"))
+                target: .object(target.value), metadataSources: [confirmed], metadataSourceID: "confirmed-tmdb",
+                workInfo: .object(["provider": .string("tmdb"), "metadataId": .number(19),
+                    "kind": .string(kind.rawValue), "title": .string("可靠作品"), "summary": .string("已有简介"),
+                    "seasonCount": .null, "episodeCount": .null])))
             let original = FilmDetail(item: .init(sourceID: "tmdb", id: "19", title: "原作品",
                 kind: kind == .movie ? .movie : .tv), summary: "已有简介")
             let detail = FilmPlaybackPresentation.detail(snapshot, original: original)

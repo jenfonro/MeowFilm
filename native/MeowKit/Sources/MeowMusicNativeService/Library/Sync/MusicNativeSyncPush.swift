@@ -150,7 +150,7 @@ extension NativeMusicService {
                 while true {
                     try await syncCurrent(round)
                     let c = round.library["collections"].array.first { $0["id"].string == id }!
-                    guard selection.kinds.contains(MusicLibrarySyncKind(rawValue: c["kind"].string)!) else { break }
+                    guard let kind = MusicLibrarySyncKind(rawValue: c["kind"].string), selection.kinds.contains(kind) else { break }
                     let bindings = c["bindings"].array.filter { $0["platform"].string == platform && $0["accountId"].string == session.accountID }
                     if bindings.isEmpty {
                         if c["deleted"].bool || c["kind"].string == "favorites" { break }
@@ -239,7 +239,9 @@ extension NativeMusicService {
         var collections = round.library["collections"].array
         for index in collections.indices {
             var c = collections[index]
-            let targets = round.request.selections.filter { $0.kinds.contains(MusicLibrarySyncKind(rawValue: c["kind"].string)!) }
+            guard let kind = MusicLibrarySyncKind(rawValue: c["kind"].string) else { continue }
+            let targets = round.request.selections.filter { $0.kinds.contains(kind) }
+            guard !targets.isEmpty else { continue }
             let bindings = c["bindings"].array.filter { b in targets.contains { $0.platform.rawValue == b["platform"].string } }
             let unresolved = round.ledger.fences.contains { $0.localID == c["id"].string }
             for (id, var intent) in c["intents"].fields {

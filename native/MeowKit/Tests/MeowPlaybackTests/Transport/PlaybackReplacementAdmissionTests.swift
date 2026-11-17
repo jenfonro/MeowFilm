@@ -94,8 +94,8 @@ import MeowContracts
             resource: .init(id: "replacement", url: file, title: "test"), replacing: attempt)
         defer { prepared.cancel() }
         try await controller.synchronizeReplacement(prepared)
-        // Inject the real loader's failure callback after ready and seek have succeeded.
-        prepared.failures.receive?(PlaybackNetworkError.transportFailed)
+        // Report through the same media failure sink used by the input and decoder.
+        prepared.media.report(PlaybackNetworkError.transportFailed)
         XCTAssertThrowsError(try controller.commitReplacement(prepared)) { error in
             XCTAssertEqual(error as? PlaybackNetworkError, .transportFailed)
         }
@@ -122,7 +122,7 @@ import MeowContracts
         let prepared = try await controller.prepareReplacement(
             resource: .init(id: "replacement", url: file, title: "test"), replacing: attempt)
         defer { prepared.cancel() }
-        prepared.failures.receive?(PlaybackNetworkError.resourceChanged)
+        prepared.media.report(PlaybackNetworkError.resourceChanged)
         do {
             try await controller.synchronizeReplacement(prepared)
             XCTFail("A failed input cannot finish synchronization")

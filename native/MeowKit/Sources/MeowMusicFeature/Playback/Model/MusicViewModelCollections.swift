@@ -33,11 +33,6 @@ extension MusicViewModel {
             do {
                 let tracks = try await service.tracks(in: current)
                 try check(epoch); try binding.check(self)
-                guard tracks.count == current.count, tracks.count <= 20_000,
-                      Set(tracks.map { Data($0.songId.utf8) }).count == tracks.count,
-                      tracks.allSatisfy({ $0.ref.kind == .library && $0.ref.id.utf8.elementsEqual($0.songId.utf8) }) else {
-                    throw MusicServiceError.invalidResponse
-                }
                 return .init(collection: current, tracks: tracks)
             } catch {
                 try check(epoch); try binding.check(self)
@@ -47,20 +42,12 @@ extension MusicViewModel {
         let catalogueID = collectionCatalogueID
         let values = try await service.collections()
         try check(epoch); try binding.check(self)
-        guard values.count <= 2000, Set(values.map { Data($0.id.utf8) }).count == values.count else {
-            throw MusicServiceError.invalidResponse
-        }
         guard let collection = values.first(where: { $0.id.utf8.elementsEqual(id.utf8) }) else {
             if collectionCatalogueID == catalogueID { publishCollections(values, origin: binding.id) }
             return nil
         }
         let tracks = try await service.tracks(in: collection)
         try check(epoch); try binding.check(self)
-        guard tracks.count == collection.count, tracks.count <= 20_000,
-              Set(tracks.map { Data($0.songId.utf8) }).count == tracks.count,
-              tracks.allSatisfy({ $0.ref.kind == .library && $0.ref.id.utf8.elementsEqual($0.songId.utf8) }) else {
-            throw MusicServiceError.invalidResponse
-        }
         if collectionCatalogueID == catalogueID { publishCollections(values, origin: binding.id) }
         return .init(collection: collection, tracks: tracks)
     }

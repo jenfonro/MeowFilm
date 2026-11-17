@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { PanError, requireValue } from '../errors.js';
 import { delay, requestJSON, requestText } from '../http.js';
 import { CookieJar } from '../cookies.js';
@@ -6,29 +6,16 @@ import { mergeCookie, parseJSON, text } from '../values.js';
 
 const browserUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0';
 const htmlAccept = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
-const tvUA = 'Mozilla/5.0 (Linux; U; Android 13; zh-cn; M2004J7AC Build/UKQ1.231108.001) AppleWebKit/533.1 (KHTML, like Gecko) Mobile Safari/533.1';
 const driveUA = (name) => `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ${name}-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch`;
 const quarkConfig = {
   id: 'quark', host: 'pan.quark.cn', api: 'https://drive.quark.cn/1/clouddrive/',
   query: { pr: 'ucpro', fr: 'pc' }, referer: 'https://pan.quark.cn/', ua: driveUA('quark'),
   sso: 'https://uop.quark.cn', clientId: '532', qrURL: 'https://su.quark.cn/4_eMHBJ',
-  tv: {
-    id: 'quark_tv', api: 'https://open-api-drive.quark.cn/file',
-    token: 'http://api.extscreen.com/quarkdrive/token',
-    clientId: 'd3194e61504e493eb6222857bccfed94', signKey: 'kw2dvtd7p4t3pjl2d9ed9yc8yej8kw2d',
-    appVersion: '1.8.2.2', channel: 'GENERAL',
-  },
 };
 const ucConfig = {
   id: 'uc', host: 'drive.uc.cn', api: 'https://pc-api.uc.cn/1/clouddrive/',
   query: { pr: 'UCBrowser', fr: 'pc' }, referer: 'https://drive.uc.cn', ua: driveUA('uc'),
   sso: 'https://api.open.uc.cn', clientId: '381', qrURL: 'https://su.uc.cn/1_n0ZCv',
-  tv: {
-    id: 'uc_tv', api: 'https://open-api-drive.uc.cn/file',
-    token: 'http://api.extscreen.com/ucdrive/token',
-    clientId: '5acf882d27b74502b7040b0c65519aa7', signKey: 'l3srvtd7p42l0d0x1u8d7yc8ye9kki4d',
-    appVersion: '1.7.2.2', channel: 'UCTVOFFICIALWEB',
-  },
 };
 
 function record(value) {
@@ -453,104 +440,6 @@ async function ordinaryPlay(config, { file, mode }, ctx) {
   return { url, headers: webHeaders(config, ctx.credentials.cookie), mode, file: stored };
 }
 
-function tvDevice(config, credentials, now) {
-  const deviceId = stringField(credentials.deviceId);
-  return {
-    req_id: createHash('md5').update(deviceId + String(now)).digest('hex'),
-    app_ver: config.appVersion, device_id: deviceId, device_brand: 'Xiaomi', platform: 'tv',
-    device_name: 'M2004J7AC', device_model: 'M2004J7AC', build_device: 'M2004J7AC', build_product: 'M2004J7AC',
-    device_gpu: 'Adreno (TM) 550', activity_rect: '{}', channel: config.channel,
-  };
-}
-
-async function tvRefresh(config, ctx) {
-  const credentials = ctx.credentials;
-  requireValue(stringField(credentials.refreshToken) && stringField(credentials.deviceId), 'NOT_CONFIGURED');
-  active(ctx);
-  const response = await ctx.http.request({
-    url: config.token, method: 'POST', signal: ctx.signal,
-    headers: { 'User-Agent': tvUA, Accept: 'application/json, text/plain, */*', 'Content-Type': 'application/json' },
-    body: Buffer.from(JSON.stringify({ ...tvDevice(config, credentials, ctx.now()), refresh_token: credentials.refreshToken.trim() })),
-  });
-  active(ctx);
-  httpOK(response);
-  const value = parseJSON(response.body);
-  requireValue(record(value) && stringField(value.code), 'UPSTREAM_FORMAT');
-  requireValue(stringField(value.code) === '200', 'UPSTREAM_ERROR');
-  const data = value.data;
-  if (record(data) && stringField(data.status) === '-1' && stringField(data.errno) === '11000') {
-    throw new PanError('AUTH_FAILED');
-  }
-  requireValue(record(data) && typeof data.access_token === 'string' && data.access_token.trim(), 'UPSTREAM_FORMAT');
-  requireValue(data.refresh_token === undefined || typeof data.refresh_token === 'string', 'UPSTREAM_FORMAT');
-  requireValue(!/[\0\r\n]/.test(data.access_token) && !/[\0\r\n]/.test(data.refresh_token || ''), 'UPSTREAM_FORMAT');
-  requireValue(data.expires_in === undefined || /^-?\d+$/.test(stringField(data.expires_in)), 'UPSTREAM_FORMAT');
-  const expiresIn = data.expires_in === undefined ? 0 : Number(data.expires_in);
-  const expiresAt = expiresIn > 0 ? ctx.now() + expiresIn * 1000 : 0;
-  requireValue(Number.isSafeInteger(expiresIn) && Number.isSafeInteger(expiresAt) && expiresAt >= 0, 'UPSTREAM_FORMAT');
-  await ctx.updateCredentials({
-    accessToken: data.access_token.trim(),
-    refreshToken: stringField(data.refresh_token) || credentials.refreshToken,
-    expiresAt,
-  });
-  return { refreshed: true };
-}
-
-function invalidToken(config, value) {
-  if (!record(value)) return false;
-  const status = stringField(value.status);
-  const errno = stringField(value.errno);
-  if (status === '-1' && (errno === '10001' || (config.id === 'uc_tv' && errno === '11001'))) return true;
-  return config.id === 'quark_tv' && /access[ _]token|token\s*无效/i.test(stringField(value.error_info) || stringField(value.message));
-}
-
-async function tvPlay(config, { file, mode }, ctx) {
-  modeRequired(mode);
-  storedFile(file);
-  requireValue(stringField(ctx.credentials.deviceId), 'NOT_CONFIGURED');
-  let credentials = ctx.credentials;
-  if (!stringField(credentials.accessToken) || (credentials.expiresAt > 0 && credentials.expiresAt <= ctx.now() + 60_000)) {
-    credentials = await ctx.refresh();
-  }
-  const resolve = async (current) => {
-    requireValue(stringField(current.accessToken) && stringField(current.deviceId), 'NOT_CONFIGURED');
-    const now = ctx.now();
-    const timestamp = String(now);
-    const url = new URL(config.api);
-    url.search = new URLSearchParams({
-      ...tvDevice(config, current, now), access_token: current.accessToken.trim(), method: mode,
-      group_by: 'source', fid: file.fileId, resolution: 'low,normal,high,super,2k,4k', support: 'dolby_vision',
-    }).toString();
-    const response = await requestJSON(ctx, url.href, {
-      headers: {
-        'User-Agent': tvUA, Accept: 'application/json, text/plain, */*', 'x-pan-tm': timestamp,
-        'x-pan-token': createHash('sha256').update(`GET&/file&${timestamp}&${config.signKey}`).digest('hex'),
-        'x-pan-client-id': config.clientId,
-      },
-    });
-    if (invalidToken(config, response.value)) return { invalid: true };
-    httpOK(response);
-    const value = response.value;
-    requireValue(record(value), 'UPSTREAM_FORMAT');
-    requireValue(value.errno === undefined || stringField(value.errno) === '0', 'UPSTREAM_ERROR');
-    const data = value.data;
-    requireValue(record(data), 'UPSTREAM_FORMAT');
-    const raw = mode === 'download' ? data.download_url
-      : (Array.isArray(data.video_info)
-        ? data.video_info.find((item) => record(item) && typeof item.url === 'string' && item.url.trim())?.url : undefined);
-    const result = typeof raw === 'string' ? raw.trim() : '';
-    requireValue(/^https?:\/\//i.test(result), 'UPSTREAM_FORMAT');
-    return { url: result };
-  };
-  let result = await resolve(credentials);
-  if (result.invalid) {
-    const latest = ctx.credentials;
-    result = await resolve(latest.accessToken !== credentials.accessToken ? latest : await ctx.refresh());
-  }
-  requireValue(!result.invalid, 'AUTH_FAILED');
-  return { url: result.url, headers: {}, mode, file };
-}
-
 function loginURL(url, base) {
   let parsed;
   try { parsed = new URL(url, base); } catch { throw new PanError('UPSTREAM_FORMAT'); }
@@ -753,17 +642,5 @@ function ordinaryProvider(config) {
   };
 }
 
-function tvProvider(config) {
-  return {
-    id: config.id,
-    credentialFields: { refreshToken: 'string', deviceId: 'string', accessToken: 'string', expiresAt: 'number' },
-    modes: ['streaming', 'download'],
-    play: (params, ctx) => tvPlay(config, params, ctx),
-    refresh: (_params, ctx) => tvRefresh(config, ctx),
-  };
-}
-
 export const quark = ordinaryProvider(quarkConfig);
 export const uc = ordinaryProvider(ucConfig);
-export const quarkTV = tvProvider(quarkConfig.tv);
-export const ucTV = tvProvider(ucConfig.tv);

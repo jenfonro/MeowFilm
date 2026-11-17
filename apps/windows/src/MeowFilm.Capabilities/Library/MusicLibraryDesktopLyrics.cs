@@ -6,14 +6,19 @@ namespace MeowFilm.Capabilities.Library;
 public sealed partial class MusicLibraryOwner
 {
     private const string DesktopLyricSettingsArea = "native-desktop-lyrics";
-    private JsonObject DesktopLyricSettings(MusicLibraryData doc) => Value(doc, DesktopLyricSettingsArea) as JsonObject ??
+    private JsonObject DesktopLyricSettings(MusicLibraryData doc)
+    {
+        var value = Area(doc, DesktopLyricSettingsArea) ??
         LJ.Obj(("schema", 1), ("revision", 0), ("layout", "single"),
             ("normalColor", "#FFB5C5"), ("highlightColor", "#FFF2A8"));
+        try { ValidateDesktopLyricSettings(value); }
+        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
+        return value;
+    }
 
     private static void ValidateDesktopLyricSettings(JsonObject value)
     {
-        LJ.Fields(value, "schema revision layout normalColor highlightColor geometry",
-            "schema revision layout normalColor highlightColor");
+        LJ.Fields(value, "schema revision layout normalColor highlightColor geometry", "schema revision layout normalColor highlightColor");
         LJ.Require(LJ.I(value["schema"]) == 1);
         _ = Revision(value);
         LJ.Require(LJ.S(value["layout"]) is "single" or "double" &&
@@ -43,12 +48,10 @@ public sealed partial class MusicLibraryOwner
         var saved = DesktopLyricSettings(doc);
         if (method == "music.lyrics.desktop.settings.get")
         {
-            LJ.Fields(p, "");
             return (LJ.Obj(("settings", saved)), false);
         }
         LJ.Require(method == "music.lyrics.desktop.settings.save", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "ifRevision layout normalColor highlightColor geometry",
-            "ifRevision layout normalColor highlightColor");
+        LJ.Fields(p, "ifRevision layout normalColor highlightColor geometry", "ifRevision layout normalColor highlightColor");
         LJ.Require(LJ.I(p["ifRevision"]) == Revision(saved), "REVISION_CONFLICT");
         var next = (JsonObject)saved.DeepClone();
         next["revision"] = checked(Revision(saved) + 1);
@@ -58,7 +61,8 @@ public sealed partial class MusicLibraryOwner
         if (p.ContainsKey("geometry"))
         {
             LJ.Require(p["geometry"] is JsonObject);
-            next["geometry"] = p["geometry"]!.DeepClone();
+            next["geometry"] = LJ.Merge((saved["geometry"] as JsonObject)?.DeepClone().AsObject() ?? new JsonObject(),
+                LJ.Object(p["geometry"]));
         }
         ValidateDesktopLyricSettings(next);
         AppearanceColors.TryParse(LJ.S(next["normalColor"]), out var normal);

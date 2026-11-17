@@ -1450,7 +1450,7 @@ public static partial class MusicUiTests
         }
         public Task<int> SavedMode() => Task.FromResult(
             MusicTestStores.For(Store).Snapshot().Areas.TryGetValue("playback-settings", out var state)
-                ? state["mode"]!.GetValue<int>() : 1);
+                ? state!["mode"]!.GetValue<int>() : 1);
         public async Task<string> Collection(string name, int count)
         {
             var result = await Rpc("music.library.create", new { name, songs = Enumerable.Range(0, count).Select(i => Song("fixture:" + i, $"曲目{i:0000}")).ToArray() });

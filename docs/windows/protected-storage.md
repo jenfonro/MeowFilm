@@ -70,7 +70,7 @@ The readable names identify ordinary data and collections. Namespace/collection 
 
 ## Current format
 
-Only the current data and wire formats are supported. Music only reads the current account and account-details namespaces declared above; it does not identify or adopt previous account/device-session documents. Ordinary documents and v2 source collections use the new plaintext layout; old encrypted ordinary documents and v1 source chunks are not migrated, used as a fallback, or automatically deleted. This is a development format boundary, not a completed data migration. The separate [Windows runtime settings adoption](native-settings.md#旧设置采用) runs before native modules and Node start; it does not expand music account or source-format compatibility. Corrupt/unsupported sensitive documents and inaccessible/unsafe target files are errors, not empty initial state. Cancellation cannot undo an acknowledged atomic commit.
+Only the current data and wire formats are supported. Music only reads the current account and account-details namespaces declared above; it does not identify or adopt previous account/device-session documents. Ordinary documents and v2 source collections use the new plaintext layout; old encrypted ordinary documents and v1 source chunks are not migrated, used as a fallback, or automatically deleted. This is a development format boundary, not a completed data migration. [Windows native settings](native-settings.md#当前格式与启动) use only their current namespaces; startup does not adopt, convert or delete legacy runtime settings. Corrupt/unsupported sensitive documents and inaccessible/unsafe target files are errors, not empty initial state. Cancellation cannot undo an acknowledged atomic commit.
 
 
 ## Clear all local user data

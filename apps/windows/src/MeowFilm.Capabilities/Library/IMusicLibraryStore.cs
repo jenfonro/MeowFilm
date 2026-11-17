@@ -9,7 +9,7 @@ public sealed record MusicLibraryRevision(long Generation, string Receipt)
 }
 
 /// <summary>Caller-owned control records. Songs are read by identity, never embedded here.</summary>
-public sealed record MusicLibrarySnapshot(MusicLibraryRevision Revision, IReadOnlyDictionary<string, JsonObject> Areas);
+public sealed record MusicLibrarySnapshot(MusicLibraryRevision Revision, IReadOnlyDictionary<string, JsonNode?> Areas);
 
 public sealed record MusicLibraryChanges(IReadOnlyDictionary<string, JsonObject> Areas,
     IReadOnlyDictionary<string, JsonObject> Songs);

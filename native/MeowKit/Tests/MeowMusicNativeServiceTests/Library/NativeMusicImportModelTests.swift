@@ -152,7 +152,7 @@ final class NativeMusicImportModelTests: XCTestCase {
         let source = try XCTUnwrap(song["sources"].array.first)
         var duplicate = song
         duplicate["sources"] = .array([source, source])
-        XCTAssertThrowsError(try MusicLibraryValidation.validateSong(duplicate, id: song["songId"].string)) {
+        XCTAssertThrowsError(try MusicModel.sources(duplicate)) {
             XCTAssertEqual($0 as? MusicServiceError, .nativeIDConflict)
         }
     }

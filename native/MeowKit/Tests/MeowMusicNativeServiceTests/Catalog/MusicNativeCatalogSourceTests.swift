@@ -128,7 +128,7 @@ final class MusicNativeCatalogSourceTests: XCTestCase {
     }
     func testCorruptPreferenceFailsCatalogueWithoutRepairOrRequests() async throws {
         for raw in [#"{"schema":1,"revision":0,"platform":"tx"}"#, #"{"schema":1,"revision":0,"platform":"WY"}"#,
-            #"{"schema":1,"revision":0}"#, #"{"schema":1,"revision":0,"platform":"kg","extra":true}"#,
+            #"{"schema":1,"revision":0}"#,
             #"{"schema":2,"revision":0,"platform":"kg"}"#, #"{"schema":1,"revision":1.5,"platform":"kg"}"#,
             #"{"schema":1,"revision":"1","platform":"kg"}"#, #"{"schema":1,"revision":-1,"platform":"kg"}"#, #""kg""#, "null"] {
             let peer = KugouDiscoveryPeer(), document = NativeMusicTestLibrary(envelope([("catalogSource", F.json(raw))])), service = try await kugouService(peer, document: document, select: false)
@@ -137,6 +137,18 @@ final class MusicNativeCatalogSourceTests: XCTestCase {
             await assertMusicFailure(.corruptDocument) { _ = try await service.publicDiscovery(.channels, cursor: nil) }
             XCTAssertEqual(document.snapshot().2, 0); await finishKugou(service, peer, operations: [])
         }
+    }
+    func testSourceSelectionPreservesUnconsumedFields() async throws {
+        let raw = try MJ.parse(Data(#"{"schema":1,"revision":0,"platform":"kg","extra":1.234567890123456789}"#.utf8))
+        let peer = KugouDiscoveryPeer(), document = NativeMusicTestLibrary(envelope([("catalogSource", raw)]))
+        let service = try await kugouService(peer, document: document, select: false)
+        let selected = try await service.homeSourceSelection()
+        XCTAssertEqual(selected.selected, .kugou)
+        let saved = try await service.selectHomeSource(.netease, ifRevision: 0)
+        XCTAssertEqual(saved.revision, 1)
+        let records = try MJ.parse(XCTUnwrap(document.snapshot().0))["areas"]
+        XCTAssertEqual(records["catalogSource"]["extra"], raw["extra"])
+        await finishKugou(service, peer, operations: [])
     }
     func testStorageReadAndSaveFailuresAreNotDefaultSourceSuccess() async throws {
         let peer = KugouDiscoveryPeer(), service = try await kugouService(peer, document: CatalogFailingDocument(), select: false)

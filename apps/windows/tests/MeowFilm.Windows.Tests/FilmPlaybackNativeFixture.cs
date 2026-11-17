@@ -191,12 +191,12 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
         {
             sessionId = owner.Id, attemptId = attempt, evidence = "d3d11-present-submissions",
             submittedPictures = evidence.Pictures, position = Native.PositionSeconds,
-            paused = Native.PauseRequested, coreIdentity = FilmKernelBuild.Identity
+            paused = Native.IsPaused, coreIdentity = FilmKernelBuild.Identity
         });
         return attempt;
     }
 
-    internal object? CurrentSession => AdaptiveMediaTests.Field(Native, "current");
+    internal object? CurrentSession => NativeMediaFixtures.Field(Native, "current");
     internal NativeAllocation CurrentAllocation() => CaptureNative();
     internal T Element<T>(string name) where T : FrameworkElement => (T)View.FindName(name);
 
@@ -204,13 +204,13 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
     {
         internal readonly object Session = session;
         internal bool Matches(NativeAllocation other) => ReferenceEquals(Session, other.Session);
-        internal bool IsCurrent => ReferenceEquals(Session, AdaptiveMediaTests.Field(native, "current"));
-        internal bool IsAlive => AdaptiveMediaTests.Field(Session, "owner") is IntPtr pointer && pointer != IntPtr.Zero;
+        internal bool IsCurrent => ReferenceEquals(Session, NativeMediaFixtures.Field(native, "current"));
+        internal bool IsAlive => NativeMediaFixtures.Field(Session, "owner") is IntPtr pointer && pointer != IntPtr.Zero;
         internal long Pictures => IsCurrent && native.Output is { } output ? (long)output.SubmittedPictures : 0;
         internal bool PhysicallyReleased =>
-            AdaptiveMediaTests.Field(Session, "release") is Task { IsCompletedSuccessfully: true } &&
-            AdaptiveMediaTests.Field(Session, "owner") is IntPtr pointer && pointer == IntPtr.Zero &&
-            AdaptiveMediaTests.Field(AdaptiveMediaTests.Field(Session, "transport")!, "_readers")
+            NativeMediaFixtures.Field(Session, "release") is Task { IsCompletedSuccessfully: true } &&
+            NativeMediaFixtures.Field(Session, "owner") is IntPtr pointer && pointer == IntPtr.Zero &&
+            NativeMediaFixtures.Field(NativeMediaFixtures.Field(Session, "transport")!, "_readers")
                 is System.Collections.IDictionary { Count: 0 };
     }
 

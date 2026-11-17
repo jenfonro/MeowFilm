@@ -21,6 +21,7 @@ private final class PlaybackVideoDecoderAdapter: PlaybackVideoDecoding {
     var output: any PlaybackVideoOutput { session.output }
     var position: Double { session.position }
     var duration: Double? { session.info?.duration }
+    var seekable: Bool { session.seekable }
     var onFailure: (@MainActor (Error) -> Void)?
     var onProgress: (@MainActor (Double) -> Void)? {
         didSet { session.onProgress = onProgress }

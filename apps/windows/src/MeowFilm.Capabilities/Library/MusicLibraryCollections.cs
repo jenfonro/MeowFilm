@@ -17,13 +17,12 @@ public sealed partial class MusicLibraryOwner
         JsonObject AtRevision()
         {
             LJ.Require(!NetworkPlaylists(library).OfType<JsonObject>().Any(r => LJ.S(r["id"]) == LJ.S(p["id"])), "READ_ONLY");
-            var c = FindCollection(library, LJ.Text(p["id"]));
+            var c = FindCollection(doc, library, LJ.Text(p["id"]));
             LJ.Require(Revision(c) == LJ.I(p["ifRevision"]), "REVISION_CONFLICT"); return c;
         }
         JsonObject DetailSong(string id) => SongReference(doc, JsonValue.Create(id));
         if (method == "music.library.list")
         {
-            LJ.Fields(p, "offset limit");
             var items = collections.OfType<JsonObject>().Where(c => !LJ.B(c["deleted"])).Select(CollectionView)
                 .Concat(NetworkPlaylists(library).OfType<JsonObject>().Where(r => LJ.B(r["present"])).Select(NetworkPlaylistView));
             return (LJ.Merge(LJ.Page(items, p), LJ.Obj(("revision", library["revision"]))), false);
@@ -32,13 +31,13 @@ public sealed partial class MusicLibraryOwner
         {
             LJ.Fields(p, "id offset limit", "id");
             LJ.Require(!NetworkPlaylists(library).OfType<JsonObject>().Any(r => LJ.S(r["id"]) == LJ.S(p["id"])), "READ_ONLY");
-            var c = FindCollection(library, LJ.Text(p["id"]));
+            var c = FindCollection(doc, library, LJ.Text(p["id"]));
             return (LJ.Merge(LJ.Page(Order(c), p, DetailSong, "songs"), LJ.Obj(("collection", CollectionView(c)))), false);
         }
         if (method == "music.library.membership")
         {
             LJ.Fields(p, "id song", "id song");
-            var c = FindCollection(library, LJ.Text(p["id"]));
+            var c = FindCollection(doc, library, LJ.Text(p["id"]));
             var song = NativeMusicSong.Normalize(p["song"]);
             string? member = doc.Songs.Find(song, Order(c).ToHashSet(StringComparer.Ordinal));
             return (LJ.Obj(("present", member is not null), ("songId", member), ("revision", Revision(c))), false);
@@ -57,6 +56,7 @@ public sealed partial class MusicLibraryOwner
         {
             LJ.Fields(p, "name songs", "name"); string name = LJ.Text(p["name"], 200); var songs = Songs(p, true);
             long next = LJ.I(library["nextId"], 1); LJ.Require(next < LJ.MaxInteger, "LIMIT");
+            LJ.Require(!collections.OfType<JsonObject>().Any(c => LJ.S(c["id"]) == "playlist:" + next), "CORRUPT_LIBRARY");
             var c = FreshCollection("playlist:" + next, name, "playlist"); library["nextId"] = next + 1;
             var order = RegisterSongs(doc, songs).Select(song => LJ.S(song["songId"])).Distinct(StringComparer.Ordinal).ToArray();
             c["order"] = LJ.Arr(order); c["manualOrder"] = true; c["locallyCreated"] = true; c["revision"] = 1;
@@ -71,17 +71,11 @@ public sealed partial class MusicLibraryOwner
         }
         else
         {
-            string allowed = method switch
-            {
-                "music.library.edit" => "id ifRevision name songs order",
-                "music.library.addSongs" => "id ifRevision songs",
-                "music.library.removeSong" => "id ifRevision songId",
-                "music.library.reorderSong" => "id ifRevision songId targetId after",
-                _ => throw new MusicLibraryException("INVALID_REQUEST")
-            };
-            LJ.Fields(p, allowed, "id ifRevision"); var c = AtRevision(); var before = Order(c); string[] next = before;
+            LJ.Require(method is "music.library.edit" or "music.library.addSongs" or
+                "music.library.removeSong" or "music.library.reorderSong");
+            LJ.Fields(p, "id ifRevision", "id ifRevision"); var c = AtRevision(); var before = Order(c); string[] next = before;
             if (method == "music.library.edit") LJ.Require(p.ContainsKey("name") || p.ContainsKey("songs") || p.ContainsKey("order"));
-            if (p.ContainsKey("songs"))
+            if ((method is "music.library.edit" or "music.library.addSongs") && p.ContainsKey("songs"))
             {
                 var added = RegisterSongs(doc, Songs(p, method != "music.library.addSongs"))
                     .Select(song => LJ.S(song["songId"]));
@@ -108,12 +102,12 @@ public sealed partial class MusicLibraryOwner
                 order.Insert(targetIndex + (LJ.B(p["after"]) ? 1 : 0), id);
                 next = order.ToArray();
             }
-            if (p["order"] is not null)
+            if (method == "music.library.edit" && p["order"] is not null)
             {
                 var order = LJ.Array(p["order"]).Select(n => LJ.Text(n)).ToArray();
                 LJ.Require(order.Length == next.Length && order.Distinct().Count() == next.Length && order.All(next.Contains), "INVALID_ORDER"); next = order;
             }
-            if (p["name"] is not null) { LJ.Require(LJ.S(c["kind"]) != "favorites", "INVALID_NAME"); c["name"] = LJ.Text(p["name"], 200); }
+            if (method == "music.library.edit" && p["name"] is not null) { LJ.Require(LJ.S(c["kind"]) != "favorites", "INVALID_NAME"); c["name"] = LJ.Text(p["name"], 200); }
             foreach (string id in before.Concat(next).Distinct())
                 if (before.Contains(id) != next.Contains(id))
                 {

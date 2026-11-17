@@ -2,12 +2,17 @@ import Foundation
 import MeowMusicFeature
 
 extension NativeMusicService: MusicSourceExclusionServing {
+    func exclusionRows(_ playback: MJ, key: String) throws -> [MJ] {
+        guard playback.contains(key) else { return [] }
+        try musicRequire(playback[key].isArray, .corruptDocument)
+        return playback[key].array
+    }
     public func sourceExclusions() async throws -> [MusicSourceExclusion] {
         let playback = try read().playback
-        return playback["sourceExclusions"].array.map {
+        return try exclusionRows(playback, key: "sourceExclusions").map {
             MusicSourceExclusion(id: $0["id"].string, songID: $0["songID"].string, title: $0["title"].string,
                   artist: $0["artist"].string, provider: $0["provider"].string, platform: $0["platform"].string)
-        } + playback["recordingSourceExclusions"].array.map {
+        } + exclusionRows(playback, key: "recordingSourceExclusions").map {
             MusicSourceExclusion(id: $0["id"].string, songID: $0["songID"].string, title: $0["title"].string,
                   artist: $0["artist"].string, provider: "", platform: $0["platform"].string,
                   scope: .recording(sourceKey: $0["sourceKey"].string))
@@ -25,7 +30,7 @@ extension NativeMusicService: MusicSourceExclusionServing {
         do {
             try transaction(["playback"]) { d in
                 let song = try song(reference, d)
-                var rows = d.playback["sourceExclusions"].array
+                var rows = try exclusionRows(d.playback, key: "sourceExclusions")
                 guard !rows.contains(where: { $0["songID"] == song["songId"] &&
                     $0["provider"].string == provider && $0["platform"].string == platform }) else { return }
                 rows.append(.obj([("id", .string(UUID().uuidString.lowercased())), ("songID", song["songId"]),
@@ -45,12 +50,16 @@ extension NativeMusicService: MusicSourceExclusionServing {
         if unconfirmed || Task.isCancelled { throw MusicServiceError.commitUnconfirmed }
     }
     public func restoreSourceExclusion(id: String) async throws {
-        let row = try await sourceExclusions().first { $0.id == id }
+        let matches = try await sourceExclusions().filter { $0.id == id }
+        try musicRequire(!id.isEmpty && matches.count <= 1, .corruptDocument)
+        let row = matches.first
         var unconfirmed = false
         do {
             try transaction(["playback"]) { d in
                 for key in ["sourceExclusions", "recordingSourceExclusions"] {
-                    d.playback[key] = .array(d.playback[key].array.filter { $0["id"].string != id })
+                    let rows = try exclusionRows(d.playback, key: key)
+                    try musicRequire(rows.filter { $0["id"].string == id }.count <= 1, .corruptDocument)
+                    d.playback[key] = .array(rows.filter { $0["id"].string != id })
                 }
             }
         } catch MusicServiceError.commitUnconfirmed { unconfirmed = true }
@@ -66,7 +75,7 @@ extension NativeMusicService: MusicSourceExclusionServing {
     }
     func sourceExcluded(_ song: MJ, provider: String, platform: String) throws -> Bool {
         let provider = MusicSourceExclusion.providerID(provider, platform: platform)
-        return try read().playback["sourceExclusions"].array.contains {
+        return try exclusionRows(read().playback, key: "sourceExclusions").contains {
             $0["songID"] == song["songId"] && $0["provider"].string == provider && $0["platform"].string == platform
         }
     }
@@ -88,7 +97,7 @@ extension NativeMusicService: MusicOfficialSourceChecking {
 // User decisions belong to the business document, never the discovery cache.
 extension NativeMusicService {
     func recordingSourceExclusions(_ song: MJ) throws -> Set<String> {
-        var keys = Set(try read().playback["recordingSourceExclusions"].array.filter {
+        var keys = Set(try exclusionRows(read().playback, key: "recordingSourceExclusions").filter {
             $0["songID"] == song["songId"]
         }.map { $0["sourceKey"].string })
         if let primary = song["sources"].array.first?["sourceKey"].string { keys.remove(primary) }
@@ -105,7 +114,7 @@ extension NativeMusicService {
         var unconfirmed = false
         do {
             try transaction(["playback"]) { d in
-                var rows = d.playback["recordingSourceExclusions"].array
+                var rows = try exclusionRows(d.playback, key: "recordingSourceExclusions")
                 guard !rows.contains(where: { $0["songID"] == song["songId"] && $0["sourceKey"].string == sourceKey }) else { return }
                 rows.append(.obj([("id", .string(UUID().uuidString.lowercased())),
                     ("songID", song["songId"]), ("title", song["title"]), ("artist", song["artist"]),

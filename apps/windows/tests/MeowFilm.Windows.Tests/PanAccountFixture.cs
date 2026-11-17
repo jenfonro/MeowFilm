@@ -11,9 +11,7 @@ internal sealed class PanAccountFixture : IRuntimeClient, IDocumentStore, IRunti
     internal static readonly (string Id, string[] Fields)[] Providers =
     [
         ("baidu", ["cookie"]), ("quark", ["cookie"]), ("uc", ["cookie"]),
-        ("tianyi", ["cookie", "username", "password"]), ("yidong", ["authorization", "refreshedAt"]),
-        ("quark_tv", ["refreshToken", "deviceId", "accessToken", "expiresAt"]),
-        ("uc_tv", ["refreshToken", "deviceId", "accessToken", "expiresAt"])
+        ("tianyi", ["cookie", "username", "password"]), ("yidong", ["authorization", "refreshedAt"])
     ];
     internal readonly Dictionary<string, PanAccountSnapshot> Accounts = Providers.ToDictionary(
         item => item.Id, item => new PanAccountSnapshot(item.Id, 0, false, "signedOut", []));
@@ -38,7 +36,7 @@ internal sealed class PanAccountFixture : IRuntimeClient, IDocumentStore, IRunti
         root[provider] = JsonSerializer.SerializeToElement(new
         {
             revision, credentials = fields.ToDictionary(field => field, field =>
-                field is "refreshedAt" or "expiresAt" ? (object)1730000000000L : "synthetic-" + field)
+                field is "refreshedAt" ? (object)1730000000000L : "synthetic-" + field)
         }, Json);
         document = JsonSerializer.SerializeToUtf8Bytes(new { version = 1, accounts = root }, Json);
     }
@@ -75,13 +73,23 @@ internal sealed class PanAccountFixture : IRuntimeClient, IDocumentStore, IRunti
         document = data.ToArray();
         var root = Saved;
         Writes.Add(root);
-        foreach (var account in root.GetProperty("accounts").EnumerateObject())
+        foreach (var (provider, allowed) in Providers)
         {
-            var fields = account.Value.GetProperty("credentials").EnumerateObject().Where(field =>
-                field.Value.ValueKind == JsonValueKind.Number ? field.Value.GetInt64() != 0 :
-                field.Value.GetString()!.Length != 0).Select(field => field.Name).ToArray();
-            Accounts[account.Name] = new(account.Name, account.Value.GetProperty("revision").GetInt64(),
-                fields.Length > 0, fields.Length > 0 ? "signedIn" : "signedOut", fields);
+            var rows = root.GetProperty("accounts").EnumerateObject().Where(item => item.NameEquals(provider)).ToArray();
+            if (rows.Length == 0) { Accounts[provider] = new(provider, 0, false, "signedOut", []); continue; }
+            try
+            {
+                if (rows.Length != 1) throw new InvalidOperationException();
+                long revision = rows[0].Value.GetProperty("revision").GetInt64();
+                if (revision is < 1 or > BridgeCodec.MaximumSafeInteger) throw new InvalidOperationException();
+                var fields = rows[0].Value.GetProperty("credentials").EnumerateObject()
+                    .Where(field => allowed.Any(name => field.NameEquals(name))).Where(field =>
+                        field.Value.ValueKind == JsonValueKind.Number ? field.Value.GetInt64() != 0 :
+                        field.Value.GetString()!.Length != 0).Select(field => field.Name).ToArray();
+                Accounts[provider] = new(provider, revision, fields.Length > 0, fields.Length > 0 ? "signedIn" : "signedOut", fields);
+            }
+            catch (Exception error) when (error is InvalidOperationException or KeyNotFoundException or FormatException)
+            { Accounts[provider] = PanAccountSnapshot.Corrupt(provider); }
         }
         return Snapshot().Fingerprint;
     }
@@ -133,12 +141,12 @@ internal sealed class PanAccountFixture : IRuntimeClient, IDocumentStore, IRunti
                     value.GetProperty("credentials").EnumerateObject().Where(field =>
                         field.Value.ValueKind == JsonValueKind.Number ? field.Value.GetInt64() != 0 :
                         field.Value.GetString()!.Length != 0).Select(field => field.Name).ToArray();
-                Account(id, Accounts[id].Revision + 1, "signedOut", fields);
+                Account(id, (Accounts[id].Revision ?? throw new BridgeException("CORRUPT_STORAGE")) + 1, "signedOut", fields);
                 result = Accounts[id];
                 break;
             case "pan.refresh":
                 string provider = value.GetProperty("provider").GetString()!;
-                if (!Accounts[provider].Configured) return Task.FromResult(Failure("AUTH_REQUIRED"));
+                if (Accounts[provider].Configured != true) return Task.FromResult(Failure("AUTH_REQUIRED"));
                 Accounts[provider] = Accounts[provider] with { Status = "signedIn" };
                 result = new { refreshed = true, account = Accounts[provider] };
                 break;

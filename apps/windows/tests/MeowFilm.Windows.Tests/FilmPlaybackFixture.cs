@@ -68,8 +68,15 @@ internal static class FilmPlaybackFixture
         return FilmJson.Encode(new
         {
             sessionId = id.ToString(), sequence, target = target.Wire(), entryTarget = (entryTarget ?? target).Wire(),
-            entrySurface, entryResolution, stage = "unavailable", error = (string?)null, metadata,
+            entrySurface, entryResolution, stage = "idle", error = (string?)null, metadata,
             metadataSources,
+            workInfo = target.MetadataProvider is not null && target.Kind is ("movie" or "tv") ? JsonSerializer.SerializeToElement(new
+            {
+                provider = target.MetadataProvider, metadataId = target.MetadataId, kind = target.Kind,
+                title = target.Title, summary = FilmJson.Text(metadata, "overview"),
+                seasonCount = target.Kind == "tv" ? (int?)FilmJson.Array(metadata, "seasons").Length : null,
+                episodeCount = target.Kind == "tv" ? (int?)episodes.Length : null
+            }) : JsonSerializer.SerializeToElement<object?>(null),
             metadataSourceId = target.MetadataProvider is null ? null : target.MetadataProvider + ":" + target.MetadataId,
             sources = Array.Empty<object>(), search = Array.Empty<object>(),
             browsing = browsing ?? FilmJson.Encode(new { sourceId = (string?)null, lineId = (string?)null, season = target.Season ?? 1,
@@ -260,12 +267,40 @@ internal sealed class FilmRuntimeProbe : IRuntimeSession, IRuntimeConnectionSour
             });
         }
         else if (action == "media.progress" && currentId != attempt) return Failure("STALE_SESSION");
-        else if (action == "select.episode")
+        else if (action == "select.target")
         {
-            var episode = FilmJson.Member(input, "episode");
-            Target = Target with { Season = FilmJson.Integer(episode, "season"), Episode = FilmJson.Integer(episode, "episode"),
-                GlobalEpisode = FilmJson.Integer(episode, "globalEpisode") };
+            Target = FilmJson.Target(FilmJson.Member(input, "target"));
+            Target.Validate();
             Change(root => root["target"] = JsonNode.Parse(FilmJson.Encode(Target.Wire()).GetRawText()));
+        }
+        else if (action == "browse")
+        {
+            Change(root =>
+            {
+                root["browsing"]!["sourceId"] = FilmJson.Text(input, "sourceId") is { Length: > 0 } source ? source : null;
+                if (input.TryGetProperty("metadataSourceId", out var metadata))
+                    root["metadataSourceId"] = metadata.ValueKind == JsonValueKind.Null ? null : metadata.GetString();
+                if (FilmJson.Member(input, "lineId").ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined))
+                    root["browsing"]!["lineId"] = JsonNode.Parse(input.GetProperty("lineId").GetRawText());
+                else if (FilmJson.Member(input, "sourceId").ValueKind == JsonValueKind.Null)
+                    root["browsing"]!["lineId"] = null;
+                if (input.TryGetProperty("season", out var season))
+                    root["browsing"]!["season"] = season.GetInt32();
+                root["browsing"]!["loading"] = false;
+            });
+        }
+        else if (action == "browse.metadata")
+        {
+            Change(root =>
+            {
+                root["metadataSourceId"] = FilmJson.RequiredText(input, "metadataSourceId");
+                if (!FilmJson.Bool(input, "keepSource")) root["browsing"]!["sourceId"] = null;
+                root["browsing"]!["loading"] = false;
+            });
+        }
+        else if (action == "browse.season")
+        {
+            Change(root => { root["browsing"]!["season"] = input.GetProperty("season").GetInt32(); root["browsing"]!["loading"] = false; });
         }
         else if (action == "stop")
         {
@@ -368,7 +403,8 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
     public NativePlaybackScope? Scope { get; private set; }
     public string? Identity { get; private set; }
     public bool HasOutput { get; private set; }
-    public bool Buffering { get; private set; }
+    private bool buffering;
+    public bool Buffering => HasOutput && !Paused && buffering;
     public string? FailureCode { get; private set; }
     public bool Paused { get; private set; }
     public double Position { get; private set; }
@@ -399,7 +435,7 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
         try
         {
             if (value.PreserveFrom is { } donor && donor != Scope)
-                throw new FilmPlaybackException(PlaybackError.Superseded);
+                throw new PlaybackException(PlaybackError.Superseded);
             if (Preparing is { } prepare) await prepare(token);
             token.ThrowIfCancellationRequested();
         }
@@ -414,8 +450,8 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
         Action committed, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        var value = intent ?? throw new InvalidOperationException("No synthetic input");
-        if (!ReferenceEquals(value, expected)) throw new FilmPlaybackException(PlaybackError.Superseded);
+        var value = intent ?? throw new PlaybackException(PlaybackError.Superseded);
+        if (!ReferenceEquals(value, expected)) throw new PlaybackException(PlaybackError.Superseded);
         var old = AcceptedLease;
         var donorScope = preparedFrom;
         var preparedLease = PendingLease;
@@ -424,7 +460,7 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
             token.ThrowIfCancellationRequested();
             if (!ReferenceEquals(intent, expected) || !ReferenceEquals(PendingLease, preparedLease) ||
                 Scope != donorScope || donorScope is not null && !HasOutput)
-                throw new FilmPlaybackException(PlaybackError.Superseded);
+                throw new PlaybackException(PlaybackError.Superseded);
             if (preparedLease?.Revoked.IsCancellationRequested == true ||
                 old?.Revoked.IsCancellationRequested == true)
                 throw new FilmPlaybackException(PlaybackError.ResourceRevoked);
@@ -435,7 +471,7 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
         if (Committing is { } committing) await committing(token);
         CheckPrepared();
         if (!canCommit()) return false;
-        if (!value.PreserveCurrent) { Position = value.Position; Paused = value.Paused; }
+        if (value.PreserveFrom is null) { Position = value.Position; Paused = value.Paused; }
         AcceptedLease = PendingLease; PendingLease = null; intent = null;
         Identity = value.Identity; Scope = new("film", value.Identity, ++generation); HasOutput = true; Commits++;
         SetBuffering(false);
@@ -454,7 +490,7 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
     }
     internal void FailPendingInput(string code) =>
         inputFailure = (intent ?? throw new InvalidOperationException("No prepared input to fail"), code);
-    public Task PauseAsync(NativePlaybackScope scope, bool paused) { Require(scope); Controls.Add((scope, "pause", paused)); Paused = paused; Pulse("PauseRequested"); return Task.CompletedTask; }
+    public Task PauseAsync(NativePlaybackScope scope, bool paused) { Require(scope); Controls.Add((scope, "pause", paused)); Paused = paused; Pulse("IsPaused"); return Task.CompletedTask; }
     public Task SeekAsync(NativePlaybackScope scope, double value) { Require(scope); Controls.Add((scope, "seek", value)); Position = value; Pulse("PositionSeconds"); return Task.CompletedTask; }
     public Task RateAsync(NativePlaybackScope scope, double value) { Require(scope); Controls.Add((scope, "rate", value)); Rate = value; return Task.CompletedTask; }
     public Task AspectAsync(NativePlaybackScope scope, string? value) { Require(scope); Controls.Add((scope, "aspect", value)); Aspect = value; return Task.CompletedTask; }
@@ -477,18 +513,20 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
         if (terminalGeneration != generation) return;
         if (ended) Ended?.Invoke(this, EventArgs.Empty); else Failed?.Invoke(this, EventArgs.Empty);
     }
-    internal async Task TakeMusicAsync()
+    internal async Task RetireScopeAsync()
     {
         if (AcceptedLease is { } lease) { AcceptedLease = null; await lease.DisposeAsync(); }
         Identity = null; Scope = null; HasOutput = false;
         SetBuffering(false);
-        Pulse("OwnerId");
+        Pulse(nameof(Scope));
+        Pulse(nameof(Identity));
+        Pulse(nameof(HasOutput));
     }
     internal void SetBuffering(bool value)
     {
-        if (Buffering == value) return;
-        Buffering = value;
-        Pulse(nameof(NativePlayback.IsBuffering));
+        if (buffering == value) return;
+        buffering = value;
+        Pulse(nameof(FilmPlayback.IsBuffering));
     }
     internal void Pulse(string property) => PropertyChanged?.Invoke(this, new(property));
     private void Require(NativePlaybackScope scope) { if (Scope != scope) throw new FilmPlaybackException("STALE_SESSION"); }

@@ -139,8 +139,8 @@ public static class MusicLibraryDatabaseTests
         await using var reopened = new MusicLibraryDatabase(folder.Root);
         var snapshot = await reopened.ReadAsync(Scope);
         Check(snapshot.Revision == revision && JsonNode.DeepEquals(reopened.ReadSong(Id(song)), song));
-        snapshot.Areas["control"]["selected"] = "caller";
-        Check((await reopened.ReadAsync(Scope)).Areas["control"]["selected"]!.GetValue<string>() == Id(song));
+        snapshot.Areas["control"]!["selected"] = "caller";
+        Check((await reopened.ReadAsync(Scope)).Areas["control"]!["selected"]!.GetValue<string>() == Id(song));
         Check(new FileInfo(folder.Database + "-journal").Exists);
     }
 
@@ -182,7 +182,7 @@ public static class MusicLibraryDatabaseTests
         await Reject(DocumentStoreError.Conflict, () => database.CommitAsync(Scope, revision, Next(revision),
             Changes([unrelated, conflict], new JsonObject { ["selected"] = "after" })));
         var after = await database.ReadAsync(Scope);
-        Check(after.Revision == revision && after.Areas["control"]["selected"]!.GetValue<string>() == "before");
+        Check(after.Revision == revision && after.Areas["control"]!["selected"]!.GetValue<string>() == "before");
         Check(database.FindSource(Key(first)) == Id(first) && database.FindSource(Key(unrelated)) is null);
         Check(database.ReadSong(Id(unrelated)) is null && database.ReadSong(Id(conflict)) is null && database.SongIds().Count == 1);
         await database.DisposeAsync();
@@ -483,7 +483,7 @@ public static class MusicLibraryDatabaseTests
         await using (var setup = new MusicLibraryOwner(database, Scope))
             _ = await setup.CreatePlaylistAsync("Scale", []);
         var saved = await database.ReadAsync(Scope);
-        var control = saved.Areas["library"].DeepClone().AsObject();
+        var control = saved.Areas["library"]!.DeepClone().AsObject();
         var collection = control["library"]!["collections"]!.AsArray().OfType<JsonObject>()
             .Single(value => value["id"]!.GetValue<string>() == "playlist:1");
         collection["order"] = new JsonArray(songs.Select(song => (JsonNode?)JsonValue.Create(Id(song))).ToArray());

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import https from 'node:https';
-import { identity, sourceIdentity } from '../packages/film-playback/src/identity.js';
+import { identity } from '../packages/film-playback/src/identity.js';
 import { decodePanResource, parseM3U8Metadata } from '../packages/script-host/src/cat-output.js';
 import { bridgeCrossShares, bridgeFiles, bridgeMaster, bridgeMasterURL, bridgeShare, bridgeUCFiles,
   startCatPanBridgeFixture, waitForBridge } from './film-cat-pan-bridge-fixture.mjs';
@@ -12,10 +12,9 @@ const highHLSURL = 'https://manifest.bridge.invalid/show/high/index.m3u8?part=1'
 const lowHLSURL = 'https://manifest.bridge.invalid/low.m3u8';
 const phases = (f, layer) => f.records.filter(row => row.layer === layer).map(row => row.phase);
 const intercepted = (f, phase) => f.records.filter(row => row.layer === 'pan-interceptor' && row.phase === phase);
-const detailTarget = (f, detailId) => ({ ...f.directTarget, id: `source:${identity(sourceIdentity(f.source), detailId)}`,
-  source: { key: f.source.key, engine: f.source.engine, installationId: f.source.installationId,
-    siteId: f.source.siteId, detailId } });
 const resolvedTarget = (f, target) => f.call('film.data.target', { target, sources: [f.source] });
+const detailTarget = (f, detailId) => resolvedTarget(f, { kind: 'source', title: f.directTarget.title,
+  source: { key: f.source.key, detailId } });
 const lineViews = (state, rows) => {
   const parent = state.sources.find(row => row.id === state.browsing.sourceId);
   return rows.map(row => ({ ...row, businessId: `line:${identity(parent.businessId, row.id)}`,
@@ -46,6 +45,8 @@ async function releasedInterceptions(f, count) {
 async function fixture(t, options) {
   const f = await startCatPanBridgeFixture(options);
   t.after(() => f.close());
+  f.directTarget = await resolvedTarget(f, f.directTarget);
+  f.metadataTarget = await resolvedTarget(f, f.metadataTarget);
   return f;
 }
 async function open(f, input = {}) {
@@ -226,7 +227,7 @@ for (const [detailId, invalidShare] of [
 ]) {
   test(`Cat → pan → film retains the valid share after ${detailId} falls back to the original network`, async t => {
     const f = await fixture(t);
-    let state = await browse(f, await open(f, { target: detailTarget(f, detailId) }));
+    let state = await browse(f, await open(f, { target: await detailTarget(f, detailId) }));
     assert.equal(state.browsing.error, null);
     assert.equal(state.browsing.episodes.length, 3);
     const captured = f.records.find(row => row.layer === 'cat' && row.phase === 'intercepted');
@@ -272,11 +273,13 @@ for (const [detailId, lineLabel, title] of [
   test(title,
     { timeout: 15000 }, async t => {
       const f = await fixture(t);
-      let state = await open(f, { target: detailTarget(f, detailId) });
+      let state = await open(f, { target: await detailTarget(f, detailId) });
       const { sessionId } = state;
       assert.equal(state.target.kind, 'source');
       assert.equal(state.sources[0].source.name, 'Bridge site');
-      assert.equal(f.panInputs.length, 0, 'opening a specific site is not a request to search every site');
+      assert.deepEqual(f.panInputs.map(row => row.operation), ['list']);
+      assert.equal(phases(f, 'cat').filter(row => row === 'search').length, 0,
+        'opening a specific site reads its directory without searching every site');
       assert.equal(f.counters.mediaHead, 0);
       const observation = await events(t, f, sessionId);
       assert.equal((await observation.next()).sessionId, sessionId);
@@ -288,13 +291,13 @@ for (const [detailId, lineLabel, title] of [
         [[1, 1, '4k_fps'], [1, 1, '1080p'], [1, 2, '1080p']]);
       assert.deepEqual(state.browsing.episodes.map(row => row.path),
         bridgeFiles.map(file => `/Season 01/${file.file_name}`));
-      const high = state.candidates.find(row => row.quality === '4k_fps');
+      const high = state.browsing.episodes.find(row => row.quality === '4k_fps');
       assert.equal(high.resolution, '3840x2160');
       assert.equal(high.fps, 60000 / 1001);
       assert.equal(high.codec, 'hevc');
-      assert.equal(high.source.detailId, detailId);
-      assert.equal(high.source.key, f.source.key);
-      assert.equal(high.provider, 'quark');
+      assert.equal(high.playbackTarget.source.detailId, detailId);
+      assert.equal(high.playbackTarget.source.key, f.source.key);
+      assert.equal(state.browsing.lines[0].provider, 'quark');
       assert.deepEqual(phases(f, 'provider'), ['token', 'list', 'list']);
       assert.deepEqual(f.providerRequests.filter(row => row.url.pathname.endsWith('/detail'))
         .map(row => row.url.searchParams.get('pdir_fid')), ['0', 'season-one']);
@@ -314,9 +317,11 @@ for (const [detailId, lineLabel, title] of [
       assert.equal(captured.shareId, normalized[0].shareId);
       assert.equal(captured.provider, normalized[0].provider);
       assert.equal(captured.passwordPresent, true);
-      assert.equal(captured.installationId, high.source.installationId);
-      assert.equal(captured.siteId, high.source.siteId);
-      await f.command(sessionId, 'select.candidate', { candidateId: high.id });
+      assert.equal(captured.installationId, high.playbackTarget.source.installationId);
+      assert.equal(captured.siteId, high.playbackTarget.source.siteId);
+      await f.command(sessionId, 'select.target', {
+        target: high.playbackTarget, metadataSourceId: state.metadataSourceId,
+      });
       state = await pending(f, sessionId);
       assert.equal(state.attempt.candidate.id, high.id);
       assert.equal(state.attempt.prepareOnly, false);
@@ -382,8 +387,8 @@ test('same fixture quality switch resolves the exact other file without repeatin
   const f = await fixture(t);
   let state = await browse(f, await open(f));
   const { sessionId } = state;
-  const high = state.candidates.find(row => row.quality === '4k_fps');
-  await f.command(sessionId, 'select.candidate', { candidateId: high.id });
+  const high = state.browsing.episodes.find(row => row.quality === '4k_fps');
+  await f.command(sessionId, 'select.target', { target: high.playbackTarget, metadataSourceId: state.metadataSourceId });
   state = await pending(f, sessionId);
   const first = state.attempt;
   await f.command(sessionId, 'media.started', { attemptId: first.id });
@@ -405,7 +410,7 @@ test('same fixture quality switch resolves the exact other file without repeatin
 test('one episode across real Quark/UC owners sorts qualities, reselects after failure and resolves a quality switch',
   { timeout: 15000 }, async t => {
     const f = await fixture(t, { searchDetailId: 'cross-provider' });
-    const rawEntry = detailTarget(f, 'cross-provider');
+    const rawEntry = await detailTarget(f, 'cross-provider');
     let state = await browse(f, await open(f, { target: rawEntry }));
     assert.equal(state.browsing.error, null);
     assert.deepEqual(state.browsing.lines, lineViews(state, [
@@ -416,25 +421,27 @@ test('one episode across real Quark/UC owners sorts qualities, reselects after f
     const actualEpisode = state.browsing.episodes[0];
     assert.deepEqual([actualEpisode.season, actualEpisode.episode], [1, 1]);
     await f.call('film.session.release', { sessionId: state.sessionId });
-    state = await open(f, { target: f.metadataTarget, resumeTarget: { ...rawEntry,
-      season: actualEpisode.season, episode: actualEpisode.episode } });
+    state = await open(f, { target: f.metadataTarget });
     const { sessionId } = state, observation = await events(t, f, sessionId);
     const metadataSource = state.metadataSources.find(row => row.provider === 'tmdb' && row.metadataId === 321);
     assert.ok(metadataSource);
+    const playbackTarget = state.target;
     await f.command(sessionId, 'browse.metadata', { metadataSourceId: metadataSource.id });
     state = await waitForBridge(async () => {
       const next = await f.snapshot(sessionId);
       return !next.browsing.loading && next.browsing.sourceId === null && next;
     }, 'explicit metadata selection');
     assert.deepEqual(state.entryTarget, f.metadataTarget);
-    assert.equal(state.target.kind, 'tv');
-    assert.equal(state.target.metadataProvider, 'tmdb');
-    assert.equal(state.target.metadataId, 321);
-    assert.equal(state.target.source, undefined);
+    assert.deepEqual(state.target, playbackTarget, 'metadata browsing does not change the actual playback target');
+    assert.equal(state.target.id, f.metadataTarget.id);
+    assert.equal(metadataSource.playbackTarget.kind, 'tv');
+    assert.equal(metadataSource.playbackTarget.metadataProvider, 'tmdb');
+    assert.equal(metadataSource.playbackTarget.metadataId, '321');
+    assert.equal(metadataSource.playbackTarget.source, undefined);
     assert.equal(state.metadataSourceId, metadataSource.id);
     assert.deepEqual([state.target.season, state.target.episode], [actualEpisode.season, actualEpisode.episode]);
-    // A missing quality makes the real scheduler finish both pan lines before
-    // selection. Browsing another line reloads detail and is not discovery.
+    // A missing quality on the actual metadata target makes the real scheduler
+    // finish both pan lines. Metadata browsing alone cannot change that target.
     await f.command(sessionId, 'quality', { quality: '4k_hdr' });
     state = await terminal(f, sessionId);
     assert.equal(state.error, 'NO_MATCH');
@@ -562,18 +569,18 @@ test('one episode across real Quark/UC owners sorts qualities, reselects after f
 test('cached provider directories and addresses are shared, while explicit pan invalidation rebuilds the real chain', async t => {
   const f = await fixture(t);
   let state = await browse(f, await open(f));
-  const high = state.candidates.find(row => row.quality === '4k_fps');
-  await f.command(state.sessionId, 'select.candidate', { candidateId: high.id });
+  const high = state.browsing.episodes.find(row => row.quality === '4k_fps');
+  await f.command(state.sessionId, 'select.target', { target: high.playbackTarget, metadataSourceId: state.metadataSourceId });
   state = await pending(f, state.sessionId);
   const count = f.providerRequests.length;
   const second = await browse(f, await open(f));
-  await f.command(second.sessionId, 'select.candidate', { candidateId: high.id });
+  await f.command(second.sessionId, 'select.target', { target: high.playbackTarget, metadataSourceId: second.metadataSourceId });
   await pending(f, second.sessionId);
   assert.equal(f.providerRequests.length, count);
   assert.equal(phases(f, 'cat').filter(row => row === 'detail').length, 1);
   assert.deepEqual(await f.call('film.data.invalidate', { domain: 'quark' }), { invalidated: true });
   const third = await browse(f, await open(f));
-  await f.command(third.sessionId, 'select.candidate', { candidateId: high.id });
+  await f.command(third.sessionId, 'select.target', { target: high.playbackTarget, metadataSourceId: third.metadataSourceId });
   await pending(f, third.sessionId);
   assert.equal(f.panInputs.filter(row => row.operation === 'list').length, 2);
   assert.equal(f.panInputs.filter(row => row.operation === 'prepare').length, 2);
@@ -608,13 +615,11 @@ for (const [scenario, code] of [['list-http', 'UPSTREAM_HTTP'], ['list-auth', 'A
   ['list-format', 'UPSTREAM_FORMAT'], ['list-timeout', 'TIMEOUT']]) {
   test(`provider ${scenario} remains a real browse error, then retries without cached false success`, async t => {
     const f = await fixture(t, { scenario });
-    let state = await browse(f, await open(f));
+    let state = await open(f);
     assert.equal(state.error, code);
-    assert.equal(state.browsing.error, null, 'the actual Cat line remains available after pan expansion fails');
+    assert.equal(state.browsing.error, code, 'the actual Cat line cannot hide a failed pan expansion');
     assert.deepEqual(state.browsing.lines, lineViews(state, [{ id: '夸克', label: '夸克', provider: 'quark' }]));
-    assert.equal(state.browsing.episodes.length, 1);
-    assert.equal(state.browsing.episodes[0].name, '第一季');
-    assert.equal(state.browsing.episodes[0].path, undefined, 'a failed pan list cannot fabricate a file');
+    assert.deepEqual(state.browsing.episodes, [], 'a failed pan list cannot fabricate a file or successful share row');
     assert.equal(state.attempt, null);
     assert.deepEqual(f.panInputs.map(row => row.operation), ['list']);
     const failure = f.records.find(row => row.layer === 'pan-service' && row.phase === 'list-error');
@@ -625,7 +630,7 @@ for (const [scenario, code] of [['list-http', 'UPSTREAM_HTTP'], ['list-auth', 'A
       const next = await f.snapshot(state.sessionId);
       return !next.browsing.loading && next;
     }, 'successful provider retry');
-    assert.equal(state.error, null);
+    assert.equal(state.error, code, 'browsing retry does not replace the independently settled playback error');
     assert.equal(state.browsing.error, null);
     assert.equal(state.browsing.episodes.length, 3);
     assert.deepEqual(f.panInputs.map(row => row.operation), ['list', 'list']);
@@ -636,8 +641,8 @@ for (const [scenario, code] of [['list-http', 'UPSTREAM_HTTP'], ['list-auth', 'A
       const next = await f.snapshot(state.sessionId);
       return !next.browsing.loading && next;
     }, 'failed provider refresh');
-    assert.equal(state.error, code, 'retaining the successful directory must not hide the actual refresh failure');
-    assert.equal(state.browsing.error, null);
+    assert.equal(state.error, code);
+    assert.equal(state.browsing.error, code, 'retaining the successful directory must not hide the actual refresh failure');
     assert.equal(state.browsing.sourceId, directory.sourceId);
     assert.equal(state.browsing.lineId, directory.lineId);
     assert.deepEqual(state.browsing.lines, directory.lines);
@@ -684,8 +689,7 @@ for (const [scenario, phase, code] of [['prepare-error', 'prepare', 'UPSTREAM_ER
 
 test('direct Cat DASH/CENC playback metadata and custom headers cross the bridge without reading media or licenses', async t => {
   const f = await fixture(t);
-  const target = { ...f.directTarget, id: 'site:descriptor',
-    source: { ...f.directTarget.source, detailId: 'descriptor' } };
+  const target = await detailTarget(f, 'descriptor');
   const state = await open(f, { target });
   await f.command(state.sessionId, 'play');
   const selected = await pending(f, state.sessionId);
@@ -709,7 +713,7 @@ test('headerless Cat DASH/CENC descriptor keeps its direct resource through film
     const descriptor = await f.invokeCat('play', { flag: '原始线路', id: 'descriptor-direct' });
     assert.equal(Object.hasOwn(descriptor, 'headers'), false);
     assert.equal(Object.hasOwn(descriptor, 'header'), false);
-    let state = await open(f, { target: detailTarget(f, 'descriptor-direct') });
+    let state = await open(f, { target: await detailTarget(f, 'descriptor-direct') });
     const { sessionId } = state, observation = await events(t, f, sessionId);
     assert.equal((await observation.next()).sessionId, sessionId);
     await f.command(sessionId, 'play');
@@ -781,13 +785,13 @@ test('real Cat HLS enhancement retains master variants and descriptor metadata w
 
 test('M3 real HLS HTTP/SSE candidates select high, switch low and reselect only the same parent after failures',
   { timeout: 15000 }, async t => {
-    const f = await fixture(t), target = detailTarget(f, 'hls-master');
+    const f = await fixture(t), target = await detailTarget(f, 'hls-master');
     let state = await browse(f, await open(f, { target }));
     const { sessionId } = state;
     assert.equal(state.browsing.episodes.length, 1);
     assert.equal(state.browsing.episodes[0].name, '正片');
-    assert.equal(state.candidates.length, 1);
-    assert.equal(state.candidates[0].quality, undefined);
+    assert.equal(state.candidates.length, 0, 'directory browsing does not populate actual playback candidates');
+    assert.equal(state.browsing.episodes[0].quality, undefined);
     assert.equal(f.counters.manifestDocuments, 0, 'ordinary detail does not probe a master');
     assert.equal(f.counters.scriptNetwork, 0);
     const observation = await events(t, f, sessionId);
@@ -896,7 +900,7 @@ test('M3 real HLS HTTP/SSE candidates select high, switch low and reselect only 
 test('M3 first explicit HLS quality discovers the real parent before filtering and publishes only the requested low attempt',
   { timeout: 15000 }, async t => {
     const f = await fixture(t);
-    let state = await open(f, { target: detailTarget(f, 'hls-master') });
+    let state = await open(f, { target: await detailTarget(f, 'hls-master') });
     const { sessionId } = state, observation = await events(t, f, sessionId);
     assert.equal(state.attempt, null);
     assert.equal(f.counters.manifestDocuments, 0);
@@ -924,7 +928,7 @@ test('M3 first explicit HLS quality discovers the real parent before filtering a
 
 test('M3 exact HLS reentry reuses parent cache and keeps opaque variant identity after invalidation and master reordering',
   { timeout: 15000 }, async t => {
-    const f = await fixture(t), target = detailTarget(f, 'hls-master');
+    const f = await fixture(t), target = await detailTarget(f, 'hls-master');
     let state = await open(f, { target });
     await f.command(state.sessionId, 'quality', { quality: '1080p' });
     state = await pending(f, state.sessionId);
@@ -973,7 +977,7 @@ test('M3 exact HLS reentry reuses parent cache and keeps opaque variant identity
     assert.ok(coldFrames.filter(frame => frame.attempt).every(frame => frame.attempt.candidate.id === low.id));
     await hlsReceipt(t, f, state, lowHLSURL);
     const previous = state.attempt.id;
-    await f.command(state.sessionId, 'select.candidate', { candidateId: high.id });
+    await f.command(state.sessionId, 'select.target', { target: high.playbackTarget, metadataSourceId: null });
     state = await pending(f, state.sessionId, previous);
     assert.equal(state.attempt.candidate.id, high.id);
     assert.equal(state.target.source.candidateId, high.id);
@@ -991,7 +995,7 @@ test('M3 exact HLS reentry reuses parent cache and keeps opaque variant identity
 
 test('M3 missing exact HLS variant fails without a master or sibling attempt and recovers only its saved target',
   { timeout: 15000 }, async t => {
-    const f = await fixture(t), target = detailTarget(f, 'hls-master');
+    const f = await fixture(t), target = await detailTarget(f, 'hls-master');
     let state = await open(f, { target });
     await f.command(state.sessionId, 'quality', { quality: '1080p' });
     state = await pending(f, state.sessionId);
@@ -1043,8 +1047,7 @@ test('M3 missing exact HLS variant fails without a master or sibling attempt and
 for (const detailId of ['headers-invalid', 'header-value-invalid', 'format-invalid']) {
   test(`malformed Cat descriptor ${detailId} fails before any upstream media request`, async t => {
     const f = await fixture(t);
-    const state = await open(f, { target: { ...f.directTarget, id: `site:${detailId}`,
-      source: { ...f.directTarget.source, detailId } } });
+    const state = await open(f, { target: await detailTarget(f, detailId) });
     await f.command(state.sessionId, 'play');
     const failed = await terminal(f, state.sessionId);
     assert.equal(failed.attempt, null);
@@ -1056,8 +1059,9 @@ for (const detailId of ['headers-invalid', 'header-value-invalid', 'format-inval
 
 test('leaving an in-flight provider directory drains into shared cache without publishing into the released page', async t => {
   const f = await fixture(t), gate = f.gate('list');
-  const first = await open(f);
-  await f.command(first.sessionId, 'browse', { sourceId: first.sources[0].id });
+  const first = await f.call('film.session.open', {
+    platform: 'test', entrySurface: 'search', target: f.directTarget, sources: [f.source],
+  });
   await gate.entered.promise;
   assert.equal(gate.signal.aborted, false);
   assert.deepEqual(await f.call('film.session.release', { sessionId: first.sessionId }), { released: true });
@@ -1076,8 +1080,9 @@ test('leaving an in-flight provider directory drains into shared cache without p
 
 test('switching away while list is in flight does not restore the old browse selection', async t => {
   const f = await fixture(t), gate = f.gate('list');
-  const initial = await open(f);
-  await f.command(initial.sessionId, 'browse', { sourceId: initial.sources[0].id });
+  const initial = await f.call('film.session.open', {
+    platform: 'test', entrySurface: 'search', target: f.directTarget, sources: [f.source],
+  });
   await gate.entered.promise;
   await f.command(initial.sessionId, 'browse', { sourceId: null });
   gate.release.resolve();
@@ -1110,8 +1115,9 @@ test('cancelling a direct pan HTTP observer aborts that request but waits for th
 test('runtime close waits for physical provider completion, closes exactly once and cannot start prepare after cancellation',
   { timeout: 15000 }, async t => {
     const f = await fixture(t), gate = f.gate('list');
-    const state = await open(f);
-    await f.command(state.sessionId, 'browse', { sourceId: state.sources[0].id });
+    const state = await f.call('film.session.open', {
+      platform: 'test', entrySurface: 'search', target: f.directTarget, sources: [f.source],
+    });
     await gate.entered.promise;
     let completed = false;
     const close = f.app.close().then(() => { completed = true; });

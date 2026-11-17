@@ -213,15 +213,20 @@ final class MusicNativeFMPreviewTests: XCTestCase {
         let calls = await owner.calls; XCTAssertEqual(calls.map(\.1), [true, false])
         await source.close(); await service.close()
     }
-    func testFMSelectionDocumentRejectsMalformedOrNonFMValues() throws {
+    func testOnlySelectedFMPreferenceIsConsumed() async throws {
         let daily = try MJ.parse(JSONEncoder().encode(MusicHomeAction.daily(branch: .default)))
-        let valid = try MJ.parse(JSONEncoder().encode(fm))
-        var document = try MusicDocument(nil, runID: "fixture")
-        document.playback["fmSelections"] = .obj([("account", valid)])
-        _ = try MusicDocument(try document.fixtureData(), runID: "fixture")
-        for value in [MJ.array([]), .obj([("account", .string("not-an-action"))]), .obj([("account", daily)])] {
-            document.playback["fmSelections"] = value
-            XCTAssertThrowsError(try MusicDocument(try document.fixtureData(), runID: "fixture")) { XCTAssertEqual($0 as? MusicServiceError, .corruptDocument) }
+        for value in [MJ.string("not-an-action"), daily] {
+            var document = try MusicDocument(nil, runID: "fixture")
+            document.playback["fmSelections"] = .obj([("another-account", value)])
+            let store = NativeMusicTestLibrary(try document.encode(changed: ["playback"]))
+            let owner = FMPreviewOwner(), service = try await NativeMusicFixture.service(store, accounts: owner)
+            let remembered = try await service.rememberedFM()
+            XCTAssertEqual(remembered, .fm(mode: .default, submode: "", entry: nil))
+            document.playback["fmSelections"]["synthetic-guest"] = value
+            store.replace(try document.encode(changed: ["playback"]))
+            await assertMusicFailure(.corruptDocument) { _ = try await service.rememberedFM() }
+            XCTAssertEqual(store.snapshot().2, 0)
+            await service.close()
         }
     }
     func testRuleCoverIsNotAPlayableBatchAndSourceNameDoesNotSplitConfiguration() async throws {

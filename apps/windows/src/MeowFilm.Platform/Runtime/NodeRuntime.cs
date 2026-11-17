@@ -164,7 +164,8 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
                 try { await Task.WhenAll(output, error).ConfigureAwait(false); } catch { failedCleanup = true; }
                 child?.Dispose();
             }
-            throw new BridgeException(failedCleanup ? "INTERNAL" : cancellationToken.IsCancellationRequested ? "CANCELLED" : failure);
+            if (failedCleanup) throw new RuntimeStartupCleanupException();
+            throw new BridgeException(cancellationToken.IsCancellationRequested ? "CANCELLED" : failure);
         }
     }
 

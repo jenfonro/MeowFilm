@@ -33,17 +33,21 @@ internal static class LJ
     internal static double N(JsonNode? n, double fallback = 0) => n is JsonValue v && v.TryGetValue<double>(out var d) ? d :
         double.TryParse(Scalar(n), NumberStyles.Float, CultureInfo.InvariantCulture, out d) ? d : fallback;
     internal static long I(JsonNode? n, long min = 0, long max = MaxInteger)
-    { double d = N(n, double.NaN); Require(n is JsonValue && !((JsonValue)n).TryGetValue<string>(out _) && double.IsFinite(d) && Math.Truncate(d) == d && d >= min && d <= max); return (long)d; }
+    {
+        decimal value = 0;
+        Require(n is JsonValue scalar && !scalar.TryGetValue<string>(out _) &&
+            decimal.TryParse(Scalar(n), NumberStyles.Float, CultureInfo.InvariantCulture, out value) &&
+            decimal.Truncate(value) == value && value >= min && value <= max);
+        return (long)value;
+    }
     internal static bool B(JsonNode? n) => n is JsonValue v && v.TryGetValue<bool>(out var b) && b;
     internal static bool IsBool(JsonNode? n) => n is JsonValue v && v.TryGetValue<bool>(out _);
     internal static bool Id(string s, int max = 2048) => s.Length > 0 && s.Length <= max && s.Trim() == s && !s.Any(c => c < 32 || c == 127);
     internal static string Text(JsonNode? n, int max = 2048)
     { string s = S(n); Require(Id(s, max)); return s; }
-    internal static void Fields(JsonObject o, string allowed, string required = "")
-    {
-        var fields = allowed.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal);
-        Require(o.All(p => fields.Contains(p.Key)) && required.Split(' ', StringSplitOptions.RemoveEmptyEntries).All(o.ContainsKey));
-    }
+    // Callers project the fields they use; extra members do not grant behavior.
+    internal static void Fields(JsonObject o, string allowed, string required = "") =>
+        Require(required.Split(' ', StringSplitOptions.RemoveEmptyEntries).All(o.ContainsKey));
     // Persisted identity digests must match JSON.stringify, not a .NET encoder's
     // escaping of non-BMP/U+2028 characters or exponent formatting.
     internal static string Stringify(JsonNode? node)
@@ -114,9 +118,9 @@ internal static class LJ
                 point >= digits.Length ? digits + new string('0', point - digits.Length) : digits.Insert(point, "."));
         return sign + mantissa + "e" + (exponent >= 0 ? "+" : "") + exponent.ToString(CultureInfo.InvariantCulture);
     }
-    internal static byte[] Bytes(JsonNode node) => Encoding.UTF8.GetBytes(Stringify(node));
+    internal static byte[] Bytes(JsonNode node) => JsonSerializer.SerializeToUtf8Bytes(node, Json);
     internal static string Hash(ReadOnlySpan<byte> bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
-    internal static string Digest(JsonNode node) => Hash(Bytes(Stable(node)!));
+    internal static string Digest(JsonNode node) => Hash(Encoding.UTF8.GetBytes(Stringify(Stable(node))));
     private static JsonNode? Stable(JsonNode? node) => node switch
     {
         JsonObject obj => new JsonObject(obj.OrderBy(p => uint.TryParse(p.Key, out uint n) && n < uint.MaxValue && n.ToString(CultureInfo.InvariantCulture) == p.Key ? 0 : 1)
@@ -126,7 +130,9 @@ internal static class LJ
         _ => node?.DeepClone()
     };
     internal static JsonElement Element(JsonNode node) => JsonSerializer.SerializeToElement(node, Json);
-    internal static JsonNode Parse(ReadOnlyMemory<byte> bytes, int maximum = 8 * 1024 * 1024)
+    internal static JsonNode Parse(ReadOnlyMemory<byte> bytes, int maximum = 8 * 1024 * 1024) =>
+        ParseValue(bytes, maximum) ?? throw new MusicLibraryException("CORRUPT_STORAGE");
+    internal static JsonNode? ParseValue(ReadOnlyMemory<byte> bytes, int maximum)
     {
         Require(bytes.Length > 0 && bytes.Length <= maximum, "LIMIT");
         try
@@ -143,10 +149,9 @@ internal static class LJ
                 }
                 else if (e.ValueKind == JsonValueKind.Array) foreach (var child in e.EnumerateArray()) Check(child);
                 else if (e.ValueKind == JsonValueKind.String) Require(e.GetString()!.Length <= 512 * 1024, "LIMIT");
-                else if (e.ValueKind == JsonValueKind.Number) { var d = e.GetDouble(); Require(double.IsFinite(d) && (Math.Truncate(d) != d || Math.Abs(d) <= MaxInteger)); }
             }
             Check(doc.RootElement);
-            return JsonNode.Parse(doc.RootElement.GetRawText()) ?? throw new MusicLibraryException("CORRUPT_STORAGE");
+            return JsonNode.Parse(doc.RootElement.GetRawText());
         }
         catch (MusicLibraryException) { throw; }
         catch { throw new MusicLibraryException("CORRUPT_STORAGE"); }
@@ -154,8 +159,6 @@ internal static class LJ
     internal static JsonObject PersistedDocument(ReadOnlyMemory<byte> bytes)
     {
         var document = Object(Parse(bytes), "CORRUPT_STORAGE");
-        byte[] canonical = Bytes(document);
-        Require(bytes.Span.SequenceEqual(canonical), "CORRUPT_STORAGE");
         return document;
     }
     internal static JsonObject Parameters(object? value, int max = 512 * 1024)

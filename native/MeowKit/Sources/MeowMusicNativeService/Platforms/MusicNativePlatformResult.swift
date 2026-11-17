@@ -12,7 +12,13 @@ enum MusicNativePlatformResult {
         return .init(platform: source, nativeID: try value[music: "id"].musicRequiredText(), kind: kind,
             title: value[music: "name"].musicText, creator: value[music: "creator"].musicText,
             artwork: MusicArtworkURL.normalized(value[music: "cover"].musicText),
-            count: rawCount == .null ? nil : try MusicPlatformDTO.count(rawCount))
+            count: rawCount == .null ? nil : try? MusicPlatformDTO.count(rawCount))
+    }
+    static func collections(_ value: RuntimeValue, platform: MusicPublicBrowsePlatform) throws -> [MusicPublicBrowseCollection] {
+        let rows = try value.musicRequiredArray()
+        let items = rows.compactMap { try? collection($0, platform: platform) }
+        guard rows.isEmpty || !items.isEmpty else { throw MusicServiceError.upstreamInvalid }
+        return items
     }
     static func channel(_ value: RuntimeValue, platform: MusicPublicBrowsePlatform) throws -> MusicPublicBrowseChannel {
         let id = try value[music: "id"].musicRequiredText()
@@ -62,11 +68,12 @@ enum MusicNativePlatformResult {
         }
     }
     static func item(_ value: RuntimeValue, platform: MusicPublicBrowsePlatform, key: String) throws -> MusicNativePublicBrowseItem {
+        guard case .object = value else { throw MusicServiceError.upstreamInvalid }
         let song = value[music: "song"] == .null ? value : value[music: "song"]
         let descriptor = value[music: "action"], type = descriptor[music: "type"].musicText
         let content: MusicNativePublicBrowseContent
         if value[music: "available"] == .bool(false) { content = .unavailable }
-        else if song[music: "sources"] != .null { content = .song(try MusicPlatformDTO.nativeTrack(song)) }
+        else if song[music: "sources"] != .null { content = .song(try track(song)) }
         else if ["playlist", "album"].contains(type) {
             content = .collection(try collection(value, platform: platform, kind: type == "album" ? .album : .playlist))
         } else if type == "channel" || value[music: "kind"].musicText == "channel" {
@@ -88,18 +95,24 @@ enum MusicNativePlatformResult {
             title: value[music: "name"].musicText.isEmpty ? song[music: "title"].musicText : value[music: "name"].musicText,
             subtitle: value[music: "subtitle"].musicText,
             artwork: MusicArtworkURL.normalized(value[music: "cover"].musicText.isEmpty ? song[music: "cover_url"].musicText : value[music: "cover"].musicText),
-            content: content, ranking: ranking, previewSongs: try
+            content: content, ranking: ranking, previewSongs:
                 (value[music: "previewSongs"].musicArray.isEmpty ? previewRows.compactMap {
                     $0[music: "song"] == .null ? nil : $0[music: "song"]
-                } : value[music: "previewSongs"].musicArray).map(MusicPlatformDTO.nativeTrack),
+                } : value[music: "previewSongs"].musicArray).compactMap { try? track($0) },
             recommendationReason: value[music: "recommendationReason"].musicText,
             coverLabel: value[music: "coverLabel"].musicText, requiresAccount: value[music: "requiresAccount"].musicBool)
     }
+    private static func track(_ value: RuntimeValue) throws -> MusicNativeTrackData {
+        let track = try MusicPlatformDTO.nativeTrack(value)
+        _ = try MusicModel.normalize(track)
+        return track
+    }
     private static func visibleItems(_ value: RuntimeValue, platform: MusicPublicBrowsePlatform,
                                      key: String) throws -> [MusicNativePublicBrowseItem] {
-        try value.musicRequiredArray().enumerated().filter { $0.element[music: "display"] != .bool(false) }.map {
-            try item($0.element, platform: platform, key: key + "\($0.offset)")
-        }
+        let rows = try value.musicRequiredArray().enumerated().filter { $0.element[music: "display"] != .bool(false) }
+        let items = rows.compactMap { try? item($0.element, platform: platform, key: key + "\($0.offset)") }
+        guard rows.isEmpty || !items.isEmpty else { throw MusicServiceError.upstreamInvalid }
+        return items
     }
     static func filters(_ value: RuntimeValue) -> [MusicPublicBrowseFilter] {
         value.musicArray.map { .init(id: $0[music: "id"].musicText, title: $0[music: "name"].musicText, group: $0[music: "group"].musicText) }
@@ -123,34 +136,63 @@ enum MusicNativePlatformResult {
             }
         }
     }
+    private static func section(_ value: RuntimeValue, id: String, platform: MusicPublicBrowsePlatform) -> MusicNativePublicBrowseSection {
+        var result = MusicNativePublicBrowseSection(id: id, title: value[music: "title"].musicText,
+            items: [], layout: layout(value),
+            avatars: value[music: "avatars"].musicArray.compactMap { MusicArtworkURL.normalized($0.musicText) },
+            filters: filters(value[music: "tags"]), selectedFilter: value[music: "selectedTag"].musicText)
+        let errorCode = value[music: "errorCode"].musicText
+        if !errorCode.isEmpty {
+            result.error = MusicPlatformClient.error(RuntimeHTTPError.remote(errorCode))
+            return result
+        }
+        do {
+            let rows = value[music: "tabs"].musicArray
+            let tabs = rows.compactMap { tab -> MusicNativePublicBrowseSectionTab? in
+                guard let tabID = try? tab[music: "id"].musicRequiredText(),
+                      let items = try? visibleItems(tab[music: "items"], platform: platform, key: id + ":tab:" + tabID + ":") else { return nil }
+                return .init(id: tabID, title: tab[music: "name"].musicText, items: items)
+            }
+            guard rows.isEmpty || !tabs.isEmpty else { throw MusicServiceError.upstreamInvalid }
+            result.tabs = tabs.filter { !$0.items.isEmpty }
+            if rows.isEmpty {
+                result.items = try visibleItems(value[music: "items"], platform: platform, key: id + ":item:")
+            } else if !result.tabs.isEmpty {
+                let selected = value[music: "selectedTab"].musicText
+                result.selectedTab = result.tabs.contains { $0.id == selected } ? selected : result.tabs[0].id
+            }
+            let link = value[music: "action"]
+            result.channel = link[music: "type"].musicText == "channel" ? try? channel(link[music: "channel"], platform: platform) : nil
+        } catch { result.error = MusicServiceError.sanitized(error) }
+        return result
+    }
     static func discovery(_ value: RuntimeValue, platform: MusicPublicBrowsePlatform) throws -> MusicNativePublicBrowseDiscovery {
-        var sections = try value[music: "sections"].musicArray.enumerated().map { index, section in
-            let id = section[music: "id"].musicText.isEmpty ? "section:\(index)" : section[music: "id"].musicText
-            let link = section[music: "action"]
-            let errorCode = section[music: "errorCode"].musicText
-            let tabs = try section[music: "tabs"].musicArray.map { tab in
-                MusicNativePublicBrowseSectionTab(id: tab[music: "id"].musicText, title: tab[music: "name"].musicText,
-                    items: try visibleItems(tab[music: "items"], platform: platform,
-                        key: id + ":tab:\(tab[music: "id"].musicText):"))
-            }.filter { !$0.items.isEmpty }
-            let selectedTab = section[music: "selectedTab"].musicText
-            return MusicNativePublicBrowseSection(id: id, title: section[music: "title"].musicText,
-                items: try visibleItems(section[music: "items"], platform: platform, key: id + ":item:"),
-                layout: layout(section), avatars: section[music: "avatars"].musicArray.compactMap { MusicArtworkURL.normalized($0.musicText) },
-                channel: link[music: "type"].musicText == "channel" ? try channel(link[music: "channel"], platform: platform) : nil,
-                filters: filters(section[music: "tags"]), selectedFilter: section[music: "selectedTag"].musicText,
-                error: errorCode.isEmpty ? nil : MusicPlatformClient.error(RuntimeHTTPError.remote(errorCode)),
-                tabs: tabs, selectedTab: tabs.contains { $0.id == selectedTab } ? selectedTab : tabs.first?.id ?? "")
+        var sections: [MusicNativePublicBrowseSection] = []
+        var hasDirectory = false
+        if case .array(let rows) = value[music: "sections"] {
+            hasDirectory = true
+            sections = rows.enumerated().map { index, row in
+                let id = row[music: "id"].musicText.isEmpty ? "section:\(index)" : row[music: "id"].musicText
+                return section(row, id: id, platform: platform)
+            }
         }
-        sections.removeAll { $0.layout == .featureRail && $0.items.isEmpty && $0.tabs.isEmpty && $0.error == nil }
         if value[music: "entries"] != .null {
-            let entries = try visibleItems(value[music: "entries"], platform: platform, key: "entry:")
-            if !entries.isEmpty { sections.insert(.init(id: "entries", title: "", items: entries, layout: .featureRail), at: 0) }
+            do {
+                let entries = try visibleItems(value[music: "entries"], platform: platform, key: "entry:")
+                hasDirectory = true
+                if !entries.isEmpty { sections.insert(.init(id: "entries", title: "", items: entries, layout: .featureRail), at: 0) }
+            } catch {
+                sections.insert(.init(id: "entries", title: "", items: [], layout: .featureRail,
+                                      error: MusicServiceError.sanitized(error)), at: 0)
+            }
         }
-        if value[music: "sections"] == .null && value[music: "items"] != .null {
-            sections.append(.init(id: "channels", title: "", items: try visibleItems(value[music: "items"],
-                platform: platform, key: "channel:"), layout: .grid))
+        if !hasDirectory, value[music: "items"] != .null {
+            let items = try visibleItems(value[music: "items"], platform: platform, key: "channel:")
+            sections.append(.init(id: "channels", title: "", items: items, layout: .grid))
+            hasDirectory = true
         }
+        guard hasDirectory else { throw MusicServiceError.upstreamInvalid }
+        sections.removeAll { $0.layout == .featureRail && $0.items.isEmpty && $0.tabs.isEmpty && $0.error == nil }
         return .init(sections: sections,
             next: value[music: "continuation"] == .null ? nil : try MJ.parse(value[music: "continuation"].musicData()),
             filters: filters(value[music: "tags"]), selected: value[music: "selectedTag"].musicText,

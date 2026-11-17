@@ -70,7 +70,6 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         var favorites = document.library["library"]["collections"].array[0]
         favorites["order"] = .strings([song["songId"].string])
         document.library["library"]["collections"] = .array([favorites])
-        _ = try MusicDocument(try document.fixtureData(), runID: "fixture")
         return NativeMusicTestLibrary(try document.encode(changed: ["queue", "playback", "library"]))
     }
 

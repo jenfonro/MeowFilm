@@ -78,37 +78,35 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         guard case .object(let description) = try await describe(),
               description["protocol"] == .string(Self.protocolName),
               description["product"] == .string("aggregate"),
-              case .array(let modules)? = description["modules"], modules.count == 9 else {
+              case .array(let modules)? = description["modules"] else {
             throw RuntimeHTTPError.invalidResponse
         }
         let expected: [(RuntimeModule, String)] = [(.music, "0.8.0"), (.cat, "0.2.0"), (.source, "0.3.0"),
                                                    (.pan, "0.1.0"), (.tmdb, "0.1.0"), (.douban, "0.1.0"),
                                                    (.film, "0.1.0"), (.netease, "0.1.0"), (.musicPlatform, "0.1.0")]
-        for ((module, version), supplied) in zip(expected, modules) {
-            guard case .object(let fields) = supplied,
+        for (module, version) in expected {
+            let matches = modules.compactMap { value -> RuntimeObject? in
+                guard case .object(let fields) = value, fields["id"] == .string(module.rawValue) else { return nil }
+                return fields
+            }
+            guard matches.count == 1, let fields = matches.first,
                   fields["id"] == .string(module.rawValue),
                   fields["version"] == .string(version),
                   fields["contract"] == .string(module.contract) else {
                 throw RuntimeHTTPError.invalidResponse
             }
-            if module == .tmdb {
-                guard case .array(let methods)? = fields["methods"],
-                      methods.count == 3, Set(methods.compactMap {
-                          if case .string(let value) = $0 { return value }; return nil
-                      }) == ["tmdb.data.request", "tmdb.data.settings.get", "tmdb.data.settings.update"] else {
-                    throw RuntimeHTTPError.invalidResponse
-                }
+            let required: Set<String>
+            switch module {
+            case .tmdb: required = ["tmdb.data.request"]
+            case .netease: required = ["netease.token.get"]
+            case .musicPlatform: required = ["music.platform.cache.clear", "music.platform.describe",
+                "music.platform.request", "music.platform.session.update"]
+            default: required = []
             }
-            if module == .netease {
-                guard fields["methods"] == .array([.string("netease.token.get")]) else {
-                    throw RuntimeHTTPError.invalidResponse
-                }
-            }
-            if module == .musicPlatform {
-                guard fields["methods"] == .array([
-                    .string("music.platform.cache.clear"), .string("music.platform.describe"),
-                    .string("music.platform.request"), .string("music.platform.session.update")
-                ]) else { throw RuntimeHTTPError.invalidResponse }
+            if !required.isEmpty {
+                guard case .array(let methods)? = fields["methods"], required.isSubset(of: Set(methods.compactMap {
+                    if case .string(let method) = $0 { return method }; return nil
+                })) else { throw RuntimeHTTPError.invalidResponse }
             }
         }
     }
@@ -323,7 +321,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
               ([200, 400, 401, 403, 404, 413, 415].contains(response.statusCode) ||
                 imageFailure && response.statusCode == 502),
               let decoded = try? RuntimeJSON.envelope(data), case .object(let fields) = decoded,
-              fields.count == 3, case .bool(let ok)? = fields["ok"],
+              case .bool(let ok)? = fields["ok"],
               case .string(let contract)? = fields["contract"] else { throw RuntimeHTTPError.invalidResponse }
         let codes: Set<String>
         if contract == protocolName { codes = RuntimeModule.publicCodes }
@@ -331,7 +329,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         else { throw RuntimeHTTPError.invalidResponse }
         if ok {
             guard contract == (module?.contract ?? protocolName), response.statusCode == 200,
-                  let value = fields["value"], (try? RuntimeJSON.validate(value)) != nil else {
+                  let value = fields["value"] else {
                 throw RuntimeHTTPError.invalidResponse
             }
             return value

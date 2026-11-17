@@ -1,3 +1,4 @@
+import { stringifyJSONValue, rawJSON } from '@meowfilm/runtime-bridge/json';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -1925,9 +1926,9 @@ test('E42/E43: source installation and file-account scope survive prepare and on
   const receipts = [];
   const scopes = [
     { sourceKey: 'A', sourceRevision: 7, sourceEngine: 'cat', sourceInstallationId: 'install-A',
-      accountProvider: 'quark_tv', accountRevision: 4, fileProvider: 'quark', fileAccountRevision: 2 },
+      accountProvider: 'quark', accountRevision: 2, fileProvider: 'quark', fileAccountRevision: 2 },
     { sourceKey: 'B', sourceRevision: 7, sourceEngine: 'cat', sourceInstallationId: 'install-B',
-      accountProvider: 'quark_tv', accountRevision: 4, fileProvider: 'quark', fileAccountRevision: 3 },
+      accountProvider: 'quark', accountRevision: 3, fileProvider: 'quark', fileAccountRevision: 3 },
     { sourceKey: 'C', sourceRevision: 7, sourceEngine: 'source', sourceInstallationId: 'install-A',
       accountProvider: 'uc', accountRevision: 2, fileProvider: 'uc', fileAccountRevision: 2 },
   ];
@@ -1944,7 +1945,7 @@ test('E42/E43: source installation and file-account scope survive prepare and on
   assert.deepEqual((await read(receipts[1].url)).body, bytes);
   assert.deepEqual((await read(receipts[2].url)).body, bytes);
   await media.invalidate(scope => scope.fileProvider === 'quark' && scope.fileAccountRevision === 2);
-  assert.deepEqual((await read(receipts[1].url)).body, bytes, 'a different ordinary file account must retain its TV media stream');
+  assert.deepEqual((await read(receipts[1].url)).body, bytes, 'a different file account must retain its media stream');
   await media.invalidate(scope => scope.fileProvider === 'quark' && scope.fileAccountRevision === 3);
   assert.equal((await read(receipts[1].url)).status, 404);
   assert.deepEqual((await read(receipts[2].url)).body, bytes);
@@ -2216,4 +2217,14 @@ test('MCR-04/E41: explicit binary HEAD responses retain their exact length and v
     if (specification.type) assert.equal(head.headers['content-type'], specification.type);
   }
   assert.equal(upstream.requests.length, specifications.length);
+});
+
+test('media receipt retains exact JSON initialization material without granting network authority', async t => {
+  const upstream = await source(t, binary), media = service(t);
+  const drm = { scheme: 'cenc', extension: rawJSON('9007199254740993'), ordinary: { rawJSON: '1e400' } };
+  const receipt = await media.prepare({ url: upstream.url, drm });
+  assert.equal(stringifyJSONValue(receipt.drm), '{"scheme":"cenc","extension":9007199254740993,"ordinary":{"rawJSON":"1e400"}}');
+  assert.equal(upstream.requests.length, 0);
+  await media.release(receipt.id);
+  await assert.rejects(media.prepare({ url: upstream.url, drm: { extension: Infinity } }), { code: 'MEDIA_INVALID_DESCRIPTOR' });
 });

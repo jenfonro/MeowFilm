@@ -15,6 +15,9 @@ public static class PanAccountsTests
         yield return Case("offline reads manual saves and clears never call the runtime", Offline);
         yield return Case("failed offline QR leaves local credentials editable", OfflineQr);
         yield return Case("native credentials and stored documents enforce provider types", Validation);
+        yield return Case("error snapshots have only provider and fixed code and cannot masquerade as account receipts", ErrorSnapshots);
+        yield return Case("corrupt account rows disable operations while healthy siblings commit and stale errors stay retired", IsolatedErrors);
+        yield return Case("one provider edit preserves unknown material and does not validate other accounts", RawInputs);
         yield return Case("save errors and CAS conflicts preserve the dialog and newer accounts", SaveFailures);
         yield return Case("retired saves and clears drain durable receipts before successors or shutdown", Receipts);
         yield return Case("cancelled reads do not admit clears and old reads cannot overwrite saves", Reads);
@@ -31,17 +34,22 @@ public static class PanAccountsTests
     private static async Task Offline()
     {
         var fixture = new PanAccountFixture { Offline = true };
-        fixture.Account("baidu", 1, "signedIn", "cookie");
         await using var model = new PanAccounts(fixture, fixture);
         await model.ActivateAsync();
-        Check(model.Rows.Select(row => row.Provider).SequenceEqual(Providers.Select(item => item.Id)) &&
-            model.Rows.All(row => row.HasSnapshot) && fixture.Calls.Count == 0, "page reads only native settings");
+        Check(model.Rows.Select(row => row.Provider).SequenceEqual(["baidu", "quark", "uc", "tianyi", "yidong"]) &&
+            model.Rows.All(row => row.HasSnapshot && !row.Configured && row.Revision == 0) && fixture.Calls.Count == 0,
+            "empty native settings expose exactly five unconfigured providers without runtime calls");
+        Check(model.Rows.All(row => row.CredentialFields.Select(field => field.Id)
+                .SequenceEqual(Providers.Single(provider => provider.Id == row.Provider).Fields)) &&
+            model.Rows.Where(row => row.SupportsQr).Select(row => row.Provider).SequenceEqual(["baidu", "quark", "uc"]) &&
+            model.Rows.All(row => row.SupportsRefresh), "current providers retain exact manual fields, QR and refresh capabilities");
         var cases = new (string Provider, Dictionary<string, string> Draft)[]
         {
+            ("baidu", new() { ["cookie"] = "synthetic-baidu-cookie" }),
+            ("quark", new() { ["cookie"] = "synthetic-quark-cookie" }),
+            ("uc", new() { ["cookie"] = "synthetic-uc-cookie" }),
             ("tianyi", new() { ["username"] = "synthetic-user", ["password"] = "  synthetic password  " }),
-            ("yidong", new() { ["authorization"] = "synthetic-auth", ["refreshedAt"] = "1730000000000" }),
-            ("quark_tv", new() { ["refreshToken"] = "synthetic-refresh", ["deviceId"] = "synthetic-device" }),
-            ("uc_tv", new() { ["accessToken"] = "synthetic-access", ["expiresAt"] = "1730000000000" })
+            ("yidong", new() { ["authorization"] = "synthetic-auth", ["refreshedAt"] = "1730000000000" })
         };
         foreach (var (provider, draft) in cases)
         {
@@ -52,7 +60,7 @@ public static class PanAccountsTests
             Check(credentials.EnumerateObject().Select(field => field.Name).SequenceEqual(draft.Keys),
                 "only the supplied whole replacement is saved");
             if (draft.ContainsKey("password")) Check(credentials.GetProperty("password").GetString() == draft["password"], "password spaces remain exact");
-            foreach (var field in draft.Keys.Where(field => field is "refreshedAt" or "expiresAt"))
+            foreach (var field in draft.Keys.Where(field => field is "refreshedAt"))
                 Check(credentials.GetProperty(field).ValueKind == JsonValueKind.Number, "timestamps are numbers");
             Check(!model.LoginOpen && row.Configured && row.Revision == 1, "native commit closes the editor without online verification");
             await model.LogoutAsync(row);
@@ -63,7 +71,7 @@ public static class PanAccountsTests
         var baidu = model.Rows[0];
         await model.OpenCredentialsAsync(baidu);
         await model.SaveAsync(new Dictionary<string, string> { ["cookie"] = "synthetic-new-cookie" });
-        Check(!model.LoginOpen && baidu.Revision == 2 && model.Notice == "网盘凭据已保存",
+        Check(!model.LoginOpen && baidu.Revision == 3 && model.Notice == "网盘凭据已保存",
             "notification failure cannot turn a durable commit into a failed save");
     }
 
@@ -87,17 +95,17 @@ public static class PanAccountsTests
         foreach (var (provider, credentials) in new (string, Dictionary<string, object>)[]
         {
             ("unknown", new()), ("baidu", new() { ["cookie"] = 1L }),
-            ("yidong", new() { ["refreshedAt"] = "1" }), ("uc_tv", new() { ["expiresAt"] = -1L }),
-            ("uc_tv", new() { ["expiresAt"] = 9007199254740992L }),
+            ("yidong", new() { ["refreshedAt"] = "1" }), ("yidong", new() { ["refreshedAt"] = -1L }),
+            ("yidong", new() { ["refreshedAt"] = 9007199254740992L }),
             ("tianyi", new() { ["cookie"] = "synthetic\r\nheader" }),
             ("tianyi", new() { ["password"] = "synthetic\0password" }),
-            ("baidu", new() { ["authorization"] = "synthetic" }), ("baidu", new() { ["cookie"] = true })
+            ("baidu", new() { ["cookie"] = true })
         }) await Expect("INVALID_REQUEST", () => store.SaveAsync(provider, credentials));
         Check(fixture.Writes.Count == 0 && fixture.Calls.Count == 0, "invalid types never touch storage or network");
         foreach (string json in new[]
         {
             "{\"version\":\"1\",\"accounts\":{}}", "{\"version\":2,\"accounts\":{}}",
-            "{\"version\":1,\"accounts\":[]}", "{\"version\":1,\"accounts\":{\"unknown\":{\"revision\":1,\"credentials\":{}}}}",
+            "{\"version\":1,\"accounts\":[]}",
             "{\"version\":1,\"accounts\":{\"baidu\":{\"revision\":0,\"credentials\":{}}}}",
             "{\"version\":1,\"accounts\":{\"baidu\":{\"revision\":1,\"credentials\":{\"cookie\":2}}}}",
             "{\"version\":1,\"accounts\":{\"baidu\":{\"revision\":1,\"credentials\":{\"cookie\":\"a\",\"cookie\":\"b\"}}}}",
@@ -105,11 +113,128 @@ public static class PanAccountsTests
         })
         {
             fixture.SetDocument(json);
-            await Expect("CORRUPT_STORAGE", () => store.ReadAsync(default));
-            await Expect("CORRUPT_STORAGE", () => store.ClearAsync("baidu"));
+            if (!json.Contains("baidu")) await Expect("CORRUPT_STORAGE", () => store.ReadAsync(default));
+            else
+            {
+                var result = (await store.ReadAsync(default)).Single(account => account.Provider == "baidu");
+                Check(result is { ErrorCode: "CORRUPT_STORAGE", Revision: null, Configured: null, Status: null, Fields: null },
+                    "bad account material is an explicit error, not a successful signed-out account");
+            }
+            if (!json.Contains("cookie")) await Expect("CORRUPT_STORAGE", () => store.ClearAsync("baidu"));
+            else Check((await store.ClearAsync("baidu")).Configured == false, "explicit clear can remove malformed consumed credentials");
         }
         fixture.SetDocument("{\"version\":1,\"accounts\":{\"baidu\":{\"revision\":9007199254740991,\"credentials\":{}}}}");
         await Expect("STORAGE_ERROR", () => store.ClearAsync("baidu"));
+    }
+
+    private static async Task RawInputs()
+    {
+        var fixture = new PanAccountFixture { Offline = true };
+        fixture.SetDocument("""
+            {"version":1,"future":1e400,"future":9007199254740993,"accounts":{
+             "baidu":{"revision":2,"credentials":{"cookie":"synthetic","future":9007199254740993,"future":1e400},"extra":1e400},
+             "quark":{"revision":"broken","credentials":false},"future":{"anything":1e400}}}
+            """);
+        var before = fixture.Saved;
+        var store = new PanSettingsStore(fixture, fixture);
+        Check((await store.ReadAsync("baidu", default)).Revision == 2, "single account read does not consume unrelated accounts");
+        var saved = await store.SaveAsync("baidu", new Dictionary<string, object>
+            { ["cookie"] = "synthetic-new", ["unused"] = new object() });
+        var after = fixture.Saved;
+        Check(saved.Revision == 3 && saved.Configured == true && after.EnumerateObject().Count(item => item.NameEquals("future")) == 2,
+            "extra input is not a credential and root extensions remain exact");
+        foreach (string name in new[] { "quark", "future" })
+            Check(before.GetProperty("accounts").GetProperty(name).GetRawText() == after.GetProperty("accounts").GetProperty(name).GetRawText(),
+                "unedited accounts are never rewritten or validated");
+        var credentials = after.GetProperty("accounts").GetProperty("baidu").GetProperty("credentials");
+        Check(credentials.EnumerateObject().Count(item => item.NameEquals("future")) == 2 && !credentials.TryGetProperty("unused", out _) &&
+            credentials.GetProperty("future").GetRawText() == "1e400", "known replacement keeps stored opaque extensions without sending new unknown input");
+        await store.ClearAsync("baidu");
+        Check((await store.ReadAsync("baidu", default)).Configured == false &&
+            fixture.Saved.GetProperty("accounts").GetProperty("baidu").GetProperty("credentials").EnumerateObject().Count() == 2,
+            "clear retires actual credentials without erasing extensions");
+    }
+
+    private static Task ErrorSnapshots()
+    {
+        var error = PanAccountSnapshot.Read(BridgeCodec.Value(new { provider = "baidu", errorCode = "CORRUPT_STORAGE", future = true }));
+        var wire = JsonSerializer.SerializeToElement(error, Json);
+        Check(wire.EnumerateObject().Select(item => item.Name).SequenceEqual(["provider", "errorCode"]) &&
+            error is { Revision: null, Configured: null, Status: null, Fields: null },
+            "error snapshots never fabricate or serialize success fields");
+        foreach (string invalid in new[]
+        {
+            """{"provider":"unknown","errorCode":"CORRUPT_STORAGE"}""",
+            """{"provider":"baidu","provider":"quark","errorCode":"CORRUPT_STORAGE"}""",
+            """{"provider":"baidu","errorCode":"CORRUPT_STORAGE","errorCode":"CORRUPT_STORAGE"}""",
+            """{"provider":"baidu","errorCode":"private-message"}""",
+            """{"provider":"baidu","errorCode":"CORRUPT_STORAGE","revision":0}""",
+            """{"provider":"baidu","errorCode":"CORRUPT_STORAGE","configured":false}""",
+            """{"provider":"baidu","errorCode":"CORRUPT_STORAGE","status":"signedOut"}""",
+            """{"provider":"baidu","errorCode":"CORRUPT_STORAGE","fields":[]}""",
+            """{"provider":"baidu","revision":1,"revision":2,"configured":true,"status":"signedIn","fields":["cookie"]}"""
+        })
+            BridgeTests.Throws("INVALID_RESPONSE", () => PanAccountSnapshot.Read(BridgeCodec.DecodeJSONValue(System.Text.Encoding.UTF8.GetBytes(invalid))));
+        var row = new PanAccountRow(PanSettingsStore.Providers[0]) { Active = true };
+        row.Publish(new("baidu", 7, true, "signedIn", ["cookie"]));
+        row.Publish(error);
+        Check(row.Revision is null && row.Status is null && row.ErrorCode == "CORRUPT_STORAGE" &&
+            row.StatusText == "凭据损坏" && !row.CanEdit && !row.CanLogin && !row.CanRefresh && !row.CanLogout,
+            "an unversioned error replaces the old presentation without inventing a newer or empty account");
+        BridgeTests.Throws("INVALID_RESPONSE", () => row.Publish(PanAccountSnapshot.Corrupt("quark")));
+        row.Publish(new("baidu", 8, true, "signedIn", ["cookie"]));
+        row.Publish(new("baidu", 7, false, "signedOut", []));
+        Check(row.Revision == 8 && row.ErrorCode is null && row.CanEdit && row.Status == "signedIn",
+            "a real reread recovers the row and older healthy revisions still cannot replace it");
+        return Task.CompletedTask;
+    }
+
+    private static async Task IsolatedErrors()
+    {
+        var fixture = new PanAccountFixture { Offline = true };
+        fixture.SetDocument("""
+            {"version":1,"accounts":{"baidu":{"revision":2,"credentials":{"cookie":"synthetic"}},
+             "quark":{"revision":"broken","credentials":false,"future":9007199254740993}}}
+            """);
+        await using var model = new PanAccounts(fixture, fixture);
+        await model.ActivateAsync();
+        var healthy = model.Rows[0]; var broken = model.Rows[1];
+        string raw = fixture.Saved.GetProperty("accounts").GetProperty("quark").GetRawText();
+        Check(!model.LoadFailed && model.Notice.Length == 0 && healthy.CanEdit && broken.HasSnapshot &&
+            broken.ErrorCode == "CORRUPT_STORAGE" && broken.Revision is null && broken.Status is null,
+            "one bad native account is visible without failing the healthy list or falling back to signed-out");
+        await model.OpenCredentialsAsync(broken); await model.OpenLoginAsync(broken);
+        await model.RefreshAsync(broken); await model.LogoutAsync(broken);
+        Check(!model.LoginOpen && fixture.Calls.Count == 0 && fixture.Writes.Count == 0, "all error-row entry points reject account operations");
+        await Expect("CORRUPT_STORAGE", () => new PanSettingsStore(fixture, fixture).ClearAsync("quark"));
+        await Expect("CORRUPT_STORAGE", () => new PanSettingsStore(fixture, fixture).SaveAsync("quark",
+            new Dictionary<string, object> { ["cookie"] = "synthetic-replacement" }));
+        await model.OpenCredentialsAsync(healthy);
+        await model.SaveAsync(new Dictionary<string, string> { ["cookie"] = "synthetic-new" });
+        Check(healthy.Revision == 3 && fixture.Writes.Count == 1 &&
+            fixture.Saved.GetProperty("accounts").GetProperty("quark").GetRawText() == raw,
+            "a healthy native CAS receipt cannot rewrite or repair the bad sibling");
+
+        fixture.SetDocument("""{"version":1,"accounts":{"baidu":{"revision":0,"credentials":{}}}}""");
+        var stale = fixture.Snapshot();
+        fixture.Account("baidu", 3, "signedIn", "cookie");
+        var held = Gate<DocumentSnapshot>();
+        fixture.ReadOverride = _ => { fixture.ReadOverride = null; return held.Task; };
+        var read = model.ReloadAsync();
+        await model.OpenCredentialsAsync(healthy);
+        await model.SaveAsync(new Dictionary<string, string> { ["cookie"] = "synthetic-current" });
+        held.SetResult(stale); await read;
+        Check(healthy.Revision == 4 && healthy.ErrorCode is null && healthy.Status == "signedIn",
+            "a delayed unversioned error is fenced by the row operation generation");
+
+        fixture.SetDocument("""{"version":1,"accounts":{"baidu":{"revision":0,"credentials":{}}}}""");
+        await model.ReloadAsync();
+        Check(healthy.ErrorCode == "CORRUPT_STORAGE" && healthy.Revision is null && !healthy.CanEdit,
+            "a current reread exposes corruption instead of retaining an earlier signed-in snapshot");
+        fixture.Account("baidu", 5, "signedIn", "cookie");
+        await model.ReloadAsync();
+        Check(healthy.Revision == 5 && healthy.ErrorCode is null && healthy.CanEdit && fixture.Calls.Count == 0,
+            "recovery requires real stored account material without an automatic network request");
     }
 
     private static async Task SaveFailures()
@@ -119,6 +244,8 @@ public static class PanAccountsTests
         await model.ActivateAsync();
         var row = model.Rows.Single(row => row.Provider == "yidong");
         await model.OpenCredentialsAsync(row);
+        await model.SaveAsync(new Dictionary<string, string> { ["authorization"] = "synthetic-auth", ["unknown"] = "synthetic" });
+        Check(fixture.Writes.Count == 0 && model.CanSave && !row.Configured, "unknown draft fields are rejected rather than silently discarded");
         foreach (string number in new[] { "-1", "1.5", "9007199254740992", "not-a-number" })
             await model.SaveAsync(new Dictionary<string, string> { ["refreshedAt"] = number });
         Check(fixture.Writes.Count == 0 && model.CanSave, "invalid manual numbers leave the editor usable");
@@ -242,6 +369,11 @@ public static class PanAccountsTests
         await model.RefreshAsync(row);
         Check(row.Revision == 2 && fixture.Writes.Count == 0, "online success rereads the committed protected document, never HTTP-backfills");
         fixture.Overrides["pan.refresh"] = (_, _) => Task.FromResult(Ok(new
+        { refreshed = true, account = PanAccountSnapshot.Corrupt("baidu") }));
+        await model.RefreshAsync(row);
+        Check(row.Revision == 2 && row.Status == "signedIn" && fixture.Writes.Count == 0 && model.Notice == "网盘凭据保存失败",
+            "an error-only HTTP item is not a refreshed receipt or a replacement for healthy native authority");
+        fixture.Overrides["pan.refresh"] = (_, _) => Task.FromResult(Ok(new
         { refreshed = true, account = new PanAccountSnapshot("baidu", 1, true, "signedIn", ["cookie"]) }));
         await model.RefreshAsync(row);
         Check(row.Revision == 2 && model.Notice == "网盘账号已变更", "stale HTTP result cannot replace the native account");
@@ -316,6 +448,12 @@ public static class PanAccountsTests
             new("baidu", 1, true, "signedIn", ["cookie"])));
         await model.PollLoginAsync();
         Check(!row.Configured && model.LoginOpen, "HTTP confirmation without protected storage commit is not authoritative");
+        await model.RetryQrAsync();
+        fixture.Overrides["pan.login.poll"] = (_, _) => Task.FromResult(fixture.Poll("baidu", "confirmed",
+            PanAccountSnapshot.Corrupt("baidu")));
+        await model.PollLoginAsync();
+        Check(!row.Configured && model.LoginOpen && model.CanRetryQr && fixture.Writes.Count == 0 &&
+            model.Notice == "网盘凭据保存失败", "an error item cannot confirm a QR session or fabricate a persisted identity");
         await model.RetryQrAsync();
         fixture.Overrides["pan.login.poll"] = (_, _) =>
         {

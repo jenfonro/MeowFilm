@@ -39,7 +39,10 @@ function action(value) {
   if (url.protocol !== 'orpheus:') return null;
   const path = url.hostname + url.pathname, q = key => url.searchParams.get(key) ?? '';
   const match = /^(playlist|song|album)\/(.+)$/.exec(path);
-  if (match) return { type: match[1], id: decodeURIComponent(match[2]) };
+  if (match) {
+    try { return { type: match[1], id: decodeURIComponent(match[2]) }; }
+    catch { return null; }
+  }
   if (['songrcmd', 'songrcmd/', 'nm/play/dailySong'].includes(path))
     return { type: 'daily', branch: first(q('tab'), q('type')) === 'style' ? 'style' : 'default' };
   if (['nm/luna/privatefm', 'privatefm', 'privatefm/'].includes(path))
@@ -127,7 +130,7 @@ function resource(r, { modern = false, channel = false } = {}) {
     const pid = declared?.id ?? id;
     if (!pid) {
       const ids = first(play?.playAction?.songIds, r.songIds);
-      if (!Array.isArray(ids) || !ids.length) return null;
+      if (!Array.isArray(ids) || !ids.length) fail('INVALID_RESPONSE');
       result.id = 'songs:' + scalar(r.resourceId);
       result.engine = 'NeteaseCollection'; result.collectionType = 'songs'; result.count = ids.length;
       return finish(kind === 'toplist' ? 'ranking' : 'collection', { type: 'song-collection', ids: ids.map(scalar) });
@@ -157,7 +160,7 @@ function resource(r, { modern = false, channel = false } = {}) {
   if (['album', 'digitalbum', 'digitalalbum'].includes(kind) || declared?.type === 'album') {
     result.id = declared?.id ?? id; result.engine = 'NeteaseAlbum';
     result.artist = text(first(r.artistName, r.subtitle)); result.count = optionalNumber(r.songCount);
-    return result.id ? finish('album', { type: 'album', id: result.id }) : null;
+    return finish('album', { type: 'album', id: required(result.id) });
   }
   if (declared?.type === 'channel') {
     result.id = declared.channel.id;
@@ -168,6 +171,24 @@ function resource(r, { modern = false, channel = false } = {}) {
     if (selected) return finish('entry', selected);
   }
   return null;
+}
+function resourceReader() {
+  let failure;
+  return {
+    read(...args) {
+      try { return resource(...args); }
+      catch (error) {
+        if (error.code !== 'INVALID_RESPONSE') throw error;
+        failure ??= error;
+        return null;
+      }
+    },
+    finish(result) {
+      if (failure && !result.entries.length && !result.sections.some(row => row.items.length) && !result.feed?.request)
+        throw failure;
+      return result;
+    },
+  };
 }
 // These traversals read the displayed DSL's resource/component tree only.
 function* leaves(node) {
@@ -189,6 +210,7 @@ function roots(value) {
 }
 function contentPage(raw, target, c, cursor = '') {
   const data = raw.data ?? raw, blocks = rows(data.blocks), result = emptyPage(target), occurrences = new Map();
+  const resources = resourceReader();
   blocks.forEach((block, bi) => {
     const code = text(first(block.positionCode, block.blockCode, block.code, block.id)) || 'block-' + bi;
     const nth = occurrences.get(code) ?? 0; occurrences.set(code, nth + 1);
@@ -198,7 +220,7 @@ function contentPage(raw, target, c, cursor = '') {
       const native = block.dslData ? [...leaves(group)] : array(block.creatives).flatMap(creative =>
         array(creative.resources).length ? creative.resources.map(value => ({ ...creative, ...value, creativeType: creative.creativeType })) :
           [{ ...creative, resourceId: creative.creativeId }]);
-      const items = native.map(value => resource(value, { modern: Boolean(block.dslData), channel: target !== 'wy:home' })).filter(Boolean);
+      const items = native.map(value => resources.read(value, { modern: Boolean(block.dslData), channel: target !== 'wy:home' })).filter(Boolean);
       const entrance = items.some(value => ['daily', 'heartbeat', 'fm', 'similar'].includes(value.action?.type)) ||
         native.some(value => value.resourceType === 'dragon_ball') ||
         nested(block.dslData)?.dslShowTitle === false && !text(block.showType).startsWith('PLAYLIST_SQUARE_');
@@ -226,7 +248,7 @@ function contentPage(raw, target, c, cursor = '') {
     blockCodeOrderList: first(data.blockCodeOrderList, ''),
     loadedPositionCodes: JSON.stringify(blocks.map(row => text(row.positionCode)).filter(Boolean)) } : null;
   if (result.more && scalar(data.cursor) === cursor) fail('INVALID_RESPONSE');
-  return result;
+  return resources.finish(result);
 }
 async function content(c, params, kind, target) {
   const prev = params.continuation ?? {}, cursor = scalar(prev.cursor) || '0';
@@ -275,11 +297,11 @@ export async function wyChannels(c) {
   ] };
 }
 function rankings(raw, target) {
-  const result = emptyPage(target);
+  const result = emptyPage(target), resources = resourceReader();
   for (const [index, group] of rows(first(raw.data, raw.list)).entries()) {
     const items = array(group.list).map(row => {
       if (row.targetType === 'PLAYLIST') {
-        const card = resource({ ...row, resourceType: 'playlist' });
+        const card = resources.read({ ...row, resourceType: 'playlist' });
         if (card) card.canPlay = row.canPlay == null || Boolean(row.canPlay);
         return card;
       }
@@ -300,7 +322,7 @@ function rankings(raw, target) {
     if (items.length) result.sections.push(section(target + ':' + (text(group.categoryCode) || index), text(group.name),
       'rankings', items, text(first(group.frontDisplayType, group.displayType)) || 'ONLY_COVER'));
   }
-  return result;
+  return resources.finish(result);
 }
 function artistTags(selection) {
   const groups = { area: [[-1, '全部'], [7, '华语'], [96, '欧美'], [8, '日本'], [16, '韩国'], [0, '其他']],
@@ -313,7 +335,7 @@ function artistTags(selection) {
 }
 function cube(raw, target, selectedTag, c) {
   const protocol = first(raw.data?.pageProtocol, raw.pageProtocol), pages = rows(protocol?.pages);
-  const groups = [], parents = new Map();
+  const groups = [], parents = new Map(), resources = resourceReader();
   function collect(node, parent) {
     if (['MusicGenreSongListItem', 'TabItem'].includes(node.componentName)) {
       groups.push(node); parents.set(node, parent); return;
@@ -332,7 +354,7 @@ function cube(raw, target, selectedTag, c) {
     const items = values.filter(Boolean);
     if (items.length) result.sections.push(section(`${target}:${text(node.id) || result.sections.length}:${type}`, heading, type, items, layout));
   }
-  const componentResource = node => resource({ ...node.props,
+  const componentResource = node => resources.read({ ...node.props,
     resourceType: node.componentName === 'Entrance' ? '' : text(node.componentName).toLowerCase() }, { channel: true });
   function walk(node, heading = '') {
     if (groups.includes(node) && node !== chosen) return;
@@ -341,13 +363,13 @@ function cube(raw, target, selectedTag, c) {
       songs: [], more: true, cursor: 0, request: { ruleId: scalar(p.songList.ruleId),
         pointIds: array(p.songList.pointId).map(row => scalar(row.id)).join(','), tabTagId: '', algTagIds: '' } };
     if (Array.isArray(p.carousel)) {
-      add(node, 'banner', p.carousel.map(row => resource(row))); return;
+      add(node, 'banner', p.carousel.map(row => resources.read(row))); return;
     }
     if (Array.isArray(p.recommendModule)) {
       const tabs = p.recommendModule.map((group, i) => ({ id: text(node.id) + ':group:' + i,
         name: text(group.title), selected: Boolean(group.isDefaultTab),
         items: array(group.modules).map((row, index) => {
-          const value = resource({ ...row, resourceType: row.type,
+          const value = resources.read({ ...row, resourceType: row.type,
             ...(row.type === 'fm' && !row.mode && !row.ruleId && !row.tabTagId && !action(first(row.action, row.url, row.orpheus)) ?
               { tabTagId: p.tab } : {}) }, { channel: true });
           return value ? entry({ ...value, key: `${target}:${text(node.id)}:entry:${i}:${index}` }, c) : null;
@@ -362,13 +384,13 @@ function cube(raw, target, selectedTag, c) {
     if (text(p.playlistIds)) {
       const names = text(p.titles).split(',');
       add(node, 'rankings', p.playlistIds.split(',').map((id, index) =>
-        resource({ id, name: names[index] ?? '', resourceType: 'playlist' })), 'ranked-songs', text(p.rankModuleTitle)); return;
+        resources.read({ id, name: names[index] ?? '', resourceType: 'playlist' })), 'ranked-songs', text(p.rankModuleTitle)); return;
     }
     if (node.componentName === 'BillboardSingleSongList' && scalar(p.id)) {
-      add(node, 'playlists', [resource({ id: p.id, name: p.cardTitle, subtitle: p.cardSubTitle, resourceType: 'playlist' })],
+      add(node, 'playlists', [resources.read({ id: p.id, name: p.cardTitle, subtitle: p.cardSubTitle, resourceType: 'playlist' })],
         'rail', text(p.cardTitle)); return;
     }
-    if (p.albumData) { add(node, 'playlists', [resource({ ...p.albumData, resourceType: 'album' })], 'rail', heading); return; }
+    if (p.albumData) { add(node, 'playlists', [resources.read({ ...p.albumData, resourceType: 'album' })], 'rail', heading); return; }
     if (node.componentName === 'InfiniteScrollList') {
       const songs = [];
       function collectSongs(value) {
@@ -396,7 +418,7 @@ function cube(raw, target, selectedTag, c) {
     }
   }
   for (const node of pages) walk(node);
-  return result;
+  return resources.finish(result);
 }
 export async function wyChannelPage(c, params) {
   const id = input(params.id), prev = params.continuation ?? {}, selectedTag = params.tag ?? prev.tag ?? '';

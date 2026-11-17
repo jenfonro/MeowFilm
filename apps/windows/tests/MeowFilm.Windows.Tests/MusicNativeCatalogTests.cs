@@ -148,7 +148,7 @@ public static partial class MusicNativeCatalogTests
             return Task.FromResult(request is MusicPlaylistRequest p
                 ? Pages?.Invoke(method == "playlist.complete" ? p with { Limit = Total } : p) ??
                     Page(method == "playlist.complete" ? p with { Limit = Total } : p, Total)
-                : E(new { marker = method, items = new[] { "opaque" }, continuation = new { provider = new { cursor = 7 } } }));
+                : E(new { marker = method, items = Array.Empty<object>(), continuation = new { provider = new { cursor = 7 } } }));
         }
         public Task<JsonElement> SearchAsync(MusicSearchRequest r, CancellationToken t = default) => Run("search", r, t);
         public Task<JsonElement> SongAsync(MusicSongRequest r, CancellationToken t = default) => Run("song", r, t);
@@ -327,6 +327,41 @@ public static partial class MusicNativeCatalogTests
                 JsonElement.DeepEquals(queue.GetProperty("entries"), before.GetProperty("entries")));
         }
         Check(f.Platform.Calls.Length == variants.Length, "Canonical consumption cannot request supplemental confirmation");
+        var visible = MusicSongFixture.Online("wy", "direct-song", "Direct card");
+        visible["available"] = false; visible["requiresAccount"] = true; visible["display"] = true;
+        visible["errorCode"] = "AUTH_REQUIRED"; visible["key"] = "direct-key";
+        visible["playbackSource"] = new JsonObject { ["type"] = "playlist", ["id"] = "origin" };
+        var hidden = new JsonObject { ["display"] = false, ["count"] = "bad", ["song"] = new JsonObject { ["sources"] = false } };
+        var preview = new JsonArray();
+        for (int i = 0; i < 3; i++) preview.Add(new JsonObject { ["title"] = "Preview " + i });
+        preview.Add(new JsonObject { ["song"] = new JsonObject { ["sources"] = false } });
+        var chart = new JsonObject { ["id"] = "chart", ["name"] = "Chart", ["kind"] = "playlist", ["preview"] = preview };
+        var page = new JsonObject { ["items"] = new JsonArray(visible, hidden, chart,
+            new JsonObject { ["song"] = new JsonObject { ["sources"] = false } }) };
+        f.Platform.Handler = _ => Task.FromResult(J(page));
+        var adopted = Ok(await f.Run("home", new { platform = "wy" }));
+        var cards = MusicCatalogDto.Read(adopted, "wy", "home", "").Single().Items;
+        Check(cards.Count == 2);
+        var direct = cards.Single(card => card.Song is not null);
+        Check(!direct.Available && direct.RequiresAccount && direct.Display && direct.ErrorCode == "AUTH_REQUIRED" &&
+            direct.StableKey == "direct-key" && direct.PlaybackSource!.Value.GetProperty("id").GetString() == "origin");
+        Check(cards.Single(card => card.Id == "chart").PreviewSongs.Count == 3);
+        foreach (var malformed in new[] { new JsonObject(), new JsonObject { ["items"] = false },
+            new JsonObject { ["items"] = new JsonArray(new JsonObject { ["song"] = new JsonObject { ["sources"] = false } }) } })
+        {
+            f.Platform.Handler = _ => Task.FromResult(J(malformed));
+            Error(await f.Run("playlist", new { platform = "wy", id = "42" }), "INVALID_RESPONSE");
+        }
+        foreach (var malformed in new[] { new JsonObject(), new JsonObject { ["items"] = false },
+            new JsonObject { ["items"] = new JsonArray(new JsonObject { ["count"] = "bad" }) } })
+        {
+            bool failed = false;
+            try { _ = MusicCatalogDto.Read(J(malformed), "wy", "home", ""); }
+            catch (MusicOperationException error) when (error.Code == "INVALID_RESPONSE") { failed = true; }
+            Check(failed, "Missing or wholly unusable content cannot become a successful empty page");
+        }
+        Check(MusicCatalogDto.Read(E(new { items = Array.Empty<object>() }), "wy", "playlist", "").Single().Items.Count == 0);
+
     }
     private static async Task PersonalRoute(string route)
     {
@@ -687,7 +722,7 @@ public static partial class MusicNativeCatalogTests
     private static async Task RequestSlots()
     {
         await using var f = new Fixture(); var release = f.Hold();
-        f.Platform.Handler = async c => { await release.Task.WaitAsync(c.Token); return E(new { marker = "home" }); };
+        f.Platform.Handler = async c => { await release.Task.WaitAsync(c.Token); return E(new { marker = "home", items = Array.Empty<object>() }); };
         var tasks = Enumerable.Range(0, 40).Select(_ => f.Run("home", new { platform = "wy" })).ToArray();
         await Until(() => f.Platform.Calls.Length == 40);
         release.TrySetResult();
@@ -864,7 +899,7 @@ public static partial class MusicNativeCatalogTests
         using var json = JsonDocument.Parse("{\"platform\":\"wy\",\"keyword\":\"" + new string('猫', 30000) + "\"}");
         Ok(await f.Run("search", json.RootElement));
         Check(((MusicSearchRequest)f.Platform.Calls.Single().Request!).Keyword.Length == 30000);
-        f.Platform.Handler = _ => Task.FromResult(E(new { data = new string('x', 512 * 1024) }));
+        f.Platform.Handler = _ => Task.FromResult(E(new { items = Array.Empty<object>(), data = new string('x', 512 * 1024) }));
         Check(S(Ok(await f.Run("home", new { platform = "wy" })), "data").Length == 512 * 1024);
         f.Platform.Handler = _ => Task.FromResult(E(new { ok = false, code = "AUTH_REQUIRED" }));
         Error(await f.Run("home", new { platform = "wy" }), "INVALID_RESPONSE");

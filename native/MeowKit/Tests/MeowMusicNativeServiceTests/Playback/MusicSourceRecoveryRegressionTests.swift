@@ -772,11 +772,11 @@ private actor ReviewScripts: MusicScriptResolving, MusicScriptSourceManaging {
     }
     func emitPrepared(duration: Double) {
         guard let id = state.generation else { return }
-        state.ready(generation: id, duration: duration, ranges: []); publish()
+        state.ready(generation: id, duration: duration); publish()
     }
     func emitPlaying() {
         guard let id = state.generation else { return }
-        state.ready(generation: id, duration: 180, ranges: [])
+        state.ready(generation: id, duration: 180)
         state.transport(generation: id, state: .playing); publish()
     }
     func emitFailure() {

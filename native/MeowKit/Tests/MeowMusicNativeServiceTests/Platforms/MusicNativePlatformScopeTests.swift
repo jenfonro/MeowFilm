@@ -334,7 +334,6 @@ final class MusicNativePlatformScopeTests: XCTestCase {
         document.history["days"] = .array([.obj([("date", .string("2026-10-23")), ("songs", .array([
             .obj([("songId", song["songId"]), ("context", .obj()), ("at", .number(NativeMusicFixture.date.timeIntervalSince1970 * 1000))])
         ]))])])
-        _ = try MusicDocument(try document.fixtureData(), runID: "fixture")
         let bytes = try document.encode(changed: ["library", "queue", "playback", "history"])
         let store = NativeMusicTestLibrary(bytes)
         for enabled in [threePlatformScope, Set<MusicPublicBrowsePlatform>(), Set(MusicPublicBrowsePlatform.allCases)] {

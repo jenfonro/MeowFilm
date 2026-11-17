@@ -18,8 +18,8 @@ fsync 与 rename 原子替换文档路径；文件链接的其他目录项保留
 
 注入 `nativeSettings` 后，规则与偏好只读 `film.rules`／`film.preferences` 原生块，
 不读写旧规则文件或把偏好写回 Node 资料库；资料库仍保存历史、人工匹配、屏蔽及点映选择。
-普通原生保存与按块通知见[共同契约](../common/settings-storage.md)，iOS 旧配置采用及保护
-见[存储](../ios/storage.md#已知-node-设置的单向迁移)，Windows 接线见[原生设置](../windows/native-settings.md)。
+普通原生保存与按块通知见[共同契约](../common/settings-storage.md)，iOS 设置及保护
+见[存储](../ios/storage.md#影视设置)，Windows 接线见[原生设置](../windows/native-settings.md)。
 HTTP `settings.set` 及规则写入
 在注入模式返回 `PERMISSION_DENIED`，不形成第二个配置写 owner。
 
@@ -58,7 +58,7 @@ Windows 只使用内置原生输出，不提供外部播放器入口或子进程
 | `session.media.release` | `{sessionId,attemptId,resourceId}` → `{released:true}`，重复释放幂等 |
 | `session.release` | `{sessionId,keepMedia?}` → `{released:true}` 或 `{retained:true}` |
 | `settings.get/set` | 读取／原子保存完整偏好 |
-| `library.get` | 读取 v2 资料库：历史、人工匹配、屏蔽、偏好、点映选择及聚合身份注册；历史投影 `businessId/playbackTarget` |
+| `library.get` | 读取 v2 资料库：历史、人工匹配、屏蔽、偏好、点映选择及聚合身份注册；健康历史投影 `businessId` 并保留已记录的 `playbackTarget`，坏历史项标记 `errorCode:'CORRUPT_STORAGE'` |
 | `library.remove` | `{kind:'history'\|'blocks',id?,block?}`，省略或 null 清空对应集合，否则准确删除 |
 | `manual.update` | `{action:'save',item}` 或 `{action:'remove',id}` |
 | `rules.get` | `{}` → `{rules,revision}` |
@@ -75,7 +75,7 @@ Windows 只使用内置原生输出，不提供外部播放器入口或子进程
 | `search.command` | `{sessionId,action:'more'\|'stop'\|'resume'}` → 受理后的 snapshot |
 | `search.release` | `{sessionId}` → 释放搜索消费者与会话 |
 | `search.handoff` | `{sessionId,selectionId,sources}` → Node 生成的准确目标、来源、已取得事实、游标及 `searchReference`；显式调用仍要求选择存在 |
-| `data.target` | `{target,sources?}` → Node 确认／补全的 typed target；不搜索、读取详情或取址，可更新身份注册及旧目标链接 |
+| `data.target` | `{target,sources?}` → Node 确认／补全的 typed target；不搜索、读取详情或取址，可更新当前聚合身份注册 |
 | `data.catalog` | `{source,action:'home'\|'category',payload?,refresh?}` → 来源目录，附可定位条目的 `businessId/playbackTarget` |
 | `data.search` | `{source,query,page?,refresh?}` → 完整单页、页号和 `hasMore`，条目附身份投影 |
 | `data.detail` | `{source,detailId,refresh?}` → 所选来源的真实详情／线路／文件，附身份投影 |
@@ -157,13 +157,18 @@ iOS 不自动准备，Windows 正常新进入仍沿正式自动播放入口；�
   不暴露私有播放材料。无有效类型／ID／标题的原始 metadata 行不会被补造身份。
 - `data.target` 只按提供的真实 provider／ID 或来源／详情及准确成员确认 typed target，
   返回 target 本身，不返回另一套地址对象；它不是上游存在性或缓存新鲜度检查。
-  该调用可写身份注册和迁移链接，但不执行网络搜索、详情加载或媒体解析。
-- `library.json` 当前为 `version:2`，新增 `groups`，历史可保存 `playbackTarget`。
-  v1 读取时转换为 v2 内存文档并保留历史／人工匹配／屏蔽／偏好／点映；
-  后续正常写入落盘 v2，不在读取时清空或强制改写文件。
-  catalog 确认旧、新目标对应后迁移这些集合的目标链接及已有历史目标，
-  历史同目标保留最新记录、屏蔽及点映去重；不是按标题扫描全库重建身份。
-  原生收藏格式不随 Node 资料库版本更名。
+  该调用可写当前聚合身份注册，但不执行网络搜索、详情加载或媒体解析。
+- `library.json` 只读写当前 `version:2` 文档，包含 `groups` 与业务集合；
+  不升级 v1，不把旧 `displayKey` 链接迁成新目标，也不为缺失目标的历史合成 `playbackTarget`。
+  当前播放 writer 保存实际文件目标。历史投影中的坏对象保留原材料并附单项错误，
+  非对象项投影为单项错误；原持久记录不被删除，健康兄弟仍可展示。
+- 资料库读取只要求当前根版本与集合容器，不做全键或逐条预检。具体身份、计数、
+  分享地址与偏好由实际消费／编辑入口检查；选中身份歧义不能靠覆盖多条记录解决。
+  未编辑扩展和坏兄弟保留，显式删除／清空仍按指定集合执行。
+  持久材料及 metadata 缓存使用公共精确 JSON owner，失真数字保留原 token，
+  不将其转成字符串或普通 `rawJSON` 属性。非 JSON 写入、坏根、真实 I/O、
+  同步原子提交与 `STORAGE_CHANGED` 约束不变。
+  原生配置注入时不采用库中残留偏好，其他业务写入也不删除它；原生收藏仍属原生 owner。
 
 `entrySurface:'home'|'search'` 标识进入位置，snapshot 的 `entryTarget` 保留原始卡片目标，
 `target` 是运行器当前使用的目标；客户端不据显示标题重新构造来源。
@@ -216,6 +221,12 @@ full。可选 handoff 中内容无法消费的记录仅作为缓存 miss，健�
 原生已加载展示的保留由[页面契约](../common/pages/data-requests.md#展示与执行生命周期)约束。
 元数据季集 map 按资料引用复用，可见集另随北京时间日期和 preview 改变；
 已加载季和关联资料不变时切回沿用原投影。上述引用只用于派生复用，不替代来源／账号／配置验证。
+
+Pan `settings.get` 的坏账号以 `{provider,errorCode:'CORRUPT_STORAGE'}` 表示，不包含
+伪造的 `revision/configured`。Film 仅验证本次选中的百度、普通夸克、普通 UC、天翼或移动
+账号；其他坏账号不阻塞健康账号的 list／prepare／play，未知 provider 不注册能力。
+选中坏账号明确失败，所选身份重复或非法代次返回格式错误；真实账号身份与 revision、
+`STALE_ACCOUNT`、取消和失效排空继续核对。
 
 元数据状态是组件级的 `ready/empty/missing/failed`；正常空值和未公布排期是成功数据，
 摘要不能冒充详情，季度概要不能冒充逐集响应。`metadata.entry.cache` 包含
@@ -318,7 +329,7 @@ raw 保持准确单源／详情，不接受关联扩大。页面重进保当前�
 
 - 两类业务分派、默认选择及智能净化作用域遵循[共同交接契约](../common/film/search.md#搜索到播放详情的交接)，
   不以入口 displayKey、成员数量或自动触发判断智能播放。
-- `prepare` 只取地址；`play` 请求当前浏览选择的正式播放，复用同一准确目标的有效已准备地址。
+- `prepare` 只取地址；`play` 请求当前正式播放目标，复用同一准确目标的有效已准备地址。
   已有旧 pending／current 不吞掉新的选择；播放器 transport 仍由原生控制当前媒体。Windows 正常新进入
   自动触发正式链；iOS 默认自动准备，允许关闭；`restoreOnly` 初始化不触发。初次 metadata 卡片没有选集坐标时，
   iOS 取首个真实正片集，不以历史集数或进度替代；Windows 优先有效历史，否则取首集。
@@ -333,7 +344,15 @@ raw 保持准确单源／详情，不接受关联扩大。页面重进保当前�
   不重新匹配、继续全站搜索或替换其他文件。
 - `search.more` 只加载尚未完成来源的下一页；菜单打开不产生请求。
   `browse {sourceId,lineId?}` 只读所选 detail／必要分享列表，`sourceId:null` 返回
-  纯 metadata。切回已加载线路沿用上次选择，盘列表有效命中不重复请求上游。
+  纯 metadata。首次读取在初始快照即报告 `browsing.loading:true`；detail 返回后先发布
+  线路菜单，只展开当前选中的线路，实际解析完成后才结算目录 loading。成功空目录没有
+  虚构候选，失败记录真实 `browsing.error`，不把未解析的分享当作成功文件。
+  切回已加载线路沿用上次选择，盘列表有效命中不重复请求上游。两端页面按来源、typed
+  线路、资料与季度保留成功展示切片，正常切回不发送 browse RPC，不另建业务 TTL。
+  browse、browse.metadata、browse.season、browse.refresh 可携带
+  `{sourceId,lineId,metadataSourceId,season}` 完整展示上下文；Node 原子采用并只读所选目录。
+  所有浏览仅更新展示，不改变正式 target、播放资料映射、pending/current、预取或自动策略，
+  浏览加载／错误也不覆盖播放状态／错误。
 - `browse.metadata {metadataSourceId,keepSource?}` 只能选择已证明关联；
   `keepSource:true` 保留当前站点／线路，只切分季资料。关联查询不阻塞主资料匹配。
   同一作品的豆瓣 subject 按已确认分季归入一个豆瓣选项，各季保留原 subject 身份。
@@ -353,13 +372,15 @@ raw 保持准确单源／详情，不接受关联扩大。页面重进保当前�
   新成功资料已删除的线路／文件不能因随后扩展失败而回滚复活。
   snapshot 的 `metadataCache` 报告资料/当前季刷新状态；`metadataSupplement` 仅在豆瓣
   与唯一TMDB可靠关联时提供原TMDB资料供图文／演职员／相似作品填缺，不改主身份或季集。
-- `select.episode {episode}` 选择真实 metadata 坐标；
-  `select.candidate {candidateId}` 选择准确源文件或该文件的真实 HLS variant，不增加选择参数。
+- `select.target {target,metadataSourceId?}` 选择运行器给出的完整 `playbackTarget`；
+  `metadataSourceId` 是该目录已证明的资料映射身份，不从客户端坐标或 candidateId 猜目标，
+  也不先发送浏览同步。Node 核对内容身份、授权来源、真实 detail／line／candidate 及映射；
+  已失效或伪造的目标在撤销可用 pending/current 前拒绝。
   元数据页面选择具体站点文件后，`target` 为同一内容 id 的准确 `source` 目标；
   `entryTarget`、元数据来源及已知资料保留，不让展示补全改变文件身份。
   普通 `group` 保留真实成员，用户仍可精确选择 owner 已提供的其他合法目录文件，
   不将其冒充原组成员；伪造候选与失效来源仍拒绝。
-  `next/previous` 使用真实列表。
+  `next/previous` 和预取使用实际播放资料映射与真实列表，不读取正在浏览的另一套资料。
   同集换源保进度和暂停意图，新集从正确起点，替代失败保留可用旧流。
   旧流结束只负责其历史与释放，不能覆盖后发的选集／换源意图。
   当前尾部无下一集或所选季缺失时先让owner检查相关资料／目录，仍无真实记录则结束／报错，
@@ -401,10 +422,16 @@ data: JSON
 ```
 
 只保留当前状态并随背压合并，不积累无限事件历史。重新连接先交当前快照；
-断开观察不关闭业务会话，也不停止实际媒体。snapshot 含 entryTarget、entrySurface、target、stage、metadata、
+断开观察不关闭业务会话，也不停止实际媒体。snapshot 含 entryTarget、entrySurface、target、stage、metadata、workInfo、
 metadataSources、sources、search、browsing、episodes、candidates、attempt、current、
 preferences、error、errorStage、reportError 和 prefetch；不含 URL、头、分享密码、playId 或 DRM key。
 仍发送完整快照，sequence 语义不变；没有新增目录 revision 或差量协议。
+
+`metadata`／`metadataSourceId` 是当前浏览资料；`workInfo` 是独立作品投影，为 null 或
+`{provider,metadataId,kind,title,summary,seasonCount,episodeCount}`，provider 为 tmdb／douban，
+kind 为 movie／tv。已有真实 TMDB 资料时固定优先，仅简介为空时使用可靠关联的豆瓣简介；
+无 TMDB 时使用可靠豆瓣资料，不采用站点简介。豆瓣多季总量只汇总已确认且不重复的季，
+没有真实总量时计数为 null，不从所选网盘文件数猜测。浏览站点、资料或季度不改变这一规则。
 
 `browsing.episodes` 是具体站源按可靠季映射过滤的选集；首次加载失败或线路真实缺失时为空，
 已有有效展示的刷新失败不清空目录。错误由客户端

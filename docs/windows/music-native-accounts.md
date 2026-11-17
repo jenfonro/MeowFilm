@@ -12,7 +12,7 @@
 
 ## 唯一当前文档
 
-文档 envelope 只接受：
+文档 envelope 读取以下必要容器：
 
 ```json
 {
@@ -23,12 +23,13 @@
 }
 ```
 
-当前最多三个 entry，分别为 `wy`、`tx`、`kg` 平台账号。这是本地安全文档契约，不是普通平台响应的数量门禁。
+当前账号命令选择 `wy`、`tx`、`kg`；其他 entry 原样保留，不参与所选平台的解码或授权。
 
 账号 key 为 `["meowfilm","music",1,"platform-account","<platform>"]`，值保存当前 version、generation、cookie、profile、scope、validatedAt。`AccountDocument` 校验当前保护文档和 fingerprint；平台私有设备材料不再形成原生第二 writer。namespace 的 `v2` 不等于 envelope 的 version。
 
 - 文档不存在时创建内存中的当前空结构。
-- 未知 key、额外或缺失字段、重复属性、损坏 value、错误 fingerprint、非规范整数或超过预算均以 `CORRUPT_STORAGE` 失败。
+- 坏根、重复 JSON 属性、错误 fingerprint 或超过预算以 `CORRUPT_STORAGE` 失败；所选平台再检查唯一 entry、必需字段、version、generation 与账号关系。数字按数值消费，不要求特定整数拼写。
+- 未消费字段及其他账号／entry 随 CAS 保存保留；未知字段不授予请求能力。单账号动作不预检其他账号，账号列表确实读取三平台，仍会报告其中所选坏值。
 - 失败不触发网络、写回、清理或局部修复，原字节保持不变。
 - 当前文档无法解码时明确失败并保留；不探测或承接历史格式。
 
@@ -132,3 +133,5 @@ Task<MusicAccountDetails> RefreshDetailsAsync(
 Windows 以 Cookie 字符串承载当前协议凭据；外部文件的字段、别名、数字及字符串语义沿共同 B09 契约，不把它改成内部文档迁移入口。无法安全表达或缺少真实认证材料时逐平台失败，不从其他安装补造。
 
 本轮只有静态接线核对，账号、文件传输和关闭竞态尚无运行通过结论。
+
+原生文件解码仅投影当前支持的凭据字段与 QQ 文件别名，再检查实际 Cookie 字符和身份。未知嵌套 credential 不进入 Cookie 或导出。网易设备补齐、酷狗 GUID→MID 关系与设备回退、QQ 可选数值的请求转换归共同 Node 配方；原生不预先要求设备字段齐全或所有可选数字符合统一拼写。最终 `account.verify`、真实 platform/userId 对比、账号基线及 CAS 保持不变。

@@ -1,3 +1,4 @@
+import { stringifyJSONValue, rawJSON } from '@meowfilm/runtime-bridge/json';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -75,4 +76,38 @@ test('directory file identities exactly match the existing recognition owner', a
   assert.deepEqual(projected.lines[0].episodes.map(row => row.businessId), candidates.map(row => row.id));
   assert.equal(projected.lines[0].episodes[0].playbackTarget.source.candidateId, candidates[0].id);
   assert.equal(projected.lines[0].episodes[0].playbackTarget.source.detailId, 0);
+});
+
+test('current group registration keeps unused corrupt siblings and exact extension material', t => {
+  const { catalog, library } = setup(t);
+  library.update(value => {
+    value.groups.push(null, { id: 'unrelated', keys: null, members: 4, extension: rawJSON('9007199254740993') });
+    value.history.push({ targetId: 'unrelated', extension: rawJSON('1e400') });
+  });
+  const target = catalog.resolve({ kind: 'group', title: '作品', members: [{ sourceKey: source.key, detailId: 0 }] }, [source]);
+  assert.match(target.id, /^group:[a-f0-9]{64}$/);
+  assert.equal(library.read().groups.length, 3);
+  assert.equal(stringifyJSONValue(library.read().groups[1]),
+    '{"id":"unrelated","keys":null,"members":4,"extension":9007199254740993}');
+  assert.equal(stringifyJSONValue(library.read().history), '[{"targetId":"unrelated","extension":1e400}]');
+  library.update(value => { value.groups[2].id = 'broken-selected-group'; });
+  assert.throws(() => catalog.resolve({ kind: 'group', title: '作品', members: [{ sourceKey: source.key, detailId: 0 }] }, [source]),
+    { code: 'CORRUPT_STORAGE' });
+});
+
+test('history projects only its recorded target and marks invalid individual materials without losing healthy rows', t => {
+  const { catalog, library } = setup(t);
+  const target = { id: 'tmdb:movie:42', kind: 'movie', title: '作品', metadataProvider: 'tmdb', metadataId: '42' };
+  library.update(value => { value.history.push(null, { targetId: target.id, extension: rawJSON('1e400') },
+    { targetId: target.id, playbackTarget: { ...target, id: 'tmdb:movie:43' } },
+    { targetId: target.id, playbackTarget: target, extension: rawJSON('9007199254740993') }); });
+  const rows = library.read().history.map(catalog.history);
+  assert.equal(rows.length, 4);
+  assert.ok(rows.slice(0, 3).every(row => row.errorCode === 'CORRUPT_STORAGE'));
+  assert.equal('playbackTarget' in rows[1], false);
+  assert.equal(stringifyJSONValue(rows[1].extension), '1e400');
+  assert.equal(rows[3].businessId, target.id);
+  assert.deepEqual(rows[3].playbackTarget, target);
+  assert.equal(stringifyJSONValue(rows[3].extension), '9007199254740993');
+  assert.equal(library.read().history[0], null);
 });

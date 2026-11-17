@@ -165,6 +165,27 @@ test('QQ feedback retains exact VIP vkey, XML escaping, floored wall seconds and
   assert.equal(f.requests.length, 7); await f.close();
 });
 
+test('QQ prepare ignores playback facts and Finish encodes only listened plus the acquired duration', async t => {
+  const unused = { duration: { bad: true }, mediaListened: 'unreadable', position: -99, rate: 'unreadable' };
+  const f = qqFeedback(request => {
+    const xml = gunzipSync(request.body).toString();
+    assert.ok(xml.includes('time="90000"')); assert.ok(xml.includes('audiotime="180000"'));
+    return response(ack({ code: 0 }));
+  });
+  t.after(() => f.close()); await f.session('tx');
+  const state = await f.request('tx', 'feedback.prepare', { target: { nativeId: 'synthetic-mid' }, ...unused, listened: {} });
+  for (const listened of ['unreadable', { toString: null }, 0]) {
+    assert.deepEqual(await f.request('tx', 'feedback.send', { sessionId: state.sessionId, event: 'end', listened, ...unused }),
+      { status: 'notSent', errorCode: 'INVALID_REQUEST' });
+    assert.equal(f.requests.length, 4);
+  }
+  assert.deepEqual(await f.request('tx', 'feedback.send', { sessionId: state.sessionId, event: 'end', listened: 90000, ...unused }),
+    { status: 'confirmed', errorCode: null });
+  assert.equal(f.requests.length, 7);
+  assert.deepEqual(await f.request('tx', 'feedback.send', { sessionId: state.sessionId, event: 'end', listened: 90000 }),
+    { status: 'notSent', errorCode: 'STALE_SESSION' });
+});
+
 test('QQ five-byte zlib ACK rejects corrupt, trailing, concatenated, gzip, oversized and noninteger successes', async () => {
   const valid = deflateSync(Buffer.from('{"code":0}')), broken = Buffer.from(valid); broken[broken.length - 1] ^= 1;
   const bomb = Buffer.from('eJztwYEAAAAAgCC2/aUWqQoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACqASKYBBE=', 'base64');
@@ -275,6 +296,19 @@ test('KG exact metadata and anonymous CSCC handshake bind real double-zlib AES s
   await f.close();
 });
 
+test('KG unused playback facts and CSCC grade metadata cannot change actual start/end records or confirmation', async t => {
+  const f = kgFeedback(capturePortrait(t), { post: () => response({ status: 1, data: { grade_synced: { unused: true } } }) });
+  t.after(() => f.close()); await f.session('kg');
+  const state = await f.request('kg', 'feedback.send', { ...kgStart, listened: {}, mediaListened: {}, position: {}, rate: {} });
+  assert.equal(state.status, 'confirmed'); assert.ok(state.sessionId);
+  f.advance(12500);
+  const result = await f.request('kg', 'feedback.send', { ...kgEnd(state.sessionId), mediaListened: { toString: null } });
+  assert.deepEqual(result, { status: 'confirmed', errorCode: null });
+  assert.equal(f.events[0].spt, '180000'); assert.equal(f.events[1].duration, '12500');
+  assert.equal(f.events[1].spt, '25000'); assert.equal(f.events[1].fs, '2.0');
+  assert.equal(f.requests.length, 5);
+});
+
 test('KG bad encrypted handshake and wrong recording/duration cannot send a start or manufacture a session', async t => {
   const portrait = capturePortrait(t);
   for (const options of [
@@ -292,7 +326,7 @@ test('KG bad encrypted handshake and wrong recording/duration cannot send a star
   }
 });
 
-test('KG CSCC requires numeric status, no grade ACK and exact HTTP success; dispatched failures remain settled once', async t => {
+test('KG CSCC requires actual status and exact HTTP success; dispatched failures remain settled once', async t => {
   const portrait = capturePortrait(t);
   for (const [raw, status, errorCode, httpStatus = 200] of [
     [{}, 'unknown', 'INVALID_RESPONSE'], [{ status: true }, 'unknown', 'INVALID_RESPONSE'],
@@ -302,7 +336,6 @@ test('KG CSCC requires numeric status, no grade ACK and exact HTTP success; disp
     [{ status: 1, errcode: false }, 'unknown', 'INVALID_RESPONSE'],
     [{ status: 1, error_code: 'not-integer' }, 'unknown', 'INVALID_RESPONSE'],
     [{ status: 1, errcode: 0.5 }, 'unknown', 'INVALID_RESPONSE'],
-    [{ status: 1, data: { grade_synced: false } }, 'unknown', 'INVALID_RESPONSE'],
     [{ status: 1 }, 'unknown', 'INVALID_RESPONSE', 201],
     ['not-json', 'unknown', 'INVALID_RESPONSE'],
   ]) {
@@ -313,29 +346,30 @@ test('KG CSCC requires numeric status, no grade ACK and exact HTTP success; disp
   }
 });
 
-test('QQ/KG keep only their real wire bounds, elapsed starts before prepare I/O, and invalid ends do not consume a session', async t => {
-  const portrait = capturePortrait(t);
-  for (const [platform, facts] of [
-    ['tx', { listened: 86401 }], ['tx', { rate: 17 }], ['tx', { duration: 180, position: 181 }],
-    ['kg', { duration: 0 }], ['kg', { rate: 0.2 }], ['kg', { rate: 17 }],
-    ['kg', { listened: 86401 }], ['kg', { position: 182 }], ['kg', { event: 'end', reason: 'playend', position: 178 }],
-  ]) {
-    const f = fixture(() => assert.fail('invalid wire facts cannot dispatch')); seedClients(f); await f.session(platform);
-    const result = await f.request(platform, 'feedback.send', { ...kgStart, ...facts });
-    assert.deepEqual(result, { status: 'notSent', errorCode: 'INVALID_REQUEST' }); await f.close();
-  }
-  const f = kgFeedback(portrait, { delay(owner) { owner.advance(10000); } }); await f.session('kg');
+test('KG feedback retains recording duration association and invalid ends do not consume a session', async t => {
+  const f = kgFeedback(capturePortrait(t)); await f.session('kg');
   const state = await f.request('kg', 'feedback.send', kgStart);
+  f.advance(12500);
   const baseline = f.requests.length;
-  for (const facts of [{ listened: 13 }, { duration: 190.001 }, { mediaListened: 193.001, listened: 12 },
-    { listened: 12, mediaListened: 1.999 }]) {
+  for (const facts of [{ duration: 190.001 }, { duration: 'invalid' }, { position: 'invalid' },
+    { listened: 'invalid' }, { listened: 15 }, { rate: 'invalid' }, { reason: 'playend', position: 178 }]) {
     assert.deepEqual(await f.request('kg', 'feedback.send', { ...kgEnd(state.sessionId), ...facts }),
       { status: 'notSent', errorCode: 'INVALID_REQUEST' });
     assert.equal(f.requests.length, baseline);
   }
-  assert.equal((await f.request('kg', 'feedback.send', { ...kgEnd(state.sessionId),
-    duration: 190, listened: 12, mediaListened: 193, position: 190, rate: 16, reason: 'playend' })).status, 'confirmed');
+  assert.equal((await f.request('kg', 'feedback.send', kgEnd(state.sessionId))).status, 'confirmed');
   assert.equal(f.requests.length, baseline + 1); await f.close();
+});
+
+test('KG elapsed listening starts before preparation I/O and uses the actual session start', async t => {
+  const f = kgFeedback(capturePortrait(t), { delay(owner) { owner.advance(10000); } });
+  t.after(() => f.close()); await f.session('kg');
+  const state = await f.request('kg', 'feedback.send', kgStart), before = f.requests.length;
+  assert.deepEqual(await f.request('kg', 'feedback.send', { ...kgEnd(state.sessionId), listened: 13 }),
+    { status: 'notSent', errorCode: 'INVALID_REQUEST' });
+  assert.equal(f.requests.length, before);
+  assert.equal((await f.request('kg', 'feedback.send', { ...kgEnd(state.sessionId), listened: 12 })).status, 'confirmed');
+  assert.equal(f.events[1].duration, '12000');
 });
 
 test('KG late confirmed start after account retirement keeps the receipt but cannot publish a feedback session', async t => {

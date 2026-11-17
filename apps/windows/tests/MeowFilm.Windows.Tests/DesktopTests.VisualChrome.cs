@@ -116,7 +116,8 @@ public static partial class DesktopTests
         });
         yield return Case("shell text follows system typography and search and navigation retain accessible focus", async () =>
         {
-            await using var f = new Fixture([new ProbeModule("typography")]); await f.LoadAsync();
+            var module = new ProbeModule("typography");
+            await using var f = new Fixture([module], pages: [new SearchEntryProbe(module)]); await f.LoadAsync();
             Equal(SystemFonts.MessageFontFamily, f.Shell.FontFamily, "Windows system body font");
             Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(f.Shell), "display text metrics");
             Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(f.Shell), "native surface chooses text rendering");
@@ -150,7 +151,7 @@ public static partial class DesktopTests
             True(item.Focusable && item.FocusVisualStyle is not null, "navigation rows keep a visible keyboard focus");
             Equal(KeyboardNavigationMode.Once, KeyboardNavigation.GetTabNavigation(navigation), "one navigation tab scope");
             var search = f.Element<TextBox>("SearchBox");
-            var action = f.Element<Button>("SearchButton");
+            var action = f.Element<ComboBox>("SearchTargetPicker");
             Equal(f.Shell.FontFamily, search.FontFamily, "search follows the body font");
             Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(search), "search inherits display metrics");
             Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(search), "ordinary search uses automatic rendering");
@@ -161,17 +162,17 @@ public static partial class DesktopTests
                 Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(text), "navigation display metrics");
                 Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(text), "navigation automatic rendering");
             }
-            True(search.Focusable && action.Focusable, "both search entry and submit remain keyboard accessible");
+            True(search.Focusable && action.Focusable, "input and category entry remain keyboard accessible");
             var origin = action.TranslatePoint(new Point(), search);
             True(origin.X >= 0 && origin.Y >= 0 &&
                 origin.X + action.ActualWidth <= search.ActualWidth &&
                 origin.Y + action.ActualHeight <= search.ActualHeight,
-                "the real search action is inside the rounded search field");
+                "the complete category entry is inside the rounded search field");
             bool Hits(FrameworkElement target, Point point) =>
                 target.IsEnabled && root.InputHitTest(target.TranslatePoint(point, root)) is DependencyObject hit &&
                 (ReferenceEquals(target, hit) || target.IsAncestorOf(hit));
             True(Hits(action, new Point(action.ActualWidth / 2, action.ActualHeight / 2)),
-                "the embedded search action receives pointer hits");
+                "the embedded category entry receives pointer hits");
             True(Hits(search, new Point((search.Padding.Left + search.ActualWidth - search.Padding.Right) / 2, search.ActualHeight / 2)),
                 "the text area keeps independent pointer hits");
             double TextOrigin(TextBox box)
@@ -187,7 +188,7 @@ public static partial class DesktopTests
             True(textChromeInset is >= 0 and <= 4,
                 $"search padding is applied once before the native text chrome ({searchTextOrigin:0.##} vs {search.Padding.Left:0.##})");
             True(searchTextOrigin - (origin.X + action.ActualWidth) is >= 2 and <= 8,
-                "the search glyph and input text have only their intentional gap");
+                "the complete category entry and input text have only their intentional gap");
             var layout = (Grid)root.Child;
             var ordinary = new TextBox
             {
@@ -204,7 +205,7 @@ public static partial class DesktopTests
             DesktopTheme.SetIsHighContrast(root, true); root.UpdateLayout(); await DrainAsync();
             Equal(SystemColors.WindowColor, ((SolidColorBrush)search.Background).Color, "system search background");
             Equal(SystemColors.WindowTextColor, ((SolidColorBrush)search.Foreground).Color, "system search text");
-            Equal(SystemColors.WindowTextColor, ((SolidColorBrush)action.Foreground).Color, "system search action");
+            Equal(SystemColors.WindowTextColor, ((SolidColorBrush)action.Foreground).Color, "system search category");
             Equal(SystemColors.WindowTextColor, ((SolidColorBrush)f.Back.BorderBrush).Color, "system back button edge");
             True(f.Element<Border>("SidebarBackground").BorderThickness.Right > 0,
                 "high contrast restores the structural sidebar edge");

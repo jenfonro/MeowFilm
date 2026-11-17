@@ -4,18 +4,23 @@ namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    private JsonObject Settings(MusicLibraryData doc) => Value(doc, "online-settings") as JsonObject ??
+    private JsonObject Settings(MusicLibraryData doc)
+    {
+        var value = Area(doc, "online-settings") ??
         LJ.Obj(("schema", 3), ("revision", 0), ("lyrics", true));
+        try { ValidateSettings(value); }
+        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
+        return value;
+    }
     private static void ValidateSettings(JsonObject settings)
     {
         LJ.Fields(settings, "schema revision lyrics", "schema revision lyrics");
-        LJ.Require(settings["schema"] is JsonValue schema && schema.TryGetValue<int>(out var version) &&
-            version == 3 && LJ.IsBool(settings["lyrics"]), "CORRUPT_STORAGE");
+        LJ.Require(LJ.I(settings["schema"]) == 3 && LJ.IsBool(settings["lyrics"]), "CORRUPT_STORAGE");
         _ = Revision(settings);
     }
     private (JsonObject Result, bool Mutate) SettingsCommand(string method, JsonObject p, MusicLibraryData doc)
     {
-        if (method == "music.settings.get") { LJ.Fields(p, ""); return (LJ.Obj(("settings", Settings(doc))), false); }
+        if (method == "music.settings.get") { return (LJ.Obj(("settings", Settings(doc))), false); }
         LJ.Fields(p, "ifRevision lyrics", "ifRevision lyrics");
         LJ.Require(pending is null, "PENDING_WRITE"); var settings = Settings(doc);
         LJ.Require(Revision(settings) == LJ.I(p["ifRevision"]), "REVISION_CONFLICT");

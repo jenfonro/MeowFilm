@@ -218,7 +218,6 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
                 Set(ref duration, candidate.Decoder.DurationSeconds, nameof(DurationSeconds));
                 Set(ref position, candidate.BasePosition, nameof(PositionSeconds));
                 Set(ref hasMedia, true, nameof(HasMedia));
-                if (reopening is not null) reopening.ReopenedScope = Scope();
                 continuation = null;
                 Changed(nameof(ContinuationPending));
                 await StartOutputAsync(candidate, lifetime.Token);

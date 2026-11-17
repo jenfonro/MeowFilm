@@ -235,9 +235,13 @@ public static partial class NovelTests
             await module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, true);
             Check(module.DiscoverBooks.Single().Revision == 2 && module.DiscoverBooks.Single().Name == "新版本");
             runtime.Records = [Source("a") with { Revision = 3, EnabledExplore = false }, Source("b")]; await sources.RefreshAsync();
+            int disabledInvocations = runtime.Calls.Count(call => call.Method == "source.runtime.library.invoke");
             await module.NavigateAsync(NovelCapability.CategoriesRoute, default);
             Check(module.ExploreSource?.InstallationId == "a" && module.DiscoverBooks.Count == 0 &&
                 module.DiscoveryState == NovelDiscoveryState.Unavailable, "An unavailable selection silently fell back to another enabled source.");
+            Check(!module.LoadingDiscovery &&
+                runtime.Calls.Count(call => call.Method == "source.runtime.library.invoke") == disabledInvocations,
+                "Publishing the same unavailable source cancelled its availability read or invoked a disabled source.");
             runtime.Records = [Source("b")]; await sources.RefreshAsync();
             await module.LoadDiscoveryAsync(null, null, true);
             Check(module.ExploreSource?.InstallationId == "a" && module.DiscoveryState == NovelDiscoveryState.Unavailable);

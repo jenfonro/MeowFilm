@@ -1,37 +1,44 @@
 import { randomUUID } from 'node:crypto';
+import { cloneJSONValue, stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { PanError, requireValue } from './errors.js';
 import { createTransport } from './http.js';
 import { PanStore } from './store.js';
 import { baidu } from './providers/baidu.js';
 import { tianyi } from './providers/tianyi.js';
 import { yidong } from './providers/yidong.js';
-import { quark, uc, quarkTV, ucTV } from './providers/quark-uc.js';
+import { quark, uc } from './providers/quark-uc.js';
 
-const providers = new Map([baidu, quark, uc, tianyi, yidong, quarkTV, ucTV].map(value => [value.id, value]));
+const providers = new Map([baidu, quark, uc, tianyi, yidong].map(value => [value.id, value]));
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value) &&
   [Object.prototype, null].includes(Object.getPrototypeOf(value));
-const clone = value => structuredClone(value);
+const clone = value => value === undefined ? undefined : cloneJSONValue(value);
 const integer = value => Number.isSafeInteger(value) && value >= 0;
-const stable = value => JSON.stringify(value, (_key, item) => object(item)
-  ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : item);
-function fields(value, allowed, required = allowed) {
-  requireValue(object(value) && Object.keys(value).every(key => allowed.includes(key)) &&
-    required.every(key => Object.hasOwn(value, key)));
+function stable(value) {
+  const ordered = item => Array.isArray(item) ? item.map(ordered)
+    : object(item) && !isRawJSON(item)
+      ? Object.fromEntries(Object.keys(item).sort().map(key => [key, ordered(item[key])])) : item;
+  return stringifyJSONValue(ordered(value));
 }
-function credentialValue(provider, value) {
-  requireValue(object(value) && Object.keys(value).every(key => Object.hasOwn(provider.credentialFields, key)));
-  for (const [key, item] of Object.entries(value)) {
-    requireValue(provider.credentialFields[key] === 'number'
-      ? integer(item) : typeof item === 'string' && !item.includes('\0'));
-    // Passwords keep their exact text; header credentials cannot contain newlines.
-    if (key !== 'password' && typeof item === 'string') requireValue(!/[\r\n]/.test(item));
-  }
-  return clone(value);
+function credentialField(provider, key, item, code) {
+  requireValue(provider.credentialFields[key] === 'number'
+    ? integer(item) : typeof item === 'string' && !item.includes('\0'), code);
+  // Passwords keep their exact text; header credentials cannot contain newlines.
+  if (key !== 'password' && typeof item === 'string') requireValue(!/[\r\n]/.test(item), code);
+  return item;
 }
 function credentialInput(provider, value) {
-  requireValue(object(value));
-  return credentialValue(provider, Object.fromEntries(Object.keys(provider.credentialFields)
-    .filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]])));
+  requireValue(object(value) && !isRawJSON(value));
+  return Object.fromEntries(Object.keys(provider.credentialFields)
+    .filter(key => Object.hasOwn(value, key))
+    .map(key => [key, credentialField(provider, key, value[key], 'INVALID_REQUEST')]));
+}
+function credentialView(provider, value) {
+  requireValue(object(value) && !isRawJSON(value), 'CORRUPT_STORAGE');
+  // Only fields actually read by this provider are checked; extensions never reach it.
+  return Object.defineProperties({}, Object.fromEntries(Object.keys(provider.credentialFields)
+    .filter(key => Object.hasOwn(value, key))
+    .map(key => [key, { enumerable: true,
+      get: () => credentialField(provider, key, value[key], 'CORRUPT_STORAGE') }])));
 }
 function select(id) {
   requireValue(typeof id === 'string' && providers.has(id));
@@ -51,15 +58,19 @@ function capabilities(provider) {
 function readDocument(value) {
   try {
     const document = value ?? { version: 1, accounts: {} };
-    fields(document, ['version', 'accounts']);
-    requireValue(document.version === 1 && object(document.accounts));
-    for (const [id, record] of Object.entries(document.accounts)) {
-      fields(record, ['revision', 'credentials']);
-      requireValue(integer(record.revision) && record.revision > 0);
-      credentialValue(select(id), record.credentials);
-    }
+    requireValue(object(document) && document.version === 1 && object(document.accounts) &&
+      !isRawJSON(document.accounts));
     return clone(document);
   } catch { throw new PanError('CORRUPT_STORAGE'); }
+}
+function accountValue(document, id) {
+  const present = Object.hasOwn(document.accounts, id);
+  const record = present ? document.accounts[id] : { revision: 0, credentials: {} };
+  return { present, revision: record?.revision, credentials: record?.credentials };
+}
+function accountRevision(account) {
+  requireValue(integer(account.revision) && (account.present ? account.revision > 0 : account.revision === 0),
+    'CORRUPT_STORAGE');
 }
 
 /** One in-process owner. Neither script engines nor platform credential bridges are required. */
@@ -76,10 +87,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
     throw error instanceof PanError ? error : new PanError(error?.code === 'CLOSED' ? 'CLOSED' : 'STORAGE_ERROR');
   }
   const http = transport ?? createTransport();
-  const accounts = new Map([...providers.keys()].map(id => [id, {
-    revision: document.accounts[id]?.revision ?? 0,
-    credentials: clone(document.accounts[id]?.credentials ?? {}),
-  }]));
+  const accounts = new Map([...providers.keys()].map(id => [id, accountValue(document, id)]));
   const pending = new Set(), controllers = new Set(), shared = new Map(), logins = new Map(), loginStarts = new Map();
   let closed = false, closing, settingsError, changes = Promise.resolve();
 
@@ -88,13 +96,20 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
     if (settingsError) throw settingsError;
     requireValue(accounts.get(id) === account, 'STALE_ACCOUNT');
     requireValue(!signal?.aborted, 'CANCELLED');
+    accountRevision(account);
   }
   function accountStatus(id) {
     const account = accounts.get(id);
-    const configured = Object.entries(account.credentials).filter(([, value]) => value !== '' && value !== 0)
-      .map(([name]) => name);
-    return { provider: id, revision: account.revision, configured: configured.length > 0, fields: configured,
-      status: configured.length ? account.status ?? 'signedIn' : 'signedOut' };
+    try {
+      accountRevision(account);
+      const configured = Object.entries(credentialView(providers.get(id), account.credentials))
+        .filter(([, value]) => value !== '' && value !== 0).map(([name]) => name);
+      return { provider: id, revision: account.revision, configured: configured.length > 0, fields: configured,
+        status: configured.length ? account.status ?? 'signedIn' : 'signedOut' };
+    } catch (error) {
+      if (error?.code !== 'CORRUPT_STORAGE') throw error;
+      return { provider: id, errorCode: 'CORRUPT_STORAGE' };
+    }
   }
   function invalidate(id, old, completedLogin) {
     for (const owner of controllers) if (owner.id === id && owner.account === old) owner.controller.abort();
@@ -114,10 +129,11 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
     }
     settingsError = undefined;
     for (const id of providers.keys()) {
-      const record = latest.accounts[id] ?? { revision: 0, credentials: {} };
+      const next = accountValue(latest, id);
       const old = accounts.get(id);
-      if (old.revision === record.revision && stable(old.credentials) === stable(record.credentials)) continue;
-      accounts.set(id, { revision: record.revision, credentials: clone(record.credentials) });
+      if (old.present === next.present && old.revision === next.revision &&
+        stable(old.credentials) === stable(next.credentials)) continue;
+      accounts.set(id, next);
       invalidate(id, old);
     }
     document = latest;
@@ -132,8 +148,8 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
   }
   async function persist(id, next) {
     if (settingsError) throw settingsError;
-    const nextDocument = { version: 1, accounts: { ...document.accounts,
-      [id]: { revision: next.revision, credentials: clone(next.credentials) } } };
+    const nextDocument = { ...document, accounts: { ...document.accounts,
+      [id]: { ...document.accounts[id], revision: next.revision, credentials: clone(next.credentials) } } };
     try { await store.write(nextDocument); }
     catch (error) {
       if (error?.code === 'STORAGE_CONFLICT') {
@@ -149,7 +165,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
       const old = accounts.get(id);
       assertCurrent(id, expected ?? old, signal);
       requireValue(Number.isSafeInteger(old.revision + 1), 'STORAGE_ERROR');
-      const next = { revision: old.revision + 1, credentials };
+      const next = { present: true, revision: old.revision + 1, credentials };
       await persist(id, next);
       accounts.set(id, next);
       invalidate(id, old, completedLogin);
@@ -177,13 +193,14 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
     const id = provider.id;
     return {
       signal, http, now,
-      get credentials() { assertCurrent(id, account, signal); return clone(account.credentials); },
+      get credentials() { assertCurrent(id, account, signal); return credentialView(provider, account.credentials); },
       async updateCredentials(patch) {
         assertCurrent(id, account, signal);
-        const update = credentialValue(provider, patch);
+        const update = credentialInput(provider, patch);
         await change(async () => {
           assertCurrent(id, account, signal);
-          const credentials = credentialValue(provider, { ...account.credentials, ...update });
+          requireValue(object(account.credentials) && !isRawJSON(account.credentials), 'CORRUPT_STORAGE');
+          const credentials = { ...account.credentials, ...update };
           await persist(id, { revision: account.revision, credentials });
           account.credentials = credentials;
         });
@@ -203,7 +220,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
           }
         });
         assertCurrent(id, account, signal);
-        return clone(account.credentials);
+        return credentialView(provider, account.credentials);
       },
       async prepare(file) {
         requireValue(typeof provider.prepare === 'function', 'UNSUPPORTED_OPERATION');
@@ -264,12 +281,8 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
   function fileInput(provider, account, file) {
     requireValue(object(file) && ['share', 'stored'].includes(file.kind) &&
       typeof file.provider === 'string' && integer(file.accountRevision));
-    const base = ({ quark_tv: 'quark', uc_tv: 'uc' })[provider.id];
-    requireValue(file.provider === provider.id || base === file.provider);
-    const sourceAccount = accounts.get(file.provider);
-    requireValue(sourceAccount?.revision === file.accountRevision, 'STALE_ACCOUNT');
-    if (base) requireValue(file.kind === 'stored');
-    else requireValue(account.revision === file.accountRevision, 'STALE_ACCOUNT');
+    requireValue(file.provider === provider.id);
+    requireValue(account.revision === file.accountRevision, 'STALE_ACCOUNT');
     return clone(file);
   }
   function cancelLogin(login, status) {
@@ -345,7 +358,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
         requireValue(object(response) &&
           ['pending', 'scanned', 'confirmed', 'expired'].includes(response.status), 'UPSTREAM_FORMAT');
         if (response.status === 'confirmed') {
-          const credentials = credentialValue(login.provider, response.credentials);
+          const credentials = credentialInput(login.provider, response.credentials);
           // The completed session remains queryable; replacement revokes all *other* unfinished sessions.
           await replace(login.provider.id, credentials, operation.signal, login.account, login);
           login.account = accounts.get(login.provider.id);
@@ -377,6 +390,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
     pruneLogins();
     if (operation === 'providers') return { providers: [...providers.values()].map(capabilities) };
     if (operation === 'settings.get') {
+      if (settingsError) throw settingsError;
       return { accounts: [...providers.keys()].map(accountStatus) };
     }
     if (operation === 'settings.set' || operation === 'settings.clear') {
@@ -397,8 +411,8 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
     if (settingsError) throw settingsError;
     requireValue(['list', 'prepare', 'play', 'refresh', 'login.start'].includes(operation), 'UNSUPPORTED_OPERATION');
     const provider = select(params.provider), account = accounts.get(provider.id);
+    assertCurrent(provider.id, account, signal);
     const owner = scope(provider.id, account, signal);
-    let sourceOwner;
     try {
       const ctx = context(provider, account, owner.signal);
       let result;
@@ -420,10 +434,6 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
       } else if (operation === 'login.start') result = await startLogin(provider, account, ctx);
       else {
         const file = fileInput(provider, account, params.file);
-        if (file.provider !== provider.id) {
-          sourceOwner = { id: file.provider, account: accounts.get(file.provider), controller: owner.controller };
-          controllers.add(sourceOwner);
-        }
         if (operation === 'prepare') result = { file: await ctx.prepare(file) };
         else {
           requireValue(provider.modes.includes(params.mode), 'UNSUPPORTED_OPERATION');
@@ -435,16 +445,13 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
             Object.entries(result.headers).every(([name, value]) =>
               /^[!#$%&'*+.^_`|~\w-]+$/.test(name) && typeof value === 'string' && !/[\r\n]/.test(value)),
           'UPSTREAM_FORMAT');
-          if (result.file) result = { ...result, file: stamp(file.provider, accounts.get(file.provider), result.file) };
-          // TV input can belong to the ordinary account; switching it while resolving invalidates the result too.
-          fileInput(provider, account, file);
+          if (result.file) result = { ...result, file: stamp(provider.id, account, result.file) };
         }
       }
       assertCurrent(provider.id, account, owner.signal);
       return clone(result);
     } finally {
       owner.dispose();
-      if (sourceOwner) controllers.delete(sourceOwner);
     }
   }
   return Object.freeze({

@@ -1,11 +1,12 @@
+import { stringifyJSONValue, rawJSON } from '@meowfilm/runtime-bridge/json';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { buildEpisodeMap, matchEpisodeMaps, resolveEpisode } from '../packages/film-playback/src/episodes.js';
 import { contentResults, matchesResult, mediaVariants, normalizeDetail, recognizeCandidates,
   recognizeVariantCandidates } from '../packages/film-playback/src/recognition.js';
 import { compareCandidates, isCandidateAllowed } from '../packages/film-playback/src/policy.js';
-import { createRecognitionRules } from '../packages/film-playback/src/rules.js';
-import { checkTarget, resultDetailId } from '../packages/film-playback/src/identity.js';
+import { createRecognitionRules, providerFamily } from '../packages/film-playback/src/rules.js';
+import { checkTarget, clone, identity, resultDetailId } from '../packages/film-playback/src/identity.js';
 import { encodePanResource } from '@meowfilm/script-host/cat-output';
 
 const source = { key: 'cat:install:site', engine: 'cat', installationId: 'install', siteId: 'site',
@@ -594,9 +595,38 @@ test('E26 normalization and recognition retain the full list, including unrecogn
   assert.equal(items[256].episode, undefined);
 });
 
+test('E11 explicitly empty playback fields normalize without an empty-identity line or candidate', async () => {
+  const row = { vod_id: 'detail-a', vod_play_from: '', vod_play_url: '' };
+  for (const raw of [row, { list: [row] }]) {
+    const normalized = normalizeDetail(raw, { source });
+    assert.equal(normalized.detailId, 'detail-a');
+    assert.deepEqual(normalized.lines, []);
+    assert.equal(normalized.raw, raw);
+    assert.deepEqual(await recognizeCandidates(normalized, { source, target }), []);
+  }
+  const emptyLine = normalizeDetail({ ...row, vod_play_from: '原始线路' }, { source });
+  assert.equal(emptyLine.lines.length, 1);
+  assert.equal(emptyLine.lines[0].id, '原始线路');
+  assert.deepEqual(emptyLine.lines[0].episodes, []);
+});
+
+test('provider recognition accepts only the five explicit pan providers without guessing from labels', () => {
+  for (const provider of ['baidu', 'quark', 'uc', 'tianyi', 'yidong']) {
+    assert.equal(providerFamily(provider), provider);
+  }
+  for (const provider of [undefined, '', 'unknown-provider', 'QUARK', '夸克']) {
+    assert.equal(providerFamily(provider), undefined);
+  }
+});
+
 test('E11 malformed/ambiguous details fail without leaking raw IDs or accepting the wrong record', async () => {
   for (const raw of [null, 'secret', { list: [] }, { list: [{ vod_id: 'a' }, { vod_id: 'b' }] },
-    { vod_id: 'a', vod_play_from: 'one$$$two', vod_play_url: 'one-id' }]) {
+    { vod_id: 'a', vod_play_from: 'one$$$two', vod_play_url: 'one-id' },
+    { vod_id: 'a', vod_play_from: '', vod_play_url: '正片$opaque' },
+    { vod_id: 'a', vod_play_from: 'one$$$', vod_play_url: '正片$opaque$$$' },
+    { vod_id: 'a', vod_play_from: ' ', vod_play_url: '' },
+    { vod_id: 'a', vod_play_from: '', vod_play_url: null },
+    { vod_id: 'a', vod_play_from: undefined, vod_play_url: '' }]) {
     assert.throws(() => normalizeDetail(raw, { source }), error =>
       error.code === 'INVALID_DETAIL' && error.message === 'Invalid film playback detail');
   }
@@ -643,4 +673,22 @@ test('different season partitions require unambiguous global evidence to map epi
   const ambiguous = { seasons: [{ season_number: 1, episode_count: 2,
     episodes: [{ episode_number: 1 }, { episode_number: 1 }] }] };
   assert.equal(matchEpisodeMaps(own, ambiguous)[0].match, null);
+});
+
+test('identity cloning retains precise JSON numbers distinct from ordinary rawJSON-named properties', () => {
+  const exact = { material: rawJSON('9007199254740993') };
+  const copy = clone(exact);
+  assert.equal(stringifyJSONValue(copy), '{"material":9007199254740993}');
+  assert.equal(identity(copy), identity(exact));
+  assert.notEqual(identity(copy), identity({ material: { rawJSON: '9007199254740993' } }));
+  assert.notEqual(identity(copy), identity({ material: 9007199254740992 }));
+  assert.throws(() => clone({ material: undefined }), { code: 'INVALID_REQUEST' });
+});
+
+test('recognition sends only present optional fields but still rejects explicit non-JSON data at the native boundary', async () => {
+  const value = detail([{ id: 0 }]);
+  const rows = await recognize(value, { target: { id: 'source:raw', kind: 'source', title: '原始' } });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].playId, 0);
+  await assert.rejects(recognize(detail([{ id: 0, fps: Infinity }])), { code: 'INVALID_REQUEST' });
 });

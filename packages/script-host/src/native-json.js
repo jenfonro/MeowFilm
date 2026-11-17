@@ -1,10 +1,12 @@
+import { createJSONCodec, parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { NativeEngine } from './native-engine.js';
 
 const fault = code => Object.assign(new Error(code), { code });
 
 function bootstrap(source) {
   return `(() => {
-    const parse = JSON.parse, stringify = JSON.stringify;
+    const { parseJSONText: parse, stringifyJSONValue: stringify } =
+      (${createJSONCodec.toString()})(() => { throw { code: 'INVALID_ARGUMENT' }; });
     for (const name of ['__meowHost', '__meowEmit', '__meowNative', '__meowTaskContext',
       '__meowGuest', '__meowCore', '__meowHostArgs', 'setTimeout', 'setInterval',
       'clearTimeout', 'clearInterval']) delete globalThis[name];
@@ -13,7 +15,7 @@ function bootstrap(source) {
     if (typeof process !== 'function') throw { code: 'INVALID_ARGUMENT' };
     return {
       async invoke(text) {
-        const result = stringify(await process(parse(text)));
+        const result = stringify(await process(parse(text, -Infinity)), -Infinity);
         if (typeof result !== 'string') throw { code: 'INVALID_ARGUMENT' };
         return result;
       }
@@ -46,7 +48,9 @@ export class NativeJsonProgram {
     if (this.#closed) throw fault('STALE_SESSION');
     if (signal?.aborted) throw fault('CANCELLED');
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw fault('INVALID_ARGUMENT');
-    const input = JSON.stringify(value);
+    let input;
+    // Text programs retain their heap/stack budgets, not HTTP's depth limit.
+    try { input = stringifyJSONValue(value, -Infinity); } catch { throw fault('INVALID_ARGUMENT'); }
     if (typeof input !== 'string') throw fault('INVALID_ARGUMENT');
     if (this.#closed) throw fault('STALE_SESSION');
     if (signal?.aborted) throw fault('CANCELLED');
@@ -99,7 +103,7 @@ export class NativeJsonProgram {
         });
         if (this.#closed) throw fault('STALE_SESSION');
         if (entry.signal?.aborted) throw fault('CANCELLED');
-        this.#settle(entry, null, JSON.parse(text));
+        this.#settle(entry, null, parseJSONText(text, -Infinity));
       } catch (error) {
         if (this.#closed) error = fault('STALE_SESSION');
         else if (entry.signal?.aborted) error = fault('CANCELLED');

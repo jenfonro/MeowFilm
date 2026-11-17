@@ -1,5 +1,6 @@
 import { createCatRuntime, ScriptHostError } from '@meowfilm/script-host';
 import { validateJSONValue } from '@meowfilm/runtime-bridge';
+import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 import { SourceCandidates } from './source-candidates.mjs';
 import { contracts } from '../contracts.mjs';
 
@@ -15,7 +16,7 @@ const sourceURL = value => {
   try { url = new URL(value); } catch { requireValue(false); }
   requireValue(['http:', 'https:'].includes(url.protocol));
 };
-const snapshot = value => { validateJSONValue(value); return structuredClone(value); };
+const snapshot = cloneJSONValue;
 const failure = error => ({ ok: false, contract: catScriptContract,
   code: error instanceof ScriptHostError && contracts.cat.codes.has(error.code) ? error.code : 'SCRIPT_EXCEPTION' });
 const success = value => { validateJSONValue(value ?? null); return { ok: true, contract: catScriptContract, value: value ?? null }; };
@@ -139,10 +140,9 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
     if (input.sourceUrl !== undefined) sourceURL(input.sourceUrl);
     return get().edit(input, { signal });
   });
-  method('update', ['installationId', 'sourceRevision'], async (input, signal) => {
+  method('update', configuration ? ['installationId'] : ['installationId', 'sourceRevision'], async (input, signal) => {
     identifier(input.installationId);
     if (configuration) {
-      requireValue(input.sourceRevision === undefined);
       return get().updateConfigured(input.installationId, { signal });
     }
     if (input.sourceRevision !== undefined) integer(input.sourceRevision);

@@ -87,17 +87,16 @@ public static class MusicOfficialSourcesPolicyTests
                 """{"ifRevision":"0","enabled":[]}""",
                 """{"ifRevision":-1,"enabled":[]}""",
                 """{"ifRevision":0.5,"enabled":[]}""",
-                """{"ifRevision":0,"enabled":[],"extra":true}"""
             })
                 Code(await owner.ExecuteAsync("music.officialSources.settings.save", JsonNode.Parse(input)), "INVALID_REQUEST");
             using var duplicate = JsonDocument.Parse("""{"ifRevision":0,"enabled":["wy"],"enabled":[]}""");
             Code(await owner.ExecuteAsync("music.officialSources.settings.save", duplicate.RootElement), "INVALID_REQUEST");
-            Code(await owner.ExecuteAsync("music.officialSources.settings.get", new { extra = true }), "INVALID_REQUEST");
+            Enabled(Ok(await owner.ExecuteAsync("music.officialSources.settings.get", new { extra = true })).GetProperty("settings"), Platforms);
             Equal(0, store.Writes);
             var unchanged = Ok(await owner.ExecuteAsync("music.officialSources.settings.get")).GetProperty("settings");
             Enabled(unchanged, Platforms);
             Equal(0L, unchanged.GetProperty("revision").GetInt64());
-            Ok(await owner.ExecuteAsync("music.officialSources.settings.save", new { ifRevision = 0, enabled = new[] { "wy" } }));
+            Ok(await owner.ExecuteAsync("music.officialSources.settings.save", new { ifRevision = 0, enabled = new[] { "wy" }, extra = true }));
             Code(await owner.ExecuteAsync("music.officialSources.settings.save",
                 new { ifRevision = 0, enabled = Platforms }), "REVISION_CONFLICT");
             Enabled(Ok(await owner.ExecuteAsync("music.officialSources.settings.get")).GetProperty("settings"), ["wy"]);
@@ -120,7 +119,6 @@ public static class MusicOfficialSourcesPolicyTests
                 """{"schema":1,"revision":1,"enabled":[false]}""",
                 """{"schema":1,"revision":1,"enabled":null}""",
                 """{"schema":1,"revision":1}""",
-                """{"schema":1,"revision":1,"enabled":[],"extra":true}"""
             })
             {
                 var document = JsonNode.Parse(original)!.AsObject();
@@ -133,6 +131,35 @@ public static class MusicOfficialSourcesPolicyTests
                     new { ifRevision = 1, enabled = Platforms }), "CORRUPT_STORAGE");
                 Equal(1, store.Writes);
             }
+        });
+        yield return Case("durable policy extensions survive edits", async (owner, store) =>
+        {
+            Ok(await owner.ExecuteAsync("music.officialSources.settings.save", new { ifRevision = 0, enabled = new[] { "wy" } }));
+            await owner.AbortAsync();
+            var document = JsonNode.Parse(store.Data!)!.AsObject();
+            document["areas"]!["native-official-sources"]!["extra"] = true;
+            store.Data = LJ.Bytes(document);
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+            Enabled(Ok(await reopened.ExecuteAsync("music.officialSources.settings.get")).GetProperty("settings"), ["wy"]);
+            Ok(await reopened.ExecuteAsync("music.officialSources.settings.save", new { ifRevision = 1, enabled = Platforms }));
+            Equal(true, store.State("native-official-sources")["extra"]!.GetValue<bool>());
+        });
+        yield return Case("reconciliation preserves unchanged active source authority and revokes unusable policy", async (owner, store) =>
+        {
+            Ok(await owner.ExecuteAsync("music.officialSources.settings.save", new { ifRevision = 0, enabled = Platforms }));
+            using var lease = await owner.AcquireOfficialSourcesAsync(default);
+            var document = JsonNode.Parse(store.Data!)!.AsObject();
+            document["areas"]!["future-area"] = new JsonObject { ["extra"] = true };
+            store.Data = LJ.Bytes(document);
+            await owner.ReconcileAsync();
+            Equal(false, lease.Token.IsCancellationRequested);
+            lease.Check("wy");
+            document["areas"]!["native-official-sources"] = null;
+            store.Data = LJ.Bytes(document);
+            await owner.ReconcileAsync();
+            Equal(true, lease.Token.IsCancellationRequested);
+            Code(await owner.ExecuteAsync("music.officialSources.settings.get"), "CORRUPT_STORAGE");
+            Equal(1, store.Writes);
         });
         yield return Case("unknown official source settings CAS reconciles on its authoritative current read", async (owner, store) =>
         {

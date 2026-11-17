@@ -15,19 +15,19 @@ final class PanLoginModelTests: XCTestCase {
     func testManualSaveCommitsWithoutOnlineValidationOrSecretReadback() async throws {
         let runtime = try PanTestRuntime()
         var accounts: [PanAccount] = []
-        let model = try login(runtime, provider: .quarkTV) { accounts.append($0) }
+        let model = try login(runtime, provider: .tianyi) { accounts.append($0) }
         XCTAssertEqual(model.method, .manual); XCTAssertTrue(model.draft.isEmpty)
         model.setVisible(true)
-        model.draft = ["refreshToken": "synthetic-refresh", "deviceId": "synthetic-device"]
+        model.draft = ["username": "synthetic-user", "password": "synthetic-password"]
         model.save()
         XCTAssertTrue(model.saved); XCTAssertTrue(model.completed); XCTAssertFalse(model.confirmed)
         XCTAssertTrue(model.draft.isEmpty); XCTAssertNil(model.progress)
         XCTAssertEqual(accounts.count, 1)
         XCTAssertEqual(accounts.last?.status, .unverified)
-        XCTAssertEqual(try runtime.storage.credentials(.quarkTV), .object([
-            "refreshToken": .string("synthetic-refresh"), "deviceId": .string("synthetic-device")]))
+        XCTAssertEqual(try runtime.storage.credentials(.tianyi), .object([
+            "username": .string("synthetic-user"), "password": .string("synthetic-password")]))
         model.save()
-        XCTAssertEqual(try runtime.storage.read().panField("accounts")?.panField("quark_tv")?.panField("revision"), .number(1))
+        XCTAssertEqual(try runtime.storage.read().panField("accounts")?.panField("tianyi")?.panField("revision"), .number(1))
         let calls = await runtime.calls
         XCTAssertTrue(calls.isEmpty)
         model.close()
@@ -60,7 +60,7 @@ final class PanLoginModelTests: XCTestCase {
         model.setVisible(true); model.draft = ["username": "synthetic-user", "password": " synthetic-password "]
         model.save()
         XCTAssertTrue(model.saved); XCTAssertFalse(model.confirmed); XCTAssertEqual(snapshots.count, 1)
-        XCTAssertTrue(snapshots[0].configured); XCTAssertEqual(snapshots[0].status, .unverified)
+        XCTAssertEqual(snapshots[0].configured, true); XCTAssertEqual(snapshots[0].status, .unverified)
         XCTAssertEqual(try runtime.storage.credentials(.tianyi)?.panField("password"), .string(" synthetic-password "))
         XCTAssertNil(model.notice)
         let count = await runtime.count("refresh")
@@ -82,12 +82,13 @@ final class PanLoginModelTests: XCTestCase {
 
     func testInvalidHeaderNeverCommitsOrFinishesAndPreservesDraft() async throws {
         let runtime = try PanTestRuntime()
-        let model = try login(runtime, provider: .ucTV)
-        model.setVisible(true); model.draft = ["refreshToken": "synthetic\r\ninvalid", "deviceId": "synthetic-device"]
+        let model = try login(runtime, provider: .uc)
+        model.selectMethod(.manual)
+        model.setVisible(true); model.draft = ["cookie": "synthetic\r\ninvalid"]
         model.save()
         XCTAssertFalse(model.completed); XCTAssertFalse(model.busy)
         XCTAssertNil(try runtime.storage.document.read())
-        XCTAssertEqual(model.draft["refreshToken"], "synthetic\r\ninvalid")
+        XCTAssertEqual(model.draft["cookie"], "synthetic\r\ninvalid")
         XCTAssertEqual(model.notice?.message, "网盘凭据无效")
         model.close()
     }

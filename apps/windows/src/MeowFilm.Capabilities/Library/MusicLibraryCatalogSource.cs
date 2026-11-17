@@ -5,8 +5,14 @@ namespace MeowFilm.Capabilities.Library;
 public sealed partial class MusicLibraryOwner
 {
     private const string CatalogSourceArea = "native-catalog-source";
-    private JsonObject CatalogSource(MusicLibraryData doc) => Value(doc, CatalogSourceArea) as JsonObject ??
+    private JsonObject CatalogSource(MusicLibraryData doc)
+    {
+        var value = Area(doc, CatalogSourceArea) ??
         LJ.Obj(("schema", 1), ("revision", 0), ("platform", "wy"));
+        try { ValidateCatalogSource(value); }
+        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
+        return value;
+    }
 
     private static void ValidateCatalogSource(JsonObject settings)
     {
@@ -22,7 +28,6 @@ public sealed partial class MusicLibraryOwner
         var settings = CatalogSource(doc);
         if (method == "music.catalogSource.settings.get")
         {
-            LJ.Fields(p, "");
             return (LJ.Obj(("settings", settings)), false);
         }
 

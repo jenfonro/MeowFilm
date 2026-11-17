@@ -5,7 +5,7 @@ namespace MeowFilm.Core.Runtime;
 /// <summary>The App's one script runtime connection. The App starts it once after composing
 /// its owners; starting the host executes no script. Explicit recovery replaces only a failed
 /// transport and never replays a business operation.</summary>
-public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRuntimeRecovery, IAsyncDisposable
+public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRuntimeRecovery, IRuntimeLifetime, IAsyncDisposable
 {
     private sealed class Epoch
     {
@@ -14,6 +14,7 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRun
         internal readonly CancellationToken Token;
         internal readonly TaskCompletionSource<IRuntimeSession> Start = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal Task? Retirement;
+        internal bool StartupCleanupFailed;
         internal Epoch(long generation) { Generation = generation; Token = Cancellation.Token; }
     }
     private readonly Func<CancellationToken, Task<IRuntimeSession>> factory;
@@ -42,6 +43,7 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRun
         _ = StartAsync(epoch);
     }
     public bool HasStarted { get { lock (gate) return current is not null; } }
+    public Task? ShutdownCompletion { get { lock (gate) return disposal; } }
     public long Generation { get { lock (gate) return current?.Generation ?? 0; } }
     public RuntimeConnectionState State
     {
@@ -166,6 +168,11 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRun
             var session = await task.ConfigureAwait(false) ?? throw new BridgeException("INTERNAL");
             epoch.Start.TrySetResult(session); // Retirement owns a late factory result.
         }
+        catch (RuntimeStartupCleanupException)
+        {
+            epoch.StartupCleanupFailed = true;
+            epoch.Start.TrySetException(new BridgeException("INTERNAL"));
+        }
         catch (OperationCanceledException)
         { epoch.Start.TrySetException(new BridgeException(epoch.Cancellation.IsCancellationRequested ? "CLOSED" : "CANCELLED")); }
         catch (BridgeException error) { epoch.Start.TrySetException(new BridgeException(error.Code)); }
@@ -246,7 +253,7 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRun
             try { epoch.Cancellation.Cancel(); } catch { failed = true; }
             IRuntimeSession? session = null;
             try { session = await epoch.Start.Task.ConfigureAwait(false); }
-            catch { /* A failed factory owns its partial initialization cleanup. */ }
+            catch { failed |= epoch.StartupCleanupFailed; }
             if (session is not null)
             { try { await session.DisposeAsync().ConfigureAwait(false); } catch { failed = true; } }
             if (failed) completion.TrySetException(new BridgeException("INTERNAL"));

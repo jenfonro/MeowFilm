@@ -1,4 +1,5 @@
 import Foundation
+import MeowRuntime
 import MeowMusicFeature
 import MeowJSON
 import MeowStorage
@@ -12,16 +13,17 @@ struct MusicNativeAccountURLCache {
     static let key = "music.platform.audio-values.v1"
     static let maximumBytes = 1_024 * 1_024
     static let retention: TimeInterval = 30 * 86_400
+    private static let audioFields = ["url", "full", "actualQuality", "bitrate", "sampleRate", "duration", "expiresAt", "licenseExpiresAt"]
 
-    struct Key: Codable, Hashable, Sendable {
+    struct Key: Hashable, Sendable {
         let scope: String
         let platform: String
         let nativeID: String
         let quality: String
     }
-    private struct Entry: Codable {
+    private struct Entry {
         let key: Key
-        let value: JSONValue
+        let value: RuntimeValue
         let savedAt: Date
         func usable(at now: Date) -> Bool {
             guard let audio = try? MusicNativeAccountURLCache.audio(value) else { return false }
@@ -29,13 +31,8 @@ struct MusicNativeAccountURLCache {
                 (audio.expiresAt == nil || audio.expiresAt!.addingTimeInterval(-10) > now)
         }
     }
-    private struct Document: Codable {
-        var version = 1
-        var entries: [Entry] = []
-    }
     private let store: DocumentStore?
     private var loaded = false
-    private var writable = true
     private var entries: [Entry] = []
     // A delayed pre-failure resolver must not reinsert a URL rejected by the
     // player. This is short-lived request state, never another disk schema.
@@ -45,7 +42,7 @@ struct MusicNativeAccountURLCache {
 
     /// Consume the shared audio fields. Unused fields never participate in
     /// admission and are not copied into the disposable cache.
-    static func audio(_ value: JSONValue) throws -> MusicNativeAudio {
+    static func audio(_ value: RuntimeValue) throws -> MusicNativeAudio {
         guard case .object(let fields) = value else { throw MusicServiceError.invalidMediaCandidate }
         let audio = try MusicAccountFields.nativeAccountAudio(fields)
         guard ["https", "http"].contains(audio.url.scheme?.lowercased() ?? ""),
@@ -76,34 +73,48 @@ struct MusicNativeAccountURLCache {
         loaded = true
         do {
             guard let data = try store?.read(key: Self.key) else { return }
-            guard data.count <= Self.maximumBytes else { writable = false; return }
-            let document = try JSONDecoder().decode(Document.self, from: data)
-            guard document.version == 1, document.entries.count <= 200 else { writable = false; return }
-            // A malformed/unknown document is a miss, never silently overwritten.
-            guard document.entries.allSatisfy({ Self.valid($0.key) && (try? Self.audio($0.value)) != nil }) else {
-                writable = false; return
-            }
-            for entry in document.entries where entry.usable(at: now) {
+            guard data.count <= Self.maximumBytes,
+                  let fields = try? JSONObject.decodeValue(data) as? JSONObject.Fields,
+                  (fields["version"] as? JSONNumber)?.exactDouble == 1,
+                  let rows = fields["entries"] as? [Any] else { return }
+            for row in rows {
+                guard let row = row as? JSONObject.Fields,
+                      let value = row["value"] as? JSONObject.Fields,
+                      let keyFields = row["key"] as? JSONObject.Fields,
+                      let scope = keyFields["scope"] as? String,
+                      let platform = keyFields["platform"] as? String,
+                      let nativeID = keyFields["nativeID"] as? String,
+                      let quality = keyFields["quality"] as? String,
+                      let savedAt = (row["savedAt"] as? JSONNumber)?.exactDouble else { continue }
+                var projected = JSONObject.Fields()
+                for name in Self.audioFields { projected[name] = value[name] }
+                guard let data = try? JSONObject.encode(projected),
+                      let value = try? RuntimeJSON.decode(data) else { continue }
+                let entry = Entry(key: .init(scope: scope, platform: platform, nativeID: nativeID, quality: quality),
+                                  value: value, savedAt: Date(timeIntervalSinceReferenceDate: savedAt))
+                guard Self.valid(entry.key), entry.usable(at: now) else { continue }
                 entries.removeAll { $0.key == entry.key }; entries.append(entry)
             }
             trim(at: now)
-        } catch { writable = false }
+        } catch {
+            // Reading the disposable cache is best effort; a later successful
+            // write can establish the current cache even after an I/O failure.
+        }
     }
 
-    mutating func value(for key: Key, at now: Date) -> JSONValue? {
+    mutating func value(for key: Key, at now: Date) -> RuntimeValue? {
         load(at: now); trim(at: now)
         guard let value = entries.last(where: { $0.key == key })?.value,
               let audio = try? Self.audio(value), !isRejected(audio.url, for: key, at: now) else { return nil }
         return value
     }
 
-    mutating func put(_ value: JSONValue, for key: Key, at now: Date) {
+    mutating func put(_ value: RuntimeValue, for key: Key, at now: Date) {
         load(at: now)
         guard Self.valid(key), let audio = try? Self.audio(value),
               !isRejected(audio.url, for: key, at: now),
               case .object(let fields) = value else { return }
-        let names = ["url", "full", "actualQuality", "bitrate", "sampleRate", "duration", "expiresAt", "licenseExpiresAt"]
-        let projected = JSONValue.object(fields.filter { names.contains($0.key) })
+        let projected = RuntimeValue.object(RuntimeObject(uniqueKeysWithValues: fields.filter { Self.audioFields.contains($0.key) }))
         let entry = Entry(key: key, value: projected, savedAt: now)
         guard entry.usable(at: now) else { return }
         entries.removeAll { $0.key == key }; entries.append(entry)
@@ -149,19 +160,24 @@ struct MusicNativeAccountURLCache {
     }
 
     private mutating func save() {
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        func encoded(_ entries: [Entry]) throws -> Data {
+            try RuntimeJSON.encode(.object(["version": .number(1), "entries": .array(entries.map { entry in
+                .object(["key": .object(["scope": .string(entry.key.scope), "platform": .string(entry.key.platform),
+                    "nativeID": .string(entry.key.nativeID), "quality": .string(entry.key.quality)]),
+                    "value": entry.value, "savedAt": .number(entry.savedAt.timeIntervalSinceReferenceDate)])
+            })]))
+        }
         do {
-            var data = try encoder.encode(Document(entries: entries))
+            var data = try encoded(entries)
             while data.count > Self.maximumBytes, !entries.isEmpty {
-                entries.removeFirst(); data = try encoder.encode(Document(entries: entries))
+                entries.removeFirst(); data = try encoded(entries)
             }
             // The byte budget also applies when persistence is absent/failed.
-            guard writable, let store else { return }
+            guard let store else { return }
             try store.write(data, key: Self.key)
         } catch {
             // A disk failure cannot turn usable media into failure.
             // Keep process-local eviction effective instead of reloading stale disk.
-            writable = false
         }
     }
 }

@@ -4,9 +4,16 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { NativeJsonProgram } from '@meowfilm/script-host/native-json';
 import { NativeEngine } from '../src/native-engine.js';
+import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 
 const timeout = 15_000;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+test('native JSON programs preserve unused numeric material across the actual QuickJS boundary', async t => {
+  const owner = program(t, 'globalThis.meowfilmProcess = input => ({ ...input, name: "after" });');
+  const text = '{"name":"before","extension":{"é":9007199254740993,"é":1.0000000000000001,"small":1e-400}}';
+  assert.equal(stringifyJSONValue(await owner.invoke(parseJSONText(text))), text.replace('"before"', '"after"'));
+});
 
 function program(t, source) {
   const owner = new NativeJsonProgram(source);
@@ -301,7 +308,7 @@ test('program failure and invalid JSON outputs reset the same source without los
     };`);
     assert.equal(await owner.invoke(null), 1);
     for (const [input, code] of [['throw', 'SCRIPT_EXCEPTION'], ['undefined', 'INVALID_ARGUMENT'],
-      ['cycle', 'SCRIPT_EXCEPTION']]) {
+      ['cycle', 'INVALID_ARGUMENT']]) {
       const original = owners.at(-1);
       const failed = assert.rejects(owner.invoke(input), { code });
       const next = owner.invoke(null);
@@ -313,7 +320,7 @@ test('program failure and invalid JSON outputs reset the same source without los
     await assert.rejects(bad.invoke(null), { code: 'INVALID_ARGUMENT' });
     assertReleased(owners.at(-1));
     const cycle = {}; cycle.self = cycle;
-    await assert.rejects(owner.invoke(cycle), TypeError);
+    await assert.rejects(owner.invoke(cycle), { code: 'INVALID_ARGUMENT' });
     assert.equal(await owner.invoke(null), 2, 'rejected host input never mutates program state');
   });
 

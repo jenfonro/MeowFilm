@@ -6,6 +6,7 @@ extension NativeMusicService {
     /// owner; new sources match one candidate against its fixed baseline.
     func registerSongs(_ input: [MJ], library: inout MJ, authoritative: Bool = false, playback: MJ? = nil,
                        acceptObservation: ((String) -> Bool)? = nil) throws -> [String] {
+        guard !input.isEmpty else { return [] }
         let preferences = try playback ?? read().playback
         guard let writer = activeSongWriter else { throw MusicServiceError.storageConflict }
         let store = MusicNativeLibraryAccessReader(database: writer, access: access)
@@ -23,7 +24,9 @@ extension NativeMusicService {
             // A retained projection is a reference, not a new observation.
             // Reading it must never restore fields removed by a newer result.
             let explicit = proposed["songId"].string
-            if !authoritative, !explicit.isEmpty, try store.containsSong(id: explicit) {
+            if !authoritative, !explicit.isEmpty, let data = try store.songData(id: explicit) {
+                let stored = try MJ.parse(data)
+                try musicRequire(UUID(uuidString: explicit) != nil && musicSame(stored["songId"].string, explicit), .songIDConflict)
                 result.append(explicit)
                 previous = (raw, explicit)
                 continue
@@ -58,10 +61,11 @@ extension NativeMusicService {
             let currentPrimary = existing["sources"].array.first?["sourceKey"].string
             let incomingPrimary = incoming.first?["sourceKey"].string
             let updatesPrimary = authoritative && currentPrimary == incomingPrimary
-            for field in ["title", "artist", "album", "duration", "artistNames"] {
+            for (field, value) in proposed.fields where
+                !["songId", "sources", "baselineDuration", "artworkSourceKey", "cover_url"].contains(field) {
                 if proposed[field] != song[field] &&
-                    (updatesPrimary || proposed[field] != .null && (song[field] == .null || song[field] == .string(""))) {
-                    song[field] = proposed[field]
+                    (updatesPrimary || value != .null && (song[field] == .null || song[field] == .string(""))) {
+                    song[field] = value
                 }
             }
             if song["baselineDuration"] == .null, let duration = evidence.duration { song["baselineDuration"] = .number(duration) }
@@ -81,6 +85,8 @@ extension NativeMusicService {
     func repositorySong(_ id: String, _ state: MusicDocument) throws -> MJ {
         let song = try state.song(id)
         guard song.isObject else { throw MusicServiceError.notFound }
+        try musicRequire(UUID(uuidString: id) != nil && musicSame(song["songId"].string, id), .songIDConflict)
+        _ = try MusicModel.sources(song)
         return song
     }
     func registeredSongID(_ value: MusicNativeTrackData) throws -> String {
@@ -230,7 +236,9 @@ extension NativeMusicService: MusicSongRepositoryReading {
         let state = try read()
         return try Dictionary(uniqueKeysWithValues: songIDs.compactMap { id in
             guard let data = try state.songRows.songData(id: id) else { return nil }
-            return (id, try MusicModel.track(MJ.parse(data), .init(kind: .library, id: id)))
+            let song = try MJ.parse(data)
+            try musicRequire(UUID(uuidString: id) != nil && musicSame(song["songId"].string, id), .songIDConflict)
+            return (id, try MusicModel.track(song, .init(kind: .library, id: id)))
         })
     }
     public func songChanges() async -> AsyncStream<Set<String>> {

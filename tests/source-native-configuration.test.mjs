@@ -1,3 +1,4 @@
+import { rawJSON } from '@meowfilm/runtime-bridge/json';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createScriptHost, ScriptHostError, SCRIPT_LIMITS } from '@meowfilm/script-host';
@@ -10,7 +11,7 @@ const contract = 'source.runtime.v2';
 const emptyPrivate = () => ({ cookies: [], storage: [] });
 const privateState = () => ({
   cookies: [['reader', [['fixture', { name: 'fixture', value: 'mock', domain: 'books.invalid',
-    path: '/', hostOnly: true, secure: false, sequence: 1, expires: null }]]]],
+    path: '/', hostOnly: true, secure: false, httpOnly: false, sameSite: null, sequence: 1, expires: null }]]]],
   storage: [['reader', [['fixture', { saved: true }]]]],
 });
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aCfoAAAAASUVORK5CYII=', 'base64');
@@ -289,32 +290,22 @@ test('the runtime-owned default restores and writes its library without native a
   assert.equal(disk.stored.has('private.json'), false);
 });
 
-test('snapshot validation is complete and atomic before any cancellation or session change', async t => {
+test('snapshot identity and consumed configuration failures remain atomic before session changes', async t => {
   const { rpc, host, disk } = fixture(t), a = source(), b = source('other');
   value(await rpc('library.apply', snapshot([a, b])));
   const stable = value(await rpc('library.list')), bytes = disk.read('private.json');
   const changed = { ...a, revision: 2, definition: definition('books', 'must-not-apply') };
   const invalid = [
     [snapshot([changed, { ...b, enabled: 'true' }], 2), 'INVALID_REQUEST'],
-    [snapshot([changed, { ...b, order: 1.5 }], 2), 'INVALID_REQUEST'],
-    [snapshot([changed, { ...b, name: '' }], 2), 'INVALID_REQUEST'],
     [snapshot([changed, { ...b, group: null }], 2), 'INVALID_REQUEST'],
     [snapshot([changed, { ...b, revision: 0 }], 2), 'INVALID_REQUEST'],
     [snapshot([changed, { ...b, sourceUrl: ' https://other.invalid/' }], 2), 'INVALID_REQUEST'],
-    [snapshot([changed, { ...b, private: emptyPrivate() }], 2), 'INVALID_REQUEST'],
     [snapshot([changed, { ...b, definition: {} }], 2), 'INVALID_REQUEST'],
     [snapshot([changed, { ...b, installationId: 'invalid\n' }], 2), 'INVALID_REQUEST'],
     [snapshot([changed, changed], 2), 'SOURCE_INTEGRITY'],
     [snapshot([changed, { ...b, sourceUrl: a.sourceUrl }], 2), 'SOURCE_INTEGRITY'],
-    [snapshot([changed, { ...b, protocol: 'qysg' }], 2), 'SOURCE_INTEGRITY'],
     [snapshot([changed, { ...b, protocol: 'cat' }], 2), 'UNSUPPORTED_PROTOCOL'],
-    [snapshot([changed, { ...b, definition: '{broken' }], 2), 'INVALID_REQUEST'],
-    [snapshot([changed, { ...b, definition: '{"ruleSearch":{},"ruleSearch":{}}' }], 2), 'INVALID_REQUEST'],
-    [snapshot([changed, { ...b, definition: '{"ruleSearch":{},"order":9007199254740992}' }], 2), 'INVALID_REQUEST'],
-    [snapshot([changed, { ...b, definition: '{"ruleSearch":{},"name":"\\ud800"}' }], 2), 'INVALID_REQUEST'],
-    [snapshot([changed, { ...b, definition: '{"ruleSearch":{},"nested":' +
-      '['.repeat(70) + '0' + ']'.repeat(70) + '}' }], 2), 'INVALID_REQUEST'],
-    [snapshot([changed, { ...b, definition: ' '.repeat(SCRIPT_LIMITS.maxSourceBytes) }], 2), 'LIMIT'],
+    [snapshot([changed, { ...b, definition: ' '.repeat(SCRIPT_LIMITS.maxSourceBytes + 1) }], 2), 'LIMIT'],
     [snapshot([changed], 0), 'INVALID_REQUEST'],
     [snapshot([changed], Number.MAX_SAFE_INTEGER + 1), 'INVALID_REQUEST'],
     [snapshot([changed], '2'), 'INVALID_REQUEST'],
@@ -333,6 +324,44 @@ test('snapshot validation is complete and atomic before any cancellation or sess
     assert.equal(host.captures.length, 0);
   }
   assert.equal(value(await search(rpc, a)).marker, 'ready');
+});
+
+test('snapshots project extras and isolate disabled or failing definitions from healthy sources', async t => {
+  const { rpc, host, owner } = fixture(t);
+  const disabled = source('disabled', { enabled: false, definition: '{broken', name: '', order: 1.5,
+    private: { storage: [['intruder', [['key', 'value']]]], cookies: [] }, actions: ['intruder'],
+    extra: rawJSON('9007199254740993') });
+  const activeBad = source('broken', { definition: '{broken' });
+  const healthy = source('healthy', { definition: '{"ruleSearch":{},"extra":9007199254740993}' });
+  const result = value(await rpc('library.apply', snapshot([disabled, activeBad, healthy])));
+  assert.equal(result.sources[0].name, '');
+  assert.equal(result.sources[0].order, 1.5);
+  assert.deepEqual(result.sources[0].actions, []);
+  assert.equal(result.sources[0].errorCode, undefined);
+  assert.ok(result.sources[1].errorCode);
+  assert.equal(result.sources[2].errorCode, undefined);
+  assert.deepEqual(host.loads.map(item => item.installationId), ['healthy']);
+  assert.deepEqual(owner.restored.map(item => item.state), [emptyPrivate()]);
+  assert.match(host.loads[0].source, /9007199254740993/);
+  assert.equal(value(await search(rpc, healthy)).name, 'healthy');
+  value(await rpc('library.apply', snapshot([disabled, activeBad, healthy])));
+  assert.equal(host.loads.length, 1);
+  value(await rpc('library.apply', snapshot([{ ...disabled, revision: 2, order: -0 }, activeBad, healthy], 2)));
+  assert.equal(value(await rpc('library.list')).sources.find(item => item.installationId === 'disabled').order, -0);
+});
+
+test('native private envelopes preserve exact extensions across unrelated source writes', async t => {
+  const { disk, call } = libraryFixture(t, { files: { 'private.json':
+    '{"schema":1,"extra":9007199254740993,"sources":[null,{"installationId":"unused","private":false,' +
+    '"extra":1.234567890123456789},{"installationId":"books","extra":1e400,' +
+    '"private":{"cookies":[],"storage":[],"extra":9007199254740995}}]}' } });
+  await call('library.apply', snapshot([source()]));
+  const saved = disk.read('private.json').toString();
+  for (const raw of ['9007199254740993', '1.234567890123456789', '1e400', '9007199254740995']) {
+    assert.ok(saved.includes(raw), raw);
+  }
+  assert.equal(disk.json('private.json').sources[0], null);
+  assert.equal(disk.json('private.json').sources[1].private, false);
 });
 
 test('global and per-source revisions reject stale and inconsistent snapshots, including removed leases', async t => {
@@ -597,13 +626,16 @@ for (const failure of ['failWrite', 'failAfterWrite']) {
   });
 }
 
-test('corrupt private data fences native snapshots without overwriting committed private state', async t => {
-  const disk = documents({ 'private.json': privateDocument('books', { cookies: {}, storage: [] }) });
-  const { rpc, host } = fixture(t, { documents: disk }), old = disk.read('private.json');
-  denied(await rpc('library.apply', snapshot([source()])), 'CORRUPT_STORAGE');
-  assert.deepEqual(disk.read('private.json'), old);
-  assert.deepEqual(disk.writes, []);
-  assert.equal(host.loads.length, 0);
+test('unadmitted private records do not fence healthy sources or lose their material', async t => {
+  const unused = { installationId: 'unused', private: { cookies: {}, storage: 7 }, extra: [1] };
+  const disk = documents({ 'private.json': { schema: 1, extension: { kept: true }, sources: [unused] } });
+  const { rpc, host, owner } = fixture(t, { documents: disk });
+  const result = value(await rpc('library.apply', snapshot([source()])));
+  assert.equal(result.sources[0].errorCode, undefined);
+  assert.equal(host.loads.length, 1);
+  assert.deepEqual(owner.restored[0].state, emptyPrivate());
+  assert.deepEqual(disk.json('private.json').sources[0], unused);
+  assert.deepEqual(disk.json('private.json').extension, { kept: true });
 });
 
 test('a new runtime must receive native definitions again; private data alone never restores sources', async t => {
@@ -621,7 +653,7 @@ test('a new runtime must receive native definitions again; private data alone ne
   assert.equal(second.host.loads.length, 1);
 });
 
-test('disabled QYSG definitions are validated but are never executed even when their script would fail', async t => {
+test('disabled QYSG definitions are never executed even when their script would fail', async t => {
   const { rpc, host } = fixture(t, { initialize: () => { throw new ScriptHostError('CAPABILITY_UNAVAILABLE'); } });
   const disabled = source('qysg', { protocol: 'qysg', enabled: false,
     definition: '<script>function invalid({</script>' });

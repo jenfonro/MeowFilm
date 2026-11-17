@@ -45,6 +45,53 @@ final class JSONObjectTests: XCTestCase {
         XCTAssertEqual(try JSONObject.decode(Data(#"{"n":1e400,"n":7}"#.utf8))["n"] as? Int, 7)
     }
 
+    func testExactDocumentRetainsDistinctUTF8MembersAndDecimalTokens() throws {
+        let bytes = Data(#"{"é":0.1234567890123456789012345,"e\u0301":1e400,"same":0,"same":2}"#.utf8)
+        let root = try XCTUnwrap(JSONObject.decodeValue(bytes) as? JSONObject.Fields)
+        XCTAssertEqual(root.count, 3)
+        XCTAssertEqual((root["é"] as? JSONNumber)?.literal, "0.1234567890123456789012345")
+        XCTAssertEqual((root["e\u{0301}"] as? JSONNumber)?.literal, "1e400")
+        XCTAssertEqual((root["same"] as? JSONNumber)?.literal, "2")
+        let reread = try XCTUnwrap(JSONObject.decodeValue(JSONObject.encode(root)) as? JSONObject.Fields)
+        XCTAssertEqual(reread.count, 3)
+        XCTAssertEqual((reread["é"] as? JSONNumber)?.literal, (root["é"] as? JSONNumber)?.literal)
+        XCTAssertEqual((reread["e\u{0301}"] as? JSONNumber)?.literal, "1e400")
+    }
+
+    func testFieldsIterateInFirstInsertionOrderWithLastDecodedMemberValue() throws {
+        let raw = #"{"z":0,"é":1e400,"a":1,"e\u0301":2,"\u007a":9007199254740993,"rows":[{"last":0,"first":1,"last":2}],"é":3}"#
+        let fields = try XCTUnwrap(JSONObject.decodeValue(Data(raw.utf8)) as? JSONObject.Fields)
+        XCTAssertEqual(fields.map { Data($0.key.utf8) }, ["z", "é", "a", "e\u{0301}", "rows"].map { Data($0.utf8) })
+        XCTAssertEqual(fields.count, 5)
+        XCTAssertEqual((fields["z"] as? JSONNumber)?.literal, "9007199254740993")
+        XCTAssertEqual((fields["é"] as? JSONNumber)?.literal, "3")
+        XCTAssertEqual((fields["e\u{0301}"] as? JSONNumber)?.literal, "2")
+        let rows = try XCTUnwrap(fields["rows"] as? [JSONObject.Fields])
+        let nested = try XCTUnwrap(rows.first)
+        XCTAssertEqual(nested.map(\.key), ["last", "first"])
+        XCTAssertEqual((nested["last"] as? JSONNumber)?.literal, "2")
+    }
+
+    func testFieldsUpdatesKeepTheirPositionAndReinsertionAppends() throws {
+        var fields = JSONObject.Fields()
+        fields["z"] = "first"; fields["é"] = "composed"; fields["e\u{0301}"] = "decomposed"
+        let original = fields
+        fields["z"] = NSNull(); fields["é"] = "updated"; fields["absent"] = nil
+        XCTAssertEqual(fields.map { Data($0.key.utf8) }, ["z", "é", "e\u{0301}"].map { Data($0.utf8) })
+        XCTAssertTrue(fields["z"] is NSNull)
+        XCTAssertEqual(fields["é"] as? String, "updated")
+        XCTAssertEqual(fields["e\u{0301}"] as? String, "decomposed")
+        fields["é"] = nil
+        XCTAssertEqual(fields.count, 2)
+        XCTAssertEqual(fields.map { Data($0.key.utf8) }, ["z", "e\u{0301}"].map { Data($0.utf8) })
+        fields["é"] = "reinserted"
+        XCTAssertEqual(fields.count, 3)
+        XCTAssertEqual(fields.map { Data($0.key.utf8) }, ["z", "e\u{0301}", "é"].map { Data($0.utf8) })
+        XCTAssertEqual(original.map { Data($0.key.utf8) }, ["z", "é", "e\u{0301}"].map { Data($0.utf8) })
+        XCTAssertEqual(original["z"] as? String, "first")
+        XCTAssertEqual(original["é"] as? String, "composed")
+    }
+
     func testMalformedJSONAndNonObjectRootsRemainInvalid() {
         for text in ["", "[]", "null", "42", "{}{}", "0 1", #"{"a":}"#, #"{"a":01}"#,
                      #"{"a":+1}"#, #"{"a":1.}"#, #"{"a":.1}"#, #"{"a":1e}"#,

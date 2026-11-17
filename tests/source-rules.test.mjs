@@ -194,6 +194,22 @@ test('ordinary extra fields and unused transform members neither execute nor blo
     }
   });
 
+test('rules RPC consumes only selected chapter identities and active text branches', { timeout }, async t => {
+  const { rpc } = setup(t);
+  const blocks = [null, { type: 'text', text: { unusable: true } }];
+  assert.deepEqual(value(await rpc('rules.process', { request: {
+    ...raw, blocks, rules: [rule({ scopeTitle: true, scopeContent: false, pattern: '书', replacement: '标题' })],
+  } })), { title: '标题', blocks });
+  for (const request of [
+    { ...raw, blocks, rules: [rule({})] },
+    { ...raw, blocks, rules: [], conversion: 'traditional' },
+    { operation: 'matchChapter', chapters: [null, {}], anchor: {} },
+  ]) denied(await rpc('rules.process', { request }), 'INVALID_REQUEST');
+  assert.deepEqual(value(await rpc('rules.process', { request: { operation: 'matchChapter',
+    chapters: [null, { name: 'B', chapterUrl: '/b' }], anchor: { chapterUrl: '/b' },
+  } })), { index: 1, requiresSelection: false });
+});
+
 test('transform sorts the complete native-owned rules stably, skips disabled rules and converts once at the end',
   { timeout }, async t => {
     const { rpc } = setup(t);

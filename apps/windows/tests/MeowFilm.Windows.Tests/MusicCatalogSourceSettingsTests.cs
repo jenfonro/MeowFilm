@@ -53,9 +53,6 @@ public static class MusicCatalogSourceSettingsTests
                 """{}""",
                 """{"platform":"kg"}""",
                 """{"ifRevision":0}""",
-                """{"ifRevision":0,"platform":"kg","extra":true}""",
-                """{"ifRevision":0,"platform":"kg","schema":1}""",
-                """{"ifRevision":0,"platform":"kg","revision":0}""",
                 """{"ifRevision":0,"platform":null}""",
                 """{"ifRevision":0,"platform":true}""",
                 """{"ifRevision":0,"platform":1}""",
@@ -90,13 +87,29 @@ public static class MusicCatalogSourceSettingsTests
                 using var duplicate = JsonDocument.Parse(input);
                 await Code(owner, "music.catalogSource.settings.save", duplicate.RootElement, "INVALID_REQUEST");
             }
-            await Code(owner, "music.catalogSource.settings.get", new { platform = "wy" }, "INVALID_REQUEST");
+            Settings(await Ok(owner, "music.catalogSource.settings.get", new { platform = "wy" }), "wy", 0);
+            Settings(await Ok(owner, "music.catalogSource.settings.save",
+                new { ifRevision = 0, platform = "wy", extra = true, schema = 9, revision = -1 }), "wy", 0);
             using var duplicateGet = JsonDocument.Parse("""{"extra":0,"extra":1}""");
             await Code(owner, "music.catalogSource.settings.get", duplicateGet.RootElement, "INVALID_REQUEST");
             await Code(owner, "music.catalogSource.settings.reconcile", null, "CAPABILITY_UNAVAILABLE");
             Settings(await Ok(owner, "music.catalogSource.settings.get"), "wy", 0);
             Equal(0, store.Writes);
             Equal<byte[]?>(null, store.Data);
+        });
+        yield return Case("durable extensions survive selected platform edits", async (owner, store) =>
+        {
+            await Ok(owner, "music.catalogSource.settings.save", new { ifRevision = 0, platform = "kg" });
+            await owner.AbortAsync();
+            var document = JsonNode.Parse(store.Data!)!.AsObject();
+            document["areas"]!["native-catalog-source"]!["extra"] = new JsonObject { ["nested"] = true };
+            store.Data = LJ.Bytes(document);
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+            var restored = await Ok(reopened, "music.catalogSource.settings.get");
+            Settings(restored, "kg", 1);
+            Check(restored.GetProperty("settings").GetProperty("extra").GetProperty("nested").GetBoolean(), "extension missing from read");
+            Settings(await Ok(reopened, "music.catalogSource.settings.save", new { ifRevision = 1, platform = "wy" }), "wy", 2);
+            Check(store.State("native-catalog-source")["extra"]!["nested"]!.GetValue<bool>(), "extension lost");
         });
         yield return Case("stale revision fails even for the already selected platform", async (owner, store) =>
         {
@@ -130,7 +143,6 @@ public static class MusicCatalogSourceSettingsTests
                 """{"schema":1,"revision":1}""",
                 """{"revision":1,"platform":"kg"}""",
                 """{"schema":1,"platform":"kg"}""",
-                """{"schema":1,"revision":1,"platform":"kg","extra":true}"""
             })
             {
                 var document = JsonNode.Parse(original)!.AsObject();
@@ -327,7 +339,6 @@ public static class MusicCatalogSourceSettingsTests
     private static void Settings(JsonElement reply, string platform, long revision)
     {
         var settings = reply.GetProperty("settings");
-        Equal(3, settings.EnumerateObject().Count());
         Equal(1, settings.GetProperty("schema").GetInt32());
         Equal(revision, settings.GetProperty("revision").GetInt64());
         Equal(platform, settings.GetProperty("platform").GetString());

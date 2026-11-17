@@ -37,7 +37,7 @@ let package = Package(
         .target(name: "MeowPlaybackVideo", dependencies: ["MeowPlayback",
             .product(name: "MeowVideoKernel", package: "videokernel")]),
         .target(name: "MeowUI", dependencies: []),
-        .target(name: "MeowRuntime", dependencies: []),
+        .target(name: "MeowRuntime", dependencies: ["MeowJSON"]),
         .target(name: "MeowMusicFeature", dependencies: ["MeowContracts", "MeowStorage", "MeowPlayback", "MeowUI"]),
         .target(name: "MeowMusicPlatform", dependencies: ["MeowMusicFeature", "MeowAudio", "MeowContracts", "MeowJSON", "MeowAccounts", "MeowStorage", "MeowRuntime", "MeowUI"]),
         .target(name: "MeowMusicNativeService", dependencies: ["CSQLite", "MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowMusicPlatform", "MeowRuntime", "MeowStorage"]),

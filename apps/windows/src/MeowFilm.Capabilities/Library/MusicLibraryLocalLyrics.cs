@@ -5,8 +5,14 @@ namespace MeowFilm.Capabilities.Library;
 public sealed partial class MusicLibraryOwner
 {
     private const string LocalLyricsArea = "native-local-lyrics";
-    private JsonObject LocalLyrics(MusicLibraryData doc) => Value(doc, LocalLyricsArea) as JsonObject ??
+    private JsonObject LocalLyrics(MusicLibraryData doc)
+    {
+        var value = Area(doc, LocalLyricsArea) ??
         LJ.Obj(("schema", 1), ("items", new JsonArray()));
+        try { ValidateLocalLyrics(value); }
+        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
+        return value;
+    }
 
     private static void ValidateLocalLyrics(JsonObject state)
     {

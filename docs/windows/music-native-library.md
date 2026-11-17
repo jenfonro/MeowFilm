@@ -51,7 +51,7 @@ ValueTask DisposeAsync();
 
 `AppendQueueAsync` 是完整歌单的进程内 next 入口，返回 `{ok:true,currentId,version,mode}`，不返回全量 entryIds。它在唯一串行边界核对 `expectedVersion`，创建独立 occurrence 并将整段按输入顺序插在当前曲之后，一次 CAS、一次版本递增；当前曲、模式及旧优先队列保留，新段优先于旧 priority。空队列选中首曲且 priority 为空，不调用媒体播放。失败不分批落盘；CAS 准入前取消不写入，准入后报告真实结果，未知写入使用既有 reconcile 机制，不重放。
 
-普通 `music.queue.append` 接受 `songs/context/next`，保持 `entryIds` 回执与 512KiB 输入字节边界，不接受 `expectedVersion`。完整入口沿现有 16MiB 完整输入边界；控制 area 每条仍限 8MiB，歌曲不再受整库 8MiB 文档上限。两者不以歌曲条数截断，空输入不允许。队列当前 schema 为 1，entry 只存 `id/songId/context`，读取时由唯一歌曲仓库投影资料。
+普通 `music.queue.append` 接受 `songs/context/next`，保持 `entryIds` 回执与 512KiB 输入字节边界，不使用调用方传入的 `expectedVersion`。完整入口沿现有 16MiB 完整输入边界；控制 area 每条仍限 8MiB，歌曲不再受整库 8MiB 文档上限。两者不以歌曲条数截断，空输入不允许。队列当前 schema 为 1，entry 只存 `id/songId/context`，读取时由唯一歌曲仓库投影资料。
 
 ## 唯一当前数据库
 
@@ -66,7 +66,14 @@ ValueTask DisposeAsync();
 
 单连接、Pooling=false、FULL 同步、PERSIST rollback journal；一次短 SQL 事务写实际变更歌曲／来源／控制与回执。主库与固定 journal 复用平台 no-follow／单链接 pins，初始化在原生 exclusive locking 中完成热 journal 恢复，再恢复 normal locking；不删除热日志或关闭耐久。路径及同权限恶意并发限制见[存储安全](protected-storage.md#music-record-database)。
 
-普通读只取得控制状态或按 ID／来源键取得相关歌曲；命令的逐记录工作集只保留本轮读写，发布的长期 reader 不缓存全库歌曲。未知或损坏的新格式返回 `CORRUPT_STORAGE`，不覆盖为空库；持久化的非法策略不当作用户写入参数返回。来源、歌曲与控制引用仍按现行领域契约校验；本代次已验证且不会删除的歌曲关系无需在小型控制提交时重复查询，新增关系仍核对真实记录。缺少可选 area 表示尚未创建，已有 null／错误类型不是空状态。
+普通读只取得控制状态或按 ID／来源键取得相关歌曲；命令的逐记录工作集只保留本轮读写，发布的长期 reader 不缓存全库歌曲。
+
+- 控制与单记录 JSON 保留实际字节／深度预算及重复属性检查，不要求重新编码后字节全等。未消费的 area、集合、队列／历史和歌曲／来源扩展随本次保存保留，包括未转换的大整数与高精度小数。数据库 header 仍须满足当前 format／scope／generation／receipt。
+- 仅在实际 getter／command 处校验当前动作涉及的 area；未知 area 不获得命令权限，也不阻断其他 area，未修改值原样保留。脚本实例私有存储不在此库。
+- 缺少可选 area 表示该 area 尚未创建；已有 `null`、错误类型或错误 schema 不是空状态，在实际消费时明确失败，不写回修复或覆盖为空库。
+- 不在加载／每次提交时遍历所有 area 或要求歌曲等于 Normalize 投影。所选歌曲身份、录音唯一 owner、队列引用／current、修订与账号绑定仍须成立；持久化的非法策略不当作用户写入参数返回。整库同步仍核对其实际遍历的集合／绑定／journal 关系。
+- 未选坏记录不阻断无关操作；该记录的 UUID、来源键或本地文件身份被再次选中时明确失败，不另建 owner 或重绑来源。封面策略只应用本次集合成员；显式全库策略变更由其消费者读取全部歌曲。
+- 本代次已验证且不会删除的歌曲关系无需在小型控制提交时重复查询，新增关系仍核对真实记录；队列加载／导航与引用校验不会因消费边界收窄而取消。
 
 未知提交保留精确 Before／After 回执；只读对账为 After 时结算本次来源观察代次，为 Before 时恢复命令前随机导航及失败状态，不重放原操作。直接歌曲／来源读取与关闭、准备关闭在同一同步读门结算；owner 关闭不依靠释放借用数据库来撤销读取。
 
@@ -101,7 +108,7 @@ playback-settings
 
 ## 在线设置当前格式
 
-`online-settings` 的当前格式为 schema 3，字段仅有：
+`online-settings` 的当前格式为 schema 3，消费以下必需字段：
 
 ```json
 {
@@ -111,11 +118,11 @@ playback-settings
 }
 ```
 
-- 缺少该 area 时，`music.settings.get` 返回上述缺省 `settings`，不制造 area 或文档。
-- `music.settings.save` 必须且只能携带 `ifRevision` 和 `lyrics`；成功保存推进一次 revision，旧 revision 返回 `REVISION_CONFLICT`。当前读写格式均不包含全局音源选择。
-- 已存在该 area 时按封闭协议校验：必须为 schema 3，完整且仅包含 `schema`、`revision`、`lyrics`，各字段类型和值须合法；不符合契约即失败，原文档不覆写。
-- 读取和重启不写入；保存通过 owner gate 和完整文档 CAS 持久化。未知提交由显式 reconcile 核对实际结果，不重放写入。
-- 在线设置保存未知提交后，后续命令封闭，使用显式 `ReconcileAsync` 读回 before/after 指纹。结算不重放写入，也不替换 pending；第三状态保持冲突。
+- 缺少该 area 时，`music.settings.get` 返回上述缺省 `settings`，不制造 area 或写入数据库。
+- `music.settings.save` 必须携带 `ifRevision` 和 `lyrics`，未消费请求字段不影响当前动作；成功保存推进一次 revision，旧 revision 返回 `REVISION_CONFLICT`。当前动作不消费全局音源选择，已有同名扩展不赋予该设置音源控制权。
+- 已存在该 area 时在实际读取／保存处校验必需字段：schema 必须是数值 3（`3.0`／`3e0` 同值可读），revision 为合法安全整数、lyrics 为布尔值；额外字段不作为拒绝条件，已有扩展随保存保留。未知 schema、重复属性及实际使用的坏字段明确失败，原记录不覆写。
+- 读取和重启不写入；保存通过 owner gate 和 generation／receipt CAS 写入实际控制变更。未知提交由显式 reconcile 核对实际结果，不重放写入。
+- 在线设置保存未知提交后，后续命令封闭，使用显式 `ReconcileAsync` 读回 Before／After generation／receipt。结算不重放写入，也不替换 pending；第三状态保持冲突。
 - 相关公开行为用例位于 `MusicNativeLibraryTests.cs` 和 `MusicOnlineSettingsTests.cs`；执行结果由集中验证记录。
 
 ## 浏览数据源设置当前格式
@@ -131,9 +138,9 @@ playback-settings
 ```
 
 - `music.catalogSource.settings.get` 返回 `settings`；缺少该 area 时返回上述缺省值，读取不写盘。
-- `music.catalogSource.settings.save` 只接收 `ifRevision` 和 `platform`，平台仅允许 `wy/kg`；revision 不符返回 `REVISION_CONFLICT`，同值保存不写盘，改变平台只推进本设置的 revision。
+- `music.catalogSource.settings.save` 消费 `ifRevision` 和 `platform`，已有扩展保留；平台仅允许 `wy/kg`；revision 不符返回 `REVISION_CONFLICT`，同值保存不写盘，改变平台只推进本设置的 revision。
 - 该偏好只控制首页与频道，不改详情资源平台、账号、搜索偏好、音源启停或在线设置；唯一 writer 仍是本 owner。
-- 未知 CAS 由本职责的权威 get 核对 before/after 指纹结算，不重放保存，也不替其他职责结算。测试归属为 `MusicCatalogSourceSettingsTests.cs`。
+- 未知 CAS 由本职责的权威 get 核对 Before／After generation／receipt 结算，不重放保存，也不替其他职责结算。测试归属为 `MusicCatalogSourceSettingsTests.cs`。
 
 ## 官方音源设置当前格式
 
@@ -157,18 +164,18 @@ playback-settings
 
 Library owner contract 为 `0.7.0`。
 
-wrapper 只有以下字段：
+wrapper 消费以下必需字段：
 
 ```json
 {
-  "schema": 2,
+  "schema": 3,
   "scope": "local",
   "revision": 0,
   "library": {}
 }
 ```
 
-`wrapper.revision` 必须等于 `library.revision`。`library` 只有：
+`wrapper.revision` 必须等于 `library.revision`。`library` 消费以下字段：
 
 ```text
 version ownerId revision nextId collections accounts networkPlaylists
@@ -190,14 +197,14 @@ version ownerId revision nextId collections accounts networkPlaylists
 
 ### 网络引用字段与回执
 
-`networkPlaylists` 是独立数组，每项严格为：
+`networkPlaylists` 是独立数组，每项消费以下字段：
 
 ```text
 id platform remoteId name cover count revision present subscription intent
 ```
 
 - `id` 固定为 `network:<platform>:<remoteId>`；`platform` 允许 `wy/tx/kg/kw/mg`。`remoteId` 使用共同平台结果中的非空定位字符串，原生不猜测数字格式、长度、字符集或前缀。
-- `cover` 是清理后的公开 URL；`count` 是非负展示整数，不表示本地成员数量。该类型没有 `songs/order/bindings`。
+- `cover` 是清理后的公开 URL；`count` 是非负展示整数，不表示本地成员数量。该类型不消费 `songs/order/bindings` 扩展，也不因此登记成员或获得写权限。
 - `present` 是本地引用可见性。`subscription` 为 `null` 或 `{accountId,present,locator}`；账号必须对应 `library.accounts[platform]`。`locator` 保存共同平台返回的当前不透明定位对象，不保存凭据；字段转换与实际写入配方归 Node，原生不按平台字段白名单再次解析。
 - `intent` 为 `null` 或 `{accountId,present}`，记录已绑定账号的明确本地操作。即使当时开关关闭也保留意图，但不发请求；重新开启时交给原同步协调器先拉取。未绑定的纯本地引用没有账号意图。
 - 取消后仍需基线、意图或耐久 fence 的记录以 `present=false` 保留；公开列表不显示它。无这些关系的纯本地记录可直接移除。
@@ -269,9 +276,9 @@ music.history.restorePlaylist
 music.history.recordPlayed
 ```
 
-原生持续推荐在同一 owner 内使用私有 `music.queue.recommendation.*` 事务，application 普通调用不可用。`enter` 通过 `capture` 明确是否捕获原队列 checkpoint，并可保留实际当前 seed occurrence；心动首批完整入队。`append` 核对 `expectedVersion` 并复用现有队列尾部追加算法，私有回执包含全部新增 `entryIds`，不改变完整目录 next 入口的公开响应。它可携带新批次内的 `selectIndex`，在同一次 envelope CAS 中追加整批并选择指定 occurrence；不携带时保留当前选择、已有 next priority 和队列 source，不把候选入队冒充进入推荐。随后实际选择活会话推荐 occurrence 时，由协调器的只读 provenance 查询提供 source，唯一队列 writer 在选择 CAS 中提交；无活会话时不会从旧 context 复活来源。原列表来源仍保存在 checkpoint 或原 occurrence context。完整批次保留全部 occurrence，仍服从既有请求／响应字节和持久 envelope 资源校验。
+原生持续推荐在同一 owner 内使用私有 `music.queue.recommendation.*` 事务，application 普通调用不可用。`enter` 通过 `capture` 明确是否捕获原队列 checkpoint，并可保留实际当前 seed occurrence；心动首批完整入队。`append` 核对 `expectedVersion` 并复用现有队列尾部追加算法，私有回执包含全部新增 `entryIds`，不改变完整目录 next 入口的公开响应。它可携带新批次内的 `selectIndex`，在同一次 SQL 事务 中追加整批并选择指定 occurrence；不携带时保留当前选择、已有 next priority 和队列 source，不把候选入队冒充进入推荐。随后实际选择活会话推荐 occurrence 时，由协调器的只读 provenance 查询提供 source，唯一队列 writer 在选择 CAS 中提交；无活会话时不会从旧 context 复活来源。原列表来源仍保存在 checkpoint 或原 occurrence context。完整批次保留全部 occurrence，仍服从既有请求／响应字节和控制 area 资源校验。
 
-私有 `restore` 接受 `nonce/expectedVersion/checkpoint`，心动与主动单曲推荐传 `retainCurrent=true`。owner 从实际队列取当前 occurrence，在 checkpoint 原 currentId 之后插入并选中；同 occurrence 已存在时不重复，空 checkpoint 保留当前曲，同录音不同 occurrence 不合并。原条目 context、队列 source 及导航状态来自 checkpoint；选中的 occurrence 从 next priority 移除。恢复与合并共用一次 envelope CAS，不另行 append 或分次落盘。相似、FM 和搜索自动推荐不捕获恢复 checkpoint。`playback-settings.mode` 只有 1／2／3，独立于 checkpoint，不在进入或恢复时改写。
+私有 `restore` 接受 `nonce/expectedVersion/checkpoint`，心动与主动单曲推荐传 `retainCurrent=true`。owner 从实际队列取当前 occurrence，在 checkpoint 原 currentId 之后插入并选中；同 occurrence 已存在时不重复，空 checkpoint 保留当前曲，同录音不同 occurrence 不合并。原条目 context、队列 source 及导航状态来自 checkpoint；选中的 occurrence 从 next priority 移除。恢复与合并共用一次 generation／receipt CAS，不另行 append 或分次落盘。相似、FM 和搜索自动推荐不捕获恢复 checkpoint。`playback-settings.mode` 只有 1／2／3，独立于 checkpoint，不在进入或恢复时改写。
 
 这些事务的 nonce、checkpoint 与算法／逐曲反馈 proof 不作为可恢复推荐会话持久化。丢失 ACK 只通过 nonce reconcile 读取真实结果，不重放 append／select／restore；成功恢复才消费 checkpoint，确认未应用保留 checkpoint 供新 nonce 重试。恢复原队列、取消或关闭按[推荐生命周期](music-recommendations.md)释放 checkpoint。
 
@@ -298,7 +305,7 @@ music.online.song
 
 `native-appearance` 使用 schema 1、revision CAS：`playlistView` 为 grid/list，`playerTheme` 为 starlight，`colorMode` 为 song/fixed；`colorPalette` 接受当前预设键或严格不透明 `#RRGGBB`（UI 提交统一大写），沿同一外观保存／权威重读路径消费。程序背景主题不属于音乐库，见[桌面接线](desktop-shell.md)。
 
-`native-desktop-lyrics` 是独立 schema 1 area，含 `schema`、`revision`、`layout`（single/double）、`normalColor`、`highlightColor`，以及可选窗口 `geometry`。几何对象含显示器设备名 `monitor`、相对该显示器工作区左上角的 DIP 偏移 `x`／`y` 和 DIP 尺寸 `width`／`height`；不带几何的既有设置仍可读取。颜色为不透明 `#RRGGBB`，保存规范为大写；缺失 area 只读返回单行、普通色 `#FFB5C5`、高亮色 `#FFF2A8`，不迁移或重写其他 area。`music.lyrics.desktop.settings.save` 接受 `ifRevision`、三个原设置值和可选 `geometry`，返回权威 `settings`；未知字段拒绝，无变化不写盘。歌词校正、锁定与源译文开关不跨重启保存。消费者在成功回执或对应权威读取后才安装值，失败通过现有通知通道报告；具体窗口交互见[原生歌词应用链](music-lyric-application.md)。
+`native-desktop-lyrics` 是独立 schema 1 area，含 `schema`、`revision`、`layout`（single/double）、`normalColor`、`highlightColor`，以及可选窗口 `geometry`。几何对象含显示器设备名 `monitor`、相对该显示器工作区左上角的 DIP 偏移 `x`／`y` 和 DIP 尺寸 `width`／`height`；不带几何的既有设置仍可读取。颜色为不透明 `#RRGGBB`，保存规范为大写；缺失 area 只读返回单行、普通色 `#FFB5C5`、高亮色 `#FFF2A8`，不迁移或重写其他 area。`music.lyrics.desktop.settings.save` 接受 `ifRevision`、三个原设置值和可选 `geometry`，返回权威 `settings`；未消费字段不作为拒绝条件，已有扩展保留；无变化不写盘。歌词校正、锁定与源译文开关不跨重启保存。消费者在成功回执或对应权威读取后才安装值，失败通过现有通知通道报告；具体窗口交互见[原生歌词应用链](music-lyric-application.md)。
 
 ## 事务、取消与关闭
 

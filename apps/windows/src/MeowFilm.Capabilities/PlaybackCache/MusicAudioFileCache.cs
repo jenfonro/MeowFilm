@@ -489,13 +489,12 @@ internal sealed partial class MusicAudioFileCache
             await using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write,
                 FileShare.Read | FileShare.Delete, 1, FileOptions.Asynchronous))
             {
-                using var input = await HttpMediaInput.OpenAsync(new Uri(info["url"]!.GetValue<string>()),
+                long size = await NativeHttpMediaTransfer.CopyCompleteAsync(new Uri(info["url"]!.GetValue<string>()),
                     info["kind"]?.GetValue<string>() == "script" && info["headers"] is JsonObject headers
                         ? headers.ToDictionary(pair => pair.Key, pair => pair.Value!.GetValue<string>(), StringComparer.OrdinalIgnoreCase)
-                        : new Dictionary<string, string>(), httpOptions, ct).ConfigureAwait(false);
-                prepared?.BeginFile(path, input.Length);
-                long size = await input.CopyCompleteAsync(output, maximum, ct,
-                    prepared is null ? null : prepared.ReceivedBytes).ConfigureAwait(false);
+                        : new Dictionary<string, string>(), output, maximum, httpOptions, ct,
+                    prepared is null ? null : prepared.ReceivedBytes,
+                    prepared is null ? null : length => prepared.BeginFile(path, length)).ConfigureAwait(false);
                 if (expectedSize > 0 && size != expectedSize) return;
                 await output.FlushAsync(ct).ConfigureAwait(false);
                 output.Flush(flushToDisk: true);

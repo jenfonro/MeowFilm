@@ -101,8 +101,10 @@ public static class MusicNativeScriptTests
         Check(update.InstallationId == Installation && update.SourceRevision > upload.SourceRevision);
         Check(f.Runtime.Requests.Last().Method == "music.script.sources.update" &&
             f.Runtime.Requests.Last().Parameters["sourceRevision"]!.GetValue<long>() == update.SourceRevision);
-        Check(f.Store.Writes == 0, "native documents hold no installation facts");
-        await Error(f.Owner, "music.sources.detail", new { installationId = Installation, extra = 1 }, "INVALID_REQUEST");
+        Check(f.Store.Writes == 0 && f.Store.Snapshot().Areas.Count == 0 && f.Store.SongIds().Count == 0,
+            "native music records hold no installation facts");
+        await Ok(f.Owner, "music.sources.detail", new { installationId = Installation, extra = 1 });
+        Check(f.Runtime.Requests.Last().Method == "music.script.sources.detail");
     }
     private static async Task CompleteSource()
     {
@@ -303,10 +305,14 @@ public static class MusicNativeScriptTests
             quality = "auto" }, "QUALITY_UNAVAILABLE");
         await Error(f.Owner, "music.online.resolve", new { installationId = Installation, platform = "kw", song = Song(),
             quality = "320k" }, "RECORDING_UNAVAILABLE");
-        await Error(f.Owner, "music.online.resolve", new { installationId = Installation, platform = "wy", song = Song(),
-            quality = "320k", generation = 4 }, "INVALID_REQUEST");
         Check(f.Runtime.Requests.Count(entry => entry.Method == "music.script.resolve") == calls,
             "rejected requests never reach a script");
+        var extra = await Ok(f.Owner, "music.online.resolve", new { installationId = Installation, platform = "wy", song = Song(),
+            quality = "320k", generation = -1 });
+        Check(extra.GetProperty("generation").GetInt64() == 4 &&
+            f.Runtime.Requests.Count(entry => entry.Method == "music.script.resolve") == calls + 1 &&
+            JsonNode.DeepEquals(f.Runtime.Requests.Last(entry => entry.Method == "music.script.resolve").Parameters, request),
+            "unused generation neither rejects nor changes the exact script request");
         f.Runtime.Business = (_, p) => new { installationId = Installation, generation = 4, contentHash = new string('a', 64),
             platform = "wy", quality = "128k", url = "https://media.invalid/b.mp3", headers = new { }, expiresAt = (long?)null };
         await Error(f.Owner, "music.online.resolve", new { installationId = Installation, platform = "wy", song = Song(),

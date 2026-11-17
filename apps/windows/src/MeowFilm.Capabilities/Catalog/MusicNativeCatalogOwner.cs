@@ -211,12 +211,18 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
             Guard(signal, captured);
             var songShape = method switch
             {
-                "music.catalog.describe" or "music.catalog.chorus" or "music.catalog.channels" => MusicLibraryOwner.PlatformSongShape.None,
+                "music.catalog.describe" or "music.catalog.chorus" or "music.catalog.channels" or
+                    "music.catalog.playlist.prepare" or "music.catalog.playlist.discard" => MusicLibraryOwner.PlatformSongShape.None,
                 "music.catalog.song" => MusicLibraryOwner.PlatformSongShape.SongDetail,
                 "music.catalog.search" => Text(input, "kind", "songs") == "songs"
                     ? MusicLibraryOwner.PlatformSongShape.Page : MusicLibraryOwner.PlatformSongShape.None,
                 _ => MusicLibraryOwner.PlatformSongShape.Catalog
             };
+            if (method is "music.catalog.playlist" or "music.catalog.search" or "music.catalog.channels" or
+                "music.catalog.personalPlaylists" or "music.catalog.daily" or "music.catalog.fm" or
+                "music.catalog.similar" or "music.catalog.heartbeat" or "music.catalog.queueRecommendations" or "music.catalog.album")
+                Check(result.ValueKind == JsonValueKind.Object && result.TryGetProperty("items", out var items) &&
+                    items.ValueKind == JsonValueKind.Array, "INVALID_RESPONSE");
             result = await library.AdoptPlatformResultAsync(result, signal,
                 authoritative: method != "music.catalog.search" || SearchSongs is null, observation: observation,
                 shape: songShape).ConfigureAwait(false);

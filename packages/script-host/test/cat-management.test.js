@@ -7,8 +7,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCatRuntime } from '../src/cat-runtime.js';
-import { validateCatSettings } from '../src/cat-settings.js';
 import { fault } from '../src/errors.js';
+import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 
 const source = value => `module.exports = { home() { return { value: ${JSON.stringify(value)} }; } };`;
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -142,6 +142,25 @@ test('Cat management persists local identity and only successful changed content
     assert.equal(disk(runtime).scripts.find(item => item.installationId === 'local').name, '已编辑');
     assert.equal(existsSync(join(runtime.dataRoot, 'sources', installed.sourceHash + '.js')), false);
   });
+
+test('Cat unrelated settings and script extensions survive loading and editing without rounding', { timeout: 30000 }, async t => {
+  const runtime = runtimeFor(t);
+  await runtime.install({ installationId: 'exact-json', source: source('live'), enabled: false });
+  const path = (await runtime.status()).settingsPath;
+  const document = parseJSONText(readFileSync(path, 'utf8'));
+  const extension = parseJSONText('{"é":9007199254740993,"é":1.0000000000000001,"large":1e400}');
+  document.extension = extension;
+  document.scripts[0].extension = extension;
+  document.scripts[0].config.extension = extension;
+  writeFileSync(path, stringifyJSONValue(document));
+  await runtime.setEnabled('exact-json', true);
+  assert.equal((await runtime.invoke(target('exact-json'))).value, 'live');
+  await runtime.edit({ installationId: 'exact-json', name: 'changed' });
+  const saved = parseJSONText(readFileSync(path, 'utf8'));
+  assert.equal(saved.scripts[0].name, 'changed');
+  for (const value of [saved.extension, saved.scripts[0].extension, saved.scripts[0].config.extension])
+    assert.equal(stringifyJSONValue(value), stringifyJSONValue(extension));
+});
 
 test('Cat failed activation restores old executable source and description and persists a separate update failure',
   { timeout: 30000 }, async t => {
@@ -850,35 +869,6 @@ test('Cat preserves enabled intent and timestamps when activation or restart fai
     assert.equal(result.updatedAt, null);
     assert.equal((await runtime.setEnabled('failed', false)).state, 'disabled');
     await assert.rejects(runtime.restart('failed'), { code: 'DISABLED' });
-  });
-
-test('Cat legacy settings migrate only real old fields; new metadata rejects partial or builtin records',
-  { timeout: 30000 }, async t => {
-    const root = rootFor(t);
-    const text = source('legacy'), sourceHash = digest(text);
-    mkdirSync(join(root, 'sources'));
-    writeFileSync(join(root, 'sources', sourceHash + '.js'), text);
-    const legacy = { version: 1, port: 0, providers: {}, mappings: [], scripts: [
-      { installationId: 'legacy', sourceHash, enabled: false, version: '1', config: {} },
-    ] };
-    writeFileSync(join(root, 'settings.json'), JSON.stringify(legacy));
-    const runtime = runtimeFor(t, { dataRoot: root });
-    const item = (await runtime.start()).instances[0];
-    assert.equal(item.name, 'legacy');
-    assert.equal(item.sourceType, 'local');
-    assert.equal(item.sourceUrl, null);
-    assert.equal(item.importedAt, null);
-    assert.equal(item.updatedAt, null);
-    assert.equal(item.enabled, false);
-    await runtime.edit({ installationId: 'legacy', name: '历史猫源' });
-    assert.equal(disk(runtime).scripts[0].name, '历史猫源');
-    assert.equal(disk(runtime).scripts[0].importedAt, null);
-    assert.throws(() => validateCatSettings({ ...legacy, scripts: [
-      { ...legacy.scripts[0], name: 'partial' },
-    ] }), { code: 'INVALID_ARGUMENT' });
-    const current = disk(runtime);
-    current.scripts[0].sourceType = 'builtin';
-    assert.throws(() => validateCatSettings(current), { code: 'INVALID_ARGUMENT' });
   });
 
 test('Cat accepted Buffer and syntax update failures retain the real owner and persist the update error',

@@ -100,6 +100,7 @@ final class NativeMusicScriptServiceTests: XCTestCase {
     }
     func testStorageFailuresAndHostFailureAreNotEmptySourceLists() async throws {
         let runtime = MusicScriptTestRuntime()
+        // Count borrower starts, not the App session's independent reconnects.
         let service = NativeMusicScriptService(connection: { try await runtime.connect() })
         await service.start()
         await runtime.fail("CORRUPT_STORAGE")
@@ -239,7 +240,7 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         await session.close()
     }
 
-    func testMusicInfoUsesStrictRuntimeJSONWithoutCanonicalKeyMerging() throws {
+    func testMusicInfoUsesObjectJSONWithoutCanonicalKeyMerging() throws {
         let bytes = Data(#"{"\u00e9":"composed","e\u0301":"decomposed","中文":null}"#.utf8)
         let value = try NativeMusicScriptService.musicInfo(bytes)
         guard case .object(let fields) = value else { return XCTFail("object required") }
@@ -247,7 +248,7 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         XCTAssertEqual(fields["\u{e9}"], .string("composed"))
         XCTAssertEqual(fields["e\u{301}"], .string("decomposed"))
         XCTAssertEqual(try RuntimeJSON.decode(RuntimeJSON.encode(value)), value)
-        for invalid in [Data([0xff]), Data(#"{"key":1,"key":2}"#.utf8), Data(#"{"n":9007199254740992}"#.utf8), Data("null".utf8)] {
+        for invalid in [Data([0xff]), Data(#"{"key":}"#.utf8), Data("null".utf8)] {
             XCTAssertThrowsError(try NativeMusicScriptService.musicInfo(invalid)) {
                 XCTAssertEqual($0 as? MusicServiceError, .invalidRequest)
             }

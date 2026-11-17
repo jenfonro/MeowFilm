@@ -272,7 +272,7 @@ final class FilmPlaybackCacheTests: XCTestCase {
             metadataCache: .object(["status": .string("stale"), "error": .object(["code": .string("UPSTREAM_HTTP")]),
                                    "components": .object(["detail": .object(["status": .string("failed")])])])))
         let kept = FilmPlaybackPresentation.detail(missing, original: original)
-        XCTAssertEqual(kept.summary, original.summary)
+        XCTAssertTrue(kept.summary.isEmpty)
         XCTAssertEqual(kept.item.posterURL, original.item.posterURL)
         XCTAssertEqual(kept.cast, original.cast)
         XCTAssertEqual(kept.seasons, original.seasons)
@@ -308,12 +308,12 @@ final class FilmPlaybackCacheTests: XCTestCase {
                 "detail": .object(["status": .string("failed")])
             ])])))
         let retained = FilmPlaybackPresentation.detail(failed, original: original)
-        XCTAssertEqual(retained.summary, original.summary)
+        XCTAssertTrue(retained.summary.isEmpty)
         XCTAssertEqual(retained.item.posterURL, original.item.posterURL)
         XCTAssertEqual(retained.backdropURL, original.backdropURL)
         XCTAssertEqual(retained.releaseDate, original.releaseDate)
-        XCTAssertEqual(retained.seasonCount, original.seasonCount)
-        XCTAssertEqual(retained.episodeCount, original.episodeCount)
+        XCTAssertNil(retained.seasonCount)
+        XCTAssertNil(retained.episodeCount)
     }
 
     func testAppendSuccessAndFailureUseTheirOwnEvidenceWhenFieldsAreOmitted() throws {
@@ -330,7 +330,7 @@ final class FilmPlaybackCacheTests: XCTestCase {
                     "images": component, "similar": component, "seasons": component
                 ])])))
             let projected = FilmPlaybackPresentation.detail(snapshot, original: original)
-            XCTAssertEqual(projected.summary, original.summary)
+            XCTAssertTrue(projected.summary.isEmpty)
             XCTAssertEqual(projected.item.posterURL, original.item.posterURL)
             XCTAssertNil(projected.logoURL)
             XCTAssertTrue(projected.cast.isEmpty)
@@ -386,15 +386,15 @@ final class FilmPlaybackCacheTests: XCTestCase {
         let detail = FilmPlaybackPresentation.detail(snapshot, original: original)
         XCTAssertEqual(detail.item.identity, original.item.identity)
         XCTAssertEqual(detail.title, "豆瓣主资料")
-        XCTAssertEqual(detail.summary, "补充简介")
+        XCTAssertTrue(detail.summary.isEmpty, "Supplemental browse data is not workInfo")
         XCTAssertEqual(detail.item.posterURL?.absoluteString, "/v1/tmdb/images/original/extra.jpg")
         XCTAssertEqual(detail.backdropURL?.absoluteString, "/v1/tmdb/images/original/backdrop.jpg")
         XCTAssertEqual(detail.logoURL?.absoluteString, "/v1/tmdb/images/original/logo.png")
         XCTAssertEqual(detail.cast.map(\.name), ["补充演员"])
         XCTAssertEqual(detail.similarItems.first?.identity, .init(sourceID: "tmdb", itemID: "1000", kind: .tv,
             businessID: similarTarget.id, playbackTarget: similarTarget))
-        XCTAssertEqual(detail.episodeCount, 9)
-        XCTAssertEqual(detail.seasonCount, original.seasonCount)
+        XCTAssertNil(detail.episodeCount)
+        XCTAssertNil(detail.seasonCount)
         XCTAssertEqual(detail.seasons.map(\.number), [2])
         XCTAssertEqual(detail.seasons.first?.episodes.map(\.number), [7])
         XCTAssertEqual(snapshot.target.position, target.position)
@@ -442,7 +442,7 @@ final class FilmPlaybackCacheTests: XCTestCase {
         let nonempty = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(metadata: .object(populated),
             target: .object(target.value), metadataSupplement: supplement))
         let primary = FilmPlaybackPresentation.detail(nonempty, original: original)
-        XCTAssertEqual(primary.summary, "主简介")
+        XCTAssertTrue(primary.summary.isEmpty, "Only workInfo owns the main summary")
         XCTAssertEqual(primary.item.posterURL?.absoluteString, "https://artwork.invalid/main.jpg")
         XCTAssertEqual(primary.item.largePosterURL?.absoluteString, "https://artwork.invalid/main-large.jpg")
         XCTAssertEqual(primary.backdropURL?.absoluteString, "https://artwork.invalid/main-backdrop.jpg")

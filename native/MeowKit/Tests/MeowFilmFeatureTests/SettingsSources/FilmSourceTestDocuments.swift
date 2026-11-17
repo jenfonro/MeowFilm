@@ -17,7 +17,7 @@ func sourceTestSettings(_ base: URL,
                 "installationId": cat.catField("installationId")!, "name": cat.catField("name")!,
                 "sourceType": cat.catField("sourceType")!, "sourceUrl": cat.catField("sourceUrl") ?? .null,
                 "localPath": .null, "localHash": local ? .string(String(repeating: "0", count: 64)) : .null,
-                "enabled": cat.catField("enabled")!, "inputRevision": cat.catField("inputRevision") ?? .number(1)
+                "enabled": cat.catField("enabled")!, "inputRevision": cat.catField("inputRevision")!
             ])
         }
         _ = try document.update { current in

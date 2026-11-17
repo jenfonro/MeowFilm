@@ -278,12 +278,13 @@ public static partial class AudioPlaybackTests
         Near(point!.PositionSeconds, 4.125, .025, "captured actual logical position");
         await player.ReopenReadAsync(point, next);
         old.AssertReleased();
+        var reopened = (await player.ReadRateAsync())!;
         Check(player.HasMedia && !player.IsPlaying && player.PauseRequested &&
             player.OwnerId == "music" && player.Identity == "fixture" &&
-            point.ReopenedScope is { } reopened && reopened.Generation != point.Scope.Generation,
+            reopened.Scope.Generation != point.Scope.Generation,
             "continuation preserves occurrence and pause");
         Near(player.PositionSeconds, 4.125, .025, "continued position");
-        Near((await player.ReadRateAsync())!.RequestedRate, 1.6, .000001, "continued tempo");
+        Near(reopened.RequestedRate, 1.6, .000001, "continued tempo");
         var reused = new Lease(WaveBytes(12));
         await Error(() => player.ReopenReadAsync(point, reused), PlaybackError.Superseded);
         reused.AssertReleased();

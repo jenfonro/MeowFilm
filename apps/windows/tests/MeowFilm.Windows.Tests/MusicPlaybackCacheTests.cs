@@ -93,6 +93,30 @@ public static class MusicPlaybackCacheTests
             Check(await f.Cache.ReadInfoAsync(scope, "song", signature, default) is null,
                 "clear removes cache eligibility while the OS retains already-open bytes");
         });
+        yield return new("Music sequential range redirect preserves source-change failure for recovery", async () =>
+        {
+            await using var f = new Fixture();
+            f.PrefixLength = 2000; f.RedirectContinuation = true;
+            using var source = f.Cache.Prepare("scope", "song", CacheSignature, f.Info(),
+                () => true, default, speculative: false);
+            await using var reader = await source.OpenAsync(default);
+            Check(reader is not null);
+            await f.PrefixSent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            byte[] first = new byte[32];
+            Check(await reader!.Content.ReadAsync(first) == first.Length &&
+                first.SequenceEqual(f.Bytes.Take(first.Length)));
+            f.ReleaseBody.TrySetResult();
+            await source.Work.WaitAsync(TimeSpan.FromSeconds(5));
+            try
+            {
+                _ = await reader.Content.ReadAsync(first);
+                throw new InvalidOperationException("Expected representation change");
+            }
+            catch (PlaybackException error) { Check(error.Code == PlaybackError.HttpRepresentationChanged); }
+            Check(f.Requests == 2 && await source.Ready.Task is null && source.BufferedFraction < 1 &&
+                await f.Cache.ReadInfoAsync("scope", "song", CacheSignature, default) is null,
+                "no redirected bytes are spliced or published");
+        });
         yield return new("Music cache clear wins delayed initial index reads and keeps caller cancellation", async () =>
         {
             await using var f = new Fixture();
@@ -570,6 +594,7 @@ public static class MusicPlaybackCacheTests
                 new NativeHttpMediaOptions());
         internal string? RequiredHeader;
         internal int PrefixLength;
+        internal bool RedirectContinuation;
         internal readonly TaskCompletionSource PrefixSent = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource ReleaseBody = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal JsonElement ScriptInfo(string provider, string quality)
@@ -631,12 +656,21 @@ public static class MusicPlaybackCacheTests
                         await stream.WriteAsync("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"u8.ToArray(), lifetime.Token);
                         continue;
                     }
-                    byte[] header = Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Length: {Bytes.Length}\r\nContent-Type: audio/wav\r\nConnection: close\r\n\r\n");
+                    if (RedirectContinuation && Requests > 1)
+                    {
+                        Check(Encoding.ASCII.GetString(request.ToArray()).Contains($"Range: bytes={PrefixLength}-", StringComparison.OrdinalIgnoreCase));
+                        await stream.WriteAsync("HTTP/1.1 302 Found\r\nLocation: /replacement.wav\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"u8.ToArray(), lifetime.Token);
+                        continue;
+                    }
+                    byte[] header = Encoding.ASCII.GetBytes(RedirectContinuation
+                        ? $"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{PrefixLength - 1}/{Bytes.Length}\r\nContent-Length: {PrefixLength}\r\nETag: \"fixture-v1\"\r\nContent-Type: audio/wav\r\nConnection: close\r\n\r\n"
+                        : $"HTTP/1.1 200 OK\r\nContent-Length: {Bytes.Length}\r\nContent-Type: audio/wav\r\nConnection: close\r\n\r\n");
                     await stream.WriteAsync(header, lifetime.Token);
                     if (PrefixLength > 0) {
                         await stream.WriteAsync(Bytes.AsMemory(0, PrefixLength), lifetime.Token);
                         PrefixSent.TrySetResult();
                         await ReleaseBody.Task.WaitAsync(lifetime.Token);
+                        if (RedirectContinuation) continue;
                         try { await stream.WriteAsync(Bytes.AsMemory(PrefixLength), lifetime.Token); }
                         catch (IOException) when (!lifetime.IsCancellationRequested)
                         { /* A cancelled reader can close this response before its held body is released. */ }

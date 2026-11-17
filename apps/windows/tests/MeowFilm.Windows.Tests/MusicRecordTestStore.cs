@@ -110,7 +110,7 @@ internal class MusicRecordTestStore : IMusicLibraryStore
         Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
     internal JsonObject State(string area, string? requestedScope = null) =>
-        Snapshot(requestedScope).Areas[area].DeepClone().AsObject();
+        Snapshot(requestedScope).Areas[area]!.DeepClone().AsObject();
     internal MusicLibrarySnapshot Snapshot(string? requestedScope = null) =>
         Database.ReadAsync(requestedScope ?? scope).GetAwaiter().GetResult();
     // A diagnostic export is not a persistence protocol. Control areas contain no songs.

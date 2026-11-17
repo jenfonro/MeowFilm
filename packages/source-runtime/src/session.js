@@ -15,6 +15,7 @@ import { LegadoAdapter, parseLegadoRequestParts } from './legado.js';
 import { QysgAdapter } from './qysg.js';
 import { readStaticRuleString, readStaticRuleValues } from './rules.js';
 import { transformCapabilityScript } from './script-transform.js';
+import { parseJSONText, stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 
 const adapters = Object.freeze({
   legado: LegadoAdapter,
@@ -180,7 +181,7 @@ class SessionKernel {
     this.nextRoute = 0;
     this.adapterTasks = new Set();
     this.invocations = new Map();
-    this.sourceValues = {};
+    this.sourceValues = { values: {}, variable: String(source.variable ?? source.bookSourceVariable ?? '') };
     this.sourceFlush = Promise.resolve();
   }
 
@@ -277,19 +278,31 @@ class SessionKernel {
   }
 
   async restoreSourceValues() {
-    let saved = await this.capabilities.call('storage.get', {
-      version: hostApiVersion, profile: `${this.profile}:storage`, key: 'reader.source.values',
-    }, this.startupContext());
-    if (typeof saved === 'string') {
-      try { saved = JSON.parse(saved); } catch { throw sourceFault('STORAGE_ERROR'); }
+    try {
+      const saved = await this.capabilities.call('storage.get', {
+        version: hostApiVersion, profile: `${this.profile}:storage`, key: 'reader.source.values',
+      }, this.startupContext());
+      if (saved !== null && saved !== undefined) this.sourceValues = saved;
+    } catch (error) {
+      if (this.signal.aborted) throw error;
+      this.sourceValuesError = error;
     }
-    if (saved !== null && saved !== undefined) {
-      sourceRequire(saved && typeof saved === 'object' && !Array.isArray(saved) &&
-        saved.values && typeof saved.values === 'object' && !Array.isArray(saved.values) &&
-        typeof saved.variable === 'string', 'STORAGE_ERROR');
-      this.sourceValues = saved.values;
-      this.source.variable = saved.variable;
+  }
+
+  sourceValueDocument() {
+    if (this.sourceValuesError) throw this.sourceValuesError;
+    if (typeof this.sourceValues === 'string') {
+      try { this.sourceValues = parseJSONText(this.sourceValues); }
+      catch { throw sourceFault('STORAGE_ERROR'); }
     }
+    sourceRequire(!isRawJSON(this.sourceValues), 'STORAGE_ERROR');
+    return sourceObject(this.sourceValues, 'STORAGE_ERROR');
+  }
+
+  sourceValueMap() {
+    const values = this.sourceValueDocument().values;
+    sourceRequire(!isRawJSON(values), 'STORAGE_ERROR');
+    return sourceObject(values, 'STORAGE_ERROR');
   }
 
   flushSourceValues(invocation) {
@@ -297,16 +310,19 @@ class SessionKernel {
     if (!entry.sourceWrites.size && entry.sourceVariable === undefined) return Promise.resolve();
     const work = this.sourceFlush.then(async () => {
       sourceRequire(!invocation.signal.aborted, 'CANCELLED');
-      const values = { ...this.sourceValues, ...Object.fromEntries(entry.sourceWrites) };
-      const variable = entry.sourceVariable ?? String(this.source.variable ?? this.source.bookSourceVariable ?? '');
+      const saved = this.sourceValueDocument();
+      const next = { ...saved };
+      if (entry.sourceWrites.size) {
+        next.values = { ...this.sourceValueMap(), ...Object.fromEntries(entry.sourceWrites) };
+      }
+      if (entry.sourceVariable !== undefined) next.variable = entry.sourceVariable;
       if (this.metadata.persistentSource) {
         await this.capabilities.call('storage.set', {
           version: hostApiVersion, profile: `${this.profile}:storage`, key: 'reader.source.values',
-          value: JSON.stringify({ values, variable }),
+          value: stringifyJSONValue(next),
         }, this.capabilityContext(this.invocationContext(invocation)));
       }
-      this.sourceValues = values;
-      this.source.variable = variable;
+      this.sourceValues = next;
     });
     this.sourceFlush = work.catch(() => {});
     return work;
@@ -399,15 +415,20 @@ class SessionKernel {
       case 'legado.sourceGet': {
         const writes = this.invocations.get(context.invocationId)?.sourceWrites;
         if (writes?.has(input.key)) return writes.get(input.key);
-        return Object.hasOwn(this.sourceValues, input.key) ? this.sourceValues[input.key] : null;
+        const values = this.sourceValueMap();
+        return Object.hasOwn(values, input.key) ? JSON.parse(stringifyJSONValue(values[input.key])) : null;
       }
       case 'legado.sourceSet':
         sourceRequire(this.invocations.has(context.invocationId), 'PERMISSION_DENIED');
         this.invocations.get(context.invocationId).sourceWrites.set(input.key, sourceClone(input.value));
         return true;
-      case 'legado.sourceVariableGet':
-        return this.invocations.get(context.invocationId)?.sourceVariable ??
-          String(this.source.variable ?? this.source.bookSourceVariable ?? '');
+      case 'legado.sourceVariableGet': {
+        const pending = this.invocations.get(context.invocationId)?.sourceVariable;
+        if (pending !== undefined) return pending;
+        const variable = this.sourceValueDocument().variable;
+        sourceRequire(typeof variable === 'string', 'STORAGE_ERROR');
+        return variable;
+      }
       case 'legado.sourceVariableSet': {
         const value = String(input.value ?? '');
         sourceRequire(this.invocations.has(context.invocationId), 'PERMISSION_DENIED');
@@ -466,6 +487,13 @@ class SessionKernel {
     }
   }
 
+  async scriptStorageGet(key, context) {
+    const value = await this.capabilities.call('storage.get', {
+      version: hostApiVersion, profile: `${this.profile}:storage`, key,
+    }, context);
+    return JSON.parse(stringifyJSONValue(value));
+  }
+
   async capability(name, input, context) {
     const trustedContext = this.capabilityContext(context);
     const call = (capability, value) => this.capabilities.call(capability, {
@@ -493,9 +521,7 @@ class SessionKernel {
         });
       case 'legado.storageGet':
       case 'cat.storageGet':
-        return call('storage.get', {
-          profile: `${this.profile}:storage`, key: String(input.key),
-        });
+        return this.scriptStorageGet(String(input.key), trustedContext);
       case 'legado.storageSet':
       case 'cat.storageSet':
         return call('storage.set', {
@@ -598,9 +624,7 @@ class SessionKernel {
         });
       case 'cache.get':
       case 'cacheGet':
-        return call('storage.get', {
-          profile: `${this.profile}:storage`, key: String(args[0] ?? name),
-        });
+        return this.scriptStorageGet(String(args[0] ?? name), trustedContext);
       case 'cache.set':
       case 'cacheSet':
         return call('storage.set', {
@@ -612,9 +636,7 @@ class SessionKernel {
           profile: `${this.profile}:storage`, key: String(args[0] ?? name),
         });
       case 'cache.allget':
-        return call('storage.get', {
-          profile: `${this.profile}:storage`, key: `all:${String(args[0] ?? '')}`,
-        });
+        return this.scriptStorageGet(`all:${String(args[0] ?? '')}`, trustedContext);
       case 'cache.allset':
         return call('storage.set', {
           profile: `${this.profile}:storage`, key: `all:${String(args[0] ?? '')}`,
@@ -625,17 +647,13 @@ class SessionKernel {
           profile: `${this.profile}:storage`, key: `all:${String(args[0] ?? '')}`,
         });
       case 'getLoginInfo':
-        return call('storage.get', {
-          profile: `${this.profile}:storage`, key: 'loginInfo',
-        });
+        return this.scriptStorageGet('loginInfo', trustedContext);
       case 'putLoginInfo':
         return call('storage.set', {
           profile: `${this.profile}:storage`, key: 'loginInfo', value: args[0],
         });
       case 'getbookVariable':
-        return call('storage.get', {
-          profile: `${this.profile}:storage`, key: `book:${String(args[0] ?? '')}`,
-        });
+        return this.scriptStorageGet(`book:${String(args[0] ?? '')}`, trustedContext);
       case 'setbookVariable':
         return call('storage.set', {
           profile: `${this.profile}:storage`, key: `book:${String(args[0] ?? '')}`,

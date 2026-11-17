@@ -58,12 +58,7 @@
 
 - [原生媒体播放](windows/media-playback.md)
 - [独立音乐核心](windows/music-audio-core.md)
-- [自适应媒体](windows/adaptive-media.md)
-- [HLS AES-128](windows/adaptive-encryption.md)
-- [Live HLS](windows/live-hls.md)
-- [离线媒体输入](windows/media-offline-input.md)
 - [媒体资源租约](windows/scoped-media-resources.md)
-- [音轨、字幕与倍速](windows/media-tracks.md)
 - [本地媒体文件授权](windows/granted-media-files.md)
 - [选择文件快照](windows/selected-files.md)
 - [播放续接](windows/playback-recovery.md)

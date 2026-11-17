@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { clone, fault, requireValue } from './errors.js';
+import { fault, requireValue } from './errors.js';
+import { parseJSONText, cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 
 export const extensionKey = '_meow';
 export const ownedExtension = Symbol('meow.cat.extension');
@@ -48,10 +49,19 @@ export function decodePanResource(value) {
     return { ...verified, installationId: share.installationId, siteId: share.siteId };
   } catch { throw fault('INVALID_ARGUMENT'); }
 }
+export function providerEnabled(settings, provider) {
+  const value = settings.providers?.[provider];
+  requireValue(value === undefined || typeof value === 'boolean', 'INVALID_ARGUMENT');
+  return value === true;
+}
 export function panProvider(flag, settings) {
   const label = String(flag).split('-')[0].trim().toLowerCase();
+  requireValue(Array.isArray(settings.mappings), 'INVALID_ARGUMENT');
   const configured = settings.mappings.find(item => item.aliases.some(alias => alias.trim().toLowerCase() === label));
-  if (configured) return configured.provider;
+  if (configured) {
+    requireValue(Object.hasOwn(defaults, configured.provider), 'INVALID_ARGUMENT');
+    return configured.provider;
+  }
   return Object.keys(defaults).find(provider =>
     [...defaults[provider], ...settings.mappings.filter(item => item.provider === provider)
       .flatMap(item => item.aliases)].some(alias => alias.toLowerCase() === label));
@@ -89,9 +99,9 @@ export function mergeExtension(output, value) {
   return result;
 }
 export function normalizeCatOutput(input, { shares = [], settings, installationId, siteId, mapUrl }) {
-  let result = clone(input);
+  let result = cloneJSONValue(input);
   if (typeof result === 'string') {
-    try { result = JSON.parse(result); } catch { return result; }
+    try { result = parseJSONText(result); } catch { return result; }
   }
   if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
   const canExtend = !Object.hasOwn(result, extensionKey);
@@ -146,11 +156,11 @@ export function normalizeCatOutput(input, { shares = [], settings, installationI
           matching = capturedShares.filter(item => expanded.includes(item.marker));
         }
         let share = matching.length === 1 ? matching[0].share : null;
-        if (!matching.length && namedProvider && settings.providers[namedProvider]) {
+        if (!matching.length && namedProvider && providerEnabled(settings, namedProvider)) {
           share = parseShare(raw);
           if (share?.provider !== namedProvider) share = null;
         }
-        if (!share || !settings.providers[share.provider])
+        if (!share || !providerEnabled(settings, share.provider))
           return separator >= 0 ? part.slice(0, separator + 1) + local : local;
         const provider = share.provider;
         const id = encodePanResource({ ...share, installationId, siteId });

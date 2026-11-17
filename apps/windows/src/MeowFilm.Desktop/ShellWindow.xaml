@@ -19,6 +19,65 @@
                 <Setter Property="MinHeight" Value="40"/>
                 <Setter Property="Padding" Value="14,6"/>
             </Style>
+            <DataTemplate x:Key="ShellSearchTargetLabel">
+                <TextBlock Text="{Binding Label}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
+            </DataTemplate>
+            <Style x:Key="ShellSearchTargetItem" TargetType="ComboBoxItem" BasedOn="{StaticResource MeowFilm.SettingsComboItem}">
+                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBoxItem">
+                    <Border Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}" CornerRadius="6">
+                        <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"/>
+                    </Border>
+                </ControlTemplate></Setter.Value></Setter>
+            </Style>
+            <Style x:Key="ShellSearchTargetPicker" TargetType="ComboBox" BasedOn="{StaticResource MeowFilm.ComboBox}">
+                <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
+                <Setter Property="ItemTemplate" Value="{StaticResource ShellSearchTargetLabel}"/>
+                <Setter Property="ItemContainerStyle" Value="{StaticResource ShellSearchTargetItem}"/>
+                <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBox">
+                    <Grid>
+                        <ToggleButton x:Name="TargetToggle" Focusable="False"
+                                      IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
+                                      Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                      BorderThickness="{TemplateBinding BorderThickness}">
+                            <ToggleButton.Template><ControlTemplate TargetType="ToggleButton">
+                                <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                        BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8"/>
+                            </ControlTemplate></ToggleButton.Template>
+                        </ToggleButton>
+                        <Grid IsHitTestVisible="False">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="*"/><ColumnDefinition Width="16"/></Grid.ColumnDefinitions>
+                            <Path x:Name="SearchGlyph" Data="M17,10.5 A6.5,6.5 0 1 1 4,10.5 A6.5,6.5 0 1 1 17,10.5 M16,16 L21,21"
+                                  Width="15" Height="15" Stretch="Uniform" StrokeThickness="1.5" VerticalAlignment="Center"
+                                  Stroke="{TemplateBinding Foreground}"/>
+                            <ContentPresenter Grid.Column="1" Content="{TemplateBinding SelectionBoxItem}"
+                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" VerticalAlignment="Center"/>
+                            <Path x:Name="Arrow" Grid.Column="2" Data="M 0,0 L 4.5,4.5 L 9,0" Width="9" Height="5" Stretch="None"
+                                  StrokeThickness="1.4" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                  Stroke="{TemplateBinding Foreground}" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5"/>
+                        </Grid>
+                        <Popup x:Name="PART_Popup" Style="{StaticResource MeowFilm.Popup}" Placement="Bottom"
+                               PlacementTarget="{Binding RelativeSource={RelativeSource TemplatedParent}}"
+                               HorizontalOffset="-8" VerticalOffset="-4" IsOpen="{TemplateBinding IsDropDownOpen}"
+                               AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                            <Border Padding="8" Background="Transparent">
+                                <Border x:Name="DropDown" Style="{StaticResource MeowFilm.FloatingSurface}" Padding="4"
+                                        Width="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}">
+                                    <ScrollViewer MaxHeight="{TemplateBinding MaxDropDownHeight}" VerticalScrollBarVisibility="Auto"
+                                                  HorizontalScrollBarVisibility="Disabled">
+                                        <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                                    </ScrollViewer>
+                                </Border>
+                            </Border>
+                        </Popup>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsDropDownOpen" Value="True">
+                            <Setter TargetName="Arrow" Property="RenderTransform"><Setter.Value><RotateTransform Angle="180"/></Setter.Value></Setter>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate></Setter.Value></Setter>
+            </Style>
             <DataTemplate x:Key="ShellNavigationTemplate">
                 <Grid>
                     <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -298,23 +357,13 @@
                                 <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.InputSurface}"/>
                             </Style></TextBox.Style>
                         </TextBox>
-                        <ComboBox x:Name="SearchTargetPicker" Width="60" Height="28" MinHeight="0" FontSize="12"
-                                  Margin="32,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center"
-                                  DisplayMemberPath="Label" SelectedValuePath="Id" Visibility="Collapsed" Padding="4,0,6,0"
+                        <ComboBox x:Name="SearchTargetPicker" Width="92" Height="28" MinHeight="0" FontSize="12"
+                                  Margin="2,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center"
+                                  SelectedValuePath="Id" Visibility="Collapsed"
                                   Background="Transparent" BorderThickness="0"
-                                  Style="{StaticResource MeowFilm.ComboBox}" AutomationProperties.Name="搜索目标"/>
+                                  Style="{StaticResource ShellSearchTargetPicker}" AutomationProperties.Name="搜索目标"/>
                         <Border x:Name="SearchDivider" Width="1" Height="16" Background="{DynamicResource MeowFilm.Brush.Border}"
                                 Margin="94,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" Visibility="Collapsed"/>
-                        <Button x:Name="SearchButton" Margin="2,0,0,0"
-                                Width="32" Height="32" MinHeight="0" HorizontalAlignment="Left" VerticalAlignment="Center"
-                                Click="OnSearchClick" AutomationProperties.Name="搜索">
-                            <Button.Style><Style TargetType="Button" BasedOn="{StaticResource MeowFilm.IconButton}">
-                                <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
-                            </Style></Button.Style>
-                            <Path Data="M17,10.5 A6.5,6.5 0 1 1 4,10.5 A6.5,6.5 0 1 1 17,10.5 M16,16 L21,21"
-                                  Width="15" Height="15" Stretch="Uniform" StrokeThickness="1.5"
-                                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                        </Button>
                         <TextBlock Text="Ctrl K" FontSize="11" Foreground="{DynamicResource MeowFilm.Brush.Muted}"
                                    Margin="0,0,12,0" HorizontalAlignment="Right" VerticalAlignment="Center" IsHitTestVisible="False"/>
                     </Grid>

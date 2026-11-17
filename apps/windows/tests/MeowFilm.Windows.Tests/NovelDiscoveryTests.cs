@@ -79,7 +79,10 @@ public static class NovelDiscoveryTests
         await using var configurationStore = new NovelTests.MemoryStore();
         var runtime = new DiscoveryRuntime(Kinds);
         await using var module = new NovelCapability(Sources(runtime, configurationStore), new NovelLibrary(store), new NovelRuleProgram(runtime));
-        await module.InitializeAsync(default); await module.NavigateAsync(NovelCapability.HomeRoute, default);
+        await module.InitializeAsync(default);
+        Check(module.Sources.Sources.Single().Actions.Length == 0 && runtime.Calls.Count == 0);
+        await module.LoadDiscoveryAsync(module.Sources.Sources.Single(), null, true);
+        await module.NavigateAsync(NovelCapability.HomeRoute, default);
         Check(module.ExploreKind == Kinds[4] && ExploreUrls(runtime).SequenceEqual(new[] { Kinds[4].Url }));
         int requests = runtime.Calls.Count;
         await module.NavigateAsync(NovelCapability.CategoriesRoute, default);
@@ -143,7 +146,7 @@ public static class NovelDiscoveryTests
             var channels = Channels(module);
             Check(channels.Select(tab => tab.Content).SequenceEqual(new[] { "男频全部", "男频榜单", "女频全部", "女频榜单" }));
             Check(channels.All(tab => ReferenceEquals(tab.Style.BasedOn, module.View.FindResource("MeowFilm.SettingsArea")) &&
-                tab.Height == 44), "Channel navigation did not reuse the settings style.");
+                tab.Height == 36), "Channel navigation did not reuse the settings style.");
             var source = NovelTests.Find<ComboBox>(module.View).Single(box => AutomationProperties.GetAutomationId(box) == "novel.discovery.source");
             var refresh = NovelTests.Find<Button>(module.View).Single(button => AutomationProperties.GetName(button) == "刷新");
             double Center(FrameworkElement element) => element.TranslatePoint(new(0, element.ActualHeight / 2), module.View).Y;
@@ -359,7 +362,7 @@ public static class NovelDiscoveryTests
             object value = method switch
             {
                 "source.runtime.library.apply" => new { revision = payload.GetProperty("revision").GetInt64(),
-                    sources = NovelJson.Decode<NovelSourceDefinition[]>(payload.GetProperty("sources")).Select(item => item.Source()).ToArray() },
+                    sources = NovelJson.Decode<NovelSourceDefinition[]>(payload.GetProperty("sources")).Select(item => item.SourceFromDefinition()).ToArray() },
                 "source.runtime.web.pending" => new { requests = Array.Empty<object>() },
                 "source.runtime.library.invoke" when payload.GetProperty("action").GetString() == "exploreKinds" => new { kinds },
                 "source.runtime.library.invoke" when ExploreError is { } code => throw new BridgeException(code),

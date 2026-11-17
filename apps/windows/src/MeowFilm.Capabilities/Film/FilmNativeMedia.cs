@@ -39,7 +39,7 @@ internal sealed class FilmNativeMedia(FilmPlayback native) : IFilmNativeMedia
     public bool HasOutput => native.HasOutput;
     public bool Buffering => native.IsBuffering;
     public string? FailureCode => native.LastErrorCode;
-    public bool Paused => native.PauseRequested;
+    public bool Paused => native.IsPaused;
     public double Position => native.PositionSeconds;
     public double Duration => native.DurationSeconds;
     public int Volume { get => native.Volume; set => native.Volume = value; }

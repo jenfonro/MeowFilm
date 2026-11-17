@@ -103,22 +103,27 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
     /// intent, not a serialized HTTP command. Import/rollback never call this.
     func recordAutomaticLibraryMutation(_ d: inout MusicDocument, collectionID: String,
                                        orderOnly: Bool = false, relationshipPlatform: MusicAccountPlatform? = nil) throws {
-        var ledger = try MusicNativeSyncLedger.load(d.library)
-        var preferences = ledger.automatic
-        try musicRequire(preferences.intentRevision < 9_007_199_254_740_991, .limit)
-        let settled = preferences.intentRevision == preferences.settledIntentRevision
+        var sync = d.library.contains("sync") ? d.library["sync"] : try MusicNativeSyncLedger().json()
+        var preferences = sync["automatic"]
+        let revision = try preferences["intentRevision"].integer()
+        let settledRevision = try preferences["settledIntentRevision"].integer()
+        try musicRequire(revision < 9_007_199_254_740_991 && settledRevision <= revision, .limit)
+        let settled = revision == settledRevision
         if let relationshipPlatform {
-            if settled { preferences.relationshipPlatforms = [relationshipPlatform] }
-            else if !preferences.relationshipPlatforms.isEmpty, !preferences.relationshipPlatforms.contains(relationshipPlatform) {
-                preferences.relationshipPlatforms.append(relationshipPlatform)
+            var platforms = preferences["relationshipPlatforms"].strings
+            if settled { platforms = [relationshipPlatform.rawValue] }
+            else if !platforms.isEmpty, !platforms.contains(relationshipPlatform.rawValue) {
+                platforms.append(relationshipPlatform.rawValue)
             }
-            preferences.orderOnly = nil
+            preferences["relationshipPlatforms"] = .strings(platforms)
+            preferences.remove("orderOnly")
         } else {
-            preferences.relationshipPlatforms = []
-            preferences.orderOnly = orderOnly && settled ? collectionID : nil
+            preferences["relationshipPlatforms"] = .array([])
+            if orderOnly && settled { preferences["orderOnly"] = .string(collectionID) }
+            else { preferences.remove("orderOnly") }
         }
-        preferences.intentRevision += 1
-        ledger.automatic = preferences; d.library["sync"] = try ledger.json()
+        preferences["intentRevision"] = .n(revision + 1)
+        sync["automatic"] = preferences; d.library["sync"] = sync
     }
 
     private func automaticSelections(_ values: [MusicLibrarySyncSelection]) throws -> [MusicLibrarySyncSelection] {
@@ -341,13 +346,16 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
     private func performAutomaticOrderSync(_ request: MusicLibrarySyncRequest, port: any MusicNativeLibrarySyncProviding,
                                           collectionID: String) async throws -> MusicLibrarySyncState {
         let initial = try read()
+        try initial.requireRevision("library")
+        let local = try collection(collectionID, initial)
+        guard let kind = MusicLibrarySyncKind(rawValue: local["kind"].string) else { throw MusicServiceError.corruptDocument }
+        try musicRequire(local["bindings"].isArray, .corruptDocument)
         var round = MusicNativeSyncRound(request: request, epoch: epoch, port: port,
             library: initial.library["library"], ledger: try MusicNativeSyncLedger.load(initial.library),
             revision: initial.library["revision"].int)
         round.ledger.selections = request.selections; round.ledger.phase = .pulling; round.ledger.issues = []
         try syncCheckpoint(&round)
         do {
-            let local = try collection(collectionID, initial)
             try musicRequire(!local["deleted"].bool, .notFound)
             // Unknown writes are recovered by a later FULL read round, never
             // replayed as a side effect of a reorder.
@@ -361,16 +369,24 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
                 round.snapshots[selection.platform.rawValue] = try await syncSnapshot(session, selection: selection, round: round)
             }
             // Preflight ALL targets before the first write.
-            for selection in request.selections where selection.kinds.contains(MusicLibrarySyncKind(rawValue: local["kind"].string)!) {
+            var targets = Set<String>()
+            for selection in request.selections where selection.kinds.contains(kind) {
                 for binding in local["bindings"].array where binding["platform"].string == selection.platform.rawValue {
+                    try musicRequire(binding["accountId"].string == round.sessions[selection.platform.rawValue]?.accountID &&
+                        binding["writable"].bool && binding["baseline"].isArray && binding["map"].isObject &&
+                        targets.insert(MusicNativeSyncLogic.bindingKey(binding)).inserted, .corruptDocument)
                     guard let remote = round.snapshots[selection.platform.rawValue]?.collections.first(where: { $0.id == binding["id"].string }) else {
                         throw MusicServiceError.targetChanged
                     }
                     try musicRequire(binding["baseline"].strings.sorted() == remote.members.map(\.occurrenceID).sorted(), .revisionConflict)
+                    for member in remote.members {
+                        let songID = binding["map"][member.occurrenceID]
+                        try musicRequire(songID.isString && repositoryReader.containsSong(id: songID.string), .corruptDocument)
+                    }
                 }
             }
             round.ledger.phase = .pushing; try syncCheckpoint(&round)
-            for selection in request.selections where selection.kinds.contains(MusicLibrarySyncKind(rawValue: local["kind"].string)!) {
+            for selection in request.selections where selection.kinds.contains(kind) {
                 let session = round.sessions[selection.platform.rawValue]!
                 for binding in local["bindings"].array where binding["platform"].string == selection.platform.rawValue {
                     guard let remote = round.snapshots[selection.platform.rawValue]?.collections.first(where: { $0.id == binding["id"].string }) else { continue }

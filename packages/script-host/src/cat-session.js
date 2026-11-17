@@ -1,3 +1,4 @@
+import { parseJSONText, stringifyJSONValue, cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import { randomBytes } from 'node:crypto';
@@ -9,7 +10,7 @@ import { PanInterceptor } from './pan-interceptor.js';
 import { ResourceScope } from './scope.js';
 import { clone, deferred, fault, requireValue, safeError } from './errors.js';
 import { normalizeCatOutput, decodePanResource, addExtension, mergeExtension,
-  ownedExtension, parseM3U8Metadata } from './cat-output.js';
+  ownedExtension, providerEnabled, parseM3U8Metadata } from './cat-output.js';
 import { fixedOriginURL } from './cat-proxy.js';
 import { isLoopbackHost } from './network-boundary.js';
 import { describeScriptError } from './script-diagnostic.js';
@@ -82,7 +83,7 @@ export class CatSession {
   }
   applySettings(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return;
-    this.settings.value = clone(value);
+    this.settings.value = cloneJSONValue(value);
   }
   applyAggregate({ port } = {}) {
     requireValue(Number.isSafeInteger(port) && port > 0, 'INVALID_ARGUMENT');
@@ -341,9 +342,9 @@ export class CatSession {
       requireValue(payload === null || typeof payload === 'object' && !Array.isArray(payload));
       for (const [key, value] of Object.entries(payload ?? {}))
         if (value !== undefined) target.searchParams.set(key,
-          value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value));
+          value !== null && typeof value === 'object' ? stringifyJSONValue(value) : String(value));
     }
-    const raw = query ? null : Buffer.from(JSON.stringify(payload));
+    const raw = query ? null : Buffer.from(stringifyJSONValue(payload));
     let token;
     let request, requestGuard, response;
     let task, value, failure;
@@ -415,7 +416,7 @@ export class CatSession {
           const text = combined.toString('utf8');
           if (!text.trim()) finish(true, null);
           else {
-            try { finish(true, JSON.parse(text)); }
+            try { finish(true, parseJSONText(text)); }
             catch {
               const contentType = String(response.headers['content-type'] ?? '');
               if (!contentType || /^text\//i.test(contentType) &&
@@ -628,7 +629,7 @@ export class CatSession {
   enhanceResult(value) {
     const owned = Boolean(value && typeof value === 'object' && value[ownedExtension]);
     if (!owned) return value;
-    const result = clone(value);
+    const result = cloneJSONValue({ ...value });
     Object.defineProperty(result, ownedExtension, { value: true });
     return result;
   }
@@ -682,7 +683,7 @@ export class CatSession {
     requireValue(site && this.capabilities[siteId].actions.includes(operation),
       'CAPABILITY_UNAVAILABLE');
     const siteOrigin = new URL(site.api).origin;
-    const settings = clone(this.settings.value);
+    const settings = cloneJSONValue(this.settings.value);
     const scope = new ResourceScope(this.root.signal, timeoutMs ?? this.limits.requestTimeoutMs);
     scope.siteId = siteId; scope.requestId = ++this.nextId;
     scope.associationId = associationId;
@@ -700,7 +701,7 @@ export class CatSession {
       const resource = operation === 'play' && payload && typeof payload === 'object'
         ? decodePanResource(payload.id) : null;
       if (resource) {
-        requireValue(settings.providers[resource.provider], 'CAPABILITY_UNAVAILABLE');
+        requireValue(providerEnabled(settings, resource.provider), 'CAPABILITY_UNAVAILABLE');
         requireValue(resource.installationId === this.installationId && resource.siteId === siteId,
           'PERMISSION_DENIED');
         return addExtension({ parse: 0, url: payload.id }, { resources: [{
@@ -778,7 +779,8 @@ export class CatSession {
       sockets: this.node.networkResources.size + this.services.connections.size,
       streams: this.node.streams.size + this.node.volume.streams.size,
       webResources: this.node.webResources.size, descriptors: this.node.volume.descriptors.size,
-      memory: process.memoryUsage(), cleanupError: this.cleanupError };
+      memory: process.memoryUsage(),
+      ...(this.cleanupError === undefined ? {} : { cleanupError: this.cleanupError }) };
   }
   stop(reason = fault('STALE_SESSION')) {
     if (this.stopping) return this.stopping;

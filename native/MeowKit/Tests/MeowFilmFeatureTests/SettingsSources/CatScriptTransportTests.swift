@@ -78,8 +78,11 @@ final class CatScriptTransportTests: XCTestCase {
         XCTAssertEqual(fields.count, 2)
         XCTAssertEqual(fields["é"], .number(1))
         XCTAssertEqual(fields["e\u{0301}"], .number(2))
-        for invalid in [Data([0xff]), Data(#"{"key":1,"key":2}"#.utf8), Data(#""\ud800""#.utf8),
-                        Data("9007199254740992".utf8), Data("not-json".utf8)] {
+        XCTAssertEqual(try CatScriptTransport.parse(Data(#"{"key":1,"key":2}"#.utf8)), .object(["key": .number(2)]))
+        let opaque = try CatScriptTransport.parse(Data("9007199254740993".utf8))
+        XCTAssertNil(opaque.catInteger, "A real integer consumer still cannot adopt an unsafe identity")
+        XCTAssertEqual(String(decoding: try RuntimeJSON.encode(opaque), as: UTF8.self), "9007199254740993")
+        for invalid in [Data([0xff]), Data(#""\ud800""#.utf8), Data("not-json".utf8)] {
             XCTAssertThrowsError(try CatScriptTransport.parse(invalid)) {
                 XCTAssertEqual($0 as? FilmSourceError, FilmSourceError(code: "INVALID_RESPONSE"))
             }

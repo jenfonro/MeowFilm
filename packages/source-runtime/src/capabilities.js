@@ -1,6 +1,7 @@
 import {
   sourceFault, sourceObject, sourceRequire, sourceSafeError,
 } from './errors.js';
+import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 
 export const hostApiVersion = 2;
 
@@ -93,70 +94,19 @@ function bytes(value, code = 'INVALID_ARGUMENT') {
   return new Uint8Array(value);
 }
 
-function unicodeScalarString(value, code) {
-  for (let index = 0; index < value.length; index++) {
-    const unit = value.charCodeAt(index);
-    if (unit >= 0xd800 && unit <= 0xdbff) {
-      const next = value.charCodeAt(++index);
-      sourceRequire(next >= 0xdc00 && next <= 0xdfff, code);
-    } else {
-      sourceRequire(unit < 0xdc00 || unit > 0xdfff, code);
-    }
-  }
-}
-
 function jsonClone(value, code = 'INVALID_ARGUMENT') {
-  const ancestors = new Set(), frames = [];
-  const visit = (input, depth) => {
-    sourceRequire(depth <= 64, code);
-    if (input === null || typeof input === 'boolean') return input;
-    if (typeof input === 'string') {
-      unicodeScalarString(input, code);
-      return input;
-    }
-    if (typeof input === 'number') {
-      sourceRequire(Number.isFinite(input) && (!Number.isInteger(input) || Number.isSafeInteger(input)), code);
-      return input;
-    }
-    sourceRequire(input && typeof input === 'object' && !ArrayBuffer.isView(input) &&
-      !(input instanceof ArrayBuffer) && !ancestors.has(input), code);
-    ancestors.add(input);
-    const array = Array.isArray(input);
-    const output = array ? new Array(input.length) : {};
-    frames.push({ input, output, array, depth, index: 0,
-      entries: array ? null : Object.entries(input), length: array ? input.length : 0 });
-    return output;
-  };
-  const output = visit(value, 0);
-  while (frames.length) {
-    const frame = frames[frames.length - 1];
-    if (frame.index === (frame.array ? frame.length : frame.entries.length)) {
-      ancestors.delete(frame.input);
-      frames.pop();
-      continue;
-    }
-    const index = frame.index++;
-    if (frame.array && !(index in frame.input)) continue;
-    const [key, child] = frame.array ? [index, frame.input[index]] : frame.entries[index];
-    if (!frame.array) unicodeScalarString(key, code);
-    Object.defineProperty(frame.output, key, {
-      value: visit(child, frame.depth + 1), enumerable: true, configurable: true, writable: true,
-    });
-  }
-  return output;
+  try { return cloneJSONValue(value); }
+  catch { throw sourceFault(code); }
 }
 
-function fields(value, allowed, required = allowed, code = 'INVALID_ARGUMENT') {
+function fields(value, required, code = 'INVALID_ARGUMENT') {
   sourceObject(value, code);
-  sourceRequire(Object.keys(value).every(key => allowed.includes(key)) &&
-    required.every(key => Object.hasOwn(value, key)), code);
+  sourceRequire(required.every(key => Object.hasOwn(value, key)), code);
   return value;
 }
 
 function validateHttp(input) {
-  fields(input, [
-    'version', 'url', 'method', 'headers', 'body', 'timeoutMs', 'redirects', 'cookieProfile',
-  ], ['version', 'url']);
+  fields(input, ['version', 'url']);
   sourceRequire(input.version === hostApiVersion);
   const method = String(input.method ?? 'GET').toUpperCase();
   sourceRequire(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'].includes(method));
@@ -178,9 +128,7 @@ function validateHttp(input) {
 }
 
 function validateHttpResult(value) {
-  fields(value, [
-    'version', 'status', 'statusText', 'headers', 'url', 'body',
-  ], ['version', 'status', 'url', 'body'], 'INVALID_RESPONSE');
+  fields(value, ['version', 'status', 'url', 'body'], 'INVALID_RESPONSE');
   sourceRequire(value.version === hostApiVersion && Number.isInteger(value.status) &&
     value.status >= 100 && value.status <= 999, 'INVALID_RESPONSE');
   return {
@@ -259,8 +207,7 @@ function validateInput(name, input) {
         key: bytes(input.key), data: bytes(input.data),
       };
     case 'crypto.aes':
-      fields(input, ['version', 'operation', 'algorithm', 'key', 'iv', 'data'],
-        ['version', 'operation', 'algorithm', 'key', 'data']);
+      fields(input, ['version', 'operation', 'algorithm', 'key', 'data']);
       sourceRequire(input.version === hostApiVersion &&
         ['encrypt', 'decrypt'].includes(input.operation) &&
         /^aes-(128|192|256)-(cbc|ecb)$/.test(input.algorithm));
@@ -292,8 +239,7 @@ function validateInput(name, input) {
         request: jsonClone(sourceObject(input.request)),
       };
     case 'virtual.register':
-      fields(input, ['version', 'profile', 'route', 'metadata'],
-        ['version', 'profile', 'route']);
+      fields(input, ['version', 'profile', 'route']);
       sourceRequire(input.version === hostApiVersion);
       return {
         version: hostApiVersion, profile: profile(input.profile),

@@ -86,6 +86,28 @@ function sizedRecords(length) {
   return events;
 }
 
+test('WY feedback send consumes event fields without reading unused prepare, duration or position facts', async t => {
+  const records = [], events = [
+    { ...base, duration: {}, position: {}, listened: {}, mediaListened: {}, rate: {} },
+    { ...base, event: 'end', duration: {}, position: {}, listened: 2.5, mediaListened: 5.5, rate: 2, reason: 'ui' },
+  ];
+  const f = fixture(request => {
+    const { bytes, filename } = fileFrom(request);
+    records.push(inspect(bytes, keyBytes).records);
+    return response({ code: 200, data: { successfiles: [filename] } });
+  });
+  seedClients(f); t.after(() => f.close()); await f.session('wy');
+  entropy(t, [keyBytes, uuidBytes, keyBytes, uuidBytes]);
+  assert.deepEqual(await f.request('wy', 'feedback.prepare', events[0]), { status: 'registered', sessionId: null });
+  assert.equal(f.requests.length, 0);
+  for (const event of events)
+    assert.deepEqual(await f.request('wy', 'feedback.send', event), { status: 'confirmed', errorCode: null });
+  assert.deepEqual(records, events.map(expectedRecord));
+  assert.deepEqual(await f.request('wy', 'feedback.send', { ...events[1], mediaListened: {} }),
+    { status: 'notSent', errorCode: 'INVALID_REQUEST' });
+  assert.equal(f.requests.length, 2);
+});
+
 test('NCBL public semantic upload retains original milliseconds, separate media/wall totals, attribution and only original MUSIC_U metadata', async t => {
   const records = [];
   const f = fixture(request => {
@@ -101,9 +123,10 @@ test('NCBL public semantic upload retains original milliseconds, separate media/
   seedClients(f); await f.session('wy', '42', 'MUSIC_U=synthetic+original/key=; __csrf=synthetic-csrf');
   const draws = entropy(t, [keyBytes, uuidBytes]);
   const events = [
-    { ...base, rate: 32, target: { nativeId: '101', source: 'search', sourceId: '真实关键词', algorithm: 'actual-alg' } },
+    { ...base, rate: {}, listened: {}, mediaListened: {}, duration: {}, position: {},
+      target: { nativeId: '101', source: 'search', sourceId: '真实关键词', algorithm: 'actual-alg' } },
     { ...base, event: 'end', occurredAt: now / 1000 + 4.125, listened: 3.75, mediaListened: 7.5,
-      position: 500000, rate: 2, reason: 'ui', target: { nativeId: '101', source: 'search', sourceId: '真实关键词', algorithm: 'actual-alg' } },
+      duration: {}, position: {}, rate: 2, reason: 'ui', target: { nativeId: '101', source: 'search', sourceId: '真实关键词', algorithm: 'actual-alg' } },
     { ...base, event: 'end', occurredAt: now / 1000 + 90000, listened: 90000, mediaListened: 2880000,
       position: 2880000, rate: 32, reason: 'interrupt' },
   ];

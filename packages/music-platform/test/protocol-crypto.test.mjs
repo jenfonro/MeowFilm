@@ -109,7 +109,7 @@ test('QIMEI carries a full independently decoded CBC device, both signatures and
         assert.equal(reserved.oz, '+JCibeQBRLhj6aGmvwBMr1u5TILvIXRE1yp9gRJPAX0=');
         assert.equal(decrypt(Buffer.from(reserved.oo, 'base64'), 'lvcwmSYVr2Axv1gn', 'cbc', 'Zs0ntDqG2jyhKN0c').toString(), 'V2408A');
         securedKeys.push(fields.key); envelopes.push(fields.params);
-        return response({ code: 0, data: JSON.stringify({ code: 0, data: { q16: 'fresh-q16', q36: 'fresh-q36' } }) });
+        return response({ code: 0, data: JSON.stringify({ code: 0, data: { q36: 'fresh-q36' } }) });
       }
       const root = qq(request);
       if (root.req_0.method === 'GetSession') {

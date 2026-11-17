@@ -34,13 +34,13 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
             Open(scope);
             using var transaction = connection!.BeginTransaction(deferred: true);
             var revision = Header(scope, transaction);
-            var areas = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+            var areas = new Dictionary<string, JsonNode?>(StringComparer.Ordinal);
             using var command = Command("SELECT name, data FROM areas ORDER BY name", transaction);
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                areas.Add(reader.GetString(0), Decode(reader.GetString(1)));
+                areas.Add(reader.GetString(0), Parse(reader.GetString(1)));
             }
             reader.Close();
             transaction.Commit();
@@ -204,8 +204,9 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
         try
         {
             if (!Guid.TryParseExact(id, "D", out var parsed) || id != parsed.ToString("D") ||
-                LJ.S(song["songId"]) != id || !JsonNode.DeepEquals(song, NativeMusicSong.Normalize(song)))
+                LJ.S(song["songId"]) != id)
                 throw new DocumentStoreException(failure);
+            _ = NativeMusicSong.Normalize(song);
             var keys = new HashSet<string>(StringComparer.Ordinal);
             foreach (var source in LJ.Array(song["sources"]).OfType<JsonObject>())
             {
@@ -234,9 +235,14 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
         catch (DocumentStoreException) { throw; }
         catch { throw new DocumentStoreException(DocumentStoreError.InvalidRequest); }
     }
+    private static JsonNode? Parse(string text)
+    {
+        try { return LJ.ParseValue(Encoding.UTF8.GetBytes(text), MaximumRecordBytes); }
+        catch (MusicLibraryException) { throw new DocumentStoreException(DocumentStoreError.Corrupt); }
+    }
     private static JsonObject Decode(string text)
     {
-        try { return LJ.Object(LJ.Parse(Encoding.UTF8.GetBytes(text), MaximumRecordBytes)); }
+        try { return LJ.Object(Parse(text)); }
         catch (MusicLibraryException) { throw new DocumentStoreException(DocumentStoreError.Corrupt); }
     }
     private static void ValidateScope(string scope)
