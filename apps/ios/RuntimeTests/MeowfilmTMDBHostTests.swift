@@ -179,7 +179,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
         XCTAssertEqual(context.snapshot.metadataSearch?.catField("results")?.catArray?.first?.catField("poster_path"),
             .string("/v1/tmdb/images/w500/tv.png"), "The original search response retains its distinct list-sized image identity")
         let poster = try XCTUnwrap(context.detail.item.posterURL)
-        XCTAssertEqual(poster.absoluteString, "/v1/tmdb/images/w500/tv.png")
+        XCTAssertEqual(poster.absoluteString, "/v1/tmdb/images/original/tv.png")
         XCTAssertNil(poster.scheme); XCTAssertNil(poster.baseURL)
         let cell = FilmPosterCell(frame: CGRect(x: 0, y: 0, width: 110, height: 224))
         cell.configure(item: context.detail.item, images: assembly.filmImages, theme: PageTheme(), label: tv.label)
@@ -199,7 +199,7 @@ final class MeowfilmTMDBHostTests: XCTestCase {
             $0.query == ["language": "zh-CN", "append_to_response": "credits,similar,images"]
         })
         assertNoRuntimeAuthentication(upstream.requests)
-        let imageReads = upstream.requests.filter { $0.path == "/images/t/p/w500/tv.png" }
+        let imageReads = upstream.requests.filter { $0.path == "/images/t/p/original/tv.png" }
         XCTAssertEqual(imageReads.count, 1)
         XCTAssertNil(imageReads.first?.headers["authorization"])
         XCTAssertEqual(imageReads.first?.query, [:])
