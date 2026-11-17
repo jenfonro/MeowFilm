@@ -20,6 +20,8 @@
 **/node_modules/
 **/.npm-cache/
 **/.cache/
+/native/AetherKernel/.cache-inputs.json
+/native/AetherKernel/.cache-prepare.lock
 **/.build/
 **/.swiftpm/
 **/DerivedData/

@@ -18,7 +18,10 @@ private let musicAccessGeneration: UInt64 = 1
 
 @MainActor
 final class MeowfilmAssembly: ObservableObject {
-    let playback = PlaybackController(volumePreferences: PlaybackVolumePreferences(), videoDecoderFactory: makePlaybackVideoDecoder)
+    let playerPreferences = FilmPlayerPreferencesStore()
+    lazy var playback = PlaybackController(volumePreferences: PlaybackVolumePreferences(), videoDecoderFactory: {
+        [playerPreferences] in try makePlaybackVideoDecoder(engine: playerPreferences.preferences.engine)
+    })
     let appearance = MusicAppearancePreferencesStore()
     let filmLibrary = FilmLibrary()
     lazy var filmSources: [any FilmSource] = [DoubanFilmSource { [weak self] in
@@ -156,7 +159,8 @@ final class MeowfilmAssembly: ObservableObject {
         let pan = PanAccountsModel(service: PanAccountService(document: resources.filmSettings[.panAccounts],
             connection: { try await resources.scriptSession.connection() }))
         let filmSettings = FilmSettingsModel(rules: resources.filmRules, sources: resources.filmSourceSettings,
-                                             tmdb: tmdb, douban: douban, pan: pan, playback: playbackSettings)
+                                             tmdb: tmdb, douban: douban, pan: pan, playback: playbackSettings,
+                                             player: playerPreferences)
         self.filmSettings = filmSettings
         filmSettings.start()
         guard !closed, !Task.isCancelled else { return }
@@ -314,7 +318,7 @@ final class MeowfilmAssembly: ObservableObject {
                           request: @escaping @Sendable () async throws -> FilmPlaybackRequest) throws -> FilmPlaybackModel {
         guard !closed, let resources else { throw FilmPlaybackError(code: "CLOSED") }
         if filmMedia == nil {
-            let media = try MeowfilmFilmMedia(playback: playback, willCommit: { [weak self] in
+            let media = try MeowfilmFilmMedia(playback: playback, preferences: playerPreferences, willCommit: { [weak self] in
                 self?.music?.mediaHandoffCompletion()
             })
             media.restoreUI = restoreFilmPlaybackUI
@@ -322,7 +326,7 @@ final class MeowfilmAssembly: ObservableObject {
         }
         return FilmPlaybackModel(transport: FilmPlaybackTransport {
             try await resources.scriptSession.connection()
-        }, media: filmMedia!, searchContext: searchContext, request: request)
+        }, media: filmMedia!, searchContext: searchContext, playerPreferences: playerPreferences, request: request)
     }
 
     private func filmPlaybackSources(resources: MeowfilmResources) async throws -> [FilmPlaybackSource] {
@@ -503,6 +507,8 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
     weak var model: FilmPlaybackModel?
     var restoreUI: (@MainActor (UUID) async -> Bool)?
     private let playback: PlaybackController
+    private let preferences: FilmPlayerPreferencesStore
+    private var preferenceObservation: AnyCancellable?
     private var lease: PlaybackVideoLease!
     private var pending: Media?
     private var current: Media?
@@ -517,13 +523,14 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
         init(input: FilmPlaybackMediaInput, receive: @escaping @MainActor (FilmMediaEvent) -> Void) {
             sessionID = input.sessionID; attemptID = input.attemptID; self.receive = receive
             state.sessionID = input.sessionID; state.attemptID = input.attemptID
+            state.resourceID = input.resourceID
             state.position = input.position; state.paused = input.paused
         }
     }
 
-    init(playback: PlaybackController,
+    init(playback: PlaybackController, preferences: FilmPlayerPreferencesStore,
          willCommit: @escaping @MainActor () -> (@MainActor () -> Void)?) throws {
-        self.playback = playback
+        self.playback = playback; self.preferences = preferences
         lease = try playback.bindVideo(owner: "film", commands: .init(
             previous: { [weak self] attempt in self?.navigate(attempt, forward: false) ?? false },
             next: { [weak self] attempt in self?.navigate(attempt, forward: true) ?? false }
@@ -532,6 +539,11 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
             guard let self, let current else { return false }
             return await restoreUI?(current.sessionID) ?? false
         }
+        preferenceObservation = preferences.$preferences.map(\.showsControlCenter).removeDuplicates()
+            .sink { [weak self] visible in
+                guard let self, let current, let attempt = attempt(current.sessionID) else { return }
+                playback.setNowPlayingVisible(visible, attempt: attempt)
+            }
     }
 
     func play(_ input: FilmPlaybackMediaInput, preservePosition: Bool,
@@ -555,6 +567,9 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
         defer { if pending === record { pending = nil } }
         do {
             record.nativeAttempt = try await lease.play(receipt, paused: input.paused, preservePosition: preservePosition,
+                                                       initialRate: current?.sessionID == input.sessionID
+                                                           ? nil : preferences.preferences.defaultRate,
+                                                       showsNowPlaying: preferences.preferences.showsControlCenter,
                                                        waitForCommit: waitForCommit, canCommit: canCommit)
         } catch {
             do { try await receipt.close() } catch { throw FilmPlaybackError(code: "MEDIA_RELEASE_FAILED") }
@@ -570,7 +585,9 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
         record.state.duration = event.snapshot.duration ?? 0
         record.state.paused = event.snapshot.phase == .paused || !event.wantsPlayback
         record.state.buffering = event.snapshot.phase == .preparing || event.snapshot.phase == .buffering
-        record.state.rate = playback.preferredRate; record.state.volume = playback.volume
+        record.state.engine = event.engine
+        record.state.chapters = event.chapters
+        record.state.rate = playback.effectiveRate; record.state.volume = playback.volume
         record.state.pictureInPicture = event.pictureInPicture == .active
         record.state.pictureInPictureAvailable = [.possible, .active].contains(event.pictureInPicture)
         switch event.kind {
@@ -578,6 +595,9 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
         case .started:
             current = record
             if pending === record { pending = nil }
+            if let attempt = record.nativeAttempt {
+                playback.setNowPlayingVisible(preferences.preferences.showsControlCenter, attempt: attempt)
+            }
             record.receive(.state(record.state))
             record.receive(.started(attemptID: record.attemptID))
         case .progress, .paused:
@@ -648,8 +668,13 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
     }
     func setRate(sessionID: UUID, rate: Double) {
         if let value = attempt(sessionID), playback.setPreferredRate(rate, attempt: value), let current {
-            current.state.rate = playback.preferredRate; current.receive(.state(current.state))
+            current.state.rate = playback.effectiveRate; current.receive(.state(current.state))
         }
+    }
+    func setTemporaryRate(sessionID: UUID, attemptID: String, rate: Double?) {
+        guard isCurrent(sessionID: sessionID, attemptID: attemptID), let value = attempt(sessionID),
+              playback.setTemporaryVideoRate(rate, attempt: value), let current else { return }
+        current.state.rate = playback.effectiveRate; current.receive(.state(current.state))
     }
     func setVolume(sessionID: UUID, volume: Double) {
         if let value = attempt(sessionID), playback.setVolume(volume, attempt: value), let current {

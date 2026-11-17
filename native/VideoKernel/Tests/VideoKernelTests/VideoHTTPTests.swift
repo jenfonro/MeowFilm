@@ -294,6 +294,8 @@ final class VideoHTTPTests: XCTestCase {
     private func syntheticHeaders(_ mediaID: String) -> [String: String] {
         ["Authorization": "Bearer synthetic-\(mediaID)",
          "Cookie": "synthetic_session=\(mediaID); synthetic_scope=media",
+         "User-Agent": "MeowVideoKernel-synthetic-\(mediaID)",
+         "Referer": "https://synthetic.invalid/media/\(mediaID)",
          "X-Media-Test": mediaID]
     }
 
@@ -305,9 +307,11 @@ final class VideoHTTPTests: XCTestCase {
             let requests = peer.headers(path)
             XCTAssertFalse(requests.isEmpty, "The real media graph must request \(name)", file: file, line: line)
             for headers in requests {
-                for field in ["authorization", "cookie", "x-media-test"] {
+                for field in ["authorization", "cookie", "referer", "x-media-test"] {
                     XCTAssertEqual(headers[field], expected[field], "\(name): \(field)", file: file, line: line)
                 }
+                XCTAssertEqual(headers["user-agent"], expected["user-agent"] ?? "KSPlayer",
+                    "\(name): user-agent", file: file, line: line)
             }
         }
         XCTAssertEqual(peer.rejectedRequests, 0, file: file, line: line)

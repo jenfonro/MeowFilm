@@ -45,6 +45,17 @@ exact compiled package inputs from the verified upstream bytes.
   seek again to rebuild feeding. Seek/flush invalidate old first-frame evidence.
 - `onDisplayLayerChanged` reports replacement of the actual
   `AVSampleBufferDisplayLayer` so the product PiP owner can rebind.
+- The transport rate drives both audio time-pitch and the sample-buffer
+  timebase. Without audio, the video clock advances continuously at that rate;
+  displaying a frame does not discard its fractional elapsed time. At high
+  rates the render tick selects the latest due queued frame, rather than
+  limiting media advancement to one frame per display refresh. Pause, buffering
+  and seek freeze/reanchor this clock. This is not a guarantee that every frame
+  of demanding content can be decoded or displayed at 8X.
+- `chapters` contains real container titles and valid start/end intervals on the
+  same zero-based axis as `currentPlaybackTime` and `seek(time:)`. Invalid or
+  wholly out-of-content intervals are omitted; it does not classify titles,
+  synthesize missing markers or automatically skip content.
 - `shutdownAndWait()` is the terminal asynchronous drain operation: input and
   decoder executors, VideoToolbox callbacks and audio callbacks are joined.
   `shutdown()` by itself is not a drain signal.

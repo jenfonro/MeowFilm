@@ -1,4 +1,5 @@
 import Foundation
+import MeowContracts
 import MeowPlayback
 import MeowVideoKernel
 
@@ -6,6 +7,16 @@ import MeowVideoKernel
 @MainActor
 public func makePlaybackVideoDecoder() throws -> any PlaybackVideoDecoding {
     PlaybackVideoDecoderAdapter(session: try VideoSession())
+}
+
+@MainActor
+public func makePlaybackVideoDecoder(engine: PlaybackVideoEngine) throws -> any PlaybackVideoDecoding {
+    switch engine {
+    case .ksPlayer: return try makePlaybackVideoDecoder()
+    case .aether:
+        return PlaybackVideoCandidateDecoder(decoder: try AetherPlaybackVideoDecoderAdapter(),
+                                             fallback: makePlaybackVideoDecoder)
+    }
 }
 
 @MainActor
@@ -21,6 +32,9 @@ private final class PlaybackVideoDecoderAdapter: PlaybackVideoDecoding {
     var output: any PlaybackVideoOutput { session.output }
     var position: Double { session.position }
     var duration: Double? { session.info?.duration }
+    var chapters: [PlaybackVideoChapter] {
+        session.chapters.map { PlaybackVideoChapter(title: $0.title, start: $0.start, end: $0.end) }
+    }
     var onFailure: (@MainActor (Error) -> Void)?
     var onProgress: (@MainActor (Double) -> Void)? {
         didSet { session.onProgress = onProgress }

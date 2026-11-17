@@ -7,6 +7,8 @@ final class PlaybackVideoTransport {
     var systemRelease: Task<NativePlaybackError?, Never>?
     let media: PlaybackVideoMediaLease
     let title: String
+    let initialRate: Double?
+    let showsNowPlaying: Bool
     let kernel: any PlaybackVideoDecoding
     var output: any PlaybackVideoOutput { kernel.output }
     private var input: PlaybackVideoInput?
@@ -16,8 +18,10 @@ final class PlaybackVideoTransport {
     var duration: Double? { kernel.duration }
     private var pictureInPicture: (any PlaybackVideoPictureInPictureControlling)?
 
-    init(media: PlaybackVideoMediaLease, input: PlaybackVideoInput, decoder: any PlaybackVideoDecoding) throws {
+    init(media: PlaybackVideoMediaLease, input: PlaybackVideoInput, decoder: any PlaybackVideoDecoding,
+         initialRate: Double? = nil, showsNowPlaying: Bool = true) throws {
         self.media = media; self.input = input; title = input.title
+        self.initialRate = initialRate; self.showsNowPlaying = showsNowPlaying
         kernel = decoder
     }
 

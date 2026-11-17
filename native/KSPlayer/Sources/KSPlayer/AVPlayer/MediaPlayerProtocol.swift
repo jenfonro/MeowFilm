@@ -63,6 +63,15 @@ public struct Chapter {
     public let start: TimeInterval
     public let end: TimeInterval
     public let title: String
+
+    static func playbackTimeline(start: TimeInterval, end: TimeInterval, title: String,
+                                 origin: TimeInterval, duration: TimeInterval) -> Chapter? {
+        guard start.isFinite, end.isFinite, origin.isFinite, end > start else { return nil }
+        let start = max(0, start - origin)
+        let end = duration > 0 ? min(duration, end - origin) : end - origin
+        guard end > start else { return nil }
+        return Chapter(start: start, end: end, title: title)
+    }
 }
 
 public protocol MediaPlayerProtocol: MediaPlayback {

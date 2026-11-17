@@ -46,6 +46,16 @@ owner lease 同样使用 nonisolated 析构：只转交初始化时建立的 Mai
 
 成功接管时撤销旧音乐待播放、恢复及导航请求，防止残留命令或迟到结果夺回视频的播放所有权。音乐队列保留，已接受的播放及退出事实继续按原身份和授权记账，但不能触发旧选择的自动续播。用户可随后明确播放音乐；视频关闭后不自动恢复音乐。
 
+## 影视卡片与内核边界
+
+影视无论使用 KSPlayer 还是 Aether，都复用上述唯一 `PlaybackController`／`PlaybackSystemSession`。`PlaybackVideoTransport.showsNowPlaying` 提供候选接管时的卡片可见值；共享播放器偏好的后续变化经 `MeowfilmFilmMedia` 调用 `setNowPlayingVisible(_:attempt:)`，只对准确的当前影视 attempt 生效。
+
+「控制中心显示」默认开启；关闭只清除影视 Now Playing 卡片，内部授权元数据和耳机／系统语义命令保留，不停止音频、不撤销播放 owner，也不改音乐歌词设置。重新显示仍核对当前 attempt 与授权，停止或撤权后的迟到设置不能复活旧卡片。屏幕播放栏显隐是独立 UIKit 控制，开关不增加后台权限，系统最终外观仍由 iOS 决定。
+
+Aether wrapper 明确关闭上游音频、原生视频及软件路径的 Now Playing owner／commands、renderer 音频激活和停止时停用行为，以 `hostManagedLifecycle` 补丁避免上游生命周期观察和全局音频 category 配置。宿主继续决定音频准入、后台保留与释放；补丁内容见[Aether 构建边界](../../native/AetherKernel/README.md#宿主适配补丁)。
+
+PiP 适配源码同时接收 `AVPlayerLayer` 和 sample-buffer 输出，并向内核转交实际 PiP 活跃状态；这不证明系统 PiP 播放／暂停已完整回到唯一 Controller。Aether 原生 PiP 的播放意图桥接、两种输出的恢复／停止与资源排空仍待真实验证，不以 layer 存在或 ready 状态宣称 PiP 通过。
+
 ## 验证边界
 
 Swift 测试覆盖元数据、身份、队列意图和播放策略；iOS 组件测试覆盖 UIKit 图片、系统元数据及通知适配。注入音频通知只证明桥接行为，模拟器和构建不能证明物理耳机点击、真实来电或灵动岛外观。系统滚动、支持机型上的灵动岛封面和指定耳机操作需要设备验收。

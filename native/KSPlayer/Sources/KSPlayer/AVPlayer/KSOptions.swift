@@ -158,7 +158,7 @@ open class KSOptions {
         avOptions["AVURLAssetHTTPHeaderFieldsKey"] = oldValue
         var str = formatContextOptions["headers"] as? String ?? ""
         for (key, value) in header {
-            str.append("\(key):\(value)\r\n")
+            str.append("\(key): \(value)\r\n")
         }
         formatContextOptions["headers"] = str
     }
@@ -657,13 +657,41 @@ public extension Array {
 public struct KSClock {
     public private(set) var lastMediaTime = CACurrentMediaTime()
     public internal(set) var position = Int64(0)
+    private let continuous: Bool
+    private var anchorTime: TimeInterval = 0
+    private var anchorMediaTime = CACurrentMediaTime()
+    private(set) var rate: Double
     public internal(set) var time = CMTime.zero {
         didSet {
             lastMediaTime = CACurrentMediaTime()
+            // A video-only clock must not discard elapsed fractional frames
+            // on every display tick. Audio timestamps remain its real anchor.
+            if !continuous || rate == 0 {
+                anchorTime = time.seconds
+                anchorMediaTime = lastMediaTime
+            }
         }
     }
 
-    func getTime() -> TimeInterval {
-        time.seconds + CACurrentMediaTime() - lastMediaTime
+    init(continuous: Bool = false) {
+        self.continuous = continuous
+        rate = continuous ? 0 : 1
+    }
+
+    mutating func setRate(_ rate: Double) {
+        guard rate != self.rate else { return }
+        let now = CACurrentMediaTime()
+        anchorTime = self.rate == 0 ? time.seconds : getTime(at: now)
+        anchorMediaTime = now
+        self.rate = rate
+    }
+
+    mutating func synchronize(to time: TimeInterval) {
+        anchorTime = time
+        anchorMediaTime = CACurrentMediaTime()
+    }
+
+    func getTime(at now: TimeInterval = CACurrentMediaTime()) -> TimeInterval {
+        anchorTime + (now - anchorMediaTime) * rate
     }
 }

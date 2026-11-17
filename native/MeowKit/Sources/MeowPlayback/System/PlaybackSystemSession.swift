@@ -184,7 +184,8 @@ final class PlaybackSystemSession {
     func update(
         snapshot: PlaybackSnapshot, attempt: PlayAttempt?, metadata: PlaybackNowPlayingMetadata?,
         rate: Float, canSeek: Bool,
-        navigation: PlaybackNavigationRoutes, playPause: PlaybackPlayPauseRoute?
+        navigation: PlaybackNavigationRoutes, playPause: PlaybackPlayPauseRoute?,
+        showsNowPlaying: Bool = true
     ) {
         guard let attempt, attempt.id == generation,
               snapshot.owner == attempt.owner, snapshot.resourceID == attempt.resourceID,
@@ -192,7 +193,7 @@ final class PlaybackSystemSession {
         MPRemoteCommandCenter.shared().changePlaybackPositionCommand.isEnabled = canSeek
         updateNavigation(navigation)
         updatePlayPause(playPause)
-        guard let metadata else {
+        guard showsNowPlaying, let metadata else {
             artworkData = nil; artwork = nil
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
             return

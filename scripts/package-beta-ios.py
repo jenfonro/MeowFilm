@@ -60,6 +60,10 @@ def strip_signatures(app):
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if check.returncode == 0 or "not signed at all" not in check.stderr:
             raise ValueError("Unable to verify an unsigned Mach-O file: " + path.name)
+    # Removing Mach-O signatures leaves bundle resource signatures behind.
+    for path in app.rglob("_CodeSignature"):
+        if not path.is_symlink() and path.is_dir():
+            shutil.rmtree(path)
     if list(app.rglob("_CodeSignature")):
         raise ValueError("Unexpected bundle signature in unsigned product")
 

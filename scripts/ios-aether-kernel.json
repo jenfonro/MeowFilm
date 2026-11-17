@@ -1,0 +1,122 @@
+{
+  "schema": 1,
+  "libraries": [
+    "AetherLibavcodec",
+    "AetherLibavformat",
+    "AetherLibavutil",
+    "AetherLibswresample",
+    "AetherLibswscale",
+    "AetherLibavfilter",
+    "AetherLibdav1d",
+    "AetherLibzimg",
+    "AetherLibzvbi"
+  ],
+  "sources": {
+    "AetherEngine": {
+      "version": "7.68.0",
+      "revision": "0de31d0b9478b99dd49baa2bd8318604a49f99a3",
+      "url": "https://codeload.github.com/superuser404notfound/AetherEngine/tar.gz/0de31d0b9478b99dd49baa2bd8318604a49f99a3",
+      "sha256": "ed70939a9af2e55959998f8f245d2780075ab17446f8bc67b2a5c3c81fab070e",
+      "licenses": {
+        "LICENSE": "18100902a54f56b75111b14242769c1671ecc1995376f8dbcc3e2e026ddbea9d"
+      }
+    },
+    "FFmpegBuild": {
+      "version": "3.15.0",
+      "revision": "d445e6daa180db73f12d47606a00c914f682e278",
+      "url": "https://codeload.github.com/superuser404notfound/FFmpegBuild/tar.gz/d445e6daa180db73f12d47606a00c914f682e278",
+      "sha256": "a5a2a03e39d938fa900789c65ab4c1c2b8f3001d0bc82c557cbb74455df2eec1",
+      "licenses": {
+        "LICENSE": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30",
+        "LICENSES/LGPL-2.1.txt": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30",
+        "LICENSES/dav1d.BSD-2-Clause.txt": "b327887de263238deaa80c34cdd2ff3e0ba1d35db585ce14a37ce3e74ee389e9",
+        "LICENSES/libzvbi-ure.MIT.txt": "b1c0bef2fac6f9f2314fa713137f911eaf26fbe0173e030d0938d5952f4fab15",
+        "LICENSES/zimg.WTFPL.txt": "7637386b5f81e8a719ca336233149005e5fa28b5e6054ea7b67de49355b0ad40"
+      }
+    },
+    "LibDovi": {
+      "version": "2.2.0",
+      "revision": "caff700968700467c089a3f38c8b4180620518b5",
+      "url": "https://codeload.github.com/superuser404notfound/LibDovi/tar.gz/caff700968700467c089a3f38c8b4180620518b5",
+      "sha256": "84af1b63a2af380bab3390e584cb4a44dfcc93b3d17b91478c1171a049033901",
+      "licenses": {
+        "LICENSE": "9e5f48717b1db7f77b7c2d59bd283b4fe974c19cae747a6dfa7f5d26797cd2ea"
+      }
+    }
+  },
+  "patches": [
+    {
+      "path": "native/AetherKernel/patches/runtime-host.patch",
+      "sha256": "fde3c145b32d3ccadb08bf5b3d4ed12aa474c1ccfdb43b466a7caa0dd244f511",
+      "files": {
+        "AetherEngine/AetherEngine.swift": {
+          "upstream": "726d34bf0062abd7b42f524888aac3e56584eb62fb49b888ec47c72dbd2a44cd",
+          "patched": "57e0e68257301ec34ddca124e341492456d6e1f085cc52afc1a4cca88ff6b936"
+        },
+        "AetherEngine/Video/HLSVideoEngine.swift": {
+          "upstream": "9aab7f695f3f36aef81268df4e0503b1169406e635d31b0eb154a9997378dd77",
+          "patched": "947b4fae915bfe89bfd1ea5f8c5db93ad24f02d92cfd83bc02345dbf1faaba27"
+        },
+        "AetherEngine/AetherEngine+Loading.swift": {
+          "upstream": "acbe6109952bd741092c3633fc46c94666b41d761c38486b1175bf99e320b804",
+          "patched": "0698f7af4d30744a698d72bbc2d155eed211de2f452c05ec9dc2fcc73d23aa41"
+        },
+        "AetherEngine/Native/SoftwarePacketReadAhead.swift": {
+          "upstream": "853b0f55326f08bfb30527086e171ac7832fdf2344f97f642ab132f39b197b11",
+          "patched": "a4c3a907f910a73e088aec2f9560322001ba13e9709277845c92ed771e0fec30"
+        },
+        "AetherEngine/Native/NativeAVPlayerHost.swift": {
+          "upstream": "0b1477a1ed3235878931dcdf395d42c77124cd4e24929a4d9db7f2edf0cb9393",
+          "patched": "38659c602c1269abb77e3de8f023c1efa893c8b1a6f96245c1d60b9c1f244406"
+        },
+        "AetherEngine/Native/SoftwarePlaybackHost.swift": {
+          "upstream": "17ade81dd8ae6e5f3c58c8791306cb8f274df9edc8b5b5487359ce118a26407c",
+          "patched": "7b7f8ab12d876f809fdfe6584124d48a64a7810b5ad3b073268f34219fb3dc68"
+        },
+        "AetherEngine/Diagnostics/EngineLog.swift": {
+          "upstream": "9bc194bda1b995c7ba7711746d891275f69f305ff3140f144a09d825d81f8e40",
+          "patched": "44e1689f735b4c58c02d527b58f346e99cab7ec10a7980543e6d1c8a5f86c285"
+        }
+      }
+    }
+  ],
+  "targets": {
+    "macos-arm64": {
+      "slice": "macos-arm64_x86_64",
+      "arch": "arm64",
+      "minimum": "15.0"
+    },
+    "ios-simulator-arm64": {
+      "slice": "ios-arm64_x86_64-simulator",
+      "arch": "arm64",
+      "minimum": "18.0"
+    },
+    "macos-x86_64": {
+      "slice": "macos-arm64_x86_64",
+      "arch": "x86_64",
+      "minimum": "15.0"
+    },
+    "ios-simulator-x86_64": {
+      "slice": "ios-arm64_x86_64-simulator",
+      "arch": "x86_64",
+      "minimum": "18.0"
+    },
+    "ios-arm64": {
+      "slice": "ios-arm64",
+      "arch": "arm64",
+      "minimum": "18.0"
+    }
+  },
+  "licenses": {
+    "AetherEngine-EXCEPTION.txt": "be2a86767eeb59067823df292c1f7424273a6b7f0caceff989f65c54fac08b74",
+    "Aether-THIRD-PARTY-NOTICES.txt": "99d0bccd5e5479f6ef9da917ac97d369177e14494701194e112a3854f3c536a4",
+    "WTFPL-2.0.txt": "7637386b5f81e8a719ca336233149005e5fa28b5e6054ea7b67de49355b0ad40",
+    "Aether-libzvbi-ure-MIT.txt": "b1c0bef2fac6f9f2314fa713137f911eaf26fbe0173e030d0938d5952f4fab15",
+    "libxml2-MIT.txt": "76aba8449c21a6fd073ff16bd75c52b0830502371cb8716e16166a16f8d0501c",
+    "FilmKernel-THIRD-PARTY-NOTICES.txt": "228e789984f27fe104c721033da8a41c69e3d79ea6fe89e22b3230bfd126324e",
+    "LGPL-2.1-only.txt": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30",
+    "LGPL-3.0-only.txt": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
+    "GPL-3.0-only.txt": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+  },
+  "preparedInventorySHA256": "5821f2eda2ea942822b7687209b1382e8e27f5fddba865d330dc8640a46872d8"
+}

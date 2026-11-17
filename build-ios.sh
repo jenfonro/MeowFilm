@@ -29,6 +29,7 @@ mkdir "$staging"
 
 python3 -I -B scripts/prepare-ios-audio-kernel.py --target ios-arm64
 python3 -I -B scripts/prepare-ios-video-kernel.py --target ios-arm64
+python3 -I -B scripts/prepare-ios-aether-kernel.py --target ios-arm64
 python3 -I -B scripts/prepare-ios-runtime.py --sdk iphoneos --arch arm64
 
 settings=(
@@ -51,6 +52,7 @@ if [ -z "$app" ]; then
   echo "Unable to locate the built app." >&2
   exit 4
 fi
+python3 -I -B scripts/prepare-ios-aether-kernel.py --target ios-arm64 --verify-app "$app"
 python3 -I -B scripts/package-beta-ios.py "$app" "$staging"
 
 mkdir -p "$(dirname "$build")"

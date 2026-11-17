@@ -43,6 +43,7 @@ public final class VideoSession: MediaPlayerDelegate {
         return confirmedPosition
     }
     public var seekable: Bool { player?.seekable == true }
+    public var chapters: [VideoChapter] { info?.chapters ?? [] }
     public var tracks: [VideoTrack] {
         guard let player else { return [] }
         return [AVMediaType.video, .audio, .subtitle].flatMap { type in

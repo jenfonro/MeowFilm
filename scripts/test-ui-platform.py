@@ -48,7 +48,7 @@ def main():
         raise ValueError("Result bundle already exists: " + str(result))
     log = result.with_suffix(".log")
     log.parent.mkdir(parents=True, exist_ok=True)
-    for kernel in ("audio", "video"):
+    for kernel in ("audio", "video", "aether"):
         preparation = run([
             sys.executable, "-I", "-B", "scripts/prepare-ios-" + kernel + "-kernel.py",
             "--target", "ios-simulator-" + platform.machine(),

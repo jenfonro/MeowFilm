@@ -2,6 +2,8 @@
 
 meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持有；页面内容综合性能、可控性、实现复杂度和维护成本选择 UIKit 或 SwiftUI。业务、平台、账号、播放、缓存和持久化位于 Swift Package `native/MeowKit`。
 
+App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行，不新增 Mac 客户端。构建输入与工具链验证边界见[发布](release.md)。
+
 共同规则分别见[页面数据请求](../common/pages/data-requests.md)和[音乐平台客户端上下文](../common/music/platform-client-context.md)。本文件说明 Swift Package 与 UIKit 的端侧装配，不把目标契约视为已完成实现。
 
 ## 应用工程
@@ -52,21 +54,22 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `MeowAccounts` | 凭据与账号状态基础设施 | Contracts |
 | `MeowAudio` | 独立音频解码、有界 PCM、原生保音高变速与 AVAudioEngine 输出 | CMeowAudioKernel |
 | `MeowPlayback` | 受控媒体输入、音乐播放、唯一系统媒体会话与播放所有权 | Contracts、MeowAudio |
-| `MeowPlaybackVideo` | 显式注入共享协调器的视频解码／原生视图输出适配 | Playback、MeowVideoKernel |
+| `MeowPlaybackVideo` | 显式注入共享协调器的视频解码／原生视图输出、候选内核选择与有界能力回退 | Contracts、Playback、MeowVideoKernel、MeowAetherKernel |
 | `MeowUI` | 中性主题、窗口渐变、页面生命周期、自绘页头、导航栈与转场、搜索页与呈现机制 | 无 |
 | `MeowRuntime` | runtime.http.v1 客户端、严格 JSON、事件观察／取消／关闭与单次内嵌启动机制；fd 仅交接受信启动及生命期 | 无 |
 | `MeowMusicFeature` | 音乐界面、交互、公开业务契约与音乐外观策略 | Contracts、Storage、Playback、UI |
 | `MeowMusicPlatform` | 网易、QQ、酷狗协议、账号、加密、HTTP 与文件缓存 | Feature、Audio、Contracts、JSON、Accounts、Storage |
 | `MeowMusicNativeService` | 曲库、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | Contracts、JSON、Feature、Runtime、Storage |
-| `MeowFilmFeature` | 影视页面、规则／搜索 RPC 消费者及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | UI、JSON、Storage、Runtime |
+| `MeowFilmFeature` | 影视页面、播放器偏好、规则／搜索 RPC 消费者及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | Contracts、UI、JSON、Storage、Runtime |
 | `native/VideoKernel` | 电影候选准备／提交、实际首帧、轨道与关闭适配 | 固定源码 KSPlayer，无业务或系统媒体会话 owner |
 | `native/KSPlayer` | core-only KSPlayer：解码、轨道／字幕、缓冲／同步、原生音频与 Metal／sample-buffer 输出 | FFmpeg 8.1.2 与 Apple 系统媒体框架，不编译上游播放控件 |
+| `native/AetherKernel` | 唯一公开 dynamic `MeowAetherKernel`、Aether 宿主生命周期与输出适配 | AetherEngine 7.68.0、动态 FFmpegBuild 3.15.0、内部静态 Dovi；无业务或系统媒体 owner |
 | `native/AudioKernel` | 锁定 FFmpeg 9.0.1 音频闭包、隐藏上游符号的动态框架与最小 C ABI | 无业务或视频依赖 |
 | `packages/film-rules`／`packages/film-search` | Node 加载的共享规则／搜索程序，不再作为 SwiftPM 依赖 | 共享 script-host 原生载体 |
 
 共享模块不依赖音乐模块。业务差异通过显式参数、契约或注入实现表达；模块边界由 `scripts/check-source-scope.py` 检查。
 
-音乐依赖闭包不包含视频目标；应用装配通过 `makePlaybackVideoDecoder` 注入现行视频适配，不迁移视频内核。音乐 PCM／输出与取消排空边界见[独立音乐核心](music-audio-core.md)，系统会话仍由[系统媒体控制](system-media.md)说明。
+音乐依赖闭包不包含视频目标；应用装配共享一个 `FilmPlayerPreferencesStore` 给设置、播放模型与媒体桥接，候选工厂通过 `makePlaybackVideoDecoder(engine:)` 读取首选内核。出厂默认 KSPlayer，设置变更只对下一媒体候选生效，当前实例不热切；播放页消费事件里的实际内核，不用首选值代替运行事实。选择、能力过滤及控制生效时机见[播放器设置](film-settings.md#播放器设置)，候选回退见[影视](film.md#内核选择与候选回退)。音乐 PCM／输出与取消排空边界见[独立音乐核心](music-audio-core.md)，系统会话仍由[系统媒体控制](system-media.md)说明。
 
 影视可编辑配置由原生 owner 保存；六块身份、离线读写和按块通知遵循[设置存储共同契约](../common/settings-storage.md)，具体文档与保护见[本地存储](storage.md#影视设置)。规则执行、搜索调度／聚合、智能播放、业务数据缓存及历史／人工匹配／屏蔽仍由 Node film owner 管理，不因配置迁移转移业务 owner。规则与通用脚本使用同一 `MeowScriptHost.framework` 内的 QuickJS-NG 0.18.0 核心，各自独立 Runtime／Context，不链接客户端规则引擎。共用约束见[影视播放契约](../runtime/film-playback.md)，视频内核构建输入见[发布](release.md)。平台验证仍须单独记录，不以九模块装配或内核版本代替实跑证据。
 

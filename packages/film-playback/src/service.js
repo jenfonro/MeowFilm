@@ -6,6 +6,7 @@ import { contentResults, matchesResult, mediaVariants, normalizeDetail, recogniz
 import { buildEpisodeMap, matchEpisodeMaps, resolveEpisode, sameSeasonPartition } from './episodes.js';
 import { providerFamily, qualityKey } from './rules.js';
 import { createFilmCatalog } from './catalog.js';
+import { recognizeChapters } from './chapters.js';
 import { checkSource, checkTarget, clone, codeOf, fail, identity, isIdentifier, object, requireValue,
   nativeMediaErrorCodes, playbackFeedbackFailure, resultDetailId, sourceRevision, text, variantParentId } from './identity.js';
 
@@ -2210,6 +2211,14 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     requireValue(object(input) && text(input.action));
     const session = get(input.sessionId);
     switch (input.action) {
+      case 'media.chapters': {
+        requireValue(text(input.attemptId) && text(input.resourceId));
+        const value = session.pending?.id === input.attemptId ? session.pending
+          : session.current?.id === input.attemptId ? session.current : null;
+        requireValue(value && !value.resourceReleased && value.resource.id === input.resourceId &&
+          session.leases.get(input.attemptId) === input.resourceId, 'STALE_SESSION');
+        return recognizeChapters(input.chapters);
+      }
       case 'prepare':
       case 'play': {
         await playSelection(session, input.action === 'prepare');

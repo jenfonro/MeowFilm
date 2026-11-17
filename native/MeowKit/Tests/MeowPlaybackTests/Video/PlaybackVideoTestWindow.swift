@@ -77,7 +77,7 @@ final class PlaybackVideoTestWindow {
         root.addSubview(display)
         display.frame = root.bounds
         #elseif os(iOS)
-        surface.stage(display)
+        surface.stage(transport.output)
         surface.setNeedsLayout(); surface.layoutIfNeeded()
         #endif
         #if os(macOS)
