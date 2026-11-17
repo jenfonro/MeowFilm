@@ -14,23 +14,16 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDECi0Np2UR87scwrvTr72L6oO01rBbbBPriSDFPxr3
 -----END PUBLIC KEY-----`;
 const xml = value => scalar(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;');
 const targetID = p => input(first(p.target?.nativeId, p.target?.nativeID, p.recording?.id, p.id));
-function feedbackFacts(c, p, state) {
-  const facts = { duration: number(p.duration, 0, 'INVALID_REQUEST'), listened: number(p.listened, 0, 'INVALID_REQUEST'),
-    media: number(first(p.mediaListened, p.media), 0, 'INVALID_REQUEST'), position: number(p.position, 0, 'INVALID_REQUEST'),
-    rate: number(p.rate, 1, 'INVALID_REQUEST') };
-  if ([facts.duration, facts.listened, facts.media, facts.position].some(value => value < 0) || facts.rate <= 0)
-    fail('INVALID_REQUEST');
-  if (c.platform !== 'wy') {
-    if ([facts.duration, facts.listened, facts.media, facts.position].some(value => value > 86400) || facts.rate > 16 ||
-        facts.duration > 0 && facts.position > facts.duration + (c.platform === 'kg' ? 1 : 0)) fail('INVALID_REQUEST');
-    if (state && facts.listened > Math.max(0, (c.clock() - state.startedAt) / 1000) + 2) fail('INVALID_REQUEST');
-  }
-  if (c.platform === 'kg') {
-    if (facts.duration <= 0 || facts.rate < 0.25 ||
-        p.event === 'end' && p.reason === 'playend' && Math.abs(facts.position - facts.duration) > 1) fail('INVALID_REQUEST');
-    if (state && (Math.abs(facts.duration - state.duration) > 10 || facts.media > facts.listened * 16 + 1 ||
-        facts.media + 1 < facts.listened * 0.25)) fail('INVALID_REQUEST');
-  }
+function kgFacts(c, p, state) {
+  const duration = number(p.duration, 0, 'INVALID_REQUEST');
+  if (duration <= 0 || state && Math.abs(duration - state.duration) > 10) fail('INVALID_REQUEST');
+  if (p.event === 'start') return { duration };
+  const listened = number(p.listened, 0, 'INVALID_REQUEST'), position = number(p.position, 0, 'INVALID_REQUEST'),
+    rate = number(p.rate, 1, 'INVALID_REQUEST');
+  if (listened < 0 || position < 0 || position > duration + 1 || rate <= 0 ||
+      p.reason === 'playend' && Math.abs(position - duration) > 1 ||
+      state && listened > Math.max(0, (c.clock() - state.startedAt) / 1000) + 2) fail('INVALID_REQUEST');
+  return { duration, listened, position, rate };
 }
 function records(p) {
   const target = p.target ?? {}, start = p.event === 'start', at = Math.floor(number(p.occurredAt, 0, 'INVALID_REQUEST') * 1000);
@@ -53,8 +46,7 @@ async function cscc(c, path, data, body, callbacks) {
       ...(path === '/v3/qrydid' ? {} : { 'KG-Rec': '1', 'User-Agent':
         'Android9-1070-10597-18-0-Cscc' + (path === '/v2/post' ? 'Post' : 'Gen') + '-wifi' }) } }, callbacks);
   const raw = response.value;
-  if (response.status !== 200 || !Number.isInteger(raw.status) ||
-      raw.data && Object.hasOwn(raw.data, 'grade_synced')) fail('INVALID_RESPONSE');
+  if (response.status !== 200 || !Number.isInteger(raw.status)) fail('INVALID_RESPONSE');
   const codes = ['errcode', 'error_code'].filter(key => raw[key] != null).map(key => {
     const value = required(raw[key]);
     if (!Number.isInteger(Number(value))) fail('INVALID_RESPONSE');
@@ -65,12 +57,12 @@ async function cscc(c, path, data, body, callbacks) {
   }
   return raw;
 }
-async function prepareKG(c, p) {
+async function prepareKG(c, p, duration) {
   const startedAt = c.clock();
   const client = c.client(), fields = cookieFields(c.accountRequired().cookie), uuid = fields.KUGOU_API_GUID ?? client.seed,
     mid = fields.KUGOU_API_MID ?? client.mid, model = fields.KUGOU_API_DEV ?? uuid.slice(0, 10).toUpperCase();
   const row = await c.kgMixRow(targetID(p).toUpperCase(), scalar(first(p.target?.mixsongId, p.target?.mixsongID, p.mixsongId)));
-  if (Math.abs(number(row.audio_info?.timelength) / 1000 - number(p.duration)) > 10) fail('REMOTE_CHANGED');
+  if (Math.abs(number(row.audio_info?.timelength) / 1000 - duration) > 10) fail('REMOTE_CHANGED');
   const mix = required(row.base?.album_audio_id);
   const time = String(Math.floor(c.clock() / 1000)), body = Buffer.from(JSON.stringify({ machine: model, mid, uuid, wh: [1920, 1080] }));
   const firstReply = await cscc(c, '/v3/qrydid', { appid: 'and02', _t: time,
@@ -82,11 +74,10 @@ async function prepareKG(c, p) {
   const second = await cscc(c, '/v2/gen', { s: portrait, appid: 3116, _t: next,
     sign: md5('_t' + next + 'appid3116s' + portrait + csccSalt) });
   const data = decodeJSON(decrypt(Buffer.from(required(second.data), 'base64'), field, 'cbc', uuid.slice(0, 16)));
-  return { mix, uuid, mid, model, field, duration: number(p.duration), startedAt, cookie: required(data.cookie),
+  return { mix, uuid, mid, model, field, duration, startedAt, cookie: required(data.cookie),
     clienttime: required(data.clienttime), serverstr: required(data.serverstr) };
 }
 async function prepareTX(c, p) {
-  const startedAt = c.clock();
   const id = targetID(p);
   await c.verifyTxFeedback();
   await c.prepareTx();
@@ -101,19 +92,19 @@ async function prepareTX(c, p) {
   if (!row || scalar(row.result) !== '0') fail('MEDIA_UNAVAILABLE');
   const duration = number(song.interval);
   if (duration <= 0 || duration > 86400) fail('INVALID_RESPONSE');
-  return { id, songId: required(song.id), duration, startedAt, singerId: scalar(song.singer?.[0]?.id) || '0',
+  return { id, songId: required(song.id), duration, singerId: scalar(song.singer?.[0]?.id) || '0',
     vkey: required(row.vkey) };
 }
-async function sendKG(c, p, state, callbacks) {
+async function sendKG(c, p, state, callbacks, facts) {
   const end = p.event === 'end', now = Math.floor(c.clock() / 1000);
-  const duration = Math.round(number(p.duration, 0, 'INVALID_REQUEST') * 1000);
-  const listened = Math.floor(number(p.listened, 0, 'INVALID_REQUEST') * 1000);
+  const duration = Math.round(facts.duration * 1000);
+  const listened = end ? Math.floor(facts.listened * 1000) : 0;
   const fields = [`type_id=${end ? '4' : '20431'}`, 'action=play', 'mixsongid=' + state.mix,
     (end ? 'st=' : 'spt=') + duration];
-  if (end) fields.push('spt=' + Math.round(number(p.position, 0, 'INVALID_REQUEST') * 1000));
+  if (end) fields.push('spt=' + Math.round(facts.position * 1000));
   fields.push('sty=' + (p.target?.automatic ? '自动' : '手动'));
   if (end) fields.push('duration=' + listened, 'state=' + (p.reason === 'exception' ? '播放错误' :
-    p.reason === 'playend' && listened > 0 ? '完整播放' : '被终止'), 'type=1', 'fs=' + number(p.rate, 1, 'INVALID_REQUEST').toFixed(1));
+    p.reason === 'playend' && listened > 0 ? '完整播放' : '被终止'), 'type=1', 'fs=' + facts.rate.toFixed(1));
   fields.push('mid=' + state.mid, 'uuid=' + state.uuid, 'sys=9', 'mod=' + state.model, 'channelid=18', 'ip=0.0.0.0',
     'net=1', 'ver=10597', 'time=' + c.clock(), 'userid=' + c.account.userId, 'ss3=' + md5(hex(16)));
   const event = Buffer.from(fields.join('&'));
@@ -179,7 +170,6 @@ export function createFeedbackOperations() {
     },
     async 'feedback.prepare'(c, p) {
       c.accountRequired();
-      feedbackFacts(c, p);
       if (c.platform === 'wy') return { status: 'registered', sessionId: null };
       if (c.platform !== 'tx') fail('UNSUPPORTED');
       const state = await prepareTX(c, p);
@@ -188,24 +178,23 @@ export function createFeedbackOperations() {
     },
     async 'feedback.send'(c, p) {
       c.accountRequired();
-      feedbackFacts(c, p);
       if (c.platform === 'wy') return upload(c, records(p));
       if (p.event === 'start') {
         if (c.platform === 'tx') return operations['feedback.prepare'](c, p);
         if (c.platform !== 'kg') fail('UNSUPPORTED');
-        const state = await prepareKG(c, p);
-        const receipt = await settleWrite(c, async callbacks => { await sendKG(c, p, state, callbacks); return {}; });
+        const facts = kgFacts(c, p), state = await prepareKG(c, p, facts.duration);
+        const receipt = await settleWrite(c, async callbacks => { await sendKG(c, p, state, callbacks, facts); return {}; });
         return { ...receipt, sessionId: receipt.status === 'confirmed' ? register(c, state) : null };
       }
       if (p.event !== 'end') fail('UNSUPPORTED');
       const entry = take(c, p.sessionId);
-      feedbackFacts(c, p, entry.state);
+      const facts = c.platform === 'tx' ? { listened: number(p.listened, 0, 'INVALID_REQUEST') } : kgFacts(c, p, entry.state);
+      if (c.platform === 'tx' && facts.listened < 1) fail('INVALID_REQUEST');
       sessions.delete(p.sessionId);
       return settleWrite(c, async callbacks => {
         const state = entry.state, now = Math.floor(c.clock() / 1000);
         if (c.platform === 'tx') {
-          const listened = Math.floor(number(p.listened));
-          if (listened < 1) fail('INVALID_REQUEST');
+          const listened = Math.floor(facts.listened);
           await c.verifyTxFeedback();
           const client = await c.prepareTx(), account = c.account, cookies = cookieFields(account.cookie);
           const comm = JSON.parse(txRequest('', '', {}, client, account, c.clock).body).comm;
@@ -234,7 +223,7 @@ export function createFeedbackOperations() {
           catch (error) { fail(error.code === 'ERR_BUFFER_TOO_LARGE' ? 'LIMIT' : 'INVALID_RESPONSE'); }
           if (!Number.isInteger(raw.code)) fail('INVALID_RESPONSE');
           if (raw.code !== 0) { callbacks.rejected(); fail('UPSTREAM_ERROR'); }
-        } else await sendKG(c, p, state, callbacks);
+        } else await sendKG(c, p, state, callbacks, facts);
         return {};
       });
     },

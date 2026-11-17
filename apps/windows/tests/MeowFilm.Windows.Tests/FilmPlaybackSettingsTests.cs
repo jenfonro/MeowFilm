@@ -62,12 +62,7 @@ public static class FilmPlaybackSettingsTests
             var document = store.Value("film.preferences.v1");
             foreach (var (field, draft) in new (string, FilmPreferences)[]
             {
-                ("ruleOrder", original with { RuleOrder = ["quality", "pan"] }),
                 ("ruleOrder", original with { RuleOrder = ["quality", "pan", "pan"] }),
-                ("ruleOrder", original with { RuleOrder = ["quality", "pan", "future"] }),
-                ("ruleOrder", original with { RuleOrder = ["Quality", "pan", "keyword"] }),
-                ("panOrder", original with { PanOrder = ["115"] }),
-                ("panOrder", original with { PanOrder = ["139"] }),
                 ("panOrder", original with { PanOrder = ["quark", " quark "] }),
                 ("keywords", original with { RuleOrder = ["keyword", "pan", "quality"], Keywords = ["DDP", " ddp "] }),
                 ("keywords", original with { Keywords = [""] }),
@@ -91,7 +86,7 @@ public static class FilmPlaybackSettingsTests
             Check((await empty.ReadAsync("film.preferences.v1")).Data is null && empty.Writes == 0 &&
                 runtime.Notifications.Count == 0 && runtime.Calls.Count == 0, "an invalid first full save cannot create a document");
         });
-        yield return Test("native preference receipts and reopen return trimmed values and complete partial pan orders", async () =>
+        yield return Test("native preference receipts and reopen return trimmed values and preserve partial pan orders", async () =>
         {
             var runtime = new FilmRuleConsumerRuntime { Respond = (_, _, _) => throw new BridgeException("CLOSED") };
             await using var store = new FilmNativeSettingsFixture();
@@ -100,10 +95,10 @@ public static class FilmPlaybackSettingsTests
                 ["\ufeffDDP\u00a0", " H.265 ", "\u0085keep\u0085"], ["\u3000直播\ufeff"], false);
             var saved = await service.SavePreferencesAsync(draft);
             Check(saved.RuleOrder.SequenceEqual(["keyword", "pan", "quality"]) &&
-                saved.PanOrder.SequenceEqual(["baidu", "quark", "yidong", "tianyi", "uc"]) &&
+                saved.PanOrder.SequenceEqual(["baidu", "quark"]) &&
                 saved.Keywords.SequenceEqual(["DDP", "H.265", "\u0085keep\u0085"]) &&
                 saved.SiteCleanKeywords.SequenceEqual(["直播"]) && !saved.IosAutoPrepare,
-                "first typed input uses JS whitespace, preserves non-whitespace NEL and keyword casing, and appends missing providers");
+                "first typed input uses JS whitespace, preserves non-whitespace NEL and keyword casing, without appending unused providers");
             Check(draft.PanOrder.SequenceEqual([" baidu ", "\ufeffquark"]) && draft.Keywords[0] == "\ufeffDDP\u00a0",
                 "normalizing a save does not mutate its caller's arrays");
             var reopened = await new FilmPlaybackSettings(runtime, store).ReadPreferencesAsync(default);
@@ -112,13 +107,31 @@ public static class FilmPlaybackSettingsTests
                 store.Writes == 1 && runtime.Notifications.SequenceEqual(["film.preferences"]) && runtime.Calls.Count == 0,
                 "the canonical response, stored native value and reopened owner agree without a runtime call");
             saved = await service.SavePreferencesAsync(saved with { PanOrder = [] }, "panOrder");
-            Check(saved.PanOrder.SequenceEqual(FilmPreferences.Defaults.PanOrder), "an empty edited pan order expands to every provider");
+            Check(saved.PanOrder.Length == 0, "an empty edited pan order stays empty");
             saved = await service.SavePreferencesAsync(saved with { Keywords = [] }, "keywords");
             saved = await service.SavePreferencesAsync(saved with { SiteCleanKeywords = [] }, "siteCleanKeywords");
             Check(saved.Keywords.Length == 0 && saved.SiteCleanKeywords.Length == 0 && !saved.IosAutoPrepare &&
                 saved.RuleOrder.SequenceEqual(["keyword", "pan", "quality"]) && store.Writes == 4 &&
                 runtime.Notifications.SequenceEqual(Enumerable.Repeat("film.preferences", 4)) && runtime.Calls.Count == 0,
                 "explicit empty keyword groups stay empty and leave other groups and the typed switch alone");
+        });
+        yield return Test("unknown and partial preference orders can be reordered without changing other raw fields", async () =>
+        {
+            var runtime = new FilmRuleConsumerRuntime();
+            await using var store = new FilmNativeSettingsFixture();
+            store.SeedBytes("film.preferences.v1", System.Text.Encoding.UTF8.GetBytes("""
+                {"version":1,"future":1e400,"preferences":{"ruleOrder":["future","quality"],"panOrder":["115","quark"],
+                 "keywords":[],"siteCleanKeywords":[],"iosAutoPrepare":true,"future":9007199254740993}}
+                """));
+            var service = new FilmPlaybackSettings(runtime, store);
+            var original = await service.ReadPreferencesAsync(default);
+            var saved = await service.SavePreferencesAsync(original with { RuleOrder = ["quality", "future"] }, "ruleOrder");
+            saved = await service.SavePreferencesAsync(saved with { PanOrder = ["quark", "115"] }, "panOrder");
+            var raw = store.Value("film.preferences.v1");
+            Check(saved.RuleOrder.SequenceEqual(["quality", "future"]) && saved.PanOrder.SequenceEqual(["quark", "115"]) &&
+                raw.GetProperty("future").GetRawText() == "1e400" &&
+                raw.GetProperty("preferences").GetProperty("future").GetRawText() == "9007199254740993",
+                "real reorder keeps unknown IDs and precise unedited material");
         });
         yield return Test("explicit and inferred preference edits preserve untouched raw shapes and missing fields", async () =>
         {
@@ -153,7 +166,7 @@ public static class FilmPlaybackSettingsTests
             var changed = await service.SavePreferencesAsync(original with
                 { PanOrder = [" baidu "], SiteCleanKeywords = [], IosAutoPrepare = true });
             var committed = store.Value("film.preferences.v1").GetProperty("preferences");
-            Check(changed.PanOrder.SequenceEqual(["baidu", "yidong", "tianyi", "quark", "uc"]) &&
+            Check(changed.PanOrder.SequenceEqual(["baidu"]) &&
                 changed.SiteCleanKeywords.Length == 0 && changed.IosAutoPrepare &&
                 JsonElement.DeepEquals(raw.GetProperty("ruleOrder"), committed.GetProperty("ruleOrder")) &&
                 JsonElement.DeepEquals(raw.GetProperty("extra"), committed.GetProperty("extra")),

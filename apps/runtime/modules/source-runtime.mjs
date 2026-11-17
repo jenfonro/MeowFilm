@@ -14,6 +14,7 @@ import {
 } from '@meowfilm/source-runtime';
 
 import { BridgeError, encodeJSONValue, validateJSONValue } from '@meowfilm/runtime-bridge';
+import { cloneJSONValue, stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { SourceCandidates, InstallationOperations } from './source-candidates.mjs';
 import { createSourceLibrary } from './source-library.mjs';
 import { createSourceWebBroker } from './source-web.mjs';
@@ -52,7 +53,7 @@ function integer(value, minimum = 0) {
   requireValue(Number.isSafeInteger(value) && value >= minimum);
 }
 
-function snapshot(value) { validateJSONValue(value); return structuredClone(value); }
+function snapshot(value) { return cloneJSONValue(value); }
 function metadataValue(value) {
   requireValue(object(value));
   requireValue(encodeJSONValue(value).length <= 32 * 1024, 'LIMIT');
@@ -60,8 +61,10 @@ function metadataValue(value) {
 }
 
 function canonical(value) {
-  return JSON.stringify(value, (_key, item) => object(item)
-    ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : item);
+  const ordered = item => Array.isArray(item) ? item.map(ordered)
+    : object(item) && !isRawJSON(item)
+      ? Object.fromEntries(Object.keys(item).sort().map(key => [key, ordered(item[key])])) : item;
+  return stringifyJSONValue(ordered(value));
 }
 
 function errorCode(error) {
@@ -313,7 +316,7 @@ export function createSourceRuntimeModule({
         if (!execution || execution.inputProtocol !== params.protocol) {
           try {
             const normalized = normalizeSourceDefinition(uploaded.source, params.protocol);
-            const source = JSON.stringify(normalized.source);
+            const source = stringifyJSONValue(normalized.source);
             requireValue(Buffer.byteLength(source) <= sourceBytes, 'LIMIT');
             const hash = source === uploaded.source ? uploaded.contentHash
               : source === execution?.source ? execution.hash : digest(source);
@@ -550,13 +553,15 @@ export function createSourceRuntimeModule({
       if (name === 'library.update') {
         requireValue(object(params.patch));
         for (const key of ['name', 'group']) if (params.patch[key] !== undefined) {
-          requireValue(typeof params.patch[key] === 'string' &&
-            (key !== 'name' || params.patch[key].trim().length > 0));
+          requireValue(typeof params.patch[key] === 'string');
         }
         for (const key of ['enabled', 'enabledExplore']) if (params.patch[key] !== undefined) {
           requireValue(typeof params.patch[key] === 'boolean');
         }
-        if (params.patch.order !== undefined) requireValue(Number.isSafeInteger(params.patch.order));
+        if (params.patch.order !== undefined) {
+          if (isRawJSON(params.patch.order)) params.patch.order = Number(params.patch.order.rawJSON);
+          requireValue(Number.isFinite(params.patch.order));
+        }
       }
       if (name === 'library.export') {
         requireValue(Array.isArray(params.installationIds));

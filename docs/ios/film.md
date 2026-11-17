@@ -8,7 +8,7 @@
 
 侧边栏主菜单首先为“首页”，其后为视频源列表；原元数据来源快捷菜单另组保留，与首页共用同一 `FilmHomeModel`。视频列表观察 App 持有的 `FilmSettingsModel` 快照，使用 `FilmSourceSnapshot.homeVideos` 保留目录顺序及 `FilmSourceKey` 精确身份，仅筛选启用且首页可见的项，不按检测结果过滤。源行是只读展示，不发起源内容请求、自动检测或管理详情导航；首页数据切源尚未接入。菜单样式与底部固定设置沿用[App 外壳](architecture.md#ui-所有权)。
 
-`FilmSourceDescriptor.id` 标识来源；`FilmItem`／`FilmItemIdentity` 原样保留 Node 返回的 `businessID` 和 `playbackTarget`，相等／散列优先使用业务身份，旧记录未补全时才使用原来源／影片／类型组合。共同身份语义见[稳定业务身份](../common/film/search.md#稳定业务身份)。来源自行返回栏目与影片，页面不按豆瓣分类解释其他来源。豆瓣读取与 Windows 一致的四个栏目：热门电影、热门剧集、新番放送、热门综艺，每栏请求 12 个摘要，不预取详情或播放地址。`DoubanFilmSource` 按实际影片 id／title 及必需的业务身份／播放目标隔离不可消费行，保留健康兄弟，从返回目标读取类型，不按栏目造业务目标；真实空数组成功，非空但全部不可消费的栏目失败，刷新失败保留已完成内容。图片地址沿用豆瓣图片代理归一化。
+`FilmSourceDescriptor.id` 标识来源；`FilmItem`／`FilmItemIdentity` 原样保留 Node 返回的 `businessID` 和 `playbackTarget`，相等／散列使用已提供的业务身份；非执行展示缺少业务身份时仅按来源／影片／类型区分显示项。共同身份语义见[稳定业务身份](../common/film/search.md#稳定业务身份)。来源自行返回栏目与影片，页面不按豆瓣分类解释其他来源。豆瓣读取与 Windows 一致的四个栏目：热门电影、热门剧集、新番放送、热门综艺，每栏请求 12 个摘要，不预取详情或播放地址。`DoubanFilmSource` 按实际影片 id／title 及必需的业务身份／播放目标隔离不可消费行，保留健康兄弟，从返回目标读取类型，不按栏目造业务目标；真实空数组成功，非空但全部不可消费的栏目失败，刷新失败保留已完成内容。图片地址沿用豆瓣图片代理归一化。
 
 `FilmHomeModel` 持有所选来源、请求及本页面内按来源区分的快照。重复进入不重复读取；切源立即撤销旧请求发布权、取消读取，恢复对应快照或发起首次读取。旧成功或错误不能覆盖新来源。失败在统一错误浮层中提供“重试”，浮层退出后显式重新读取；“确定”仅关闭通知，不发起请求，之后仍可下拉刷新。页面正文只保留加载、失败或空集合状态，不放重试控件。页面从导航生命周期释放时关闭请求。覆盖详情或切换主页面保留首页及滚动位置。
 
@@ -24,13 +24,12 @@
 
 元数据视图的季集、资料投影及电影／剧集控件读取 `metadataSourceId` 对应的确认项，不因准确播放目标变成 `source` 就丢失已有资料。元数据集数发送 `select.episode` 坐标，详情总播放发送 `play` 交由 Node 使用当前浏览目标；播放器有有效输出时 `pauseOrResume()` 只控制当前原生媒体，不因浏览新来源切流，无有效输出才通过既有 `play` 正式发起播放。媒体准备捕获该 attempt 的内容类型，保留同一电影换源时的播放位置，未知剧集仍要求准确集号或同一候选身份。
 
-`MeowfilmAssembly.makeFilmPlayback` 优先使用条目携带的 `playbackTarget`；旧条目缺少目标时，
-按已有真实 provider／ID 调用 `film.data.target` 补全，不在 Swift 拼业务 ID。
+`MeowfilmAssembly.makeFilmPlayback` 直接消费条目携带的稳定 `playbackTarget`／`businessID`；缺少执行身份明确失败，不按旧条目 provider／ID 补造目标。
 无 `searchReference` 的元数据重入保留原始 `target`、metadata seed 和入口信息，
 以 `resumeTarget` 携带当前准确 `source`／坐标；不限豆瓣入口。搜索入口已可用卡片固定目标，
 reference 只复用活跃事实；原本没有元数据的 source／group 不补造元数据 provenance。
 
-`FilmPlaybackModel`／`MeowfilmFilmMedia` 的媒体接缝把真实 attempt 交给共享 MeowPlayback 的两阶段 prepare／commit；播放状态来自实际内核输出，不用本地计时模拟。MeowVideoKernel 适配固定源码 KSMEPlayer 的真实解码／原生输出，保留完整渲染视图及实际首帧确认；核心关闭等待真实输入、解码、轨道、音频与渲染工作退出后才释放媒体 receipt。直连输入的 HTTP headers／Cookie 通过每实例 KSOptions 注入，运行器 receipt 保持空原生上下文。Node 仍拥有业务会话及媒体资源授权，见[共同原生播放契约](../common/film/playback.md)。影片收藏继续由稳定 `FilmLibrary` 持有，用原 namespace `meowfilm.film.library.v1` 保存身份记录，新增可选 `businessID/playbackTarget`；`contains`／`toggle` 仍识别原来源／影片／类型记录，不清空旧收藏。它不复制进 Node v2 历史／人工匹配／屏蔽／偏好／聚合注册库，也不写音乐曲库。
+`FilmPlaybackModel`／`MeowfilmFilmMedia` 的媒体接缝把真实 attempt 交给共享 MeowPlayback 的两阶段 prepare／commit；播放状态来自实际内核输出，不用本地计时模拟。MeowVideoKernel 适配固定源码 KSMEPlayer 的真实解码／原生输出，保留完整渲染视图及实际首帧确认；核心关闭等待真实输入、解码、轨道、音频与渲染工作退出后才释放媒体 receipt。直连输入的 HTTP headers／Cookie 通过每实例 KSOptions 注入，运行器 receipt 保持空原生上下文。Node 仍拥有业务会话及媒体资源授权，见[共同原生播放契约](../common/film/playback.md)。影片收藏继续由稳定 `FilmLibrary` 持有，用原 namespace `meowfilm.film.library.v1` 保存身份记录，记录包含当前 `businessID/playbackTarget`；收藏与重开直接消费稳定目标，不提供旧收藏双身份匹配或缺字段补全。读取隔离不可用及歧义身份条目，无关增删保留原始坏行和精确扩展；坏根或非空全坏明确失败。它不复制进 Node v2 历史／人工匹配／屏蔽／偏好／聚合注册库，也不写音乐曲库。
 
 视频定位能力由 `VideoSession → PlaybackVideoDecoding → PlaybackController` 透传：准备后的有限 HLS／DASH 时间线使用实际探测到的 demuxer 时间定位能力，不要求主清单支持 HTTP Range；普通 progressive 输入使用核心的字节定位能力。未准备、失败或已撤销的 session 不接受 seek，已知时长不等于可定位。不按 URL 后缀或调用方 format hint 推断能力，也不新增 live／DVR 时间线支持。
 

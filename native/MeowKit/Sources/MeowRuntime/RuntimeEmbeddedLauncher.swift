@@ -245,7 +245,7 @@ private final class RuntimeBootstrapChannel: @unchecked Sendable {
                                 throw RuntimeHTTPError.invalidResponse
                             }
                             received.removeSubrange(...newline)
-                            if reply.count == 1, case .string(let address)? = reply["baseUrl"],
+                            if case .string(let address)? = reply["baseUrl"],
                                !ready, let url = URL(string: address) {
                                 ready = true
                                 continuation.resume(returning: url)
@@ -311,8 +311,8 @@ private final class RuntimeBootstrapChannel: @unchecked Sendable {
               case .string(let block)? = request["block"], settings.blocks.contains(block),
               case .number(let id)? = request["id"], id >= 1, id <= 9_007_199_254_740_991,
               id.rounded(.towardZero) == id,
-              kind == "settings.read" && request.count == 3 ||
-                kind == "settings.write" && request.count == 5 && settings.writableBlocks.contains(block),
+              kind == "settings.read" ||
+                kind == "settings.write" && settings.writableBlocks.contains(block),
               kind != "settings.write" || request["document"] != nil && request["expected"] != nil else {
             throw RuntimeHTTPError.invalidResponse
         }

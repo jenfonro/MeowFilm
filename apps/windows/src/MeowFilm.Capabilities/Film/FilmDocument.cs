@@ -15,19 +15,8 @@ internal static class FilmDocument
         return document.RootElement.Clone();
     }
 
-    internal static JsonElement Set(JsonElement original, string name, JsonElement value) => Write(writer =>
-    {
-        writer.WriteStartObject();
-        bool found = false;
-        foreach (var property in original.EnumerateObject())
-        {
-            writer.WritePropertyName(property.Name);
-            if (property.NameEquals(name)) { value.WriteTo(writer); found = true; }
-            else property.Value.WriteTo(writer);
-        }
-        if (!found) { writer.WritePropertyName(name); value.WriteTo(writer); }
-        writer.WriteEndObject();
-    });
+    internal static JsonElement Set(JsonElement original, string name, JsonElement value) =>
+        MeowFilm.Platform.Storage.SettingsDocument.SetMember(original, name, value);
 
     internal static JsonElement Merge(JsonElement original, JsonElement before, JsonElement after)
     {

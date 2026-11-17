@@ -171,12 +171,13 @@ public sealed partial class MusicLibraryOwner
                     MetadataSourceEnabled(doc, song, requested), "DISABLED");
                 RequireCurrentLyricSong(doc, key);
                 ValidateDisplayLines(LJ.Array(p["lines"]));
-                var display = LJ.Obj(("sourceKey", requested), ("lines", p["lines"]));
+                var lines = DecodeCachedDisplayLines(p["lines"]);
+                var display = LJ.Obj(("sourceKey", requested), ("lines", lines));
                 byte[] bytes = LJ.Bytes(display);
                 LJ.Require(bytes.Length <= 512 * 1024, "LIMIT");
                 try
                 {
-                    await presentations.SaveLyricsAsync(key, requested, LJ.Array(p["lines"]), cacheEpoch, token).ConfigureAwait(false);
+                    await presentations.SaveLyricsAsync(key, requested, lines, cacheEpoch, token).ConfigureAwait(false);
                 }
                 catch (DocumentStoreException) { System.Diagnostics.Trace.TraceWarning("LYRIC_DISPLAY_CACHE_UNAVAILABLE"); }
                 result = LJ.Obj(("saved", true));

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { NativeJsonProgram } from '@meowfilm/script-host/native-json';
+import { cloneJSONValue, parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { createFilmRulesService } from '../packages/film-playback/src/rules-service.js';
 import { createRecognitionRules, filmRuleFailure } from '../packages/film-playback/src/rules.js';
 import { matchesResults } from '../packages/film-playback/src/recognition.js';
@@ -179,6 +180,28 @@ test('queued restore and preview capture consumed drafts before callers can muta
     request: { section: 'movie', text } });
   rules[0].replace = 'changed'; text[0] = 'X'.charCodeAt(0);
   assert.equal((await preview).rewrittenText, 'Film');
+});
+
+test('preview and restore pass exact numeric draft extensions to the real rule program without changing saved rule projection', async t => {
+  const f = fixture(t), seen = [], invoke = NativeJsonProgram.prototype.invoke;
+  t.mock.method(NativeJsonProgram.prototype, 'invoke', function(input, options) {
+    if (['preview', 'restore'].includes(input.operation)) seen.push(cloneJSONValue(input));
+    return invoke.call(this, input, options);
+  });
+  const extensionText = '{"integer":9007199254740993,"decimal":1.0000000000000001,"large":1e400}';
+  const extension = parseJSONText(extensionText);
+  const rows = [{ pattern: '^Movie$', replace: 'Film', flags: '', extension }];
+  assert.equal((await f.service.previewGroup({ group: 'movie', rules: rows,
+    request: { section: 'movie', text: 'Movie' } })).rewrittenText, 'Film');
+  assert.equal(stringifyJSONValue(seen[0].rules.movieRules[0].extension), extensionText);
+  assert.equal(existsSync(f.path), false);
+  const restored = await f.service.restore({ section: 'episode',
+    rules: { ...empty(), movieRules: rows, extension } });
+  assert.equal(stringifyJSONValue(seen[1].rules.extension), extensionText);
+  assert.equal(stringifyJSONValue(seen[1].rules.movieRules[0].extension), extensionText);
+  assert.deepEqual(restored.rules.movieRules, [{ pattern: '^Movie$', replace: 'Film', flags: '' }]);
+  assert.deepEqual(parseJSONText(readFileSync(f.path, 'utf8')), { rules: restored.rules });
+  assert.equal(stringifyJSONValue(extension), extensionText);
 });
 
 test('failed durable writes keep the previous snapshot and external changes are detected', async t => {

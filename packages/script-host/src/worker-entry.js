@@ -1,3 +1,4 @@
+import { parseJSONText, stringifyJSONValue, cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 import { parentPort, workerData } from 'node:worker_threads';
 import { CatSession } from './cat-session.js';
 import { ownedExtension } from './cat-output.js';
@@ -65,7 +66,7 @@ function makeCancellable(message, start) {
 
 function catResult(value, newProxies) {
   return {
-    result: value,
+    result: value && typeof value === 'object' && value[ownedExtension] ? { ...value } : value,
     newProxies: newProxies ?? [],
     ...(value && typeof value === 'object' && value[ownedExtension] ? { owned: true } : {}),
   };
@@ -83,11 +84,11 @@ function sessionEvent(session, value = {}) {
 
 function applySettingsSnapshot(value) {
   if (!value || typeof value !== 'object') return;
-  if (value.settings !== undefined) latestSettings = clone(value.settings);
+  if (value.settings !== undefined) latestSettings = cloneJSONValue(value.settings);
   if (value.aggregate !== undefined) latestAggregate = clone(value.aggregate);
   const session = sessions.get(value.installationId);
   if (!session) return;
-  if (latestSettings !== undefined) session.applySettings?.(clone(latestSettings));
+  if (latestSettings !== undefined) session.applySettings?.(cloneJSONValue(latestSettings));
   if (latestAggregate !== undefined) session.applyAggregate?.(clone(latestAggregate));
 }
 
@@ -119,7 +120,7 @@ function createSession(spec) {
       phase: state?.ready ? 'running' : 'initialization',
     })),
   });
-  if (latestSettings !== undefined) session.applySettings?.(clone(latestSettings));
+  if (latestSettings !== undefined) session.applySettings?.(cloneJSONValue(latestSettings));
   if (latestAggregate !== undefined) session.applyAggregate?.(clone(latestAggregate));
   sessions.set(spec.installationId, session);
   if (typeof session.send === 'function') {
@@ -164,7 +165,12 @@ function sessionFor(params) {
 
 parentPort.on('message', raw => {
   let message;
-  try { message = validateMessage(raw); }
+  try {
+    message = validateMessage(raw);
+    if (message.kind === 'request') message = { ...message, params: parseJSONText(message.params) };
+    else if (message.kind === 'event' && message.event === 'settings')
+      message = { ...message, value: parseJSONText(message.value) };
+  }
   catch (error) {
     if (raw?.kind === 'request' && Number.isSafeInteger(raw.id)) {
       try { send(failure(raw.id, error)); } catch { /* The worker may already be closing. */ }
@@ -223,7 +229,7 @@ parentPort.on('message', raw => {
         return makeCancellable(message, signal => {
           const session = sessionFor(message.params);
           return import('./cat-management.js').then(({ detectCatManagement }) =>
-            detectCatManagement(session, { signal }));
+            detectCatManagement(session, { signal })).then(value => ({ ...value }));
         });
       case 'management.sync':
         return makeCancellable(message, signal => {
@@ -259,7 +265,10 @@ parentPort.on('message', raw => {
         throw fault('UNSUPPORTED_OPTION');
     }
   }).then(value => {
-    try { send(response(message.id, value)); } catch { /* The worker may already be closing. */ }
+    try { send(response(message.id, stringifyJSONValue(value ?? null, -2))); }
+    catch (error) {
+      try { send(failure(message.id, safeError(error, 'INVALID_ARGUMENT'))); } catch { /* The worker may already be closing. */ }
+    }
   }, error => {
     try { send(failure(message.id, error)); } catch { /* The worker may already be closing. */ }
   });

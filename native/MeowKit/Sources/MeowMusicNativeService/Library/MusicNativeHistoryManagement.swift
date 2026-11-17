@@ -52,7 +52,7 @@ extension NativeMusicService: MusicHistoryManaging {
                 let old = d.queue
                 let rows = snapshot.entries
                 d.queue["serial"] = .n(max(d.queue["serial"].int, snapshot.maximumSerial))
-                archive(old, into: &d)
+                try archive(old, into: &d)
                 let selected = rows[index]["id"].string
                 d.queue["entries"] = .array(rows)
                 d.queue["currentId"] = .string(selected)

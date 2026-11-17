@@ -22,7 +22,6 @@ internal sealed class StoredAccount
 internal sealed class AccountDocument
 {
     internal const int MaximumBytes = 8 * 1024 * 1024;
-    private const int CurrentEntryCount = 3;
     private static readonly JsonSerializerOptions Encoding = new()
     {
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
@@ -46,37 +45,14 @@ internal sealed class AccountDocument
             using var json = JsonDocument.Parse(document.Data, new JsonDocumentOptions { MaxDepth = 64 });
             // Reject ambiguous duplicate properties, rather than normalizing a corrupt document on save.
             CheckJson(json.RootElement);
-            AccountRules.Fields(json.RootElement, ["version", "entries"], ["version", "entries"], "CORRUPT_STORAGE");
+            AccountRules.Required(json.RootElement, ["version", "entries"], "CORRUPT_STORAGE");
             AccountRules.Require(AccountRules.Integer(json.RootElement.GetProperty("version")) == 1, "CORRUPT_STORAGE");
             var entries = json.RootElement.GetProperty("entries");
-            AccountRules.Require(entries.ValueKind == JsonValueKind.Array &&
-                entries.GetArrayLength() <= CurrentEntryCount, "CORRUPT_STORAGE");
-            var keys = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var entry in entries.EnumerateArray())
-            {
-                AccountRules.Fields(entry, ["key", "value"], ["key", "value"], "CORRUPT_STORAGE");
-                var key = entry.GetProperty("key");
-                AccountRules.Require(key.ValueKind == JsonValueKind.String, "CORRUPT_STORAGE");
-                string name = key.GetString()!;
-                AccountRules.Require(name.Length is > 0 and <= 8192 && keys.Add(name), "CORRUPT_STORAGE");
-                ValidateEntry(name, entry.GetProperty("value"));
-            }
+            AccountRules.Require(entries.ValueKind == JsonValueKind.Array, "CORRUPT_STORAGE");
             return new AccountDocument(JsonNode.Parse(document.Data)!.AsObject(), document.Fingerprint);
         }
         catch { throw new MusicAccountException("CORRUPT_STORAGE"); }
         finally { if (document.Data is not null) CryptographicOperations.ZeroMemory(document.Data); }
-    }
-    private static void ValidateEntry(string key, JsonElement value)
-    {
-        foreach (string platform in AccountRules.Platforms)
-        {
-            if (key == Key(platform))
-            {
-                _ = ReadAccount(value, platform);
-                return;
-            }
-        }
-        throw new MusicAccountException("CORRUPT_STORAGE");
     }
     private static void CheckJson(JsonElement node)
     {
@@ -92,16 +68,22 @@ internal sealed class AccountDocument
     {
         try
         {
-            var row = root["entries"]!.AsArray().FirstOrDefault(n => n!["key"]!.GetValue<string>() == Key(platform));
+            var row = Entry(platform);
             if (row is null) return new();
             return ReadAccount(JsonSerializer.SerializeToElement(row["value"], Encoding), platform);
         }
         catch { throw new MusicAccountException("CORRUPT_STORAGE"); }
     }
+    private JsonObject? Entry(string platform)
+    {
+        var rows = root["entries"]!.AsArray().OfType<JsonObject>()
+            .Where(n => n["key"] is JsonValue key && key.TryGetValue<string>(out var value) && value == Key(platform)).ToArray();
+        AccountRules.Require(rows.Length <= 1, "CORRUPT_STORAGE");
+        return rows.SingleOrDefault();
+    }
     private static StoredAccount ReadAccount(JsonElement raw, string platform)
     {
-        AccountRules.Fields(raw, ["version", "generation", "cookie", "profile", "scope", "validatedAt"],
-            ["version", "generation", "cookie", "profile", "scope", "validatedAt"], "CORRUPT_STORAGE");
+        AccountRules.Required(raw, ["version", "generation", "cookie", "profile", "scope", "validatedAt"], "CORRUPT_STORAGE");
         AccountRules.Require(AccountRules.Integer(raw.GetProperty("version")) == 1, "CORRUPT_STORAGE");
         long generation = AccountRules.Integer(raw.GetProperty("generation"));
         AccountRules.Require(generation > 0, "CORRUPT_STORAGE");
@@ -117,7 +99,7 @@ internal sealed class AccountDocument
         {
             AccountRules.Require(cookie.Length > 0, "CORRUPT_STORAGE");
             var p = raw.GetProperty("profile");
-            AccountRules.Fields(p, ["platform", "userId", "displayName", "avatar"], ["platform", "userId", "displayName"], "CORRUPT_STORAGE");
+            AccountRules.Required(p, ["platform", "userId", "displayName"], "CORRUPT_STORAGE");
             if (p.TryGetProperty("avatar", out var presentAvatar))
                 AccountRules.Require(presentAvatar.ValueKind == JsonValueKind.String, "CORRUPT_STORAGE");
             profile = new(p.GetProperty("platform").GetString()!, p.GetProperty("userId").GetString()!,
@@ -141,12 +123,17 @@ internal sealed class AccountDocument
             current.ValueFingerprint == expected.ValueFingerprint, "STORAGE_CONFLICT");
         AccountRules.Require(next.Generation == current.Generation + 1 && next.Generation <= AccountRules.MaxInteger, "LIMIT");
         var entries = root["entries"]!.AsArray();
-        var existing = entries.FirstOrDefault(n => n!["key"]!.GetValue<string>() == Key(platform));
-        var value = new JsonObject { ["version"] = 1, ["generation"] = next.Generation, ["cookie"] = next.Cookie,
-            ["profile"] = ProfileNode(next.Profile), ["scope"] = next.Scope, ["validatedAt"] = next.ValidatedAt };
+        var existing = Entry(platform);
+        var value = existing?["value"]?.DeepClone().AsObject() ?? new JsonObject();
+        value["version"] = 1; value["generation"] = next.Generation; value["cookie"] = next.Cookie;
+        var profile = ProfileNode(next.Profile);
+        if (profile is not null && value["profile"] is JsonObject previous)
+            foreach (var field in previous)
+                if (field.Key is not ("platform" or "userId" or "displayName" or "avatar"))
+                    profile[field.Key] = field.Value?.DeepClone();
+        value["profile"] = profile; value["scope"] = next.Scope; value["validatedAt"] = next.ValidatedAt;
         if (existing is null)
         {
-            AccountRules.Require(entries.Count < CurrentEntryCount, "LIMIT");
             entries.Add(new JsonObject { ["key"] = Key(platform), ["value"] = value });
         }
         else existing["value"] = value;

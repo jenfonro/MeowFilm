@@ -100,11 +100,11 @@ test('QQ QIMEI and session preparation are single-flight and save before busines
       assert.equal(request.headers.sign, md5('qimei_qq_androidpzAuCmaFAaFaHrdakPjLIEqKrGnSOOvH' + request.headers.timestamp));
       assert.equal(body.qimeiParams.extra, '{"appKey":"0AND0HD6FE4HY80F"}');
       await held.wait();
-      return response({ code: 0, data: JSON.stringify({ code: 0, data: { q16: 'fresh-q16', q36: 'fresh-q36' } }) });
+      return response({ code: 0, data: JSON.stringify({ code: 0, data: { q36: 'fresh-q36' } }) });
     }
     const value = qq(request), call = value.req_0;
     if (call.method === 'GetSession') {
-      assert.ok(f.files.get('clients.json').toString().includes('fresh-q16'));
+      assert.ok(f.files.get('clients.json').toString().includes('fresh-q36'));
       return rpc({ session: { uid: 'fresh-uid', sid: 'fresh-sid' } });
     }
     assert.equal(value.comm.QIMEI36, 'fresh-q36');
@@ -123,7 +123,7 @@ test('QQ QIMEI and session preparation are single-flight and save before busines
 });
 
 test('QQ preparation save failure cannot dispatch GetSession or business HTTP', async () => {
-  const f = fixture(() => response({ code: 0, data: JSON.stringify({ code: 0, data: { q16: 'fresh-q16', q36: 'fresh-q36' } }) }));
+  const f = fixture(() => response({ code: 0, data: JSON.stringify({ code: 0, data: { q36: 'fresh-q36' } }) }));
   seedClients(f);
   const clients = JSON.parse(f.files.get('clients.json')); clients.tx.qimei = null; clients.tx.session = null;
   f.files.set('clients.json', Buffer.from(JSON.stringify(clients))); f.failWrites();

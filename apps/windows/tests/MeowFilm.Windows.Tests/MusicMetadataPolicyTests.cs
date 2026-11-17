@@ -35,12 +35,13 @@ public static class MusicMetadataPolicyTests
                 Code(await owner.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 0, platforms = Platforms, enabled }), "INVALID_REQUEST");
             Equal(0, store.Writes);
         });
-        yield return Case("unknown fields and a stale policy revision cannot overwrite the chosen order", async (owner, store) =>
+        yield return Case("unconsumed fields do not grant writes and stale revisions remain fenced", async (owner, store) =>
         {
-            Code(await owner.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 0, platforms = Platforms, enabled = Platforms, url = "synthetic.invalid" }), "INVALID_REQUEST");
-            Ok(await owner.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 0, platforms = Platforms, enabled = Array.Empty<string>() }));
+            Ok(await owner.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 0, platforms = Platforms, enabled = Platforms, url = "synthetic.invalid" }));
+            Check(!Encoding.UTF8.GetString(store.Data!).Contains("synthetic.invalid", StringComparison.Ordinal));
+            Ok(await owner.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 1, platforms = Platforms, enabled = Array.Empty<string>() }));
             Code(await owner.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 0, platforms = Platforms, enabled = Platforms }), "REVISION_CONFLICT");
-            Equal(1, store.Writes);
+            Equal(2, store.Writes);
         });
         yield return Case("disabled cached source does not suppress an enabled exact alternative", async (owner, _) =>
         {

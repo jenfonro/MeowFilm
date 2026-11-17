@@ -22,6 +22,76 @@ enum NativeDiscoveryFixture {
 private typealias D = NativeDiscoveryFixture
 final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
     private let channel = MusicPublicBrowseChannel(id: "synthetic", title: "Synthetic", kind: .cube, pageCode: "synthetic_page")
+    func testTabsIgnoreFallbackAndSnapshotOnlyRegisteredSongs() async throws {
+        for fallback in [RuntimeValue.null, .object([:]), .array([try D.song("43")])] {
+            let section: RuntimeValue = .object(["id": .string("tabs"), "items": fallback,
+                "tabs": .array([.object(["id": .string("shown"), "items": .array([try D.song("42")])])])])
+            let store = NativeMusicMemoryDocument()
+            let service = try await NativeMusicFixture.service(store, platform: NativeMusicResultFixture([D.page([section])]))
+            let page = try await service.homePage(cursor: nil, refresh: true)
+            guard case .track(let shown) = page.sections[0].items[0].content else { return XCTFail("song required") }
+            XCTAssertEqual(shown.sources[0].nativeId, "42")
+            let state = try await service.read()
+            XCTAssertEqual(state.library["library"]["songs"].fields.count, 1)
+            let savedDisplay = await service.homeDisplay
+            let display = try XCTUnwrap(savedDisplay)
+            XCTAssertTrue(display.1.sections[0].items.isEmpty)
+            guard case .record(let savedID) = display.1.sections[0].tabs[0].items[0].content else { return XCTFail("reference required") }
+            XCTAssertEqual(savedID, shown.songId)
+            await service.close()
+        }
+    }
+    func testBadPreviewCountCardAndTabKeepHealthySiblings() async throws {
+        var card = D.collection("41")
+        if case .object(var fields) = card {
+            fields["count"] = .object([:])
+            fields["previewSongs"] = .array([.object([:]), try D.song("42")])
+            card = .object(fields)
+        }
+        let bad: RuntimeValue = .object(["action": .object(["type": .string("playlist")])])
+        let section: RuntimeValue = .object(["id": .string("tabs"), "tabs": .array([
+            .object(["id": .string("bad"), "items": .object([:])]),
+            .object(["id": .string("good"), "items": .array([bad, card])])])])
+        let service = try await NativeMusicFixture.service(platform: NativeMusicResultFixture([D.page([
+            D.section("bad-section", items: [bad]), section])]))
+        let page = try await service.homePage(cursor: nil, refresh: true)
+        XCTAssertEqual(page.sections[0].error, .upstreamInvalid)
+        XCTAssertEqual(page.sections[1].tabs.map(\.id), ["good"])
+        let item = try XCTUnwrap(page.sections[1].items.first)
+        guard case .collection(let collection) = item.content else { return XCTFail("collection required") }
+        XCTAssertNil(collection.count)
+        XCTAssertEqual(item.previewSongs.map { $0.sources[0].nativeId }, ["42"])
+        await service.close()
+    }
+    func testFailedSectionDoesNotDecodeItsUnusedItems() throws {
+        let value: RuntimeValue = .object(["id": .string("failed"), "items": .object([:]),
+            "errorCode": .string("NETWORK_ERROR")])
+        let page = try MusicNativePlatformResult.discovery(D.page([value]), platform: .netease)
+        XCTAssertEqual(page.sections[0].error, .connectionFailed)
+        XCTAssertTrue(page.sections[0].items.isEmpty)
+    }
+    func testMalformedDirectoryCannotReplacePriorHomeDisplay() async throws {
+        let peer = NativeMusicResultFixture([D.page([D.section("good", items: [D.collection("41")])]),
+            .object(["sections": .object([:])])])
+        let service = try await NativeMusicFixture.service(platform: peer)
+        _ = try await service.homePage(cursor: nil, refresh: true)
+        let before = await service.homeDisplay
+        await assertMusicFailure(.upstreamInvalid) { _ = try await service.homePage(cursor: nil, refresh: true) }
+        let after = await service.homeDisplay
+        XCTAssertEqual(after?.1.sections.first?.items.first?.id, before?.1.sections.first?.items.first?.id)
+        XCTAssertThrowsError(try MusicNativePlatformResult.discovery(.object([:]), platform: .netease))
+        XCTAssertTrue(try MusicNativePlatformResult.discovery(D.page([]), platform: .netease).sections.isEmpty)
+        await service.close()
+    }
+    func testDetailConsumesOnlyPositionsForActualTracks() async throws {
+        let value: RuntimeValue = .object(["id": .string("41"), "items": .array([try D.song("42")]),
+            "sourcePositions": .array([.number(7), .object([:])])])
+        let peer = NativeMusicResultFixture([value])
+        let platforms = MusicNativePlatforms(client: try peer.makeClient())
+        let page = try await platforms.browseDetail(.init(platform: .netease, nativeID: "41", title: ""), continuation: .null)
+        XCTAssertEqual(page.tracks.count, 1)
+        XCTAssertEqual(page.sourcePositions, [7]); XCTAssertEqual(page.tracks[0].sourcePosition, 7)
+    }
     func testHomeConsumesAlreadyCompletedSummariesWithoutReadingMembers() async throws {
         let cover = "https://p1.music.126.net/radar.jpg?param=800y800&quality=90"
         let peer = NativeMusicResultFixture([D.page([D.section("entries", items: [D.collection("41", title: "私人雷达", cover: cover), D.collection("42", title: "补齐歌单名")], type: "entries")])])

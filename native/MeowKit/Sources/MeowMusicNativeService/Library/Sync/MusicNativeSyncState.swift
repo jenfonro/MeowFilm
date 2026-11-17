@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
 import MeowMusicFeature
+import MeowMusicPlatform
+import MeowRuntime
 
 /// Durable write facts only. Live mutation tracks are request material, not a
 /// second persistent song repository or an input to unknown-write recovery.
@@ -102,9 +104,13 @@ struct MusicNativeSyncLedger: Codable {
     var phase: MusicLibrarySyncState.Phase = .idle
     var issues: [MusicLibrarySyncIssue] = []
     var automatic = MusicNativeAutomaticSyncPreferences()
+    private var original: RuntimeValue? = nil
+    private var projection: RuntimeValue? = nil
+    private enum CodingKeys: String, CodingKey { case schema, selections, scopes, fences, phase, issues, automatic }
+    init() {}
     static func load(_ wrapper: MJ) throws -> Self {
         guard wrapper.contains("sync") else { return .init() }
-        let value: Self
+        var value: Self
         do { value = try JSONDecoder().decode(Self.self, from: wrapper["sync"].bytes) }
         catch { throw MusicServiceError.corruptDocument }
         guard value.schema == 2, value.selections.count <= 3,
@@ -168,13 +174,44 @@ struct MusicNativeSyncLedger: Codable {
                 guard !member.nativeID.isEmpty, !member.occurrenceID.isEmpty else { throw MusicServiceError.corruptDocument }
             }
         }
+        value.original = try RuntimeJSON.decode(wrapper["sync"].bytes)
+        value.projection = try RuntimeJSON.decode(value.json().bytes)
         return value
     }
     func json() throws -> MJ {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let data = try encoder.encode(self)
         try musicRequire(data.count <= 5 * 1024 * 1024, .limit)
-        return try MJ.parse(data)
+        let next = try RuntimeJSON.decode(data)
+        guard let original, let projection else { return try MJ.parse(data) }
+        var merged = original.applyingChanges(from: projection, to: next)
+        // These arrays carry stable owner identities, not positional records.
+        // Retained fences keep opaque facts while acknowledgements change.
+        func mergeRows(_ key: String, in raw: RuntimeValue, before: RuntimeValue, after: RuntimeValue,
+                       identity: (RuntimeValue) -> RuntimeValue) -> RuntimeValue {
+            let previous = before[music: key].musicArray, originals = raw[music: key].musicArray
+            return .array(after[music: key].musicArray.map { row in
+                guard let index = previous.firstIndex(where: { identity($0) == identity(row) }),
+                      originals.indices.contains(index) else { return row }
+                return originals[index].applyingChanges(from: previous[index], to: row)
+            })
+        }
+        if case .object(var fields) = merged {
+            fields["fences"] = mergeRows("fences", in: original, before: projection, after: next,
+                identity: { $0[music: "mutation"][music: "id"] })
+            fields["selections"] = mergeRows("selections", in: original, before: projection, after: next,
+                identity: { $0[music: "platform"] })
+            if case .object(var automatic)? = fields["automatic"] {
+                automatic["selections"] = mergeRows("selections", in: original[music: "automatic"],
+                    before: projection[music: "automatic"], after: next[music: "automatic"],
+                    identity: { $0[music: "platform"] })
+                fields["automatic"] = .object(automatic)
+            }
+            merged = .object(fields)
+        }
+        let preserved = try RuntimeJSON.encode(merged)
+        try musicRequire(preserved.count <= 5 * 1024 * 1024, .limit)
+        return try MJ.parse(preserved)
     }
 }
 

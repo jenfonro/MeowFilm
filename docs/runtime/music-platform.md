@@ -17,11 +17,19 @@
 
 `operation:"home"` 返回当前平台的 `entries`、`sections` 及真实 `continuation`，顶部入口无需另行查询目录或在客户端拼固定列表。网易首页入口及 Cube 推荐组统一附带 `requiresAccount`、`display`、`available`；其中账号入口的显示声明取自原生已发布 session。登录／退出沿既有 session 更新失效缓存和旧请求，下一次首页读取返回当前声明。显示隐藏不替代 `daily`、`heartbeat` 等操作自身的实际账号准入。
 
+`operation:"lyrics"` 保持 `{text,translation,romanization}`；QQ／咪咕附属轨失败时额外返回 `errors`，以 `translation`／`romanization` 为键、有限错误码为值。失败轨为空字符串，健康主轨及兄弟轨继续返回；没有任何可用轨的解析失败仍抛错。取消、超时、会话失效及资源超限不降级为轨道错误。原生可继续消费原三个字段，不能把 `errors` 中的附属失败解释成主轨失败。
+
+网易 `playlist` 先选择当前成员再消费详情，`memberIds`／`consumed` 保持真实成员顺序和重复 occurrence；`sourcePositions` 只对已关联成员给出位置，canonical 别名返回的未知关联仍为 null。`playlist.complete` 消费全集，不借分页清理省略完整成员。
+
 两端 aggregate 按 `music, cat, source, pan, tmdb, douban, film, netease, music-platform` 顺序装配九模块。`connectMusicPlatform` 从已装配 netease 的真实 `netease.token.get` 能力借用 token；不创建第二个 SDK owner。通用 `createRuntime` 默认仍三模块，仅显式 `musicPlatform` 选项连接此模块。
 
 ## 数据与生命周期
 
-默认文档 port 为 `PrivateDocuments(dataRoot, "music-platform")`，用于当前匿名协议状态；原生凭据安全存储、永久歌曲仓库及图片字节不在此处。包使用 Node 内置能力，没有新增 npm 运行依赖。
+默认文档 port 为 `PrivateDocuments(dataRoot, "music-platform")`，用于当前匿名协议状态；原生凭据安全存储、永久歌曲仓库及图片字节不在此处。包复用 Node 内置能力与公共 JSON 模块，没有新增第三方 npm 运行依赖。
+
+QQ 匿名 prepare 只保存实际请求使用的 q36 与保存时间，不要求或保存 q16；UID／SID、时效、保存确认和关闭排空保持原职责。
+
+匿名文档读写及 API 缓存复制使用公共 `@meowfilm/runtime-bridge/json`，无关状态更新保留未消费扩展的精确数字；HTTP 请求中的精确数字定位在音乐实际参数消费处转为字符串或协议整数，不对 rawJSON 使用 `structuredClone`。
 
 request 将 HTTP `context.signal` 交给 owner。普通目录读取退订与物理工作分别跟踪；媒体／认证等实际取消、session 失效、已派发写回执和 close 由共同 owner 管理。session 更新等待应退休工作物理结算；close 停止新准入、取消未提交工作并等待真实结束，运行器不把 owner 关闭失败伪报成功。原生设置未知提示见[设置回执](../common/music/settings-receipts.md)。
 

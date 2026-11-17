@@ -53,9 +53,14 @@ extension NativeMusicService {
             requestQuality: d.playback["requestQuality"].isString ? d.playback["requestQuality"].string : "flac",
             queueSourceTitle: sourceTitle.isEmpty ? nil : sourceTitle)
     }
-    public func state() async throws -> MusicPlaybackState { stateDTO(try read()) }
+    public func state() async throws -> MusicPlaybackState {
+        let d = try read(); try d.requireQueue(); try d.requireRevision("playback")
+        try musicRequire(d.playback["officialSources"].isArray, .corruptDocument)
+        return stateDTO(d)
+    }
     public func queue() async throws -> MusicQueueSnapshot {
-        let d = try read(), rows = d.queue["entries"].array
+        let d = try read(); try d.requireQueue()
+        let rows = d.queue["entries"].array
         let projected = try rows.map { try entrySong($0, d) }
         var tracks: [Data: (song: MJ, track: MusicRemoteTrack)] = [:]
         return .init(revision: d.queue["revision"].int, currentId: d.queue["currentId"] == .null ? nil : d.queue["currentId"].string,
@@ -82,8 +87,9 @@ extension NativeMusicService {
                         song: song, occurrence: id, context: entry["context"]))
             })
     }
-    func archive(_ queue: MJ, into d: inout MusicDocument) {
+    func archive(_ queue: MJ, into d: inout MusicDocument) throws {
         if queue["entries"].array.count < 2 { return }
+        try musicRequire(d.history["playlists"].isArray, .corruptDocument)
         var item = queue
         for key in ["schema", "serial", "revision", "runId", "failed"] { item.remove(key) }
         item["id"] = .string(UUID().uuidString.lowercased()); item["at"] = .number(now().timeIntervalSince1970 * 1000)
@@ -104,6 +110,7 @@ extension NativeMusicService {
         var library = document.library["library"]
         let ids = try registerSongs(songs, library: &library, authoritative: authoritative, playback: document.playback)
         document.library["library"] = library
+        try document.requireQueue()
         var serial = document.queue["serial"].int
         try musicRequire(ids.count <= 9_007_199_254_740_991 - serial, .limit)
         let rows = ids.map { id -> MJ in
@@ -124,6 +131,7 @@ extension NativeMusicService {
         case .remove, .reorder: similarChange = .edit
         }
         let result = try similarQueueTransaction(["queue", "playback", "history"]) { d -> MusicPlaybackState in
+            try d.requireQueue()
             try musicRequire(d.queue["revision"].int == expectedRevision, .staleRevision)
             let old = d.queue, previous = old["currentId"]
             var resolvedSongs: [MusicReference: MJ] = [:]
@@ -141,7 +149,7 @@ extension NativeMusicService {
                     ("sourceTitle", .string("歌曲")), ("sourceType", .string("song"))
                 ]))
                 changesCurrent = true
-                archive(old, into: &d); d.queue["entries"] = .array(rows); d.queue["currentId"] = rows[index]["id"]
+                try archive(old, into: &d); d.queue["entries"] = .array(rows); d.queue["currentId"] = rows[index]["id"]
                 for key in ["history", "priority", "failed"] { d.queue[key] = .array([]) }
                 d.queue["source"] = .obj([("sourceType", .string("song")), ("sourceTitle", .string("歌曲"))])
             case .collection(let id, let revision, let index):
@@ -152,7 +160,7 @@ extension NativeMusicService {
                 try musicRequire(ids.indices.contains(index))
                 let rows = try makeEntries(ids.map { d.library["library"]["songs"][$0] }, document: &d,
                     context: .obj([("collectionId", .string(id)), ("sourceTitle", c["name"])]))
-                archive(old, into: &d); d.queue["entries"] = .array(rows); d.queue["currentId"] = rows[index]["id"]
+                try archive(old, into: &d); d.queue["entries"] = .array(rows); d.queue["currentId"] = rows[index]["id"]
                 for key in ["history", "priority", "failed"] { d.queue[key] = .array([]) }
                 d.queue["source"] = .obj([("id", .string(id)), ("title", c["name"])])
             case .append(let refs, let next):
@@ -217,6 +225,7 @@ extension NativeMusicService {
             return .init(state: stateDTO(before), selectedId: nil)
         }
         let result = try similarQueueTransaction(["queue", "playback"]) { d -> MusicAdvanceResult in
+            try d.requireQueue()
             try musicRequire(d.queue["revision"].int == expectedRevision, .staleRevision)
             let id = nextID(d, direction: direction, reason: reason)
             if let id {
@@ -290,24 +299,32 @@ extension NativeMusicService {
     }
     public func playedSongs() async throws -> [MusicPlayedSong] {
         let d = try read()
+        try musicRequire(d.history["days"].isArray, .corruptDocument)
         return try d.history["days"].array.flatMap { day in
-            try day["songs"].array.map {
+            try musicRequire(day["songs"].isArray, .corruptDocument)
+            return try day["songs"].array.map {
                 let song = try repositorySong($0["songId"].string, d)
                 let context = $0["context"].isObject ? MusicModel.durable($0["context"]) : .obj()
-                return .init(date: day["date"].string, at: $0["at"].number, track: try repositoryTrack(song),
+                return MusicPlayedSong(date: day["date"].string, at: $0["at"].number, track: try repositoryTrack(song),
                     displayIdentity: MusicNativeQueueDisplayIdentity.make(
                         song: song, occurrence: "", context: context))
             }
         }
     }
     public func playedPlaylists() async throws -> [MusicPlayedPlaylist] {
-        try read().history["playlists"].array.map { .init(id: $0["id"].string, title: $0["title"].string, count: $0["entries"].array.count, at: $0["at"].number) }
+        let rows = try read().history["playlists"]
+        try musicRequire(rows.isArray, .corruptDocument)
+        return rows.array.map { .init(id: $0["id"].string, title: $0["title"].string, count: $0["entries"].array.count, at: $0["at"].number) }
     }
     public func restoreHistory(id: String, expectedRevision: Int) async throws -> MusicPlaybackState {
         let result = try similarQueueTransaction(["queue", "playback", "history"]) { d in
+            try d.requireQueue()
             try musicRequire(d.queue["revision"].int == expectedRevision, .staleRevision)
-            guard let snapshot = d.history["playlists"].array.first(where: { $0["id"].string == id }) else { throw MusicServiceError.notFound }
-            let old = d.queue; archive(old, into: &d)
+            try musicRequire(d.history["playlists"].isArray, .corruptDocument)
+            let matches = d.history["playlists"].array.filter { $0["id"].string == id }
+            guard let snapshot = matches.first else { throw MusicServiceError.notFound }
+            try musicRequire(matches.count == 1, .corruptDocument)
+            let old = d.queue; try archive(old, into: &d)
             for key in ["entries", "currentId", "priority", "history", "source"] { d.queue[key] = snapshot[key] }
             d.queue["failed"] = .array([])
             similarWillChangeQueue(.replace, queue: &d.queue)

@@ -2,7 +2,6 @@ import Foundation
 import MeowAccounts
 import MeowContracts
 import MeowMusicFeature
-import MeowJSON
 import MeowRuntime
 import MeowStorage
 import MeowMusicTestSupport
@@ -180,10 +179,11 @@ struct MusicNativeFixture {
     func enable(_ generation: Int = 1) async throws {
         _ = try await service.setAccess(available: true, generation: generation)
     }
-    func invoke(_ operation: String, _ fields: [String: JSONValue] = [:]) async throws -> [String: JSONValue] {
+    func invoke(_ operation: String, _ fields: RuntimeObject = [:]) async throws -> RuntimeObject {
         do {
             var input = fields
-            let requested = try input.removeValue(forKey: "operation").map { try MusicAccountFields.string($0) } ?? operation
+            let requested = try input["operation"].map { try MusicAccountFields.string($0) } ?? operation
+            input["operation"] = nil
             var reply = try await service.nativeBusiness(requested, platform: accountPlatform, fields: input)
             reply["version"] = .number(1); reply["ok"] = .bool(true)
             return reply
@@ -253,8 +253,8 @@ actor MusicAccountTestProvider: MusicAccountProvider, MusicAccountSMSProvider {
     func cancelQR(_ id: UUID) {}
     func revoke() {}
     func recommendations(kind: String, page: Int) -> MusicAccountRecommendation { .init(rows: [], nextPage: nil) }
-    func collectionRows() -> [JSONValue] { [] }
-    func tracks(collectionID: String) -> [JSONValue] { [] }
+    func collectionRows() -> [RuntimeValue] { [] }
+    func tracks(collectionID: String) -> [RuntimeValue] { [] }
     func capabilities(mid: String) -> [String] { ["128k"] }
-    func resolve(mid: String, quality: String) -> JSONValue { .null }
+    func resolve(mid: String, quality: String) -> RuntimeValue { .null }
 }

@@ -92,10 +92,9 @@ private actor SourceSessionPublicationScripts: MusicScriptResolving {
         guard installationID == "a" else { throw MusicServiceError.sourceUnavailable }
         if !requests.isEmpty, let document = cancellationDocument {
             cancellationDocument = nil
-            // The post-resolve declaration has five reads left: recording
-            // admission, final inspectionCheck, recording/provider admission,
-            // and session.check's owner inspectionCheck. The last read runs in the child,
-            // after the resolve deadline has already returned.
+            // The post-resolve declaration has five owner reads: recording
+            // admission, inspectionCheck, current metadata, then recording/provider
+            // admission. The last read cancels the deadline operation before it returns.
             document.arm(afterReads: 5)
         }
         return snapshot()
@@ -377,8 +376,8 @@ final class MusicSourceSessionTests: XCTestCase {
         let cancelledHistory = try await service.playedSongs(), cancelledExclusions = try await service.sourceExclusions()
         XCTAssertTrue(cancelledHistory.isEmpty); XCTAssertTrue(cancelledExclusions.isEmpty)
 
-        // The final owner's read finishes after its cancellation checks, so
-        // publication must reject this response without exhausting its peer.
+        // The cancelled deadline operation must not publish its returned value
+        // or exhaust this peer.
         // Retry this exact session without beginSelection, refresh, or reconstruction.
         let retried = try await session.match(intent: .quality("flac"))
         XCTAssertEqual(retried.selection.installationId, "a")

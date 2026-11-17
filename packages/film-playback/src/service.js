@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { isDeepStrictEqual } from 'node:util';
+import { stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { compareCandidates, defaultPreferences, isCandidateAllowed, isSmartSiteAllowed, normalizePreferences } from './policy.js';
 import { contentResults, matchesResult, mediaVariants, normalizeDetail, recognizeCandidates, recognizeVariantCandidates } from './recognition.js';
 import { buildEpisodeMap, matchEpisodeMaps, resolveEpisode, sameSeasonPartition } from './episodes.js';
@@ -45,6 +46,10 @@ const addressLifetime = 3 * 60_000;
 function fields(value, names) {
   return Object.fromEntries(names.filter(name => value[name] !== undefined).map(name => [name, clone(value[name])]));
 }
+function historyPosition(row) {
+  requireValue(Number.isFinite(row.position) && row.position >= 0, 'CORRUPT_STORAGE');
+  return row.position;
+}
 function episodeTarget(target, episode) {
   const next = { ...target };
   for (const name of ['season', 'episode', 'globalEpisode']) {
@@ -60,7 +65,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
   const episodeMaps = new WeakMap(), browsingProjections = new WeakMap();
   let closed = false, closing;
   requireValue(rules && typeof rules.snapshot === 'function');
-  const preferences = () => library.read().preferences ?? defaultPreferences();
+  const preferences = () => normalizePreferences(library.read().preferences ?? defaultPreferences());
   function get(id) {
     requireValue(!closed, 'CLOSED');
     const session = sessions.get(id);
@@ -213,12 +218,16 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     browsing.episodes = browsing.episodes.map(projectFile);
     if (browsing.originalEpisodes) browsing.originalEpisodes = browsing.originalEpisodes.map(projectFile);
     const selected = session.metadataSources.find(row => row.id === session.metadataSourceId);
-    const metadataProvider = selected?.provider ?? session.target.metadataProvider;
-    const metadataKind = selected?.kind ?? session.target.kind;
-    const metadataId = selected?.metadataId ?? session.target.metadataId;
+    // Cold source reentry retains the TMDB entry's metadata before discovery
+    // supplies a selected metadata source.
+    const metadataTarget = !session.target.metadataProvider && session.entryTarget.metadataProvider === 'tmdb'
+      ? session.entryTarget : session.target;
+    const metadataProvider = selected?.provider ?? metadataTarget.metadataProvider;
+    const metadataKind = selected?.kind ?? metadataTarget.kind;
+    const metadataId = selected?.metadataId ?? metadataTarget.metadataId;
     const metadataPath = `${metadataProvider === 'douban' ? '/rexxar/api/v2' : '/3'}/${metadataKind}/${metadataId}`;
     const metadata = session.metadata && metadataProvider
-      ? catalog.metadata(metadataProvider, metadataPath, session.metadata, session.target) : clone(session.metadata);
+      ? catalog.metadata(metadataProvider, metadataPath, session.metadata, metadataTarget) : clone(session.metadata);
     const episodes = visibleEpisodes(session).map(row => {
       const entry = catalog.metadata(metadataProvider, `${metadataPath}/season/${row.season}`,
         { name: session.target.title, season_number: row.season, episodes: [row] });
@@ -335,7 +344,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
   const manualIdentity = row => identity(fields(row, ['targetId', 'kind', 'sourceKey', 'detailId',
     'provider', 'share', 'seasonHint']));
   function currentManual(session, value) {
-    return library.read().manual.find(row => row.id === value.manualId && row.enabled !== false &&
+    return library.read().manual.find(row => row?.id === value.manualId && row.enabled !== false &&
       row.targetId === session.target.id && manualIdentity(row) === value.manualIdentity);
   }
   async function recognizeResult(session, result, detail, target = session.target) {
@@ -408,6 +417,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     if (candidate.fileIdentity && !candidate.variant) session.excluded.add(candidate.fileIdentity);
   }
   async function smartResult(session, result, target = session.target) {
+    if (result.hint && !result.verifiedRaw) return false;
     if (!result.hint) {
       if (result.linkedTargetId === target.id && (!result.manualId || !!currentManual(session, result))) return true;
     }
@@ -699,8 +709,9 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
   function manualOutcome(row, error) {
     if (error && cancelled(error)) return;
     library.update(document => {
-      const entry = document.manual.find(item => item.id === row.id);
+      const entry = document.manual.find(item => item?.id === row.id);
       if (!entry || entry.enabled === false || manualIdentity(entry) !== manualIdentity(row)) return;
+      requireValue(Number.isSafeInteger(entry.failureCount) && entry.failureCount >= 0, 'CORRUPT_STORAGE');
       entry.failureCount = error ? entry.failureCount + 1 : 0;
       if (entry.autoDisable && entry.failureCount >= 3) entry.enabled = false;
     });
@@ -766,13 +777,18 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       for (const stage of ['history', 'manual']) {
         if (!valid(session, generation)) return;
         session.stage = session.target.metadataProvider ? stage : 'loading'; publish(session);
-        const rows = document[stage].filter(row => row.targetId === session.target.id && row.enabled !== false);
+        const rows = document[stage].filter(row => row?.targetId === session.target.id && row.enabled !== false);
         for (const row of rows) {
           if (!valid(session, generation)) return;
+          if (stage === 'manual' && (!Number.isSafeInteger(row.failureCount) || row.failureCount < 0 ||
+              row.failureCount === Number.MAX_SAFE_INTEGER)) {
+            session.selectionError = 'CORRUPT_STORAGE';
+            continue;
+          }
           if (stage === 'manual' && row.share) {
             if (['source', 'group'].includes(session.target.kind)) continue;
             const source = { key: `manual:${row.id}`, engine: 'pan', name: row.name || '人工匹配',
-              detailId: row.id, manualSeasonHint: row.seasonHint };
+              detailId: row.id, ...fields({ manualSeasonHint: row.seasonHint }, ['manualSeasonHint']) };
             try {
               const line = await runIO(session, generation, source, { provider: row.provider }, () =>
                 data.expand(source, { id: row.id, label: row.name || row.provider,
@@ -1019,7 +1035,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     if (previous && session.target.episode !== undefined && session.target.season === previous.episode?.season &&
         session.target.episode === previous.episode?.episode &&
         (session.target.globalEpisode === undefined || previous.episode?.globalEpisode === undefined ||
-          session.target.globalEpisode === previous.episode.globalEpisode)) session.resumePosition = previous.position;
+          session.target.globalEpisode === previous.episode.globalEpisode)) session.resumePosition = historyPosition(previous);
   }
   async function discoverMetadata(session) {
     const epoch = session.metadataEpoch, browsing = session.browseGeneration;
@@ -1052,7 +1068,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       if (!session.restoreOnly && session.target.kind === 'tv' &&
           session.target.episode === undefined && session.generation === 0) {
         const previous = session.platform === 'windows'
-          ? library.read().history.find(row => row.targetId === session.target.id) : null;
+          ? library.read().history.find(row => row?.targetId === session.target.id) : null;
         initializeEpisode(session, previous);
         if (session.target.episode !== undefined) {
           session.stage = 'idle'; session.error = null;
@@ -1130,7 +1146,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       if (seasonResult) acceptMetadataCache(session, seasonResult.entry, season, seasonResult.error);
       loadedMetadata = null;
       if (!await selectTarget(session, episodeTarget(target, mapped ?? {})) || !admitted()) return;
-      session.browsing = { ...(saved ?? session.browsing), season, error: null };
+      session.browsing = { ...(saved ?? session.browsing), ...fields({ season }, ['season']), error: null };
       await refreshBrowsing(session);
       if (!admitted()) return;
       session.browsing = { ...session.browsing, loading: false, refreshing: false };
@@ -1143,7 +1159,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
           session.metadata = loadedMetadata.display;
           selected.metadata = loadedMetadata.entry.value;
           acceptMetadataCache(session, loadedMetadata.entry);
-          session.browsing = { ...session.browsing, season: loadedMetadata.season };
+          session.browsing = { ...session.browsing, ...fields(loadedMetadata, ['season']) };
         }
         session.browsing = { ...session.browsing, loading: false, refreshing: false };
         session.metadataError = codeOf(error);
@@ -1238,7 +1254,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         }
       }
       const previous = !session.restoreOnly && session.platform === 'windows'
-        ? library.read().history.find(row => row.targetId === session.target.id) : null;
+        ? library.read().history.find(row => row?.targetId === session.target.id) : null;
       if (session.target.kind === 'tv') {
         initializeEpisode(session, session.generation === 0 ? previous : null);
         if (session.target.metadataProvider === 'tmdb' && session.target.season !== undefined) {
@@ -1259,12 +1275,12 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
               (!session.target.source || row.source.key === session.target.source.key &&
                 row.source.detailId === session.target.source.detailId));
             if (result) {
-              session.resumePosition = previous.position;
+              session.resumePosition = historyPosition(previous);
               session.resumeCandidateId = previous.candidateId;
               if (session.browseGeneration === 0)
                 session.browsing = { ...session.browsing, sourceId: result.id, lineId: previous.lineId };
             }
-          } else session.resumePosition = previous.position;
+          } else session.resumePosition = historyPosition(previous);
         }
       }
       if (session.released) return;
@@ -1344,7 +1360,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     const createsSeedWaitGroup = doubanSeed && !resumeTarget;
     const target = createsSeedWaitGroup
       ? checkTarget({ id: `group:${entryTarget.id}`, kind: 'group',
-        title: entryTarget.title, year: entryTarget.year, members: [] }) : resumeTarget ?? entryTarget;
+        title: entryTarget.title, ...fields(entryTarget, ['year']), members: [] }) : resumeTarget ?? entryTarget;
     const sources = (input.sources ?? []).map(checkSource);
     requireValue(new Set(sources.map(source => source.key)).size === sources.length);
     if (target.kind === 'group') requireValue((createsSeedWaitGroup || target.members.length > 0) && target.members.every(member =>
@@ -1401,7 +1417,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       }
     }
     if (target.kind === 'source' && target.source.engine === 'pan') {
-      const row = library.read().manual.find(value => value.id === target.source.detailId &&
+      const row = library.read().manual.find(value => value?.id === target.source.detailId &&
         value.targetId === target.id && value.share && value.enabled !== false);
       requireValue(row && target.source.key === `manual:${row.id}`, 'SOURCE_NOT_FOUND');
       const source = { key: target.source.key, engine: 'pan', name: row.name || '人工匹配', detailId: row.id };
@@ -1741,7 +1757,8 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         selected.metadata = entry.value;
         if (selected.provider === 'tmdb') selected.seasons = display.seasons;
       }
-      session.browsing = { ...previous, season: requestedSeason, loading: false, refreshing: false, error: null };
+      session.browsing = { ...previous, ...fields({ season: requestedSeason }, ['season']),
+        loading: false, refreshing: false, error: null };
       rememberBrowsing(session);
       session.initializationError = null;
       if (session.target.metadataProvider) detached(session, discoverMetadata(session));
@@ -1783,14 +1800,17 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     if (!selected) return;
     const candidate = selected.candidate;
     library.update(document => {
-      const value = { targetId: selected.target.id, title: selected.target.title,
+      const matches = document.history.filter(row => row?.targetId === selected.target.id);
+      requireValue(matches.length <= 1, 'CORRUPT_STORAGE');
+      const previous = matches[0];
+      const value = { ...previous, targetId: selected.target.id, title: selected.target.title,
         playbackTarget: catalog.candidate(selected.target, candidate).playbackTarget,
         sourceKey: candidate.source.key, detailId: candidate.source.detailId,
         lineId: candidate.lineId, candidateId: candidate.id,
         episode: fields(selected.target, ['season', 'episode', 'globalEpisode']),
         position: session.position, duration: session.duration, paused: session.paused, ended,
         updatedAt: now() };
-      document.history = [value, ...document.history.filter(row => row.targetId !== value.targetId)];
+      document.history = [value, ...document.history.filter(row => row?.targetId !== value.targetId)];
     });
     session.lastHistoryWrite = now();
   }
@@ -2531,7 +2551,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       if (closed || session.released) { body.push(null); return; }
       if (!demand || !initial && session.sequence <= after) return;
       demand = false; initial = false; after = session.sequence;
-      body.push(Buffer.from(`id: ${after}\nevent: snapshot\ndata: ${JSON.stringify(snapshot(session))}\n\n`));
+      body.push(Buffer.from(`id: ${after}\nevent: snapshot\ndata: ${stringifyJSONValue(snapshot(session))}\n\n`));
     };
     const body = new Readable({ highWaterMark: 16 * 1024,
       read() { demand = true; changed(); },
@@ -2550,7 +2570,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     async setSettings(input) {
       requireValue(library.configurationOwner !== 'native', 'PERMISSION_DENIED');
       const next = normalizePreferences(input);
-      library.update(document => { document.preferences = next; });
+      library.update(document => { document.preferences = { ...document.preferences, ...next }; });
       for (const session of sessions.values()) await refreshEligibility(session);
       return clone(next);
     },
@@ -2560,7 +2580,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       library.update(document => {
         if (input.kind === 'history') {
           requireValue(input.id == null || text(input.id));
-          document.history = input.id == null ? [] : document.history.filter(row => row.targetId !== input.id);
+          document.history = input.id == null ? [] : document.history.filter(row => row?.targetId !== input.id);
         } else {
           requireValue(input.block == null || object(input.block));
           document.blocks = input.block == null ? [] : document.blocks.filter(row => identity(row) !== identity(input.block));
@@ -2574,15 +2594,38 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       library.update(document => {
         if (input.action === 'remove') {
           requireValue(text(input.id));
-          previous = document.manual.find(row => row.id === input.id);
-          document.manual = document.manual.filter(row => row.id !== input.id);
+          previous = document.manual.find(row => row?.id === input.id);
+          document.manual = document.manual.filter(row => row?.id !== input.id);
         }
         else {
           requireValue(object(input.item) && text(input.item.targetId) &&
             (text(input.item.sourceKey) && isIdentifier(input.item.detailId) || object(input.item.share) && text(input.item.provider)));
-          const item = { ...clone(input.item), id: input.item.id || randomUUID(), failureCount: 0 };
-          previous = document.manual.find(row => row.id === item.id); updated = item;
-          document.manual = [...document.manual.filter(row => row.id !== item.id), item];
+          const id = input.item.id ?? randomUUID();
+          requireValue(text(id));
+          const matches = document.manual.filter(row => row?.id === id);
+          requireValue(matches.length <= 1, 'CORRUPT_STORAGE');
+          previous = matches[0];
+          const item = { ...previous, ...clone(input.item), id, failureCount: 0 };
+          for (const key of ['kind', 'title', 'name', 'sourceKey', 'detailId', 'provider', 'share',
+            'seasonHint', 'enabled', 'autoDisable']) {
+            if (!Object.hasOwn(input.item, key)) delete item[key];
+          }
+          if (object(previous?.share) && object(item.share)) {
+            item.share = { ...previous.share, ...item.share };
+            if (!Object.hasOwn(input.item.share, 'password')) delete item.share.password;
+          }
+          if (item.share !== undefined) {
+            requireValue(object(item.share) && typeof item.share.url === 'string' &&
+              (item.share.password === undefined || typeof item.share.password === 'string'));
+            let url;
+            try { url = new URL(item.share.url); } catch { throw fail('INVALID_REQUEST'); }
+            requireValue(['https:', 'http:'].includes(url.protocol) && !url.username && !url.password);
+          }
+          for (const key of ['enabled', 'autoDisable'])
+            requireValue(item[key] === undefined || typeof item[key] === 'boolean');
+          requireValue(item.seasonHint === undefined || Number.isSafeInteger(item.seasonHint) && item.seasonHint >= 0);
+          updated = item;
+          document.manual = [...document.manual.filter(row => row?.id !== item.id), item];
         }
       });
       if (previous && updated && manualIdentity(previous) === manualIdentity(updated) &&

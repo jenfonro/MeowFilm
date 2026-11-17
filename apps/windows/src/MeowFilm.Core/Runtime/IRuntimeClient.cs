@@ -51,7 +51,10 @@ public interface IRuntimeConnectionSource
     Task<RuntimeConnection> CaptureConnectionAsync(CancellationToken cancellationToken = default);
 }
 
-public sealed record RuntimeModule(string Id, string Version);
+public sealed record RuntimeModule(string Id, string Version)
+{
+    public IReadOnlyList<string> RequiredMethods { get; init; } = [];
+}
 
 /// <summary>Image bytes from a validated runtime-relative reference, without HTTP access credentials.
 /// Completion includes physical response disposal, including cancellation.</summary>

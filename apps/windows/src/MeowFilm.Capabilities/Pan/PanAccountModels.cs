@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities;
@@ -33,12 +34,37 @@ public sealed record PanCredentialField(string Id)
     }
 }
 
-internal sealed record PanAccountSnapshot(string Provider, long Revision, bool Configured, string Status, string[] Fields)
+internal sealed record PanAccountSnapshot(string Provider,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? Revision,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? Configured,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Status,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string[]? Fields,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ErrorCode = null)
 {
+    internal static PanAccountSnapshot Corrupt(string provider) => new(provider, null, null, null, null, "CORRUPT_STORAGE");
+
     internal static PanAccountSnapshot Read(JsonElement value)
     {
+        string provider;
+        try { provider = BridgeCodec.RequiredProperty(value, "provider").GetString()!; }
+        catch { throw new BridgeException("INVALID_RESPONSE"); }
+        var declaration = PanSettingsStore.Providers.SingleOrDefault(item => item.GetProperty("provider").GetString() == provider);
+        if (declaration.ValueKind == JsonValueKind.Undefined) throw new BridgeException("INVALID_RESPONSE");
+        if (value.TryGetProperty("errorCode", out _))
+        {
+            try
+            {
+                if (BridgeCodec.RequiredProperty(value, "errorCode").GetString() != "CORRUPT_STORAGE" ||
+                    new[] { "revision", "configured", "status", "fields" }.Any(key => value.TryGetProperty(key, out _)))
+                    throw new BridgeException("INVALID_RESPONSE");
+                return Corrupt(provider);
+            }
+            catch { throw new BridgeException("INVALID_RESPONSE"); }
+        }
+        foreach (string key in new[] { "revision", "configured", "status", "fields" })
+            if (value.EnumerateObject().Count(item => item.NameEquals(key)) != 1)
+                throw new BridgeException("INVALID_RESPONSE");
         if (value.ValueKind != JsonValueKind.Object ||
-            !value.TryGetProperty("provider", out var providerValue) || providerValue.ValueKind != JsonValueKind.String ||
             !value.TryGetProperty("revision", out var revisionValue) || revisionValue.ValueKind != JsonValueKind.Number ||
             !revisionValue.TryGetInt64(out long revision) ||
             !value.TryGetProperty("configured", out var configuredValue) ||
@@ -47,13 +73,10 @@ internal sealed record PanAccountSnapshot(string Provider, long Revision, bool C
             !value.TryGetProperty("fields", out var fieldValues) || fieldValues.ValueKind != JsonValueKind.Array ||
             fieldValues.EnumerateArray().Any(item => item.ValueKind != JsonValueKind.String))
             throw new BridgeException("INVALID_RESPONSE");
-        string provider = value.GetProperty("provider").GetString()!;
         bool configured = value.GetProperty("configured").GetBoolean();
         string status = value.GetProperty("status").GetString()!;
         var fields = value.GetProperty("fields").EnumerateArray().Select(item => item.GetString()!).ToArray();
-        var declaration = PanSettingsStore.Providers.SingleOrDefault(item => item.GetProperty("provider").GetString() == provider);
-        if (declaration.ValueKind == JsonValueKind.Undefined ||
-            fields.Distinct().Count() != fields.Length ||
+        if (fields.Distinct().Count() != fields.Length ||
             fields.Any(field => !declaration.GetProperty("credentialFields").EnumerateArray().Any(item => item.GetString() == field)) ||
             configured != (fields.Length > 0) || revision < 0 || revision > BridgeCodec.MaximumSafeInteger ||
             status is not ("signedIn" or "expired" or "signedOut") ||
@@ -87,10 +110,12 @@ public sealed class PanAccountRow : INotifyPropertyChanged
     public IReadOnlyList<PanCredentialField> CredentialFields { get; }
     public bool SupportsQr { get; }
     public bool SupportsRefresh { get; }
-    public long Revision => snapshot?.Revision ?? 0;
+    public long? Revision => snapshot?.Revision;
     public bool Configured => snapshot?.Configured == true;
-    public string Status => snapshot?.Status ?? "signedOut";
-    public string StatusText => Status switch { "signedIn" => "已登录", "expired" => "失效", _ => "未登录" };
+    public string? Status => snapshot?.Status;
+    public string? ErrorCode => snapshot?.ErrorCode;
+    public string StatusText => ErrorCode == "CORRUPT_STORAGE" ? "凭据损坏" :
+        Status switch { "signedIn" => "已登录", "expired" => "失效", "signedOut" => "未登录", _ => "" };
     public bool HasSnapshot => snapshot is not null;
     public bool IsBusy => Request is not null;
     public bool CanLogin => Available && Status != "signedIn";
@@ -103,18 +128,18 @@ public sealed class PanAccountRow : INotifyPropertyChanged
     internal bool Editing;
     internal bool Active;
     private PanAccountSnapshot? snapshot;
-    private bool Available => Active && HasSnapshot && !IsBusy && !Editing;
+    private bool Available => Active && snapshot is { ErrorCode: null, Revision: not null } && !IsBusy && !Editing;
 
     internal void Publish(PanAccountSnapshot value)
     {
         if (value.Provider != Provider) throw new BridgeException("INVALID_RESPONSE");
-        if (value.Revision < Revision) return;
+        if (value.ErrorCode is null && value.Revision < Revision) return;
         snapshot = value;
         Changed();
     }
     internal void Changed()
     {
-        foreach (string name in new[] { nameof(Revision), nameof(Configured), nameof(Status), nameof(StatusText),
+        foreach (string name in new[] { nameof(Revision), nameof(Configured), nameof(Status), nameof(StatusText), nameof(ErrorCode),
             nameof(HasSnapshot), nameof(IsBusy), nameof(CanLogin), nameof(CanEdit), nameof(CanRefresh), nameof(CanLogout), nameof(LoginText) })
             PropertyChanged?.Invoke(this, new(name));
     }

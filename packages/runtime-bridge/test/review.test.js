@@ -41,9 +41,9 @@ for (const direction of ['forward', 'reverse']) {
   });
 }
 
-test('encoder rejects unpaired UTF-16 values and keys while preserving legal Unicode', () => {
+test('encoder preserves JSON strings and keys without Unicode normalization', () => {
   for (const value of ['\ud800', '\udfff', { '\ud800': 1 }, { '\udfff': 1 }]) {
-    assert.throws(() => encodeJSONValue(value), { code: 'INVALID_REQUEST' });
+    assert.deepEqual(JSON.parse(encodeJSONValue(value)), value);
   }
   assert.equal(encodeJSONValue({ 'é': 1, 'e\u0301': 2 }).toString(), '{"é":1,"é":2}');
 });

@@ -477,12 +477,14 @@ internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNative
         if (terminalGeneration != generation) return;
         if (ended) Ended?.Invoke(this, EventArgs.Empty); else Failed?.Invoke(this, EventArgs.Empty);
     }
-    internal async Task TakeMusicAsync()
+    internal async Task RetireScopeAsync()
     {
         if (AcceptedLease is { } lease) { AcceptedLease = null; await lease.DisposeAsync(); }
         Identity = null; Scope = null; HasOutput = false;
         SetBuffering(false);
         Pulse(nameof(Scope));
+        Pulse(nameof(Identity));
+        Pulse(nameof(HasOutput));
     }
     internal void SetBuffering(bool value)
     {

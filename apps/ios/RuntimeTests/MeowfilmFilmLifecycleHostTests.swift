@@ -310,7 +310,8 @@ final class MeowfilmFilmColdStartPrepareTests: XCTestCase {
             "keywords": .array([.string("1080p"), .string("原始")]),
             "siteCleanKeywords": .array([.string("合成净化词")]), "iosAutoPrepare": .bool(false),
         ])
-        let saved = try await client.call(module: .film, operation: "settings.set", parameters: changed)
+        try await NativeFilmFixture.preferences(changed, resources: resources)
+        let saved = try await client.call(module: .film, operation: "settings.get")
         XCTAssertEqual(saved, changed)
         let manual: [RuntimeValue] = [
             .object(["id": .string(run + "-site"), "targetId": .string(fixture.targetID), "kind": .string("site"),
@@ -456,8 +457,10 @@ private enum FilmLifecycleHost {
         try await client.call(module: .film, operation: "library.get").filmRequiredObject()
     }
     static func favorite(_ checkpoint: RuntimeObject) throws -> FilmItem {
-        .init(sourceID: "tmdb", id: try checkpoint.filmString("metadataId"),
-              title: try checkpoint.filmString("installationId"), kind: .tv)
+        let id = try checkpoint.filmString("metadataId"), targetID = try checkpoint.filmString("targetId")
+        let title = try checkpoint.filmString("installationId")
+        return .init(sourceID: "tmdb", id: id, title: title, kind: .tv, businessID: targetID,
+            playbackTarget: .init(id: targetID, kind: .tv, title: title, metadataProvider: .tmdb, metadataID: id))
     }
     static func checkpoint(run: String, fixture: FilmPlaybackHostFixture,
                            assembly: MeowfilmAssembly) async throws -> RuntimeObject {
@@ -557,21 +560,15 @@ private enum FilmLifecycleHost {
             if assembly.filmLibrary.contains(favorite) { XCTAssertFalse(try assembly.filmLibrary.toggle(favorite)) }
         } catch { failure = failure ?? error }
         do {
-            let status = try await client.call(module: .cat, operation: "status").filmRequiredObject()
-            if try status.filmArray("instances").contains(where: {
-                $0.filmObject?["installationId"] == .string(installationID)
-            }) {
-                _ = try await client.call(module: .cat, operation: "uninstall",
-                    parameters: .object(["installationId": .string(installationID)]))
-            }
+            try await NativeFilmFixture.removeCat(installationID, resources: XCTUnwrap(assembly.resources))
             let removed = try await client.call(module: .cat, operation: "status").filmRequiredObject()
             XCTAssertFalse(try removed.filmArray("instances").contains {
                 $0.filmObject?["installationId"] == .string(installationID)
             })
         } catch { failure = failure ?? error }
         do {
-            _ = try await client.call(module: .film, operation: "settings.set",
-                                      parameters: try checkpoint.filmValue("originalSettings"))
+            try await NativeFilmFixture.preferences(checkpoint.filmValue("originalSettings"),
+                resources: XCTUnwrap(assembly.resources))
         } catch { failure = failure ?? error }
         XCTAssertTrue(UserDefaults.standard.synchronize())
         if let failure { throw failure }

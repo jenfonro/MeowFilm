@@ -28,8 +28,8 @@ import MeowRuntime
         let client = fixture.makeClient(), provider = MusicNodeAccountProvider(platform: .kugou, client: client)
         let rows = try await provider.tracks(collectionID: "0:7")
         XCTAssertEqual(rows.count, 2001)
-        XCTAssertEqual(try rows.map { try MusicPlatformDTO.runtime($0)[music: "fileid"].musicRequiredText() }, (501..<2502).map(String.init))
-        XCTAssertTrue(try rows.allSatisfy { try MusicPlatformDTO.runtime($0)[music: "songmid"].musicRequiredText() == "same-recording" })
+        XCTAssertEqual(try rows.map { try $0[music: "fileid"].musicRequiredText() }, (501..<2502).map(String.init))
+        XCTAssertTrue(try rows.allSatisfy { try $0[music: "songmid"].musicRequiredText() == "same-recording" })
         XCTAssertEqual(fixture.requests().map(\.operation), ["personalPlaylists", "playlist.complete"])
         try await client.close(); await fixture.runtime.close()
     }
@@ -42,7 +42,7 @@ import MeowRuntime
             await peer.replies("personalPlaylists", .object(["items": .array([.object(["id": .string("0:7"),
                 "name": .string(title), "owned": .bool(true), "unused": .null])]), "more": .bool(false)]))
             let rows = try await provider.collectionRows()
-            let row = try MusicPlatformDTO.runtime(XCTUnwrap(rows.first))
+            let row = try XCTUnwrap(rows.first)
             XCTAssertEqual(row[music: "title"], .string(title)); XCTAssertEqual(row[music: "count"], .null)
         }
         XCTAssertEqual(fixture.requests().map(\.operation), ["personalPlaylists", "personalPlaylists"])
@@ -67,7 +67,7 @@ import MeowRuntime
         let client = fixture.makeClient(), provider = MusicNodeAccountProvider(platform: .kugou, client: client)
         let values = try await provider.tracks(collectionID: "1:9")
         XCTAssertEqual(values.count, 1)
-        XCTAssertEqual(try MusicPlatformDTO.runtime(XCTUnwrap(values.first))[music: "fileid"], .null)
+        XCTAssertEqual(try XCTUnwrap(values.first)[music: "fileid"], .null)
         XCTAssertEqual(fixture.requests().count, 2)
         try await client.close(); await fixture.runtime.close()
     }
@@ -81,7 +81,7 @@ import MeowRuntime
         for kind in ["daily", "fm", "current-kind"] {
             let result = try await provider.recommendations(kind: kind, page: 1)
             XCTAssertEqual(result.rows.count, 1); XCTAssertNil(result.nextPage)
-            let row = try MusicPlatformDTO.runtime(XCTUnwrap(result.rows.first))
+            let row = try XCTUnwrap(result.rows.first)
             XCTAssertEqual(row[music: "songmid"], .string("canonical-id"))
             XCTAssertEqual(row[music: "token"], .null)
         }

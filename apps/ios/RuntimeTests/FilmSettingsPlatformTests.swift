@@ -462,7 +462,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
                 XCTAssertGreaterThan(table.bounds.width, 0)
                 XCTAssertLessThanOrEqual(frame.maxX, page.view.bounds.maxX)
                 XCTAssertGreaterThanOrEqual(frame.minY, page.pageHeader.frame.maxY)
-                XCTAssertEqual(frame.maxY, page.view.safeAreaLayoutGuide.layoutFrame.maxY - (manager == nil ? 0 : 8), accuracy: 1)
+                XCTAssertEqual(frame.maxY, manager == nil ? page.view.safeAreaLayoutGuide.layoutFrame.maxY : page.view.bounds.maxY, accuracy: 1)
                 for cell in table.visibleCells {
                     XCTAssertGreaterThanOrEqual(cell.bounds.height, 44)
                     XCTAssertFalse(cell.accessibilityIdentifier?.isEmpty ?? true)

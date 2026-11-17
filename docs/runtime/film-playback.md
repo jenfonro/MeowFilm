@@ -18,8 +18,8 @@ fsync 与 rename 原子替换文档路径；文件链接的其他目录项保留
 
 注入 `nativeSettings` 后，规则与偏好只读 `film.rules`／`film.preferences` 原生块，
 不读写旧规则文件或把偏好写回 Node 资料库；资料库仍保存历史、人工匹配、屏蔽及点映选择。
-普通原生保存与按块通知见[共同契约](../common/settings-storage.md)，iOS 旧配置采用及保护
-见[存储](../ios/storage.md#已知-node-设置的单向迁移)，Windows 接线见[原生设置](../windows/native-settings.md)。
+普通原生保存与按块通知见[共同契约](../common/settings-storage.md)，iOS 持久化与保护
+见[存储](../ios/storage.md)，Windows 接线见[原生设置](../windows/native-settings.md)。
 HTTP `settings.set` 及规则写入
 在注入模式返回 `PERMISSION_DENIED`，不形成第二个配置写 owner。
 
@@ -58,7 +58,7 @@ Windows 只使用内置原生输出，不提供外部播放器入口或子进程
 | `session.media.release` | `{sessionId,attemptId,resourceId}` → `{released:true}`，重复释放幂等 |
 | `session.release` | `{sessionId,keepMedia?}` → `{released:true}` 或 `{retained:true}` |
 | `settings.get/set` | 读取／原子保存完整偏好 |
-| `library.get` | 读取 v2 资料库：历史、人工匹配、屏蔽、偏好、点映选择及聚合身份注册；历史投影 `businessId/playbackTarget` |
+| `library.get` | 读取 v2 资料库：历史、人工匹配、屏蔽、偏好、点映选择及聚合身份注册；健康历史投影 `businessId` 并保留已记录的 `playbackTarget`，坏历史项标记 `errorCode:'CORRUPT_STORAGE'` |
 | `library.remove` | `{kind:'history'\|'blocks',id?,block?}`，省略或 null 清空对应集合，否则准确删除 |
 | `manual.update` | `{action:'save',item}` 或 `{action:'remove',id}` |
 | `rules.get` | `{}` → `{rules,revision}` |
@@ -75,7 +75,7 @@ Windows 只使用内置原生输出，不提供外部播放器入口或子进程
 | `search.command` | `{sessionId,action:'more'\|'stop'\|'resume'}` → 受理后的 snapshot |
 | `search.release` | `{sessionId}` → 释放搜索消费者与会话 |
 | `search.handoff` | `{sessionId,selectionId,sources}` → Node 生成的准确目标、来源、已取得事实、游标及 `searchReference`；显式调用仍要求选择存在 |
-| `data.target` | `{target,sources?}` → Node 确认／补全的 typed target；不搜索、读取详情或取址，可更新身份注册及旧目标链接 |
+| `data.target` | `{target,sources?}` → Node 确认／补全的 typed target；不搜索、读取详情或取址，可更新当前聚合身份注册 |
 | `data.catalog` | `{source,action:'home'\|'category',payload?,refresh?}` → 来源目录，附可定位条目的 `businessId/playbackTarget` |
 | `data.search` | `{source,query,page?,refresh?}` → 完整单页、页号和 `hasMore`，条目附身份投影 |
 | `data.detail` | `{source,detailId,refresh?}` → 所选来源的真实详情／线路／文件，附身份投影 |
@@ -157,13 +157,18 @@ iOS 不自动准备，Windows 正常新进入仍沿正式自动播放入口；�
   不暴露私有播放材料。无有效类型／ID／标题的原始 metadata 行不会被补造身份。
 - `data.target` 只按提供的真实 provider／ID 或来源／详情及准确成员确认 typed target，
   返回 target 本身，不返回另一套地址对象；它不是上游存在性或缓存新鲜度检查。
-  该调用可写身份注册和迁移链接，但不执行网络搜索、详情加载或媒体解析。
-- `library.json` 当前为 `version:2`，新增 `groups`，历史可保存 `playbackTarget`。
-  v1 读取时转换为 v2 内存文档并保留历史／人工匹配／屏蔽／偏好／点映；
-  后续正常写入落盘 v2，不在读取时清空或强制改写文件。
-  catalog 确认旧、新目标对应后迁移这些集合的目标链接及已有历史目标，
-  历史同目标保留最新记录、屏蔽及点映去重；不是按标题扫描全库重建身份。
-  原生收藏格式不随 Node 资料库版本更名。
+  该调用可写当前聚合身份注册，但不执行网络搜索、详情加载或媒体解析。
+- `library.json` 只读写当前 `version:2` 文档，包含 `groups` 与业务集合；
+  不升级 v1，不把旧 `displayKey` 链接迁成新目标，也不为缺失目标的历史合成 `playbackTarget`。
+  当前播放 writer 保存实际文件目标。历史投影中的坏对象保留原材料并附单项错误，
+  非对象项投影为单项错误；原持久记录不被删除，健康兄弟仍可展示。
+- 资料库读取只要求当前根版本与集合容器，不做全键或逐条预检。具体身份、计数、
+  分享地址与偏好由实际消费／编辑入口检查；选中身份歧义不能靠覆盖多条记录解决。
+  未编辑扩展和坏兄弟保留，显式删除／清空仍按指定集合执行。
+  持久材料及 metadata 缓存使用公共精确 JSON owner，失真数字保留原 token，
+  不将其转成字符串或普通 `rawJSON` 属性。非 JSON 写入、坏根、真实 I/O、
+  同步原子提交与 `STORAGE_CHANGED` 约束不变。
+  原生配置注入时不采用库中残留偏好，其他业务写入也不删除它；原生收藏仍属原生 owner。
 
 `entrySurface:'home'|'search'` 标识进入位置，snapshot 的 `entryTarget` 保留原始卡片目标，
 `target` 是运行器当前使用的目标；客户端不据显示标题重新构造来源。
@@ -216,6 +221,11 @@ full。可选 handoff 中内容无法消费的记录仅作为缓存 miss，健�
 原生已加载展示的保留由[页面契约](../common/pages/data-requests.md#展示与执行生命周期)约束。
 元数据季集 map 按资料引用复用，可见集另随北京时间日期和 preview 改变；
 已加载季和关联资料不变时切回沿用原投影。上述引用只用于派生复用，不替代来源／账号／配置验证。
+
+Pan `settings.get` 的坏账号以 `{provider,errorCode:'CORRUPT_STORAGE'}` 表示，不包含
+伪造的 `revision/configured`。Film 仅验证本次选中的普通账号；其他坏账号及不可用 TV
+账号不阻塞健康普通账号的 list／prepare／play。选中坏账号明确失败，所选身份重复或
+非法代次返回格式错误；普通／TV 同账号证明、`STALE_ACCOUNT`、取消和失效排空继续生效。
 
 元数据状态是组件级的 `ready/empty/missing/failed`；正常空值和未公布排期是成功数据，
 摘要不能冒充详情，季度概要不能冒充逐集响应。`metadata.entry.cache` 包含

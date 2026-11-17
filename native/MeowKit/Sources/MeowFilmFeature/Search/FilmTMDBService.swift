@@ -99,10 +99,10 @@ enum FilmMetadataSettingsDocument {
         let saved = try document.update { current in
             var values = try settings(current, defaults: defaults).filmRequiredObject()
             for (key, value) in patch {
-                guard defaults.filmObject?[key] != nil else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
+                guard defaults.filmObject?[key] != nil else { continue }
                 values[key] = value
             }
-            let normalized = try normalize(values, defaults: defaults.filmObject!)
+            let normalized = try normalize(values, defaults: defaults.filmObject!, keys: patch.keys)
             var envelope = current?.filmObject ?? ["version": .number(1)]
             envelope["settings"] = .object(normalized)
             return .object(envelope)
@@ -113,18 +113,18 @@ enum FilmMetadataSettingsDocument {
     private static func settings(_ document: RuntimeValue?, defaults: RuntimeValue) throws -> RuntimeValue {
         guard let document else { return defaults }
         guard let fields = document.filmObject, fields["version"] == .number(1),
-              let settings = fields["settings"]?.filmObject, settings.count == defaults.filmObject?.count,
-              settings.allSatisfy({ key, value in
-                  guard let expected = defaults.filmObject?[key] else { return false }
-                  if case .bool = expected { if case .bool = value { return true }; return false }
-                  return value.filmText != nil
+              let settings = fields["settings"]?.filmObject,
+              defaults.filmObject!.allSatisfy({ key, expected in
+                  if case .bool = expected { if case .bool? = settings[key] { return true }; return false }
+                  return settings[key]?.filmText != nil
               }) else { throw FilmSettingsStorageError.invalidDocument }
         return .object(settings)
     }
 
-    private static func normalize(_ values: RuntimeObject, defaults: RuntimeObject) throws -> RuntimeObject {
-        var result = RuntimeObject()
-        for (key, expected) in defaults {
+    private static func normalize(_ values: RuntimeObject, defaults: RuntimeObject, keys: [String]) throws -> RuntimeObject {
+        var result = values
+        for key in keys {
+            guard let expected = defaults[key] else { continue }
             guard let value = values[key] else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
             if key == "includeAdult" {
                 guard case .bool = value else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }

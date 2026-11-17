@@ -504,6 +504,7 @@ export class LegadoAdapter {
       });
       const baseVariables = this.kernel.invocations.get(invocation.id).variables;
       for (const item of items) {
+        sourceRequire(item !== null && item !== undefined, 'INVALID_RESPONSE');
         this.kernel.invocations.get(invocation.id).variables = new Map(baseVariables);
         const fallback = itemObject(item);
         const chapter = { index: chapters.length, bookUrl: payload.bookUrl ?? '',
@@ -524,6 +525,7 @@ export class LegadoAdapter {
           ? await this.string(this.tocRule.chapterUrl, item, itemPayload, invocation,
             { baseUrl: response.url })
           : text(fallback.chapterUrl ?? fallback.url ?? fallback.chapterId);
+        sourceRequire(Boolean(name || chapterUrl), 'INVALID_RESPONSE');
         if (!chapterUrl) chapterUrl = isVolume ? `${name}${chapter.index}` : response.url;
         else if (!isVolume || !chapterUrl.startsWith(name)) chapterUrl = absolute(chapterUrl, response.url);
         const identity = chapterUrl || `${name}:${chapters.length}`;

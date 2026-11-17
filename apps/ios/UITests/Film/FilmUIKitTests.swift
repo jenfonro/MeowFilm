@@ -822,7 +822,8 @@ final class FilmUIKitTests: XCTestCase {
 
     func testFavoriteButtonsStayInSyncAcrossDetailInstances() async throws {
         let library = try isolatedLibrary()
-        let detail = FilmDetail(item: .init(sourceID: "fixture", id: "shared", title: "共同影片"))
+        let detail = FilmDetail(item: .init(sourceID: "fixture", id: "shared", title: "共同影片",
+            businessID: "fixture:shared", playbackTarget: .init(id: "fixture:shared", kind: .movie, title: "共同影片")))
         let first = FilmDetailViewController(detail: detail, library: library,
                                              images: artworkImages(), themeProvider: FilmUIKitTheme())
         let second = FilmDetailViewController(detail: detail, library: library,

@@ -58,8 +58,7 @@ struct MeowfilmResources: Sendable {
             maximumDocumentBytes: 4 * 1024 * 1024))
         musicHomeSnapshot = MusicNativeHomeSnapshotDocument(storeFactory: Self.documentFactory(
             base: cacheRoot, namespace: MusicNativeHomeSnapshotDocument.namespace))
-        let filmSettings = try MeowfilmNativeSettings(documentsRoot: libraryRoot,
-            runtimeRoot: MeowfilmScriptRuntime.dataDirectory)
+        let filmSettings = try MeowfilmNativeSettings(documentsRoot: libraryRoot)
         self.filmSettings = filmSettings
         let scriptSession = RuntimeSession(launcher: MeowfilmScriptRuntime.launcher(settings: filmSettings.access))
         filmSettings.attach(scriptSession)

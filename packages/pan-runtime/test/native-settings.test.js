@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { cloneJSONValue as clone, parseJSONText, stringifyJSONValue, rawJSON } from '@meowfilm/runtime-bridge/json';
 import { createPanService } from '../src/service.js';
 
-const clone = value => structuredClone(value);
 const empty = () => ({ version: 1, accounts: {} });
 const record = (revision, credentials) => ({ revision, credentials });
 const response = (input, value, headers = {}) => ({
@@ -15,17 +15,17 @@ function deferred() {
   return { promise, resolve };
 }
 function casStore(initial = empty()) {
-  let disk = clone(initial), observed = JSON.stringify(disk), closed = false;
+  let disk = clone(initial), observed = stringifyJSONValue(disk), closed = false;
   const writes = [];
   return {
     writes,
     read: () => clone(disk),
-    async reload() { observed = JSON.stringify(disk); return clone(disk); },
+    async reload() { observed = stringifyJSONValue(disk); return clone(disk); },
     async write(document) {
       if (closed) throw Object.assign(new Error('CLOSED'), { code: 'CLOSED' });
-      if (observed !== JSON.stringify(disk))
+      if (observed !== stringifyJSONValue(disk))
         throw Object.assign(new Error('STORAGE_CONFLICT'), { code: 'STORAGE_CONFLICT' });
-      disk = clone(document); observed = JSON.stringify(disk); writes.push(clone(document));
+      disk = clone(document); observed = stringifyJSONValue(disk); writes.push(clone(document));
       return clone(disk);
     },
     native(document) { disk = clone(document); },
@@ -66,7 +66,7 @@ function qr(input) {
   return response(input, {});
 }
 
-test('native reload uses the whole validated document and cancels old sessions, not unrelated accounts', async t => {
+test('native reload cancels changed account sessions, not unrelated accounts', async t => {
   const store = casStore({ version: 1, accounts: { quark_tv: record(1, tv) } });
   const entered = deferred(), release = deferred();
   t.after(() => release.resolve());
@@ -202,22 +202,16 @@ test('QR confirmation checks its original account again when a queued replacemen
   assert.equal(store.writes.length, 2, 'only refresh and clear commit, never the stale QR');
 });
 
-test('reload validates every record before changing memory and can recover on a later valid notification', async t => {
+test('reload rejects corrupt roots without publishing old state or overwriting and can recover later', async t => {
   const initial = { version: 1, accounts: { baidu: record(1, { cookie: 'synthetic-old' }) } };
   const store = casStore(initial);
   const { service, requests } = setup(t, store);
-  const before = await service.invoke('settings.get');
   for (const invalid of [
-    { ...initial, extra: true }, { version: 2, accounts: {} }, { version: 1, accounts: [] },
-    { version: 1, accounts: { baidu: record(0, {}) } },
-    { version: 1, accounts: { baidu: record(9007199254740992, {}) } },
-    { version: 1, accounts: { baidu: record(2, { cookie: 2 }) } },
-    { version: 1, accounts: { yidong: record(2, { refreshedAt: '1' }) } },
-    { version: 1, accounts: { baidu: record(2, { cookie: 'synthetic-new' }), unknown: record(1, {}) } },
+    [], {}, { version: 2, accounts: {} }, { version: 1, accounts: [] },
   ]) {
     store.native(invalid);
     await assert.rejects(service.settingsChanged(), { code: 'CORRUPT_STORAGE' });
-    assert.deepEqual(await service.invoke('settings.get'), before, 'no partial publication from a corrupt document');
+    await assert.rejects(service.invoke('settings.get'), { code: 'CORRUPT_STORAGE' });
     await assert.rejects(service.invoke('settings.clear', { provider: 'baidu' }), { code: 'CORRUPT_STORAGE' });
     assert.deepEqual(store.saved(), invalid, 'a changed CAS fingerprint cannot authorize overwriting a rejected document');
   }
@@ -225,6 +219,202 @@ test('reload validates every record before changing memory and can recover on a 
   await service.settingsChanged();
   assert.equal((await account(service, 'baidu')).configured, false);
   assert.equal(requests.length, 0);
+});
+
+test('bad account records stay visible and preserved while healthy accounts refresh and change', async t => {
+  for (const bad of [
+    null, [], 'broken', record(0, {}), record(9007199254740992, {}),
+    record(2, null), record(2, { cookie: 2 }), record(2, { cookie: 'bad\r\nheader' }),
+  ]) {
+    const store = casStore({ version: 1, extra: true, accounts: {
+      baidu: bad, quark_tv: record(1, tv), unknown: { future: true },
+    } });
+    const { service, requests } = setup(t, store, rotation);
+    assert.deepEqual(await account(service, 'baidu'), { provider: 'baidu', errorCode: 'CORRUPT_STORAGE' });
+    await assert.rejects(service.invoke('refresh', { provider: 'baidu' }), { code: 'CORRUPT_STORAGE' });
+    assert.equal(requests.length, 0);
+    assert.equal((await service.invoke('refresh', { provider: 'quark_tv' })).refreshed, true);
+    await service.invoke('settings.clear', { provider: 'uc' });
+    assert.deepEqual(store.saved().accounts.baidu, bad);
+    assert.deepEqual(store.saved().accounts.unknown, { future: true });
+    assert.equal(store.saved().extra, true);
+    assert.equal(store.writes.length, 2);
+  }
+});
+
+test('reloading a bad sibling neither cancels healthy work nor loses its record on token commit', async t => {
+  const store = casStore({ version: 1, accounts: { quark_tv: record(1, tv) } });
+  const entered = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  const { service, requests } = setup(t, store, async input => {
+    entered.resolve(); await release.promise; return rotation(input);
+  });
+  const refresh = service.invoke('refresh', { provider: 'quark_tv' });
+  await entered.promise;
+  const bad = record(2, { refreshedAt: 'not-a-timestamp' });
+  store.native({ version: 1, accounts: { quark_tv: record(1, tv), yidong: bad } });
+  await service.settingsChanged();
+  assert.equal(requests[0].signal.aborted, false);
+  assert.deepEqual(await account(service, 'yidong'), { provider: 'yidong', errorCode: 'CORRUPT_STORAGE' });
+  release.resolve();
+  assert.equal((await refresh).refreshed, true);
+  assert.deepEqual(store.saved().accounts.yidong, bad);
+});
+
+test('native numeric extensions survive reload and rotation without acquiring credential authority', async t => {
+  const material = parseJSONText(`{"large":9007199254740993,"decimal":1.00000000000000001,
+    "overflow":1e400,"tiny":1e-400,"negativeZero":-0,"nested":{"rawJSON":"ordinary text"}}`);
+  const initial = { version: 1, future: material, accounts: {
+    baidu: record(3, { cookie: 'synthetic-other', extra: material }),
+    quark_tv: { ...record(1, { ...tv, extra: material, cookie: 'must-not-be-used',
+      headers: { Authorization: 'must-not-be-used' } }), future: material },
+  } };
+  const store = casStore(initial), entered = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  const { service, requests } = setup(t, store, async input => {
+    assert.equal(input.headers.Authorization, undefined);
+    assert.equal(input.headers.cookie, undefined);
+    assert.equal(input.headers.Cookie, undefined);
+    const body = JSON.parse(input.body);
+    assert.equal(body.refresh_token, tv.refreshToken);
+    assert.equal(body.extra, undefined);
+    assert.equal(body.headers, undefined);
+    entered.resolve(); await release.promise;
+    return rotation(input);
+  });
+  const refresh = service.invoke('refresh', { provider: 'quark_tv' });
+  await entered.promise;
+  await service.settingsChanged();
+  assert.equal(requests[0].signal.aborted, false, 'rawJSON clones retain stable numeric identity');
+  release.resolve(); await refresh;
+  const saved = store.saved();
+  for (const value of [saved.future, saved.accounts.quark_tv.future, saved.accounts.quark_tv.credentials.extra])
+    assert.equal(stringifyJSONValue(value), stringifyJSONValue(material));
+  assert.equal(stringifyJSONValue(saved.accounts.baidu), stringifyJSONValue(initial.accounts.baidu));
+  assert.deepEqual((await account(service, 'quark_tv')).fields,
+    ['refreshToken', 'deviceId', 'accessToken', 'expiresAt']);
+  await service.invoke('settings.set', { provider: 'quark_tv', credentials: { refreshToken: 'synthetic-new' } });
+  assert.deepEqual(store.saved().accounts.quark_tv.credentials, { refreshToken: 'synthetic-new' });
+  assert.equal(stringifyJSONValue(store.saved().accounts.quark_tv.future), stringifyJSONValue(material));
+  await service.invoke('settings.clear', { provider: 'quark_tv' });
+  assert.deepEqual(store.saved().accounts.quark_tv.credentials, {});
+  assert.equal(store.saved().accounts.quark_tv.revision, 3);
+});
+
+test('valid revision permits explicit repair of bad credentials but never invents a bad revision', async t => {
+  const store = casStore({ version: 1, accounts: { baidu: record(2, null), uc: record(0, {}) } });
+  const { service } = setup(t, store);
+  assert.equal((await service.invoke('settings.clear', { provider: 'baidu' })).revision, 3);
+  await assert.rejects(service.invoke('settings.clear', { provider: 'uc' }), { code: 'CORRUPT_STORAGE' });
+  assert.deepEqual(store.saved().accounts.uc, record(0, {}));
+});
+
+test('TV cross-account file consumption checks the actual ordinary account revision', async t => {
+  const store = casStore({ version: 1, accounts: {
+    quark: record(0, {}), quark_tv: record(1, { deviceId: 'synthetic-device', accessToken: 'synthetic-access' }),
+  } });
+  const { service, requests } = setup(t, store);
+  await assert.rejects(service.invoke('play', { provider: 'quark_tv', mode: 'download',
+    file: { kind: 'stored', fileId: 'synthetic-file', provider: 'quark', accountRevision: 0 } }),
+  { code: 'CORRUPT_STORAGE' });
+  assert.equal(requests.length, 0);
+  assert.equal(store.writes.length, 0);
+});
+
+test('Tianyi consumes usable Cookie without inspecting unused password or sending unknown credentials', async t => {
+  const credentials = { cookie: 'session=synthetic', password: { broken: true },
+    authorization: 'must-not-be-used', headers: { Cookie: 'must-not-be-used' } };
+  const store = casStore({ version: 1, accounts: { tianyi: record(1, credentials) } });
+  const { service, requests } = setup(t, store, input => {
+    const path = new URL(input.url).pathname;
+    assert.equal(input.headers.Authorization, undefined);
+    if (path === '/api/portal/loginUrl.action') return { ...response(input, ''), status: 302,
+      headers: { location: '/web/main', 'set-cookie': ['session=synthetic-rotated; Path=/'] } };
+    if (path === '/web/main') {
+      assert.equal(input.headers.Cookie, 'session=synthetic-rotated');
+      return response(input, 'synthetic account page');
+    }
+    assert.equal(path.endsWith('getShareInfoByCodeV2.action'), true);
+    assert.equal(input.headers.Cookie ?? input.headers.cookie, credentials.cookie);
+    return response(input, { res_code: 0, shareId: 'synthetic-share', fileId: 'synthetic-file',
+      fileName: 'Original.mp4', isFolder: false, shareMode: '3' });
+  });
+  assert.deepEqual(await account(service, 'tianyi'), { provider: 'tianyi', errorCode: 'CORRUPT_STORAGE' });
+  const result = await service.invoke('list', { provider: 'tianyi',
+    share: { url: 'https://cloud.189.cn/t/SyntheticCode' } });
+  assert.equal(result.files[0].name, 'Original.mp4');
+  assert.equal(result.files[0].file.accountRevision, 1);
+  assert.equal(requests.length, 1);
+  assert.deepEqual(store.saved().accounts.tianyi.credentials, credentials, 'listing does not rotate Cookie');
+  const refreshed = await service.invoke('refresh', { provider: 'tianyi' });
+  assert.equal(refreshed.refreshed, true);
+  assert.deepEqual(refreshed.account, { provider: 'tianyi', errorCode: 'CORRUPT_STORAGE' });
+  assert.equal(requests.length, 3);
+  assert.deepEqual(store.saved().accounts.tianyi.credentials.password, credentials.password);
+  assert.deepEqual(store.saved().accounts.tianyi.credentials.headers, credentials.headers);
+  assert.equal(store.saved().accounts.tianyi.credentials.cookie, 'session=synthetic-rotated');
+});
+
+test('all bad accounts produce explicit item failures, never empty successful account states', async t => {
+  const ids = ['baidu', 'quark', 'uc', 'tianyi', 'yidong', 'quark_tv', 'uc_tv'];
+  const initial = { version: 1, accounts: Object.fromEntries(ids.map(id => [id, null])) };
+  const store = casStore(initial), { service, requests } = setup(t, store);
+  assert.deepEqual((await service.invoke('settings.get')).accounts,
+    ids.map(provider => ({ provider, errorCode: 'CORRUPT_STORAGE' })));
+  for (const provider of ids)
+    await assert.rejects(service.invoke('refresh', { provider }), { code: 'CORRUPT_STORAGE' });
+  assert.equal(requests.length, 0);
+  assert.deepEqual(store.saved(), initial);
+  assert.equal(store.writes.length, 0);
+});
+
+test('token refresh repairs consumed output fields without prechecking stale optional token fields', async t => {
+  const store = casStore({ version: 1, accounts: {
+    quark_tv: record(1, { ...tv, accessToken: [], expiresAt: 'broken' }),
+  } });
+  const { service } = setup(t, store, rotation);
+  assert.deepEqual(await account(service, 'quark_tv'), { provider: 'quark_tv', errorCode: 'CORRUPT_STORAGE' });
+  const result = await service.invoke('refresh', { provider: 'quark_tv' });
+  assert.equal(result.account.status, 'signedIn');
+  assert.equal(store.saved().accounts.quark_tv.credentials.accessToken, 'synthetic-rotated-access');
+  assert.equal(typeof store.saved().accounts.quark_tv.credentials.expiresAt, 'number');
+});
+
+test('raw numeric material and a rawJSON-named ordinary object are distinct reload identities', async t => {
+  const store = casStore({ version: 1, accounts: {
+    quark_tv: record(1, { ...tv, extra: rawJSON('9007199254740993') }),
+  } });
+  const entered = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  const { service, requests } = setup(t, store, async input => {
+    entered.resolve(); await release.promise; return rotation(input);
+  });
+  const refresh = assert.rejects(service.invoke('refresh', { provider: 'quark_tv' }), { code: 'STALE_ACCOUNT' });
+  await entered.promise;
+  store.native({ version: 1, accounts: {
+    quark_tv: record(1, { ...tv, extra: { rawJSON: '9007199254740993' } }),
+  } });
+  await service.settingsChanged();
+  assert.equal(requests[0].signal.aborted, true);
+  release.resolve(); await refresh;
+  assert.equal(store.writes.length, 0);
+});
+
+test('bad document roots revoke active work and never let late rotation commit', async t => {
+  const store = casStore({ version: 1, accounts: { quark_tv: record(1, tv) } });
+  const entered = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  const { service, requests } = setup(t, store, async input => {
+    entered.resolve(); await release.promise; return rotation(input);
+  });
+  const refresh = assert.rejects(service.invoke('refresh', { provider: 'quark_tv' }), { code: 'CANCELLED' });
+  await entered.promise;
+  store.native({ version: 1, accounts: [] });
+  await assert.rejects(service.settingsChanged(), { code: 'CORRUPT_STORAGE' });
+  assert.equal(requests[0].signal.aborted, true);
+  release.resolve(); await refresh;
+  await service.close();
+  assert.equal(store.writes.length, 0);
 });
 
 test('cancel and close fence queued writes but shutdown drains a previously admitted native commit', async t => {

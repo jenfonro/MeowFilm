@@ -79,9 +79,8 @@ public actor FilmSourceService {
         if store == nil { store = try storeFactory() }
         let data = try store!.read(key: Self.documentKey)
         let loaded: FilmSourceDocument
-        do { loaded = try data.map { try JSONDecoder().decode(FilmSourceDocument.self, from: $0) } ?? FilmSourceDocument() }
+        do { loaded = try data.map { try FilmSourceDocument.read($0, configured: configured) } ?? FilmSourceDocument() }
         catch { throw FilmSourceError(code: "INVALID_DOCUMENT") }
-        try loaded.validate()
         cancelDetections()
         document = loaded; expected = data; initialized = true
         let cats = configured.map { input in
@@ -96,8 +95,7 @@ public actor FilmSourceService {
         try Task.checkCancellation()
         let candidate = FilmSourceDocument(cats: cats.map(StoredFilmCat.init), videos: videos,
             deleted: deleted.sorted(by: FilmSourceKey.ordered))
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        let bytes = try encoder.encode(candidate)
+        let bytes = try candidate.encode(replacing: document, original: expected)
         if bytes != expected {
             do { try store!.compareAndSwap(key: Self.documentKey, expected: expected, replacement: bytes) }
             catch {

@@ -1,3 +1,4 @@
+import { stringifyJSONValue, rawJSON } from '@meowfilm/runtime-bridge/json';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -2216,4 +2217,14 @@ test('MCR-04/E41: explicit binary HEAD responses retain their exact length and v
     if (specification.type) assert.equal(head.headers['content-type'], specification.type);
   }
   assert.equal(upstream.requests.length, specifications.length);
+});
+
+test('media receipt retains exact JSON initialization material without granting network authority', async t => {
+  const upstream = await source(t, binary), media = service(t);
+  const drm = { scheme: 'cenc', extension: rawJSON('9007199254740993'), ordinary: { rawJSON: '1e400' } };
+  const receipt = await media.prepare({ url: upstream.url, drm });
+  assert.equal(stringifyJSONValue(receipt.drm), '{"scheme":"cenc","extension":9007199254740993,"ordinary":{"rawJSON":"1e400"}}');
+  assert.equal(upstream.requests.length, 0);
+  await media.release(receipt.id);
+  await assert.rejects(media.prepare({ url: upstream.url, drm: { extension: Infinity } }), { code: 'MEDIA_INVALID_DESCRIPTOR' });
 });

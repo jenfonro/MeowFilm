@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createScriptHost, ScriptHostError, SCRIPT_LIMITS } from '@meowfilm/script-host';
 import { encodeJSONValue } from '@meowfilm/runtime-bridge';
+import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { createMusicScriptModule, musicScriptContract } from '../apps/runtime/modules/music-script.mjs';
 import { moduleHttp } from './runtime-http-fixture.mjs';
 import { until, deferred } from '../packages/runtime-bridge/test/http-fixture.js';
@@ -154,6 +155,98 @@ test('failed directed invocation never calls a second same-platform instance', a
   const good = await load(rpc, options('good'));
   denied(await rpc('invoke', request(bad)), 'SCRIPT_FAILURE');
   assert.equal((await value(rpc, good)).count, 1);
+});
+
+test('real HTTP exact numbers project to LX Numbers without changing request materials', async t => {
+  const { rpc } = setup(t);
+  const item = await load(rpc, options(), fixture({ handler: `async ({info}) => {
+    const m=info.musicInfo||info;
+    if(info.type==='flac') {
+      if(typeof m.id!=='number'||m.interval!=='01:01') throw Error('not projected');
+      return 'https://fixture.invalid/'+String(m.id);
+    }
+    return {types:[typeof m.id,typeof m.fraction,typeof m.huge,typeof m.tiny],
+      values:[String(m.id),String(m.fraction),String(m.huge),String(m.tiny)],
+      ordinary:m.ordinary,interval:m.interval||null};
+  }` }));
+  const text = '{"id":9007199254740993,"fraction":0.123456789012345678901,"huge":1.0000000000000000001e300,' +
+    '"tiny":1e-400,"duration":61.123456789012345678901,"ordinary":{"rawJSON":"9007199254740993"}}';
+  const data = parseJSONText(text);
+  const expected = { types: ['number', 'number', 'number', 'number'],
+    values: ['9007199254740992', '0.12345678901234568', '1e+300', '0'],
+    ordinary: { rawJSON: '9007199254740993' }, interval: '01:01' };
+  assert.deepEqual(await value(rpc, item, 'kw', data), expected);
+  assert.deepEqual(await value(rpc, item, 'local', {}, { payload: data, operation: 'lyric' }),
+    { ...expected, interval: null });
+  const resolved = okay(await rpc('resolve', { installationId: item.installationId,
+    platform: 'kw', quality: 'flac', musicInfo: data }));
+  assert.equal(resolved.url, 'https://fixture.invalid/9007199254740992');
+  assert.equal(stringifyJSONValue(data), text);
+  // The existing native value boundary still rejects a non-finite Number projection.
+  const overflow = parseJSONText('{"huge":1e400}');
+  denied(await rpc('invoke', request(item, 'kw', overflow)), 'INVALID_REQUEST');
+  assert.equal(stringifyJSONValue(overflow), '{"huge":1e400}');
+});
+
+test('private storage preserves exact untouched values and projects only LX reads across cold reopen', async t => {
+  const wrapped = wrappedHost();
+  const first = setup(t, { hostFactory: wrapped.factory });
+  const source = fixture({ handler: `async ({info},{storage}) => {
+    const m=info.musicInfo;
+    if(m.op==='set') return await storage.set(m.key,m.value);
+    if(m.op==='delete') return await storage.delete(m.key);
+    const v=await storage.get(m.key||'exact');
+    return {types:[typeof v.id,typeof v.fraction,typeof v.huge,typeof v.tiny],
+      values:[String(v.id),String(v.fraction),String(v.huge),String(v.tiny)],ordinary:v.ordinary};
+  }` });
+  const item = await load(first.rpc, options(), source);
+  const text = '{"id":9007199254740993,"fraction":0.123456789012345678901,"huge":1.0000000000000000001e300,' +
+    '"tiny":1e-400,"ordinary":{"rawJSON":"9007199254740993"}}';
+  const exact = parseJSONText(text);
+  await wrapped.state.storage.set(storageInput(item.installationId, item.generation, 'kw',
+    { key: 'exact', value: exact }));
+  await wrapped.state.storage.set(storageInput(item.installationId, item.generation, 'kw',
+    { key: 'overflow', value: parseJSONText('1e400') }));
+  const path = join(first.dataRoot, 'music', 'data', `${item.installationId}.json`);
+  const retained = () => parseJSONText(readFileSync(path, 'utf8')).sites.kw.find(entry => entry.key === 'exact').value;
+  assert.equal(stringifyJSONValue(retained()), text);
+  const beforeRead = readFileSync(path);
+  denied(await first.rpc('invoke', request(item, 'kw', { key: 'overflow' })), 'INVALID_REQUEST');
+  assert.deepEqual(readFileSync(path), beforeRead);
+  const expected = { types: ['number', 'number', 'number', 'number'],
+    values: ['9007199254740992', '0.12345678901234568', '1e+300', '0'],
+    ordinary: { rawJSON: '9007199254740993' } };
+  assert.deepEqual(await value(first.rpc, item), expected);
+  assert.equal(await value(first.rpc, item, 'kw', { op: 'set', key: 'edited', value: 7 }), null);
+  assert.equal(await value(first.rpc, item, 'tx', { op: 'set', key: 'other-site', value: 8 }), null);
+  assert.equal(stringifyJSONValue(retained()), text);
+  okay(await first.module.close());
+  const reopened = setup(t, { dataRoot: first.dataRoot });
+  assert.deepEqual(await value(reopened.rpc, item), expected);
+  assert.equal(await value(reopened.rpc, item, 'kw', { op: 'delete', key: 'edited' }), null);
+  assert.equal(stringifyJSONValue(retained()), text);
+  assert.equal(stringifyJSONValue(parseJSONText(readFileSync(path, 'utf8'))
+    .sites.kw.find(entry => entry.key === 'overflow').value), '1e400');
+  denied(await reopened.rpc('invoke', request(item, 'kw', { key: 'overflow' })), 'INVALID_REQUEST');
+  assert.equal(stringifyJSONValue(exact), text);
+});
+
+test('private storage counts exact numeric text against the unchanged value byte budget', async t => {
+  const wrapped = wrappedHost();
+  const { rpc, dataRoot } = setup(t, { hostFactory: wrapped.factory });
+  const item = await load(rpc, options(), storageFixture);
+  const text = '{"number":9007199254740993,"padding":""}';
+  const exact = parseJSONText(text);
+  exact.padding = 'x'.repeat(16384 - Buffer.byteLength(text));
+  assert.equal(Buffer.byteLength(stringifyJSONValue(exact)), 16384);
+  const input = storageInput(item.installationId, item.generation, 'kw', { value: exact });
+  await wrapped.state.storage.set(input);
+  const path = join(dataRoot, 'music', 'data', `${item.installationId}.json`);
+  const before = readFileSync(path);
+  assert.equal(stringifyJSONValue(parseJSONText(before.toString()).sites.kw[0].value), stringifyJSONValue(exact));
+  exact.padding += 'x';
+  await assert.rejects(wrapped.state.storage.set(input), { code: 'RESOURCE_LIMIT' });
+  assert.deepEqual(readFileSync(path), before);
 });
 
 test('private storage get/set/delete is isolated by installation and site', async t => {
@@ -398,12 +491,12 @@ test('private KV corrupt documents and invalid directories are explicit and neve
   denied(await rpc('invoke', request(item, 'kw', { op: 'set', value: 'replace' })), 'CORRUPT_STORAGE');
   assert.equal(readFileSync(path, 'utf8'), '{broken');
   writeFileSync(path, JSON.stringify({ schema: 1, sites: {} }));
-  // A non-directory storage layout remains intact and cannot authorize a write.
+  // A non-directory storage layout remains intact and fails storage I/O.
   const directory = join(dataRoot, 'music', 'data');
   rmSync(path);
   rmSync(directory, { recursive: true });
   writeFileSync(directory, 'occupied');
-  denied(await rpc('invoke', request(item, 'kw', { op: 'set', value: 'replace' })), 'PERMISSION_DENIED');
+  denied(await rpc('invoke', request(item, 'kw', { op: 'set', value: 'replace' })), 'STORAGE_ERROR');
   assert.equal(readFileSync(directory, 'utf8'), 'occupied');
   rmSync(directory); mkdirSync(directory);
 });

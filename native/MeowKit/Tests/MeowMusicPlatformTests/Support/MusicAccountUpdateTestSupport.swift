@@ -1,8 +1,8 @@
 import Foundation
+import MeowRuntime
 import XCTest
 import MeowAccounts
 import MeowMusicFeature
-import MeowJSON
 @testable import MeowMusicPlatform
 
 // Synthetic storage only. No Keychain, platform request or private Accounts API.
@@ -100,13 +100,13 @@ actor MusicUpdateProvider: MusicAccountProvider {
     func recommendations(kind: String, page: Int) async throws -> MusicAccountRecommendation {
         .init(rows: [], nextPage: nil)
     }
-    func collectionRows() async throws -> [JSONValue] { [] }
-    func tracks(collectionID: String) async throws -> [JSONValue] { [] }
+    func collectionRows() async throws -> [RuntimeValue] { [] }
+    func tracks(collectionID: String) async throws -> [RuntimeValue] { [] }
     func capabilities(mid: String) async throws -> [String] {
         if let capabilityHold { await capabilityHold.wait() }
         return ["128k"]
     }
-    func resolve(mid: String, quality: String) async throws -> JSONValue {
+    func resolve(mid: String, quality: String) async throws -> RuntimeValue {
         resolutions += 1
         return .object(["url": .string("https://media.invalid/synthetic.mp3"),
                         "requestQuality": .string(quality), "actualQuality": .string(quality),

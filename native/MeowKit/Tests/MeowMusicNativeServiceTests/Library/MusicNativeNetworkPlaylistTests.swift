@@ -170,7 +170,7 @@ final class MusicNativeNetworkPlaylistTests: XCTestCase {
         }
     }
 
-    func testCurrentNetworkStorageRejectsMembersBadIdentityAndCorruptRelationshipWithoutRewrite() async throws {
+    func testNetworkListIsolatesBadIdentityAndPreservesUnconsumedRelationshipAndExtra() async throws {
         let valid = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(valid)
         _ = try await service.saveNetworkPlaylist(.init(platform: .qq, nativeID: "501", title: "Remote"), intent: .init())
         let current = try NativeSyncFixture.document(valid)
@@ -189,14 +189,15 @@ final class MusicNativeNetworkPlaylistTests: XCTestCase {
             document.library["library"]["networkReferences"] = .array(rows)
             let bytes = try document.encode(changed: ["library"]), store = NativeMusicMemoryDocument(bytes)
             let reopened = try await NativeMusicFixture.service(store)
-            do { _ = try await reopened.collections(); XCTFail("corrupt network storage") }
-            catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
+            let values = try await reopened.collections()
+            XCTAssertTrue(values.contains { $0.id == "favorites" })
+            XCTAssertEqual(values.filter { $0.networkReference != nil }.count, [0, 3].contains(corruption) ? 1 : 0)
             XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
             await reopened.close()
         }
     }
 
-    func testMalformedCurrentLibraryReferencesFailWithoutClearingOtherAreas() async throws {
+    func testMalformedNetworkListDoesNotBlockManagedCollectionsOrClearOtherAreas() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
         _ = try await MusicAccountQueueFixture.seed(service)
         _ = try await service.saveNetworkPlaylist(.init(platform: .qq, nativeID: "501", title: "Remote"), intent: .init())
@@ -207,8 +208,12 @@ final class MusicNativeNetworkPlaylistTests: XCTestCase {
             document.library["library"]["networkReferences"] = malformed
             let bytes = try document.encode(changed: ["library"]), rejected = NativeMusicMemoryDocument(bytes)
             let reopened = try await NativeMusicFixture.service(rejected)
-            do { _ = try await reopened.collections(); XCTFail("malformed current reference array") }
-            catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
+            let values = try await reopened.collections()
+            XCTAssertTrue(values.contains { $0.id == "favorites" })
+            XCTAssertTrue(values.allSatisfy { $0.networkReference == nil })
+            await assertMusicFailure(.corruptDocument) {
+                _ = try await reopened.saveNetworkPlaylist(.init(platform: .qq, nativeID: "502", title: "New"), intent: .init())
+            }
             XCTAssertEqual(rejected.snapshot().0, bytes); XCTAssertEqual(rejected.snapshot().2, 0)
             await reopened.close()
         }

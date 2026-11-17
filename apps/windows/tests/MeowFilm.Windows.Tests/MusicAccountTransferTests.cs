@@ -101,15 +101,15 @@ public static class MusicAccountTransferTests
         });
         foreach (var missing in new[] { ("wy", "deviceId"), ("wy", "_ntes_nuid"), ("wy", "_ntes_nnid"),
             ("wy", "WNMCID"), ("kg", "KUGOU_API_GUID"), ("kg", "KUGOU_API_DEV"), ("kg", "KUGOU_API_MAC") })
-            yield return Case("external missing required material fails locally " + missing, async () =>
+            yield return Case("external optional device material reaches the protocol " + missing, async () =>
             {
                 await using var f = new TransferFixture();
                 var input = TransferFixture.Only(missing.Item1);
                 input["accounts"]![0]!["credentials"]!.AsObject().Remove(missing.Item2);
                 using var plan = await f.Prepare(input);
                 var result = await f.Owner.ImportAccountTransferAsync(plan, MusicAccountTransferPolicy.Overwrite);
-                Check(result.Items.Single().Code == "INVALID_CREDENTIALS" && result.Items.Single().Status == "failed");
-                Check(f.Requests.Values.Sum() == 0 && f.Store.Writes == 0);
+                Check(result.Items.Single().Status == "imported");
+                Check(f.Requests[missing.Item1] == 1 && f.Store.Writes == 1);
             });
         yield return Case("same UID is a conflict and skip never validates or writes that platform", async () =>
         {
@@ -191,15 +191,21 @@ public static class MusicAccountTransferTests
             var result = await f.Owner.ImportAccountTransferAsync(plan, MusicAccountTransferPolicy.Overwrite);
             Check(result.Items.Single().Code == "IDENTITY_MISMATCH" && f.Store.Writes == 0);
         });
-        yield return Case("unknown credential field and invalid credential value are per platform failures", async () =>
+        yield return Case("unknown credential fields are inert while invalid transmitted values still fail", async () =>
         {
             await using var f = new TransferFixture();
-            var input = TransferFixture.Shared(); input["accounts"]![0]!["credentials"]!["unknown"] = "SYNTHETIC_UNKNOWN";
+            var input = TransferFixture.Shared(); input["accounts"]![0]!["credentials"]!["unknown"] = new JsonObject { ["nested"] = "SYNTHETIC_UNKNOWN" };
+            input["extra"] = true; input["accounts"]![0]!["extra"] = new JsonArray(1, 2);
             input["accounts"]![1]!["credentials"]!["musickey"] = "bad;injected=value";
             using var plan = await f.Prepare(input);
             var result = await f.Owner.ImportAccountTransferAsync(plan, MusicAccountTransferPolicy.Overwrite);
-            Check(result.Items.Count(item => item.Status == "failed") == 2 && result.Items.Single(item => item.Platform == "kg").Status == "imported");
-            Check(f.Requests["wy"] == 0 && f.Requests["tx"] == 0 && f.Store.Writes == 1);
+            Check(result.Items.Count(item => item.Status == "failed") == 1 &&
+                result.Items.Single(item => item.Platform == "wy").Status == "imported" &&
+                result.Items.Single(item => item.Platform == "kg").Status == "imported");
+            Check(f.Requests["wy"] == 1 && f.Requests["tx"] == 0 && f.Store.Writes == 2);
+            using var exported = await f.Owner.ExportAccountTransferAsync(); using var output = new MemoryStream();
+            await exported!.WriteAsync(output);
+            Check(!Encoding.UTF8.GetString(output.ToArray()).Contains("SYNTHETIC_UNKNOWN", StringComparison.Ordinal));
         });
         yield return Case("empty optional QQ credentials remain strings and KG opaque t1 is unchanged", async () =>
         {
@@ -230,27 +236,20 @@ public static class MusicAccountTransferTests
                 Check(JsonNode.DeepEquals(JsonNode.Parse(output.ToArray()), input));
             }
         });
-        yield return Case("QQ numeric transfer fields reject invalid values per item and retain exact safe integer boundaries", async () =>
+        yield return Case("QQ optional protocol metadata reaches its actual consumer unchanged", async () =>
         {
-            await using var f = new TransferFixture(); await f.Seed(TransferFixture.Only("tx"));
-            var old = await f.Owner.AcquireAsync("tx"); var before = await f.AccountBytes();
             foreach (string field in new[] { "expired_at", "musickey_create_time", "key_expires_in", "login_type" })
-                foreach (string value in new[] { "", "00", "01", "-1", "1.0", "1e3", "9007199254740992", "999999999999999999999" })
+                foreach (string value in new[] { "", "0", "3600", "9007199254740991", "00", "01", "-1", "1.0", "1e3", "9007199254740992", "999999999999999999999" })
                 {
+                    await using var f = new TransferFixture();
                     var input = TransferFixture.Only("tx"); input["accounts"]![0]!["credentials"]![field] = value;
                     using var plan = await f.Prepare(input);
                     var result = await f.Owner.ImportAccountTransferAsync(plan, MusicAccountTransferPolicy.Overwrite);
-                    Check(result.Items.Single().Status == "failed" && result.Items.Single().Code == "INVALID_CREDENTIALS");
+                    Check(result.Items.Single().Status == "imported" && f.Requests["tx"] == 1 && f.Store.Writes == 1);
+                    using var file = await f.Owner.ExportAccountTransferAsync(); using var output = new MemoryStream();
+                    await file!.WriteAsync(output);
+                    Check(JsonNode.DeepEquals(JsonNode.Parse(output.ToArray()), input));
                 }
-            var after = await f.AccountBytes();
-            Check(f.Store.Writes == 0 && f.Requests["tx"] == 0 && f.Owner.IsCurrent(old!) && before.SequenceEqual(after));
-            var valid = TransferFixture.Only("tx");
-            var fields = valid["accounts"]![0]!["credentials"]!;
-            fields["expired_at"] = "9007199254740991"; fields["musickey_create_time"] = "0"; fields["key_expires_in"] = "3600";
-            using var accepted = await f.Prepare(valid);
-            Check((await f.Owner.ImportAccountTransferAsync(accepted, MusicAccountTransferPolicy.Overwrite)).Items.Single().Status == "imported");
-            using var file = await f.Owner.ExportAccountTransferAsync(); using var output = new MemoryStream(); await file!.WriteAsync(output);
-            Check(JsonNode.DeepEquals(JsonNode.Parse(output.ToArray()), valid));
         });
         yield return Case("current external QQ aliases retain numeric and empty credential semantics", async () =>
         {
@@ -266,7 +265,7 @@ public static class MusicAccountTransferTests
             Check(exported["login_type"]!.GetValue<string>() == "2" && exported["expired_at"]!.GetValue<string>() == "1800000000" &&
                 exported["refresh_token"]!.GetValue<string>() == "" && exported["key_expires_in"]!.GetValue<string>() == "3600" && exported["musickey_create_time"]!.GetValue<string>() == "1700000000");
         });
-        yield return Case("current stored QQ invalid numeric metadata cannot be silently dropped on export", async () =>
+        yield return Case("current stored QQ optional numeric metadata is preserved on export", async () =>
         {
             foreach (string field in new[] { "expired_at", "musickey_create_time", "key_expires_in", "login_type" })
             {
@@ -274,7 +273,9 @@ public static class MusicAccountTransferTests
                 await f.MutateStoredCookie("tx", cookie => cookie + "; " + field + "=01",
                     remove: field);
                 var before = await f.AccountBytes();
-                await Expect("INVALID_CREDENTIALS", () => f.Owner.ExportAccountTransferAsync());
+                using var file = await f.Owner.ExportAccountTransferAsync(); using var output = new MemoryStream();
+                await file!.WriteAsync(output);
+                Check(JsonNode.Parse(output.ToArray())!["accounts"]![0]!["credentials"]![field]!.GetValue<string>() == "01");
                 var after = await f.AccountBytes();
                 Check(before.SequenceEqual(after) && f.Store.Writes == 0 && f.Requests["tx"] == 0);
             }
@@ -286,9 +287,7 @@ public static class MusicAccountTransferTests
             var invalids = new List<string> { "not json", "[]", valid.Replace("\"version\":1", "\"version\":2"),
                 valid.Replace("\"version\":1", "\"version\":1,\"version\":1"), valid.Replace("\"platform\":\"wy\"", "\"platform\":\"kw\""),
                 valid.Replace("\"platform\":\"tx\"", "\"platform\":\"wy\""), valid.Replace("\"MUSIC_U\":", "\"MUSIC_U\":\"x\",\"MUSIC_U\":"),
-                valid.Replace("\"MUSIC_U\":\"SYNTHETIC_NETEASE_SESSION\"", "\"MUSIC_U\":123"),
-                valid.Replace("\"platform\":\"wy\"", "\"platform\":\"wy\",\"extra\":0"),
-                valid.Replace("\"format\":", "\"extra\":true,\"format\":") };
+                valid.Replace("\"MUSIC_U\":\"SYNTHETIC_NETEASE_SESSION\"", "\"MUSIC_U\":123") };
             foreach (string invalid in invalids)
             {
                 using var stream = new MemoryStream(Encoding.UTF8.GetBytes(invalid)); using var file = await MusicAccountTransferFile.ReadAsync(stream);

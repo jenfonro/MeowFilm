@@ -1,12 +1,12 @@
 import { isUtf8 } from 'node:buffer';
-import { parseJSON } from '../../pan-runtime/src/values.js';
+import { parseJSONText, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { fail } from './errors.mjs';
 
 export const platforms = Object.freeze(['wy', 'tx', 'kg', 'kw', 'mg']);
 export const first = (...values) => values.find(value => value !== undefined && value !== null && value !== '');
 export const text = value => typeof value === 'string' ? value : '';
 export const scalar = value => typeof value === 'string' ? value :
-  typeof value === 'number' || typeof value === 'bigint' ? String(value) : '';
+  typeof value === 'number' || typeof value === 'bigint' ? String(value) : isRawJSON(value) ? value.rawJSON : '';
 export function required(value, code = 'INVALID_RESPONSE') {
   const result = scalar(value);
   if (!result) fail(code);
@@ -15,17 +15,19 @@ export function required(value, code = 'INVALID_RESPONSE') {
 export function number(value, fallback = 0, code = 'INVALID_RESPONSE') {
   if (value === undefined || value === null || value === '') return fallback;
   let result;
-  try { result = Number(value); }
+  try { result = Number(isRawJSON(value) ? value.rawJSON : value); }
   catch { fail(code); }
   if (!Number.isFinite(result)) fail(code);
   return result;
 }
 export function optionalNumber(value) {
-  if (value === undefined || value === null || value === '' || typeof value === 'boolean') return null;
+  if (isRawJSON(value)) value = value.rawJSON;
+  if (!['string', 'number', 'bigint'].includes(typeof value) || value === '') return null;
   const result = Number(value);
   return Number.isFinite(result) ? result : null;
 }
 export function durationSeconds(value, scale = 1) {
+  if (isRawJSON(value)) value = value.rawJSON;
   if (typeof value !== 'string' && typeof value !== 'number') return null;
   const result = optionalNumber(value);
   return result !== null && result > 0 ? result / scale : null;
@@ -45,19 +47,21 @@ export function utf8(bytes) {
 /** JSON itself is decoded once. Unsafe integer tokens remain exact strings. */
 export function decodeJSON(bytes) {
   try {
-    // Preserve legal out-of-range tokens too: unused fields must not fail the
-    // shared parser's finite-number representation, nor become invented values.
-    const source = utf8(bytes).replace(/"(?:[^"\\]|\\[\s\S])*(?:"|\\?$)|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/g,
-      (token, at, document) => {
-        if (token[0] === '"' || Number.isFinite(Number(token))) return token;
-        if (/^[ \t\r\n]*:/.test(document.slice(at + token.length))) fail('INVALID_RESPONSE');
-        return JSON.stringify(token);
-      });
-    return parseJSON(source);
+    const project = value => {
+      if (isRawJSON(value)) return value.rawJSON;
+      if (typeof value === 'number' && Number.isInteger(value) && !Number.isSafeInteger(value))
+        return String(value);
+      if (Array.isArray(value)) return value.map(project);
+      if (value !== null && typeof value === 'object')
+        return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, project(child)]));
+      return value;
+    };
+    return project(parseJSONText(utf8(bytes)));
   } catch { fail('INVALID_RESPONSE'); }
 }
 /** Protocol payloads contain JSON values and exact BigInt integer tokens. */
 export function encodeProtocolJSON(value) {
+  if (isRawJSON(value)) return value.rawJSON;
   if (typeof value === 'bigint') return value.toString();
   if (Array.isArray(value)) return '[' + Array.from(value, item => encodeProtocolJSON(item) ?? 'null').join(',') + ']';
   if (value !== null && typeof value === 'object') {
@@ -129,7 +133,7 @@ export function wySong(raw) {
   const s = first(raw.songInfo, raw.songData, raw.song, raw);
   const album = first(s.al, s.album) ?? {};
   const artists = first(s.ar, s.artists);
-  const names = Array.isArray(artists) ? artists.map(a => text(a.name)) : undefined;
+  const names = Array.isArray(artists) ? artists.map(a => text(a?.name)).filter(Boolean) : undefined;
   const types = [['128k', 'l'], ['192k', 'm'], ['320k', 'h'], ['flac', 'sq'], ['flac24bit', 'hr']]
     .filter(([, key]) => Number(s[key]?.size) > 0).map(([type]) => ({ type }));
   return song('wy', first(s.id, s.songId, s.resourceId), first(s.name, s.title),
@@ -139,7 +143,7 @@ export function wySong(raw) {
     first(album.picUrl, s.picUrl, s.coverUrl), { albumId: scalar(album.id), types }, names);
 }
 export function txSong(s) {
-  const album = s.album ?? {}, names = Array.isArray(s.singer) ? s.singer.map(a => text(a.name)) : undefined;
+  const album = s.album ?? {}, names = Array.isArray(s.singer) ? s.singer.map(a => text(a?.name)).filter(Boolean) : undefined;
   const types = [['128k', 'size_128mp3'], ['320k', 'size_320mp3'], ['flac', 'size_flac'], ['flac24bit', 'size_hires']]
     .filter(([, field]) => Number(s.file?.[field]) > 0).map(([type]) => ({ type }));
   const albumMid = scalar(album.mid);

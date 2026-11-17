@@ -24,7 +24,7 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
                 let songs = try tracks.map { try repositorySong($0.songId, document) }
                 let old = document.queue
                 let entries = try makeEntries(songs, document: &document, context: context)
-                archive(old, into: &document)
+                try archive(old, into: &document)
                 document.queue["entries"] = .array(entries); document.queue["currentId"] = entries[index]["id"]
                 for key in ["history", "priority", "failed"] { document.queue[key] = .array([]) }
                 document.queue["source"] = context

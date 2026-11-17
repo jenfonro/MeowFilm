@@ -1,5 +1,5 @@
 import { Writable, PassThrough } from 'node:stream';
-import { parseShare, providerForHost, shareIdentity } from './cat-output.js';
+import { parseShare, providerForHost, providerEnabled, shareIdentity } from './cat-output.js';
 
 const valid = value => typeof value === 'string' && /^[A-Za-z0-9_-]{4,256}$/.test(value);
 const bases = { baidu: 'https://pan.baidu.com/s/1', quark: 'https://pan.quark.cn/s/',
@@ -18,7 +18,7 @@ function fields(url, body) {
 export class PanInterceptor {
   request(url, options, scope, open, own = value => value) {
     const provider = providerForHost(url.hostname);
-    if (!provider || !scope.panShares || !scope.settings?.providers[provider]) return null;
+    if (!provider || !scope.panShares || !scope.settings || !providerEnabled(scope.settings, provider)) return null;
     const path = url.pathname;
     const stage = ['quark', 'uc'].includes(provider)
       ? /\/share\/sharepage\/token$/.test(path) ? 'token' : /\/share\/sharepage\/detail$/.test(path) ? 'list' : null

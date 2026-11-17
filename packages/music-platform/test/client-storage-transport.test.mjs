@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { fixture, response, rpc, qq, seedClients, gate, wySong, nativeHTTP } from './support.mjs';
 import { createMusicTransport } from '../src/transport.mjs';
 import { MusicPlatformError } from '../src/index.mjs';
+import { parseJSONText } from '@meowfilm/runtime-bridge/json';
 import { gzipSync, brotliCompressSync } from 'node:zlib';
 
 // HEAD Clients/{MusicNativeClientContextTests,MusicClientStorageFailureTests}
@@ -38,7 +39,7 @@ test('an unknown QIMEI save reloads the applied value or actual durable winner, 
     const files = new Map(); let unknown = true;
     const f = fixture(request => {
       if (new URL(request.url).hostname === 'api.tencentmusic.com')
-        return response({ code: 0, data: JSON.stringify({ code: 0, data: { q16: 'new-q16', q36: 'new-q36' } }) });
+        return response({ code: 0, data: JSON.stringify({ code: 0, data: { q36: 'new-q36' } }) });
       const root = qq(request);
       assert.equal(root.comm.QIMEI36, conflict ? 'winner-q36' : 'new-q36');
       if (root.req_0.method === 'GetSession') return rpc({ session: { uid: 'new-uid', sid: 'new-sid' } });
@@ -50,7 +51,7 @@ test('an unknown QIMEI save reloads the applied value or actual durable winner, 
           unknown = false;
           if (conflict) {
             const winner = JSON.parse(bytes);
-            winner.tx.qimei = { ...winner.tx.qimei, q16: 'winner-q16', q36: 'winner-q36' };
+            winner.tx.qimei = { ...winner.tx.qimei, q36: 'winner-q36' };
             files.set(key, Buffer.from(JSON.stringify(winner)));
           } else files.set(key, bytes);
           throw Error('save acknowledgement unavailable');
@@ -73,13 +74,37 @@ test('an unknown QIMEI save reloads the applied value or actual durable winner, 
   }
 });
 
+test('anonymous context updates and cold reload preserve unconsumed precise JSON material', async t => {
+  const f = fixture(request => qq(request).req_0.method === 'GetSession' ?
+    rpc({ session: { uid: 'new-uid', sid: 'new-sid' } }) :
+    rpc({ body: { item_song: [] }, meta: { sum: 0, nextpage: -1 } }));
+  t.after(() => f.close());
+  seedClients(f);
+  const state = JSON.parse(f.files.get('clients.json')); state.tx.session = null;
+  const raw = JSON.stringify(state).replace(/}$/, ',"unknown":{"integer":9007199254740993,"decimal":0.123456789012345678901,' +
+    '"huge":1e400,"tiny":1e-400,"negativeZero":-0,"é":1,"é":2}}')
+    .replace('"qimei":', '"extension":{"number":9007199254740995},"qimei":');
+  f.files.set('clients.json', Buffer.from(raw));
+  const before = parseJSONText(raw);
+  await f.request('tx', 'search', { keyword: 'x' });
+  const saved = parseJSONText(f.files.get('clients.json').toString());
+  assert.deepEqual(saved.unknown, before.unknown); assert.deepEqual(saved.tx.extension, before.tx.extension);
+  assert.equal(f.writes.length, 1); assert.equal(saved.tx.session.uid, 'new-uid');
+  const cold = fixture(() => rpc({ body: { item_song: [] }, meta: { sum: 0, nextpage: -1 } }), { files: f.files });
+  t.after(() => cold.close());
+  const snapshot = Buffer.from(cold.files.get('clients.json'));
+  await cold.request('tx', 'search', { keyword: 'x' });
+  assert.equal(cold.writes.length, 0); assert.deepEqual(cold.files.get('clients.json'), snapshot);
+  assert.equal(qq(cold.requests[0]).comm.uid, 'new-uid');
+});
+
 test('a cancelled QQ waiter does not cancel shared prepare; close aborts and drains prepare without saving late state', async t => {
   for (const closing of [false, true]) await t.test(String(closing), async t => {
     const held = gate(), controller = new AbortController();
     const f = fixture(async request => {
       if (new URL(request.url).hostname === 'api.tencentmusic.com') {
         await held.wait();
-        return response({ code: 0, data: JSON.stringify({ code: 0, data: { q16: 'new-q16', q36: 'new-q36' } }) });
+        return response({ code: 0, data: JSON.stringify({ code: 0, data: { q36: 'new-q36' } }) });
       }
       if (qq(request).req_0.method === 'GetSession') return rpc({ session: { uid: 'new-uid', sid: 'new-sid' } });
       return rpc({ body: { item_song: [] }, meta: { sum: 0, nextpage: -1 } });

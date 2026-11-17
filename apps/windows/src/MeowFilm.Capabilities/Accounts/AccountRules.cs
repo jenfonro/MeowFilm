@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-only
-using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using MeowFilm.Platform.Storage;
@@ -60,28 +59,19 @@ internal static class AccountRules
     }
     internal static long Integer(JsonElement node)
     {
-        string raw = node.ValueKind == JsonValueKind.Number ? node.GetRawText() : "";
-        long value = 0;
-        Require(raw.Length is > 0 and <= 16 && raw.All(char.IsAsciiDigit) &&
-            long.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out value) &&
-            value <= MaxInteger, "CORRUPT_STORAGE");
-        return value;
+        decimal value = 0;
+        Require(node.ValueKind == JsonValueKind.Number && node.TryGetDecimal(out value) &&
+            value >= 0 && value <= MaxInteger && decimal.Truncate(value) == value, "CORRUPT_STORAGE");
+        return (long)value;
     }
     internal static string Id(string? value, string code = "INVALID_RESPONSE")
     { Require(value is not null && Match(value, "^[1-9][0-9]{0,19}$"), code); return value!; }
-    internal static string QqNumber(string value, string code)
-    {
-        Require(Match(value, "^(0|[1-9][0-9]{0,15})$") &&
-            long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var number) &&
-            number <= MaxInteger, code);
-        return value;
-    }
-    internal static void Fields(JsonElement value, string[] allowed, string[] required, string code = "INVALID_REQUEST")
+    internal static void Required(JsonElement value, string[] required, string code = "INVALID_REQUEST")
     {
         Require(value.ValueKind == JsonValueKind.Object, code);
         var names = new HashSet<string>(StringComparer.Ordinal);
         foreach (var property in value.EnumerateObject())
-            Require(allowed.Contains(property.Name, StringComparer.Ordinal) && names.Add(property.Name), code);
+            Require(names.Add(property.Name), code);
         Require(required.All(names.Contains), code);
     }
     internal static string String(JsonElement value, string name, int max, string code = "INVALID_REQUEST", bool empty = false)

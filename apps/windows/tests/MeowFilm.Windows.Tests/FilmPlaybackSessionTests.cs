@@ -982,7 +982,7 @@ public static class FilmPlaybackSessionTests
             }
             finally { rig.Page.RetainOwner(null); owner.Close(); }
         });
-        yield return Test("native direct output releases its exact receipt after music takeover and stale film controls cannot touch music", async () =>
+        yield return Test("native direct output releases its exact receipt after scope retirement and rejects stale controls", async () =>
         {
             var entered = Gate(); var finish = Gate();
             await using var rig = new FilmPlaybackRig();
@@ -993,24 +993,24 @@ public static class FilmPlaybackSessionTests
             {
                 if (method == "film.session.media.release")
                 {
-                    Check(FilmJson.Text(input, "attemptId") == "first", "takeover releases the exact Film occurrence");
+                    Check(FilmJson.Text(input, "attemptId") == "first", "scope retirement releases the exact Film occurrence");
                     entered.TrySetResult(); await finish.Task;
                 }
                 return rig.Runtime.Handle(method, input);
             };
             try
             {
-                await rig.Native.TakeMusicAsync();
+                await rig.Native.RetireScopeAsync();
                 await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 Check(!rig.Session.HasOutput && !rig.Runtime.Released.Contains("first"),
                     "retiring the old Film output does not fabricate its business receipt release");
                 finish.TrySetResult();
                 await Until(() => !rig.Session.HasSession);
-                int musicVolume = rig.Native.Volume, controls = rig.Native.Controls.Count;
+                int retiredVolume = rig.Native.Volume, controls = rig.Native.Controls.Count;
                 rig.Session.Volume = 12;
                 await Error("STALE_SESSION", () => rig.Session.SetPausedAsync(true));
                 await Error("STALE_SESSION", () => rig.Session.SeekAsync(81));
-                Check(rig.Native.Volume == musicVolume && rig.Native.Controls.Count == controls &&
+                Check(rig.Native.Volume == retiredVolume && rig.Native.Controls.Count == controls &&
                     !rig.Session.HasOutput && !rig.Session.CanRetainMedia && !Called(rig, "media.failed") &&
                     rig.Runtime.Calls.Count(call => call.Method == "film.session.media.release" &&
                         FilmJson.Text(call.Parameters, "attemptId") == "first") == 1,
