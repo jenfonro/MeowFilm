@@ -164,16 +164,18 @@ public static class FilmPlaybackTests
         await using var scene = new Scene(840);
         await scene.OpenAsync();
         await Drain();
+        scene.Runtime.Change(root => root["stage"] = "unavailable");
+        await FilmPlaybackFixture.Until(() => !scene.Page.CanPlay);
         var view = scene.Playback;
         var player = Named<Grid>(view, "PlayerFrame");
         var metadata = Named<Grid>(view, "MetadataPanel");
         var hero = Named<Grid>(view, "HeroGrid");
         var scroll = Named<ScrollViewer>(view, "PageScroll");
         var play = Named<Button>(view, "PlayButton");
-        Check(!play.IsEnabled && Named<Button>(view, "HeroPlayButton").IsEnabled &&
-            Named<TextBlock>(view, "PlayerStatus").Text == "暂无可用片源" &&
+        Check(!play.IsEnabled && !Named<Button>(view, "HeroPlayButton").IsEnabled &&
+            Named<TextBlock>(view, "PlayerStatus").Text == "无可用视频源" &&
             AutomationProperties.GetName(play) == "播放或暂停" && scene.Native.Commits == 0,
-            "an unavailable snapshot disables empty transport while the page still offers explicit playback");
+            "an unavailable snapshot disables empty transport and the page does not offer an impossible playback action");
 
         foreach (double width in new[] { 1160d, 840d, 839d, 700d })
         {
@@ -227,7 +229,7 @@ public static class FilmPlaybackTests
         await Drain();
         CheckInsideViewport(scroll, Named<ItemsControl>(view, "EpisodeList"));
         CheckInsideViewport(scroll, Named<Grid>(view, "MetadataPanel"));
-        Check(!play.IsEnabled && Named<Button>(view, "HeroPlayButton").IsEnabled &&
+        Check(!play.IsEnabled && !Named<Button>(view, "HeroPlayButton").IsEnabled &&
             !scene.Page.HasOutput && scene.Native.Commits == 0 && scene.Source.Calls == 0,
             "resizing and scrolling do not manufacture an output or resolve a source");
     }
@@ -534,7 +536,7 @@ public static class FilmPlaybackTests
         }
         Check(play.IsEnabled && AutomationProperties.GetName(play) == "播放当前选择" &&
             Visuals(play).OfType<TextBlock>().Any(text => text.Text == "播放") && !page.HasOutput,
-            "the hero offers explicit retry without claiming a native media output");
+            "the hero offers explicit playback of the current target without claiming a native media output");
         Check(favorite.IsEnabled && favorite.IsTabStop && favorite.Focusable && !page.IsFavorite &&
             favorite.IsChecked == false && Named<TextBlock>(view, "FavoriteLabel").Text == "收藏",
             "favorite starts off with a labelled keyboard-accessible toggle");

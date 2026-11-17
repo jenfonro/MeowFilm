@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { decodePanResource } from '@meowfilm/script-host/cat-output';
 import { mediaVariants, normalizeDetail, stableFileIdentity } from './recognition.js';
-import { createRecognitionRules, providerFamily } from './rules.js';
+import { createRecognitionRules } from './rules.js';
 import { createMetadataCache } from './metadata-cache.js';
 import { metadataTTL } from './metadata-policy.js';
 import { tmdbQuery } from './metadata-query.js';
@@ -12,8 +12,7 @@ const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const STABLE = 14 * DAY;
 const ADDRESS = 3 * 60_000;
-const ordinaryProviders = new Set(['baidu', 'quark', 'uc', 'tianyi', 'yidong']);
-const providers = [...ordinaryProviders, 'quark_tv', 'uc_tv'];
+const providers = ['baidu', 'quark', 'uc', 'tianyi', 'yidong'];
 const prefixes = { cat: 'cat.script.', source: 'source.runtime.', pan: 'pan.',
   tmdb: 'tmdb.data.', douban: 'douban.data.' };
 const errorCodes = new Set([
@@ -346,7 +345,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
         try { share = decodePanResource(value); } catch { throw fail('UPSTREAM_FORMAT'); }
       }
       if (!share) return undefined;
-      requireValue(object(share) && ordinaryProviders.has(share.provider) && text(share.url));
+      requireValue(object(share) && providers.includes(share.provider) && text(share.url));
       if (share.installationId !== undefined || share.siteId !== undefined) {
         requireValue(share.installationId === source.installationId && share.siteId === source.siteId, 'STALE_SOURCE');
       }
@@ -690,9 +689,8 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       const original = candidate.file;
       requireValue(object(original) && providers.includes(original.provider) && ['share', 'stored'].includes(original.kind) &&
         Number.isSafeInteger(original.accountRevision) && original.accountRevision >= 0);
-      requireValue(candidate.provider === undefined || providerFamily(candidate.provider) === providerFamily(original.provider));
-      const deps = [...sourceDependencies(source), ...providers.filter(provider =>
-        providerFamily(provider) === providerFamily(original.provider)).map(provider => accountDependency(provider))];
+      requireValue(candidate.provider === undefined || candidate.provider === original.provider);
+      const deps = [...sourceDependencies(source), accountDependency(original.provider)];
       const rows = await readAccounts(signal, deps, checkSchedule);
       const account = rows.find(row => row.provider === original.provider);
       requireValue(account && account.revision === original.accountRevision, 'STALE_ACCOUNT');
@@ -709,52 +707,21 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       }
       const selectedMode = mode ?? (file.provider === 'yidong' ? 'download' : 'streaming');
       requireValue(['streaming', 'download'].includes(selectedMode));
-      const choices = [file.provider];
-      const tv = rows.find(row => row.provider === `${file.provider}_tv`);
-      if (tv?.configured && file.kind === 'stored') {
-        const matchDeps = [accountDependency(file.provider, file.accountRevision), accountDependency(tv.provider, tv.revision)];
-        try {
-          const proof = await load({ kind: 'account-match', provider: tv.provider,
-            revision: tv.revision, baseRevision: file.accountRevision }, async producerSignal => {
-            const value = await call('pan', 'account.match', { provider: tv.provider,
-              revision: tv.revision, baseRevision: file.accountRevision }, producerSignal, matchDeps);
-            requireValue(object(value) && value.provider === tv.provider && value.revision === tv.revision &&
-              value.baseProvider === file.provider && value.baseRevision === file.accountRevision &&
-              typeof value.sameAccount === 'boolean', 'UPSTREAM_FORMAT');
-            return value;
-          }, { ttl: STABLE, dependencies: matchDeps, signal, checkSchedule });
-          if (proof.value.sameAccount === true) choices.unshift(tv.provider);
-        } catch (error) {
-          if (['CANCELLED', 'CLOSED', 'STALE_ACCOUNT'].includes(error.code)) throw error;
-          // Failed identity lookup is not proof. Only the ordinary account is usable.
-        }
-      }
-      let failure;
-      for (const provider of choices) {
-        open(signal);
-        const row = rows.find(item => item.provider === provider);
-        const common = [...fileDeps, accountDependency(provider, row.revision)];
-        const dependency = [...common, { kind: 'address', identity: addressIdentity({ ...candidate, variant: undefined }, source) }];
-        try {
-          const request = { kind: 'pan-play', source: scopeOf(source), provider,
-            revision: row.revision, file, mode: selectedMode };
-          const parent = await load(request, async producerSignal => {
-            const value = mediaValue(await call('pan', 'play', { provider, file, mode: selectedMode }, producerSignal, dependency));
-            if (value.file !== undefined) fileValue(value.file, file.provider, file.accountRevision);
-            requireValue(value.mode === selectedMode, 'UPSTREAM_FORMAT');
-            return value;
-          }, { ttl: addressTTL, dependencies: dependency, signal, checkSchedule, refresh });
-          const entry = await variantEntry(candidate, request, parent,
-            [...common, { kind: 'address', identity: addressIdentity(candidate, source) }], signal, checkSchedule);
-          return { ...clone(entry.value), resolvedFile: clone(file), resolvedAt: entry.fetchedAt,
-            expiresAt: entry.expiresAt, scope: { ...scopeOf(source), accountProvider: provider, accountRevision: row.revision,
-              fileProvider: file.provider, fileAccountRevision: file.accountRevision } };
-        } catch (error) {
-          if (signal.aborted || ['CLOSED', 'CANCELLED', 'STALE_ACCOUNT', 'STALE_SOURCE'].includes(error.code)) throw error;
-          failure = error;
-        }
-      }
-      throw failure;
+      const dependency = [...fileDeps, { kind: 'address', identity: addressIdentity({ ...candidate, variant: undefined }, source) }];
+      const request = { kind: 'pan-play', source: scopeOf(source), provider: file.provider,
+        revision: file.accountRevision, file, mode: selectedMode };
+      const parent = await load(request, async producerSignal => {
+        const value = mediaValue(await call('pan', 'play', { provider: file.provider, file, mode: selectedMode },
+          producerSignal, dependency));
+        if (value.file !== undefined) fileValue(value.file, file.provider, file.accountRevision);
+        requireValue(value.mode === selectedMode, 'UPSTREAM_FORMAT');
+        return value;
+      }, { ttl: addressTTL, dependencies: dependency, signal, checkSchedule, refresh });
+      const entry = await variantEntry(candidate, request, parent,
+        [...fileDeps, { kind: 'address', identity: addressIdentity(candidate, source) }], signal, checkSchedule);
+      return { ...clone(entry.value), resolvedFile: clone(file), resolvedAt: entry.fetchedAt,
+        expiresAt: entry.expiresAt, scope: { ...scopeOf(source), accountProvider: file.provider,
+          accountRevision: file.accountRevision, fileProvider: file.provider, fileAccountRevision: file.accountRevision } };
     }
     requireValue(source.engine !== 'pan' && !candidate.share, 'INVALID_REQUEST');
     requireValue(isIdentifier(candidate.playId) && isIdentifier(candidate.flag));
@@ -775,7 +742,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
   }
   function candidateDependencies(candidate, source) {
     return [...sourceDependencies(source), ...providers.filter(provider =>
-      providerFamily(provider) === providerFamily(candidate.file?.provider)).map(provider => accountDependency(provider))];
+      provider === candidate.file?.provider).map(provider => accountDependency(provider))];
   }
   async function resolve(candidate, { signal, canSchedule, mode, discoverVariants = false } = {}) {
     requireValue(object(candidate));

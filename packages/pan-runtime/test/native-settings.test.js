@@ -45,10 +45,9 @@ function setup(t, store, handler = () => assert.fail('passive settings must not 
 async function account(service, id) {
   return (await service.invoke('settings.get')).accounts.find(value => value.provider === id);
 }
-const tv = { refreshToken: 'synthetic-refresh', deviceId: 'synthetic-device' };
-const rotation = input => response(input, { code: 200, data: {
-  access_token: 'synthetic-rotated-access', refresh_token: 'synthetic-rotated-refresh', expires_in: 3600,
-} });
+const cookie = { cookie: 'session=synthetic-account' };
+const rotation = input => response(input, { code: 'OK', success: true, data: { nickname: 'synthetic' } },
+  { 'set-cookie': ['session=synthetic-rotated; Path=/'] });
 function qr(input) {
   const path = new URL(input.url).pathname;
   if (path === '/v2/api/getqrcode') return response(input, {
@@ -67,22 +66,22 @@ function qr(input) {
 }
 
 test('native reload uses the whole validated document and cancels old sessions, not unrelated accounts', async t => {
-  const store = casStore({ version: 1, accounts: { quark_tv: record(1, tv) } });
+  const store = casStore({ version: 1, accounts: { quark: record(1, cookie) } });
   const entered = deferred(), release = deferred();
   t.after(() => release.resolve());
   const { service, requests } = setup(t, store, async input => {
-    if (new URL(input.url).hostname === 'api.extscreen.com') {
+    if (new URL(input.url).hostname === 'pan.quark.cn') {
       entered.resolve(); await release.promise;
       return rotation(input);
     }
     return qr(input);
   });
   const login = await service.invoke('login.start', { provider: 'baidu' });
-  const refresh = assert.rejects(service.invoke('refresh', { provider: 'quark_tv' }), { code: 'STALE_ACCOUNT' });
+  const refresh = assert.rejects(service.invoke('refresh', { provider: 'quark' }), { code: 'STALE_ACCOUNT' });
   await entered.promise;
   store.native({ version: 1, accounts: {
     baidu: record(1, { cookie: 'synthetic-native' }),
-    quark_tv: record(1, { ...tv, refreshToken: 'synthetic-native-rotated' }),
+    quark: record(1, { cookie: 'session=synthetic-native-rotated' }),
   } });
   await service.settingsChanged();
   assert.equal(requests.at(-1).signal.aborted, true);
@@ -94,7 +93,7 @@ test('native reload uses the whole validated document and cancels old sessions, 
 });
 
 test('CAS conflict from an unrelated native edit never overwrites either account or blind-retries', async t => {
-  const store = casStore({ version: 1, accounts: { quark_tv: record(1, tv) } });
+  const store = casStore({ version: 1, accounts: { quark: record(1, cookie) } });
   const entered = deferred(), release = deferred();
   t.after(() => release.resolve());
   let calls = 0;
@@ -102,35 +101,35 @@ test('CAS conflict from an unrelated native edit never overwrites either account
     if (++calls === 1) { entered.resolve(); await release.promise; }
     return rotation(input);
   });
-  const refresh = assert.rejects(service.invoke('refresh', { provider: 'quark_tv' }), { code: 'STALE_ACCOUNT' });
+  const refresh = assert.rejects(service.invoke('refresh', { provider: 'quark' }), { code: 'STALE_ACCOUNT' });
   await entered.promise;
   const latest = { version: 1, accounts: {
-    quark_tv: record(1, tv), baidu: record(2, { cookie: 'synthetic-new-native' }),
+    quark: record(1, cookie), baidu: record(2, { cookie: 'synthetic-new-native' }),
   } };
   store.native(latest);
   release.resolve(); await refresh;
   assert.deepEqual(store.saved(), latest);
   assert.equal(store.writes.length, 0);
   assert.equal((await account(service, 'baidu')).revision, 2);
-  await service.invoke('refresh', { provider: 'quark_tv' });
+  await service.invoke('refresh', { provider: 'quark' });
   assert.equal(store.writes.length, 1);
   assert.deepEqual(store.saved().accounts.baidu, latest.accounts.baidu);
-  assert.equal(store.saved().accounts.quark_tv.credentials.refreshToken, 'synthetic-rotated-refresh');
+  assert.equal(store.saved().accounts.quark.credentials.cookie, 'session=synthetic-rotated');
 });
 
-test('notification reload and token write share one queue and preserve unrelated native edits', async t => {
-  const store = casStore({ version: 1, accounts: { quark_tv: record(1, tv) } });
+test('notification reload and Cookie write share one queue and preserve unrelated native edits', async t => {
+  const store = casStore({ version: 1, accounts: { quark: record(1, cookie) } });
   const entered = deferred(), release = deferred(), requested = deferred();
   t.after(() => release.resolve());
   const reload = store.reload;
   store.reload = async () => { entered.resolve(); await release.promise; return reload(); };
   const { service } = setup(t, store, input => { requested.resolve(); return rotation(input); });
   store.native({ version: 1, accounts: {
-    quark_tv: record(1, tv), uc: record(1, { cookie: 'synthetic-native-uc' }),
+    quark: record(1, cookie), uc: record(1, { cookie: 'synthetic-native-uc' }),
   } });
   const notification = service.settingsChanged();
   await entered.promise;
-  const refresh = service.invoke('refresh', { provider: 'quark_tv' });
+  const refresh = service.invoke('refresh', { provider: 'quark' });
   await requested.promise; await turn();
   assert.equal(store.writes.length, 0, 'write must not pass the pending native reload');
   release.resolve();
@@ -171,25 +170,25 @@ test('a CAS-rejected QR confirmation reloads newer native credentials and stays 
 });
 
 test('QR confirmation checks its original account again when a queued replacement is admitted', async t => {
-  const store = casStore({ version: 1, accounts: { quark_tv: record(1, tv) } });
+  const store = casStore({ version: 1, accounts: { quark: record(1, cookie) } });
   const entered = deferred(), release = deferred(), polling = deferred(), pollRelease = deferred();
   t.after(() => { release.resolve(); pollRelease.resolve(); });
   const write = store.write;
   store.write = async value => {
-    if (value.accounts.quark_tv.credentials.accessToken && !entered.done) {
+    if (value.accounts.quark.credentials.cookie === 'session=synthetic-rotated' && !entered.done) {
       entered.done = true; entered.resolve(); await release.promise;
     }
     return write(value);
   };
   const { service } = setup(t, store, async input => {
-    if (new URL(input.url).hostname === 'api.extscreen.com') return rotation(input);
+    if (new URL(input.url).hostname === 'pan.quark.cn') return rotation(input);
     if (new URL(input.url).pathname === '/channel/unicast') {
       polling.resolve(); await pollRelease.promise;
     }
     return qr(input);
   });
   const login = await service.invoke('login.start', { provider: 'baidu' });
-  const refresh = service.invoke('refresh', { provider: 'quark_tv' });
+  const refresh = service.invoke('refresh', { provider: 'quark' });
   await entered.promise;
   const poll = assert.rejects(service.invoke('login.poll', { sessionId: login.sessionId }), { code: 'STALE_ACCOUNT' });
   await polling.promise;

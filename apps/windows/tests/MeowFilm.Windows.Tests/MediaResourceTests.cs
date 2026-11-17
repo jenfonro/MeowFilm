@@ -51,7 +51,7 @@ public static class MediaResourceTests
             var rejected = LeaseFor(origin, "/root");
             await Cancelled(() => Open(player, rejected, cancelled.Token)); Released(rejected);
             Check(ReferenceEquals(current, Session(player)) && first.DisposeCalls == 0 &&
-                player.HasOutput && !player.PauseRequested,
+                player.HasOutput && !player.IsPaused,
                 "rejection does not preempt existing media");
             await player.StopAsync(); Released(first);
         });
@@ -63,7 +63,7 @@ public static class MediaResourceTests
             var lease = LeaseFor(origin, "/root");
             await Start(player, lease);
             await player.SeekAsync(player.Scope!, 15); await player.SetPausedAsync(player.Scope!, true);
-            Check(player.HasOutput && player.PauseRequested && lease.DisposeCalls == 0, "capability retained while paused");
+            Check(player.HasOutput && player.IsPaused && lease.DisposeCalls == 0, "capability retained while paused");
             lease.Revoke();
             await Until(() => !player.HasOutput && lease.ReleaseComplete, "paused resource revoked");
             Released(lease);
@@ -77,7 +77,7 @@ public static class MediaResourceTests
             using var cancel = new CancellationTokenSource();
             var lease = LeaseFor(origin, "/root");
             await Open(player, lease, cancel.Token);
-            Check(player.HasOutput && !player.PauseRequested, "native output committed");
+            Check(player.HasOutput && !player.IsPaused, "native output committed");
             cancel.Cancel();
             await Until(() => lease.ReleaseComplete && !player.HasOutput, "caller cancellation retired");
             Released(lease);
@@ -208,7 +208,7 @@ public static class MediaResourceTests
                 "cancelled admission releases only its receipt without reading or preempting donor");
             subscription.Cancel();
             await player.SeekAsync(player.Scope!, 8); await player.SetPausedAsync(player.Scope!, true);
-            Check(player.HasOutput && player.PauseRequested && !first.Revoked.IsCancellationRequested &&
+            Check(player.HasOutput && player.IsPaused && !first.Revoked.IsCancellationRequested &&
                 origin.Requests.All(request => !request.AnyCallerHeader) && origin.Requests.Any(request => request.Range),
                 "UI visibility does not own playback or inject upstream credentials into Node-shaped input");
             runtime.Cancel();
@@ -234,14 +234,14 @@ public static class MediaResourceTests
             await player.SeekAsync(player.Scope!, 7); player.Volume = 37;
             var donor = player.Scope!;
             var next = authority.CreateLease(nextId, origin.Uri("/root"), nextScope.Token);
-            var replacement = new RuntimeMediaPlaybackIntent("film", "next-attempt", 0, player.PauseRequested, donor);
+            var replacement = new RuntimeMediaPlaybackIntent("film", "next-attempt", 0, player.IsPaused, donor);
             await player.PrepareAsync(replacement, next.Address, FilmKernelIntegrationTests.Input("progressive"), next);
             Check(released.Count == 0 && !next.Revoked.IsCancellationRequested && player.Scope == donor,
                 "silent prepared receipt does not retire donor or own its pause intent");
             int commits = 0;
             Check(await player.TryCommitAsync(replacement, () => true, () => commits++), "replacement commit");
             Check(commits == 1 && released.SequenceEqual([firstId]) && !next.Revoked.IsCancellationRequested &&
-                player.HasOutput && player.PauseRequested && player.Identity == "next-attempt" &&
+                player.HasOutput && player.IsPaused && player.Identity == "next-attempt" &&
                 player.Volume == 37 && Math.Abs(player.PositionSeconds - 7) <= .25,
                 "new attempt keeps exact donor clock, paused controls and its independent receipt");
             firstScope.Cancel();
@@ -280,7 +280,7 @@ public static class MediaResourceTests
     private static async Task Start(FilmPlayback player, Lease lease)
     {
         await Open(player, lease);
-        Check(player.Output is { SubmittedPictures: > 0 } && !player.PauseRequested, "actual native picture submission");
+        Check(player.Output is { SubmittedPictures: > 0 } && !player.IsPaused, "actual native picture submission");
     }
     private static Lease LeaseFor(Origin origin, string path) =>
         new(origin.Uri(path), origin.Headers);

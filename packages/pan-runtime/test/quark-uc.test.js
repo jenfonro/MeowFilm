@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, mkdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,20 +10,7 @@ const ordinary = [
   { id: 'quark', host: 'pan.quark.cn', apiHost: 'drive.quark.cn', prefix: '/1/clouddrive', pr: 'ucpro' },
   { id: 'uc', host: 'drive.uc.cn', apiHost: 'pc-api.uc.cn', prefix: '/1/clouddrive', pr: 'UCBrowser' },
 ];
-const tv = [
-  {
-    id: 'quark_tv', ordinary: 'quark', host: 'open-api-drive.quark.cn', tokenPath: '/quarkdrive/token',
-    clientId: 'd3194e61504e493eb6222857bccfed94', key: 'kw2dvtd7p4t3pjl2d9ed9yc8yej8kw2d',
-    appVersion: '1.8.2.2', channel: 'GENERAL', invalid: 10001,
-  },
-  {
-    id: 'uc_tv', ordinary: 'uc', host: 'open-api-drive.uc.cn', tokenPath: '/ucdrive/token',
-    clientId: '5acf882d27b74502b7040b0c65519aa7', key: 'l3srvtd7p42l0d0x1u8d7yc8ye9kki4d',
-    appVersion: '1.7.2.2', channel: 'UCTVOFFICIALWEB', invalid: 11001,
-  },
-];
 const cookie = '__pus=synthetic-account; __puus=synthetic-transfer; Video-Auth=synthetic-video';
-const account = { accessToken: 'synthetic-access', refreshToken: 'synthetic-refresh', deviceId: 'synthetic-device', expiresAt: now + 600_000 };
 const video = (id, name = 'movie.mp4') => ({ fid: String(id), file_name: name, file_type: 1, share_fid_token: 'synthetic-file-token' });
 const folder = (id, name) => ({ fid: String(id), file_name: name, dir: true, file_type: 0 });
 const ok = (data) => ({ value: { code: 0, data } });
@@ -101,7 +87,7 @@ function ordinaryRoute(config, overrides = {}) {
   };
 }
 
-test('capabilities expose ordinary QR/list/prepare and independent TV modes', async (t) => {
+test('capabilities expose ordinary QR/list/prepare and direct-link modes', async (t) => {
   const { service, requests } = await fixture(t, () => { throw new Error('No upstream request expected'); });
   const result = await service.invoke('providers');
   for (const config of ordinary) {
@@ -112,17 +98,6 @@ test('capabilities expose ordinary QR/list/prepare and independent TV modes', as
     assert.equal(provider.refresh, true);
     assert.deepEqual(provider.credentialFields, ['cookie']);
     assert.deepEqual(provider.modes, ['streaming', 'download']);
-  }
-  for (const config of tv) {
-    const provider = result.providers.find((item) => item.provider === config.id);
-    assert.equal(provider.list, false);
-    assert.equal(provider.prepare, false);
-    assert.equal(provider.login, false);
-    assert.equal(provider.refresh, true);
-    assert.deepEqual(provider.modes, ['streaming', 'download']);
-    assert.deepEqual(provider.credentialFields, ['refreshToken', 'deviceId', 'accessToken', 'expiresAt']);
-    await assert.rejects(service.invoke('list', { provider: config.id, share: { url: 'https://example.test/s/a' } }), { code: 'UNSUPPORTED_OPERATION' });
-    await assert.rejects(service.invoke('prepare', { provider: config.id, file: storedReference(config.id, { accountRevision: 0 }) }), { code: 'UNSUPPORTED_OPERATION' });
   }
   assert.equal(requests.length, 0);
 });
@@ -742,237 +717,6 @@ test('UC transfer preflight still initializes cookies after the share-page reque
   assert.equal((await service.invoke('prepare', { provider: 'uc', file: shareReference('uc') })).file.fileId, 'saved-after-preflight');
   assert.match((await document()).accounts.uc.credentials.cookie, /Video-Auth=synthetic-video/);
   assert.equal(requests.length, 4);
-});
-
-for (const config of tv) {
-  test(`${config.id}: stored fid uses one specified official method and the reference request signature`, async (t) => {
-    const { service, requests } = await fixture(t, (request) => {
-      assert.equal(request.url.origin, `https://${config.host}`);
-      assert.equal(request.url.pathname, '/file');
-      const query = request.url.searchParams;
-      assert.equal(query.get('fid'), '9007199254740999');
-      assert.equal(query.get('req_id'), createHash('md5').update(`synthetic-device${now}`).digest('hex'));
-      assert.equal(query.get('access_token'), 'synthetic-access');
-      assert.equal(query.get('app_ver'), config.appVersion);
-      assert.equal(query.get('channel'), config.channel);
-      assert.equal(query.get('resolution'), 'low,normal,high,super,2k,4k');
-      assert.equal(query.get('support'), 'dolby_vision');
-      assert.equal(request.headers['x-pan-tm'], String(now));
-      assert.equal(request.headers['x-pan-client-id'], config.clientId);
-      assert.equal(request.headers['x-pan-token'], createHash('sha256').update(`GET&/file&${now}&${config.key}`).digest('hex'));
-      assert.equal(request.headers.cookie, undefined);
-      return { value: { status: 200, errno: 0, data: { download_url: ' https://media.example/download ', video_info: [{ url: ' ' }, { url: ' https://media.example/stream ' }] } } };
-    }, { accounts: { [config.id]: account, [config.ordinary]: { cookie } } });
-    for (const mode of ['streaming', 'download']) {
-      const result = await service.invoke('play', { provider: config.id, file: storedReference(config.ordinary), mode });
-      assert.equal(result.url, `https://media.example/${mode === 'streaming' ? 'stream' : 'download'}`);
-      assert.deepEqual(result.headers, {});
-    }
-    assert.deepEqual(requests.map((item) => item.url.searchParams.get('method')), ['streaming', 'download']);
-    await assert.rejects(service.invoke('play', { provider: config.id, file: shareReference(config.ordinary), mode: 'streaming' }), { code: 'INVALID_REQUEST' });
-    assert.equal(requests.length, 2);
-  });
-
-  test(`${config.id}: absent selected TV address never uses the other mode or an ordinary provider`, async (t) => {
-    const { service, requests } = await fixture(t, (request) => ({
-      value: { errno: 0, data: request.url.searchParams.get('method') === 'streaming'
-        ? { download_url: 'https://media.example/not-streaming' }
-        : { video_info: [{ url: 'https://media.example/not-download' }] } },
-    }), { accounts: { [config.id]: account, [config.ordinary]: { cookie } } });
-    for (const mode of ['streaming', 'download']) {
-      await assert.rejects(service.invoke('play', { provider: config.id, file: storedReference(config.id), mode }),
-        { code: 'UPSTREAM_FORMAT' });
-    }
-    assert.deepEqual(requests.map((item) => [item.url.hostname, item.url.pathname, item.url.searchParams.get('method')]),
-      [[config.host, '/file', 'streaming'], [config.host, '/file', 'download']]);
-  });
-
-  test(`${config.id}: explicit and expiring-token refresh join once, persist rotation and then request the chosen file method`, async (t) => {
-    const entered = deferred(), release = deferred();
-    const { service, requests, document } = await fixture(t, async (request) => {
-      if (request.url.hostname === 'api.extscreen.com') {
-        assert.equal(request.url.protocol, 'http:');
-        assert.equal(request.url.pathname, config.tokenPath);
-        assert.equal(request.method, 'POST');
-        assert.equal(request.payload.refresh_token, 'synthetic-refresh');
-        assert.equal(request.payload.device_id, 'synthetic-device');
-        assert.equal(request.payload.req_id, createHash('md5').update(`synthetic-device${now}`).digest('hex'));
-        assert.equal(request.payload.app_ver, config.appVersion);
-        entered.resolve();
-        await release.promise;
-        return { value: { code: 200, data: { access_token: 'synthetic-new-access', refresh_token: 'synthetic-new-refresh', expires_in: 3600 } } };
-      }
-      assert.equal(request.url.searchParams.get('access_token'), 'synthetic-new-access');
-      assert.equal(request.url.searchParams.get('method'), 'download');
-      return { value: { errno: 0, data: { download_url: 'https://media.example/rotated' } } };
-    }, { accounts: { [config.id]: { ...account, expiresAt: now + 30_000 } } });
-    const refreshing = service.invoke('refresh', { provider: config.id });
-    await entered.promise;
-    const playing = service.invoke('play', { provider: config.id, file: storedReference(config.id), mode: 'download' });
-    release.resolve();
-    assert.equal((await refreshing).refreshed, true);
-    assert.equal((await playing).url, 'https://media.example/rotated');
-    assert.equal(requests.filter((item) => item.url.hostname === 'api.extscreen.com').length, 1);
-    assert.deepEqual((await document()).accounts[config.id].credentials, {
-      ...account, accessToken: 'synthetic-new-access', refreshToken: 'synthetic-new-refresh', expiresAt: now + 3_600_000,
-    });
-  });
-
-  test(`${config.id}: structured invalid-token 4xx refreshes and retries once without ordinary fallback`, async (t) => {
-    let fileCalls = 0;
-    const { service, requests } = await fixture(t, (request) => {
-      if (request.url.hostname === 'api.extscreen.com') return { value: { code: 200, data: { access_token: 'retry-access', expires_in: 3600 } } };
-      fileCalls += 1;
-      if (fileCalls === 1) return { status: 401, value: { status: -1, errno: config.invalid, error_info: 'synthetic invalid access token' } };
-      assert.equal(request.url.searchParams.get('access_token'), 'retry-access');
-      return { value: { errno: 0, data: { video_info: [{ url: 'https://media.example/retry' }] } } };
-    }, { accounts: { [config.id]: account } });
-    assert.equal((await service.invoke('play', { provider: config.id, file: storedReference(config.id), mode: 'streaming' })).url, 'https://media.example/retry');
-    assert.equal(requests.length, 3);
-    assert.deepEqual(requests.filter((item) => item.url.pathname === '/file').map((item) => item.url.searchParams.get('method')), ['streaming', 'streaming']);
-  });
-
-  test(`${config.id}: a late old-token rejection reuses the already rotated token without a second refresh`, async (t) => {
-    const entered = deferred(), release = deferred();
-    let oldCalls = 0;
-    const { service, requests } = await fixture(t, async (request) => {
-      if (request.url.hostname === 'api.extscreen.com') return { value: { code: 200, data: { access_token: 'rotated-access', expires_in: 3600 } } };
-      if (request.url.searchParams.get('access_token') === 'synthetic-access') {
-        oldCalls += 1;
-        if (oldCalls === 1) { entered.resolve(); await release.promise; }
-        return { value: { status: -1, errno: config.invalid } };
-      }
-      assert.equal(request.url.searchParams.get('access_token'), 'rotated-access');
-      return { value: { errno: 0, data: { download_url: 'https://media.example/concurrent' } } };
-    }, { accounts: { [config.id]: account } });
-    const late = service.invoke('play', { provider: config.id, file: storedReference(config.id), mode: 'download' });
-    await entered.promise;
-    const first = await service.invoke('play', { provider: config.id, file: storedReference(config.id), mode: 'download' });
-    assert.equal(first.url, 'https://media.example/concurrent');
-    release.resolve();
-    assert.equal((await late).url, 'https://media.example/concurrent');
-    assert.equal(requests.filter((item) => item.url.hostname === 'api.extscreen.com').length, 1);
-    assert.equal(requests.filter((item) => item.url.pathname === '/file').length, 4);
-  });
-
-  test(`${config.id}: repeated invalid credentials fail after one refresh; file permission errors do not refresh`, async (t) => {
-    let permission = false;
-    const { service, requests } = await fixture(t, (request) => {
-      if (request.url.hostname === 'api.extscreen.com') return { value: { code: 200, data: { access_token: 'retry-access' } } };
-      return { value: permission ? { status: -1, errno: 90004, error_info: 'file permission denied' } : { status: -1, errno: config.invalid } };
-    }, { accounts: { [config.id]: account } });
-    await assert.rejects(service.invoke('play', { provider: config.id, file: storedReference(config.id), mode: 'download' }), { code: 'AUTH_FAILED' });
-    assert.equal(requests.filter((item) => item.url.hostname === 'api.extscreen.com').length, 1);
-    permission = true;
-    await assert.rejects(service.invoke('play', { provider: config.id, file: storedReference(config.id), mode: 'download' }), { code: 'UPSTREAM_ERROR' });
-    assert.equal(requests.length, 4);
-  });
-
-  test(`${config.id}: valid token without refresh works; expired token without refresh fails before external requests`, async (t) => {
-    const { service, requests, set } = await fixture(t, () => ({ value: { errno: 0, data: { download_url: 'https://media.example/direct' } } }),
-      { accounts: { [config.id]: { accessToken: 'only-access', deviceId: 'synthetic-device' } } });
-    await service.invoke('play', { provider: config.id, file: storedReference(config.id), mode: 'download' });
-    await set(config.id, { accessToken: 'old-access', deviceId: 'synthetic-device', expiresAt: now - 1 });
-    await assert.rejects(service.invoke('play', { provider: config.id, file: storedReference(config.id, { accountRevision: 2 }), mode: 'download' }), { code: 'NOT_CONFIGURED' });
-    assert.equal(requests.length, 1);
-  });
-
-  test(`${config.id}: reference credentials trim protocol whitespace and non-positive expiry stays unknown`, async (t) => {
-    let expiresIn = 0;
-    const { service, requests, document, set } = await fixture(t, (request) => {
-      if (request.url.hostname === 'api.extscreen.com') {
-        assert.equal(request.payload.device_id, 'synthetic-device');
-        assert.equal(request.payload.refresh_token, 'synthetic-refresh');
-        return { value: { code: 200, data: { access_token: '  next-access  ', refresh_token: ' next-refresh ', expires_in: expiresIn } } };
-      }
-      assert.equal(request.url.searchParams.get('access_token'), 'next-access');
-      assert.equal(request.url.searchParams.get('device_id'), 'synthetic-device');
-      return { value: { errno: 0, data: { download_url: 'https://media.example/trimmed' } } };
-    }, { accounts: { [config.id]: { refreshToken: ' synthetic-refresh ', deviceId: ' synthetic-device ' } } });
-    await service.invoke('play', { provider: config.id, file: storedReference(config.id), mode: 'download' });
-    assert.equal((await document()).accounts[config.id].credentials.expiresAt, 0);
-    assert.equal((await document()).accounts[config.id].credentials.refreshToken, 'next-refresh');
-    expiresIn = -1;
-    await set(config.id, { refreshToken: ' synthetic-refresh ', deviceId: ' synthetic-device ' });
-    await service.invoke('refresh', { provider: config.id });
-    assert.equal((await document()).accounts[config.id].credentials.expiresAt, 0);
-    await set(config.id, { refreshToken: ' ', deviceId: ' ' });
-    await assert.rejects(service.invoke('refresh', { provider: config.id }), { code: 'NOT_CONFIGURED' });
-    assert.equal(requests.length, 3);
-  });
-
-  test(`${config.id}: token persistence failure is awaited and prevents file resolution`, async (t) => {
-    const { service, requests, root } = await fixture(t, () => ({ value: { code: 200, data: { access_token: 'unsaved-token', expires_in: 3600 } } }),
-      { accounts: { [config.id]: { ...account, expiresAt: now - 1 } } });
-    const path = join(root, 'pan/accounts.json');
-    await unlink(path);
-    await mkdir(path);
-    await assert.rejects(service.invoke('play', { provider: config.id, file: storedReference(config.id), mode: 'streaming' }), { code: 'STORAGE_ERROR' });
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].url.hostname, 'api.extscreen.com');
-  });
-
-  test(`${config.id}: rejected refresh token is an authentication failure without changing persisted credentials`, async (t) => {
-    let data;
-    const { service, requests, root } = await fixture(t, (request) => {
-      assert.equal(request.url.hostname, 'api.extscreen.com');
-      assert.equal(request.url.pathname, config.tokenPath);
-      return { value: { code: 200, message: 'success', data } };
-    }, { accounts: { [config.id]: account } });
-    const path = join(root, 'pan/accounts.json');
-    const before = await readFile(path);
-    const settings = await service.invoke('settings.get');
-    for (const [status, errno] of [[-1, 11000], ['-1', '11000']]) {
-      data = { status, errno, error_info: 'refresh token无效', access_token: '', refresh_token: '', expires_in: 0 };
-      await assert.rejects(service.invoke('refresh', { provider: config.id }), { code: 'AUTH_FAILED' });
-      assert.deepEqual(await readFile(path), before);
-      assert.deepEqual(await service.invoke('settings.get'), {
-        accounts: settings.accounts.map(item => item.provider === config.id ? { ...item, status: 'expired' } : item),
-      });
-    }
-    assert.equal(requests.length, 2);
-  });
-
-  test(`${config.id}: malformed rotated credentials and expiry fail as upstream format without publishing them`, async (t) => {
-    let data;
-    const { service, requests, document } = await fixture(t, () => ({ value: { code: 200, data } }),
-      { accounts: { [config.id]: account } });
-    for (const candidate of [
-      {},
-      { status: 0, errno: 0 },
-      { status: -1 },
-      { status: 0, errno: 11000 },
-      { status: -1, errno: 90004, error_info: 'refresh token无效' },
-      { access_token: 'invalid\r\nheader' },
-      { access_token: 'synthetic-next', refresh_token: 123 },
-      { access_token: 'synthetic-next', expires_in: 0.5 },
-      { access_token: 'synthetic-next', expires_in: '9007199254740991' },
-    ]) {
-      data = candidate;
-      await assert.rejects(service.invoke('refresh', { provider: config.id }), { code: 'UPSTREAM_FORMAT' });
-      assert.deepEqual((await document()).accounts[config.id].credentials, account);
-    }
-    assert.equal(requests.every((item) => item.url.hostname === 'api.extscreen.com'), true);
-  });
-}
-
-test('Quark TV detects the reference invalid-token message after an empty error_info', async (t) => {
-  const { service, requests } = await fixture(t, (request) => {
-    if (request.url.hostname === 'api.extscreen.com') {
-      return { value: { code: 200, data: { access_token: 'synthetic-new-token' } } };
-    }
-    if (request.url.searchParams.get('access_token') === account.accessToken) {
-      return { status: 401, value: { status: -1, errno: 1234, error_info: ' ', message: 'access_token invalid' } };
-    }
-    return { value: { errno: 0, data: { video_info: [{ url: 'https://media.example/refreshed' }] } } };
-  }, { accounts: { quark_tv: account } });
-  const result = await service.invoke('play', {
-    provider: 'quark_tv', file: storedReference('quark_tv'), mode: 'streaming',
-  });
-  assert.equal(result.url, 'https://media.example/refreshed');
-  assert.deepEqual(requests.map(request => [request.url.hostname, request.url.pathname]), [
-    ['open-api-drive.quark.cn', '/file'], ['api.extscreen.com', '/quarkdrive/token'], ['open-api-drive.quark.cn', '/file'],
-  ]);
 });
 
 function qrRoute(config, statuses, overrides = {}) {

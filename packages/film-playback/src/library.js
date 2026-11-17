@@ -84,7 +84,7 @@ function history(value) {
   text(value.title);
   identity(value.sourceKey);
   candidateIdentity(value.candidateId);
-  if (value.playbackTarget !== undefined) {
+  {
     const target = value.playbackTarget;
     shape(target, ['id', 'kind', 'title', 'year', 'metadataProvider', 'metadataId',
       'season', 'episode', 'globalEpisode', 'members', 'source']);
@@ -170,10 +170,6 @@ function blockIdentity(value) {
 }
 
 function validate(value) {
-  if (value.version === 1) {
-    shape(value, ['version', 'preferences', 'history', 'manual', 'blocks', 'previewTargets']);
-    value = { ...value, version: 2, groups: [] };
-  }
   shape(value, ['version', 'preferences', 'history', 'manual', 'blocks', 'previewTargets', 'groups']);
   requireValue(value.version === 2 && object(value.preferences) &&
     Array.isArray(value.history) && Array.isArray(value.manual) && Array.isArray(value.blocks) &&
@@ -231,6 +227,7 @@ export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
       try {
         requireValue(isUtf8(bytes));
         const value = JSON.parse(bytes.toString('utf8'));
+        if (nativePreferences) requireValue(!Object.hasOwn(value, 'preferences'));
         return validate(nativePreferences ? { ...value, preferences: defaultPreferences() } : value);
       }
       catch { throw failure('CORRUPT_STORAGE'); }

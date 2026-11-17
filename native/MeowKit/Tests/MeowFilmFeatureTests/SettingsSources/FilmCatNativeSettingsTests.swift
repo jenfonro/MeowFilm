@@ -207,13 +207,16 @@ final class FilmCatNativeSettingsTests: XCTestCase {
         await owner.close()
     }
 
-    func testLegacyCatalogProjectsNativeIntentAndFirstSuccessfulCommitRemovesCleartextWithoutLosingMetadata() async throws {
+    func testCurrentCatalogPreservesReadOnlyMetadataAndVideoChoicesAcrossOfflineSaveAndReopen() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: base) }
         let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
-        let legacyCats = [SourcesRuntimeFixture.cat("a"), SourcesRuntimeFixture.cat("b")]
-        let document = try sourceTestSettings(base, cats: legacyCats)
+        let document = try sourceTestSettings(base)
+        let runtime = SourcesRuntimeFixture()
+        let initialOwner = FilmSourceService(transport: runtime.transport, storeFactory: { store },
+            settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
+        try await initialOwner.refresh()
         let visible = FilmSourceKey(installationId: "a", siteKey: "same")
         let deleted = FilmSourceKey(installationId: "b", siteKey: "same")
         let detection = FilmSourceDetection(result: "valid", checkedAt: 123, playbackResolved: true,
@@ -221,27 +224,23 @@ final class FilmCatNativeSettingsTests: XCTestCase {
         let video = FilmVideoSource(key: visible, name: "站点", api: "/api/a", actions: ["search"], methods: [:],
             options: .init(enabled: false, homeVisible: false, searchEnabled: true, aggregateImages: true),
             order: 9, detection: detection)
-        let cached = legacyCats.map { cat -> RuntimeValue in
-            guard case .object(var fields) = cat else { preconditionFailure("Fixture") }
-            for field in ["inputRevision", "generation", "state", "error"] { fields[field] = nil }
-            fields["sourceUrl"] = .string("https://example.invalid/old.js?token=synthetic-legacy")
-            fields["name"] = .string("Old display name")
-            return .object(fields)
-        }
-        let legacy = RuntimeValue.object(["version": .number(1), "cats": .array(cached),
-            "videos": .array([try RuntimeJSON.decode(JSONEncoder().encode(video))]),
-            "deleted": .array([try RuntimeJSON.decode(JSONEncoder().encode(deleted))])])
-        let bytes = try RuntimeJSON.encode(legacy)
+        try await initialOwner.deleteVideo(deleted)
+        try await initialOwner.saveVideoOptions(visible, options: video.options, order: video.order)
+        let initialDocument = try RuntimeJSON.decode(XCTUnwrap(store.read(key: FilmSourceService.documentKey)))
+        guard case .object(var initialFields) = initialDocument else { throw FilmSourceError(code: "INVALID_DOCUMENT") }
+        initialFields["videos"] = .array([try RuntimeJSON.decode(JSONEncoder().encode(video))])
+        let bytes = try RuntimeJSON.encode(.object(initialFields))
         try store.write(bytes, key: FilmSourceService.documentKey)
+        await initialOwner.close()
         let owner = FilmSourceService(transport: unavailableCatTransport("UNEXPECTED_RUNTIME"), storeFactory: { store },
             settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await owner.initialize()
         let initial = await owner.snapshot
-        XCTAssertEqual(initial.cats.map(\.name), ["A", "B"], "Editable fields always come from native intent, never a legacy cache")
+        XCTAssertEqual(initial.cats.map(\.name), ["A", "B"])
         XCTAssertEqual(initial.cats.first?.sourceUrl, "https://example.invalid/a.js")
         XCTAssertEqual(initial.cats.first?.sites.count, 1)
         XCTAssertEqual(initial.videos, [video])
-        XCTAssertEqual(try store.read(key: FilmSourceService.documentKey), bytes, "Read projection does not invent a migration receipt")
+        XCTAssertEqual(try store.read(key: FilmSourceService.documentKey), bytes, "Reading does not write a new receipt")
         try await owner.saveVideoOptions(visible, options: video.options, order: 10)
         let saved = try RuntimeJSON.decode(XCTUnwrap(store.read(key: FilmSourceService.documentKey)))
         XCTAssertEqual(saved.catField("version"), .number(2))
@@ -252,11 +251,10 @@ final class FilmCatNativeSettingsTests: XCTestCase {
                 XCTAssertNil(cat.catField(field), "No editable or sensitive input in the display cache")
             }
             XCTAssertEqual(cat.catField("sites")?.catArray?.count, 1)
+            XCTAssertEqual(cat.catField("inputRevision"), .number(1))
         }
-        XCTAssertEqual(saved.catField("deleted"), legacy.catField("deleted"))
-        XCTAssertFalse(String(decoding: try RuntimeJSON.encode(saved), as: UTF8.self).contains("synthetic-legacy"))
+        XCTAssertEqual(saved.catField("deleted"), initialDocument.catField("deleted"))
         await owner.close()
-        let runtime = SourcesRuntimeFixture()
         let reopened = FilmSourceService(transport: runtime.transport, storeFactory: { store },
             settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await reopened.initialize()
@@ -267,7 +265,7 @@ final class FilmCatNativeSettingsTests: XCTestCase {
         XCTAssertEqual(restored.cats.map { $0.sites.count }, [1, 1])
         try await reopened.refresh()
         let synchronized = await reopened.snapshot
-        XCTAssertEqual(synchronized.videos.map(\.key), [visible], "A legacy tombstone still excludes the other parent's site")
+        XCTAssertEqual(synchronized.videos.map(\.key), [visible], "The saved deletion excludes the other parent's site")
         XCTAssertEqual(synchronized.videos.first?.detection, detection)
         XCTAssertEqual(synchronized.videos.first?.options, video.options)
         await reopened.close()

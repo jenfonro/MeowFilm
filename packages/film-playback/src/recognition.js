@@ -91,10 +91,12 @@ export function normalizeDetail(raw, { source } = {}) {
     const id = detail.lineId ?? provider ?? detail.provider;
     if (!scalar(id)) invalidDetail();
     lines = [{ id, label: detail.label ?? String(id), ...(provider === undefined ? {} : { provider }), episodes }];
+  } else if (detail.vod_play_from === '' && detail.vod_play_url === '') {
+    lines = [];
   } else if (typeof detail.vod_play_from === 'string' && typeof detail.vod_play_url === 'string') {
     const flags = detail.vod_play_from.split('$$$');
     const urls = detail.vod_play_url.split('$$$');
-    if (flags.length !== urls.length) invalidDetail();
+    if (flags.length !== urls.length || flags.some(flag => !isIdentifier(flag))) invalidDetail();
     const counts = urls.map(url => url === '' ? 0 : url.split('#').length);
     const singleResource = counts.reduce((total, count) => total + count, 0) === 1;
     const occurrences = new Map();

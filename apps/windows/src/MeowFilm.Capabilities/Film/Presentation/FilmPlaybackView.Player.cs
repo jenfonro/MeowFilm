@@ -333,6 +333,8 @@ public partial class FilmPlaybackView
         }
         if (overlayViewport == visible) return;
         overlayViewport = visible;
-        PlayerOverlay.Clip = visible.IsEmpty ? Geometry.Empty : new RectangleGeometry(visible);
+        var clip = visible.IsEmpty ? Geometry.Empty : new RectangleGeometry(visible);
+        clip.Freeze();
+        PlayerOverlay.Clip = clip;
     }
 }

@@ -3,14 +3,13 @@ import MeowFilmFeature
 import MeowRuntime
 import MeowStorage
 
-/// The App's sole document instances are shared by pages and the trusted Node
-/// channel. Migration runs before either consumer can start.
+/// The App's sole document instances are shared by pages and the trusted Node channel.
 final class MeowfilmNativeSettings: @unchecked Sendable {
     static let keychainService = MeowfilmIdentity.bundleIdentifier + ".film.settings.keys.v1"
     let documents: [FilmSettingsBlock: FilmSettingsDocument]
     private let notifications = SettingsNotifications()
 
-    init(documentsRoot: URL, runtimeRoot: URL) throws {
+    init(documentsRoot: URL) throws {
         try FileManager.default.createDirectory(at: documentsRoot, withIntermediateDirectories: true)
         let protectedRoot = documentsRoot.appendingPathComponent("protected-settings", isDirectory: true)
         try FileManager.default.createDirectory(at: protectedRoot, withIntermediateDirectories: true)
@@ -24,7 +23,6 @@ final class MeowfilmNativeSettings: @unchecked Sendable {
             }
             return (block, FilmSettingsDocument(block: block, storage: storage) { notifications.changed($0) })
         })
-        try FilmSettingsMigration.apply(runtimeRoot: runtimeRoot, documents: documents)
     }
 
     subscript(_ block: FilmSettingsBlock) -> FilmSettingsDocument { documents[block]! }

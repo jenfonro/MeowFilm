@@ -278,24 +278,11 @@ final class MeowfilmAssembly: ObservableObject {
     func makeFilmPlayback(item: FilmItem, kind: FilmPlaybackKind,
                           entrySurface: String? = nil) throws -> FilmPlaybackModel {
         guard !closed, let resources else { throw FilmPlaybackError(code: "CLOSED") }
+        guard let target = item.playbackTarget else { throw FilmPlaybackError(code: "INVALID_REQUEST") }
         let metadata = try item.metadataSeed.map(RuntimeJSON.decode)
         return try makeFilmPlayback { [weak self] in
             guard let self else { throw FilmPlaybackError(code: "CLOSED") }
             let sources = try await self.filmPlaybackSources(resources: resources)
-            let target: FilmPlaybackTarget
-            if let supplied = item.playbackTarget { target = supplied }
-            else {
-                guard let provider = FilmMetadataProvider(rawValue: item.sourceID), kind == .movie || kind == .tv else {
-                    throw FilmPlaybackError(code: "INVALID_REQUEST")
-                }
-                // Existing saved records supply accurate provider fields. Node
-                // confirms the address; the client never constructs a business ID.
-                let raw: RuntimeObject = ["kind": .string(kind.rawValue), "title": .string(item.title),
-                    "metadataProvider": .string(provider.rawValue), "metadataId": .string(item.id)]
-                let client = try await resources.scriptSession.connection()
-                target = try FilmPlaybackTarget(await client.call(module: .film, operation: "data.target",
-                    parameters: .object(["target": .object(raw), "sources": .array(sources.map { .object($0.value) })])))
-            }
             return FilmPlaybackRequest(target: target, sources: sources, metadata: metadata, entrySurface: entrySurface)
         }
     }

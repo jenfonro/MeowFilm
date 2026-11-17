@@ -26,6 +26,8 @@ const history = () => ({
   candidateId: 'candidate:exact-file', episode: { season: 1, episode: 2, globalEpisode: 2 },
   detailId: 'detail:one', lineId: 'raw-flag', position: 12.5, duration: 600,
   paused: false, ended: false, playedAt: 1000, updatedAt: 1200,
+  playbackTarget: { id: 'tmdb:tv:42', kind: 'source', title: '合成剧集', season: 1, episode: 2, globalEpisode: 2,
+    source: { key: 'cat:installation:site', detailId: 'detail:one', lineId: 'raw-flag', candidateId: 'candidate:exact-file' } },
 });
 const manual = () => ({
   id: 'manual:one', targetId: 'tmdb:tv:42', kind: 'site', sourceKey: 'cat:installation:site',
@@ -37,18 +39,6 @@ const block = (extra = {}) => ({
 });
 const empty = () => ({
   version: 2, preferences: defaultPreferences(), history: [], manual: [], blocks: [], previewTargets: [], groups: [],
-});
-
-test('v1 playback documents migrate once without losing existing watching and source preferences', t => {
-  const dataRoot = area(t), directory = join(dataRoot, 'film-playback');
-  fs.mkdirSync(directory);
-  const previous = { version: 1, preferences: defaultPreferences(), history: [history()],
-    manual: [manual()], blocks: [block()], previewTargets: ['tmdb:tv:42'] };
-  fs.writeFileSync(join(directory, 'library.json'), JSON.stringify(previous));
-  const { owner } = library(t, dataRoot);
-  assert.deepEqual(owner.read(), { ...previous, version: 2, groups: [] });
-  owner.update(draft => { draft.preferences.iosAutoPrepare = false; });
-  assert.equal(JSON.parse(fs.readFileSync(join(directory, 'library.json'))).version, 2);
 });
 
 test('native preferences stay in their sole settings owner while repeated business writes and reopen preserve library facts', t => {
@@ -180,6 +170,8 @@ test('E30: history preserves movie identity, exact source/candidate and progress
   entry.targetId = 'douban:movie:50';
   entry.title = '合成电影';
   delete entry.episode;
+  entry.playbackTarget = { id: entry.targetId, kind: 'movie', title: entry.title,
+    metadataProvider: 'douban', metadataId: 50 };
   owner.update(draft => { draft.history.push(entry); });
   owner.update(draft => {
     const current = draft.history[0];
@@ -630,6 +622,8 @@ test('E19/E30: ordinary source page URLs remain valid opaque target/source/line 
   value.targetId = 'https://synthetic.invalid/detail?id=42';
   value.sourceKey = 'https://synthetic.invalid/source?id=site';
   value.lineId = 'https://synthetic.invalid/line?id=original';
+  value.playbackTarget = { ...value.playbackTarget, id: value.targetId,
+    source: { ...value.playbackTarget.source, key: value.sourceKey, lineId: value.lineId } };
   owner.update(draft => {
     draft.history.push(value);
     draft.blocks.push(block({ targetId: value.targetId, sourceKey: value.sourceKey, lineId: value.lineId }));

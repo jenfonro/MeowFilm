@@ -112,5 +112,5 @@ export async function verifyPanAndDoubanAssembly(client) {
   assert.equal(pan.ok, true);
   assert.equal(pan.contract, 'pan.runtime.v1');
   assert.deepEqual(pan.value.providers.map(row => row.provider).sort(),
-    ['baidu', 'quark', 'quark_tv', 'tianyi', 'uc', 'uc_tv', 'yidong']);
+    ['baidu', 'quark', 'tianyi', 'uc', 'yidong']);
 }

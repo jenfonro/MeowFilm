@@ -677,8 +677,6 @@ public sealed partial class ShellWindow : DesktopWindow
         RunUiAction(SearchAsync);
     }
 
-    private void OnSearchClick(object sender, RoutedEventArgs e) => RunUiAction(SearchAsync);
-
     private Task SearchAsync()
     {
         if (!_isClosing && _current is { IsSettingsOpen: false } && _searchPage is { } searchPage &&

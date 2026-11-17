@@ -36,6 +36,7 @@ public static class FilmKernelIntegrationTests
                 return pixel != uint.MaxValue && blue > green + 40 && blue > red + 40 && green < 150;
             }, "decoded blue picture reaches actual desktop pixels");
             Console.WriteLine($"OBSERVED_FILM_DESKTOP_PIXEL colorref=0x{pixel:X6}; source=synthetic-blue-jpeg");
+            await NativeDesktopCapture.SaveAsync(player.VideoView, "decoded-blue-picture");
         }));
         yield return Case("film kernel forward-only paused subtitle disable repaints actual desktop pixels", () => WithPlayer(async (player, kernel) =>
         {
@@ -116,7 +117,7 @@ public static class FilmKernelIntegrationTests
                     !player.HasOutput && lease.Disposals == 0, "silent prepare requires a decoded picture");
                 bool published = false;
                 Check(await player.TryCommitAsync(intent, () => true, () => published = true) &&
-                    published && player.Scope is not null && player.PauseRequested, "native commit respects paused intent");
+                    published && player.Scope is not null && player.IsPaused, "native commit respects paused intent");
                 Check(kernel.Read(kernel.Owner).State == 3, "first native presentation is paused");
                 Check(player.Output is { SubmittedPictures: > 0 } output && output.Scope == player.Scope,
                     "the committed identity has an actual native render/Present submission");
@@ -225,7 +226,7 @@ public static class FilmKernelIntegrationTests
             var after = kernel.Read(donor);
             Check(commits == 0 && publications == 0 && kernel.Starts == 1 && failures == 0 && ends == 0 &&
                 player.Scope == donorScope && player.Output?.Scope == donorScope && player.HasOutput &&
-                player.PauseRequested && player.LastErrorCode is null && after.State == 3 && after.Error == 0 &&
+                player.IsPaused && player.LastErrorCode is null && after.State == 3 && after.Error == 0 &&
                 after.SubmittedPictures == before.SubmittedPictures &&
                 Math.Abs(after.Position - before.Position) < .000001 &&
                 Math.Abs(player.PositionSeconds - before.Position) < .000001,
@@ -254,7 +255,7 @@ public static class FilmKernelIntegrationTests
             await player.SelectSubtitleTrackAsync(scope, tracks.Subtitles[0].Index);
             var selected = await player.ReadTracksAsync();
             Check(selected?.AudioIndex == alternate && selected?.SubtitleIndex == tracks.Subtitles[0].Index &&
-                player.Scope == scope && player.PauseRequested, "track commands preserve identity and pause intent");
+                player.Scope == scope && player.IsPaused, "track commands preserve identity and pause intent");
             try
             {
                 await player.SelectAudioTrackAsync(scope, int.MaxValue);

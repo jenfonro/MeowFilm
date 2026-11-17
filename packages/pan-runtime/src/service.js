@@ -5,9 +5,9 @@ import { PanStore } from './store.js';
 import { baidu } from './providers/baidu.js';
 import { tianyi } from './providers/tianyi.js';
 import { yidong } from './providers/yidong.js';
-import { quark, uc, quarkTV, ucTV } from './providers/quark-uc.js';
+import { quark, uc } from './providers/quark-uc.js';
 
-const providers = new Map([baidu, quark, uc, tianyi, yidong, quarkTV, ucTV].map(value => [value.id, value]));
+const providers = new Map([baidu, quark, uc, tianyi, yidong].map(value => [value.id, value]));
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value) &&
   [Object.prototype, null].includes(Object.getPrototypeOf(value));
 const clone = value => structuredClone(value);
@@ -264,12 +264,8 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
   function fileInput(provider, account, file) {
     requireValue(object(file) && ['share', 'stored'].includes(file.kind) &&
       typeof file.provider === 'string' && integer(file.accountRevision));
-    const base = ({ quark_tv: 'quark', uc_tv: 'uc' })[provider.id];
-    requireValue(file.provider === provider.id || base === file.provider);
-    const sourceAccount = accounts.get(file.provider);
-    requireValue(sourceAccount?.revision === file.accountRevision, 'STALE_ACCOUNT');
-    if (base) requireValue(file.kind === 'stored');
-    else requireValue(account.revision === file.accountRevision, 'STALE_ACCOUNT');
+    requireValue(file.provider === provider.id);
+    requireValue(account.revision === file.accountRevision, 'STALE_ACCOUNT');
     return clone(file);
   }
   function cancelLogin(login, status) {
@@ -398,7 +394,6 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
     requireValue(['list', 'prepare', 'play', 'refresh', 'login.start'].includes(operation), 'UNSUPPORTED_OPERATION');
     const provider = select(params.provider), account = accounts.get(provider.id);
     const owner = scope(provider.id, account, signal);
-    let sourceOwner;
     try {
       const ctx = context(provider, account, owner.signal);
       let result;
@@ -420,10 +415,6 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
       } else if (operation === 'login.start') result = await startLogin(provider, account, ctx);
       else {
         const file = fileInput(provider, account, params.file);
-        if (file.provider !== provider.id) {
-          sourceOwner = { id: file.provider, account: accounts.get(file.provider), controller: owner.controller };
-          controllers.add(sourceOwner);
-        }
         if (operation === 'prepare') result = { file: await ctx.prepare(file) };
         else {
           requireValue(provider.modes.includes(params.mode), 'UNSUPPORTED_OPERATION');
@@ -435,16 +426,13 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
             Object.entries(result.headers).every(([name, value]) =>
               /^[!#$%&'*+.^_`|~\w-]+$/.test(name) && typeof value === 'string' && !/[\r\n]/.test(value)),
           'UPSTREAM_FORMAT');
-          if (result.file) result = { ...result, file: stamp(file.provider, accounts.get(file.provider), result.file) };
-          // TV input can belong to the ordinary account; switching it while resolving invalidates the result too.
-          fileInput(provider, account, file);
+          if (result.file) result = { ...result, file: stamp(provider.id, account, result.file) };
         }
       }
       assertCurrent(provider.id, account, owner.signal);
       return clone(result);
     } finally {
       owner.dispose();
-      if (sourceOwner) controllers.delete(sourceOwner);
     }
   }
   return Object.freeze({

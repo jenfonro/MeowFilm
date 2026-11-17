@@ -1,7 +1,10 @@
 using System.Collections.Specialized;
 using System.Windows;
 using System.Windows.Automation;
+using System.Windows.Automation.Peers;
+using System.Windows.Automation.Provider;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -14,6 +17,93 @@ public static partial class DesktopTests
 {
     private static IEnumerable<TestCase> HeaderPresentationCases()
     {
+        yield return Case("search category shares one hit target and equal left-aligned menu without submitting", async () =>
+        {
+            var module = new ProbeModule("search-entry");
+            var page = new SearchEntryProbe(module);
+            await using var f = new Fixture([module], pages: [page]); await f.LoadAsync();
+            var root = DetachChrome(f.Shell);
+            using var source = new HwndSource(new HwndSourceParameters("shell-search-category-fixture")
+            {
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000088,
+                PositionX = 80, PositionY = 80, Width = 1110, Height = 800
+            });
+            source.RootVisual = root;
+            root.Measure(new(1110, 800)); root.Arrange(new Rect(0, 0, 1110, 800)); root.UpdateLayout();
+            await DrainAsync();
+            var picker = f.Element<ComboBox>("SearchTargetPicker");
+            var input = f.Search;
+            picker.SelectedValue = "music";
+            input.Text = "  草稿  ";
+            picker.ApplyTemplate(); root.UpdateLayout();
+            var toggle = (ToggleButton)picker.Template.FindName("TargetToggle", picker);
+            var popup = (Popup)picker.Template.FindName("PART_Popup", picker);
+            var menu = (Border)picker.Template.FindName("DropDown", picker);
+            True(picker.Focusable && input.Focusable && picker.FocusVisualStyle is not null,
+                "native ComboBox and input preserve their keyboard focus semantics");
+            Equal("搜索目标", AutomationProperties.GetName(picker), "category accessible name");
+            var expansion = (IExpandCollapseProvider)UIElementAutomationPeer.CreatePeerForElement(picker)!
+                .GetPattern(PatternInterface.ExpandCollapse);
+            var toggleAction = (IToggleProvider)UIElementAutomationPeer.CreatePeerForElement(toggle)!
+                .GetPattern(PatternInterface.Toggle);
+            foreach (var width in new[] { 92d, 118d })
+            {
+                picker.Width = width; root.UpdateLayout(); await DrainAsync();
+                foreach (var x in new[] { 15d, width / 2, width - 8 })
+                {
+                    var hit = root.InputHitTest(picker.TranslatePoint(new Point(x, picker.ActualHeight / 2), root));
+                    True(hit is DependencyObject target && (ReferenceEquals(target, toggle) || toggle.IsAncestorOf(target)),
+                        "magnifier label and arrow route to the same actual toggle");
+                    toggleAction.Toggle(); await UntilAsync(() => popup.IsOpen && menu.IsLoaded, "category dropdown opens");
+                    menu.UpdateLayout(); await DrainAsync();
+                    Equal(ExpandCollapseState.Expanded, expansion.ExpandCollapseState, "native accessible expanded state");
+                    True(Math.Abs(menu.ActualWidth - picker.ActualWidth) < .01,
+                        "visible menu body tracks the whole entry ActualWidth");
+                    True(Math.Abs(menu.PointToScreen(new Point()).X - picker.PointToScreen(new Point()).X) <= 1,
+                        "visible menu body aligns with the whole entry left edge, not its label");
+                    Equal("  草稿  ", input.Text, "opening categories preserves unsubmitted input");
+                    Equal(0, page.Submissions.Count, "category clicks never submit search");
+                    await NativeDesktopCapture.SaveAsync(menu, $"search-category-{width}-{x}");
+                    expansion.Collapse(); await DrainAsync();
+                }
+            }
+            expansion.Expand(); await UntilAsync(() => menu.IsLoaded && popup.IsOpen, "long categories open");
+            var labels = ChromeVisuals(menu).OfType<TextBlock>().Where(text => text.Text.Contains("小说")).ToArray();
+            True(labels.Length > 0 && labels.All(text => text.TextWrapping == TextWrapping.NoWrap &&
+                text.TextTrimming == TextTrimming.CharacterEllipsis && text.ActualWidth < menu.ActualWidth),
+                "long categories remain constrained single-line ellipsized labels");
+            True(ChromeVisuals(menu).OfType<TextBlock>().All(text => text.FontWeight == FontWeights.Normal) &&
+                picker.FontWeight == FontWeights.Normal && input.FontWeight == FontWeights.Normal,
+                "category controls and menu keep regular system typography");
+            expansion.Collapse();
+            Click(f.Button("设置")); await DrainAsync();
+            True(!input.IsEnabled && !picker.IsEnabled, "settings disables input and category entry together");
+            Equal(0, page.Submissions.Count, "category operations never submit");
+            source.RootVisual = null;
+        });
+        yield return Case("search category draft submits only through plain Enter", async () =>
+        {
+            var module = new ProbeModule("search-entry");
+            var page = new SearchEntryProbe(module);
+            await using var f = new Fixture([module], pages: [page]); await f.LoadAsync();
+            var input = f.Search;
+            input.Text = "   ";
+            RaiseKey(input, Key.Enter, ModifierKeys.None, false); await DrainAsync();
+            Equal(0, page.Submissions.Count, "empty input cannot submit");
+            input.Text = "  草稿  ";
+            f.Element<ComboBox>("SearchTargetPicker").SelectedValue = "novel";
+            False(RaiseKey(input, Key.Enter, ModifierKeys.Control, false).Handled, "modified Enter does not submit");
+            False(RaiseKey(input, Key.ImeProcessed, ModifierKeys.None, false).Handled, "IME composition does not submit");
+            Equal(0, page.Submissions.Count, "keyboard composition preserves the draft");
+            True(RaiseKey(input, Key.Enter, ModifierKeys.None, false).Handled, "plain Enter submits the input");
+            await UntilAsync(() => page.Submissions.Count == 1 && f.Status == "", "search submission completes");
+            Equal(("草稿", "novel"), page.Submissions.Single(), "trimmed query retains the selected opaque target");
+            Click(f.Button("设置")); await DrainAsync();
+            True(!input.IsEnabled && !f.Element<ComboBox>("SearchTargetPicker").IsEnabled,
+                "settings disables input and category entry together");
+            RaiseKey(input, Key.Enter, ModifierKeys.None, false); await DrainAsync();
+            Equal(1, page.Submissions.Count, "disabled search cannot submit");
+        });
         yield return Case("shared header composes different slot structures without a shell", async () =>
         {
             var navigation = new TextBox { Width = 160, Height = 36, Text = "retained navigation" };
@@ -497,6 +587,32 @@ public static partial class DesktopTests
             remove { changed -= value; Subscribers--; }
         }
         public void Publish(DesktopHeaderContribution value) { header = value; changed?.Invoke(this, EventArgs.Empty); }
+    }
+
+    private sealed class SearchEntryProbe(IDesktopModule owner) : IDesktopSearchPage
+    {
+        public string Id => "search";
+        public string Title => "搜索";
+        public string Glyph => "";
+        public bool ShowInSidebar => false;
+        public FrameworkElement View { get; } = new Grid();
+        public IReadOnlyList<DesktopSearchTarget> Targets { get; } =
+            [new("music", "音乐"), new("film", "影视"), new("novel", "小说类别长项长项长项长项")];
+        public string SelectedTarget { get; private set; } = "music";
+        public string Query { get; private set; } = "";
+        public IDesktopModule ContentOwner => owner;
+        public List<(string Query, string Target)> Submissions { get; } = [];
+        public Task ActivateAsync(CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+        public Task SubmitAsync(string query, string target, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            Query = query; SelectedTarget = target; Submissions.Add((query, target));
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class HeaderContributionProbe(string id, DesktopHeaderContribution header) : IDesktopPage, IDesktopHeaderSource

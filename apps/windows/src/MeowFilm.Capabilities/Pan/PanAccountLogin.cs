@@ -167,6 +167,8 @@ public sealed partial class PanAccounts
         var credentials = new Dictionary<string, object>();
         try
         {
+            if (draft.Keys.Any(key => !session.Row.CredentialFields.Any(field => field.Id == key)))
+                throw new BridgeException("INVALID_REQUEST");
             foreach (var field in session.Row.CredentialFields)
                 if (draft.TryGetValue(field.Id, out string? value) && value.Length > 0)
                     credentials.Add(field.Id, field.Parse(value));

@@ -99,6 +99,15 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       }
     });
   }
+  function detachedBrowsing(session, work) {
+    const generation = session.browseGeneration;
+    tracked(work).catch(error => {
+      if (!closed && !session.released && generation === session.browseGeneration && !cancelled(error)) {
+        session.browsing = { ...session.browsing, loading: false, refreshing: false, error: codeOf(error) };
+        publish(session);
+      }
+    });
+  }
   function valid(session, generation) {
     return !closed && !session.released && session.generation === generation && !session.stopped;
   }
@@ -143,31 +152,77 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     if (!map) { map = buildEpisodeMap(metadata); episodeMaps.set(metadata, map); }
     return map;
   }
-  function episodeProjection(session) {
+  function playbackMetadataSource(session) {
+    return session.metadataSources.find(row => row.id === session.playbackMetadataSourceId);
+  }
+  function playbackMetadata(session) {
+    const selected = playbackMetadataSource(session);
+    return selected ? session.metadataViews.get(selected.id)?.display ?? selected.metadata : null;
+  }
+  function episodeProjection(session, metadata = session.metadata) {
     const today = new Date(now() + 8 * 3_600_000).toISOString().slice(0, 10);
     const previous = session.episodeProjection;
-    if (previous?.metadata === session.metadata && previous.today === today &&
+    if (previous?.metadata === metadata && previous.today === today &&
         previous.preview === session.previewEpisodes) return previous;
-    const map = episodeMap(session.metadata);
-    const next = session.metadata?.next_episode_to_air;
+    const map = episodeMap(metadata);
+    const next = metadata?.next_episode_to_air;
     const nextSeason = next?.season_number, nextEpisode = next?.episode_number;
     const hasNext = Number.isSafeInteger(nextSeason) && Number.isSafeInteger(nextEpisode) &&
-      nextSeason > 0 && nextEpisode > 0 && session.metadata?.status !== 'Ended';
+      nextSeason > 0 && nextEpisode > 0 && metadata?.status !== 'Ended';
     const lastEpisode = next?.air_date && next.air_date <= today ? nextEpisode : nextEpisode - 1;
     const visible = map.filter(row => session.previewEpisodes || (!row.air_date || row.air_date <= today) &&
       (!hasNext || row.season < nextSeason || row.season === nextSeason && row.episode <= lastEpisode));
-    return session.episodeProjection = { metadata: session.metadata, today, preview: session.previewEpisodes,
+    return session.episodeProjection = { metadata, today, preview: session.previewEpisodes,
       map, visible, keys: new Set(map.map(row => `${row.season}:${row.episode}`)),
       visibleKeys: new Set(visible.map(row => `${row.season}:${row.episode}`)), seasons: new Map() };
   }
   function visibleEpisodes(session, allSeasons = false) {
-    if (['movie', 'group'].includes(session.target.kind)) return [];
+    const selected = session.metadataSources.find(row => row.id === session.metadataSourceId);
+    if ((selected?.kind ?? session.target.kind) !== 'tv') return [];
     if (!allSeasons && (session.browsing.loading && !session.browsing.refreshing || session.browsing.error)) return [];
     const { map, visible, seasons } = episodeProjection(session);
     if (allSeasons) return visible;
     const season = session.browsing.season ?? session.target.season ?? map.find(row => row.season > 0)?.season;
     if (!seasons.has(season)) seasons.set(season, visible.filter(row => row.season === season));
     return seasons.get(season);
+  }
+  function workInfo(session) {
+    const known = session.metadataSources.filter(row => object(row.metadata));
+    const primary = known.find(row => row.provider === 'tmdb' &&
+      session.entryTarget.metadataProvider === 'tmdb' &&
+      String(row.metadataId) === String(session.entryTarget.metadataId)) ??
+      (known.filter(row => row.provider === 'tmdb').length === 1
+        ? known.find(row => row.provider === 'tmdb') : null);
+    const related = known.filter(row => row.provider === 'douban' && (!primary ||
+      row.association?.targetProvider === 'tmdb' &&
+        String(row.association.targetMetadataId) === String(primary.metadataId) ||
+      primary.association?.targetProvider === 'douban' &&
+        String(primary.association.targetMetadataId) === String(row.metadataId)));
+    const douban = related.find(row => session.entryTarget.metadataProvider === 'douban' &&
+      String(row.metadataId) === String(session.entryTarget.metadataId)) ??
+      (related.length === 1 ? related[0] : null);
+    const selected = primary ?? douban;
+    if (!selected) return null;
+    const count = value => {
+      const number = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+      return Number.isSafeInteger(number) && number >= 0 ? number : null;
+    };
+    const metadata = selected.metadata;
+    let seasonCount = selected.kind === 'tv' ? count(metadata.number_of_seasons) : null;
+    let episodeCount = selected.kind === 'tv'
+      ? count(metadata.number_of_episodes ?? metadata.episodes_count) : null;
+    if (selected.provider === 'douban' && selected.kind === 'tv') {
+      const seasons = (selected.seasons ?? []).filter(row => Number.isSafeInteger(row.season) && row.season > 0);
+      seasonCount = seasons.length || null;
+      const counts = seasons.map(row => count(row.episodeCount));
+      episodeCount = counts.length && counts.every(value => value !== null)
+        ? counts.reduce((sum, value) => sum + value, 0) : null;
+    }
+    return { provider: selected.provider, metadataId: String(selected.metadataId), kind: selected.kind,
+      title: text(metadata.title) || text(metadata.name) || selected.title,
+      summary: text(metadata.overview) || text(metadata.intro) ||
+        (primary ? text(douban?.metadata.intro) || text(douban?.metadata.overview) : ''),
+      seasonCount, episodeCount };
   }
   function snapshot(session) {
     const unverifiedHints = new Map();
@@ -205,6 +260,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       browsing.lines = browsing.lines.map(row => ({ ...row, ...catalog.line(parent, row) }));
     }
     const projectFile = row => {
+      if (row.playbackTarget) return row;
       const candidate = session.candidates.get(row.candidateId);
       if (candidate) return { ...row, ...catalog.candidate(session.target, candidate) };
       const file = result?.detail?.lines.find(line => line.id === browsing.lineId)?.episodes.find(item => item.index === row.index);
@@ -230,7 +286,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       ...(session.entrySurface === undefined ? {} : { entrySurface: session.entrySurface }),
       stage: session.stage, error: session.error,
       errorStage: session.error && session.error === session.feedbackFailure?.code ? session.feedbackFailure.stage : null,
-      reportError: session.reportError, metadata,
+      reportError: session.reportError, metadata, workInfo: workInfo(session),
       metadataSources: session.metadataSources.map(row => {
         const value = catalog.metadata(row.provider,
           `${row.provider === 'douban' ? '/rexxar/api/v2' : '/3'}/${row.kind}/${row.metadataId}`,
@@ -248,10 +304,10 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         ...catalog.source(session.target, item.source, item.title || session.target.title) })),
       search: [...session.search.values()].map(state => fields(state, ['sourceKey', 'page', 'completed', 'loading', 'error'])),
       browsing, episodes, candidates: candidates.map(candidate => publicCandidate(candidate, session.target, catalog)),
-      attempt: session.pending && !session.pending.resourceReleased ? { id: session.pending.id, candidate: publicCandidate(session.pending.candidate, session.target, catalog),
+      attempt: session.pending && !session.pending.resourceReleased ? { id: session.pending.id, candidate: publicCandidate(session.pending.candidate, session.pending.target, catalog),
         prepareOnly: session.pending.prepareOnly, position: session.pending.position, paused: session.pending.paused } : null,
       current: session.current && !session.current.resourceReleased ? { attemptId: session.current.id,
-        candidate: publicCandidate(session.current.candidate, session.target, catalog), position: session.position,
+        candidate: publicCandidate(session.current.candidate, session.current.target, catalog), position: session.position,
         duration: session.duration, paused: session.paused } : null,
       constraint: clone(session.constraint), searchComplete: searchComplete(session),
       preferences: clone(preferences()), shortVideo: session.shortVideo, previewEpisodes: session.previewEpisodes,
@@ -261,8 +317,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
   }
   function contentTarget(session) {
     const target = session.searchMetadataTarget ?? session.entryTarget;
-    const selected = session.metadataSources.find(row => row.id === session.metadataSourceId);
-    const metadata = selected?.metadata ?? session.entryMetadata ?? session.metadata;
+    const metadata = session.entryMetadata ?? playbackMetadata(session);
     const value = { ...metadata, ...session.entryTarget, ...target };
     if (session.searchMetadataTarget)
       value.aliases = [metadata?.aliases, session.entryTarget.aliases, target.aliases]
@@ -338,7 +393,8 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     return library.read().manual.find(row => row.id === value.manualId && row.enabled !== false &&
       row.targetId === session.target.id && manualIdentity(row) === value.manualIdentity);
   }
-  async function recognizeResult(session, result, detail, target = session.target) {
+  async function recognizeResult(session, result, detail, target = session.target,
+    metadata = playbackMetadata(session), lifetime = 'playback') {
     if (result.hint && !result.verifiedRaw) return [];
     const source = { ...result.source };
     const manual = result.manualId ? currentManual(session, result) : null;
@@ -347,14 +403,14 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       if (manual?.seasonHint !== undefined) source.manualSeasonHint = manual.seasonHint;
     }
     const candidates = (await calculate(session, signal =>
-      recognizeCandidates(detail, { target, source, metadata: session.metadata, rules: session.rules, signal,
-        completeDirectory: true })))
+      recognizeCandidates(detail, { target, source, metadata, rules: session.rules, signal,
+        completeDirectory: true }), lifetime))
       .map(candidate => manual ? { ...candidate, manualId: manual.id, manualIdentity: manualIdentity(manual) } : candidate);
     const expanded = [];
     for (const candidate of candidates) {
       const variants = result.variants?.get(candidate.id);
       if (variants) expanded.push(...await calculate(session, signal =>
-        recognizeVariantCandidates(candidate, variants, { rules: session.rules, signal })));
+        recognizeVariantCandidates(candidate, variants, { rules: session.rules, signal }), lifetime));
       else expanded.push(candidate);
     }
     return expanded;
@@ -362,7 +418,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
   async function candidatesFrom(session, result, detail) {
     if (closed || session.released || result.detail !== detail || !session.results.includes(result) ||
         !currentSource(session, result.source)) return;
-    const target = session.target, metadata = session.metadata, generation = session.generation;
+    const target = session.target, metadata = playbackMetadata(session), generation = session.generation;
     const manual = result.manualId ? currentManual(session, result) : null;
     const manualKey = manual ? manualIdentity(manual) : null;
     const context = { detail, metadata: target.kind === 'group' ? null : metadata,
@@ -380,7 +436,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     if (closed || session.released) return;
     const current = result.manualId ? currentManual(session, result) : null;
     if (target !== session.target ||
-        metadata !== session.metadata || generation !== session.generation || result.detail !== detail ||
+        metadata !== playbackMetadata(session) || generation !== session.generation || result.detail !== detail ||
         !session.results.includes(result) || result.variants !== context.variants ||
         result.hint !== context.hint || result.verifiedRaw !== context.verifiedRaw ||
         result.source.manualSeasonHint !== context.seasonHint ||
@@ -415,13 +471,14 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     const raw = result.hint ? result.verifiedRaw : result.raw;
     const contentIdentity = !result.hint && result.contentMember ? content : null;
     const previous = result.match;
-    if (previous && previous.raw === raw && previous.target === target && previous.metadata === session.metadata &&
+    const metadata = playbackMetadata(session);
+    if (previous && previous.raw === raw && previous.target === target && previous.metadata === metadata &&
         previous.contentKind === contentIdentity?.kind && previous.contentProvider === contentIdentity?.metadataProvider &&
         previous.contentId === contentIdentity?.metadataId) return previous.value;
-    const entry = { raw, target, metadata: session.metadata, contentKind: contentIdentity?.kind,
+    const entry = { raw, target, metadata, contentKind: contentIdentity?.kind,
       contentProvider: contentIdentity?.metadataProvider, contentId: contentIdentity?.metadataId };
     result.match = entry;
-    entry.value = calculate(session, signal => matchesResult(raw, { target: { ...session.metadata, ...target },
+    entry.value = calculate(session, signal => matchesResult(raw, { target: { ...metadata, ...target },
       rules: session.rules, ...(contentIdentity
         ? { contentIdentity: fields(contentIdentity, ['kind', 'metadataProvider', 'metadataId']) } : {}), signal }));
     try { entry.value = await entry.value; }
@@ -435,7 +492,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     discoverVariants = false } = {}) {
     if (!retry && (session.excluded.has(candidate.id) ||
         candidate.fileIdentity !== undefined && session.excluded.has(candidate.fileIdentity))) return false;
-    if (target.metadataProvider && metadataCacheState(session)?.status === 'stale') return false;
+    if (target.metadataProvider && metadataCacheState(session, session.playbackMetadataSourceId)?.status === 'stale') return false;
     if (target.metadataProvider && candidate.eligible === false) return false;
     if (candidate.share && !candidate.file) return false;
     if (!explicit && !(target.metadataProvider ? smartSourceAllowed(session, candidate.source)
@@ -469,7 +526,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       excluded: retry ? new Set() : session.excluded, blocks: library.read().blocks,
       actualEpisode })) return false;
     if (target.kind === 'tv' && !explicit) {
-      const projection = episodeProjection(session), key = `${candidate.season}:${candidate.episode}`;
+      const projection = episodeProjection(session, playbackMetadata(session)), key = `${candidate.season}:${candidate.episode}`;
       if (projection.keys.has(key) && !projection.visibleKeys.has(key)) return false;
     }
     if (!gate || explicit || session.discoveryComplete) return true;
@@ -509,7 +566,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
           (recordId === undefined || recordId === detailId)
           ? record : undefined;
       }
-      await candidatesFrom(session, result, result.detail);
+      if (!browsing) await candidatesFrom(session, result, result.detail);
       if (!admitted()) return null;
       if (result.hint) {
         requireValue(result.verifiedRaw, 'UPSTREAM_FORMAT');
@@ -531,6 +588,10 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
   async function expandDetail(session, result, detail, generation) {
     for (let index = 0; index < detail.lines.length && valid(session, generation); index++) {
       const line = result.baseDetail?.lines[index] ?? detail.lines[index];
+      if (!session.reselecting && session.target.source?.lineId !== undefined &&
+          line.id !== session.target.source.lineId) continue;
+      if (session.constraint.action === 'pan' && providerFamily(line.provider) &&
+          providerFamily(line.provider) !== providerFamily(session.constraint.provider)) continue;
       if (line.expanded || !line.episodes.some(item => item.share ||
         String(item.playId ?? item.id ?? item.url).startsWith('meow.pan.v1.'))) continue;
       try {
@@ -562,7 +623,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
   async function installPending(session, candidate, descriptor, resource, generation, preparedAt = now(), explicit = false) {
     if (!valid(session, generation)) { await media.release(resource.id); return false; }
     if (['source', 'group'].includes(session.target.kind)) session.target = targetForCandidate(session.target, candidate);
-    const metadataKind = session.metadataSources.find(row => row.id === session.metadataSourceId)?.kind;
+    const metadataKind = playbackMetadataSource(session)?.kind;
     const sameContent = session.playbackTarget?.id === session.target.id;
     const sameMetadataEpisode = sameContent && metadataKind === 'tv' &&
       (session.playbackTarget.globalEpisode !== undefined && session.target.globalEpisode !== undefined
@@ -576,6 +637,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         sameActualEpisode(session.playbackTarget, session.target);
     session.pending = { id: randomUUID(), candidate, descriptor, resource, preparedAt, generation, explicit,
       prepareOnly: session.prepareOnly, target: clone(session.target),
+      metadataSourceId: session.playbackMetadataSourceId,
       position: continuation ? session.position
         : !session.resumeCandidateId || session.resumeCandidateId === candidate.id ? session.resumePosition : 0,
       paused: continuation ? session.paused : false };
@@ -710,12 +772,8 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       await session.initialization;
       if (!valid(session, generation)) return;
       if (session.initializationError && session.target.metadataProvider) throw fail(session.initializationError);
-      if (session.target.metadataProvider && metadataCacheState(session)?.status === 'stale') {
-        const refreshError = await refreshMetadataDisplay(session);
-        if (!valid(session, generation)) return;
-        if (refreshError) throw fail(refreshError);
-        requireFreshMetadata(session);
-      }
+      if (session.target.metadataProvider) await loadPlaybackMetadata(session, generation);
+      if (!valid(session, generation)) return;
       if (!groupScopeAvailable(session)) {
         session.stage = 'unavailable'; session.error = 'SOURCE_NOT_FOUND'; publish(session); return;
       }
@@ -734,12 +792,13 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       }
       requireValue(session.target.kind !== 'tv' || session.target.episode !== undefined, 'NO_EPISODE_MAPPING');
       if (session.target.kind === 'tv' && session.target.metadataProvider === 'tmdb' && session.target.season !== undefined) {
-        const target = session.target, epoch = session.metadataEpoch;
+        const target = session.target;
         const entry = await data.seasonMetadataEntry(target, target.season, { rules: session.rules,
-          canSchedule: () => valid(session, generation) && epoch === session.metadataEpoch });
-        if (!valid(session, generation) || epoch !== session.metadataEpoch) return;
-        session.metadata = mergeSeason(target, session.metadata, target.season, entry.value);
-        acceptMetadataCache(session, entry, target.season);
+          canSchedule: () => valid(session, generation) });
+        if (!valid(session, generation)) return;
+        const display = mergeSeason(target, playbackMetadata(session), target.season, entry.value);
+        acceptMetadataCache(session, entry, target.season, undefined, session.playbackMetadataSourceId, display);
+        if (session.playbackMetadataSourceId === session.metadataSourceId) session.metadata = display;
         requireFreshMetadata(session);
       }
       session.stage = session.target.metadataProvider ? 'cached' : 'loading'; publish(session);
@@ -862,7 +921,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         session.target = targetForCandidate(session.target, donor.candidate);
       }
       session.stage = 'unavailable';
-      session.error = selectionError(session, session.results.find(value => value.error)?.error ??
+      session.error = selectionError(session,
         [...session.search.values()].find(value => value.error)?.error ?? 'NO_MATCH');
       publish(session);
     } catch (error) {
@@ -908,10 +967,11 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     rows.sort((a, b) => (a.season_number ?? a.season) - (b.season_number ?? b.season));
     return { ...metadata, [key]: rows };
   }
-  function metadataCacheState(session) {
-    const base = clone(session.metadataCache);
-    if (base && session.metadataExpiresAt <= now()) base.status = 'stale';
-    const season = session.metadataSeasonCache;
+  function metadataCacheState(session, id = session.metadataSourceId) {
+    const view = session.metadataViews.get(id);
+    const base = clone(view?.cache ?? null);
+    if (base && view.expiresAt <= now()) base.status = 'stale';
+    const season = view?.seasonCache;
     if (!season) return base;
     const error = base?.error ?? season.cache.error;
     return { ...clone(base ?? season.cache),
@@ -921,20 +981,23 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         [`season:${season.season}`]: { status: season.cache.error ? 'failed' : 'ready',
           fetchedAt: season.fetchedAt, ...(season.cache.error ? { error: clone(season.cache.error) } : {}) } } };
   }
-  function acceptMetadataCache(session, entry, season, supplementError) {
+  function acceptMetadataCache(session, entry, season, supplementError,
+    id = session.metadataSourceId, display = session.metadata) {
+    const view = session.metadataViews.get(id);
+    if (!view) return;
     if (season === undefined) {
-      session.metadataCache = entry?.cache ?? null;
-      session.metadataExpiresAt = entry?.expiresAt;
-      session.metadataSeasonCache = null;
+      view.cache = entry?.cache ?? null;
+      view.expiresAt = entry?.expiresAt;
+      view.seasonCache = null;
     } else {
-      session.metadataSeasonCache = { season, cache: entry.cache, fetchedAt: entry.fetchedAt, expiresAt: entry.expiresAt };
-      const view = session.metadataViews.get(session.metadataSourceId);
-      if (view) { view.display = session.metadata; view.loadedSeasons.add(season); }
+      view.seasonCache = { season, cache: entry.cache, fetchedAt: entry.fetchedAt, expiresAt: entry.expiresAt };
+      view.display = display; view.loadedSeasons.add(season);
     }
-    session.metadataError = metadataCacheState(session)?.error?.code ?? supplementError ?? null;
+    if (id === session.metadataSourceId)
+      session.metadataError = metadataCacheState(session)?.error?.code ?? supplementError ?? null;
   }
   function requireFreshMetadata(session) {
-    const cache = metadataCacheState(session);
+    const cache = metadataCacheState(session, session.playbackMetadataSourceId);
     if (cache?.status === 'stale') throw fail(cache.error?.code ?? 'STALE_METADATA');
   }
   const metadataIdentity = row => identity(row.provider, row.kind, String(row.metadataId));
@@ -948,9 +1011,53 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         isDeepStrictEqual(previous.reference, reference)) return previous.display;
     const loadedSeasons = new Set((base?.doubanSeasons ?? base?.seasons ?? [])
       .filter(season => Array.isArray(season.episodes)).map(season => season.season_number ?? season.season));
-    session.metadataViews.set(id, { base, display: base, reference, loadedSeasons,
-      browsing: previous?.browsing });
+    session.metadataViews.set(id, { ...previous, base, display: base, reference, loadedSeasons });
     return base;
+  }
+  async function loadPlaybackMetadata(session, generation) {
+    const selected = playbackMetadataSource(session);
+    requireValue(selected, 'NOT_FOUND');
+    const cache = metadataCacheState(session, selected.id);
+    if (cache && cache.status !== 'stale') return;
+    const target = { ...session.target, kind: selected.kind,
+      metadataProvider: selected.provider, metadataId: selected.metadataId };
+    let entry;
+    try {
+      entry = await data.targetMetadataEntry(target, { rules: session.rules,
+        canSchedule: () => valid(session, generation) });
+    } catch (error) {
+      if (valid(session, generation) && selected.id === session.metadataSourceId)
+        session.metadataError = codeOf(error);
+      throw error;
+    }
+    if (!valid(session, generation)) return;
+    selected.metadata = entry.value;
+    const display = metadataDisplay(session, selected);
+    acceptMetadataCache(session, entry, undefined, undefined, selected.id, display);
+    if (selected.id === session.metadataSourceId) session.metadata = display;
+    requireFreshMetadata(session);
+  }
+  async function refreshPlaybackSeason(session, season, requestedEpisode) {
+    const generation = session.generation, target = session.target;
+    const selected = playbackMetadataSource(session);
+    requireValue(selected, 'NOT_FOUND');
+    const admitted = () => valid(session, generation) && session.target === target;
+    try {
+      const entry = await data.targetMetadataEntry(target, { rules: session.rules, canSchedule: admitted });
+      if (!admitted()) return;
+      const display = metadataDisplay(session, { ...selected, metadata: entry.value });
+      const value = await seasonDisplay(session, target, display, season, { canSchedule: admitted, requestedEpisode });
+      if (!admitted()) return;
+      selected.metadata = entry.value;
+      acceptMetadataCache(session, entry, undefined, undefined, selected.id, value.display);
+      acceptMetadataCache(session, value.entry, season, value.error, selected.id, value.display);
+      if (selected.id === session.metadataSourceId) session.metadata = value.display;
+      requireFreshMetadata(session);
+      publish(session);
+    } catch (error) {
+      if (admitted() && selected.id === session.metadataSourceId) session.metadataError = codeOf(error);
+      throw error;
+    }
   }
   function associatedTMDB(session, selected) {
     if (selected?.provider !== 'douban') return null;
@@ -1012,7 +1119,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
   function initializeEpisode(session, previous) {
     if (session.target.episode === undefined) {
       const episode = session.target.globalEpisode === undefined && previous ? previous.episode
-        : resolveEpisode(episodeMap(session.metadata), { globalEpisode: session.target.globalEpisode ?? 1 });
+        : resolveEpisode(episodeMap(playbackMetadata(session)), { globalEpisode: session.target.globalEpisode ?? 1 });
       if (episode && (session.target.globalEpisode === undefined || session.target.season === undefined ||
           session.target.season === episode.season)) session.target = episodeTarget(session.target, episode);
     }
@@ -1021,12 +1128,12 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         (session.target.globalEpisode === undefined || previous.episode?.globalEpisode === undefined ||
           session.target.globalEpisode === previous.episode.globalEpisode)) session.resumePosition = previous.position;
   }
-  async function discoverMetadata(session) {
-    const epoch = session.metadataEpoch, browsing = session.browseGeneration;
+  async function discoverMetadata(session, target = session.target) {
+    const epoch = session.metadataEpoch;
     const admitted = () => !session.released && !session.stopped && !closed &&
-      epoch === session.metadataEpoch && browsing === session.browseGeneration;
+      epoch === session.metadataEpoch;
     try {
-      const rows = await data.metadataSources(session.target, {
+      const rows = await data.metadataSources(target, {
         rules: session.rules, canSchedule: admitted });
       if (!admitted()) return;
       const sources = rows.map(row => ({ ...clone(row), id: metadataIdentity(row) }));
@@ -1035,7 +1142,8 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       session.metadataSources = sources;
       for (const id of session.metadataViews.keys())
         if (!sources.some(row => row.id === id)) session.metadataViews.delete(id);
-      session.metadataError = metadataCacheState(session)?.error?.code ?? null;
+      const cache = metadataCacheState(session);
+      session.metadataError = cache ? cache.error?.code ?? null : session.metadataError;
       const selected = session.metadataSources.find(row => row.id === session.metadataSourceId);
       if (selected?.provider === 'douban' && selected.seasons) {
         const display = metadataDisplay(session, selected);
@@ -1043,14 +1151,15 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
           buildEpisodeMap(display).find(row => row.season > 0)?.season;
         if (season !== undefined) {
           const value = await seasonDisplay(session, { ...session.target,
-            metadataProvider: selected.provider, metadataId: selected.metadataId }, display, season, { canSchedule: admitted });
+            kind: selected.kind, metadataProvider: selected.provider, metadataId: selected.metadataId },
+            display, season, { canSchedule: admitted });
           if (!admitted()) return;
           session.metadata = value.display;
           acceptMetadataCache(session, value.entry, season, value.error);
         } else session.metadata = display;
       }
       if (!session.restoreOnly && session.target.kind === 'tv' &&
-          session.target.episode === undefined && session.generation === 0) {
+          session.target.episode === undefined && session.generation === 0 && session.selectionEpoch === 0) {
         const previous = session.platform === 'windows'
           ? library.read().history.find(row => row.targetId === session.target.id) : null;
         initializeEpisode(session, previous);
@@ -1068,7 +1177,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     }
     publish(session);
   }
-  async function browseMetadata(session, id, keepSource = false) {
+  async function browseMetadata(session, id, keepSource = false, context = {}) {
     const selected = session.metadataSources.find(row => row.id === id);
     requireValue(selected, 'NOT_FOUND');
     rememberBrowsing(session);
@@ -1076,17 +1185,16 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     const saved = keepSource ? session.browsing : view?.browsing ??
       (view?.loadedSeasons.size ? { sourceId: null, lineId: null, loading: false, error: null,
         lines: [], episodes: [] } : undefined);
-    const selectedSeason = saved?.season ?? (id === session.metadataSourceId ? session.browsing.season : undefined);
-    session.userSelected = true;
-    const generation = ++session.browseGeneration;
-    const epoch = ++session.metadataEpoch;
+    const selectedSeason = context.season ?? saved?.season ??
+      (id === session.metadataSourceId ? session.browsing.season : undefined);
+    const generation = context.generation ?? ++session.browseGeneration;
+    const epoch = session.metadataEpoch;
     const admitted = () => !session.released && !closed &&
       generation === session.browseGeneration && epoch === session.metadataEpoch;
-    session.generation++; session.runKey = null;
-    const pending = session.pending; session.pending = null;
-    if (pending) detached(session, retire(session, pending));
-    detached(session, clearPrefetch(session));
-    session.browsing = saved ? { ...session.browsing, loading: true, refreshing: true, error: null }
+    const previousId = session.metadataSourceId, previousMetadata = session.metadata;
+    session.metadataSourceId = id;
+    session.metadata = view?.display ?? selected.metadata ?? null;
+    session.browsing = saved ? { ...saved, loading: true, refreshing: true, error: null }
       : { sourceId: null, lineId: null, loading: true, error: null, lines: [], episodes: [] };
     publish(session);
     let loadedMetadata;
@@ -1094,31 +1202,41 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       const target = { ...session.target, kind: selected.kind,
         metadataProvider: selected.provider, metadataId: selected.metadataId };
       delete target.members; delete target.source;
-      const entry = await data.targetMetadataEntry(target, { rules: session.rules, canSchedule: admitted });
+      const knownSeasons = (view?.display ?? selected.metadata)?.doubanSeasons ??
+        (view?.display ?? selected.metadata)?.seasons ?? selected.seasons ?? [];
+      const entry = !context.refresh && object(selected.metadata) && (context.season === undefined ||
+          knownSeasons.some(row => (row.season_number ?? row.season) === context.season)) ? null
+        : await data.targetMetadataEntry(target, { rules: session.rules, canSchedule: admitted,
+          refresh: context.refresh === true });
       if (!admitted()) return;
-      const metadata = entry.value;
+      const metadata = entry?.value ?? selected.metadata;
       let display = metadataDisplay(session, { ...selected, metadata });
       const coordinates = session.target.kind === 'group' ? {}
         : session.target.globalEpisode !== undefined ? { globalEpisode: session.target.globalEpisode }
-        : id === session.metadataSourceId ? fields(session.target, ['season', 'episode']) : {};
-      const mappedEpisode = value => id === session.metadataSourceId
+        : id === previousId ? fields(session.target, ['season', 'episode']) : {};
+      const mappedEpisode = value => id === previousId
         ? resolveEpisode(buildEpisodeMap(value), coordinates)
-        : matchEpisodeMaps(value, session.metadata).find(({ match }) => match &&
+        : matchEpisodeMaps(value, previousMetadata).find(({ match }) => match &&
           (session.target.season !== undefined && session.target.episode !== undefined
             ? match.season === session.target.season && match.episode === session.target.episode
             : match.globalEpisode !== undefined && match.globalEpisode === session.target.globalEpisode))?.episode;
       let mapped = mappedEpisode(display);
       const seasons = display.doubanSeasons ?? display.seasons ?? [];
+      if (context.season !== undefined)
+        requireValue(target.kind === 'tv' && seasons.some(row =>
+          (row.season_number ?? row.season) === context.season), 'NOT_FOUND');
       const firstSeason = seasons.find(row => (row.season_number ?? row.season) > 0) ?? seasons[0];
-      const preferredSeason = selectedSeason ?? mapped?.season ?? (id === session.metadataSourceId
+      const preferredSeason = selectedSeason ?? mapped?.season ?? (id === previousId
         ? coordinates.season ?? session.browsing.season
-        : sameSeasonPartition(display, session.metadata) ? session.target.season : undefined);
+        : sameSeasonPartition(display, previousMetadata) ? session.target.season : undefined);
       const season = seasons.some(row => (row.season_number ?? row.season) === preferredSeason)
         ? preferredSeason : firstSeason?.season_number ?? firstSeason?.season;
       loadedMetadata = { entry, display, season };
       let seasonResult;
-      if (target.kind === 'tv' && season !== undefined) {
-        const value = await seasonDisplay(session, target, display, season, { canSchedule: admitted });
+      if (target.kind === 'tv' && season !== undefined && (context.refresh ||
+          !session.metadataViews.get(id)?.loadedSeasons.has(season))) {
+        const value = await seasonDisplay(session, target, display, season,
+          { canSchedule: admitted, refresh: context.refresh === true });
         if (!admitted()) return;
         display = value.display;
         seasonResult = value;
@@ -1126,30 +1244,34 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       }
       selected.metadata = metadata;
       session.metadata = display; session.metadataSourceId = id;
-      acceptMetadataCache(session, entry);
+      if (entry) acceptMetadataCache(session, entry);
       if (seasonResult) acceptMetadataCache(session, seasonResult.entry, season, seasonResult.error);
+      session.metadataError = metadataCacheState(session)?.error?.code ?? seasonResult?.error ?? null;
       loadedMetadata = null;
-      if (!await selectTarget(session, episodeTarget(target, mapped ?? {})) || !admitted()) return;
       session.browsing = { ...(saved ?? session.browsing), season, error: null };
       await refreshBrowsing(session);
       if (!admitted()) return;
-      session.browsing = { ...session.browsing, loading: false, refreshing: false };
-      rememberBrowsing(session);
-      session.stage = session.current && !session.current.resourceReleased ? 'playing' : 'idle';
+      session.browsing = { ...session.browsing, loading: context.complete === false, refreshing: false };
+      if (context.complete !== false) rememberBrowsing(session);
+      publish(session);
+      return true;
     } catch (error) {
       if (!admitted()) return;
       if (saved) {
         if (loadedMetadata && id === session.metadataSourceId) {
           session.metadata = loadedMetadata.display;
-          selected.metadata = loadedMetadata.entry.value;
-          acceptMetadataCache(session, loadedMetadata.entry);
+          if (loadedMetadata.entry) {
+            selected.metadata = loadedMetadata.entry.value;
+            acceptMetadataCache(session, loadedMetadata.entry);
+          }
           session.browsing = { ...session.browsing, season: loadedMetadata.season };
         }
-        session.browsing = { ...session.browsing, loading: false, refreshing: false };
+        session.browsing = { ...session.browsing, loading: false, refreshing: false, error: codeOf(error) };
         session.metadataError = codeOf(error);
       } else session.browsing = { ...session.browsing, loading: false, error: codeOf(error), episodes: [] };
     }
     publish(session);
+    return false;
   }
   async function restoreReads(session) {
     const selected = session.restoreBrowsing;
@@ -1197,10 +1319,10 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         if (!resolved) {
           session.entryResolution = 'unmatched';
           session.metadataSources = []; session.metadataSourceId = null;
-          session.metadata = session.entryMetadata;
-          if (session.target.kind === 'group' && !session.target.members.length) {
-            session.restoring = false; session.stage = 'idle'; publish(session); return;
-          }
+          displayTarget = session.entryTarget;
+          try {
+            entry = await data.targetMetadataEntry(displayTarget, { rules: session.rules, canSchedule: admitted, refresh });
+          } catch (error) { displayError = codeOf(error); }
         } else {
           session.entryResolution = 'matched';
           session.seedWaitGroup = false;
@@ -1222,18 +1344,19 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       const metadata = entry?.value ?? (session.entryResolution === 'unmatched' ? session.entryMetadata
         : displayTarget !== session.target ? session.metadata : null);
       session.metadata = metadata;
-      acceptMetadataCache(session, entry);
       if (displayError) session.metadataError = displayError;
       if (displayTarget.metadataProvider) {
         const row = { provider: displayTarget.metadataProvider, metadataId: displayTarget.metadataId,
           kind: displayTarget.kind, title: displayTarget.title, metadata };
         session.metadataSourceId = metadataIdentity(row);
         session.metadataSources = [{ ...row, id: session.metadataSourceId }];
+        session.playbackMetadataSourceId = session.metadataSourceId;
         session.metadata = metadataDisplay(session, row);
+        acceptMetadataCache(session, entry, undefined, displayError);
         // Association lookup must not delay the primary source's automatic
         // preparation. Failure only affects the optional metadata selector.
-        if (session.target.metadataProvider) {
-          session.metadataDiscovery = discoverMetadata(session);
+        if (displayTarget.metadataProvider) {
+          session.metadataDiscovery = discoverMetadata(session, displayTarget);
           detached(session, session.metadataDiscovery);
         }
       }
@@ -1268,16 +1391,36 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         }
       }
       if (session.released) return;
+      if (session.browseGeneration === 0) {
+        if (session.browsing.sourceId !== null)
+          await browse(session, session.browsing.sourceId, session.browsing.lineId ?? undefined);
+        else session.browsing = { ...session.browsing, loading: false,
+          ...(session.target.season === undefined ? {} : { season: session.target.season }) };
+      }
       if (session.generation === 0 || session.stage === 'loading') {
         session.stage = 'idle'; publish(session);
       }
-      if (session.generation !== 0) return;
+      if (session.generation !== 0 || session.selectionEpoch !== 0) return;
       if (session.restoreOnly) {
         await restoreReads(session);
         return;
       }
-      if (session.target.metadataProvider && metadataCacheState(session)?.status === 'stale' ||
-          session.target.kind === 'group' && !session.target.members.length) return;
+      if (session.target.kind === 'group' && !session.target.members.length) {
+        session.stage = 'unavailable'; session.error = 'SOURCE_NOT_FOUND'; publish(session); return;
+      }
+      if (session.target.kind === 'source' && !session.browsing.loading) {
+        if (session.browsing.error) {
+          session.stage = 'error'; session.error = session.browsing.error; publish(session); return;
+        }
+        if (!session.browsing.episodes.length) {
+          session.stage = 'unavailable'; session.error = 'MEDIA_UNAVAILABLE'; publish(session); return;
+        }
+      }
+      if (session.target.metadataProvider && metadataCacheState(session)?.status === 'stale') return;
+      if (session.target.metadataProvider && !session.sources.some(source => source.enabled !== false) &&
+          !library.read().manual.some(row => row.targetId === session.target.id && row.enabled !== false && row.share)) {
+        session.stage = 'unavailable'; session.error = 'MEDIA_UNAVAILABLE'; publish(session); return;
+      }
       const autoPrepare = session.platform === 'ios' && !!session.target.metadataProvider && preferences().iosAutoPrepare;
       // An explicit global coordinate is not an instruction to fall back to
       // the first episode or another episode's historical position.
@@ -1292,6 +1435,8 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       if (admitted()) {
         session.restoring = false;
         session.initializationError = codeOf(error);
+        if (session.browseGeneration === 0)
+          session.browsing = { ...session.browsing, loading: false, error: codeOf(error) };
         if (session.entryResolution === 'loading') session.entryResolution = 'error';
         if (session.generation === 0 || session.stage === 'loading') {
           session.stage = 'error'; session.error = codeOf(error); publish(session);
@@ -1371,15 +1516,15 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         !target.metadataProvider && entryTarget.metadataProvider === 'tmdb' ? clone(input.metadata ?? null) : null,
       rules: capturedRules,
       calculations: new Map(), metadataViews: new Map(), candidateEpoch: 0,
-      metadataSources: [], metadataSourceId: null, metadataError: null,
-      metadataCache: null, metadataSeasonCache: null, lastFailed: null,
+      metadataSources: [], metadataSourceId: null, playbackMetadataSourceId: null, metadataError: null,
+      lastFailed: null,
       initializationError: null,
       results: [], resultKeys: new Set(), candidates: new Map(), excluded: new Set(), listeners: new Set(),
       search: new Map(sources.map(source => [source.key, { sourceKey: source.key, page: 0, completed: false,
         loading: false, error: null, seen: new Set() }])),
-      sequence: 0, generation: 0, metadataEpoch: 0, browseGeneration: 0, searchGeneration: 0,
+      sequence: 0, generation: 0, selectionEpoch: 0, metadataEpoch: 0, browseGeneration: 0, searchGeneration: 0,
       stage: 'loading', error: null, reportError: null,
-      browsing: { sourceId: null, lineId: null, loading: false, error: null, lines: [], episodes: [] },
+      browsing: { sourceId: null, lineId: null, loading: true, error: null, lines: [], episodes: [] },
       stopped: false, released: false, pending: null, current: null, constraint: { action: 'default' },
       prepareOnly: false, resumePosition: 0, position: 0, duration: 0, paused: false,
       shortVideo: false, previewEpisodes: (library.read().previewTargets ?? []).includes(target.id),
@@ -1559,6 +1704,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         }
         session.generation++; session.runKey = null; session.metadataEpoch++;
         session.metadata = display; session.metadataSourceId = row.id; session.initializationError = null;
+        session.playbackMetadataSourceId = row.id;
         acceptMetadataCache(session, entry);
         const first = carrier.kind === 'tv' ? resolveEpisode(episodeMap(display), { globalEpisode: 1 }) : null;
         if (!await selectTarget(session, episodeTarget(metadataTarget, first ?? {}))) return;
@@ -1594,45 +1740,71 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       if (view) view.browsing = browsing;
     }
   }
-  function browseEpisodes(result, line) {
+  function browseEpisodes(result, line, recognized = result.recognized?.candidates, parent) {
     if (!line) return [];
     result.directories ??= new Map();
-    const recognized = result.recognized?.candidates;
     const previous = result.directories.get(line.id);
     if (previous?.line === line && previous.recognized === recognized) return previous.episodes;
     const candidates = new Map((recognized ?? []).filter(item => item.lineId === line.id)
       .map(item => [item.episodeId, item]));
-    const episodes = line.episodes.map(value => {
+    const episodes = line.episodes.filter(value => !value.share || value.file).map(value => {
       const candidate = candidates.get(value.id);
       return { id: candidate?.id ?? identity(result.id, line.id, value.id), ...fields(value, ['name', 'path', 'index']),
         ...(candidate ? { candidateId: candidate.id, ...fields(candidate,
-          ['season', 'episode', 'globalEpisode', 'quality', 'resolution', 'fps', 'codec']) } : {}) };
+          ['season', 'episode', 'globalEpisode', 'quality', 'resolution', 'fps', 'codec']),
+          ...(parent ? catalog.candidate(parent, candidate) : {}) } : {}) };
     });
     result.directories.set(line.id, { line, recognized, episodes });
+    return episodes;
+  }
+  async function directoryProjection(session, result, line, generation) {
+    if (!line) return [];
+    const selected = session.metadataSources.find(row => row.id === session.metadataSourceId);
+    const metadata = selected ? session.metadata : null;
+    const parent = { id: session.selectionId, title: session.entryTarget.title };
+    const target = selected ? { ...parent, kind: selected.kind,
+      metadataProvider: selected.provider, metadataId: selected.metadataId } : session.entryTarget;
+    const previous = result.directories?.get(line.id);
+    if (previous?.line === line && previous.metadata === metadata && previous.variants === result.variants)
+      return previous.episodes;
+    const candidates = await recognizeResult(session, result, result.detail, target, metadata, 'session');
+    if (closed || session.released || generation !== session.browseGeneration ||
+        metadata !== (selected ? session.metadata : null) || !currentSource(session, result.source)) return null;
+    const episodes = browseEpisodes(result, line, candidates, parent);
+    Object.assign(result.directories.get(line.id), { metadata, variants: result.variants });
     return episodes;
   }
   async function refreshBrowsing(session) {
     const browsing = session.browsing, generation = session.browseGeneration;
     const result = session.results.find(row => row.id === browsing.sourceId);
     if (!result?.detail) return;
-    const target = session.target, metadata = session.metadata;
-    await candidatesFrom(session, result, result.detail);
-    if (closed || session.released || session.browsing !== browsing || generation !== session.browseGeneration ||
-        target !== session.target || metadata !== session.metadata || !currentSource(session, result.source)) return;
+    const metadata = session.metadata;
     const line = result.detail.lines.find(row => row.id === browsing.lineId);
-    const episodes = browseEpisodes(result, line);
+    const episodes = await directoryProjection(session, result, line, generation);
+    if (closed || session.released || session.browsing !== browsing || generation !== session.browseGeneration ||
+        metadata !== session.metadata || episodes === null || !currentSource(session, result.source)) return;
     if (browsing.episodes !== episodes) session.browsing = { ...browsing, episodes };
     rememberBrowsing(session);
   }
-  async function browse(session, resultId, lineId, { refresh = false, retainDisplay = false } = {}) {
+  async function browse(session, resultId, lineId, {
+    refresh = false, retainDisplay = false, metadataSourceId, season,
+  } = {}) {
     rememberBrowsing(session);
     const generation = ++session.browseGeneration;
+    lineId ??= undefined;
     if (!resultId) {
+      if (metadataSourceId === null) {
+        session.metadataSourceId = null; session.metadata = null;
+      } else if (metadataSourceId !== undefined || season !== undefined || refresh) {
+        const id = metadataSourceId ?? session.metadataSourceId;
+        requireValue(id, 'NOT_FOUND');
+        await browseMetadata(session, id, false, { generation, season, refresh });
+        return;
+      }
       const saved = session.metadataViews.get(session.metadataSourceId)?.browsing;
       session.browsing = saved ? { ...saved, loading: false, refreshing: false, error: null }
         : { sourceId: null, lineId: null, loading: false, error: null, lines: [], episodes: [] };
       publish(session);
-      if (session.target.metadataProvider) await refreshMetadataDisplay(session);
       return;
     }
     const result = session.results.find(value => value.id === resultId);
@@ -1640,68 +1812,83 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     const admitted = () => !session.released && !closed && generation === session.browseGeneration &&
       currentSource(session, result.source);
     const previous = session.browsing;
+    const previousMetadataSourceId = session.metadataSourceId;
     const saved = previous.sourceId === resultId ? previous : result.browsing;
     lineId ??= saved?.lineId ?? undefined;
     const knownLine = result.detail?.lines.find(row => row.id === lineId) ??
       (lineId === undefined ? result.detail?.lines[0] : undefined);
-    const retained = !!knownLine || retainDisplay && previous.sourceId === resultId &&
+    const retained = !!knownLine && result.directories?.has(knownLine.id) ||
+      retainDisplay && previous.sourceId === resultId &&
       (lineId === undefined || lineId === previous.lineId);
     const priorDetail = retained ? result.detail : null;
     const display = knownLine ? { sourceId: resultId, lineId: knownLine.id, loading: false, error: null,
       lines: result.detail.lines.map(value => fields(value, ['id', 'label', 'provider'])),
-      episodes: browseEpisodes(result, knownLine),
+      episodes: retained ? result.directories?.get(knownLine.id)?.episodes ?? [] : [],
       ...((previous.season ?? saved?.season) === undefined ? {} : { season: previous.season ?? saved.season }) } : saved;
     session.browsing = retained ? { ...(display ?? previous), loading: true, refreshing: true, error: null }
       : { sourceId: resultId, lineId: lineId ?? null, loading: true,
         error: null, lines: [], episodes: [] };
+    if (season !== undefined) session.browsing.season = season;
     publish(session);
     try {
+      if (metadataSourceId === null) {
+        session.metadataSourceId = null; session.metadata = null;
+      } else if (metadataSourceId !== undefined && metadataSourceId !== previousMetadataSourceId ||
+          season !== undefined && season !== previous.season) {
+        const id = metadataSourceId ?? session.metadataSourceId;
+        requireValue(id, 'NOT_FOUND');
+        const loaded = await browseMetadata(session, id, true, { generation, season, complete: false });
+        if (!admitted()) return;
+        requireValue(loaded, session.browsing.error ?? session.metadataError ?? 'UPSTREAM_ERROR');
+      }
       let detail;
       if (result.source.engine === 'pan') {
         const row = currentManual(session, result);
         requireValue(row?.share, 'NOT_FOUND');
-        const line = await data.expand(result.source, { id: row.id, label: row.name || row.provider,
-          provider: row.provider, episodes: [{ id: row.id, name: row.name || session.target.title,
-            share: { ...row.share, provider: row.provider } }] }, { canSchedule: admitted, refresh });
-        if (!admitted()) return;
-        detail = isDeepStrictEqual(result.detail, { lines: [line], detailId: row.id })
-          ? result.detail : { lines: [line], detailId: row.id };
-        result.detail = detail; result.state = 'ready'; result.error = null;
-        await candidatesFrom(session, result, detail);
-      } else detail = await loadDetail(session, result, generation, true, refresh);
+        if (!refresh && result.detail) detail = result.detail;
+        else {
+          const line = { id: row.id, label: row.name || row.provider, provider: row.provider,
+            episodes: [{ id: row.id, name: row.name || session.target.title,
+              share: { ...row.share, provider: row.provider } }] };
+          detail = { lines: [line], detailId: row.id };
+          result.baseDetail = detail; result.detail = detail;
+        }
+      } else detail = !refresh && result.detail ? result.detail
+        : await loadDetail(session, result, generation, true, refresh);
       if (!admitted()) return;
       if (!detail) throw fail(result.error ?? 'UPSTREAM_ERROR');
       let line = lineId === undefined ? detail.lines[0] : detail.lines.find(value => value.id === lineId);
       if (lineId !== undefined) requireValue(line, 'NOT_FOUND');
+      session.browsing = { ...session.browsing, lineId: line?.id ?? null,
+        lines: detail.lines.map(value => fields(value, ['id', 'label', 'provider'])) };
+      publish(session);
       if (line) {
-        if (result.source.engine !== 'pan') line = await data.expand(result.source,
+        const cached = result.directories?.get(line.id);
+        if (refresh || cached?.line !== line) line = await data.expand(result.source,
           result.baseDetail?.lines.find(value => value.id === line.id) ?? line, { canSchedule: admitted, refresh });
         if (!admitted()) return;
         detail = replaceLine(result, detail, detail.lines.findIndex(value => value.id === line.id), line);
         line = detail.lines.find(value => value.id === line.id);
         requireValue(line, 'NOT_FOUND');
-        await candidatesFrom(session, result, detail);
       }
       if (!admitted()) return;
+      const episodes = await directoryProjection(session, result, line, generation);
+      if (!admitted() || episodes === null) return;
+      result.state = 'ready'; result.error = null;
       session.browsing = { sourceId: resultId, lineId: line?.id ?? null, loading: false, error: null,
         ...(session.browsing.season === undefined ? {} : { season: session.browsing.season }),
         lines: detail.lines.map(value => fields(value, ['id', 'label', 'provider'])),
-        episodes: browseEpisodes(result, line) };
-      if (retained) session.error = null;
+        episodes };
       rememberBrowsing(session);
     } catch (error) {
       if (!admitted()) return;
       if (retained && result.detail === priorDetail) {
-        session.browsing = { ...(display ?? previous), loading: false, refreshing: false };
-        session.error = codeOf(error);
+        session.browsing = { ...(display ?? previous), loading: false, refreshing: false, error: codeOf(error) };
       } else {
-        const line = lineId === undefined ? result.detail?.lines[0]
-          : result.detail?.lines.find(value => value.id === lineId);
         session.browsing = { ...session.browsing, loading: false, refreshing: false,
-          error: line ? null : codeOf(error),
+          error: codeOf(error),
           lines: (result.detail?.lines ?? []).map(value => fields(value, ['id', 'label', 'provider'])),
-          episodes: browseEpisodes(result, line) };
-        session.error = codeOf(error);
+          episodes: [] };
       }
     }
     publish(session);
@@ -1749,15 +1936,17 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       // its local/global coordinates and its native lease keep their identity.
     } catch (error) {
       if (!admitted()) return;
-      session.browsing = { ...previous, loading: false, refreshing: false };
       session.metadataError = failure = codeOf(error);
+      session.browsing = { ...previous, loading: false, refreshing: false, error: failure };
     }
     publish(session);
     return failure;
   }
-  async function refreshBrowse(session, refresh) {
+  async function refreshBrowse(session, refresh, context = {}) {
+    const generation = session.browseGeneration;
     await session.initialization;
-    if (session.released || session.stopped || closed || !groupScopeAvailable(session)) return;
+    if (session.released || session.stopped || closed || generation !== session.browseGeneration ||
+        !groupScopeAvailable(session)) return;
     if (session.entryTarget.metadataProvider === 'douban' && !session.target.metadataProvider &&
         (session.entryResolution === 'error' || session.target.kind === 'group' && !session.target.members.length)) {
       session.initializationError = null; session.error = null; session.stage = 'loading';
@@ -1766,6 +1955,12 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       publish(session);
       await session.initialization;
       return;
+    }
+    if (Object.hasOwn(context, 'sourceId') || Object.hasOwn(context, 'metadataSourceId') ||
+        Object.hasOwn(context, 'lineId') || Object.hasOwn(context, 'season')) {
+      return browse(session, context.sourceId ?? null, context.lineId, {
+        refresh, retainDisplay: true, ...fields(context, ['metadataSourceId', 'season']),
+      });
     }
     const resultId = session.browsing.sourceId;
     if (resultId) return browse(session, resultId, session.browsing.lineId ?? undefined,
@@ -1826,7 +2021,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         value.source.detailId === current.source.detailId && value.lineId === current.lineId && value.episodeId === item.id);
       return candidate ? { target: targetForCandidate(session.target, candidate), candidateId: candidate.id } : null;
     }
-    const items = visibleEpisodes(session, true);
+    const items = episodeProjection(session, playbackMetadata(session)).visible;
     const index = items.findIndex(value => value.globalEpisode !== undefined && value.globalEpisode === session.target.globalEpisode ||
       value.season === session.target.season && value.episode === session.target.episode);
     return index < 0 || !items[index + direction] ? null : { target: episodeTarget(session.target, items[index + direction]) };
@@ -1858,10 +2053,12 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     return checkTarget({ ...fields(session.target, ['id', 'title', 'year', 'members']),
       kind: selected.kind, metadataProvider: selected.provider, metadataId: selected.metadataId });
   }
-  async function playTarget(session, target, { prepareOnly = false, candidateId = null } = {}) {
-    const changed = !sameEpisode(session.target, target);
+  async function playTarget(session, target, { prepareOnly = false, candidateId = null,
+    metadataSourceId = session.playbackMetadataSourceId } = {}) {
+    const changed = !sameEpisode(session.target, target) || metadataSourceId !== session.playbackMetadataSourceId;
     if (changed) {
       session.generation++; session.runKey = null;
+      session.playbackMetadataSourceId = metadataSourceId;
     }
     const generation = session.generation;
     try {
@@ -1902,66 +2099,100 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     }
   }
   async function playSelection(session, prepareOnly = false) {
-    const generation = session.generation, browsing = session.browseGeneration;
+    const generation = session.generation, selection = ++session.selectionEpoch;
+    const admitted = () => !closed && !session.released && generation === session.generation &&
+      selection === session.selectionEpoch;
     await session.initialization;
-    if (session.browseWork) await session.browseWork;
-    if (closed || session.released || generation !== session.generation || browsing !== session.browseGeneration) return;
+    if (!admitted()) return;
     try {
-      if (session.initializationError && session.browsing.sourceId === null) {
-        session.stage = 'error'; session.error = session.initializationError; publish(session); return;
-      }
-      if (session.browsing.sourceId === null && ['source', 'group'].includes(session.target.kind) &&
-          session.target.source) throw fail('SOURCE_NOT_FOUND');
-      if (session.browsing.sourceId !== null) {
-        const sourceId = session.browsing.sourceId;
-        const result = session.results.find(row => row.id === sourceId);
+      let target = clone(session.target);
+      if (['source', 'group'].includes(target.kind) && target.source?.candidateId === undefined) {
+        const pointer = target.source ?? target.members[0];
+        const result = session.results.find(row => row.source.key === (pointer?.key ?? pointer?.sourceKey) &&
+          row.source.detailId === pointer?.detailId);
         requireValue(result && currentSource(session, result.source), 'SOURCE_NOT_FOUND');
-        const selector = session.target.source?.key === result.source.key &&
-          session.target.source.detailId === result.source.detailId &&
-          (session.target.source.lineId === undefined || session.target.source.lineId === session.browsing.lineId)
-          ? session.target.source : null;
-        if (!session.browsing.lines.length && !session.browsing.error) {
-          await browse(session, sourceId, selector?.lineId ?? session.browsing.lineId ?? undefined);
-          if (closed || session.released || generation !== session.generation ||
-              session.browsing.sourceId !== sourceId || session.browseGeneration !== browsing + 1) return;
-        }
-        requireValue(!session.browsing.error, session.browsing.error);
-        const candidates = session.browsing.episodes.map(row => session.candidates.get(row.candidateId)).filter(Boolean);
-        const expected = selector?.candidateId ?? (session.userSelected ? null : session.resumeCandidateId);
-        const parentId = variantParentId(expected);
-        const candidate = expected ? candidates.find(row => row.id === expected || row.id === parentId)
-          : selector && ['playId', 'episodeId'].some(field => selector[field] !== undefined)
-            ? candidates.find(row => ['playId', 'episodeId'].every(field =>
-              selector[field] === undefined || row[field] === selector[field]))
-            : selector && session.target.episode !== undefined
-              ? candidates.find(row => row.episode === session.target.episode &&
-                (session.target.season === undefined || row.season === session.target.season))
-              : candidates.find(row => [session.pending?.candidate.id, session.current?.candidate.id].includes(row.id)) ??
-                candidates[0];
-        requireValue(candidate, expected || selector ? 'NOT_FOUND' : 'MEDIA_UNAVAILABLE');
-        const target = parentId && candidate.id === parentId ? session.target
-          : targetForCandidate(session.target, candidate);
-        await playTarget(session, target, { prepareOnly,
-          candidateId: parentId && candidate.id === parentId ? null : expected ?? candidate.id });
-      } else {
-        let target = selectedMetadataTarget(session);
-        if (target.kind === 'tv') {
-          const sameMetadata = target.metadataProvider === session.target.metadataProvider &&
-            String(target.metadataId) === String(session.target.metadataId);
-          const season = session.browsing.season ?? (sameMetadata ? session.target.season : undefined);
-          const episode = sameMetadata && (season === undefined || season === session.target.season)
-            ? fields(session.target, ['season', 'episode', 'globalEpisode']) : {};
-          const first = visibleEpisodes(session).find(row => season === undefined || row.season === season);
-          requireValue(episode.episode !== undefined || first, 'NO_EPISODE_MAPPING');
-          target = episodeTarget(target, episode.episode !== undefined ? episode : first);
-        }
-        await playTarget(session, target, { prepareOnly });
+        requireValue(result.detail, result.error ?? 'MEDIA_UNAVAILABLE');
+        const line = target.source?.lineId === undefined ? result.detail.lines[0]
+          : result.detail.lines.find(row => row.id === target.source.lineId);
+        requireValue(line, 'MEDIA_UNAVAILABLE');
+        const candidates = await recognizeResult(session, result, result.detail, target, playbackMetadata(session), 'session');
+        if (!admitted()) return;
+        const rows = line.episodes.map(row => candidates.find(candidate => candidate.lineId === line.id &&
+          candidate.episodeId === row.id)).filter(candidate => candidate && (!candidate.share || candidate.file));
+        const selected = target.source && ['playId', 'episodeId'].some(field => target.source[field] !== undefined)
+          ? rows.find(candidate => ['playId', 'episodeId'].every(field =>
+            target.source[field] === undefined || target.source[field] === candidate[field]))
+          : target.episode !== undefined || target.globalEpisode !== undefined
+            ? rows.find(candidate => ['season', 'episode', 'globalEpisode'].every(field =>
+              target[field] === undefined || target[field] === candidate[field]))
+            : rows.find(candidate => candidate.id === session.resumeCandidateId) ?? rows[0];
+        requireValue(selected, 'MEDIA_UNAVAILABLE');
+        target = targetForCandidate(target, selected);
       }
+      await playTarget(session, target, { prepareOnly });
     } catch (error) {
-      if (!closed && !session.released && generation === session.generation) {
-        session.stage = 'unavailable'; session.error = codeOf(error); publish(session);
-      }
+      if (admitted()) { session.stage = 'unavailable'; session.error = codeOf(error); publish(session); }
     }
+  }
+  async function selectPlaybackTarget(session, input) {
+    const target = checkTarget(input.target);
+    requireValue(input.metadataSourceId == null || text(input.metadataSourceId));
+    let metadataSourceId = input.metadataSourceId === undefined
+      ? session.playbackMetadataSourceId : input.metadataSourceId;
+    const selected = target.metadataProvider
+      ? session.metadataSources.find(row => row.provider === target.metadataProvider && row.kind === target.kind &&
+        String(row.metadataId) === String(target.metadataId))
+      : session.metadataSources.find(row => row.id === metadataSourceId);
+    let result;
+    if (target.metadataProvider) {
+      requireValue(selected && target.id === `${target.metadataProvider}:${target.kind}:${target.metadataId}`, 'NO_MATCH');
+      metadataSourceId = selected.id;
+    } else {
+      requireValue(target.kind === 'source' && [session.selectionId, session.target.id,
+        ...session.metadataSources.map(row => `${row.provider}:${row.kind}:${row.metadataId}`)].includes(target.id), 'NO_MATCH');
+      result = session.results.find(row => row.source.key === target.source.key &&
+        row.source.detailId === target.source.detailId);
+      requireValue(result?.detail && text(target.source.candidateId), 'NOT_FOUND');
+      requireValue(currentSource(session, result.source), 'STALE_SOURCE');
+      if (metadataSourceId !== null) requireValue(selected, 'NOT_FOUND');
+    }
+    const generation = session.generation, selection = ++session.selectionEpoch;
+    const admitted = () => !closed && !session.released && generation === session.generation &&
+      selection === session.selectionEpoch;
+    let metadata = selected ? session.metadataViews.get(selected.id)?.display ?? selected.metadata : null;
+    let canonical, candidateId = null;
+    if (target.metadataProvider) {
+      if (target.kind === 'tv') {
+        let episode = resolveEpisode(episodeMap(metadata), target);
+        if (!episode) {
+          const entry = await data.seasonMetadataEntry(target, target.season, { rules: session.rules, canSchedule: admitted });
+          if (!admitted()) return;
+          metadata = mergeSeason(target, metadata, target.season, entry.value);
+          metadataDisplay(session, selected);
+          acceptMetadataCache(session, entry, target.season, undefined, selected.id, metadata);
+          if (selected.id === session.metadataSourceId) session.metadata = metadata;
+          episode = resolveEpisode(episodeMap(metadata), target);
+        }
+        requireValue(episode && episodeProjection(session, metadata).visibleKeys.has(`${episode.season}:${episode.episode}`), 'NO_MATCH');
+        canonical = episodeTarget({ ...target, title: selected.title }, episode);
+      } else canonical = { ...target, title: selected.title };
+    } else {
+      const context = selected ? { id: target.id, title: session.entryTarget.title, kind: selected.kind,
+        metadataProvider: selected.provider, metadataId: selected.metadataId } : session.entryTarget;
+      const candidates = await recognizeResult(session, result, result.detail, context, metadata, 'session');
+      if (!admitted()) return;
+      const candidate = candidates.find(row => row.id === target.source.candidateId);
+      requireValue(candidate, 'NOT_FOUND');
+      canonical = catalog.candidate({ id: target.id, title: session.entryTarget.title }, candidate).playbackTarget;
+      for (const field of ['key', 'engine', 'installationId', 'siteId', 'detailId', 'lineId', 'candidateId'])
+        requireValue(target.source[field] === canonical.source[field], 'NO_MATCH');
+      for (const field of ['season', 'episode', 'globalEpisode'])
+        requireValue(target[field] === canonical[field], 'NO_MATCH');
+      candidateId = candidate.id;
+    }
+    if (!admitted()) return;
+    session.userSelected = true;
+    await playTarget(session, canonical, { candidateId, metadataSourceId });
   }
   function reselectActualFile(session, selected = session.pending ?? session.current) {
     if (!['source', 'group'].includes(session.target.kind)) return false;
@@ -1991,13 +2222,14 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
   async function checkNextEpisode(session) {
     if (session.target.kind === 'tv') {
       const generation = session.generation, target = session.target;
-      await refreshMetadataDisplay(session, { season: session.target.season,
-        requestedEpisode: session.target.episode === undefined ? undefined : session.target.episode + 1 });
+      await refreshPlaybackSeason(session, session.target.season,
+        session.target.episode === undefined ? undefined : session.target.episode + 1);
       if (!valid(session, generation) || session.target !== target || adjacent(session, 1)) return;
-      const nextSeason = (session.metadata?.doubanSeasons ?? session.metadata?.seasons ?? [])
+      const metadata = playbackMetadata(session);
+      const nextSeason = (metadata?.doubanSeasons ?? metadata?.seasons ?? [])
         .map(row => row.season_number ?? row.season)
         .filter(season => Number.isSafeInteger(season) && season > session.target.season).sort((a, b) => a - b)[0];
-      if (nextSeason !== undefined) await refreshMetadataDisplay(session, { season: nextSeason, requestedEpisode: 1 });
+      if (nextSeason !== undefined) await refreshPlaybackSeason(session, nextSeason, 1);
       return;
     }
     if (!['source', 'group'].includes(session.target.kind)) return;
@@ -2006,15 +2238,11 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     const candidate = selected.candidate, generation = session.generation;
     const result = session.results.find(row => row.source.key === candidate.source.key &&
       row.source.detailId === candidate.source.detailId);
-    if (!result || result.source.engine === 'pan') {
-      // Manual shares use the same directory owner as an explicitly browsed list.
-      if (result) await browse(session, result.id, candidate.lineId, { retainDisplay: true });
-      return;
-    }
+    if (!result) return;
     const admitted = () => valid(session, generation) && currentSource(session, result.source) &&
       (session.current === selected || session.pending === selected);
     try {
-      const detail = await loadDetail(session, result, generation);
+      const detail = result.source.engine === 'pan' ? result.detail : await loadDetail(session, result, generation);
       if (!detail || !admitted()) return;
       const index = detail.lines.findIndex(row => row.id === candidate.lineId);
       if (index < 0) return;
@@ -2209,77 +2437,30 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
   async function command(input, { searchHandoff } = {}) {
     requireValue(object(input) && text(input.action));
     const session = get(input.sessionId);
+    if (input.action === 'browse' || input.action.startsWith('browse.')) {
+      for (const field of ['sourceId', 'metadataSourceId'])
+        requireValue(input[field] == null || text(input[field]));
+      requireValue(input.lineId == null || isIdentifier(input.lineId));
+      requireValue(input.season === undefined || Number.isSafeInteger(input.season) && input.season >= 0);
+    }
     switch (input.action) {
       case 'prepare':
       case 'play': {
         await playSelection(session, input.action === 'prepare');
         break;
       }
-      case 'select.episode': {
-        requireValue(object(input.episode));
-        const selected = selectedMetadataTarget(session);
-        let episode = resolveEpisode(episodeMap(session.metadata), input.episode);
-        if (!episode) {
-          const { season, episode: number, globalEpisode } = input.episode;
-          requireValue(season !== undefined || number !== undefined
-            ? Number.isSafeInteger(season) && season >= 0 && Number.isSafeInteger(number) && number >= 0
-            : Number.isSafeInteger(globalEpisode) && globalEpisode > 0, 'NO_MATCH');
-          const generation = session.generation, target = session.target;
-          await refreshMetadataDisplay(session, { season: input.episode.season,
-            requestedEpisode: input.episode.episode });
-          if (!valid(session, generation) || session.target !== target) break;
-          episode = resolveEpisode(episodeMap(session.metadata), input.episode);
-        }
-        requireValue(episode && visibleEpisodes(session, true).some(value => value.season === episode.season &&
-          value.episode === episode.episode), 'NO_MATCH');
-        session.userSelected = true;
-        await playTarget(session, episodeTarget(selected, episode)); break;
-      }
+      case 'select.target':
+        await selectPlaybackTarget(session, input); break;
       case 'browse.season': {
         requireValue(Number.isSafeInteger(input.season) && input.season >= 0);
-        const metadataTarget = selectedMetadataTarget(session);
-        requireValue(metadataTarget.kind === 'tv', 'NOT_FOUND');
-        const hasSeason = () => (session.metadata?.doubanSeasons ?? session.metadata?.seasons ?? [])
-          .some(row => (row.season_number ?? row.season) === input.season);
-        if (!hasSeason()) {
-          const epoch = session.metadataEpoch, browsing = session.browseGeneration;
-          const entry = await data.targetMetadataEntry(metadataTarget, { rules: session.rules,
-            canSchedule: () => !closed && !session.released &&
-              session.metadataEpoch === epoch && session.browseGeneration === browsing });
-          if (closed || session.released || session.metadataEpoch !== epoch || session.browseGeneration !== browsing) break;
-          const selected = session.metadataSources.find(row => row.id === session.metadataSourceId);
-          selected.metadata = entry.value;
-          session.metadata = metadataDisplay(session, selected);
-          acceptMetadataCache(session, entry);
-        }
-        requireValue(hasSeason(), 'NOT_FOUND');
-        const generation = ++session.browseGeneration, epoch = session.metadataEpoch;
-        const admitted = () => !session.released && !closed &&
-          generation === session.browseGeneration && epoch === session.metadataEpoch;
-        rememberBrowsing(session);
-        const loaded = session.browsing.sourceId !== null ||
-          session.metadataViews.get(session.metadataSourceId)?.loadedSeasons.has(input.season);
-        session.browsing = { ...session.browsing, season: input.season, loading: true, refreshing: !!loaded, error: null };
-        publish(session);
-        detached(session, (async () => {
-          try {
-            const season = await seasonDisplay(session, metadataTarget, session.metadata, input.season, { canSchedule: admitted });
-            if (!admitted()) return;
-            session.metadata = season.display;
-            acceptMetadataCache(session, season.entry, input.season, season.error);
-            await refreshBrowsing(session);
-            if (!admitted()) return;
-            session.browsing = { ...session.browsing, loading: false, refreshing: false, error: null };
-            rememberBrowsing(session);
-          } catch (error) {
-            if (!admitted()) return;
-            if (loaded) {
-              session.browsing = { ...session.browsing, loading: false, refreshing: false };
-              session.metadataError = codeOf(error);
-            } else session.browsing = { ...session.browsing, loading: false, error: codeOf(error), episodes: [] };
-          }
-          publish(session);
-        })());
+        const metadataSourceId = input.metadataSourceId ?? session.metadataSourceId;
+        requireValue(session.metadataSources.some(row => row.id === metadataSourceId && row.kind === 'tv'), 'NOT_FOUND');
+        session.browseWork = browse(session,
+          Object.hasOwn(input, 'sourceId') ? input.sourceId : session.browsing.sourceId,
+          Object.hasOwn(input, 'lineId') ? input.lineId : session.browsing.lineId, {
+            metadataSourceId, season: input.season,
+          });
+        detachedBrowsing(session, session.browseWork);
         break;
       }
       case 'next': case 'previous':
@@ -2298,14 +2479,6 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         else await Promise.all([clearPrefetch(session),
           ...[session.current, session.pending].filter(Boolean).map(value => media.cancelPrefetch(value.resource.id))]);
         publish(session); break;
-      case 'select.candidate': {
-        const candidate = session.candidates.get(input.candidateId);
-        requireValue(candidate, 'NOT_FOUND');
-        requireValue(currentSource(session, candidate.source), 'STALE_SOURCE');
-        const target = targetForCandidate(session.target, candidate);
-        session.userSelected = true;
-        await playTarget(session, target, { candidateId: candidate.id }); break;
-      }
       case 'pan': case 'quality': case 'switch': {
         if (input.action === 'pan') requireValue(providerFamily(input.provider));
         if (input.action === 'quality') requireValue(qualityKey(input.quality));
@@ -2334,20 +2507,24 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         void start(session, { reselecting: reselectActualFile(session, selected) }); break;
       }
       case 'browse':
-        session.userSelected = true;
-        session.browseWork = browse(session, input.sourceId, input.lineId);
-        detached(session, session.browseWork); break;
+        session.browseWork = browse(session, input.sourceId, input.lineId,
+          fields(input, ['metadataSourceId', 'season']));
+        detachedBrowsing(session, session.browseWork); break;
       case 'browse.refresh':
         requireValue(input.refresh === undefined || typeof input.refresh === 'boolean');
-        detached(session, refreshBrowse(session, input.refresh !== false)); break;
+        detachedBrowsing(session, refreshBrowse(session, input.refresh !== false, input)); break;
       case 'media.retry':
         requireValue(input.attemptId === undefined || text(input.attemptId));
         await retryMedia(session, input.attemptId); break;
       case 'browse.metadata':
         requireValue(text(input.metadataSourceId) &&
           (input.keepSource === undefined || typeof input.keepSource === 'boolean'));
-        session.browseWork = browseMetadata(session, input.metadataSourceId, input.keepSource);
-        detached(session, session.browseWork); break;
+        session.browseWork = browse(session,
+          Object.hasOwn(input, 'sourceId') ? input.sourceId : input.keepSource ? session.browsing.sourceId : null,
+          Object.hasOwn(input, 'lineId') ? input.lineId : input.keepSource ? session.browsing.lineId : undefined, {
+            metadataSourceId: input.metadataSourceId, ...fields(input, ['season']),
+          });
+        detachedBrowsing(session, session.browseWork); break;
       case 'search.update': await updateSearch(session, input, searchHandoff); break;
       case 'search.more':
         requireValue(groupScopeAvailable(session), 'SOURCE_NOT_FOUND');
@@ -2679,7 +2856,6 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
           session.metadataSources = session.metadataSources.filter(row => row.provider !== domain);
           if (!session.metadataSources.some(row => row.id === session.metadataSourceId)) {
             session.metadata = null; session.metadataSourceId = null;
-            session.metadataCache = null; session.metadataSeasonCache = null;
           }
           session.metadataEpoch++;
           if (session.target.metadataProvider && !session.stopped) detached(session, discoverMetadata(session));
@@ -2752,7 +2928,6 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
           const epoch = ++session.metadataEpoch;
           const admitted = () => !session.released && !session.stopped && !closed && session.metadataEpoch === epoch;
           session.metadata = null;
-          session.metadataCache = null; session.metadataSeasonCache = null;
           session.metadataSources = []; session.metadataSourceId = null;
           session.initializationError = null;
           session.initialization = tracked((async () => {
@@ -2762,13 +2937,14 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
               if (!admitted()) return;
               const value = entry.value;
               session.metadata = value; session.error = null;
-              acceptMetadataCache(session, entry);
               session.browsing = { sourceId: null, lineId: null, loading: false, error: null, lines: [], episodes: [] };
               const row = { provider: session.target.metadataProvider, metadataId: session.target.metadataId,
                 kind: session.target.kind, title: session.target.title, metadata: value };
               session.metadataSourceId = metadataIdentity(row);
               session.metadataSources = [{ ...row, id: session.metadataSourceId }];
+              session.playbackMetadataSourceId = session.metadataSourceId;
               session.metadata = metadataDisplay(session, row);
+              acceptMetadataCache(session, entry);
               detached(session, discoverMetadata(session));
             } catch (error) {
               if (!admitted()) return;

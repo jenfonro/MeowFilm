@@ -8,7 +8,7 @@ using System.Windows.Media;
 
 namespace MeowFilm.Media;
 
-/// <summary>Native picture HWND with a separate transparent WPF controls window.</summary>
+/// <summary>Native picture and transparent WPF controls share one child HWND container.</summary>
 public sealed class FilmVideoSurface : ContentControl, IDisposable
 {
     private readonly HwndSource parking;
@@ -31,7 +31,7 @@ public sealed class FilmVideoSurface : ContentControl, IDisposable
             Width = 1, Height = 1, WindowStyle = unchecked((int)0x80000000),
             ExtendedWindowStyle = 0x08000080
         });
-        try { picture = new PictureHost(parking.Handle); }
+        try { picture = new PictureHost(parking.Handle, CloseOverlay); }
         catch { parking.Dispose(); throw; }
         var factory = new FrameworkElementFactory(typeof(Border));
         factory.Name = "PART_Picture";
@@ -81,14 +81,14 @@ public sealed class FilmVideoSurface : ContentControl, IDisposable
     private void GeometryChanged(object? sender, EventArgs args) => UpdateWindows();
     private void WatchControlsClip()
     {
-        if (controlsClip is not null) controlsClip.Changed -= GeometryChanged;
+        if (controlsClip is { IsFrozen: false }) controlsClip.Changed -= GeometryChanged;
         controlsClip = controls?.Clip;
-        if (controlsClip is not null) controlsClip.Changed += GeometryChanged;
+        if (controlsClip is { IsFrozen: false }) controlsClip.Changed += GeometryChanged;
     }
     private void UnwatchControls()
     {
         if (controls is not null) ClipPropertyDescriptor.RemoveValueChanged(controls, ControlsClipChanged);
-        if (controlsClip is not null) controlsClip.Changed -= GeometryChanged;
+        if (controlsClip is { IsFrozen: false }) controlsClip.Changed -= GeometryChanged;
         controls = null; controlsClip = null;
     }
     private void LoadedSurface(object sender, RoutedEventArgs args) => UpdateWindows();
@@ -105,7 +105,7 @@ public sealed class FilmVideoSurface : ContentControl, IDisposable
     {
         if (closed) return;
         if (!IsLoaded || !IsVisible || ActualWidth <= 0 || ActualHeight <= 0 ||
-            PresentationSource.FromVisual(this) is not HwndSource parent || picture.Handle == IntPtr.Zero)
+            PresentationSource.FromVisual(this) is not HwndSource || picture.Handle == IntPtr.Zero)
         {
             picture.Park();
             if (overlay is not null) ShowWindow(overlay.Handle, 0);
@@ -120,19 +120,16 @@ public sealed class FilmVideoSurface : ContentControl, IDisposable
         {
             overlay = new HwndSource(new HwndSourceParameters("meowfilm-film-controls")
             {
-                ParentWindow = parent.Handle, Width = width, Height = height,
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                UsesPerPixelOpacity = true
+                ParentWindow = picture.Handle, Width = width, Height = height,
+                WindowStyle = 0x40000000 | 0x04000000, ExtendedWindowStyle = 0x08000000,
+                UsesPerPixelTransparency = true, TreatAsInputRoot = true
             });
             if (overlay.CompositionTarget is { } composition) composition.BackgroundColor = Colors.Transparent;
             overlay.RootVisual = foreground;
         }
-        else SetWindowLongPtr(overlay.Handle, -8, parent.Handle); // Owner follows fullscreen/reparenting.
         foreground.Width = ActualWidth;
         foreground.Height = ActualHeight;
-        var origin = PointToScreen(new Point());
-        SetWindowPos(overlay.Handle, IntPtr.Zero, (int)Math.Round(origin.X), (int)Math.Round(origin.Y),
-            width, height, 0x0010); // No activation; retain normal owned-window z-order.
+        SetWindowPos(overlay.Handle, IntPtr.Zero, 0, 0, width, height, 0x0010);
         var clip = VisibleRectangle();
         ApplyRegion(PictureHandle, clip, dpi);
         ApplyRegion(picture.Handle, clip, dpi);
@@ -175,7 +172,7 @@ public sealed class FilmVideoSurface : ContentControl, IDisposable
     {
         var source = overlay;
         overlay = null;
-        // Closing the owner HWND can dispose its owned source before Unloaded.
+        // The container releases its controls before destroying its child HWNDs.
         if (source is null || source.IsDisposed) return;
         source.RootVisual = null;
         source.Dispose();
@@ -194,10 +191,12 @@ public sealed class FilmVideoSurface : ContentControl, IDisposable
     private sealed class PictureHost : HwndHost
     {
         private readonly IntPtr parking;
+        private readonly Action closeOverlay;
         internal IntPtr PictureHandle { get; private set; }
-        internal PictureHost(IntPtr parking)
+        internal PictureHost(IntPtr parking, Action closeOverlay)
         {
             this.parking = parking;
+            this.closeOverlay = closeOverlay;
             PictureHandle = CreateWindowEx(0, "static", "", 0x40000000 | 0x02000000,
                 0, 0, 1, 1, parking, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
             if (PictureHandle == IntPtr.Zero) throw new PlaybackException("FILM_RENDER_FAILED");
@@ -212,7 +211,7 @@ public sealed class FilmVideoSurface : ContentControl, IDisposable
         }
         protected override void DestroyWindowCore(HandleRef hwnd)
         {
-            Park(); DestroyWindow(hwnd.Handle);
+            closeOverlay(); Park(); DestroyWindow(hwnd.Handle);
         }
         internal void Mount()
         {
@@ -235,8 +234,6 @@ public sealed class FilmVideoSurface : ContentControl, IDisposable
         int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr parameter);
     [DllImport("user32.dll")] private static extern bool DestroyWindow(IntPtr window);
     [DllImport("user32.dll")] private static extern IntPtr SetParent(IntPtr child, IntPtr parent);
-    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
-    private static extern IntPtr SetWindowLongPtr(IntPtr window, int index, IntPtr value);
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
     [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr window, IntPtr after,
         int x, int y, int width, int height, int flags);

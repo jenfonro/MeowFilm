@@ -4,7 +4,7 @@ using System.Text.Json;
 namespace MeowFilm.Capabilities;
 
 // Presentation state only. The runtime remains the owner of directory validity and data.
-public sealed class FilmEpisodeDirectory
+public sealed class FilmEpisodeDirectory : INotifyPropertyChanged
 {
     private JsonElement rows;
     private long metadataRevision = -1;
@@ -14,8 +14,10 @@ public sealed class FilmEpisodeDirectory
     public IReadOnlyList<FilmCandidateItem> Candidates { get; private set; } = [];
     public double HorizontalOffset { get; set; }
     internal double VerticalOffset { get; set; }
+    internal System.Windows.FrameworkElement? Presentation { get; set; }
+    public event PropertyChangedEventHandler? PropertyChanged;
 
-    internal void Apply(FilmPlaybackPage page, JsonElement nextRows, JsonElement nextSeasons,
+    internal void Apply(string poster, string overview, JsonElement nextRows, JsonElement nextSeasons,
         JsonElement nextCandidates, long revision, bool raw, bool movie, bool refreshCandidates)
     {
         bool rowsChanged = !FilmJson.Equal(rows, nextRows), metadataChanged = metadataRevision != revision;
@@ -28,7 +30,7 @@ public sealed class FilmEpisodeDirectory
             var nextChoices = FilmJson.Array(nextCandidates).Where(row => visible is null || visible.Contains(FilmJson.Text(row, "id")))
                 .Select(row =>
                 {
-                    var candidate = FilmCandidateItem.Read(row) with { Image = page.ContentPoster, Overview = page.Overview };
+                    var candidate = FilmCandidateItem.Read(row) with { Image = poster, Overview = overview };
                     if (!movie) return candidate;
                     int count = duplicates.GetValueOrDefault(candidate.DisplayLabel) + 1;
                     duplicates[candidate.DisplayLabel] = count;
@@ -39,7 +41,7 @@ public sealed class FilmEpisodeDirectory
                 if (previousChoices.TryGetValue(nextChoices[index].Id, out var existing) && existing.SameDisplay(nextChoices[index]))
                     nextChoices[index] = existing;
             if (!Candidates.SequenceEqual(nextChoices, ReferenceEqualityComparer.Instance))
-            { Candidates = nextChoices; candidatesChanged = true; }
+            { Candidates = nextChoices; candidatesChanged = true; PropertyChanged?.Invoke(this, new(nameof(Candidates))); }
         }
         if (!rowsChanged && !metadataChanged)
         {
@@ -66,10 +68,10 @@ public sealed class FilmEpisodeDirectory
             int? season = FilmJson.Integer(row, "season") ?? FilmJson.Integer(row, "season_number");
             int? episode = FilmJson.Integer(row, "episode") ?? FilmJson.Integer(row, "episode_number");
             item.Apply(row, raw ? details.GetValueOrDefault((season, episode)) : row,
-                season is { } value ? posters.GetValueOrDefault(value, "") : "", page.ContentPoster, page.Overview);
+                season is { } value ? posters.GetValueOrDefault(value, "") : "", poster, overview);
             return item;
         }).ToArray();
-        if (!Episodes.SequenceEqual(next)) Episodes = next;
+        if (!Episodes.SequenceEqual(next)) { Episodes = next; PropertyChanged?.Invoke(this, new(nameof(Episodes))); }
         UpdateCandidateFields();
     }
 

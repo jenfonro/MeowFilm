@@ -2,7 +2,7 @@ import Foundation
 import MeowRuntime
 
 public enum PanProviderID: String, CaseIterable, Sendable, Hashable, Identifiable {
-    case baidu, quark, uc, tianyi, yidong, quarkTV = "quark_tv", ucTV = "uc_tv"
+    case baidu, quark, uc, tianyi, yidong
     public var id: String { rawValue }
     public var title: String {
         switch self {
@@ -11,14 +11,12 @@ public enum PanProviderID: String, CaseIterable, Sendable, Hashable, Identifiabl
         case .uc: return "UC 网盘"
         case .tianyi: return "天翼云盘"
         case .yidong: return "移动云盘"
-        case .quarkTV: return "夸克 TV"
-        case .ucTV: return "UC TV"
         }
     }
 }
 
 public enum PanCredentialField: String, Sendable, Equatable, Identifiable {
-    case cookie, username, password, authorization, refreshedAt, refreshToken, deviceId, accessToken, expiresAt
+    case cookie, username, password, authorization, refreshedAt
     public var id: String { rawValue }
     public var title: String {
         switch self {
@@ -27,14 +25,10 @@ public enum PanCredentialField: String, Sendable, Equatable, Identifiable {
         case .password: return "密码"
         case .authorization: return "Authorization"
         case .refreshedAt: return "刷新时间（毫秒）"
-        case .refreshToken: return "Refresh Token"
-        case .deviceId: return "设备 ID"
-        case .accessToken: return "Access Token"
-        case .expiresAt: return "过期时间（毫秒）"
         }
     }
-    public var isNumber: Bool { self == .refreshedAt || self == .expiresAt }
-    public var isSecret: Bool { !isNumber && self != .username && self != .deviceId }
+    public var isNumber: Bool { self == .refreshedAt }
+    public var isSecret: Bool { !isNumber && self != .username }
 }
 
 public struct PanProvider: Equatable, Sendable, Identifiable {
@@ -48,7 +42,6 @@ public struct PanProvider: Equatable, Sendable, Identifiable {
         case .baidu, .quark, .uc: fields = [.cookie]
         case .tianyi: fields = [.cookie, .username, .password]
         case .yidong: fields = [.authorization, .refreshedAt]
-        case .quarkTV, .ucTV: fields = [.refreshToken, .deviceId, .accessToken, .expiresAt]
         }
         return PanProvider(id: id, credentialFields: fields,
                            login: [.baidu, .quark, .uc].contains(id), refresh: true)
@@ -70,6 +63,9 @@ public struct PanProvider: Equatable, Sendable, Identifiable {
         }
     }
     public func credentials(from draft: [String: String]) throws -> RuntimeValue {
+        guard Set(draft.keys).isSubset(of: Set(credentialFields.map(\.rawValue))) else {
+            throw RuntimeHTTPError.remote("INVALID_REQUEST")
+        }
         var fields = RuntimeObject()
         for field in credentialFields {
             let text = draft[field.rawValue] ?? ""

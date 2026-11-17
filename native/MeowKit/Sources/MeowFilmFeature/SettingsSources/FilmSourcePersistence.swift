@@ -9,9 +9,9 @@ struct FilmSourceDocument: Codable {
 
     func validate() throws {
         let ids = Set(cats.map(\.installationId))
-        guard [1, 2].contains(version), ids.count == cats.count,
+        guard version == 2, ids.count == cats.count,
               cats.allSatisfy({ cat in !cat.installationId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-                  cat.inputRevision >= 0 && cat.inputRevision <= 9_007_199_254_740_991 &&
+                  cat.inputRevision > 0 && cat.inputRevision <= 9_007_199_254_740_991 &&
                   Set(cat.sites.map { $0.identity(installationId: cat.installationId) }).count == cat.sites.count &&
                   cat.sites.allSatisfy({ !$0.key.isEmpty }) }),
               Set(videos.map(\.key)).count == videos.count,
@@ -48,9 +48,7 @@ struct StoredFilmCat: Codable {
     init(from decoder: Decoder) throws {
         let fields = try decoder.container(keyedBy: CodingKeys.self)
         installationId = try fields.decode(String.self, forKey: .installationId)
-        // A version-1 display cache has no native input revision. It cannot
-        // authorize a live generation or act as a source configuration.
-        inputRevision = try fields.decodeIfPresent(Int64.self, forKey: .inputRevision) ?? 0
+        inputRevision = try fields.decode(Int64.self, forKey: .inputRevision)
         importedAt = try fields.decodeIfPresent(Int64.self, forKey: .importedAt)
         updatedAt = try fields.decodeIfPresent(Int64.self, forKey: .updatedAt)
         updateState = try fields.decode(String.self, forKey: .updateState)
