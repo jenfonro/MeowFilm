@@ -31,7 +31,7 @@ public static class MusicOfficialAudioTests
                 var audio = JsonNode.Parse(result.GetRawText())!.AsObject(); audio["actualQuality"] = "flac";
                 return MusicPlatformRuntimeFixture.Json(audio);
             };
-            var app = new MusicNativeApplication(f.Store, runtime, f.CacheStore);
+            var app = new MusicNativeApplication(f.Store, MusicTestStores.For(f.Store), runtime, f.CacheStore);
             await using var player = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
             await using var module = new MusicCapability(app, f.Store, new NativeMusicPlayback(player), new CacheDialogs(),
                 playbackCacheRoot: f.Root, cacheStore: f.CacheStore);
@@ -82,7 +82,7 @@ public static class MusicOfficialAudioTests
             await using var cacheStore = new CacheDocumentStore(store);
             int vkeys = 0;
             await using var runtime = AudioPeer(audio: () => vkeys++);
-            await using var app = new MusicNativeApplication(store, runtime, cacheStore);
+            await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime, cacheStore);
             var login = await app.ExecuteAsync("music.accounts.import",
                 new { platform = "tx", cookie = "musicid=123; musickey=synthetic; encrypt_uin=FixtureEUIN" });
             Check(login.GetProperty("ok").GetBoolean(), "native import");
@@ -109,7 +109,7 @@ public static class MusicOfficialAudioTests
         {
             await using var store = new MemoryStore(); int vkeys = 0;
             await using var runtime = AudioPeer(audio: () => vkeys++);
-            await using var app = new MusicNativeApplication(store, runtime);
+            await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             Check((await app.ExecuteAsync("music.accounts.import",
                 new { platform = "tx", cookie = "musicid=123; musickey=synthetic; encrypt_uin=FixtureEUIN" })).GetProperty("ok").GetBoolean());
             var song = await MusicSongFixture.AdoptAsync(app, Song("tx", "FixtureMID"));
@@ -172,7 +172,7 @@ public static class MusicOfficialAudioTests
                 await using var backing = new MemoryStore { Failure = error };
                 backing.Data[MusicSourceCache.Namespace] = "{"u8.ToArray();
                 backing.Data[MusicChorusCache.Namespace] = "{\"entries\":null}"u8.ToArray();
-                backing.Data[MusicLibraryOwner.DocumentNamespace] = "business"u8.ToArray();
+                backing.Data["test.unrelated-document.v1"] = "business"u8.ToArray();
                 await using var store = new CacheDocumentStore(backing);
                 var clock = new Clock();
                 var source = new MusicSourceCache(store, clock);
@@ -184,7 +184,7 @@ public static class MusicOfficialAudioTests
                 Check(await source.ReadAsync("scope", "song", Hash('a'), default) is not null);
                 Check(await chorus.ReadAsync(Hash('b'), 100, default) == (20d, 30d));
                 await store.DrainAsync();
-                Check(Encoding.UTF8.GetString(backing.Data[MusicLibraryOwner.DocumentNamespace]) == "business");
+                Check(Encoding.UTF8.GetString(backing.Data["test.unrelated-document.v1"]) == "business");
             }
         });
         yield return new("Music source and chorus saves never wait for initial disk read or slow persistence", async () =>
@@ -254,7 +254,7 @@ public static class MusicOfficialAudioTests
         });
         yield return new("Music queue preload reserves shuffle next without moving queue or writing history", async () =>
         {
-            await using var store = new MemoryStore(); await using var library = new MusicLibraryOwner(store);
+            await using var store = new MemoryStore(); await using var library = new MusicLibraryOwner(MusicTestStores.For(store));
             await library.ExecuteAsync("music.queue.replace", new { songs = new[] { Song("wy", "1"), Song("wy", "2") }, index = 0 });
             await library.ExecuteAsync("music.queue.mode", new { mode = 2 });
             int writes = store.Writes;
@@ -294,7 +294,7 @@ public static class MusicOfficialAudioTests
     {
         await using var store = new MemoryStore();
         await using var runtime = AudioPeer();
-        await using var app = new MusicNativeApplication(store, runtime);
+        await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
         // Use the real repository owner for the concurrent authoritative observation;
         // a second platform request would wait behind the very publication under test.
         var library = (MusicLibraryOwner)typeof(MusicNativeApplication).GetField("library",
@@ -317,8 +317,7 @@ public static class MusicOfficialAudioTests
             var current = JsonNode.Parse((await Call("music.queue.get")).GetRawText())!.AsObject();
             foreach (var entry in current["entries"]!.AsArray().OfType<JsonObject>().Append(current["current"]!.AsObject()))
                 entry["song"] = new JsonObject { ["songId"] = entry["song"]!["songId"]!.DeepClone() };
-            var history = store.Root(MusicLibraryOwner.DocumentNamespace)["entries"]!.AsArray().Single(entry =>
-                entry!["key"]!.GetValue<string>() == new JsonArray("meowfilm", "music", 1, "local", "history").ToJsonString())!["value"]!;
+            var history = MusicTestStores.For(store).State("history");
             return current.ToJsonString() + history.ToJsonString();
         }
         string control = await Control();
@@ -416,7 +415,7 @@ public static class MusicOfficialAudioTests
         }
         yield return new("Official high-quality resolve without account is local AUTH_REQUIRED", async () => {
             await using var store = new MemoryStore(); await using var runtime = AudioPeer();
-            await using var app = new MusicNativeApplication(store, runtime);
+            await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             foreach (string platform in new[] { "wy", "tx", "kg" }) {
                 var song = await MusicSongFixture.AdoptAsync(app, Song(platform));
                 var result = await app.ExecuteAsync("music.official.resolve", new { platform, song, quality = "320k" });
@@ -493,7 +492,6 @@ public static class MusicOfficialAudioTests
     {
         internal readonly Dictionary<string, byte[]> Data = [];
         internal DocumentStoreError? Failure; internal int Writes;
-        internal DocumentFingerprint? WriteReceipt;
         internal JsonObject Root(string ns) => JsonNode.Parse(Data[ns])!.AsObject();
         public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         {
@@ -513,7 +511,7 @@ public static class MusicOfficialAudioTests
                 if (before != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
                 Writes++;
                 Data[ns] = bytes.ToArray();
-                return Task.FromResult(WriteReceipt ?? DocumentFingerprint.FromBytes(bytes.Span));
+                return Task.FromResult(DocumentFingerprint.FromBytes(bytes.Span));
             }
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

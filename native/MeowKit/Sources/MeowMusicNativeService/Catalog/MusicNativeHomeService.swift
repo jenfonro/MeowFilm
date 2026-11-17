@@ -472,9 +472,8 @@ extension NativeMusicService: MusicHomeBrowsing {
             if value.sections.contains(where: { $0.error != nil }) { return try access.perform { page } }
             current.nextCursor = page.cursor
             current.sections = cursor == nil ? value.sections : mergeHomeSections(current.sections, value.sections)
-            let repository = try read().library["library"]["songs"]
-            let display = try MusicNativeHomeSnapshot.references(.init(sections: current.sections), songs: repository)
-            let cachedDisplay = try MusicNativeHomeSnapshot.references(value, songs: repository)
+            let display = try MusicNativeHomeSnapshot.references(.init(sections: current.sections), sourceOwner: { try repositoryReader.sourceOwner(key: $0) })
+            let cachedDisplay = try MusicNativeHomeSnapshot.references(value, sourceOwner: { try repositoryReader.sourceOwner(key: $0) })
             return try access.perform {
                 homeLoad = current
                 // Reusing the real first-response cache is not a newer

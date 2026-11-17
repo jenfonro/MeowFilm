@@ -34,7 +34,7 @@
 - [影视设置、播放器控制与来源管理](ios/film-settings.md)
 - [影视搜索](ios/film-search.md)
 - [小说、书架与原生阅读器](ios/novel.md)
-- [本地文档存储](ios/storage.md)
+- [本地存储](ios/storage.md)
 - [内嵌 Node 运行底座预检](ios/runtime-preflight.md)
 - [构建、发布与安装](ios/release.md)
 

@@ -150,7 +150,7 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
                 prepared?.armed == true && prepared?.candidate.resourceId == sample.resourceID ||
                 cached?.armed == true && cached?.playback.candidate.resourceId == sample.resourceID else { return }
             if ![.failed, .unavailable, .stopped].contains(sample.kind),
-               !MusicMediaDuration.matches(expected: draft.library["library"]["songs"][entry["songId"].string]["duration"].number, actual: sample.duration) {
+               !MusicMediaDuration.matches(expected: try draft.song(entry["songId"].string)["duration"].number, actual: sample.duration) {
                 playbackFeedback.invalidate(); playbackFeedbackAdmission = nil
                 return
             }

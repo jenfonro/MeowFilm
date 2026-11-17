@@ -5,7 +5,6 @@ import MeowMusicFeature
 extension NativeMusicService {
     func syncConfirm(_ fence: MusicNativeSyncFence, snapshot: MusicLibrarySyncSnapshot,
                      round: inout MusicNativeSyncRound) throws {
-        round.library["songs"] = try read().library["library"]["songs"]
         if fence.mutation.action.isSubscription {
             try syncConfirmSubscription(fence, snapshot: snapshot, round: &round)
             return
@@ -35,7 +34,7 @@ extension NativeMusicService {
                 ("accountId", .string(fence.accountID)), ("id", .string(target)), ("map", .obj())])
             var mapping = b["map"]
             for member in remote.members {
-                let id = try registeredSongID(.init(platform: fence.platform.rawValue, data: member.track), library: round.library)
+                let id = try registeredSongID(.init(platform: fence.platform.rawValue, data: member.track))
                 mapping[member.occurrenceID] = .string(id)
             }
             b["map"] = mapping; b["baseline"] = .strings(remote.members.map(\.occurrenceID))

@@ -402,7 +402,7 @@ public static class MusicLyricApplicationTests
         { var value = Signal(); releaseOnClose.Add(value); return value; }
         internal Fixture()
         {
-            Library = new(Store); Owner = new(Library, Provider, Script, Clock);
+            Library = new(MusicTestStores.For(Store)); Owner = new(Library, Provider, Script, Clock);
         }
         internal ScriptSource AddSource(string id, string platform, bool enabled = true, bool idle = false, bool lyrics = true)
         {
@@ -474,24 +474,7 @@ public static class MusicLyricApplicationTests
         public override DateTimeOffset GetUtcNow() => now;
         internal void Advance(TimeSpan time) => now += time;
     }
-    private sealed class Store : IDocumentStore
+    private sealed class Store : MusicRecordTestStore
     {
-        private byte[]? data;
-        internal int Writes;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken ct = default)
-        {
-            ct.ThrowIfCancellationRequested(); Equal(MusicLibraryOwner.DocumentNamespace, ns);
-            return Task.FromResult(new DocumentSnapshot(data?.ToArray(),
-                data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(data)));
-        }
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes,
-            DocumentFingerprint expected, CancellationToken ct = default)
-        {
-            ct.ThrowIfCancellationRequested(); Equal(MusicLibraryOwner.DocumentNamespace, ns);
-            var before = data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(data);
-            if (expected != before) throw new DocumentStoreException(DocumentStoreError.Conflict);
-            Writes++; data = bytes.ToArray(); return Task.FromResult(DocumentFingerprint.FromBytes(data));
-        }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

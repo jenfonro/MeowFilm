@@ -42,7 +42,7 @@ final class MusicNativeCandidateDiscoveryTests: XCTestCase {
             XCTAssertEqual(after.queue, before.queue)
             XCTAssertEqual(after.playback, before.playback)
             XCTAssertEqual(after.history, before.history)
-            XCTAssertEqual(after.library["library"]["songs"][song["songId"].string]["baselineDuration"].number, 100)
+            XCTAssertEqual((try after.fixtureSong(song["songId"].string))["baselineDuration"].number, 100)
         } catch {
             await barrier.release()
             _ = await task.result
@@ -163,7 +163,7 @@ final class MusicNativeCandidateDiscoveryTests: XCTestCase {
         XCTAssertEqual(after.queue, before.queue)
         XCTAssertEqual(after.playback, before.playback)
         XCTAssertEqual(after.history, before.history)
-        let saved = after.library["library"]["songs"][snapshot.track.songId]
+        let saved = (try after.fixtureSong(snapshot.track.songId))
         XCTAssertEqual(Set(saved["sources"].array.map { $0["source"].string }), ["tx", "wy", "kg", "kw", "mg"])
         let queue = try await service.queue()
         XCTAssertEqual(queue.revision, 1); XCTAssertEqual(queue.currentId, "entry-1")
@@ -327,7 +327,7 @@ final class MusicNativeCandidateDiscoveryTests: XCTestCase {
             let store = try MusicNativeCandidateDiscoveryFixture.store(song: seed)
             let accounts = MusicNativeScopedAccounts(signedIn ? [.netease, .qq] : [.netease])
             let qq = MusicNativeCandidateDiscoveryQQ(), http = MusicNativeDiscoveryPlatforms()
-            let service = NativeMusicService(document: store,
+            let service = NativeMusicService(database: store,
             accounts: accounts,
             platformClient: try NativeMusicFixture.routes(primary: qq, others: http).makeClient(),
             enabledPlatforms: [.qq, .kugou],

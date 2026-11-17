@@ -175,7 +175,7 @@ final class MeowfilmAssembly: ObservableObject {
         await resources.musicAccountGate?.setAvailable(true)
         guard !closed, !Task.isCancelled else { return }
         let service = NativeMusicService(
-            document: resources.musicDocument, scripts: resources.musicScripts,
+            database: resources.musicLibrary, scripts: resources.musicScripts,
             accounts: resources.musicAccounts, platformClient: resources.musicPlatform,
             sourceDiscovery: resources.musicSourceDiscoveryCache,
             enabledPlatforms: [.netease, .qq, .kugou, .kuwo, .migu],

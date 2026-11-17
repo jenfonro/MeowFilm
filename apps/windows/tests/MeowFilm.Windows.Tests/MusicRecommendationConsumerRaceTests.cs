@@ -315,7 +315,7 @@ public static partial class MusicUiTests
     private sealed class RecommendationRaceApplication(IDocumentStore store) : MusicApplicationTestDouble
     {
         private const long Generation = 1;
-        private readonly MusicLibraryOwner library = new(store);
+        private readonly MusicLibraryOwner library = new(MusicTestStores.For(store));
         private MusicRecommendationCoordinator? coordinator;
         private MusicRecommendationQueuePort? queue;
         private readonly HashSet<Task> selections = [];

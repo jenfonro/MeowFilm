@@ -207,7 +207,7 @@ public static partial class MusicOfficialPlaybackScopeTests
                 ? Task.FromResult(MusicPlatformRuntimeFixture.Json(new { ok = true, contract = "music.script.v3",
                     value = new { items = Array.Empty<object>() } }))
                 : throw new InvalidOperationException("unexpected script operation: " + call.Method);
-            App = new(Store, Runtime, Cache);
+            App = new(Store, MusicTestStores.For(Store), Runtime, Cache);
             Module = new(App, Store, Output, new Dialogs(), cacheStore: Cache);
         }
         internal static async Task<ArtworkScene> Create()

@@ -17,7 +17,7 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music online settings current schema consumes extras and rejects unusable current values", OnlineSettingsInvalidCurrent);
         yield return new("Native music online settings save before commit failure settles without replay", () => OnlineSettingsUnknownCommit(false));
         yield return new("Native music online settings save after commit failure settles without replay", () => OnlineSettingsUnknownCommit(true));
-        yield return new("Native music online settings save CAS conflict preserves the competing document and pending attempt", () => OnlineSettingsConflict(true));
+        yield return new("Native music online settings save revision conflict preserves the competing records and pending attempt", () => OnlineSettingsConflict(true));
         yield return new("Native music online settings save unknown commit rejects a third state without rewriting it", () => OnlineSettingsConflict(false));
         yield return new("Native music online settings save cancelled during initial read remains retryable", OnlineSettingsSaveCancelRead);
         yield return new("Native music online settings save cancellation before and after admission preserves the real result", OnlineSettingsSaveCancellation);
@@ -30,7 +30,7 @@ public static partial class MusicNativeLibraryTests
     {
         var current = await CurrentDocuments();
         return Document(("online-settings", settings),
-            ("library", current.Library), ("queue", current.Queue), ("history", current.History),
+            ("library", current.Library), ("queue", current.Queue), ("history", current.History), ("songs", current.Songs),
             ("native-official-sources", O(new { schema = 1, revision = 4, enabled = new[] { "kg" } })));
     }
 
@@ -45,24 +45,18 @@ public static partial class MusicNativeLibraryTests
     {
         var original = JsonNode.Parse(before)!.AsObject();
         var actual = store.Root;
-        Check(original["version"]!.GetValue<int>() == actual["version"]!.GetValue<int>());
-        var oldEntries = original["entries"]!.AsArray();
-        var newEntries = actual["entries"]!.AsArray();
-        Check(oldEntries.Count == newEntries.Count);
-        for (int index = 0; index < oldEntries.Count; index++)
-        {
-            string key = oldEntries[index]!["key"]!.GetValue<string>();
-            Check(key == newEntries[index]!["key"]!.GetValue<string>());
-            if (key != AreaKey("online-settings"))
-                Check(oldEntries[index]!.ToJsonString(PersistedJson) == newEntries[index]!.ToJsonString(PersistedJson),
-                    "Settings operation changed another area: " + key);
-        }
+        var oldAreas = original["areas"]!.AsObject(); var newAreas = actual["areas"]!.AsObject();
+        Check(oldAreas.Count == newAreas.Count);
+        foreach (var pair in oldAreas)
+            if (pair.Key != "online-settings") Check(JsonNode.DeepEquals(pair.Value, newAreas[pair.Key]), "online settings changed another area");
+        Check(JsonNode.DeepEquals(original["songs"], actual["songs"]), "online settings changed song records");
     }
 
     private static async Task OnlineSettingsMissingArea()
     {
         await using var f = new Fixture();
-        f.Store.Bytes = Document(("library", (await CurrentDocuments()).Library));
+        var current = await CurrentDocuments();
+        f.Store.Bytes = Document(("library", current.Library), ("songs", current.Songs));
         byte[] before = f.Store.Bytes.ToArray();
         var owner = f.Owner();
         var fresh = (await Ok(owner, "music.settings.get")).GetProperty("settings");
@@ -116,17 +110,17 @@ public static partial class MusicNativeLibraryTests
         }
     }
 
-    private static async Task RejectOnlineSettingsDocument(byte[] bytes, string code = "CORRUPT_STORAGE", bool rootCorrupt = false)
+    private static async Task RejectOnlineSettingsDocument(byte[] bytes, string code = "CORRUPT_STORAGE")
     {
         await using var f = new Fixture();
         f.Store.Bytes = bytes.ToArray();
+        var durable = f.Store.Bytes!.ToArray();
         var owner = f.Owner();
         await Error(owner, "music.settings.get", null, code);
         await Error(owner, "music.settings.save", new { ifRevision = 7, lyrics = true }, code);
-        if (rootCorrupt) await Throws(code, () => owner.ReconcileAsync());
-        else await owner.ReconcileAsync();
+        await owner.ReconcileAsync();
         await Error(owner, "music.settings.get", null, code);
-        Check(f.Store.WriteCalls == 0 && bytes.SequenceEqual(f.Store.Bytes!));
+        Check(f.Store.WriteCalls == 0 && durable.SequenceEqual(f.Store.Bytes!));
     }
 
     private static async Task OnlineSettingsMissingRequired()
@@ -147,14 +141,13 @@ public static partial class MusicNativeLibraryTests
         })
         {
             var doc = JsonNode.Parse(await OnlineSettingsDocument(CurrentOnlineSettings()))!.AsObject();
-            doc["entries"]!.AsArray().Single(e => e!["key"]!.GetValue<string>() == AreaKey(area))!["value"] = invalid;
+            doc["areas"]![area] = invalid;
             await using var f = new Fixture();
             f.Store.Bytes = JsonSerializer.SerializeToUtf8Bytes(doc, PersistedJson);
             var owner = f.Owner();
             CheckOnlineSettings((await Ok(owner, "music.settings.get")).GetProperty("settings"), 7, false);
             await Ok(owner, "music.settings.save", new { ifRevision = 7, lyrics = true });
-            Check(JsonNode.DeepEquals(f.Store.Root["entries"]!.AsArray().OfType<JsonObject>()
-                .Single(e => e["key"]!.GetValue<string>() == AreaKey(area))["value"], invalid));
+            Check(JsonNode.DeepEquals(f.Store.Root["areas"]![area], invalid));
             await Error(owner, area == "library" ? "music.library.list" : "music.officialSources.settings.get", null, code);
         }
     }
@@ -178,17 +171,31 @@ public static partial class MusicNativeLibraryTests
             settings.Remove(field);
             await RejectOnlineSettingsDocument(await OnlineSettingsDocument(settings));
         }
-        byte[] valid = await OnlineSettingsDocument(CurrentOnlineSettings());
-        await RejectOnlineSettingsDocument(Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(valid)
-            .Replace("\"lyrics\":false", "\"lyrics\":false,\"lyrics\":false", StringComparison.Ordinal)), rootCorrupt: true);
-        await using var f = new Fixture();
-        var extended = CurrentOnlineSettings(); extended["target"] = null; extended["extra"] = new JsonObject { ["nested"] = true };
-        f.Store.Bytes = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(await OnlineSettingsDocument(extended))
-            .Replace("\"schema\":3", "\"schema\":3.0", StringComparison.Ordinal));
-        var owner = f.Owner();
-        CheckOnlineSettings((await Ok(owner, "music.settings.get")).GetProperty("settings"), 7, false);
-        await Ok(owner, "music.settings.save", new { ifRevision = 7, lyrics = true, unused = new { value = 1 } });
-        Check(JsonNode.DeepEquals(f.Store.State("online-settings")["extra"], extended["extra"]));
+        await using (var duplicate = new Fixture())
+        {
+            duplicate.Store.SetAreaJson("online-settings", "{\"schema\":3,\"revision\":7,\"lyrics\":false,\"lyrics\":false}");
+            var owner = duplicate.Owner();
+            await Error(owner, "music.settings.get", null, "CORRUPT_STORAGE");
+            await Error(owner, "music.settings.save", new { ifRevision = 7, lyrics = true }, "CORRUPT_STORAGE");
+            await owner.DisposeAsync();
+            await Error(duplicate.Owner(), "music.settings.get", null, "CORRUPT_STORAGE");
+            Check(duplicate.Store.WriteCalls == 0, "ambiguous SQL control JSON must not be rewritten");
+        }
+        foreach (string schema in new[] { "3.0", "3e0" })
+        {
+            await using var f = new Fixture();
+            var extended = CurrentOnlineSettings(); extended["target"] = null;
+            extended["extra"] = new JsonObject { ["nested"] = true };
+            f.Store.SetAreaJson("online-settings", extended.ToJsonString()
+                .Replace("\"schema\":3", "\"schema\":" + schema, StringComparison.Ordinal));
+            var owner = f.Owner();
+            CheckOnlineSettings((await Ok(owner, "music.settings.get")).GetProperty("settings"), 7, false);
+            Check(f.Store.WriteCalls == 0);
+            await Ok(owner, "music.settings.save", new { ifRevision = 7, lyrics = true, unused = new { value = 1 } });
+            Check(JsonNode.DeepEquals(f.Store.State("online-settings")["extra"], extended["extra"]));
+            Check(f.Store.State("online-settings").ContainsKey("target") && f.Store.State("online-settings")["target"] is null);
+            Check(f.Store.WriteCalls == 1);
+        }
     }
 
     private static async Task OnlineSettingsUnknownCommit(bool committed)
@@ -245,62 +252,26 @@ public static partial class MusicNativeLibraryTests
     {
         await using var f = new Fixture();
         f.Store.Bytes = await OnlineSettingsDocument(CurrentOnlineSettings());
-        byte[] before = f.Store.Bytes.ToArray();
-        var competingDocument = JsonNode.Parse(before)!.AsObject();
-        competingDocument["entries"]!.AsArray()
-            .Single(e => e!["key"]!.GetValue<string>() == AreaKey("native-official-sources"))!["value"] =
-            O(new { schema = 1, revision = 5, enabled = Array.Empty<string>() });
-        byte[] competing = JsonSerializer.SerializeToUtf8Bytes(competingDocument, PersistedJson);
-        var owner = f.Owner();
-        byte[] observed;
-        if (conflictAtCommit)
-        {
-            f.Store.Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            f.Store.Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            var saving = owner.ExecuteAsync("music.settings.save", new { ifRevision = 7, lyrics = true });
-            await f.Store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
-            f.Store.Bytes = competing.ToArray();
-            f.Store.Release.TrySetResult();
-            var failed = await saving;
-            Check(!failed.GetProperty("ok").GetBoolean() && failed.GetProperty("code").GetString() == "STORAGE_CONFLICT");
-            observed = before;
-        }
-        else
+        var owner = f.Owner(); await Ok(owner, "music.settings.get");
+        if (!conflictAtCommit)
         {
             f.Store.Failure = 2;
             await Error(owner, "music.settings.save", new { ifRevision = 7, lyrics = true }, "COMMIT_UNKNOWN");
-            observed = f.Store.Bytes!.ToArray();
-            f.Store.Bytes = competing.ToArray();
         }
+        var competitor = f.Owner();
+        await Ok(competitor, "music.officialSources.settings.save", new { ifRevision = 4, enabled = Array.Empty<string>() });
+        byte[] durable = f.Store.Bytes!.ToArray();
+        if (conflictAtCommit)
+            await Error(owner, "music.settings.save", new { ifRevision = 7, lyrics = true }, "STORAGE_CONFLICT");
+        int calls = f.Store.WriteCalls;
+        await Throws("STORAGE_CONFLICT", () => owner.ReconcileAsync());
+        await Throws("STORAGE_CONFLICT", () => owner.ReconcileAsync());
         string blocked = conflictAtCommit ? "STORAGE_CONFLICT" : "PENDING_WRITE";
-        await Throws("STORAGE_CONFLICT", () => owner.ReconcileAsync());
-        await Throws("STORAGE_CONFLICT", () => owner.ReconcileAsync());
         await Error(owner, "music.settings.get", null, blocked);
         await Error(owner, "music.settings.save", new { ifRevision = 7, lyrics = true }, blocked);
         await Throws(conflictAtCommit ? "STORAGE_CONFLICT" : "COMMIT_UNKNOWN", () => owner.PrepareShutdownAsync());
-        Check(f.Store.WriteCalls == 1 && competing.SequenceEqual(f.Store.Bytes!));
-
-        // Restoring an original CAS side must still settle the original pending attempt.
-        f.Store.Bytes = observed.ToArray();
-        await owner.ReconcileAsync();
-        Check(f.Store.WriteCalls == 1 && observed.SequenceEqual(f.Store.Bytes!));
-        CheckOnlineSettings((await Ok(owner, "music.settings.get")).GetProperty("settings"), conflictAtCommit ? 7 : 8, !conflictAtCommit);
-        Check(f.Store.WriteCalls == 1);
-        CheckOtherOnlineSettingsAreas(before, f.Store);
-    }
-
-    private sealed class OnlineSettingsReadCancellation(Store store, CancellationTokenSource cancel) : IDocumentStore
-    {
-        public async Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
-        {
-            var document = await store.ReadAsync(documentNamespace, cancellationToken);
-            cancel.Cancel();
-            return document;
-        }
-        public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> bytes,
-            DocumentFingerprint expected, CancellationToken cancellationToken = default) =>
-            store.WriteAsync(documentNamespace, bytes, expected, cancellationToken);
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        Check(f.Store.WriteCalls == calls && durable.SequenceEqual(f.Store.Bytes!), "foreign receipt must remain fenced without replay");
+        CheckOnlineSettings((await Ok(competitor, "music.settings.get")).GetProperty("settings"), conflictAtCommit ? 7 : 8, !conflictAtCommit);
     }
 
     private static async Task OnlineSettingsSaveCancelRead()
@@ -309,7 +280,8 @@ public static partial class MusicNativeLibraryTests
         f.Store.Bytes = await OnlineSettingsDocument(CurrentOnlineSettings());
         byte[] before = f.Store.Bytes.ToArray();
         using var cancel = new CancellationTokenSource();
-        var owner = f.Owner(new OnlineSettingsReadCancellation(f.Store, cancel));
+        f.Store.AfterRead = () => { f.Store.AfterRead = null; cancel.Cancel(); };
+        var owner = f.Owner();
         var result = await owner.ExecuteAsync("music.settings.save", new { ifRevision = 7, lyrics = true }, cancel.Token);
         Check(!result.GetProperty("ok").GetBoolean() && result.GetProperty("code").GetString() == "CANCELLED");
         Check(f.Store.WriteCalls == 0 && before.SequenceEqual(f.Store.Bytes!));

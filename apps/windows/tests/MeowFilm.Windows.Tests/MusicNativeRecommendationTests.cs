@@ -123,14 +123,7 @@ public static class MusicNativeRecommendationTests
     private static JsonElement Song(int id) => Song(id.ToString());
     private static JsonElement Song(string id) => MusicSongFixture.Element(MusicSongFixture.Online(
         "wy", id, "Fixture " + id, "Synthetic", "Native fixture", 180));
-    internal static string PersistedQueue(ReadOnlyMemory<byte> bytes)
-    {
-        using var document = JsonDocument.Parse(bytes);
-        foreach (var entry in document.RootElement.GetProperty("entries").EnumerateArray())
-            if (S(entry, "key") == "[\"meowfilm\",\"music\",1,\"local\",\"queue\"]")
-                return entry.GetProperty("value").GetRawText();
-        return "";
-    }
+    private const string MusicRecordsKey = "music-records";
 
     private sealed class Barrier
     {
@@ -144,12 +137,32 @@ public static class MusicNativeRecommendationTests
             finally { Settled.TrySetResult(); }
         }
     }
-    private sealed class Store(LocalDocumentStore inner) : IDocumentStore
+    private sealed class Store : IDocumentStore
     {
         internal readonly ConcurrentDictionary<(string Namespace, int Number), Barrier> Holds = new();
         internal readonly ConcurrentDictionary<string, int> Reads = new(), Writes = new();
         internal readonly ConcurrentBag<Barrier> Barriers = [];
-        private readonly ConcurrentDictionary<DocumentFingerprint, string> queueSnapshots = new();
+        private readonly LocalDocumentStore inner;
+        internal readonly MusicRecordTestStore Records;
+        internal Store(LocalDocumentStore inner, string root)
+        {
+            this.inner = inner;
+            Records = MusicTestStores.Use(this, root);
+            Records.AfterReadAsync = async (snapshot, token) =>
+            {
+                int count = Reads.AddOrUpdate(MusicRecordsKey, 1, (_, n) => n + 1);
+                if (Holds.TryRemove((MusicRecordsKey, count), out var point)) await point.Block(token).ConfigureAwait(false);
+            };
+            Records.BeforeCommit = async (changes, token) =>
+            {
+                int count = Writes.AddOrUpdate(MusicRecordsKey, 1, (_, n) => n + 1);
+                if (Holds.TryRemove(("write:" + MusicRecordsKey, count), out var point)) await point.Block(token).ConfigureAwait(false);
+                if (!changes.Areas.ContainsKey("queue")) return;
+                if (Holds.TryRemove(("queue-write", Interlocked.Increment(ref QueueWrites)), out var queuePoint))
+                    await queuePoint.Block(token).ConfigureAwait(false);
+                Records.Failure = Interlocked.Exchange(ref UnknownQueueWrite, 0);
+            };
+        }
         internal int Disposals, UnknownQueueWrite, QueueWrites;
         internal Barrier HoldRead(string ns, int number)
         {
@@ -169,8 +182,6 @@ public static class MusicNativeRecommendationTests
         {
             int count = Reads.AddOrUpdate(ns, 1, (_, n) => n + 1);
             var document = await inner.ReadAsync(ns, token).ConfigureAwait(false);
-            if (ns == MusicLibraryOwner.DocumentNamespace)
-                queueSnapshots[document.Fingerprint] = document.Data is null ? "" : PersistedQueue(document.Data);
             if (Holds.TryRemove((ns, count), out var point)) await point.Block(token).ConfigureAwait(false);
             return document;
         }
@@ -179,21 +190,7 @@ public static class MusicNativeRecommendationTests
         {
             int count = Writes.AddOrUpdate(ns, 1, (_, n) => n + 1);
             if (Holds.TryRemove(("write:" + ns, count), out var point)) await point.Block(token).ConfigureAwait(false);
-            string queue = "";
-            bool queueWrite = false;
-            if (ns == MusicLibraryOwner.DocumentNamespace)
-            {
-                Check(queueSnapshots.TryGetValue(expected, out var before), "Queue CAS must use an observed document");
-                queue = PersistedQueue(bytes);
-                queueWrite = queue != before;
-                if (queueWrite && Holds.TryRemove(("queue-write", Interlocked.Increment(ref QueueWrites)), out var queuePoint))
-                    await queuePoint.Block(token).ConfigureAwait(false);
-            }
-            int unknown = queueWrite ? Interlocked.Exchange(ref UnknownQueueWrite, 0) : 0;
-            if (unknown == 1) throw new IOException("synthetic lost acknowledgement");
             var value = await inner.WriteAsync(ns, bytes, expected, token).ConfigureAwait(false);
-            if (ns == MusicLibraryOwner.DocumentNamespace) queueSnapshots[value] = queue;
-            if (unknown == 2) throw new IOException("synthetic lost acknowledgement");
             return value;
         }
         internal async Task SetAccount(long generation = 1)
@@ -210,14 +207,14 @@ public static class MusicNativeRecommendationTests
             Okay(await owner.CallAsync("music.accounts.import", new {
                 platform = "wy", cookie = "MUSIC_U=synthetic-account-key-" + generation }), "seed current account");
         }
-        internal async Task<string> RawLibrary()
-        {
-            var value = await inner.ReadAsync(MusicLibraryOwner.DocumentNamespace);
-            try { return value.Data is null ? "" : Encoding.UTF8.GetString(value.Data); }
-            finally { if (value.Data is { } bytes) CryptographicOperations.ZeroMemory(bytes); }
-        }
+        internal Task<string> RawLibrary() => Task.FromResult(Records.Root.ToJsonString());
         internal void ReleaseAll() { foreach (var point in Barriers) point.Release.TrySetResult(); }
-        public async ValueTask DisposeAsync() { Disposals++; await inner.DisposeAsync(); }
+        public async ValueTask DisposeAsync()
+        {
+            Disposals++;
+            try { await Records.DisposeAsync(); }
+            finally { await inner.DisposeAsync(); }
+        }
     }
     private sealed class ResponseHold
     {
@@ -305,7 +302,8 @@ public static class MusicNativeRecommendationTests
             string parent = Environment.GetEnvironmentVariable("MEOWFILM_NATIVE_RECOMMENDATIONS_DATA") ??
                 throw new InvalidOperationException("Explicit isolated fixture directory required");
             Root = root ?? Path.Combine(parent, Guid.NewGuid().ToString("N")); Directory.CreateDirectory(Root);
-            Store = new(new LocalDocumentStore(Root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
+            Store = new(new LocalDocumentStore(Root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces),
+                Path.Combine(Root, "music-records"));
             Runtime.OnRequest = Handler.Read;
             Runtime.OnSessionUpdate = (call, _) =>
             {
@@ -313,7 +311,7 @@ public static class MusicNativeRecommendationTests
                 Handler.PublishedCookie = session.ValueKind == JsonValueKind.Null ? "" : session.GetProperty("cookie").GetString()!;
                 return Task.FromResult(MusicPlatformRuntimeFixture.Json(new { published = true }));
             };
-            App = new(Store, Runtime);
+            App = new(Store, Store.Records, Runtime);
             Source.Changed += value => Notices.Enqueue(value.Clone());
         }
         internal static async Task<Fixture> Create(bool account = true, bool bind = true, string? root = null)
@@ -371,7 +369,8 @@ public static class MusicNativeRecommendationTests
             {
                 if (abort) await App.AbortAsync();
                 else await App.DisposeAsync();
-                Check(Store.Disposals == 0 && Runtime.Calls.All(c => c.Method.StartsWith("music.platform.", StringComparison.Ordinal)) && Runtime.Disposals == 0,
+                Check(Store.Disposals == 0 && !Store.Records.Disposed &&
+                    Runtime.Calls.All(c => c.Method.StartsWith("music.platform.", StringComparison.Ordinal)) && Runtime.Disposals == 0,
                     "Native application invoked scripts or disposed borrowed runtime/store");
             }
             finally
@@ -408,9 +407,9 @@ public static class MusicNativeRecommendationTests
     {
         await using var f = await Fixture.Create(); var started = await f.Start();
         await Until(() => Task.FromResult(f.Notices.Any(n => N(n, "batch") == 1 && !B(n, "loading"))));
-        int calls = f.Handler.Paths.Count, writes = f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace);
+        int calls = f.Handler.Paths.Count, writes = f.Store.Writes.GetValueOrDefault(MusicRecordsKey);
         for (int i = 0; i < 3; i++) Check(S(await f.State(), "id") == S(started, "id"));
-        Check(f.Handler.Paths.Count == calls && f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace) == writes);
+        Check(f.Handler.Paths.Count == calls && f.Store.Writes.GetValueOrDefault(MusicRecordsKey) == writes);
         Check(f.Notices.All(n => !n.GetRawText().Contains("synthetic-account-key", StringComparison.Ordinal)));
         var revisions = f.Notices.Select(n => N(n, "revision")).ToArray();
         Check(revisions.Zip(revisions.Skip(1)).All(p => p.First < p.Second), "Changed revisions must be monotonic");
@@ -633,13 +632,13 @@ public static class MusicNativeRecommendationTests
         await f.Call("music.queue.replace", new { songs = new[] { Song(9),
             MusicSongFixture.Element(MusicSongFixture.Online("tx", "qq123")) }, index });
         var before = await f.Queue(); int writes = f.Store.QueueWrites;
-        int libraryWrites = f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace);
+        int libraryWrites = f.Store.Writes.GetValueOrDefault(MusicRecordsKey);
         var state = await f.Start(new { kind = "queue", platform = "wy" }); var after = await f.Queue();
         Check((index == 1 ? S(state, "error") == "NATIVE_ID_REQUIRED" && f.Handler.Paths.IsEmpty &&
                 state.GetProperty("candidates").GetArrayLength() == 0 : S(state, "error") == "" &&
                 S(state, "seedSongId") == "9" && state.GetProperty("candidates").GetArrayLength() == 3) && f.Selections.IsEmpty &&
             f.Store.QueueWrites == writes &&
-            (index == 0 || f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace) == libraryWrites));
+            (index == 0 || f.Store.Writes.GetValueOrDefault(MusicRecordsKey) == libraryWrites));
         Check(N(after, "version") == N(before, "version") && N(after, "mode") == N(before, "mode") &&
             Fixture.Current(after) == Fixture.Current(before) &&
             after.GetProperty("entries").GetRawText() == before.GetProperty("entries").GetRawText() &&
@@ -682,12 +681,12 @@ public static class MusicNativeRecommendationTests
         await f.Call("music.queue.replace", new { songs = new[] { Song(9) }, index = 0 });
         var hold = f.Handler.Hold(); var start = f.Start(new { kind = "queue", platform = "wy" });
         await Wait(hold.Entered.Task);
-        int writes = f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace);
+        int writes = f.Store.Writes.GetValueOrDefault(MusicRecordsKey);
         var logout = f.App.ExecuteAsync("music.accounts.logout", new { platform = "wy" });
         await Until(async () => !B(await f.State(), "active"));
         hold.Release.TrySetResult(); await start; await logout;
         Check(N(await f.Queue(), "total") == 1 && f.Selections.IsEmpty && (await f.State()).GetProperty("candidates").GetArrayLength() == 0 &&
-            f.Store.Writes.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace) == writes);
+            f.Store.Writes.GetValueOrDefault(MusicRecordsKey) == writes);
     }
     private static async Task QueueDisableCommit()
     {
@@ -826,8 +825,7 @@ public static class MusicNativeRecommendationTests
             "Next append must retain the live recommendation session like an ordinary edit");
         string persisted = await f.Store.RawLibrary();
         using var document = JsonDocument.Parse(persisted);
-        var savedQueue = document.RootElement.GetProperty("entries").EnumerateArray()
-            .Single(e => S(e, "key") == "[\"meowfilm\",\"music\",1,\"local\",\"queue\"]").GetProperty("value");
+        var savedQueue = document.RootElement.GetProperty("areas").GetProperty("queue");
         Check(S(savedQueue, "currentId") == Fixture.Current(before) &&
             savedQueue.GetProperty("entries").EnumerateArray().Select(e => S(e, "id")).SequenceEqual(entries.Select(e => S(e, "id"))),
             "Durable queue must retain the same ordered occurrences and current selection");
@@ -1008,11 +1006,11 @@ public static class MusicNativeRecommendationTests
     {
         await using var f = await Fixture.Create(); f.Store.UnknownQueueWrite = 2;
         var state = await f.Start(); Check(B(state, "requiresReconcile") && f.Store.QueueWrites == 1 && f.Selections.IsEmpty);
-        int writes = f.Store.Writes[MusicLibraryOwner.DocumentNamespace];
+        int writes = f.Store.Writes[MusicRecordsKey];
         Error(await f.App.ExecuteAsync("music.recommendations.retry", new { id = S(state, "id") }), "COMMIT_UNKNOWN");
-        Check(f.Store.Writes[MusicLibraryOwner.DocumentNamespace] == writes);
+        Check(f.Store.Writes[MusicRecordsKey] == writes);
         var result = await f.Call("music.recommendations.reconcile", new { id = S(state, "id") });
-        Check(!B(result, "requiresReconcile") && f.Selections.IsEmpty && f.Store.Writes[MusicLibraryOwner.DocumentNamespace] == writes);
+        Check(!B(result, "requiresReconcile") && f.Selections.IsEmpty && f.Store.Writes[MusicRecordsKey] == writes);
         Check(N(await f.Queue(), "total") == 3);
     }
     private static async Task UnknownAbort(int outcome)
@@ -1022,7 +1020,7 @@ public static class MusicNativeRecommendationTests
         {
             f.Store.UnknownQueueWrite = outcome;
             Check(B(await f.Start(), "requiresReconcile") && f.Store.QueueWrites == 1);
-            int writes = f.Store.Writes[MusicLibraryOwner.DocumentNamespace];
+            int writes = f.Store.Writes[MusicRecordsKey];
             string persisted = await f.Store.RawLibrary();
             foreach (var close in new Func<Task>[] { () => f.App.PrepareShutdownAsync(), () => f.App.DisposeAsync().AsTask() })
             {
@@ -1032,7 +1030,7 @@ public static class MusicNativeRecommendationTests
             await Wait(f.App.AbortAsync());
             await Wait(f.App.AbortAsync());
             Check(f.Runtime.Disposals == 0 && f.Store.Disposals == 0 && f.Runtime.Disposals == 0);
-            Check(f.Store.Writes[MusicLibraryOwner.DocumentNamespace] == writes &&
+            Check(f.Store.Writes[MusicRecordsKey] == writes &&
                 await f.Store.RawLibrary() == persisted && f.Selections.IsEmpty,
                 "Abort must neither retry nor reconcile the unknown write or select media");
             Error(await f.App.ExecuteAsync("music.recommendations.get"), "CLOSED");
@@ -1104,7 +1102,7 @@ public static class MusicNativeRecommendationTests
         {
             f.Store.UnknownQueueWrite = outcome;
             var state = await f.Start(); Check(B(state, "requiresReconcile") && f.Store.QueueWrites == 1);
-            int writes = f.Store.Writes[MusicLibraryOwner.DocumentNamespace];
+            int writes = f.Store.Writes[MusicRecordsKey];
             try
             {
                 await (full ? f.App.PrepareShutdownAsync() : f.Source.PrepareRecommendationsAsync());
@@ -1116,11 +1114,11 @@ public static class MusicNativeRecommendationTests
             var pending = await f.State();
             Check(B(pending, "requiresReconcile") && !B(pending, "active") && f.Selections.IsEmpty);
             Error(await f.App.ExecuteAsync("music.recommendations.start", new { kind = "fm", platform = "wy" }), "COMMIT_UNKNOWN");
-            Check(f.Store.Writes[MusicLibraryOwner.DocumentNamespace] == writes && f.Handler.Paths.Count == 1);
+            Check(f.Store.Writes[MusicRecordsKey] == writes && f.Handler.Paths.Count == 1);
             var reconciled = await f.Call("music.recommendations.reconcile", new { id = S(state, "id") });
             Check(!B(reconciled, "requiresReconcile") && f.Selections.IsEmpty);
             Check(N(await f.Queue(), "total") == (outcome == 2 ? 3 : 0) &&
-                f.Store.Writes[MusicLibraryOwner.DocumentNamespace] == writes && f.Handler.Paths.Count == 1);
+                f.Store.Writes[MusicRecordsKey] == writes && f.Handler.Paths.Count == 1);
             Check(B(await f.Start(), "active") && f.Handler.Paths.Count == 2);
             finished = true;
         }
@@ -1150,8 +1148,8 @@ public static class MusicNativeRecommendationTests
         try { await f.Source.PrepareRecommendationsAsync(); throw new InvalidOperationException("Expected unknown preparation"); }
         catch (Exception e) when (e.Message == "COMMIT_UNKNOWN") { }
         await f.App.CancelShutdownPreparationAsync();
-        var hold = f.Store.HoldRead(MusicLibraryOwner.DocumentNamespace,
-            f.Store.Reads.GetValueOrDefault(MusicLibraryOwner.DocumentNamespace) + 1);
+        var hold = f.Store.HoldRead(MusicRecordsKey,
+            f.Store.Reads.GetValueOrDefault(MusicRecordsKey) + 1);
         var reconcile = f.Call("music.recommendations.reconcile", new { id = S(state, "id") });
         await Wait(hold.Entered.Task);
         var close = f.Source.PrepareRecommendationsAsync();

@@ -68,7 +68,7 @@ final class MusicNativeArtistActivityTests: XCTestCase {
         }
     }
     func testAlbumSummaryNeedsNoPreviewOrSongMetadataRead() async throws {
-        let store = NativeMusicMemoryDocument(), account = ArtistActivityAccount([page([album()])])
+        let store = NativeMusicTestLibrary(), account = ArtistActivityAccount([page([album()])])
         let service = try await NativeMusicFixture.service(store, accounts: account)
         let result = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
         XCTAssertTrue(result.sections[0].items[0].previewSongs.isEmpty); XCTAssertEqual(store.snapshot().2, 0)
@@ -83,7 +83,7 @@ final class MusicNativeArtistActivityTests: XCTestCase {
         XCTAssertEqual(track.sources.first?.nativeId, "41"); XCTAssertEqual(track.title, "独立歌曲")
         XCTAssertNotNil(UUID(uuidString: track.songId))
         let document = try await service.read()
-        XCTAssertEqual(document.library["library"]["songs"][track.songId]["songId"].string, track.songId)
+        XCTAssertEqual((try document.fixtureSong(track.songId))["songId"].string, track.songId)
         await service.close()
     }
     func testCanonicalAlbumIdentityAndDeclaredSummaryAreNotRecomputedFromPreview() async throws {

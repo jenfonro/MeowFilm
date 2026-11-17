@@ -484,7 +484,7 @@ private actor ContentArtworkService: MusicServing, MusicArtworkSelecting, MusicS
     private let entries: [MusicQueueEntry]
     private let snapshot: MusicPlaybackState
     private var songs: [String: MusicRemoteTrack]
-    private var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
+    private var observers: [UUID: AsyncStream<Set<String>>.Continuation] = [:]
     private var selectionGate: MusicCollectionGate?
     private var successes: [Success] = []
     private var failures = 0
@@ -509,13 +509,13 @@ private actor ContentArtworkService: MusicServing, MusicArtworkSelecting, MusicS
         songs[songID] = .init(ref: track.ref, songId: track.songId, title: track.title,
             artist: track.artist, album: track.album, duration: track.duration, sources: track.sources,
             artwork: url, artistNames: track.artistNames, sourcePosition: track.sourcePosition)
-        for observer in observers.values { observer.yield(()) }
+        for observer in observers.values { observer.yield([songID]) }
     }
     func repositoryTracks(songIDs: Set<String>) -> [String: MusicRemoteTrack] {
         songs.filter { songIDs.contains($0.key) }
     }
-    func songChanges() -> AsyncStream<Void> {
-        let id = UUID(), pair = AsyncStream<Void>.makeStream()
+    func songChanges() -> AsyncStream<Set<String>> {
+        let id = UUID(), pair = AsyncStream<Set<String>>.makeStream()
         observers[id] = pair.continuation
         pair.continuation.onTermination = { [weak self] _ in Task { await self?.removeObserver(id) } }
         return pair.stream

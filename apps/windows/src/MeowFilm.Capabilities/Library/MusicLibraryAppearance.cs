@@ -5,7 +5,7 @@ namespace MeowFilm.Capabilities.Library;
 public sealed partial class MusicLibraryOwner
 {
     private const string AppearanceArea = "native-appearance";
-    private JsonObject Appearance(JsonObject doc)
+    private JsonObject Appearance(MusicLibraryData doc)
     {
         var value = Area(doc, AppearanceArea) ??
         LJ.Obj(("schema", 1), ("revision", 0), ("playlistView", "grid"),
@@ -27,7 +27,7 @@ public sealed partial class MusicLibraryOwner
     }
 
     private Task<(JsonObject Result, bool Mutate)> AppearanceCommand(
-        string method, JsonObject p, JsonObject doc, CancellationToken token)
+        string method, JsonObject p, MusicLibraryData doc, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         LJ.Require(pending is null, "PENDING_WRITE");

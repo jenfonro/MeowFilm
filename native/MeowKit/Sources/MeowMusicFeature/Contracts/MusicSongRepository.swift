@@ -4,7 +4,7 @@ import Foundation
 /// and page context, but obtain song facts from the one committed store.
 public protocol MusicSongRepositoryReading: Sendable {
     func repositoryTracks(songIDs: Set<String>) async throws -> [String: MusicRemoteTrack]
-    func songChanges() async -> AsyncStream<Void>
+    func songChanges() async -> AsyncStream<Set<String>>
 }
 
 extension MusicRemoteTrack {
@@ -23,6 +23,7 @@ extension MusicPublicBrowseItem {
         return ids
     }
     func projected(_ songs: [String: MusicRemoteTrack], layout: MusicPublicBrowseSection.Layout) -> Self {
+        guard !songIDs.isDisjoint(with: songs.keys) else { return self }
         let nextContent: MusicPublicBrowseContent
         var nextTitle = title, nextSubtitle = subtitle, nextArtwork = artwork
         if case .track(let previous) = content {
@@ -52,7 +53,8 @@ extension MusicPublicBrowseSection {
             .union(tabs.flatMap(\.items).reduce(into: Set<String>()) { $0.formUnion($1.songIDs) })
     }
     func projected(_ songs: [String: MusicRemoteTrack]) -> Self {
-        .init(id: id, title: title, items: items.map { $0.projected(songs, layout: layout) },
+        guard !songIDs.isDisjoint(with: songs.keys) else { return self }
+        return .init(id: id, title: title, items: items.map { $0.projected(songs, layout: layout) },
             layout: layout, avatars: avatars, channel: channel, filters: filters,
             selectedFilter: selectedFilter, error: error, tabs: tabs.map {
                 .init(id: $0.id, title: $0.title, items: $0.items.map { $0.projected(songs, layout: layout) },

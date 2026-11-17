@@ -6,7 +6,7 @@ namespace MeowFilm.Capabilities.Library;
 public sealed partial class MusicLibraryOwner
 {
     private const string DesktopLyricSettingsArea = "native-desktop-lyrics";
-    private JsonObject DesktopLyricSettings(JsonObject doc)
+    private JsonObject DesktopLyricSettings(MusicLibraryData doc)
     {
         var value = Area(doc, DesktopLyricSettingsArea) ??
         LJ.Obj(("schema", 1), ("revision", 0), ("layout", "single"),
@@ -42,7 +42,7 @@ public sealed partial class MusicLibraryOwner
         return ((JsonValue)value!).GetValue<double>();
     }
 
-    private (JsonObject Result, bool Mutate) DesktopLyricSettingsCommand(string method, JsonObject p, JsonObject doc)
+    private (JsonObject Result, bool Mutate) DesktopLyricSettingsCommand(string method, JsonObject p, MusicLibraryData doc)
     {
         LJ.Require(pending is null, "PENDING_WRITE");
         var saved = DesktopLyricSettings(doc);

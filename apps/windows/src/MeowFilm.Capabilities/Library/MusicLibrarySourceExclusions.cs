@@ -12,7 +12,7 @@ public sealed partial class MusicLibraryOwner
 {
     private const string SourceExclusionsArea = "native-source-exclusions";
     internal const string OfficialProvider = "official";
-    private JsonObject SourceExclusions(JsonObject doc)
+    private JsonObject SourceExclusions(MusicLibraryData doc)
     {
         var value = Area(doc, SourceExclusionsArea) ??
         LJ.Obj(("schema", 1), ("revision", 0), ("items", new JsonArray()));
@@ -42,7 +42,7 @@ public sealed partial class MusicLibraryOwner
         foreach (var item in items) ValidateSourceExclusion(LJ.Object(item, "CORRUPT_STORAGE"));
         LJ.Require(items.Select(ExclusionKey).Distinct(StringComparer.Ordinal).Count() == items.Count, "CORRUPT_STORAGE");
     }
-    private (JsonObject Result, bool Mutate) SourceExclusionsCommand(string method, JsonObject p, JsonObject doc)
+    private (JsonObject Result, bool Mutate) SourceExclusionsCommand(string method, JsonObject p, MusicLibraryData doc)
     {
         LJ.Require(pending is null, "PENDING_WRITE");
         var saved = SourceExclusions(doc);

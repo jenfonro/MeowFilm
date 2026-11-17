@@ -8,7 +8,7 @@
 
 - 它借用同一个 `MusicLibraryOwner`、账号会话 owner 和[平台客户端](music-platform-client-context.md)；`MusicSyncAdapter` 调共同 Node 配方，不执行原生平台 HTTP。
 - 它不拥有第二份曲库或运行器，不保存账号凭据；网易订阅准备在 Node 内借用既有 token owner。
-- 同步状态位于 `music.library.v2` 的 `library-sync` area，并与曲库在同一 envelope CAS 中提交。
+- 同步状态位于原生音乐数据库的 `library-sync` area，并与相关曲库控制在同一 SQL 事务提交。checkpoint 不含 songs；歌曲采用由同一 owner 的逐记录事务完成，不能从旧计划替换仓库。
 - binding map 的唯一方向是实际成员 key → 永久 `songId`。
 - 普通目录／集合读取只消费共同结果；远端写所需 baseline、preflight、journal 和 readback 由同步 engine 独立负责，不把事务证明施加到普通播放读取。
 - 平台映射与写入仅枚举歌曲实际 `sources`，不把整首歌曲重复当作主来源。本地歌曲的空来源是合法状态：有足够元数据时尝试匹配，否则报告该歌曲未映射，继续同步其它可用歌曲，不使整轮变为 `INVALID_SONG`。
@@ -82,8 +82,8 @@ platform accountId collectionId remoteId operation beforePresent desiredPresent 
 2. 同一时间只允许一个 round；账号变化、设置变化和关闭会提升 generation 并取消旧 round。
 3. 只读取已启用平台和类型；未启用平台不发请求。
 4. `SyncDirectory.Collections` 只含当前账号本人可写的已选集合及其完整成员；`Subscriptions` 只含订阅元信息。适配器不为订阅调用成员或补搜接口。
-5. 本地曲库和同步状态通过 `CommitLibrarySyncAsync` 在同一 envelope CAS 中提交。
-6. 每次远端写入前先耐久写入 pending fence。
+5. 已登记成员按来源键查询；新来源由 `AdoptLibrarySyncSongsAsync` 采用。`CommitLibrarySyncAsync` 仅提交控制状态，不扫描或复制歌曲。
+6. 每次远端写入前先耐久写入 pending fence，结束本地 SQL 事务后才执行网络请求。
 7. Node 回执区分 `confirmed/notSent/rejected/unknown`。明确未发送／拒绝按真实回执结算 fence，已发送未知不当作回滚；确认目标状态仍由事务 readback 完成。
 8. 未确认结果保留 pending，不自动重放。订阅读回以完整稳定目录核对 presence；只有观测到 `desiredPresent` 才清 fence 和对应意图。仍为 `beforePresent` 不能排除请求迟到，继续保留围栏及意图并返回 `WRITE_UNCONFIRMED`；重复 run、重开及计划轮均不重发，随后读回目标效果才解除围栏。
 9. 设置页明确启用、确认或用户明确同步会立即进入同一协调器；计划轮只接受 `idle`／`synced` 状态，`blocked`、`partial`、确认及 pending 不会形成后台重试环。

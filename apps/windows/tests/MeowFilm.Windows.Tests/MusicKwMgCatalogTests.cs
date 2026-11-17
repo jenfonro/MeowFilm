@@ -56,7 +56,7 @@ public static class MusicKwMgCatalogTests
     {
         await using var runtime = new MusicPlatformRuntimeFixture();
         await using var store = new MusicPlatformRuntimeFixture.MemoryStore();
-        await using var library = new MusicLibraryOwner(store);
+        await using var library = new MusicLibraryOwner(MusicTestStores.For(store));
         await using var scripts = new MusicScriptOwner(library, runtime);
         const string installation = "5f0c1b9e-2a6d-4e43-8a1f-0b7c2d9e4f31";
         string quality = platform == "kw" ? "128k" : "320k";
@@ -114,7 +114,7 @@ public static class MusicKwMgCatalogTests
     {
         await using var runtime = new MusicPlatformRuntimeFixture();
         await using var store = new MusicPlatformRuntimeFixture.MemoryStore();
-        await using var library = new MusicLibraryOwner(store);
+        await using var library = new MusicLibraryOwner(MusicTestStores.For(store));
         await using var owner = new MusicNativeCatalogOwner(runtime.Catalog, library);
         var songs = Enumerable.Range(0, 235).Select(i => MusicSongFixture.Online(platform, "recording-" + i / 2, "Track " + i / 2)).ToArray();
         runtime.OnRequest = (call, _) =>
@@ -137,7 +137,7 @@ public static class MusicKwMgCatalogTests
             Check(items[0].GetProperty("song").GetProperty("songId").GetString() == items[1].GetProperty("song").GetProperty("songId").GetString());
             Check(MusicSongFixture.NativeId(queue.GetProperty("current").GetProperty("song")) == "recording-50");
         }
-        await using (var cold = new MusicLibraryOwner(store))
+        await using (var cold = new MusicLibraryOwner(MusicTestStores.For(store)))
         {
             var reloaded = Ok(await cold.ExecuteAsync("music.queue.get", new { limit = 1 }));
             Check(reloaded.GetProperty("total").GetInt32() == queue.GetProperty("total").GetInt32() &&

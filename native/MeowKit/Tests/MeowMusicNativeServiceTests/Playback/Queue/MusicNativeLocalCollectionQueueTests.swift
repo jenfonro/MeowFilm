@@ -7,8 +7,8 @@ import MeowMusicFeature
 /// no JS resolver, live account, remote transport or media playback.
 final class MusicNativeLocalCollectionQueueTests: XCTestCase {
     private func setup(accounts: (any MusicNativeAccountProviding)? = nil) async throws ->
-        (NativeMusicMemoryDocument, NativeMusicService, MusicCollection, [MusicRemoteTrack]) {
-        let store = NativeMusicMemoryDocument()
+        (NativeMusicTestLibrary, NativeMusicService, MusicCollection, [MusicRemoteTrack]) {
+        let store = NativeMusicTestLibrary()
         let service = try await NativeMusicFixture.service(store, accounts: accounts)
         var refs: [MusicReference] = []
         for name in ["CollectionAlpha", "CollectionBeta", "CollectionGamma"] {
@@ -122,12 +122,12 @@ final class MusicNativeLocalCollectionQueueTests: XCTestCase {
     }
 
     func testCollectionQueueKeepsMoreThanFormerTwoThousandOccurrences() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         let songs = try (0..<2001).map { try NativeMusicFixture.song("BULK\($0)") }
         let ids = songs.map { $0["songId"].string }
+        try await service.seedRepositorySongs(songs)
         try await service.transaction(["library"]) { d in
             var library = d.library["library"]
-            library["songs"] = .obj(songs.map { ($0["songId"].string, $0) })
             var collection = MusicModel.freshCollection("playlist:1", "Bulk")
             collection["order"] = .strings(ids)
             collection["revision"] = .n(1)
@@ -186,12 +186,12 @@ final class MusicNativeLocalCollectionQueueTests: XCTestCase {
     }
 
     func testMembershipUsesPermanentReferenceNotEquivalentDisplayMetadata() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store)
         var a = try NativeMusicFixture.song("ExactA"), b = try NativeMusicFixture.song("ExactB")
         a["title"] = .string("caf\u{00e9}"); b["title"] = .string("cafe\u{0301}")
         let memberID = a["songId"].string, outsiderID = b["songId"].string
+        try await service.seedRepositorySongs([a, b])
         try await service.transaction(["library"]) { d in
-            d.library["library"]["songs"] = .obj([(memberID, a), (outsiderID, b)])
             var source = MusicModel.freshCollection("exact-source", "Exact")
             source["order"] = .strings([memberID])
             d.library["library"]["collections"] = .array(d.library["library"]["collections"].array + [source])

@@ -11,8 +11,6 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
 {
     private MusicLibrarySyncSnapshot snapshot = null!;
     private JsonObject library = null!, state = null!;
-    private NativeMusicSongGroups? songGroups;
-    private NativeMusicSongGroups SongGroups => songGroups ??= MusicLibraryOwner.IndexLibrarySongs(library, token);
     private readonly Dictionary<string, MusicSyncAdapter> adapters = [];
     private readonly Dictionary<string, MusicPlatformSession> leases = [];
     private readonly List<JsonObject> issues = [];
@@ -42,7 +40,6 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
         await Guard().ConfigureAwait(false);
         snapshot = await owner.CommitLibrarySyncAsync(snapshot, LJ.Element(library), LJ.Element(state), token).ConfigureAwait(false);
         library = JsonNode.Parse(snapshot.Library.GetRawText())!.AsObject(); state = JsonNode.Parse(snapshot.State.GetRawText())!.AsObject();
-        songGroups = null;
         // Callers never retain JsonNode references across a checkpoint; reacquire by stable ID.
     }
     private async Task AdoptMembers(IEnumerable<SyncMember> members)
@@ -52,10 +49,8 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
         await Guard().ConfigureAwait(false);
         snapshot = await owner.AdoptLibrarySyncSongsAsync(snapshot, songs, token).ConfigureAwait(false);
         GuardLeases();
-        // Preserve unsaved membership/journal edits, but take source ownership only
-        // from the current repository before building member maps.
-        library["songs"] = JsonNode.Parse(snapshot.Library.GetRawText())!["songs"]!.DeepClone();
-        songGroups = null;
+        // Preserve unsaved membership/journal edits. Songs remain in the repository,
+        // not in checkpoint snapshots.
     }
     private JsonObject Collection(string id) => Collections.Single(c => S(c["id"]) == id);
     private JsonObject Binding(string cid, string key) => Bindings(Collection(cid)).Single(b => BindingKey(b) == key);
@@ -211,7 +206,7 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
     {
         // Pull and readback register every real member source before mapping it.
         // File occurrence keys cannot substitute for this source ownership.
-        return SongGroups.NativeOwner(NativeMusicSong.SourceKey(member.Song))!.Id;
+        return owner.FindLibrarySyncSource(NativeMusicSong.SourceKey(member.Song));
     }
     private void Merge(Dictionary<string, SyncDirectory> pulls)
     {
@@ -244,8 +239,7 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
             {
                 string platform = S(b["platform"]); if (!pulls.TryGetValue(platform, out var pull) || !Enabled(platform, S(c["kind"]))) continue;
                 var r = pull.Collections.FirstOrDefault(r => r.Id == S(b["id"])); if (r is null) continue;
-                var map = LJ.Object(b["map"]); var songStore = LJ.Object(library["songs"]);
-                LJ.Require(map.All(p => songStore.ContainsKey(S(p.Value))), "INVALID_BINDING");
+                var map = LJ.Object(b["map"]);
                 var oldKeys = Strings(b["baseline"]); bool known = map.Count > 0; string key = BindingKey(b);
                 bool Observable(string id) => intents[id] is not JsonObject intent || !LJ.B(intent["pending"]) || S(intent["origin"]) != "local" ||
                     (intent["acknowledged"] as JsonArray ?? []).Any(k => S(k) == key);
@@ -298,7 +292,7 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
                 if (!Enabled(platform, S(c["kind"]))) continue;
                 foreach (string id in Strings(c["order"]))
                 {
-                    var song = LJ.Object(library["songs"]![id]);
+                    var song = owner.ReadLibrarySyncSong(id);
                     string key = platform + ":" + id;
                     if (Sources(song).Any(s => adapter.NativeId(s) is not null) || !seen.Add(key)) continue;
                     try
@@ -312,7 +306,9 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
                         }
                         LJ.Require(new NativeMusicSong.Recordings(song, token).CanMerge(new(match, token), token), "RECORDING_CONFLICT");
                         match["songId"] = id;
-                        _ = MusicLibraryOwner.AddLibrarySyncSongs(library, [match], SongGroups);
+                        await Guard().ConfigureAwait(false);
+                        snapshot = await owner.AdoptLibrarySyncSongsAsync(snapshot, [(match, true)], token).ConfigureAwait(false);
+                        GuardLeases();
                     }
                     catch (Exception e) when (!Fatal(e))
                     {

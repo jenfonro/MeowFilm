@@ -21,7 +21,7 @@ actor MusicCollectionGate {
     }
 }
 
-actor MusicCollectionService: MusicServing {
+actor MusicCollectionService: MusicServing, MusicCollectionMembershipServing {
     static func track(_ id: String) -> MusicRemoteTrack {
         .init(ref: .init(kind: .library, id: id), songId: id, title: id,
             artist: "Synthetic artist", duration: 180,
@@ -43,10 +43,13 @@ actor MusicCollectionService: MusicServing {
         var lists = 0, tracks = 0, createCalls = 0, editCalls = 0, writes = 0, queueWrites = 0, queueRequests = 0, networkSaves = 0
         var edited: [MusicCollection] = []
         var requestedRefs: [[MusicReference]?] = []
+        var referenceReads = 0
+        var membershipAdds: [[MusicReference]] = [], membershipRemovals: [[MusicReference]] = []
         var requestedOrders: [[String]?] = []
     }
     private var rows: [Row]
     private var counts = Counts()
+    private var referenceGate: MusicCollectionGate?
     private var trackGates: [MusicCollectionGate] = []
     private var trackError: MusicServiceError?
     private var beforeEdit: MusicCollectionGate?
@@ -67,6 +70,7 @@ actor MusicCollectionService: MusicServing {
     func blockTracks(_ gate: MusicCollectionGate, error: MusicServiceError? = nil) {
         trackGates.append(gate); trackError = error
     }
+    func blockReferences(_ gate: MusicCollectionGate) { referenceGate = gate }
     func blockEdit(before: MusicCollectionGate? = nil, after: MusicCollectionGate? = nil) {
         beforeEdit = before; afterEdit = after
     }
@@ -93,6 +97,30 @@ actor MusicCollectionService: MusicServing {
             if let failure { throw failure }
         }
         return captured
+    }
+    func collectionReferences(in collection: MusicCollection) async throws -> [MusicReference] {
+        counts.referenceReads += 1
+        let refs = try row(collection).tracks.map(\.ref)
+        if let gate = referenceGate { referenceGate = nil; await gate.wait() }
+        return refs
+    }
+    func changeCollectionMembership(_ collection: MusicCollection, adding: [MusicReference], removing: [MusicReference]) async throws -> MusicCollection {
+        counts.editCalls += 1; counts.membershipAdds.append(adding); counts.membershipRemovals.append(removing)
+        if let gate = beforeEdit { beforeEdit = nil; await gate.wait() }
+        try Task.checkCancellation()
+        let existing = try row(collection)
+        let removed = Set(removing.map(\.id))
+        var ids = existing.tracks.map(\.songId).filter { !removed.contains($0) }
+        var seen = Set(ids)
+        ids += adding.map(\.id).filter { seen.insert($0).inserted }
+        guard ids != existing.tracks.map(\.songId) else { return existing.collection }
+        let changed = Row(id: collection.id, revision: collection.revision + 1,
+                          title: collection.title, kind: collection.kind, songs: ids)
+        rows[rows.firstIndex(where: { $0.collection.id == collection.id })!] = changed
+        counts.writes += 1; counts.edited.append(collection)
+        if let gate = afterEdit { afterEdit = nil; await gate.wait() }
+        if unconfirmed { unconfirmed = false; throw MusicServiceError.commitUnconfirmed }
+        return changed.collection
     }
     func editPlaylist(_ collection: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) async throws -> MusicCollection {
         counts.editCalls += 1

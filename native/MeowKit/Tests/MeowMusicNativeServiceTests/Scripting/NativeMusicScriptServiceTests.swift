@@ -538,7 +538,7 @@ extension NativeMusicScriptServiceTests {
         let qq = MusicNativeCandidateDiscoveryQQ(items: [MusicNativeCandidateDiscoveryFixture.track("tx", id: "101")])
         let http = MusicNativeDiscoveryPlatforms()
         let song = try NativeMusicFixture.storedSong(MusicNativeCandidateDiscoveryFixture.track("kw", id: "123"))
-        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song),
+        let service = NativeMusicService(database: try MusicNativeCandidateDiscoveryFixture.store(song: song),
             scripts: scripts,
             accounts: accounts,
             platformClient: try NativeMusicFixture.routes(primary: qq, others: http).makeClient(),

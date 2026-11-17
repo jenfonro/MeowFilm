@@ -10,7 +10,7 @@ public sealed partial class MusicLibraryOwner
     private readonly object officialSourcesGate = new();
     private OfficialSourcesLease? officialSourcesLease;
 
-    private JsonObject OfficialSources(JsonObject doc)
+    private JsonObject OfficialSources(MusicLibraryData doc)
     {
         var value = Area(doc, OfficialSourcesArea) ??
         LJ.Obj(("schema", 1), ("revision", 0), ("enabled", LJ.Arr(OfficialSourcePlatforms)));
@@ -35,7 +35,7 @@ public sealed partial class MusicLibraryOwner
     }
 
     private (JsonObject Result, bool Mutate) OfficialSourcesCommand(
-        string method, JsonObject p, JsonObject doc, CancellationToken token)
+        string method, JsonObject p, MusicLibraryData doc, CancellationToken token)
     {
         LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
         var settings = OfficialSources(doc);
@@ -138,7 +138,7 @@ public sealed partial class MusicLibraryOwner
         }
     }
 
-    private OfficialSourcesLease RefreshOfficialSources(JsonObject doc)
+    private OfficialSourcesLease RefreshOfficialSources(MusicLibraryData doc)
     {
         var settings = OfficialSources(doc);
         long revision = Revision(settings);

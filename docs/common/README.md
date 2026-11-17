@@ -14,8 +14,8 @@
 | 小说阅读 | [小说业务与阅读](novel/reading.md) | 来源与书籍身份、搜索／书架／历史、净化、阅读锚点、换源及资源生命周期 |
 | 音乐平台 | [平台请求与上下文](music/platform-client-context.md) | 共同 Node 配方、参数／字段消费、匿名连续性、账号交接及保留边界 |
 | 音乐账号 | [账号导入与导出](music/account-transfer.md) | 双端明文文件、凭据与设备关联、批次冲突选择和验证后保存 |
-| 音乐播放 | [歌曲资料与智能播放](music/smart-playback.md) | 永久歌曲身份、原生唯一仓库、引用队列、来源发现及选源 |
-| 音乐展示资源 | [共享图片与展示资源](music/presentation-resources.md) | 首页快照、封面引用、单份图片资源、冷热读取及清理隔离 |
+| 音乐播放 | [歌曲资料与智能播放](music/smart-playback.md) | 永久歌曲身份、来源唯一归属、逐记录事务、引用队列、来源发现及选源 |
+| 音乐展示资源 | [共享图片与展示资源](music/presentation-resources.md) | 首页快照、封面引用、独立 URL 图片缓存、冷热读取及清理隔离 |
 | 音乐设置 | [保存回执与未知结果](music/settings-receipts.md) | 提交后关页、稳定 owner 提示、后续同项成功及范围隔离 |
 | 音乐队列 | [播放来源与自动续播](music/playback-sessions.md) | 全局循环、来源会话、候选与插队、续取、恢复和入口资格 |
 | 音乐歌单 | [所有权与订阅关系](music/playlist-ownership.md) | 自管内容、网络引用、平台订阅及同步隔离 |
@@ -29,7 +29,7 @@
 
 | 端 | 装配与能力 | 页面与平台 | 存储 |
 | --- | --- | --- | --- |
-| iOS | [架构与职责](../ios/architecture.md) | [音乐能力](../ios/music.md) | [本地文档存储](../ios/storage.md) |
+| iOS | [架构与职责](../ios/architecture.md) | [音乐能力](../ios/music.md) | [本地存储](../ios/storage.md) |
 | Windows | [架构与职责](../windows/app-structure.md) | [平台接入](../windows/music-platform-client-context.md)、[平台目录](../windows/music-native-platforms.md)、[目录与频道](../windows/music-catalog.md)、[个人目录页面](../windows/music-catalog-personal-ui.md)、[账号](../windows/music-native-accounts.md) | [账号存储](../windows/music-account-storage.md)、[原生歌曲仓库](../windows/music-native-library.md) |
 
 ## 契约与验证状态

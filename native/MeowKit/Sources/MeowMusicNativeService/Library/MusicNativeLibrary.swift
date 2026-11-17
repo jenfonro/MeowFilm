@@ -3,7 +3,15 @@
 import Foundation
 import MeowMusicFeature
 
-extension NativeMusicService {
+enum MusicLibraryValidation {
+    static func validateSong(_ song: MJ, id: String) throws {
+        try musicRequire(UUID(uuidString: id) != nil && song["songId"].string.utf8.elementsEqual(id.utf8), .songIDConflict)
+        try musicRequire(song.isObject && song["sources"].isArray, .corruptDocument)
+        _ = try MusicModel.sources(song)
+    }
+}
+
+extension NativeMusicService: MusicCollectionMembershipServing {
     func collection(_ id: String, _ d: MusicDocument) throws -> MJ {
         let library = d.library["library"]
         try musicRequire(library["collections"].isArray, .corruptDocument)
@@ -33,13 +41,14 @@ extension NativeMusicService {
         d.library["library"] = library; d.library["revision"] = .n(d.library["revision"].int + 1)
     }
     public func collections() async throws -> [MusicCollection] {
-        let library = try read().library["library"]
+        let state = try read(), library = state.library["library"]
         let rows = library["collections"].array.filter { !$0["deleted"].bool }
         let identities = Dictionary(grouping: rows, by: { Data($0["id"].string.utf8) })
-        let managed: [MusicCollection] = rows.filter {
+        let managed: [MusicCollection] = try rows.filter {
             !$0["id"].string.isEmpty && identities[Data($0["id"].string.utf8)]?.count == 1 && $0["revision"].isInteger
         }.map { row in
-            let first = row["order"].strings.first.map { library["songs"][$0] } ?? .null
+            let first = try row["order"].strings.first.flatMap { try state.songRows.songData(id: $0) }
+                .map { try MJ.parse($0) } ?? .null
             return .init(id: row["id"].string, title: row["name"].string, kind: row["kind"].string,
                 count: row["order"].array.count, revision: row["revision"].int,
                 artwork: MusicNativePublicBrowseSupport.artwork(first["cover_url"]))
@@ -59,22 +68,17 @@ extension NativeMusicService {
         let d = try read(), c = try collection(requested.id, d)
         try musicRequire(c["revision"].int == requested.revision, .staleRevision)
         let ids = c["order"].strings
-        let songs = try await sharedSongMetadata(ids.map { try repositorySong($0, d) })
-        try musicRequire(try collection(requested.id, read())["revision"].int == requested.revision, .staleRevision)
-        return try zip(ids, songs).map { try MusicModel.track($0.1, .init(kind: .library, id: $0.0)) }
+        return try ids.map { try MusicModel.track(repositorySong($0, d), .init(kind: .library, id: $0)) }
     }
     public func createPlaylist(name: String, refs: [MusicReference]) async throws -> MusicCollection {
         _ = try musicText(name, maximum: 600); try musicRequire(name.utf16.count <= 200)
-        let before = try read()
-        let originals = try refs.map { try song($0, before) }
-        let acquired = try await sharedSongMetadata(originals)
         let result = try transaction(["library"]) { d in
             var lib = d.library["library"]
             try musicRequire(lib["nextId"].isInteger && lib["nextId"].int > 0 && lib["collections"].isArray, .corruptDocument)
             try musicRequire(lib["nextId"].int < 9_007_199_254_740_991, .limit)
             let newID = "playlist:\(lib["nextId"].int)"
             try musicRequire(!lib["collections"].array.contains { $0["id"].string == newID }, .corruptDocument)
-            let ids = try upsert(acquired, library: &lib)
+            let ids = try collectionSongIDs(refs, state: d)
             var c = MusicModel.freshCollection("playlist:\(lib["nextId"].int)", name)
             lib["nextId"] = .n(lib["nextId"].int + 1)
             c["order"] = .strings(ids); c["manualOrder"] = .bool(true); c["locallyCreated"] = .bool(true); c["revision"] = .n(1)
@@ -88,45 +92,85 @@ extension NativeMusicService {
     }
     public func editPlaylist(_ requested: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) async throws -> MusicCollection {
         try musicRequire(requested.networkReference == nil, .unsupported)
-        let acquired: [MJ]?
-        if let refs {
-            let before = try read()
-            let songs = try refs.map { try song($0, before) }
-            acquired = try await sharedSongMetadata(songs)
-        } else { acquired = nil }
         let result = try transaction(["library"]) { d in
-            var c = try collection(requested.id, d), lib = d.library["library"]
+            var c = try collection(requested.id, d)
             try musicRequire(c["revision"].int == requested.revision, .revisionConflict)
-            let previous = c["order"].strings
-            var next = try acquired.map { try upsert($0, library: &lib) } ?? previous
+            var next = try refs.map { try collectionSongIDs($0, state: d) } ?? c["order"].strings
             if let order {
                 try musicRequire(order.count == next.count && musicIDs(order).count == order.count && musicIDs(order) == musicIDs(next))
                 next = order
             }
-            if let name {
-                try musicRequire(c["kind"].string != "favorites", .favoritesProtected)
-                _ = try musicText(name, maximum: 600); try musicRequire(name.utf16.count <= 200)
-                c["name"] = .string(name)
-            }
-            var intents = c["intents"]
-            var touched = Set<Data>()
-            for id in previous + next where touched.insert(Data(id.utf8)).inserted {
-                let before = previous.contains { musicSame($0, id) }, after = next.contains { musicSame($0, id) }
-                if before != after {
-                    try musicRequire(intents.isObject && c["bindings"].isArray, .corruptDocument)
-                    // An unbound local removal must not become a future account's delete.
-                    if !after, c["bindings"].array.isEmpty { intents.remove(id) }
-                    else { intents[id] = .obj([("present", .bool(after)), ("pending", .bool(true)), ("origin", .string("local"))]) }
-                }
-            }
-            c["intents"] = intents; c["order"] = .strings(next); c["manualOrder"] = .bool(true); c["revision"] = .n(requested.revision + 1)
-            d.library["library"] = lib; try saveCollection(c, &d)
-            try recordAutomaticLibraryMutation(&d, collectionID: c["id"].string,
-                orderOnly: previous.sorted() == next.sorted())
+            try finishCollectionEdit(&c, next: next, name: name, state: &d)
             return collectionDTO(c)
         }
         publishAutomaticLibrarySync(.localMutation)
         return result
+    }
+    public func collectionReferences(in requested: MusicCollection) async throws -> [MusicReference] {
+        try musicRequire(requested.networkReference == nil, .unsupported)
+        let d = try read(), c = try collection(requested.id, d)
+        try musicRequire(c["revision"].int == requested.revision, .staleRevision)
+        return c["order"].strings.map { .init(kind: .library, id: $0) }
+    }
+    public func changeCollectionMembership(_ requested: MusicCollection, adding: [MusicReference],
+                                           removing: [MusicReference]) async throws -> MusicCollection {
+        try musicRequire(requested.networkReference == nil, .unsupported)
+        let result = try transaction(["library"]) { d in
+            var c = try collection(requested.id, d)
+            try musicRequire(c["revision"].int == requested.revision, .revisionConflict)
+            let added = try collectionSongIDs(adding, state: d)
+            let removed = Set(try collectionSongIDs(removing, state: d).map { Data($0.utf8) })
+            try musicRequire(removed.isDisjoint(with: added.map { Data($0.utf8) }))
+            let previous = c["order"].strings
+            var next = previous.filter { !removed.contains(Data($0.utf8)) }
+            var seen = Set(next.map { Data($0.utf8) })
+            next += added.filter { seen.insert(Data($0.utf8)).inserted }
+            guard next != previous else { return collectionDTO(c) }
+            try finishCollectionEdit(&c, next: next, name: nil, state: &d)
+            return collectionDTO(c)
+        }
+        publishAutomaticLibrarySync(.localMutation)
+        return result
+    }
+    private func collectionSongIDs(_ refs: [MusicReference], state: MusicDocument) throws -> [String] {
+        var seen = Set<Data>()
+        return try refs.compactMap { ref in
+            let id: String
+            switch ref.kind {
+            case .library: id = ref.id
+            case .queue:
+                try musicRequire(state.queue["entries"].isArray, .corruptDocument)
+                let entries = state.queue["entries"].array.filter { musicSame($0["id"].string, ref.id) }
+                guard let entry = entries.first else { throw MusicServiceError.notFound }
+                try musicRequire(entries.count == 1, .corruptDocument)
+                id = entry["songId"].string
+            }
+            guard seen.insert(Data(id.utf8)).inserted else { return nil }
+            try musicRequire(UUID(uuidString: id) != nil, .songIDConflict)
+            let exists = try (activeSongWriter as (any MusicNativeLibraryReading)? ?? repositoryReader).containsSong(id: id)
+            try musicRequire(exists, .notFound)
+            return id
+        }
+    }
+    private func finishCollectionEdit(_ c: inout MJ, next: [String], name: String?, state d: inout MusicDocument) throws {
+        let previous = c["order"].strings
+        if let name {
+            try musicRequire(c["kind"].string != "favorites", .favoritesProtected)
+            _ = try musicText(name, maximum: 600); try musicRequire(name.utf16.count <= 200)
+            c["name"] = .string(name)
+        }
+        let before = Set(previous.map { Data($0.utf8) }), after = Set(next.map { Data($0.utf8) })
+        var intents = c["intents"]
+        for id in previous + next where before.contains(Data(id.utf8)) != after.contains(Data(id.utf8)) {
+            try musicRequire(intents.isObject && c["bindings"].isArray, .corruptDocument)
+            let present = after.contains(Data(id.utf8))
+            // An unbound local removal must not become a future account's delete.
+            if !present, c["bindings"].array.isEmpty { intents.remove(id) }
+            else { intents[id] = .obj([("present", .bool(present)), ("pending", .bool(true)), ("origin", .string("local"))]) }
+        }
+        c["intents"] = intents; c["order"] = .strings(next); c["manualOrder"] = .bool(true)
+        c["revision"] = .n(c["revision"].int + 1); try saveCollection(c, &d)
+        try recordAutomaticLibraryMutation(&d, collectionID: c["id"].string, orderOnly: before == after)
     }
     public func removePlaylist(_ requested: MusicCollection) async throws {
         try musicRequire(requested.networkReference == nil, .unsupported)

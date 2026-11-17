@@ -45,7 +45,7 @@ internal sealed partial class MusicLibrarySyncEngine
             {
                 var existing = current.Members.Where(m => S(map[m.Key]) == id).Select(m => m.Id).ToArray();
                 if (existing.Length > 0) { desired.AddRange(existing); continue; }
-                var song = LJ.Object(library["songs"]![id]);
+                var song = owner.ReadLibrarySyncSong(id);
                 var source = Sources(song).FirstOrDefault(s => adapter.NativeId(s) is not null);
                 if (source is null)
                 {
@@ -117,7 +117,6 @@ internal sealed partial class MusicLibrarySyncEngine
             CancellationToken.None).ConfigureAwait(false);
         library = JsonNode.Parse(snapshot.Library.GetRawText())!.AsObject();
         state = JsonNode.Parse(snapshot.State.GetRawText())!.AsObject();
-        songGroups = null;
     }
     private async Task<SyncRemote?> RecoverPending()
     {

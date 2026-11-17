@@ -11,7 +11,7 @@
 
 ## 搜索偏好
 
-`music.library.v2` 的 `native-search-policy` 只接受当前 schema（字段见[搜索设置与历史](music-search-preferences.md)）：
+原生音乐数据库的 `native-search-policy` area 只接受当前 schema（字段见[搜索设置与历史](music-search-preferences.md)）：
 
 ```json
 {

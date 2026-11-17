@@ -381,7 +381,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
                     try musicRequire(binding["baseline"].strings.sorted() == remote.members.map(\.occurrenceID).sorted(), .revisionConflict)
                     for member in remote.members {
                         let songID = binding["map"][member.occurrenceID]
-                        try musicRequire(songID.isString && round.library["songs"][songID.string].isObject, .corruptDocument)
+                        try musicRequire(songID.isString && repositoryReader.containsSong(id: songID.string), .corruptDocument)
                     }
                 }
             }

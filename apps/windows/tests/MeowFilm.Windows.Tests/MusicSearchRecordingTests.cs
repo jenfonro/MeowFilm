@@ -75,7 +75,7 @@ public static partial class MusicSearchTests
             rows[0].GetProperty("baselineDuration").GetDouble() == 103);
 
         await using var store = new MusicOfficialAudioTests.MemoryStore();
-        await using var library = new MusicLibraryOwner(store);
+        await using var library = new MusicLibraryOwner(MusicTestStores.For(store));
         async Task<JsonElement> Call(string method, object data)
         {
             var reply = await library.ExecuteAsync(method, data);

@@ -82,7 +82,7 @@ public static class MusicManualSourcePolicyTests
                 actualQuality = "128k", qualityVerified = true, duration = 100, size = 1600000,
                 expiresAt = DateTimeOffset.UtcNow.AddMinutes(10).ToUnixTimeMilliseconds(), full = true }));
         };
-        await using var app = new MusicNativeApplication(store, runtime);
+        await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
         async Task<JsonElement> Ok(string method, object? input = null)
         {
             var value = await app.ExecuteAsync(method, input);

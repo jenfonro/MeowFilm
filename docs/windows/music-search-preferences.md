@@ -9,7 +9,7 @@
 
 ## 当前持久格式
 
-两项数据都位于 `music.library.v2` 当前 scope 中。
+两项数据都位于原生音乐数据库当前 scope 的控制 area 中，与相关歌曲事务共用唯一 owner。
 
 ### `native-search-policy`
 

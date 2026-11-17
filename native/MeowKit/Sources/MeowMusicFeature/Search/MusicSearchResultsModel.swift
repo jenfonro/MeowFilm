@@ -144,17 +144,19 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         songObservation = Task { [weak self] in
             let changes = await repository.songChanges()
             await self?.refreshSongProjections()
-            for await _ in changes {
+            for await changed in changes {
                 guard !Task.isCancelled else { return }
-                await self?.refreshSongProjections()
+                await self?.refreshSongProjections(changed: changed)
             }
         }
     }
-    private func refreshSongProjections() async {
+    private func refreshSongProjections(changed: Set<String>? = nil) async {
         guard !Task.isCancelled, usable, let repository else { return }
         let own = UUID(), request = requestID, generation = access
+        let referenced = Set(songStates.values.flatMap { $0.items + $0.roundItems + $0.pages.flatMap(\.items) }.map(\.songId))
+        let ids = changed.map { referenced.intersection($0) } ?? referenced
+        guard !ids.isEmpty else { return }
         songProjectionID = own
-        let ids = Set(songStates.values.flatMap(\.items).map(\.songId))
         do {
             let current = try await repository.repositoryTracks(songIDs: ids)
             guard accepts(request, generation), songProjectionID == own else { return }
@@ -170,7 +172,8 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
                 songStates[platform] = state
             }
             songs = songs.map {
-                .init(id: $0.id, track: $0.track.projected(current), variants: $0.variants.map { $0.projected(current) },
+                guard current[$0.track.songId] != nil || $0.variants.contains(where: { current[$0.songId] != nil }) else { return $0 }
+                return .init(id: $0.id, track: $0.track.projected(current), variants: $0.variants.map { $0.projected(current) },
                     matchedPlatforms: $0.matchedPlatforms, score: $0.score)
             }
         } catch {}

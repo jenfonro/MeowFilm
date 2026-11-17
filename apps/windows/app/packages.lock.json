@@ -7,6 +7,79 @@
         "resolved": "9.0.1.1",
         "contentHash": "+BLh0C8VET4aMUorxr/LMZAgmKl2PYSoY7Qm4PJ4eePx/LT2gIHkxOUnlGM91QETgfsnSZajHx9rK0d67ilpgw=="
       },
+      "meowfilm.apphost": {
+        "type": "Project",
+        "dependencies": {
+          "MeowFilm.Desktop": "[1.0.0, )",
+          "MeowFilm.Platform": "[1.0.0, )"
+        }
+      },
+      "meowfilm.audio": {
+        "type": "Project",
+        "dependencies": {
+          "FFmpeg.AutoGen": "[9.0.1.1, 9.0.1.1]",
+          "MeowFilm.Core": "[1.0.0, )",
+          "NAudio.Core": "[3.3.0, 3.3.0]",
+          "NAudio.Wasapi": "[3.3.0, 3.3.0]"
+        }
+      },
+      "meowfilm.capabilities": {
+        "type": "Project",
+        "dependencies": {
+          "MeowFilm.Audio": "[1.0.0, )",
+          "MeowFilm.Desktop": "[1.0.0, )",
+          "MeowFilm.Media": "[1.0.0, )",
+          "MeowFilm.Platform": "[1.0.0, )",
+          "Microsoft.Web.WebView2": "[1.0.4314.35, 1.0.4314.35]",
+          "Net.Codecrete.QrCodeGenerator": "[3.2.1, 3.2.1]",
+          "ZXing.Net": "[0.16.11, 0.16.11]",
+          "Microsoft.Data.Sqlite": "[10.0.15, 10.0.15]"
+        }
+      },
+      "meowfilm.core": {
+        "type": "Project"
+      },
+      "meowfilm.desktop": {
+        "type": "Project",
+        "dependencies": {
+          "MeowFilm.Core": "[1.0.0, )",
+          "SkiaSharp": "[4.155.0, 4.155.0]",
+          "SkiaSharp.NativeAssets.Win32": "[4.155.0, 4.155.0]"
+        }
+      },
+      "meowfilm.media": {
+        "type": "Project",
+        "dependencies": {
+          "MeowFilm.Core": "[1.0.0, )"
+        }
+      },
+      "meowfilm.platform": {
+        "type": "Project",
+        "dependencies": {
+          "MeowFilm.Core": "[1.0.0, )"
+        }
+      },
+      "meowfilm.systemmedia": {
+        "type": "Project"
+      },
+      "Microsoft.Data.Sqlite": {
+        "type": "Transitive",
+        "resolved": "10.0.15",
+        "contentHash": "PtnNCUloQOLAXhB09id+0CL2c9yd+9/wi0QHCHPa+zrTKEJTdu07jlUgblFjorYhKnwcHN1VS0z75jN8vFruuQ==",
+        "dependencies": {
+          "Microsoft.Data.Sqlite.Core": "10.0.15",
+          "SQLitePCLRaw.bundle_e_sqlite3": "2.1.13",
+          "SQLitePCLRaw.core": "2.1.13"
+        }
+      },
+      "Microsoft.Data.Sqlite.Core": {
+        "type": "Transitive",
+        "resolved": "10.0.15",
+        "contentHash": "mjDz/zleAF78J1KRN9FludN2bzbsMWoXYSLVcawADle7RBhZYpFZYivGRvbvlH/RtXT/gjO0yhG99tzdFiET+A==",
+        "dependencies": {
+          "SQLitePCLRaw.core": "2.1.13"
+        }
+      },
       "Microsoft.Web.WebView2": {
         "type": "Transitive",
         "resolved": "1.0.4314.35",
@@ -46,6 +119,33 @@
         "resolved": "4.155.0",
         "contentHash": "mTpojWcWzoB8mERp8Du9/T6KnBHo1nguYiLdy0AxjIsA6xHIDdo4xAU7FB6CxW9ATEkR77drNFTv84RuUDurvQ=="
       },
+      "SQLitePCLRaw.bundle_e_sqlite3": {
+        "type": "Transitive",
+        "resolved": "2.1.13",
+        "contentHash": "NlDixlC7uHmo+ojXRgkNvN0tQtVGpLDZ3x2OpgNj+G07VHh5cXSszFDrAiC4BpUiPwkcaeuQkMV9WQ123xVtmQ==",
+        "dependencies": {
+          "SQLitePCLRaw.lib.e_sqlite3": "2.1.13",
+          "SQLitePCLRaw.provider.e_sqlite3": "2.1.13"
+        }
+      },
+      "SQLitePCLRaw.core": {
+        "type": "Transitive",
+        "resolved": "2.1.13",
+        "contentHash": "2joofoinuHBFs0nMX3nKuXgxpXryRkCOdM2Ua6HBqQLLy6IW+5f28ZI+HAvMyF8vG7XfNz/lwfBfE6V4juru8Q=="
+      },
+      "SQLitePCLRaw.lib.e_sqlite3": {
+        "type": "Transitive",
+        "resolved": "2.1.13",
+        "contentHash": "D2UAuiGxFYBqeRXjjjGgvJ5UQifzn6wefmSqeKU7XcNGKLbJRP6X7kcPZ6opOBJGdCIlgbSxTvDpBbLvsN594A=="
+      },
+      "SQLitePCLRaw.provider.e_sqlite3": {
+        "type": "Transitive",
+        "resolved": "2.1.13",
+        "contentHash": "ZU60dSqoSNRe49KcQDUmOVgdRtjITOssVXFtiISs+zJXDI4D2Sndwpn2NOtzDQNPu0ZAvpoLPQ+GLKv6iEZn8Q==",
+        "dependencies": {
+          "SQLitePCLRaw.core": "2.1.13"
+        }
+      },
       "System.Numerics.Tensors": {
         "type": "Transitive",
         "resolved": "9.0.0",
@@ -55,60 +155,6 @@
         "type": "Transitive",
         "resolved": "0.16.11",
         "contentHash": "OZfAVu88hl87BffQ+rlWCj/vLvAhhCK4QnFaoveeF/MY8SjHNSYBQ3qyUEWlPKNgBQGh1syXhCDg10vUnCsqkg=="
-      },
-      "meowfilm.apphost": {
-        "type": "Project",
-        "dependencies": {
-          "MeowFilm.Desktop": "[1.0.0, )",
-          "MeowFilm.Platform": "[1.0.0, )"
-        }
-      },
-      "meowfilm.audio": {
-        "type": "Project",
-        "dependencies": {
-          "FFmpeg.AutoGen": "[9.0.1.1, 9.0.1.1]",
-          "MeowFilm.Core": "[1.0.0, )",
-          "NAudio.Core": "[3.3.0, 3.3.0]",
-          "NAudio.Wasapi": "[3.3.0, 3.3.0]"
-        }
-      },
-      "meowfilm.capabilities": {
-        "type": "Project",
-        "dependencies": {
-          "MeowFilm.Audio": "[1.0.0, )",
-          "MeowFilm.Desktop": "[1.0.0, )",
-          "MeowFilm.Media": "[1.0.0, )",
-          "MeowFilm.Platform": "[1.0.0, )",
-          "Microsoft.Web.WebView2": "[1.0.4314.35, 1.0.4314.35]",
-          "Net.Codecrete.QrCodeGenerator": "[3.2.1, 3.2.1]",
-          "ZXing.Net": "[0.16.11, 0.16.11]"
-        }
-      },
-      "meowfilm.core": {
-        "type": "Project"
-      },
-      "meowfilm.desktop": {
-        "type": "Project",
-        "dependencies": {
-          "MeowFilm.Core": "[1.0.0, )",
-          "SkiaSharp": "[4.155.0, 4.155.0]",
-          "SkiaSharp.NativeAssets.Win32": "[4.155.0, 4.155.0]"
-        }
-      },
-      "meowfilm.media": {
-        "type": "Project",
-        "dependencies": {
-          "MeowFilm.Core": "[1.0.0, )"
-        }
-      },
-      "meowfilm.platform": {
-        "type": "Project",
-        "dependencies": {
-          "MeowFilm.Core": "[1.0.0, )"
-        }
-      },
-      "meowfilm.systemmedia": {
-        "type": "Project"
       }
     },
     "net10.0-windows10.0.19041/win-x64": {
@@ -121,6 +167,11 @@
         "type": "Transitive",
         "resolved": "4.155.0",
         "contentHash": "mTpojWcWzoB8mERp8Du9/T6KnBHo1nguYiLdy0AxjIsA6xHIDdo4xAU7FB6CxW9ATEkR77drNFTv84RuUDurvQ=="
+      },
+      "SQLitePCLRaw.lib.e_sqlite3": {
+        "type": "Transitive",
+        "resolved": "2.1.13",
+        "contentHash": "D2UAuiGxFYBqeRXjjjGgvJ5UQifzn6wefmSqeKU7XcNGKLbJRP6X7kcPZ6opOBJGdCIlgbSxTvDpBbLvsN594A=="
       }
     }
   }

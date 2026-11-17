@@ -81,9 +81,10 @@ extension NativeMusicService {
                 try prefs.apply(change, available: enabledPlatforms, to: &d.playback)
                 d.playback["revision"] = .n(change.ifRevision + 1)
                 if before.order != prefs.order || before.enabled != prefs.enabled {
-                    for (id, var song) in d.library["library"]["songs"].fields {
+                    for id in try d.songRows.allSongIDs() {
+                        var song = try d.song(id)
                         selectSongArtwork(&song, playback: d.playback, force: true)
-                        d.library["library"]["songs"][id] = song
+                        try saveRepositorySong(song)
                     }
                 }
                 return (prefs.visible(revision: change.ifRevision + 1, available: enabledPlatforms),
@@ -141,7 +142,7 @@ extension NativeMusicService: MusicArtworkSelecting {
             }
             selectSongArtwork(&song, playback: document.playback, force: true,
                               failedURLs: Set(attempted.map(\.absoluteString)).union([url.absoluteString]))
-            document.library["library"]["songs"][songID] = song
+            try saveRepositorySong(song)
             return MusicNativePublicBrowseSupport.artwork(song["cover_url"])
         }
     }
@@ -162,7 +163,7 @@ extension NativeMusicService: MusicArtworkSelecting {
             guard let platform = MusicPublicBrowsePlatform(rawValue: row["source"].string),
                   preferences.enabled.contains(platform) else { return MusicNativePublicBrowseSupport.artwork(song["cover_url"]) }
             song["artworkSourceKey"] = row["sourceKey"]; song["cover_url"] = .string(url.absoluteString)
-            document.library["library"]["songs"][songID] = song
+            try saveRepositorySong(song)
             return url
         }
     }

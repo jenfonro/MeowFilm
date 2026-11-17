@@ -79,7 +79,7 @@ final class MusicNativePublicBrowseFivePlatformTests: XCTestCase {
     func testCanonicalByteBudgetAndTransportFailuresRemainExplicitWithoutWrites() async throws {
         for platform in MusicNativePublicBrowseFiveFixture.platforms {
             for failure in [MusicServiceError.limit, .upstreamFailed, .upstreamInvalid, .requestRejected] {
-                let store = NativeMusicMemoryDocument(), peer = NativeMusicResultFixture(failure: failure)
+                let store = NativeMusicTestLibrary(), peer = NativeMusicResultFixture(failure: failure)
                 let service = try await NativeMusicFixture.service(store, platform: peer)
                 await assertMusicFailure(failure) { _ = try await service.publicPlaylists(platform: platform, query: "Synthetic", cursor: nil) }
                 XCTAssertEqual(store.snapshot().2, 0)

@@ -32,18 +32,17 @@ public static class MusicCatalogSourceSettingsTests
         yield return Case("platform and revision survive owner restarts in the fixed area", async (owner, store) =>
         {
             Settings(await Ok(owner, "music.catalogSource.settings.save", new { ifRevision = 0, platform = "kg" }), "kg", 1);
-            var entry = JsonNode.Parse(store.Data!)!["entries"]!.AsArray().Single()!;
-            Equal("""["meowfilm","music",1,"local","native-catalog-source"]""", entry["key"]!.GetValue<string>());
-            Equal(3, entry["value"]!.AsObject().Count);
-            Equal(1, entry["value"]!["schema"]!.GetValue<int>());
+            var entry = store.State("native-catalog-source");
+            Equal(3, entry.AsObject().Count);
+            Equal(1, entry["schema"]!.GetValue<int>());
             await owner.AbortAsync();
-            await using (var reopened = new MusicLibraryOwner(store))
+            await using (var reopened = new MusicLibraryOwner(MusicTestStores.For(store)))
             {
                 Settings(await Ok(reopened, "music.catalogSource.settings.get"), "kg", 1);
                 Equal(1, store.Writes);
                 Settings(await Ok(reopened, "music.catalogSource.settings.save", new { ifRevision = 1, platform = "wy" }), "wy", 2);
             }
-            await using var finalOwner = new MusicLibraryOwner(store);
+            await using var finalOwner = new MusicLibraryOwner(MusicTestStores.For(store));
             Settings(await Ok(finalOwner, "music.catalogSource.settings.get"), "wy", 2);
             Equal(2, store.Writes);
         });
@@ -103,14 +102,14 @@ public static class MusicCatalogSourceSettingsTests
             await Ok(owner, "music.catalogSource.settings.save", new { ifRevision = 0, platform = "kg" });
             await owner.AbortAsync();
             var document = JsonNode.Parse(store.Data!)!.AsObject();
-            document["entries"]![0]!["value"]!["extra"] = new JsonObject { ["nested"] = true };
+            document["areas"]!["native-catalog-source"]!["extra"] = new JsonObject { ["nested"] = true };
             store.Data = LJ.Bytes(document);
-            await using var reopened = new MusicLibraryOwner(store);
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
             var restored = await Ok(reopened, "music.catalogSource.settings.get");
             Settings(restored, "kg", 1);
             Check(restored.GetProperty("settings").GetProperty("extra").GetProperty("nested").GetBoolean(), "extension missing from read");
             Settings(await Ok(reopened, "music.catalogSource.settings.save", new { ifRevision = 1, platform = "wy" }), "wy", 2);
-            Check(JsonNode.Parse(store.Data!)!["entries"]![0]!["value"]!["extra"]!["nested"]!.GetValue<bool>(), "extension lost");
+            Check(store.State("native-catalog-source")["extra"]!["nested"]!.GetValue<bool>(), "extension lost");
         });
         yield return Case("stale revision fails even for the already selected platform", async (owner, store) =>
         {
@@ -147,10 +146,10 @@ public static class MusicCatalogSourceSettingsTests
             })
             {
                 var document = JsonNode.Parse(original)!.AsObject();
-                document["entries"]!.AsArray().Single()!["value"] = JsonNode.Parse(value);
+                document["areas"]!["native-catalog-source"] = JsonNode.Parse(value);
                 store.Data = LJ.Bytes(document);
                 byte[] corrupt = store.Data.ToArray();
-                await using var reopened = new MusicLibraryOwner(store);
+                await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
                 await Code(reopened, "music.catalogSource.settings.get", null, "CORRUPT_STORAGE");
                 await Code(reopened, "music.catalogSource.settings.save",
                     new { ifRevision = 1, platform = "wy" }, "CORRUPT_STORAGE");
@@ -158,8 +157,8 @@ public static class MusicCatalogSourceSettingsTests
                 Check(corrupt.SequenceEqual(store.Data!), "corrupt settings were rewritten");
             }
         });
-        yield return Case("unknown before CAS reads the old durable state without replay", (owner, store) => Unknown(owner, store, false));
-        yield return Case("unknown after CAS reads the new durable state without replay", (owner, store) => Unknown(owner, store, true));
+        yield return Case("unknown before commit reads the old durable state without replay", (owner, store) => Unknown(owner, store, false));
+        yield return Case("unknown after commit reads the new durable state without replay", (owner, store) => Unknown(owner, store, true));
         foreach (string method in new[] { "music.queue.mode", "music.search.settings.save", "music.officialSources.settings.save" })
             yield return Case("get cannot settle another owner " + method, async (owner, store) =>
             {
@@ -186,30 +185,30 @@ public static class MusicCatalogSourceSettingsTests
                 Settings(await Ok(owner, "music.catalogSource.settings.get"), "wy", 0);
                 Equal(1, store.Writes);
             });
-        yield return Case("whole document CAS conflict remains fenced on get and save", async (owner, store) =>
+        yield return Case("exact generation conflict remains fenced on get and save", async (owner, store) =>
         {
             await Ok(owner, "music.catalogSource.settings.get");
-            await using var concurrent = new MusicLibraryOwner(store);
+            await using var concurrent = new MusicLibraryOwner(MusicTestStores.For(store));
             await Ok(concurrent, "music.catalogSource.settings.save", new { ifRevision = 0, platform = "kg" });
             byte[] saved = store.Data!.ToArray();
             await Code(owner, "music.catalogSource.settings.save", new { ifRevision = 0, platform = "kg" }, "STORAGE_CONFLICT");
             await Code(owner, "music.catalogSource.settings.get", null, "STORAGE_CONFLICT");
             await Code(owner, "music.catalogSource.settings.save", new { ifRevision = 0, platform = "wy" }, "STORAGE_CONFLICT");
             Equal(1, store.Writes);
-            Check(saved.SequenceEqual(store.Data!), "CAS conflict overwrote another owner");
+            Check(saved.SequenceEqual(store.Data!), "revision conflict overwrote another owner");
         });
-        yield return Case("unknown CAS cannot claim a third durable state as its receipt", async (owner, store) =>
+        yield return Case("unknown commit cannot claim a third durable state as its receipt", async (owner, store) =>
         {
             store.FailAfterWrite = true;
             await Code(owner, "music.catalogSource.settings.save", new { ifRevision = 0, platform = "kg" }, "COMMIT_UNKNOWN");
-            await using var concurrent = new MusicLibraryOwner(store);
+            await using var concurrent = new MusicLibraryOwner(MusicTestStores.For(store));
             await Ok(concurrent, "music.catalogSource.settings.save", new { ifRevision = 1, platform = "wy" });
             byte[] saved = store.Data!.ToArray();
             await Code(owner, "music.catalogSource.settings.get", null, "STORAGE_CONFLICT");
             await Code(owner, "music.catalogSource.settings.save", new { ifRevision = 2, platform = "kg" }, "PENDING_WRITE");
             await Code(owner, "music.catalogSource.settings.get", null, "STORAGE_CONFLICT");
             Equal(2, store.Writes);
-            Check(saved.SequenceEqual(store.Data!), "unknown CAS changed the third durable state");
+            Check(saved.SequenceEqual(store.Data!), "unknown commit changed the third durable state");
         });
         yield return Case("source preferences preserve every existing entry and playback and search state", Independent);
         yield return Case("cancellation before admission cannot write", async (owner, store) =>
@@ -223,7 +222,7 @@ public static class MusicCatalogSourceSettingsTests
             Settings(await Ok(owner, "music.catalogSource.settings.get"), "wy", 0);
             Equal(0, store.Writes);
         });
-        yield return new("catalog source local document storage retains KG across store and owner restarts", LocalStoreRestart);
+        yield return new("catalog source SQLite storage retains KG across store and owner restarts", LocalStoreRestart);
     }
 
     private static async Task Unknown(MusicLibraryOwner owner, Store store, bool after)
@@ -277,14 +276,10 @@ public static class MusicCatalogSourceSettingsTests
         Check(original.SequenceEqual(store.Data!), "default settings changed existing document");
         Settings(await Ok(owner, "music.catalogSource.settings.save", new { ifRevision = 0, platform = "kg" }), "kg", 1);
         var after = JsonNode.Parse(store.Data!)!.AsObject();
-        Equal(document["entries"]!.AsArray().Count + 1, after["entries"]!.AsArray().Count);
-        foreach (var entry in document["entries"]!.AsArray())
-        {
-            var retained = after["entries"]!.AsArray().Single(value =>
-                value!["key"]!.GetValue<string>() == entry!["key"]!.GetValue<string>());
-            Check(JsonNode.DeepEquals(entry, retained), "source save changed an existing entry");
-        }
-        Equal(document["version"]!.GetValue<int>(), after["version"]!.GetValue<int>());
+        Equal(document["areas"]!.AsObject().Count + 1, after["areas"]!.AsObject().Count);
+        foreach (var entry in document["areas"]!.AsObject())
+            Check(JsonNode.DeepEquals(entry.Value, after["areas"]![entry.Key]), "source save changed an existing area");
+        Check(JsonNode.DeepEquals(document["songs"], after["songs"]), "source save changed song records");
         foreach (string method in methods) Equal(before[method], (await Ok(owner, method)).GetRawText());
         await Ok(owner, "music.settings.save", new { ifRevision = 1, lyrics = true });
         await Ok(owner, "music.officialSources.settings.save", new { ifRevision = 1, enabled = Array.Empty<string>() });
@@ -295,7 +290,7 @@ public static class MusicCatalogSourceSettingsTests
         await Ok(owner, "music.queue.mode", new { mode = 3 });
         Settings(await Ok(owner, "music.catalogSource.settings.get"), "kg", 1);
         await owner.AbortAsync();
-        await using var reopened = new MusicLibraryOwner(store);
+        await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
         Settings(await Ok(reopened, "music.catalogSource.settings.get"), "kg", 1);
         Equal("tx", (await Ok(reopened, "music.queue.get")).GetProperty("current").GetProperty("song")
             .GetProperty("sources")[0].GetProperty("source").GetString());
@@ -307,11 +302,11 @@ public static class MusicCatalogSourceSettingsTests
         string root = Path.Combine(Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT")
             ?? throw new InvalidOperationException("Isolated test root required"), "catalog-source-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
-        await using (var store = new LocalDocumentStore(root, [MusicLibraryOwner.DocumentNamespace]))
-        await using (var owner = new MusicLibraryOwner(store))
+        await using (var store = new MusicRecordTestStore(root))
+        await using (var owner = new MusicLibraryOwner(MusicTestStores.For(store)))
             Settings(await Ok(owner, "music.catalogSource.settings.save", new { ifRevision = 0, platform = "kg" }), "kg", 1);
-        await using var reopenedStore = new LocalDocumentStore(root, [MusicLibraryOwner.DocumentNamespace]);
-        await using var reopened = new MusicLibraryOwner(reopenedStore);
+        await using var reopenedStore = new MusicRecordTestStore(root);
+        await using var reopened = new MusicLibraryOwner(MusicTestStores.For(reopenedStore));
         Settings(await Ok(reopened, "music.catalogSource.settings.get"), "kg", 1);
     }
 
@@ -330,7 +325,7 @@ public static class MusicCatalogSourceSettingsTests
         new("catalog source " + name, async () =>
         {
             await using var store = new Store();
-            var owner = new MusicLibraryOwner(store);
+            var owner = new MusicLibraryOwner(MusicTestStores.For(store));
             try { await run(owner, store); }
             finally { await owner.AbortAsync(); }
         });
@@ -363,45 +358,8 @@ public static class MusicCatalogSourceSettingsTests
             method + ": expected " + expected + ", got " + reply.GetRawText());
     }
 
-    private sealed class Store : IDocumentStore
+    private sealed class Store : MusicRecordTestStore
     {
-        internal byte[]? Data;
-        internal int Reads, Writes;
-        internal bool FailBeforeWrite, FailAfterWrite, FailRead;
-
-        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            Equal(MusicLibraryOwner.DocumentNamespace, documentNamespace);
-            Reads++;
-            if (FailRead) throw new DocumentStoreException(DocumentStoreError.Unavailable);
-            byte[]? copy = Data?.ToArray();
-            return Task.FromResult(new DocumentSnapshot(copy,
-                copy is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(copy)));
-        }
-
-        public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> value,
-            DocumentFingerprint expected, CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            Equal(MusicLibraryOwner.DocumentNamespace, documentNamespace);
-            var actual = Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data);
-            if (actual != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-            Writes++;
-            if (FailBeforeWrite)
-            {
-                FailBeforeWrite = false;
-                throw new IOException("synthetic failure before CAS");
-            }
-            Data = value.ToArray();
-            if (FailAfterWrite)
-            {
-                FailAfterWrite = false;
-                throw new IOException("synthetic receipt loss after CAS");
-            }
-            return Task.FromResult(DocumentFingerprint.FromBytes(Data));
-        }
-
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        internal Store() { ReadError = DocumentStoreError.Unavailable; }
     }
 }

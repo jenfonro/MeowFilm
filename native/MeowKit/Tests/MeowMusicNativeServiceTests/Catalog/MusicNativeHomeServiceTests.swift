@@ -108,8 +108,8 @@ private actor HomeAccountFixture: MusicNativeAccountProviding, MusicNativeHomeDi
 final class MusicNativeHomeServiceTests: XCTestCase {
     private func service(_ account: HomeAccountFixture, store: HomeSnapshotFixture = .init(),
                          peer: any MusicPlatformFixtureResponding = NativeMusicResultFixture(failure: .upstreamFailed),
-                         document: NativeMusicMemoryDocument = .init()) async throws -> NativeMusicService {
-        let value = NativeMusicService(document: document, accounts: account, platformClient: try peer.makeClient(),
+                         document: NativeMusicTestLibrary = .init()) async throws -> NativeMusicService {
+        let value = NativeMusicService(database: document, accounts: account, platformClient: try peer.makeClient(),
             enabledPlatforms: [.netease, .qq, .kugou], homeSnapshot: store, clock: { NativeMusicFixture.date })
         try await value.setAccess(available: true, generation: 1); return value
     }
@@ -165,7 +165,7 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         await value.close()
     }
     func testDisplayedQueueUsesOwnedRecordsAndPreservesSectionHistory() async throws {
-        let account = HomeAccountFixture(), document = NativeMusicMemoryDocument(), value = try await service(account, document: document)
+        let account = HomeAccountFixture(), document = NativeMusicTestLibrary(), value = try await service(account, document: document)
         let page = try await value.homePage(cursor: nil, refresh: true), track = try XCTUnwrap(page.sections.first?.tracks.first)
         let calls = await account.calls.count
         let first = try await value.replaceDisplayedQueue([track, track], index: 1, origin: .section(title: "原版推荐栏目"), expectedRevision: 0, intent: .init())
@@ -175,12 +175,12 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let single = try await value.replaceDisplayedQueue([track], index: 0, origin: .song, expectedRevision: first.revision, intent: .init())
         XCTAssertNil(single.queueSourceTitle)
         let root = try MJ.parse(XCTUnwrap(document.snapshot().0))
-        XCTAssertEqual(root["records"][MusicModel.key("history")]["playlists"].array.first?["title"].string, "原版推荐栏目")
-        XCTAssertEqual(root["records"][MusicModel.key("queue")]["entries"].array.first?["songId"].string, track.songId)
+        XCTAssertEqual(root["areas"]["history"]["playlists"].array.first?["title"].string, "原版推荐栏目")
+        XCTAssertEqual(root["areas"]["queue"]["entries"].array.first?["songId"].string, track.songId)
         let after = await account.calls.count; XCTAssertEqual(after, calls); await value.close()
     }
     func testDisplayedQueueReadsCurrentRepositoryAndRejectsForeignRecordOrRevokedIntent() async throws {
-        let account = HomeAccountFixture(), document = NativeMusicMemoryDocument(), value = try await service(account, document: document)
+        let account = HomeAccountFixture(), document = NativeMusicTestLibrary(), value = try await service(account, document: document)
         let page = try await value.homePage(cursor: nil, refresh: true), track = try XCTUnwrap(page.sections.first?.tracks.first)
         let replacement = try await service(account, document: document)
         let state = try await replacement.replaceDisplayedQueue([track], index: 0, origin: .song, expectedRevision: 0, intent: .init())
@@ -224,7 +224,7 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let refreshed = await account.calls; XCTAssertEqual(refreshed, [.home(), .home()]); await value.close()
     }
     func testAccountChangeKeepsPublicDisplayButRejectsOldContinuation() async throws {
-        let account = HomeAccountFixture(), store = HomeSnapshotFixture(), document = NativeMusicMemoryDocument(), value = try await service(account, store: store, document: document)
+        let account = HomeAccountFixture(), store = HomeSnapshotFixture(), document = NativeMusicTestLibrary(), value = try await service(account, store: store, document: document)
         let first = try await value.homePage(cursor: nil, refresh: true), cursor = try XCTUnwrap(first.cursor), saved = store.read()
         await account.changeAccount()
         let restored = try await value.restoredHome(); XCTAssertEqual(restored?.sections.map(\.id), first.sections.map(\.id)); XCTAssertEqual(store.read(), saved)
@@ -233,7 +233,7 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         XCTAssertEqual(cold?.sections.map(\.id), first.sections.map(\.id)); await value.close(); await restarted.close()
     }
     func testSnapshotPreloadIsReusedWithoutReadingOrValidatingAccounts() async throws {
-        let account = HomeAccountFixture(), store = HomeSnapshotFixture(), document = NativeMusicMemoryDocument(), previous = try await service(account, store: store, document: document)
+        let account = HomeAccountFixture(), store = HomeSnapshotFixture(), document = NativeMusicTestLibrary(), previous = try await service(account, store: store, document: document)
         _ = try await previous.homePage(cursor: nil, refresh: true); await previous.close()
         let restarted = try await service(account, store: store, document: document), before = store.readCount(), bindingCalls = await account.bindingCalls
         let preload = try await restarted.restoredHome(); XCTAssertNotNil(preload); XCTAssertEqual(store.readCount(), before + 1)
@@ -252,7 +252,7 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         await value.close()
     }
     func testColdOfflineSnapshotAndObservationNeverAcquireLiveAccountBinding() async throws {
-        let account = HomeAccountFixture(), store = HomeSnapshotFixture(), document = NativeMusicMemoryDocument(), previous = try await service(account, store: store, document: document)
+        let account = HomeAccountFixture(), store = HomeSnapshotFixture(), document = NativeMusicTestLibrary(), previous = try await service(account, store: store, document: document)
         let page = try await previous.homePage(cursor: nil, refresh: true), saved = store.read()
         await account.failBinding(.unavailable); let before = await account.bindingCalls
         let restarted = try await service(account, store: store, document: document), restored = try await restarted.restoredHome()
@@ -294,7 +294,7 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let image = "http://p1.music.126.net/cover.jpg?param=800y800&quality=90&extra=a%2Fb", expected = image.replacingOccurrences(of: "http:", with: "https:")
         let peer = NativeMusicResultFixture([.object(["sections": .array([.object(["id": .string("songs"), "type": .string("songs"),
             "items": .array([try MusicPlatformFixture.song(MusicNativePublicBrowseFixture.track("41", artwork: image))])])])])])
-        let account = HomeAccountFixture(loggedIn: false), store = HomeSnapshotFixture(), document = NativeMusicMemoryDocument()
+        let account = HomeAccountFixture(loggedIn: false), store = HomeSnapshotFixture(), document = NativeMusicTestLibrary()
         let value = try await service(account, store: store, peer: peer, document: document), page = try await value.homePage(cursor: nil, refresh: true)
         XCTAssertEqual(page.sections.first?.tracks.first?.artwork?.absoluteString, expected); await value.close()
         let restarted = try await service(account, store: store, document: document), restored = try await restarted.restoredHome()
@@ -351,7 +351,7 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let calls = await account.calls; XCTAssertEqual(calls, [.home()]); await value.close()
     }
     func testCurrentHomeAndColdSnapshotReadSharedSongRecordsWithoutHydration() async throws {
-        let account = HomeAccountFixture(), store = HomeSnapshotFixture(), document = NativeMusicMemoryDocument(), value = try await service(account, store: store, document: document)
+        let account = HomeAccountFixture(), store = HomeSnapshotFixture(), document = NativeMusicTestLibrary(), value = try await service(account, store: store, document: document)
         await account.setHome(canonicalHome(["41", "43", "41"], artists: true))
         let live = try await value.homePage(cursor: nil, refresh: true); await value.close(); await account.failBinding(.sourceUnavailable)
         let restarted = try await service(account, store: store, document: document), snapshot = try await restarted.restoredHome()
@@ -368,7 +368,7 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let calls = await account.calls; XCTAssertEqual(calls, [.home()]); await restarted.close()
     }
     func testCachedArtistAlbumKeepsSummaryIndependentlyOfMemberSong() async throws {
-        let account = HomeAccountFixture(), store = HomeSnapshotFixture(), document = NativeMusicMemoryDocument(), value = try await service(account, store: store, document: document)
+        let account = HomeAccountFixture(), store = HomeSnapshotFixture(), document = NativeMusicTestLibrary(), value = try await service(account, store: store, document: document)
         await account.setHome(canonicalHome(["41"]))
         let live = try await value.homePage(cursor: nil, refresh: true), snapshot = try await value.restoredHome()
         let restored = try XCTUnwrap(snapshot)
@@ -490,7 +490,7 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let accountCalls = await account.calls; XCTAssertTrue(accountCalls.isEmpty); await value.close()
     }
     func testSongColumnSelectionReplacesAllSevenTracksInOneQueueTransaction() async throws {
-        let account = HomeAccountFixture(), document = NativeMusicMemoryDocument(), value = try await service(account, document: document), ids = (1...7).map(String.init)
+        let account = HomeAccountFixture(), document = NativeMusicTestLibrary(), value = try await service(account, document: document), ids = (1...7).map(String.init)
         await account.setHome(canonicalHome(ids, artists: false))
         let page = try await value.homePage(cursor: nil, refresh: true), section = try XCTUnwrap(page.sections.first)
         XCTAssertEqual(section.layout, .songColumns)

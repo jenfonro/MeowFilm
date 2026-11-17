@@ -13,7 +13,7 @@ final class MusicNativeSearchDiscoveryTests: XCTestCase {
             "failures": .array(failures), "expiresAt": .number(expires.timeIntervalSince1970 * 1000)])
     }
     func testDiscoveryConsumesAllCanonicalSummariesWithoutMembersOrAudioReads() async throws {
-        let peer = NativeMusicResultFixture([discovery((1...25).map { "Keyword \($0)" }, charts: ["41", "42", "43", "44"])]), document = NativeMusicMemoryDocument(), scripts = NativeMusicScriptFixture(), accounts = NativeMusicAccountFixture()
+        let peer = NativeMusicResultFixture([discovery((1...25).map { "Keyword \($0)" }, charts: ["41", "42", "43", "44"])]), document = NativeMusicTestLibrary(), scripts = NativeMusicScriptFixture(), accounts = NativeMusicAccountFixture()
         let owner = try await NativeMusicFixture.service(document, scripts: scripts, accounts: accounts, platform: peer), result = try await owner.searchDiscovery()
         XCTAssertEqual(result.hot.count, 25); XCTAssertEqual(result.charts.map(\.collection.nativeID), ["41", "42", "43", "44"]); XCTAssertTrue(result.hotCanPlay); XCTAssertTrue(result.failures.isEmpty)
         XCTAssertEqual(result.validUntil, NativeMusicFixture.date.addingTimeInterval(600)); XCTAssertEqual(document.snapshot().2, 0)
@@ -83,11 +83,11 @@ final class MusicNativeSearchDiscoveryTests: XCTestCase {
         let peer = NativeMusicResultFixture([try MusicPlatformFixture.page([MusicNativePublicBrowseFixture.track("11")], platform: "wy")]), owner = try await NativeMusicFixture.service(platform: peer)
         let short = try await owner.searchHotPlayback(keywords: ["第一词", "第二词"]); XCTAssertEqual(short.count, 1); await owner.close()
         let broken: RuntimeValue = .object(["items": .array([try NativeDiscoveryFixture.song("11"), .object(["sources": .array([.object(["source": .string("wy"), "musicInfo": .object([:])])])])])])
-        let document = NativeMusicMemoryDocument(), failed = try await NativeMusicFixture.service(document, platform: NativeMusicResultFixture([broken]))
+        let document = NativeMusicTestLibrary(), failed = try await NativeMusicFixture.service(document, platform: NativeMusicResultFixture([broken]))
         await assertMusicFailure(.upstreamInvalid) { _ = try await failed.searchHotPlayback(keywords: ["first", "second"]) }; XCTAssertEqual(document.snapshot().2, 0); await failed.close()
     }
     func testDisabledNetEaseRejectsBeforeIOEvenIfAnotherPlatformIsEnabled() async throws {
-        let peer = NativeMusicResultFixture(), document = NativeMusicMemoryDocument(), owner = NativeMusicService(document: document, platformClient: try peer.makeClient(), enabledPlatforms: [.qq])
+        let peer = NativeMusicResultFixture(), document = NativeMusicTestLibrary(), owner = NativeMusicService(database: document, platformClient: try peer.makeClient(), enabledPlatforms: [.qq])
         try await owner.setAccess(available: true, generation: 1)
         await assertMusicFailure(.unsupported) { _ = try await owner.searchDiscovery() }
         let calls = await peer.calls(); XCTAssertTrue(calls.isEmpty); XCTAssertEqual(document.snapshot().2, 0); await owner.close()
@@ -99,7 +99,7 @@ final class MusicNativeSearchDiscoveryTests: XCTestCase {
         first.cancel(); await assertMusicFailure(.cancelled) { _ = try await first.value }; await gate.release(); await peer.waitUntilIdle(); await owner.close()
     }
     func testCancellationRejectsLateDiscoveryWithoutSongAdoption() async throws {
-        let gate = NativeMusicGate(), peer = NativeMusicResultFixture([discovery()], gate: gate), document = NativeMusicMemoryDocument(), owner = try await NativeMusicFixture.service(document, platform: peer)
+        let gate = NativeMusicGate(), peer = NativeMusicResultFixture([discovery()], gate: gate), document = NativeMusicTestLibrary(), owner = try await NativeMusicFixture.service(document, platform: peer)
         let task = Task { try await owner.searchDiscovery() }; await gate.started(); task.cancel()
         await assertMusicFailure(.cancelled) { _ = try await task.value }; await gate.release(); await peer.waitUntilIdle(); XCTAssertEqual(document.snapshot().2, 0); await owner.close()
     }

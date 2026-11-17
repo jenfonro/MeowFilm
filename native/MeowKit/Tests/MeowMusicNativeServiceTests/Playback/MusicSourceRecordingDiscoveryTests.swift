@@ -196,7 +196,7 @@ final class MusicSourceRecordingDiscoveryTests: XCTestCase {
             let scripts = RecordingDiscoveryScripts(qualities: ["128k"])
             let qq = MusicNativeCandidateDiscoveryQQ(items: [MusicNativeCandidateDiscoveryFixture.track(id: "new")])
             let http = MusicNativeDiscoveryPlatforms()
-            let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song),
+            let service = NativeMusicService(database: try MusicNativeCandidateDiscoveryFixture.store(song: song),
             scripts: scripts,
             platformClient: try NativeMusicFixture.routes(primary: qq, others: http).makeClient(),
             sourceDiscovery: cache,
@@ -232,7 +232,7 @@ final class MusicSourceRecordingDiscoveryTests: XCTestCase {
         let gate = MusicNativeCandidateDiscoveryBarrier()
         let qq = MusicNativeCandidateDiscoveryQQ(barrier: gate,
             items: [MusicNativeCandidateDiscoveryFixture.track(id: "new")])
-        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song),
+        let service = NativeMusicService(database: try MusicNativeCandidateDiscoveryFixture.store(song: song),
             scripts: scripts,
             platformClient: try qq.makeClient(),
             sourceDiscovery: cache,
@@ -267,7 +267,7 @@ final class MusicSourceRecordingDiscoveryTests: XCTestCase {
         let replacement = MusicNativeCandidateDiscoveryFixture.track(id: "replacement")
         let replacementKey = try NativeMusicFixture.storedSong(replacement)["sources"].array[0]["sourceKey"].string
         let qq = MusicNativeCandidateDiscoveryQQ(items: [replacement])
-        let service = NativeMusicService(document: try MusicNativeCandidateDiscoveryFixture.store(song: song),
+        let service = NativeMusicService(database: try MusicNativeCandidateDiscoveryFixture.store(song: song),
             scripts: scripts,
             platformClient: try qq.makeClient(),
             sourceDiscovery: cache,
@@ -319,17 +319,18 @@ private actor RecordingPublicationCache: MusicSourceDiscoveryCaching {
 
 // Only the final-window test injects the already-confirmed session notification.
 // The public rejection/CAS/cache chain is exercised separately below.
-private final class RecordingPublicationDocument: MusicNativeDocumentStoring, @unchecked Sendable {
-    let base: NativeMusicMemoryDocument
+private final class RecordingPublicationDocument: NativeMusicTestLibraryWrapping, @unchecked Sendable {
+    let base: NativeMusicTestLibrary
+    var backingLibrary: NativeMusicTestLibrary { base }
     private let lock = NSLock()
     private var remaining = 0, notifications = 0
     private var action: (@Sendable () throws -> Void)?
-    init(_ base: NativeMusicMemoryDocument) { self.base = base }
+    init(_ base: NativeMusicTestLibrary) { self.base = base }
     func arm(afterReads: Int, action: @escaping @Sendable () throws -> Void) {
         lock.lock(); defer { lock.unlock() }
         remaining = afterReads; self.action = action
     }
-    func read() throws -> Data? {
+    func readSnapshot() throws -> MusicNativeLibrarySnapshot {
         lock.lock()
         var notify: (@Sendable () throws -> Void)?
         if action != nil {
@@ -338,10 +339,10 @@ private final class RecordingPublicationDocument: MusicNativeDocumentStoring, @u
         }
         lock.unlock()
         try notify?()
-        return try base.read()
+        return try base.readSnapshot()
     }
-    func compareAndSwap(expected: Data?, replacement: Data) throws {
-        try base.compareAndSwap(expected: expected, replacement: replacement)
+    func withTransaction<T>(commit: (_ action: () throws -> Void) throws -> Void, _ body: (any MusicNativeLibraryWriting) throws -> T) throws -> T {
+        return try base.withTransaction(commit: commit, body)
     }
     func notificationCount() -> Int { lock.lock(); defer { lock.unlock() }; return notifications }
 }
@@ -396,7 +397,7 @@ extension MusicSourceRecordingDiscoveryTests {
         await cache.observe(songID: song["songId"].string,
             observation: .init(startedAt: at, checkedAt: at, platform: "tx", query: "Synthetic recording Fixture",
                 scope: .recording, outcome: .found), sourceKeys: peers.map { $0["sourceKey"].string })
-        let service = NativeMusicService(document: document,
+        let service = NativeMusicService(database: document,
             scripts: scripts,
             platformClient: try MusicNativeCandidateDiscoveryQQ(items: []).makeClient(),
             sourceDiscovery: cache,
@@ -613,13 +614,20 @@ extension MusicSourceRecordingDiscoveryTests {
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
         let cache = MusicNativeMemorySourceDiscoveryCache()
         let first = try await NativeMusicFixture.service(store, scripts: RecordingDiscoveryScripts(), sourceDiscovery: cache)
-        let originalLibrary = try MusicDocument(store.read(), runID: "temporary").library
+        let songID = song["songId"].string
+        var originalLibrary = try MusicDocument(store.read(), runID: "temporary").library
+        // Normalize only this song's root keys, not controls or nested source values.
+        originalLibrary["library"]["songs"][songID] = .obj(
+            originalLibrary["library"]["songs"][songID].fields.sorted { $0.0 < $1.0 })
         let inspection = try await first.sourceSession(occurrenceID: "entry-1", expectedQueueRevision: 1)
         try await inspection.reject(sourceKey: key, occurrenceID: "entry-1", expectedQueueRevision: 1)
         let saved = try await first.sourceExclusions()
         XCTAssertEqual(saved.map(\.scope), [.recording(sourceKey: key)])
         XCTAssertEqual(saved.first?.songID, song["songId"].string)
-        XCTAssertEqual(try MusicDocument(store.read(), runID: "temporary").library, originalLibrary)
+        var savedLibrary = try MusicDocument(store.read(), runID: "temporary").library
+        savedLibrary["library"]["songs"][songID] = .obj(
+            savedLibrary["library"]["songs"][songID].fields.sorted { $0.0 < $1.0 })
+        XCTAssertEqual(savedLibrary.bytes, originalLibrary.bytes)
         await cache.persist(retaining: [])
         await first.close()
 

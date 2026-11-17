@@ -123,7 +123,7 @@ final class MusicNativeHomeActionTests: XCTestCase {
         await service.close()
     }
     func testDailyStyleConfirmedReceiptSurvivesRepositoryReadbackSaveFailureWithoutRepeatingWrite() async throws {
-        let owner = NativeDailyStyleOwner(), store = NativeMusicMemoryDocument()
+        let owner = NativeDailyStyleOwner(), store = NativeMusicTestLibrary()
         let service = try await NativeMusicFixture.service(store, accounts: owner)
         let source = try await service.openHomeActionQueue(.daily(branch: .style), title: "Style")
         let selection = MusicDailyStyleSelection(category: "style", tags: [.init(id: "tag", name: "Tag")])

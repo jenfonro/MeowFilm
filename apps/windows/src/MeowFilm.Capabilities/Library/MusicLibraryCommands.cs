@@ -7,7 +7,7 @@ public sealed partial class MusicLibraryOwner
     private async Task<(JsonObject Result, bool Mutate)> DispatchAsync(
         string method,
         JsonObject parameters,
-        JsonObject document,
+        MusicLibraryData document,
         CancellationToken cancellationToken,
         bool full)
     {

@@ -90,7 +90,7 @@ public static class MusicHomeSnapshotTests
         Directory.CreateDirectory(Path.Combine(root, "songs"));
         try
         {
-            await using var songs = new LocalDocumentStore(Path.Combine(root, "songs"), [MusicLibraryOwner.DocumentNamespace]);
+            await using var songs = new MusicRecordTestStore(Path.Combine(root, "songs"));
             var first = Page("wy", "disk-first");
             first["entries"] = new JsonArray(new JsonObject
             {
@@ -122,7 +122,7 @@ public static class MusicHomeSnapshotTests
                 protectedNamespaces: AppIdentity.CacheProtectedNamespaces))
             await using (var store = new CacheDocumentStore(backing))
             {
-                await using var library = new MusicLibraryOwner(songs);
+                await using var library = new MusicLibraryOwner(MusicTestStores.For(songs));
                 first = JsonNode.Parse((await library.AdoptPlatformResultAsync(
                     JsonSerializer.SerializeToElement(first), default,
                     shape: MusicLibraryOwner.PlatformSongShape.Catalog)).GetRawText())!.AsObject();
@@ -138,7 +138,7 @@ public static class MusicHomeSnapshotTests
                 protectedNamespaces: AppIdentity.CacheProtectedNamespaces))
             await using (var store = new CacheDocumentStore(backing))
             {
-                await using var library = new MusicLibraryOwner(songs);
+                await using var library = new MusicLibraryOwner(MusicTestStores.For(songs));
                 Check((await library.ExecuteAsync("music.library.list")).GetProperty("ok").GetBoolean());
                 var saved = (await new MusicHomeSnapshotStore(store).ReadAsync(library.SongSnapshot))!;
                 Check(saved.Platform == "wy" && saved.Pages.Select(PageId).SequenceEqual(new[] { "disk-first", "disk-second" }));
@@ -230,7 +230,7 @@ public static class MusicHomeSnapshotTests
     private static async Task SongReferences()
     {
         await using var backing = new MusicOfficialAudioTests.MemoryStore();
-        await using var library = new MusicLibraryOwner(backing);
+        await using var library = new MusicLibraryOwner(MusicTestStores.For(backing));
         var song = await library.AdoptSongAsync(MusicSongFixture.Online("kg", "canonical-other-platform",
             "Initial title", "Artist", duration: 180, cover: "https://images.invalid/initial.png"), default);
         var page = Page("wy", "current");

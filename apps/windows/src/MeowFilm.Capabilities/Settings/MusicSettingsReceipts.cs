@@ -1,6 +1,5 @@
 using System.Text.Json;
 using MeowFilm.Desktop;
-using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
 
@@ -43,7 +42,7 @@ public sealed partial class MusicCapability : IDesktopOwnedNoticeSource
             if (input.ValueKind == JsonValueKind.Object && input.TryGetProperty("geometry", out _))
                 fields = [.. fields, "geometry"];
         }
-        return fields.Select(field => MusicLibraryOwner.DocumentNamespace + ":" + area + ":" + field).ToArray();
+        return fields.Select(field => area + ":" + field).ToArray();
     }
 
     private static string? SettingLabel(string method) => method switch

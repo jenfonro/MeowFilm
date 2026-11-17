@@ -627,7 +627,7 @@ public static partial class MusicOfficialPlaybackScopeTests
         {
             Files = new(bytes);
             Files.Clock.Now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            App = new(new MusicNativeApplication(Files.Store, Runtime, Files.CacheStore), Files);
+            App = new(new MusicNativeApplication(Files.Store, MusicTestStores.For(Files.Store), Runtime, Files.CacheStore), Files);
             Runtime.OnRequest = App.ReadPlatform;
             Module = new(App, Files.Store, playback ?? Output, files ? Files.Cache : null, new Dialogs(), cacheStore: Files.CacheStore);
         }

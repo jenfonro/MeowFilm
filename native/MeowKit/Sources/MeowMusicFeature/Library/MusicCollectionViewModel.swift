@@ -199,7 +199,7 @@ enum MusicCollectionOwnerChange {
     private var songObservation: Task<Void, Never>?
     private var songProjectionID = UUID()
     private var action: (id: UUID, task: Task<Void, Never>, filterSensitive: Bool)?
-    private var favoriteSnapshot: MusicCollectionPageSnapshot?
+    private var favoriteSnapshot: (collection: MusicCollection, refs: Set<MusicReference>)?
     private var favoriteReadID: UUID?
     // Receipt of this page's successful unfiltered queue transaction. Never
     // infer source identity from matching song titles or another list's tracks.
@@ -233,25 +233,24 @@ enum MusicCollectionOwnerChange {
         songObservation = Task { [weak self] in
             let changes = await repository.songChanges()
             await self?.refreshSongProjections(repository, access: access)
-            for await _ in changes {
+            for await changed in changes {
                 guard !Task.isCancelled else { return }
-                await self?.refreshSongProjections(repository, access: access)
+                await self?.refreshSongProjections(repository, access: access, changed: changed)
             }
         }
     }
-    private func refreshSongProjections(_ repository: any MusicSongRepositoryReading, access: UUID) async {
+    private func refreshSongProjections(_ repository: any MusicSongRepositoryReading, access: UUID, changed: Set<String>? = nil) async {
         guard !Task.isCancelled, visible, isAvailable, model.accountAccessGeneration == access else { return }
         let id = presentationID, projection = UUID()
+        let referenced = Set((tracks + (editor?.tracks ?? [])).map(\.songId))
+        let ids = changed.map { referenced.intersection($0) } ?? referenced
+        guard !ids.isEmpty else { return }
         songProjectionID = projection
-        let ids = Set((tracks + (editor?.tracks ?? []) + (favoriteSnapshot?.tracks ?? [])).map(\.songId))
         do {
             let songs = try await repository.repositoryTracks(songIDs: ids)
             guard !Task.isCancelled, visible, isAvailable, model.accountAccessGeneration == access,
                   presentationID == id, songProjectionID == projection else { return }
             tracks = tracks.map { $0.projected(songs) }; editor?.project(songs)
-            if let snapshot = favoriteSnapshot {
-                favoriteSnapshot = .init(collection: snapshot.collection, tracks: snapshot.tracks.map { $0.projected(songs) })
-            }
         } catch {}
     }
 
@@ -330,7 +329,7 @@ enum MusicCollectionOwnerChange {
                 }
                 self.collection = snapshot.collection; self.tracks = snapshot.tracks
                 if snapshot.collection.kind == "favorites" {
-                    self.favoriteSnapshot = snapshot; self.favoritesLoaded = true
+                    self.favoriteSnapshot = (snapshot.collection, Set(snapshot.tracks.map(\.ref))); self.favoritesLoaded = true
                 } else { self.refreshFavorites() }
                 if let repository = self.model.service as? any MusicSongRepositoryReading {
                     await self.refreshSongProjections(repository, access: self.model.accountAccessGeneration)
@@ -360,7 +359,7 @@ enum MusicCollectionOwnerChange {
             favoritesError = .notFound; return nil
         }
         if target == collection {
-            favoriteSnapshot = .init(collection: target, tracks: tracks); favoritesLoaded = true
+            favoriteSnapshot = (target, Set(tracks.map(\.ref))); favoritesLoaded = true
             return nil
         }
         let id = UUID(); favoriteReadID = id; favoritesLoading = true
@@ -371,11 +370,10 @@ enum MusicCollectionOwnerChange {
                 if self.favoriteReadID == id { self.favoriteReadID = nil; self.favoritesLoading = false }
             }
             do {
-                guard let snapshot = try await self.model.readCollectionPage(id: target.id, binding: own),
-                      snapshot.collection.kind == "favorites" else { throw MusicServiceError.notFound }
+                let refs = try await self.model.readCollectionReferences(target, binding: own)
                 try own.check(self.model)
                 guard self.favoriteReadID == id, self.binding === own else { return }
-                self.favoriteSnapshot = snapshot; self.favoritesLoaded = true
+                self.favoriteSnapshot = (target, Set(refs)); self.favoritesLoaded = true
             } catch {
                 guard self.favoriteReadID == id, own.matches(self.model), self.binding === own else { return }
                 self.favoritesError = MusicServiceError.sanitized(error)
@@ -385,16 +383,16 @@ enum MusicCollectionOwnerChange {
         return task
     }
     public func isFavorite(_ ref: MusicReference) -> Bool {
-        favoriteSnapshot?.tracks.contains(where: { $0.ref == ref }) == true
+        favoriteSnapshot?.refs.contains(ref) == true
     }
     @discardableResult public func toggleFavorite(_ ref: MusicReference, presentationID: UUID) -> Task<Void, Never>? {
         guard favoritesLoaded, tracks.contains(where: { $0.ref == ref }), let snapshot = favoriteSnapshot,
               let ticket = ticket(presentationID: presentationID) else { return nil }
-        var refs = snapshot.tracks.map(\.ref)
-        if refs.contains(ref) { refs.removeAll { $0 == ref } } else { refs.append(ref) }
+        let removing = snapshot.refs.contains(ref)
         let favoriteTicket = MusicCollectionEditTicket(binding: ticket.binding, collection: snapshot.collection)
         return run(ticket, mutation: true, reloadAfterMutation: false) { model in
-            try await model.editCollectionPage(favoriteTicket, name: nil, refs: refs, order: nil)
+            try await model.changeCollectionPageMembership(favoriteTicket,
+                adding: removing ? [] : [ref], removing: removing ? [ref] : [])
         }
     }
     public func beginEditing(presentationID: UUID) -> MusicCollectionEditorDraft? {
@@ -435,18 +433,10 @@ enum MusicCollectionOwnerChange {
               ["playlist", "favorites"].contains(target.kind),
               let ticket = ticket(presentationID: presentationID) else { return nil }
         return run(ticket, mutation: true, reloadAfterMutation: false) { model in
-            guard let snapshot = try await model.readCollectionPage(id: target.id, binding: ticket.binding) else {
-                throw MusicServiceError.notFound
-            }
             try ticket.check(model)
-            // A menu copied an explicit destination revision. Never silently
-            // upgrade that admission to a successor collection.
-            guard snapshot.collection == target else { throw MusicServiceError.staleRevision }
-            var seen = Set(snapshot.tracks.map(\.ref))
-            let merged = snapshot.tracks.map(\.ref) + refs.filter { seen.insert($0).inserted }
-            guard merged != snapshot.tracks.map(\.ref) else { return }
+            // The destination revision is captured by the menu, never upgraded.
             let targetTicket = MusicCollectionEditTicket(binding: ticket.binding, collection: target)
-            try await model.editCollectionPage(targetTicket, name: nil, refs: merged, order: nil)
+            try await model.changeCollectionPageMembership(targetTicket, adding: refs, removing: [])
         }
     }
     @discardableResult public func playFiltered(at index: Int = 0, presentationID: UUID,
@@ -534,7 +524,7 @@ enum MusicCollectionOwnerChange {
     @discardableResult public func add(at index: Int, to target: MusicCollection, presentationID: UUID) -> Task<Void, Never>? {
         guard tracks.indices.contains(index), let ticket = ticket(presentationID: presentationID) else { return nil }
         let ref = tracks[index].ref
-        return run(ticket, mutation: true) { model in
+        return run(ticket, mutation: true, reloadAfterMutation: false) { model in
             try await model.addCollectionPage(ticket, ref: ref, to: target)
         }
     }
@@ -561,7 +551,7 @@ enum MusicCollectionOwnerChange {
                     return
                 }
                 // Source mutations normally publish a catalogue and reread.
-                // A batch add/favorite on another collection keeps the open
+                // An add/favorite on another collection keeps the open
                 // source editor; catalogue events refresh its favorite state.
                 if mutation, reloadAfterMutation, self.binding === own { self.reload(preservingContent: true) }
             } catch {

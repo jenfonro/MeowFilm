@@ -58,7 +58,7 @@ public static class MusicQualityPolicyTests
         await using var f = new QualityFixture();
         var read = await f.Ok("music.quality.settings.get");
         Check(read.GetProperty("settings").GetProperty("request").GetString() == "flac");
-        Check(f.Store.Writes == 0 && f.Runtime.Calls.Count == 0);
+        Check(MusicTestStores.For(f.Store).Writes == 0 && f.Runtime.Calls.Count == 0);
         var before = read;
         await f.Ok("music.settings.save", new { ifRevision = 0, lyrics = false });
         read = await f.Ok("music.quality.settings.get");
@@ -69,7 +69,7 @@ public static class MusicQualityPolicyTests
             "saving lyrics must leave the complete quality policy and signature unchanged");
         Check(read.GetProperty("onlineSettings").GetProperty("schema").GetInt32() == 3 &&
             read.GetProperty("onlineSettings").GetProperty("revision").GetInt64() == 1);
-        Check(f.Store.Writes == 1 && f.Runtime.Calls.Count == 0);
+        Check(MusicTestStores.For(f.Store).Writes == 1 && f.Runtime.Calls.Count == 0);
     }
     private static async Task Invalid()
     {
@@ -83,25 +83,25 @@ public static class MusicQualityPolicyTests
             if (kind == "request") p["request"] = "dolby";
             await f.Error("music.quality.settings.save", p, kind is "off" or "spatial" ? "QUALITY_REQUIRED" : "INVALID_REQUEST");
         }
-        Check(f.Store.Writes == 0 && f.Runtime.Calls.Count == 0);
+        Check(MusicTestStores.For(f.Store).Writes == 0 && f.Runtime.Calls.Count == 0);
     }
     private static async Task Corrupt()
     {
         var store = new QualityFixture.DocumentStore();
         await using (var seed = new QualityFixture(store))
             await seed.Ok("music.quality.settings.save", await seed.SaveParameters("master"));
-        var document = JsonNode.Parse(store.Data[MusicLibraryOwner.DocumentNamespace])!.AsObject();
-        var policy = document["entries"]!.AsArray().OfType<JsonObject>()
-            .Single(entry => entry["value"] is JsonObject value && value.ContainsKey("qualityEnabled"))["value"]!.AsObject();
+        var document = MusicTestStores.For(store).Root;
+        var policy = document["areas"]!.AsObject().Single(entry => entry.Value is JsonObject value && value.ContainsKey("qualityEnabled")).Value!.AsObject();
         policy["qualityEnabled"] = new JsonArray();
         policy["spatialEnabled"] = new JsonArray();
-        store.Put(MusicLibraryOwner.DocumentNamespace, document);
-        byte[] original = store.Data[MusicLibraryOwner.DocumentNamespace].ToArray();
-        int writes = store.Writes;
+        var records = MusicTestStores.For(store);
+        records.Seed(document);
+        byte[] original = records.Bytes!.ToArray();
+        int writes = records.Writes;
         await using var f = new QualityFixture(store);
         await f.Ok("music.library.list");
         await f.Error("music.quality.settings.get", null, "CORRUPT_STORAGE");
-        Check(store.Writes == writes && store.Data[MusicLibraryOwner.DocumentNamespace].SequenceEqual(original) &&
+        Check(records.Writes == writes && records.Bytes!.SequenceEqual(original) &&
             f.Runtime.Calls.Count == 0, "invalid current data must not be repaired, rewritten or sent to Node");
     }
     private static async Task IndependentOwners()
@@ -111,17 +111,16 @@ public static class MusicQualityPolicyTests
             { ifRevision = 0, lyrics = false });
         var request = await f.SaveParameters("master");
         var reply = await f.Ok("music.quality.settings.save", request);
-        Check(f.Store.Writes == 2 &&
+        Check(MusicTestStores.For(f.Store).Writes == 2 &&
             reply.GetProperty("onlineSettings").GetRawText() ==
             online.GetProperty("settings").GetRawText() &&
             reply.GetProperty("settings").GetProperty("request").GetString() == "master");
         var stale = await f.SaveParameters();
         stale["ifRevision"] = 0;
         await f.Error("music.quality.settings.save", stale, "REVISION_CONFLICT");
-        Check(f.Store.Writes == 2);
-        Check(f.Store.WriteNames.SetEquals([MusicLibraryOwner.DocumentNamespace]), "settings only write the library document");
-        Check(f.Store.Names.SetEquals([MusicLibraryOwner.DocumentNamespace]),
-            "settings read the sole native library document, not supplementary source-discovery state");
+        Check(MusicTestStores.For(f.Store).Writes == 2);
+        Check(f.Store.WriteNames.Count == 0, "music settings must not write document namespaces");
+        Check(MusicTestStores.For(f.Store).Snapshot().Areas.ContainsKey("native-quality-policy"), "quality control record is durable");
     }
     private static async Task Restart()
     {
@@ -140,13 +139,13 @@ public static class MusicQualityPolicyTests
     private static async Task Unknown(bool after)
     {
         await using var f = new QualityFixture();
-        f.Store.FaultNamespace = MusicLibraryOwner.DocumentNamespace; f.Store.FaultAfter = after; f.Store.Fault = true;
+        MusicTestStores.For(f.Store).FaultAfter = after; MusicTestStores.For(f.Store).Fault = true;
         var p = await f.SaveParameters("auto");
         await f.Error("music.quality.settings.save", p, "COMMIT_UNKNOWN");
-        int writes = f.Store.Writes;
+        int writes = MusicTestStores.For(f.Store).Writes;
         var read = await f.Ok("music.quality.settings.get");
         Check(read.GetProperty("settings").GetProperty("request").GetString() == (after ? "auto" : "flac"));
-        Check(f.Store.Writes == writes);
+        Check(MusicTestStores.For(f.Store).Writes == writes);
         await f.Error("music.quality.settings.reconcile", null, "CAPABILITY_UNAVAILABLE");
     }
     private static async Task CancelBefore()
@@ -154,20 +153,20 @@ public static class MusicQualityPolicyTests
         await using var f = new QualityFixture(); var p = await f.SaveParameters("auto");
         using var cts = new CancellationTokenSource(); cts.Cancel();
         QualityFixture.Code(await f.App.ExecuteAsync("music.quality.settings.save", p, cts.Token), "CANCELLED");
-        Check(f.Store.Writes == 0);
+        Check(MusicTestStores.For(f.Store).Writes == 0);
     }
     private static async Task CancelAdmitted()
     {
         await using var f = new QualityFixture(); var p = await f.SaveParameters("auto");
-        f.Store.HoldNamespace = MusicLibraryOwner.DocumentNamespace;
+        MusicTestStores.For(f.Store).HoldCommit();
         using var cts = new CancellationTokenSource();
         var saving = f.App.ExecuteAsync("music.quality.settings.save", p, cts.Token);
-        await f.Store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); cts.Cancel();
+        await MusicTestStores.For(f.Store).Entered!.Task.WaitAsync(TimeSpan.FromSeconds(5)); cts.Cancel();
         var close = f.App.PrepareShutdownAsync();
         Check(!saving.IsCompleted && !close.IsCompleted);
-        f.Store.Release.TrySetResult();
+        MusicTestStores.For(f.Store).Release?.TrySetResult();
         Check((await saving).GetProperty("ok").GetBoolean());
-        await close; Check(f.Store.Writes == 1 && !f.Store.Disposed);
+        await close; Check(MusicTestStores.For(f.Store).Writes == 1 && !f.Store.Disposed);
         await f.App.CancelShutdownPreparationAsync();
     }
     private static async Task Intersection()
@@ -318,16 +317,16 @@ public static class MusicQualityPolicyTests
         var prior = MusicSongFixture.Online("wy", "11", "合成歌曲", "合成艺人", "合成专辑", 120,
             native: new JsonObject { ["artistNames"] = new JsonArray("合成艺人"), ["qualityKnown"] = true,
                 ["types"] = new JsonArray(new JsonObject { ["type"] = "128k" }) });
-        await using (var seed = new MusicLibraryOwner(store))
+        var records = MusicTestStores.For(store);
+        await using (var seed = new MusicLibraryOwner(records))
             await MusicSongFixture.AdoptAsync(seed, prior);
-        var document = JsonNode.Parse(store.Data[MusicLibraryOwner.DocumentNamespace])!.AsObject();
-        var stored = document["entries"]!.AsArray().Select(entry => entry!["value"]).OfType<JsonObject>()
-            .Single(value => value.ContainsKey("library"))["library"]!["songs"]!.AsObject().Single().Value!.AsObject();
+        var document = records.Root;
+        var stored = document["songs"]!.AsObject().Single().Value!.AsObject();
         var extension = JsonNode.Parse("""{"integer":900719925474099312345,"fraction":0.12345678901234567890123456789}""")!;
         stored["future"] = extension.DeepClone();
         stored["sources"]![0]!["future"] = extension.DeepClone();
         MusicSongFixture.Info(stored)["future"] = extension.DeepClone();
-        store.Put(MusicLibraryOwner.DocumentNamespace, document);
+        records.Seed(document);
         await using var runtime = new NativeMusicScriptTestRuntime();
         int catalogCalls = 0;
         bool qualityKnown = false;
@@ -341,7 +340,7 @@ public static class MusicQualityPolicyTests
             if (qualityKnown) MusicSongFixture.Info(recording)["qualityKnown"] = true;
             return Task.FromResult(MusicPlatformRuntimeFixture.Json(new { items = new[] { recording }, more = false }));
         };
-        await using var app = new MusicNativeApplication(store, runtime);
+        await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
         async Task<JsonElement> Call(string method, object? parameters = null)
         {
             var result = await app.ExecuteAsync(method, parameters);
@@ -403,16 +402,15 @@ public static class MusicQualityPolicyTests
             "explicit resolver miss must not retry or downgrade");
         Check(catalogCalls == 3 && runtime.Calls.All(method => method.StartsWith("music.script.", StringComparison.Ordinal)),
             "only the three explicit catalog observations may read metadata; resolves never add a search");
-        document = JsonNode.Parse(store.Data[MusicLibraryOwner.DocumentNamespace])!.AsObject();
-        stored = document["entries"]!.AsArray().Select(entry => entry!["value"]).OfType<JsonObject>()
-            .Single(value => value.ContainsKey("library"))["library"]!["songs"]![song.GetProperty("songId").GetString()!]!.AsObject();
+        string songId = song.GetProperty("songId").GetString()!;
+        stored = records.ReadSong(songId) ?? throw new InvalidOperationException("Expected the actual SQLite song");
         Check(JsonNode.DeepEquals(stored["future"], extension) &&
             JsonNode.DeepEquals(stored["sources"]![0]!["future"], extension) &&
             JsonNode.DeepEquals(MusicSongFixture.Info(stored)["future"], extension) &&
             !MusicSongFixture.Info(stored).ContainsKey("types") && !MusicSongFixture.Info(stored).ContainsKey("qualityKnown") &&
             !MusicSongFixture.Info(stored).ContainsKey("artistNames") && !stored.ContainsKey("artistNames"),
             "current metadata omissions stay absent while unconsumed durable extensions remain exact");
-        string durable = Encoding.UTF8.GetString(store.Data[MusicLibraryOwner.DocumentNamespace]);
+        string durable = stored.ToJsonString(LJ.Json);
         Check(durable.Contains("900719925474099312345", StringComparison.Ordinal) &&
             durable.Contains("0.12345678901234567890123456789", StringComparison.Ordinal),
             "unconsumed numeric extensions must not be rounded during metadata replacement");
@@ -426,7 +424,7 @@ internal sealed class QualityFixture : IAsyncDisposable
     internal MusicNativeApplication App { get; }
     internal QualityFixture(DocumentStore? store = null)
     {
-        Store = store ?? new(); App = new(Store, Runtime);
+        Store = store ?? new(); App = new(Store, MusicTestStores.For(Store), Runtime);
     }
     internal static void Check(bool value, string message = "quality assertion")
     { if (!value) throw new InvalidOperationException(message); }
@@ -469,7 +467,7 @@ internal sealed class QualityFixture : IAsyncDisposable
     }
     public async ValueTask DisposeAsync()
     {
-        Runtime.Release.TrySetResult(); Store.Release.TrySetResult();
+        Runtime.Release.TrySetResult(); MusicTestStores.For(Store).Release?.TrySetResult(); Store.Release.TrySetResult();
         await App.DisposeAsync();
     }
     internal sealed class DocumentStore : IDocumentStore

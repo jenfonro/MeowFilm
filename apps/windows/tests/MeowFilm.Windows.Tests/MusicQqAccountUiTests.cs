@@ -345,7 +345,7 @@ public static class MusicQqAccountUiTests
             Directory.CreateDirectory(root);
             Store = new(new LocalDocumentStore(root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
             Runtime.Platform.OnRequest = Transport.Read;
-            Application = new(Store, Runtime);
+            Application = new(Store, MusicTestStores.For(Store), Runtime);
             Calls = new(Application);
             Module = new(Calls, Store, new Output(), new Dialogs());
         }

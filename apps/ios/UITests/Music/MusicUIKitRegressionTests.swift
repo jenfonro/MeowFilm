@@ -6599,7 +6599,7 @@ private final class MusicUIKitRegressionRouter: MusicUIRouting {
 private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, MusicPublicBrowsing, MusicPublicPlaylistSearching,
     MusicSearchDiscoveryProviding, MusicSearchHotPlaybackProviding, MusicChorusProviding, MusicHomeBrowsing,
     MusicSearchBatchPlaying, MusicResolvedSourcesServing, MusicFMPreviewServing, MusicSimilarModeServing, MusicHomeActionQueueServing,
-    MusicQueueRecommendationServing, MusicFMPlaybackServing, MusicSongRepositoryReading {
+    MusicQueueRecommendationServing, MusicFMPlaybackServing, MusicSongRepositoryReading, MusicCollectionMembershipServing {
     enum SourceCommand: Equatable, Sendable {
         case similarContinue(UUID, Bool), queueContinue(UUID, Bool), fmContinue(UUID, Bool)
         case retrySimilar(UUID), retryQueue(UUID)
@@ -6650,7 +6650,7 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     private var requestedInspections: [MusicRemoteTrack] = []
     private var inspectionObserver: (@Sendable () -> Void)?
     private var resultRepository: [String: MusicRemoteTrack] = [:]
-    private var songContinuations: [UUID: AsyncStream<Void>.Continuation] = [:]
+    private var songContinuations: [UUID: AsyncStream<Set<String>>.Continuation] = [:]
     private var resultFavorites: [MusicRemoteTrack] = []
     private let resultInspection = MusicUIKitResultInspectionSession()
     private let sourceSelection: (entry: MusicQueueEntry, session: MusicUIKitSourceSelectionSession)?
@@ -6864,8 +6864,8 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     func repositoryTracks(songIDs: Set<String>) -> [String: MusicRemoteTrack] {
         resultRepository.filter { songIDs.contains($0.key) }
     }
-    func songChanges() -> AsyncStream<Void> {
-        let pair = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    func songChanges() -> AsyncStream<Set<String>> {
+        let pair = AsyncStream<Set<String>>.makeStream()
         let id = UUID()
         songContinuations[id] = pair.continuation
         pair.continuation.onTermination = { [weak self] _ in
@@ -6875,7 +6875,7 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     }
     private func removeSongContinuation(_ id: UUID) { songContinuations[id] = nil }
     private func adoptResultTracks(_ tracks: [MusicRemoteTrack]) -> [MusicRemoteTrack] {
-        var changed = false
+        var changed = Set<String>()
         let current = tracks.map { track in
             // The fixture already supplies permanent IDs; only newly read
             // source facts join that committed record, never unseen pages.
@@ -6888,11 +6888,11 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
             let value = MusicRemoteTrack(ref: track.ref, songId: track.songId, title: track.title,
                 artist: track.artist, album: track.album, duration: track.duration, sources: sources,
                 artwork: track.artwork, artistNames: track.artistNames, sourcePosition: track.sourcePosition)
-            if resultRepository[track.songId] != value { changed = true }
+            if resultRepository[track.songId] != value { changed.insert(track.songId) }
             resultRepository[track.songId] = value
             return value
         }
-        if changed { for continuation in songContinuations.values { continuation.yield(()) } }
+        if !changed.isEmpty { for continuation in songContinuations.values { continuation.yield(changed) } }
         return current
     }
     func replaceSearchBatch(_ request: MusicSearchBatchRequest, expectedRevision: Int,
@@ -7088,6 +7088,18 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
         trackCalls += 1
         if let gate = localTracksGate { localTracksGate = nil; await gate.wait() }
         return songResultPages != nil ? resultFavorites : localTracks
+    }
+    func collectionReferences(in collection: MusicCollection) -> [MusicReference] {
+        (songResultPages != nil ? resultFavorites : localTracks).map(\.ref)
+    }
+    func changeCollectionMembership(_ collection: MusicCollection, adding: [MusicReference], removing: [MusicReference]) throws -> MusicCollection {
+        guard songResultPages != nil else { throw MusicServiceError.unsupported }
+        let removed = Set(removing)
+        resultFavorites.removeAll { removed.contains($0.ref) }
+        var seen = Set(resultFavorites.map(\.ref))
+        resultFavorites += adding.filter { seen.insert($0).inserted }.compactMap { resultRepository[$0.id] }
+        return .init(id: collection.id, title: collection.title, kind: collection.kind,
+            count: resultFavorites.count, revision: collection.revision + 1)
     }
     func createPlaylist(name: String, refs: [MusicReference]) throws -> MusicCollection { throw MusicServiceError.unsupported }
     func editPlaylist(_ collection: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) throws -> MusicCollection {

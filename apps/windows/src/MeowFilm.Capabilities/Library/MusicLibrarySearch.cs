@@ -32,7 +32,7 @@ public sealed partial class MusicLibraryOwner
         LJ.Obj(("order", LJ.Arr(SearchPlatforms)), ("enabled", LJ.Arr(SearchPlatforms)),
             ("pages", 1), ("concurrency", 1), ("cacheMinutes", 60));
 
-    private JsonObject SearchPolicy(JsonObject doc)
+    private JsonObject SearchPolicy(MusicLibraryData doc)
     {
         var value = Area(doc, SearchPolicyArea) ??
         LJ.Obj(("schema", 3), ("revision", 0), ("songs", EmptySearchKind()),
@@ -42,7 +42,7 @@ public sealed partial class MusicLibraryOwner
         return value;
     }
 
-    private JsonObject SearchHistory(JsonObject doc)
+    private JsonObject SearchHistory(MusicLibraryData doc)
     {
         var value = Area(doc, SearchHistoryArea) ??
         LJ.Obj(("schema", 2), ("revision", 0), ("items", new JsonArray()));
@@ -110,7 +110,7 @@ public sealed partial class MusicLibraryOwner
         }
     }
 
-    private (JsonObject Result, bool Mutate) SearchCommand(string method, JsonObject p, JsonObject doc)
+    private (JsonObject Result, bool Mutate) SearchCommand(string method, JsonObject p, MusicLibraryData doc)
     {
         LJ.Require(pending is null, "PENDING_WRITE");
         if (method.StartsWith("music.search.settings.", StringComparison.Ordinal))

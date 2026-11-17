@@ -18,7 +18,6 @@ enum MusicModel {
         "musickey", "qqmusickey", "qmkeyst", "wxkey", "vkey",
         "userid", "t1", "dfid", "sid", "sessionid", "jsessionid"
     ]
-    static func key(_ area: String) -> String { MJ.array([.string("meowfilm"), .string("music"), .n(3), .string("device"), .string(area)]).json }
     static func freshCollection(_ id: String, _ name: String, _ kind: String = "playlist") -> MJ {
         .obj([("id", .string(id)), ("name", .string(name)), ("kind", .string(kind)), ("order", .array([])),
               ("revision", .n(0)), ("manualOrder", .bool(false)), ("bindings", .array([])), ("intents", .obj())])
@@ -27,7 +26,7 @@ enum MusicModel {
         .obj([("version", .n(2)), ("ownerId", .string("device")), ("revision", .n(0)), ("nextId", .n(1)),
               ("collections", .array([freshCollection("favorites", "我的收藏", "favorites")])),
               ("networkReferences", .array([])),
-              ("songs", .obj()), ("accounts", .obj()), ("status", .obj([("phase", .string("idle")), ("at", .n(0)), ("issues", .array([]))]))])
+              ("accounts", .obj()), ("status", .obj([("phase", .string("idle")), ("at", .n(0)), ("issues", .array([]))]))])
     }
     static var library: MJ { .obj([("schema", .n(2)), ("scope", .string("device")), ("revision", .n(0)), ("library", emptyLibrary)]) }
     static var queue: MJ { .obj([("schema", .n(1)), ("entries", .array([])), ("currentId", .null), ("priority", .array([])),
@@ -70,17 +69,23 @@ enum MusicModel {
     /// Missing matching evidence is retained as missing, not manufactured.
     static func cleanSong(_ raw: MJ) throws -> MJ {
         try musicRequire(raw.isObject && raw["sources"].isArray, .invalidResponse)
-        let fields = ["songId", "title", "artist", "album", "duration", "artistNames",
-                      "baselineDuration", "artworkSourceKey", "cover_url", "sources"]
-        var song = MJ.obj(raw.fields.filter { fields.contains($0.0) })
+        var song = durable(raw)
         song["cover_url"] = publicURL(raw["cover_url"])
         song["sources"] = .array(try raw["sources"].array.map(cleanSource))
         return song
     }
     static func cleanSource(_ raw: MJ) throws -> MJ {
-        let info = try cleanNative(raw["musicInfo"])
+        let info = try nativeMetadata(raw["musicInfo"])
         let key = try sourceKey(info)
-        return .obj([("sourceKey", .string(key)), ("source", info["source"]), ("musicInfo", info)])
+        var source = durable(raw)
+        source["sourceKey"] = .string(key); source["source"] = info["source"]; source["musicInfo"] = info
+        return source
+    }
+    private static func nativeMetadata(_ raw: MJ) throws -> MJ {
+        let clean = try cleanNative(raw)
+        var info = durable(raw)
+        for (field, value) in clean.fields { info[field] = value }
+        return info
     }
     static func orderedSources(_ rows: [MJ]) -> [MJ] {
         guard let first = rows.first else { return rows }
@@ -101,7 +106,11 @@ enum MusicModel {
                 for (field, value) in proposed["musicInfo"].fields {
                     if info[field] == .null || info[field] == .string("") { info[field] = value }
                 }
-                rows[index]["musicInfo"] = info
+                var source = rows[index]
+                for (field, value) in proposed.fields where field != "musicInfo" {
+                    if source[field] == .null || source[field] == .string("") { source[field] = value }
+                }
+                source["musicInfo"] = info; rows[index] = source
             } else { positions[key] = rows.count; rows.append(proposed) }
         }
         song["sources"] = .array(orderedSources(rows))
@@ -110,7 +119,7 @@ enum MusicModel {
     static func normalize(_ value: MusicNativeTrackData) throws -> MJ {
         var info = try MJ.parse(value.data)
         info["source"] = .string(value.platform)
-        let data = try cleanNative(info)
+        let data = try nativeMetadata(info)
         let key = try sourceKey(data)
         var song = MJ.obj([("title", data["name"]), ("artist", data["singer"]), ("album", data["albumName"]),
             ("duration", data["duration"]), ("cover_url", publicURL(data["img"])),

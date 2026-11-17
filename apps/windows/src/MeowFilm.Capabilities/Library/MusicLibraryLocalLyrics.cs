@@ -5,7 +5,7 @@ namespace MeowFilm.Capabilities.Library;
 public sealed partial class MusicLibraryOwner
 {
     private const string LocalLyricsArea = "native-local-lyrics";
-    private JsonObject LocalLyrics(JsonObject doc)
+    private JsonObject LocalLyrics(MusicLibraryData doc)
     {
         var value = Area(doc, LocalLyricsArea) ??
         LJ.Obj(("schema", 1), ("items", new JsonArray()));
@@ -32,7 +32,7 @@ public sealed partial class MusicLibraryOwner
         }
     }
 
-    private (JsonObject Result, bool Mutate) LocalLyricsCommand(string method, JsonObject p, JsonObject doc)
+    private (JsonObject Result, bool Mutate) LocalLyricsCommand(string method, JsonObject p, MusicLibraryData doc)
     {
         LJ.Require(method is "music.lyrics.local.get" or "music.lyrics.local.save" or "music.lyrics.local.remove",
             "CAPABILITY_UNAVAILABLE");
@@ -76,7 +76,7 @@ public sealed partial class MusicLibraryOwner
         return (LJ.Obj(("saved", true)), true);
     }
 
-    private void RequireCurrentLyricSong(JsonObject doc, string key)
+    private void RequireCurrentLyricSong(MusicLibraryData doc, string key)
     {
         var queue = Queue(doc);
         var entry = LJ.Array(queue["entries"]).OfType<JsonObject>()

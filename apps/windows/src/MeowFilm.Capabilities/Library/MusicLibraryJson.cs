@@ -130,7 +130,9 @@ internal static class LJ
         _ => node?.DeepClone()
     };
     internal static JsonElement Element(JsonNode node) => JsonSerializer.SerializeToElement(node, Json);
-    internal static JsonNode Parse(ReadOnlyMemory<byte> bytes, int maximum = 8 * 1024 * 1024)
+    internal static JsonNode Parse(ReadOnlyMemory<byte> bytes, int maximum = 8 * 1024 * 1024) =>
+        ParseValue(bytes, maximum) ?? throw new MusicLibraryException("CORRUPT_STORAGE");
+    internal static JsonNode? ParseValue(ReadOnlyMemory<byte> bytes, int maximum)
     {
         Require(bytes.Length > 0 && bytes.Length <= maximum, "LIMIT");
         try
@@ -149,7 +151,7 @@ internal static class LJ
                 else if (e.ValueKind == JsonValueKind.String) Require(e.GetString()!.Length <= 512 * 1024, "LIMIT");
             }
             Check(doc.RootElement);
-            return JsonNode.Parse(doc.RootElement.GetRawText()) ?? throw new MusicLibraryException("CORRUPT_STORAGE");
+            return JsonNode.Parse(doc.RootElement.GetRawText());
         }
         catch (MusicLibraryException) { throw; }
         catch { throw new MusicLibraryException("CORRUPT_STORAGE"); }
@@ -170,6 +172,14 @@ internal static class LJ
         int limit = p["limit"] is null ? 50 : (int)I(p["limit"], 1, 100);
         var all = values.ToArray();
         return Obj((field, Arr(offset >= all.Length ? [] : all.Skip((int)offset).Take(limit))), ("total", all.Length), ("offset", offset), ("limit", limit));
+    }
+    internal static JsonObject Page<T>(IEnumerable<T> values, JsonObject p, Func<T, JsonNode?> project, string field = "items")
+    {
+        long offset = p["offset"] is null ? 0 : I(p["offset"]);
+        int limit = p["limit"] is null ? 50 : (int)I(p["limit"], 1, 100);
+        var all = values.ToArray();
+        return Obj((field, Arr(offset >= all.Length ? [] : all.Skip((int)offset).Take(limit).Select(project))),
+            ("total", all.Length), ("offset", offset), ("limit", limit));
     }
     internal static JsonObject Merge(JsonObject a, JsonObject b) { foreach (var p in b) a[p.Key] = p.Value?.DeepClone(); return a; }
 }

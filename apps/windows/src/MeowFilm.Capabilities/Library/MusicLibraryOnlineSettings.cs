@@ -4,7 +4,7 @@ namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    private JsonObject Settings(JsonObject doc)
+    private JsonObject Settings(MusicLibraryData doc)
     {
         var value = Area(doc, "online-settings") ??
         LJ.Obj(("schema", 3), ("revision", 0), ("lyrics", true));
@@ -18,7 +18,7 @@ public sealed partial class MusicLibraryOwner
         LJ.Require(LJ.I(settings["schema"]) == 3 && LJ.IsBool(settings["lyrics"]), "CORRUPT_STORAGE");
         _ = Revision(settings);
     }
-    private (JsonObject Result, bool Mutate) SettingsCommand(string method, JsonObject p, JsonObject doc)
+    private (JsonObject Result, bool Mutate) SettingsCommand(string method, JsonObject p, MusicLibraryData doc)
     {
         if (method == "music.settings.get") { return (LJ.Obj(("settings", Settings(doc))), false); }
         LJ.Fields(p, "ifRevision lyrics", "ifRevision lyrics");

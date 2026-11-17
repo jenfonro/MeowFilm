@@ -38,7 +38,7 @@ public static partial class MusicRecommendationTests
     private static async Task HotQueueNextResponsiveness()
     {
         await using var store = new RecommendationWriteStore();
-        await using var library = new MusicLibraryOwner(store);
+        await using var library = new MusicLibraryOwner(MusicTestStores.For(store));
         var port = new MusicRecommendationQueuePort(library);
         int reads = 0;
         store.Inner.AfterRead = () => Interlocked.Increment(ref reads);
@@ -67,7 +67,7 @@ public static partial class MusicRecommendationTests
             Check(after.GetProperty("ok").GetBoolean() && N(after, "total") == 2 && Current(after) == next &&
                 S(after.GetProperty("current"), "id") == next && SongId(after.GetProperty("current").GetProperty("song")) == "2");
             Check(after.GetProperty("entries").GetRawText() == before.GetProperty("entries").GetRawText());
-            await using var reopened = new MusicLibraryOwner(store);
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
             var durable = await Ok(reopened, "music.queue.get");
             Check(Current(durable) == next && N(durable, "total") == 2 &&
                 S(durable.GetProperty("current"), "id") == next && SongId(durable.GetProperty("current").GetProperty("song")) == "2",
@@ -138,16 +138,14 @@ public static partial class MusicRecommendationTests
         catch (OperationCanceledException error) { Check(error.CancellationToken == token, "caller cancellation must be retained"); }
     }
 
-    private sealed class RecommendationWriteStore : IDocumentStore
+    private sealed class RecommendationWriteStore : IAsyncDisposable
     {
         internal readonly Store Inner = new();
         internal SynchronousRecommendationHold? NextWrite;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken ct = default) => Inner.ReadAsync(ns, ct);
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected,
-            CancellationToken ct = default)
+        internal RecommendationWriteStore()
         {
-            Interlocked.Exchange(ref NextWrite, null)?.Wait();
-            return Inner.WriteAsync(ns, bytes, expected, ct);
+            MusicTestStores.Attach(this, Inner);
+            Inner.BeforeWrite = () => Interlocked.Exchange(ref NextWrite, null)?.Wait();
         }
         public ValueTask DisposeAsync() => Inner.DisposeAsync();
     }

@@ -241,5 +241,34 @@ let package = Package(name: "Fixture", products: [
         path.write_text(video)
         self.assertTrue(any("depends on video" in error for error in scope.check(self.root)))
 
+    def sqlite_target(self, consumer="MeowMusicNativeService", module="sqlite3"):
+        path = self.root / "native/MeowKit/Package.swift"
+        text = path.read_text().replace("targets: [\n", 'targets: [\n.systemLibrary(name: "CSQLite", pkgConfig: "sqlite3"),\n'
+            f'.target(name: "{consumer}", dependencies: ["CSQLite"]),\n')
+        path.write_text(text)
+        self.write(f"native/MeowKit/Sources/{consumer}/Fixture.swift", "import CSQLite\n")
+        self.write("native/MeowKit/Sources/CSQLite/module.modulemap",
+            f'module CSQLite [system] {{ header "shim.h" link "{module}" export * }}\n')
+        self.write("native/MeowKit/Sources/CSQLite/shim.h", "#include <sqlite3.h>\n")
+
+    def test_system_sqlite_is_explicit_and_owned_by_native_music(self):
+        self.sqlite_target()
+        self.assertEqual(scope.check(self.root), [])
+
+    def test_system_sqlite_rejects_other_linked_libraries(self):
+        self.sqlite_target(module="foreign")
+        self.assertIn("Invalid system module: CSQLite", scope.check(self.root))
+
+    def test_system_sqlite_rejects_unowned_consumers(self):
+        self.sqlite_target(consumer="UnownedSQLiteConsumer")
+        self.assertIn("Unapproved system dependency: UnownedSQLiteConsumer", scope.check(self.root))
+
+    def test_unknown_system_targets_are_rejected(self):
+        path = self.root / "native/MeowKit/Package.swift"
+        path.write_text(path.read_text().replace("targets: [\n", 'targets: [\n.systemLibrary(name: "Foreign"),\n'))
+        self.write("native/MeowKit/Sources/Foreign/module.modulemap", 'module Foreign { header "shim.h" export * }\n')
+        self.write("native/MeowKit/Sources/Foreign/shim.h", "#include <sqlite3.h>\n")
+        self.assertIn("Unapproved system target", scope.check(self.root))
+
 if __name__ == "__main__":
     unittest.main()

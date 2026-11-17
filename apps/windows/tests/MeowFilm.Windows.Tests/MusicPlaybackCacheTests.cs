@@ -348,7 +348,7 @@ public static class MusicPlaybackCacheTests
         yield return new("Music cache clear fences pending publication and leaves active read and unrelated documents untouched", async () =>
         {
             await using var f = new Fixture();
-            f.Store.Data["music.library.v2"] = "library"u8.ToArray();
+            f.Store.Data["test.unrelated-document.v1"] = "library"u8.ToArray();
             f.Store.Data["unrelated.settings.v1"] = "settings"u8.ToArray();
             await f.Cache.StorePlayedAsync("scope", "song", CacheSignature, f.Info(), () => true, default);
             await using (var lease = await f.Cache.OpenAsync("scope", "song", CacheSignature, default))
@@ -362,7 +362,7 @@ public static class MusicPlaybackCacheTests
                 Check(await f.Cache.OpenAsync("scope", "song", CacheSignature, default) is null &&
                     await f.Cache.OpenAsync("scope", "next", CacheSignature, default) is null);
                 Check(lease is not null && lease.Content.ReadByte() == 'R', "clearing cannot interrupt current playback");
-                Check(Encoding.UTF8.GetString(f.Store.Data["music.library.v2"]) == "library" &&
+                Check(Encoding.UTF8.GetString(f.Store.Data["test.unrelated-document.v1"]) == "library" &&
                     Encoding.UTF8.GetString(f.Store.Data["unrelated.settings.v1"]) == "settings");
             }
             await f.Cache.ClearAsync(default);

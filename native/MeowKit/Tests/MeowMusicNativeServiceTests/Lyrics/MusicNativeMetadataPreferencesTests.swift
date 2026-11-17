@@ -51,10 +51,10 @@ private enum MetadataNativeFixture {
         return try d.encode(changed: ["library", "queue", "playback", "history"])
     }
 
-    static func service(_ store: NativeMusicMemoryDocument,
+    static func service(_ store: NativeMusicTestLibrary,
                         enabled: Set<MusicPublicBrowsePlatform> = threePlatformScope,
                         probe: MetadataNetworkProbe = MetadataNetworkProbe()) async throws -> NativeMusicService {
-        let service = NativeMusicService(document: store,
+        let service = NativeMusicService(database: store,
             scripts: probe,
             platformClient: try NativeMusicFixture.routes(primary: probe, others: probe).makeClient(),
             enabledPlatforms: enabled,
@@ -94,7 +94,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
     }
 
     func testMissingFieldsUseOriginalOrderWithoutCreatingDocumentOrEnablingExcludedPlatforms() async throws {
-        let store = NativeMusicMemoryDocument(), probe = MetadataNetworkProbe()
+        let store = NativeMusicTestLibrary(), probe = MetadataNetworkProbe()
         let service = try await MetadataNativeFixture.service(store, probe: probe)
         let value = try await service.metadataPreferences()
         XCTAssertEqual(value.platforms, [.netease, .qq, .kugou])
@@ -111,7 +111,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         playback["metadataEnabled"] = .strings(["kw", "tx", "wy"])
         playback["retainedPreference"] = .string("unrelated-value")
         let bytes = try MetadataNativeFixture.document(playback: playback)
-        let before = try MJ.parse(bytes), store = NativeMusicMemoryDocument(bytes)
+        let before = try MJ.parse(bytes), store = NativeMusicTestLibrary(bytes)
         let service = try await MetadataNativeFixture.service(store)
         let value = try await service.updateMetadataPreferences(.init(ifRevision: 0,
             platforms: [.kugou, .netease, .qq], enabledPlatforms: [.kugou]))
@@ -119,13 +119,13 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         XCTAssertEqual(value.enabledPlatforms, [.kugou]); XCTAssertEqual(value.revision, 1)
         let after = try MJ.parse(XCTUnwrap(store.snapshot().0))
         for record in ["library", "queue", "history"] {
-            XCTAssertEqual(after["records"][MusicModel.key(record)], before["records"][MusicModel.key(record)], record)
+            XCTAssertEqual(after["areas"][record], before["areas"][record], record)
         }
-        XCTAssertEqual(Set(after["records"].fields.map(\.0)), Set(before["records"].fields.map(\.0)))
-        var expected = before["records"][MusicModel.key("playback")]
+        XCTAssertEqual(Set(after["areas"].fields.map(\.0)), Set(before["areas"].fields.map(\.0)))
+        var expected = before["areas"]["playback"]
         expected["metadataPlatforms"] = .strings(["kw", "kg", "mg", "wy", "tx"])
         expected["metadataEnabled"] = .strings(["kg", "kw"]); expected["revision"] = .n(1)
-        XCTAssertEqual(after["records"][MusicModel.key("playback")], expected)
+        XCTAssertEqual(after["areas"]["playback"], expected)
         let full = try await MetadataNativeFixture.service(store, enabled: Set(MetadataNativeFixture.all))
         let restored = try await full.metadataPreferences()
         XCTAssertEqual(restored.platforms, [.kuwo, .kugou, .migu, .netease, .qq])
@@ -134,12 +134,11 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
     }
 
     func testMetadataAndExistingSettingsShareRevisionAndDoNotEraseEachOther() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await MetadataNativeFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await MetadataNativeFixture.service(store)
         _ = try await service.updateMetadataPreferences(.init(ifRevision: 0,
             platforms: [.kugou, .qq, .netease], enabledPlatforms: []))
         let envelope = try MJ.parse(XCTUnwrap(store.snapshot().0))
-        XCTAssertEqual(envelope["version"], .n(1), "Optional fields must not require a new envelope/schema")
-        XCTAssertEqual(envelope["records"][MusicModel.key("playback")]["schema"], .n(1))
+        XCTAssertEqual(envelope["areas"]["playback"]["schema"], .n(1))
         await expect(.staleRevision) { _ = try await service.updateSettings(.init(ifRevision: 0, lyricsEnabled: false)) }
         let state = try await service.updateSettings(.init(ifRevision: 1, lyricsEnabled: false))
         XCTAssertEqual(state.settingsRevision, 2)
@@ -161,7 +160,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         playback["metadataEnabled"] = .array([])
         let song = try MetadataNativeFixture.song([MetadataNativeFixture.row(.qq, "AudioMID")])
         let bytes = try MetadataNativeFixture.document(song: song, playback: playback)
-        let store = NativeMusicMemoryDocument(bytes), service = try await MetadataNativeFixture.service(store)
+        let store = NativeMusicTestLibrary(bytes), service = try await MetadataNativeFixture.service(store)
         let result = try await service.metadataCandidates(occurrenceID: "entry-1")
         XCTAssertEqual(result.preferences.platforms, [.netease, .qq, .kugou])
         XCTAssertTrue(result.preferences.enabledPlatforms.isEmpty)
@@ -182,7 +181,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         for (field, value) in invalid {
             var playback = MusicModel.playback; playback[field] = value
             let bytes = try MetadataNativeFixture.document(playback: playback)
-            let store = NativeMusicMemoryDocument(bytes), service = try await MetadataNativeFixture.service(store)
+            let store = NativeMusicTestLibrary(bytes), service = try await MetadataNativeFixture.service(store)
             await expect(.corruptDocument) { _ = try await service.metadataPreferences() }
             await expect(.corruptDocument) {
                 _ = try await service.updateMetadataPreferences(.init(ifRevision: 0,
@@ -194,7 +193,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
     }
 
     func testInvalidPatchesAndStorageFailureDoNotPartiallyCommit() async throws {
-        let store = NativeMusicMemoryDocument(), service = try await MetadataNativeFixture.service(store)
+        let store = NativeMusicTestLibrary(), service = try await MetadataNativeFixture.service(store)
         for change in [
             MusicMetadataPreferencesChange(ifRevision: -1, enabledPlatforms: []),
             .init(ifRevision: 0, platforms: [.qq, .qq, .netease]),
@@ -216,7 +215,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         await service.close()
 
         var playback = MusicModel.playback; playback["revision"] = .n(9_007_199_254_740_991)
-        let maxStore = NativeMusicMemoryDocument(try MetadataNativeFixture.document(playback: playback))
+        let maxStore = NativeMusicTestLibrary(try MetadataNativeFixture.document(playback: playback))
         let maxService = try await MetadataNativeFixture.service(maxStore)
         await expect(.limit) {
             _ = try await maxService.updateMetadataPreferences(.init(ifRevision: 9_007_199_254_740_991, enabledPlatforms: []))
@@ -237,7 +236,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         let song = try MetadataNativeFixture.song(rows)
         let bytes = try MetadataNativeFixture.document(song: song, playback: playback)
         XCTAssertNoThrow(try MusicDocument(bytes, runID: "fixture"))
-        let store = NativeMusicMemoryDocument(bytes), probe = MetadataNetworkProbe()
+        let store = NativeMusicTestLibrary(bytes), probe = MetadataNetworkProbe()
         let service = try await MetadataNativeFixture.service(store, probe: probe)
         let result = try await service.metadataCandidates(occurrenceID: "entry-1")
         XCTAssertEqual(result.candidates.map(\.source.platform), Array(repeating: "kg", count: 4) + Array(repeating: "wy", count: 4))
@@ -266,7 +265,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         // the primary audio artwork; a valid independent CDN URL is retained.
         rows[1]["musicInfo"]["img"] = .string("")
         rows[2]["musicInfo"]["img"] = .string("https://independent-cdn.invalid/image.jpg")
-        let store = NativeMusicMemoryDocument(try MetadataNativeFixture.document(song: MetadataNativeFixture.song(rows)))
+        let store = NativeMusicTestLibrary(try MetadataNativeFixture.document(song: MetadataNativeFixture.song(rows)))
         let service = try await MetadataNativeFixture.service(store, enabled: Set(MetadataNativeFixture.all))
         let result = try await service.metadataCandidates(occurrenceID: "entry-1")
         XCTAssertEqual(result.candidates.count, 15)
@@ -294,7 +293,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
                 return [accepted, rejected]
             }
             let bytes = try MetadataNativeFixture.document(song: MetadataNativeFixture.song(rows))
-            let store = NativeMusicMemoryDocument(bytes), probe = MetadataNetworkProbe()
+            let store = NativeMusicTestLibrary(bytes), probe = MetadataNetworkProbe()
             let service = try await MetadataNativeFixture.service(store, enabled: Set(MetadataNativeFixture.all), probe: probe)
             let result = try await service.metadataCandidates(occurrenceID: "entry-1")
             XCTAssertEqual(result.candidates.count, 10)
@@ -316,7 +315,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         let song = try MetadataNativeFixture.song([])
         XCTAssertEqual(song["sources"], .array([]))
         let bytes = try MetadataNativeFixture.document(song: song)
-        let store = NativeMusicMemoryDocument(bytes), service = try await MetadataNativeFixture.service(store)
+        let store = NativeMusicTestLibrary(bytes), service = try await MetadataNativeFixture.service(store)
         let result = try await service.metadataCandidates(occurrenceID: "entry-1")
         XCTAssertTrue(result.candidates.isEmpty)
         XCTAssertTrue(result.track.sources.isEmpty)
@@ -328,7 +327,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         var song = try MetadataNativeFixture.song([])
         song.remove("sources")
         let bytes = try MetadataNativeFixture.document(song: song)
-        let store = NativeMusicMemoryDocument(bytes), service = try await MetadataNativeFixture.service(store)
+        let store = NativeMusicTestLibrary(bytes), service = try await MetadataNativeFixture.service(store)
         await expect(.corruptDocument) { _ = try await service.metadataCandidates(occurrenceID: "entry-1") }
         XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
         await service.close()
@@ -337,7 +336,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
     func testOccurrencesAndPolicyReadOnePermanentRepositoryWithoutQueueRewrite() async throws {
         let row = try MetadataNativeFixture.row(.qq, "AudioMID")
         let song = try MetadataNativeFixture.song([row])
-        let store = NativeMusicMemoryDocument(try MetadataNativeFixture.document(song: song))
+        let store = NativeMusicTestLibrary(try MetadataNativeFixture.document(song: song))
         let service = try await MetadataNativeFixture.service(store)
         let first = try await service.metadataCandidates(occurrenceID: "entry-1")
         _ = try await service.changeQueue(.select("entry-2"), expectedRevision: 3)
@@ -348,7 +347,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         XCTAssertEqual(second.queueRevision, 4)
         let current = try await service.read()
         XCTAssertTrue(current.queue["entries"].array.allSatisfy { $0["song"] == .null && $0["songId"].string == first.track.songId })
-        XCTAssertEqual(current.library["library"]["songs"].fields.count, 1)
+        XCTAssertEqual((try current.fixtureSongs()).fields.count, 1)
         XCTAssertEqual(second.preferences.platforms, [.qq, .netease, .kugou])
         await expect(.targetChanged) { _ = try await service.metadataCandidates(occurrenceID: "entry-1") }
         await service.close()
@@ -363,7 +362,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         let primary = try MetadataNativeFixture.row(.qq, "AudioMID")
         var song = try MetadataNativeFixture.song([primary])
         song["artworkSourceKey"] = primary["sourceKey"]
-        let store = NativeMusicMemoryDocument(try MetadataNativeFixture.document(song: song))
+        let store = NativeMusicTestLibrary(try MetadataNativeFixture.document(song: song))
         let service = try await MetadataNativeFixture.service(store)
         let original = try await service.queue()
         let peer = try MetadataNativeFixture.row(.netease, "Peer")
@@ -409,7 +408,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
     }
 
     func testProtectionRevocationAndCancelledCallerDoNotReadOrWrite() async throws {
-        let store = NativeMusicMemoryDocument(try MetadataNativeFixture.document(song: MetadataNativeFixture.song([])))
+        let store = NativeMusicTestLibrary(try MetadataNativeFixture.document(song: MetadataNativeFixture.song([])))
         let service = try await MetadataNativeFixture.service(store)
         service.revokeAccess(generation: 2)
         let before = store.snapshot()
@@ -434,7 +433,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
 
     func testCommittedPolicyChangeRevokesAnAlreadyRunningLyricRequest() async throws {
         let song = try MetadataNativeFixture.song([MetadataNativeFixture.row(.qq, "AudioMID")])
-        let store = NativeMusicMemoryDocument(try MetadataNativeFixture.document(song: song))
+        let store = NativeMusicTestLibrary(try MetadataNativeFixture.document(song: song))
         let gate = NativeMusicGate()
         let qq = NativeMusicResultFixture([.object(["text": .string("[00:01.000]Synthetic")])], gate: gate)
         let service = try await NativeMusicFixture.service(store, platform: qq)

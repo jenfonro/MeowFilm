@@ -3,6 +3,7 @@ using System.IO;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Film.Rules;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
@@ -43,7 +44,8 @@ public static partial class AppUserDataResetTests
         });
         var audio = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
         var video = new FilmPlayback();
-        var application = new MusicNativeApplication(store, runtime, cache);
+        var library = new MusicLibraryDatabase(Path.Combine(paths.Documents, "music-library"));
+        var application = new MusicNativeApplication(store, library, runtime, cache);
         var music = new MusicCapability(application, store, audio, cacheStore: cache,
             playbackCacheRoot: Path.Combine(paths.Caches, "music-audio"));
         var rules = new FilmRuleService(runtime, store);
@@ -52,7 +54,7 @@ public static partial class AppUserDataResetTests
         var film = new FilmCapability(rules, sources, runtime, store, video, runtime.CaptureConnectionAsync, metadata);
         var novel = new NovelCapability(runtime, store);
         RuntimeConnection? connection = null;
-        bool runtimeClosed = false, cacheClosed = false, storeClosed = false;
+        bool runtimeClosed = false, cacheClosed = false, libraryClosed = false, storeClosed = false;
         var participants = new[] {
             new NativeResetParticipant("music", music, BeforeAbort, errors),
             new NativeResetParticipant("film", film, BeforeAbort, errors),
@@ -63,6 +65,7 @@ public static partial class AppUserDataResetTests
             new(() => video.DisposeAsync()),
             new(async () => { await cache.DisposeAsync(); cacheClosed = true; }),
             new(async () => { await CloseRuntime(); }, InterruptsPendingOperations: true),
+            new(async () => { await library.DisposeAsync(); libraryClosed = true; }),
             new(async () => { await store.DisposeAsync(); storeClosed = true; })
         ]);
         bool cleared = false, reopened = false;
@@ -88,7 +91,7 @@ public static partial class AppUserDataResetTests
             var reset = new AppUserDataReset(data.RequestReset, shutdown.ForceReleaseAsync,
                 () =>
                 {
-                    Check(shutdown.IsReleased && runtimeClosed && cacheClosed && storeClosed,
+                    Check(shutdown.IsReleased && runtimeClosed && cacheClosed && libraryClosed && storeClosed,
                         "All real owners and shared resources must release before deletion.");
                     data.Clear();
                     cleared = true;
@@ -100,9 +103,10 @@ public static partial class AppUserDataResetTests
                     data.Open();
                     Directory.CreateDirectory(paths.Documents);
                     Directory.CreateDirectory(paths.Caches);
-                    await using var fresh = new LocalDocumentStore(paths.Documents, AppIdentity.NativeNamespaces,
-                        AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
-                    Check(!(await fresh.ReadAsync("music.library.v2")).Fingerprint.Exists);
+                    await using var freshLibrary = new MusicLibraryDatabase(Path.Combine(paths.Documents, "music-library"));
+                    var fresh = await freshLibrary.ReadAsync("music:native");
+                    Check(fresh.Revision == MusicLibraryRevision.Empty && fresh.Areas.Count == 0 &&
+                        freshLibrary.SongIds().Count == 0);
                     File.WriteAllText(Path.Combine(paths.Documents, "new-generation"), "new business");
                     File.WriteAllText(Path.Combine(paths.Caches, "new-generation"), "new cache");
                     reopened = true;
@@ -129,6 +133,7 @@ public static partial class AppUserDataResetTests
                 await Cleanup("audio", () => audio.DisposeAsync().AsTask());
                 await Cleanup("video", () => video.DisposeAsync().AsTask());
                 await Cleanup("cache", () => cache.DisposeAsync().AsTask());
+                await Cleanup("library", () => library.DisposeAsync().AsTask());
                 await Cleanup("store", () => store.DisposeAsync().AsTask());
             }
             child?.Dispose();

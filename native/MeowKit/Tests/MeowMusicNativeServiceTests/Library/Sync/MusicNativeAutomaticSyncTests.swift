@@ -95,7 +95,7 @@ import MeowMusicFeature
         let valid = try NativeSyncFixture.store()
         var document = try NativeSyncFixture.document(valid), ledger = try MusicNativeSyncLedger().json()
         ledger.remove("automatic"); document.library["sync"] = ledger
-        let bytes = try document.encode(changed: ["library"]), store = NativeMusicMemoryDocument(bytes)
+        let bytes = try document.encode(changed: ["library"]), store = NativeMusicTestLibrary(bytes)
         let peer = NativeSyncPeer(), service = try await NativeMusicFixture.service(store, accounts: peer)
         do { _ = try await service.automaticLibrarySyncPreferences(); XCTFail("Missing current settings") }
         catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }

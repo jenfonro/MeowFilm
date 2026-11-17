@@ -41,18 +41,18 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private bool stopping, disposed, recorded, queueSaved = true, playbackSubscribed;
     private string? openedEntry;
 
-    public MusicCapability(IRuntimeClient runtime, IDocumentStore store, NativeAudioPlayback playback, string? playbackCacheRoot = null,
+    public MusicCapability(IRuntimeClient runtime, IDocumentStore store, IMusicLibraryStore libraryStore, NativeAudioPlayback playback, string? playbackCacheRoot = null,
         CacheDocumentStore? cacheStore = null)
-        : this(cacheStore is null ? new MusicNativeApplication(store, runtime) : new MusicNativeApplication(store, runtime, cacheStore),
+        : this(cacheStore is null ? new MusicNativeApplication(store, libraryStore, runtime) : new MusicNativeApplication(store, libraryStore, runtime, cacheStore),
             store, new NativeMusicPlayback(playback), playbackCacheRoot: playbackCacheRoot, cacheStore: cacheStore) { }
 
     public MusicCapability(IMusicApplication application, IDocumentStore store, NativeAudioPlayback playback,
         IMusicDialogs? dialogs = null, string? playbackCacheRoot = null, CacheDocumentStore? cacheStore = null)
         : this(application, store, new NativeMusicPlayback(playback), dialogs, playbackCacheRoot, cacheStore) { }
 
-    public MusicCapability(IRuntimeClient runtime, IDocumentStore store, IMusicPlayback playback,
+    public MusicCapability(IRuntimeClient runtime, IDocumentStore store, IMusicLibraryStore libraryStore, IMusicPlayback playback,
         IMusicDialogs? dialogs = null)
-        : this(new MusicNativeApplication(store, runtime), store, playback, dialogs) { }
+        : this(new MusicNativeApplication(store, libraryStore, runtime), store, playback, dialogs) { }
 
     public MusicCapability(IMusicApplication application, IDocumentStore store, IMusicPlayback playback,
         IMusicDialogs? dialogs = null, string? playbackCacheRoot = null, CacheDocumentStore? cacheStore = null)

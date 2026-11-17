@@ -158,7 +158,7 @@ extension NativeMusicService {
                 try musicRequire(c["revision"].int == revision, .staleRevision)
                 let ids = c["order"].strings
                 try musicRequire(ids.indices.contains(index))
-                let rows = try makeEntries(ids.map { d.library["library"]["songs"][$0] }, document: &d,
+                let rows = try makeEntries(ids.map { try d.song($0) }, document: &d,
                     context: .obj([("collectionId", .string(id)), ("sourceTitle", c["name"])]))
                 try archive(old, into: &d); d.queue["entries"] = .array(rows); d.queue["currentId"] = rows[index]["id"]
                 for key in ["history", "priority", "failed"] { d.queue[key] = .array([]) }

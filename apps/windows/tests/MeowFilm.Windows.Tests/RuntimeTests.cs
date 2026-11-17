@@ -28,7 +28,7 @@ public static class RuntimeTests
     }
     private const string Identity = "aggregate";
     private static RuntimeModule[] Modules => RuntimeHttpClientTests.Modules;
-    private static string[] Namespaces => [MusicLibraryOwner.DocumentNamespace, MusicAccountOwner.DocumentNamespace];
+    private static string[] Namespaces => [MusicAccountOwner.DocumentNamespace];
     private static string ScriptData() => Path.Combine(NewData(), "script-runtime");
 
     public static IEnumerable<TestCase> Cases()
@@ -94,15 +94,15 @@ public static class RuntimeTests
             }
             BridgeTests.Equal(true, runtime.IsConnected);
         });
-        yield return new("native-runtime: native music queue survives script process restart through DPAPI", async () =>
+        yield return new("native-runtime: native music queue survives script process restart through SQLite", async () =>
         {
             var root = NewData();
             var modules = Modules;
             var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity, modules);
             string collectionId, songId;
-            await using (var store = new LocalDocumentStore(root, Namespaces, protectedNamespaces: [MusicAccountOwner.DocumentNamespace]))
+            await using (var store = new MusicRecordTestStore(Path.Combine(root, "music-library")))
             await using (var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, ScriptData()))
-            await using (var library = new MusicLibraryOwner(store))
+            await using (var library = new MusicLibraryOwner(MusicTestStores.For(store)))
             {
                 var created = await library.ExecuteAsync("music.library.create", new { name = "本机契约测试" });
                 BridgeTests.Equal(true, created.GetProperty("ok").GetBoolean());
@@ -120,9 +120,9 @@ public static class RuntimeTests
                 BridgeTests.Equal(true, Guid.TryParse(songId, out _));
                 await BridgeTests.Expect("METHOD_UNAVAILABLE", () => runtime.CallAsync("music.library.list", new { }));
             }
-            await using (var store = new LocalDocumentStore(root, Namespaces, protectedNamespaces: [MusicAccountOwner.DocumentNamespace]))
+            await using (var store = new MusicRecordTestStore(Path.Combine(root, "music-library")))
             await using (var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, ScriptData()))
-            await using (var library = new MusicLibraryOwner(store))
+            await using (var library = new MusicLibraryOwner(MusicTestStores.For(store)))
             {
                 var detail = await library.ExecuteAsync("music.library.detail", new { id = collectionId, offset = 0, limit = 10 });
                 BridgeTests.Equal("确定性测试", detail.GetProperty("songs")[0].GetProperty("title").GetString());

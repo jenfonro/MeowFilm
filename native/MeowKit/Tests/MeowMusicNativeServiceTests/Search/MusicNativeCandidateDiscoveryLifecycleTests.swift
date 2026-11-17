@@ -59,7 +59,7 @@ final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
                 title: $0 == 7 ? "Synthetic recording" : "Unplayed recording \($0)")
         }
         let pages = MusicAccountQueuePages(roots: [tracks]), source = MusicAccountQueueFixture.source(pages)
-        let store = NativeMusicMemoryDocument(), http = MusicNativeDiscoveryPlatforms(), qq = MusicNativeCandidateDiscoveryQQ()
+        let store = NativeMusicTestLibrary(), http = MusicNativeDiscoveryPlatforms(), qq = MusicNativeCandidateDiscoveryQQ()
         let scripts = MusicNativeCandidateDiscoveryScripts()
         await scripts.supported(["wy"])
         let cache = MusicNativeMemorySourceDiscoveryCache()

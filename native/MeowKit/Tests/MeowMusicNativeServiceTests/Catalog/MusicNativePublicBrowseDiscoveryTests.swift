@@ -26,13 +26,13 @@ final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
         for fallback in [RuntimeValue.null, .object([:]), .array([try D.song("43")])] {
             let section: RuntimeValue = .object(["id": .string("tabs"), "items": fallback,
                 "tabs": .array([.object(["id": .string("shown"), "items": .array([try D.song("42")])])])])
-            let store = NativeMusicMemoryDocument()
+            let store = NativeMusicTestLibrary()
             let service = try await NativeMusicFixture.service(store, platform: NativeMusicResultFixture([D.page([section])]))
             let page = try await service.homePage(cursor: nil, refresh: true)
             guard case .track(let shown) = page.sections[0].items[0].content else { return XCTFail("song required") }
             XCTAssertEqual(shown.sources[0].nativeId, "42")
             let state = try await service.read()
-            XCTAssertEqual(state.library["library"]["songs"].fields.count, 1)
+            XCTAssertEqual(try state.songRows.allSongIDs(), [shown.songId])
             let savedDisplay = await service.homeDisplay
             let display = try XCTUnwrap(savedDisplay)
             XCTAssertTrue(display.1.sections[0].items.isEmpty)
@@ -95,7 +95,7 @@ final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
     func testHomeConsumesAlreadyCompletedSummariesWithoutReadingMembers() async throws {
         let cover = "https://p1.music.126.net/radar.jpg?param=800y800&quality=90"
         let peer = NativeMusicResultFixture([D.page([D.section("entries", items: [D.collection("41", title: "私人雷达", cover: cover), D.collection("42", title: "补齐歌单名")], type: "entries")])])
-        let document = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(document, platform: peer), page = try await service.publicDiscovery(.home, cursor: nil)
+        let document = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(document, platform: peer), page = try await service.publicDiscovery(.home, cursor: nil)
         XCTAssertEqual(page.sections[0].items.map(\.title), ["私人雷达", "补齐歌单名"]); XCTAssertEqual(page.sections[0].items[0].artwork?.absoluteString, cover)
         guard case .collection(let collection) = page.sections[0].items[0].content else { return XCTFail("collection required") }
         XCTAssertEqual(collection.artwork, page.sections[0].items[0].artwork); XCTAssertEqual(document.snapshot().2, 0)

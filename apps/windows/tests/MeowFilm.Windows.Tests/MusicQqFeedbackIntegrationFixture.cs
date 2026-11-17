@@ -28,7 +28,7 @@ internal sealed class MusicQqFeedbackIntegrationFixture : IAsyncDisposable
         Root = root ?? TestWorkspace.DataPath("qq-feedback-integration-fixtures", Guid.NewGuid().ToString("N"));
         TestWorkspace.ValidatePath(TestWorkspace.DataRoot, Root); Directory.CreateDirectory(Root);
         Store = new(new LocalDocumentStore(Root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
-        Runtime.OnRequest = Handler.Respond; App = new(Store, Runtime);
+        Runtime.OnRequest = Handler.Respond; App = new(Store, MusicTestStores.For(Store), Runtime);
     }
     internal static void Check(bool condition, string reason = "QQ application invariant") { if (!condition) throw new InvalidOperationException(reason); }
     internal static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);

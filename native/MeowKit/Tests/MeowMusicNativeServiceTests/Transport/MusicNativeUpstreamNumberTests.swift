@@ -13,7 +13,7 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
             info["albumId"] = .string("18446744073709551615")
             if platform == "kg" { info["hash"] = .string("1234567890ABCDEF1234567890ABCDEF"); info["albumAudioId"] = .string("9007199254740995") }
             let peer = NativeMusicResultFixture([try MusicPlatformFixture.page([.init(platform: platform, data: info.bytes)], platform: platform)])
-            let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+            let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
             let page = try await service.search(platform: platform, query: "Synthetic", page: 1, limit: 30)
             let track = try XCTUnwrap(page.items.first)
             let collection = try await service.createPlaylist(name: "Long locators", refs: [track.ref])
@@ -22,7 +22,7 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
             let restored = try await reopened.tracks(in: collection)
             XCTAssertEqual(restored[0].songId, track.songId); XCTAssertEqual(restored[0].sources[0].nativeId, nativeID)
             let document = try MusicDocument(store.snapshot().0, runID: "inspect")
-            let saved = try XCTUnwrap(document.library["library"]["songs"][track.songId]["sources"].array.first)["musicInfo"]
+            let saved = try XCTUnwrap((try document.fixtureSong(track.songId))["sources"].array.first)["musicInfo"]
             XCTAssertEqual(saved["albumId"].string, "18446744073709551615")
             if platform == "kg" { XCTAssertEqual(saved["albumAudioId"].string, "9007199254740995") }
             await reopened.close()
@@ -42,7 +42,7 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
     func testMissingCanonicalRequiredLocatorFailsWithoutPublishingPartialRepository() async throws {
         let valid = try MusicPlatformFixture.song(NativeMusicFixture.track())
         let peer = NativeMusicResultFixture([.object(["items": .array([valid, .object(["sources": .array([])])]), "total": .number(2)])])
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
         await assertMusicFailure(.upstreamInvalid) { _ = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30) }
         XCTAssertEqual(store.snapshot().2, 0)
         await service.close()
@@ -56,7 +56,7 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
         let ordinary = RuntimeValue.object(["items": .array([song]), "total": .number(1)])
         if case .object(var fields) = song { fields["unused"] = extra; song = .object(fields) }
         let peer = NativeMusicResultFixture([ordinary, .object(["items": .array([song]), "total": .number(1)])])
-        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, platform: peer)
+        let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
         let first = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
         let baseline = try await service.read(), writes = store.snapshot().2
         let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)

@@ -2292,7 +2292,7 @@ public static partial class PlaybackRecoveryTests
                 ? new Reply([]) { Status = 401 } : new Reply(bytes, "audio/wav");
             Native = new(audioOutput: NativeAudioOutput.Dummy);
             ScriptSource[] sources = [new("fixture-source", enabled: !official, platforms: platforms)];
-            App = new(new MusicNativeApplication(Store, Runtime, CacheStore), Origin, expiry, official, sources);
+            App = new(new MusicNativeApplication(Store, MusicTestStores.For(Store), Runtime, CacheStore), Origin, expiry, official, sources);
             Runtime.OnRequest = App.ReadPlatform;
             Module = new(App, Store, Native, new Dialogs(), cacheStore: CacheStore);
         }
@@ -2415,7 +2415,7 @@ public static partial class PlaybackRecoveryTests
                 await f.CacheStore.DrainAsync();
                 await using var restartedCache = new CacheDocumentStore(f.CacheBacking);
                 await using var restartedRuntime = new MusicPlatformRuntimeFixture();
-                var app = new MusicApp(new MusicNativeApplication(f.Store, restartedRuntime, restartedCache), f.Origin,
+                var app = new MusicApp(new MusicNativeApplication(f.Store, MusicTestStores.For(f.Store), restartedRuntime, restartedCache), f.Origin,
                     expiry: false, official: false, sources: []) { QualityRequest = "flac" };
                 restartedRuntime.OnRequest = app.ReadPlatform;
                 var output = new ControlledPlayback();
@@ -2714,7 +2714,7 @@ public static partial class PlaybackRecoveryTests
         {
             CacheStore = new(CacheBacking);
             Origin.RequireAuthorization = false;
-            App = new(new MusicNativeApplication(Store, Runtime, CacheStore), Origin,
+            App = new(new MusicNativeApplication(Store, MusicTestStores.For(Store), Runtime, CacheStore), Origin,
                 expiry: false, official, sources)
             {
                 QualityRequest = qualityRequest,

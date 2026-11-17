@@ -56,7 +56,6 @@ extension NativeMusicService: MusicLibrarySyncing {
             // Metadata adoption does not advance the user's library revision.
             // Preserve its current facts rather than writing this round's older
             // display projection over concurrent metadata observations.
-            library["songs"] = d.library["library"]["songs"]
             d.library["library"] = library; d.library["sync"] = ledger; d.library["revision"] = .n(expected + 1)
         }
         round.library = library; round.revision = expected + 1
@@ -92,10 +91,10 @@ extension NativeMusicService: MusicLibrarySyncing {
                 musicIDs(row["order"].strings).count == row["order"].array.count, .corruptDocument)
             try musicRequire(row["kind"].string != "favorites" || row["id"].string == "favorites" && !row["deleted"].bool, .favoritesProtected)
             for songID in row["order"].array {
-                try musicRequire(songID.isString && library["songs"][songID.string].isObject, .corruptDocument)
+                try musicRequire(songID.isString && repositoryReader.containsSong(id: songID.string), .corruptDocument)
             }
             for (songID, intent) in row["intents"].fields {
-                try musicRequire(library["songs"][songID].isObject && intent["present"].isBool &&
+                try musicRequire(repositoryReader.containsSong(id: songID) && intent["present"].isBool &&
                     intent["pending"].isBool && ["local", "remote"].contains(intent["origin"].string), .corruptDocument)
             }
             for binding in row["bindings"].array where selected.contains(where: { $0.platform.rawValue == binding["platform"].string }) {
@@ -106,10 +105,10 @@ extension NativeMusicService: MusicLibrarySyncing {
                     musicIDs(binding["baseline"].strings).count == binding["baseline"].array.count, .corruptDocument)
                 for occurrence in binding["baseline"].array {
                     try musicRequire(occurrence.isString && !occurrence.string.isEmpty &&
-                        library["songs"][binding["map"][occurrence.string].string].isObject, .corruptDocument)
+                        repositoryReader.containsSong(id: binding["map"][occurrence.string].string), .corruptDocument)
                 }
                 for (_, songID) in binding["map"].fields {
-                    try musicRequire(songID.isString && library["songs"][songID.string].isObject, .corruptDocument)
+                    try musicRequire(songID.isString && repositoryReader.containsSong(id: songID.string), .corruptDocument)
                 }
             }
         }

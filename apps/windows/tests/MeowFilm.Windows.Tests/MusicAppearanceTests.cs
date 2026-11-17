@@ -26,12 +26,12 @@ public static class MusicAppearanceTests
             var saved = (await f.Ok("music.appearance.get")).GetProperty("settings");
             Check(saved.GetProperty("colorMode").GetString() == "song" &&
                 saved.GetProperty("playlistView").GetString() == "grid");
-            Check(f.Store.Writes == 0 && f.Runtime.Calls.Count == 0);
+            Check(MusicTestStores.For(f.Store).Writes == 0 && f.Runtime.Calls.Count == 0);
             long revision = 0;
             foreach (var palette in MusicAppearancePalette.Options)
                 await f.Ok("music.appearance.save", Draft(revision++, palette.Key));
             await f.Ok("music.appearance.save", Draft(revision++, "#12ABEF"));
-            await using var reopened = new MusicLibraryOwner(f.Store);
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(f.Store));
             var restored = await reopened.ExecuteAsync("music.appearance.get");
             Check(restored.GetProperty("ok").GetBoolean() &&
                 restored.GetProperty("settings").GetProperty("revision").GetInt64() == revision);
@@ -48,47 +48,46 @@ public static class MusicAppearanceTests
                 var request = Draft(); request[bad.Item1] = bad.Item2;
                 await f.Error("music.appearance.save", request, "INVALID_REQUEST");
             }
-            Check(f.Store.Writes == 0);
+            Check(MusicTestStores.For(f.Store).Writes == 0);
             await f.Ok("music.appearance.save", Draft());
             await f.Error("music.appearance.save", Draft(), "REVISION_CONFLICT");
             using var cancellation = new CancellationTokenSource(); cancellation.Cancel();
             Code(await f.App.ExecuteAsync("music.appearance.save", Draft(1), cancellation.Token), "CANCELLED");
-            Check(f.Store.Writes == 1);
+            Check(MusicTestStores.For(f.Store).Writes == 1);
         });
         yield return new("Music appearance ambiguous CAS reconciles on the next current command without a public reconcile route", async () =>
         {
             await using var f = new QualityFixture();
-            f.Store.Fault = true; f.Store.FaultAfter = true;
-            f.Store.FaultNamespace = MusicLibraryOwner.DocumentNamespace;
+            MusicTestStores.For(f.Store).Fault = true; MusicTestStores.For(f.Store).FaultAfter = true;
             await f.Error("music.appearance.save", Draft(), "COMMIT_UNKNOWN");
             var current = await f.Ok("music.appearance.get");
             Check(current.GetProperty("settings").GetProperty("revision").GetInt64() == 1 &&
                 current.GetProperty("settings").GetProperty("colorPalette").GetString() == "mint");
-            Check(f.Store.Writes == 1);
+            Check(MusicTestStores.For(f.Store).Writes == 1);
             await f.Error("music.appearance.reconcile", null, "CAPABILITY_UNAVAILABLE");
 
-            var doc = JsonNode.Parse(f.Store.Data[MusicLibraryOwner.DocumentNamespace])!.AsObject();
-            var entry = doc["entries"]!.AsArray().OfType<JsonObject>().Single();
-            entry["value"]!["colorMode"] = "corrupt";
-            f.Store.Put(MusicLibraryOwner.DocumentNamespace, doc);
-            await using var owner = new MusicLibraryOwner(f.Store);
+            var doc = MusicTestStores.For(f.Store).Root;
+            var entry = doc["areas"]!.AsObject().Single().Value!;
+            entry["colorMode"] = "corrupt";
+            MusicTestStores.For(f.Store).Seed(doc);
+            await using var owner = new MusicLibraryOwner(MusicTestStores.For(f.Store));
             Code(await owner.ExecuteAsync("music.appearance.get"), "CORRUPT_STORAGE");
-            entry["value"]!["colorMode"] = "fixed";
-            f.Store.Put(MusicLibraryOwner.DocumentNamespace, doc);
+            entry["colorMode"] = "fixed";
+            MusicTestStores.For(f.Store).Seed(doc);
         });
         yield return new("Music device volume persists separately and cannot overwrite appearance", async () =>
         {
             await using var f = new QualityFixture();
             Check((await f.Ok("music.device.settings.get")).GetProperty("settings").GetProperty("volume").GetInt32() == 100);
-            Check(f.Store.Writes == 0);
+            Check(MusicTestStores.For(f.Store).Writes == 0);
             await f.Ok("music.appearance.save", Draft());
             await f.Ok("music.device.settings.save", new { ifRevision = 0, volume = 37 });
             await f.Error("music.device.settings.save", new { ifRevision = 1, volume = 101 }, "INVALID_REQUEST");
             await f.Error("music.device.settings.save", new { ifRevision = 0, volume = 10 }, "REVISION_CONFLICT");
-            int writes = f.Store.Writes;
+            int writes = MusicTestStores.For(f.Store).Writes;
             await f.Ok("music.device.settings.save", new { ifRevision = 1, volume = 37 });
-            Check(f.Store.Writes == writes);
-            await using var reopened = new MusicLibraryOwner(f.Store);
+            Check(MusicTestStores.For(f.Store).Writes == writes);
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(f.Store));
             var volume = await reopened.ExecuteAsync("music.device.settings.get");
             Check(volume.GetProperty("settings").GetProperty("volume").GetInt32() == 37);
             Check((await reopened.ExecuteAsync("music.appearance.get")).GetProperty("settings")
@@ -262,14 +261,14 @@ public static class MusicAppearanceTests
             var palette = Visuals(settings).OfType<ColorPicker>().Single();
             Check(!palette.IsEnabled && (string?)mode.SelectedValue == "song");
 
-            int writes = f.Store.Writes;
+            int writes = MusicTestStores.For(f.Store).Writes;
             await module.SetAppearanceAsync("colorMode", "fixed"); await Ready(module);
             await module.SetAppearanceAsync("colorPalette", "mint"); await Ready(module);
             await module.SetAppearanceAsync("playlistView", "list"); await Ready(module);
             settings.UpdateLayout();
             Check(module.AppearanceColorMode == "fixed" && module.AppearanceColorPalette == "mint" &&
                 module.PlaylistListView && palette.IsEnabled && module.AppearanceStatus.Length == 0);
-            Check(f.Store.Writes == writes + 3, "each changed selection is one immediate durable write");
+            Check(MusicTestStores.For(f.Store).Writes == writes + 3, "each changed selection is one immediate durable write");
             Check(!Visuals(settings).OfType<Button>().Select(button => button.Content as string).Any(label =>
                 label is "保存设置" or "保存外观设置" or "重新读取设置" or "放弃更改"));
 
@@ -322,21 +321,20 @@ public static class MusicAppearanceTests
         {
             await module.InitializeAsync(default); await Ready(module);
             await module.SetAppearanceAsync("colorMode", "fixed"); await Ready(module);
-            int writes = f.Store.Writes;
+            int writes = MusicTestStores.For(f.Store).Writes;
 
-            f.Store.Fault = true; f.Store.FaultAfter = true;
-            f.Store.FaultNamespace = MusicLibraryOwner.DocumentNamespace;
+            MusicTestStores.For(f.Store).Fault = true; MusicTestStores.For(f.Store).FaultAfter = true;
             await module.SetAppearanceAsync("colorPalette", "rose"); await Ready(module);
             Check(module.AppearanceColorPalette == "rose" && module.AppearanceStatus.Length == 0 &&
-                f.Store.Writes == writes + 1, "lost receipt is reconciled without replay");
-            writes = f.Store.Writes;
+                MusicTestStores.For(f.Store).Writes == writes + 1, "lost receipt is reconciled without replay");
+            writes = MusicTestStores.For(f.Store).Writes;
             await module.SetAppearanceAsync("colorPalette", "rose");
-            Check(f.Store.Writes == writes, "accepted current value is not resent");
+            Check(MusicTestStores.For(f.Store).Writes == writes, "accepted current value is not resent");
 
-            f.Store.Fault = true; f.Store.FaultAfter = false;
+            MusicTestStores.For(f.Store).Fault = true; MusicTestStores.For(f.Store).FaultAfter = false;
             await module.SetAppearanceAsync("colorPalette", "sky"); await Ready(module);
             Check(module.AppearanceColorPalette == "rose" &&
-                module.AppearanceStatus == "外观设置保存失败" && f.Store.Writes == writes + 1,
+                module.AppearanceStatus == "外观设置保存失败" && MusicTestStores.For(f.Store).Writes == writes + 1,
                 "failed CAS restores the sole durable value and reports failure");
         }
         finally { await module.AbortAsync(); }
@@ -359,16 +357,16 @@ public static class MusicAppearanceTests
             var palette = Visuals(settings).OfType<ColorSelection>().Single();
 
             await f.Ok("music.appearance.save", Draft(0, "mint"));
-            int writes = f.Store.Writes;
+            int writes = MusicTestStores.For(f.Store).Writes;
             await module.SetAppearanceAsync("colorPalette", "rose"); await Ready(module);
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
             Check(module.AppearanceColorPalette == "mint" && palette.Value == "mint" &&
                 module.AppearanceStatus == "外观设置已更新" && reload.IsVisible && reload.IsEnabled,
                 "revision conflict reads the authority and exposes the actual reload button");
-            Check(f.Store.Writes == writes, "revision conflict does not replay the rejected draft");
+            Check(MusicTestStores.For(f.Store).Writes == writes, "revision conflict does not replay the rejected draft");
 
             await f.Ok("music.appearance.save", Draft(1, "sky"));
-            writes = f.Store.Writes;
+            writes = MusicTestStores.For(f.Store).Writes;
             Check(module.AppearanceColorPalette == "mint", "the newer authority has not yet been read");
             reload.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
             await Ready(module);
@@ -376,7 +374,7 @@ public static class MusicAppearanceTests
             Check(module.AppearanceColorPalette == "sky" && palette.Value == "sky" &&
                 module.AppearanceStatus.Length == 0 && !reload.IsVisible,
                 "explicit reload reads the latest saved value and clears the conflict notice");
-            Check(f.Store.Writes == writes, "reload performs no save");
+            Check(MusicTestStores.For(f.Store).Writes == writes, "reload performs no save");
             Check((await f.Ok("music.appearance.get")).GetProperty("settings")
                 .GetProperty("revision").GetInt64() == 2, "reload leaves the authority revision unchanged");
         }

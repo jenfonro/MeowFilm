@@ -284,7 +284,7 @@ public static class MusicWySmsUiTests
             Directory.CreateDirectory(root);
             Store = new(new LocalDocumentStore(root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
             Runtime.Platform.OnRequest = Transport.Read;
-            Calls = new(new MusicNativeApplication(Store, Runtime));
+            Calls = new(new MusicNativeApplication(Store, MusicTestStores.For(Store), Runtime));
             Module = new(Calls, Store, new Output(), new Dialogs());
         }
         internal static async Task<Fixture> Create()
