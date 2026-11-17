@@ -726,10 +726,10 @@ for (const protocol of ['cat', 'legado', 'qysg']) {
   });
 }
 
-test('source depth violations, capability failures and actual script stack exhaustion stay explicit and recoverable', async t => {
+test('source scalar values survive while depth, actual consumers, capability and stack failures stay recoverable', async t => {
   const base = createNodeSourceCapabilities({ network: async () => assert.fail('no network') });
   const writes = [];
-  const { session } = await sourceSession(t, {
+  const { session, nativeSession } = await sourceSession(t, {
     owner: {
       invoke(name, input, context) {
         if (name === 'storage.set') writes.push(input.key);
@@ -751,6 +751,7 @@ test('source depth violations, capability failures and actual script stack exhau
           if (kind === 'range') throw new RangeError('not a stack failure');
           if (kind === 'failure' || kind === 'oversized') return local.get(kind);
           if (kind === 'unicode') return '\\ud800';
+          if (kind === 'utf8') return new TextEncoder().encode('\\ud800');
           if (kind === 'number') return Infinity;
           if (kind === 'unsafe') return 9007199254740992;
           let value = null;
@@ -763,11 +764,13 @@ test('source depth violations, capability failures and actual script stack exhau
       };
     `,
   });
+  assert.equal(await session.invoke('search', { keyword: 'unicode' }), '\ud800');
+  assert.equal(await session.invoke('search', { keyword: 'unsafe' }), 9007199254740992);
   for (const [keyword, code] of [
     ['depth', 'INVALID_ARGUMENT'], ['envelope', 'INVALID_ARGUMENT'], ['cycle', 'INVALID_ARGUMENT'],
     ['failure', 'STORAGE_ERROR'], ['oversized', 'INVALID_RESPONSE'],
     ['stack', 'RESOURCE_LIMIT'], ['range', 'SCRIPT_EXCEPTION'],
-    ['unicode', 'INVALID_ARGUMENT'], ['number', 'INVALID_ARGUMENT'], ['unsafe', 'INVALID_ARGUMENT'],
+    ['utf8', 'INVALID_ARGUMENT'], ['number', 'INVALID_ARGUMENT'],
   ]) {
     await assert.rejects(session.invoke('search', { keyword }, { timeoutMs: 1000 }), error => {
       assert.equal(error.code, code);
@@ -776,6 +779,10 @@ test('source depth violations, capability failures and actual script stack exhau
     });
     assert.deepEqual(await session.invoke('search', { keyword: 'valid' }), sourceDepthValue(64));
   }
+  await assert.rejects(nativeSession.engine.call('utility', ['random', [9007199254740992]]),
+    { code: 'INVALID_ARGUMENT' }, 'native random byte counts consume an exact Integer()');
+  assert.deepEqual(await nativeSession.engine.call('utility', ['random', [0]]), Buffer.alloc(0));
+  assert.deepEqual(await session.invoke('search', { keyword: 'valid' }), sourceDepthValue(64));
   assert.deepEqual(writes, Array(10).fill('valid'), 'invalid values must not reach the storage owner');
 });
 

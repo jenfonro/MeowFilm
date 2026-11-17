@@ -74,7 +74,7 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         try check(own)
         let sources = try MusicModel.sources(song).filter { platformEnabled($0.platform) && !excluded.contains($0.sourceKey) }
         let songID = song["songId"].string, playback = d.playback
-        let exclusions = playback["sourceExclusions"].array.filter { $0["songID"].string == songID }
+        let exclusions = try exclusionRows(playback, key: "sourceExclusions").filter { $0["songID"].string == songID }
         let quality = selection?.quality ?? requestedQuality ?? (playback["requestQuality"].isString ? playback["requestQuality"].string : "flac")
         // The session already chose an automatic tier or an explicit manual
         // tier. Preparing that exact file must not apply automatic preferences.

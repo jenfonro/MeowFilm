@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -634,7 +635,9 @@ public static partial class MusicUiTests
         }
         internal async Task Submit(string word, string target)
         {
-            Input.Text = word; Picker.SelectedValue = target; Click("SearchButton");
+            Input.Text = word; Picker.SelectedValue = target;
+            await (Task)typeof(ShellWindow).GetMethod("SearchAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(Shell, null)!;
             await SearchFixture.Until(() => Page.Query == word && Page.SelectedTarget == target && Status == "");
             await Drain();
         }

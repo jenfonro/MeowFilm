@@ -35,7 +35,7 @@ test('session close callback runs once after terminal state and actual request d
   assert.equal(calls, 1);
 });
 
-for (const scenario of ['truncated', 'redirect', 'wrong-id', 'wrong-contract', 'malformed-json', 'duplicate-key']) {
+for (const scenario of ['truncated', 'redirect', 'wrong-id', 'wrong-contract', 'malformed-json']) {
   test(`client rejects ${scenario} HTTP response without retry`, async t => {
     let requests = 0;
     const identity = lifecycle();
@@ -46,8 +46,7 @@ for (const scenario of ['truncated', 'redirect', 'wrong-id', 'wrong-contract', '
         ...(scenario === 'truncated' ? { 'content-length': 200 } : {}),
       });
       if (scenario === 'truncated') { response.write('{'); setImmediate(() => response.destroy()); }
-      else response.end(scenario === 'malformed-json' ? '{' : scenario === 'duplicate-key'
-        ? '{"ok":true,"contract":"runtime.http.v1","value":{"a":1,"a":2}}'
+      else response.end(scenario === 'malformed-json' ? '{'
         : JSON.stringify({ ok: true, contract: scenario === 'wrong-contract' ? 'runtime.http.v0' : 'runtime.http.v1', value: null }));
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

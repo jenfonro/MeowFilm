@@ -13,18 +13,20 @@ import { installerFixture as fixture } from './windows-installer-fixture.mjs';
 
 test('installer packages the entire publish closure and emits an explicit upgrade/uninstall ownership inventory', t => {
   const f = fixture(t);
-  f.write('libvlc/plugins/video output/libdirect3d11_plugin.dll');
+  f.write('film-kernel/meowfilm_film_kernel.dll');
+  f.write('assets/cover art/example.png');
   const result = f.prepare();
   const lines = readFileSync(join(f.output, 'meowfilm-install-files.txt'), 'utf8').trim().split('\n');
   assert.equal(lines[0], 'meowfilm-installer-files-v1');
   assert.equal(lines.length, result.files + 2);
   assert.equal(new Set(lines).size, lines.length);
-  for (const path of ['meowfilm.exe', 'libvlc/plugins/video output/libdirect3d11_plugin.dll',
+  for (const path of ['meowfilm.exe', 'film-kernel/meowfilm_film_kernel.dll', 'assets/cover art/example.png',
     'runtime/native/engine.node', ...licenseFiles.map(name => `licenses/${name}`), 'meowfilm-install-files.txt']) {
     assert.ok(lines.includes(path), path);
   }
   const include = readFileSync(join(f.output, 'payload-files.iss'), 'utf8');
-  assert.ok(include.includes('Source: "{#PayloadDir}\\libvlc\\plugins\\video output\\libdirect3d11_plugin.dll"; DestDir: "{app}\\libvlc\\plugins\\video output"; Flags: ignoreversion'));
+  assert.ok(include.includes('Source: "{#PayloadDir}\\film-kernel\\meowfilm_film_kernel.dll"; DestDir: "{app}\\film-kernel"; Flags: ignoreversion'));
+  assert.ok(include.includes('Source: "{#PayloadDir}\\assets\\cover art\\example.png"; DestDir: "{app}\\assets\\cover art"; Flags: ignoreversion'));
   assert.equal(include.split('\n').filter(Boolean).length, result.files);
   assert.ok(!include.includes('recursesubdirs'));
   assert.ok(!existsSync(join(f.payload, 'meowfilm-install-files.txt')), 'packaging does not add files to the runtime closure');
@@ -36,7 +38,7 @@ for (const [name, change] of [
   ['framework-dependent', f => f.change('build-result.json', result => { result.selfContained = false; })],
   ['wrong architecture', f => f.change('build-result.json', result => { result.runtimeIdentifier = 'win-arm64'; })],
   ['missing native runtime', f => rmSync(join(f.payload, 'coreclr.dll'))],
-  ['missing native dependency', f => rmSync(join(f.payload, 'libvlc.dll'))],
+  ['missing native dependency', f => rmSync(join(f.payload, 'libSkiaSharp.dll'))],
   ['missing managed dependency', f => rmSync(join(f.payload, 'Example.dll'))],
   ['missing satellite dependency', f => rmSync(join(f.payload, 'zh-Hans/Example.resources.dll'))],
   ['missing runtime entry', f => f.change('runtime/runtime-manifest.json', result => { result.entry = 'absent.mjs'; })],

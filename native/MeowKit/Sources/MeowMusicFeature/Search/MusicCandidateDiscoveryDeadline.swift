@@ -17,7 +17,11 @@ public enum MusicCandidateDiscoveryDeadline {
         try Task.checkCancellation()
         let gate = MusicCandidateDiscoveryGate<T>()
         let task = Task {
-            do { gate.finish(.success(try await operation())) }
+            do {
+                let value = try await operation()
+                try Task.checkCancellation()
+                gate.finish(.success(value))
+            }
             catch { gate.finish(.failure(error)) }
         }
         let timer = Task {

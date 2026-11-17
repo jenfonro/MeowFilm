@@ -1,9 +1,10 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Threading;
 using MeowFilm.Media;
-using static MeowFilm.Windows.Tests.AdaptiveMediaTests;
+using static MeowFilm.Windows.Tests.NativeMediaFixtures;
 using static MeowFilm.Windows.Tests.FFmpegVideoFixtures;
 
 namespace MeowFilm.Windows.Tests;
@@ -35,6 +36,7 @@ public static class FilmKernelIntegrationTests
                 return pixel != uint.MaxValue && blue > green + 40 && blue > red + 40 && green < 150;
             }, "decoded blue picture reaches actual desktop pixels");
             Console.WriteLine($"OBSERVED_FILM_DESKTOP_PIXEL colorref=0x{pixel:X6}; source=synthetic-blue-jpeg");
+            await NativeDesktopCapture.SaveAsync(player.VideoView, "decoded-blue-picture");
         }));
         yield return Case("film kernel forward-only paused subtitle disable repaints actual desktop pixels", () => WithPlayer(async (player, kernel) =>
         {
@@ -115,7 +117,7 @@ public static class FilmKernelIntegrationTests
                     !player.HasOutput && lease.Disposals == 0, "silent prepare requires a decoded picture");
                 bool published = false;
                 Check(await player.TryCommitAsync(intent, () => true, () => published = true) &&
-                    published && player.Scope is not null && player.PauseRequested, "native commit respects paused intent");
+                    published && player.Scope is not null && player.IsPaused, "native commit respects paused intent");
                 Check(kernel.Read(kernel.Owner).State == 3, "first native presentation is paused");
                 Check(player.Output is { SubmittedPictures: > 0 } output && output.Scope == player.Scope,
                     "the committed identity has an actual native render/Present submission");
@@ -155,6 +157,88 @@ public static class FilmKernelIntegrationTests
                 Check(!player.HasOutput && player.Scope is null && lease.Disposals == 1 && kernel.Releases == 1,
                     "stop joins real workers and releases the exact lease once");
             }));
+        yield return Case("film kernel wrong ClearKey rejects candidate and preserves paused donor", () => WithPlayer(async (player, kernel) =>
+        {
+            await using var origin = Fixture("dash-cenc");
+            var headers = origin.Headers;
+            origin.RequiredHeaders = headers;
+            await using var donorLease = new Lease(origin.Uri("/root"), headers);
+            var donorIntent = Intent(paused: true);
+            await player.PrepareAsync(donorIntent, donorLease.Address, Input("dash-cenc"), donorLease);
+            Check(await player.TryCommitAsync(donorIntent, () => true, () => { }), "correct-key control commits a real encrypted movie");
+            var donorScope = player.Scope!;
+            IntPtr donor = kernel.Owner;
+            await player.SeekAsync(donorScope, 6);
+            var before = kernel.Read(donor);
+            Check(before.State == 3 && before.Error == 0 && before.SubmittedPictures > 0 &&
+                Math.Abs(before.Position - 6) < .15, "correct-key control decodes and seeks while paused");
+            int priorRequests = origin.Requests.Count, commits = 0, publications = 0, failures = 0, ends = 0;
+            var candidate = new RuntimeMediaPlaybackIntent("film", Guid.NewGuid().ToString("N"), 0, true, donorScope);
+            player.PropertyChanged += (_, _) =>
+            {
+                if (player.Scope?.Identity == candidate.Identity || player.Output?.Scope.Identity == candidate.Identity)
+                    publications++;
+            };
+            player.Failed += (_, _) => failures++;
+            player.Ended += (_, _) => ends++;
+            const string wrongKey = "00000000000000000000000000000000";
+            using var input = new NativeVideoInput(NativeVideoFormat.Dash, NativeClearKeySet.FromHex(
+                new Dictionary<string, string> { [VideoKid] = wrongKey, [AudioKid] = AudioKey }));
+            await using var rejectedLease = new Lease(origin.Uri("/root"), headers);
+            try
+            {
+                await player.PrepareAsync(candidate, rejectedLease.Address, input, rejectedLease);
+                throw new InvalidOperationException("Wrong-key candidate unexpectedly prepared a picture");
+            }
+            catch (PlaybackException error)
+            {
+                Check(error.Code == "FILM_DECODE_FAILED" && error.Message == error.Code &&
+                    error.InnerException is null && error.Data.Count == 0,
+                    "wrong-key failure must be the fixed decoder error, not open, network, cancellation or timeout");
+                string diagnostic = error.ToString();
+                Check(new[] { wrongKey, VideoKey, AudioKey, VideoKid, AudioKid, origin.Base.AbsoluteUri,
+                    headers["Authorization"], headers["Cookie"] }.All(secret =>
+                        !diagnostic.Contains(secret, StringComparison.OrdinalIgnoreCase)),
+                    "public decoder diagnostics contain no URL, headers, KIDs or key material");
+            }
+            IntPtr rejected = kernel.Owner;
+            Check(rejected != donor && kernel.PrepareResult == 6 &&
+                kernel.Prepared is { State: 6, Error: 6, SubmittedPictures: 0 },
+                "real native wrong-key decode fails before any candidate presentation");
+            var requests = origin.Requests.Skip(priorRequests).ToArray();
+            Check(requests.Any(request => request.Path == "/root") &&
+                requests.Any(request => request.Path == "/parts/video-init") &&
+                requests.Any(request => request.Path == "/parts/video-0") &&
+                requests.All(request => request.Authorized),
+                "candidate reads the same valid protected manifest, initialization and ciphertext as the control");
+            Check(kernel.ReleaseCounts.GetValueOrDefault(rejected) == 1 &&
+                kernel.ReleaseCounts.GetValueOrDefault(donor) == 0 && kernel.Releases == 1 &&
+                rejectedLease.DisposeCalls == 1 && rejectedLease.Disposals == 1 && donorLease.DisposeCalls == 0,
+                "prepare failure waits for one actual candidate native and receipt drain without retiring its donor");
+            try
+            {
+                await player.TryCommitAsync(candidate, () => true, () => commits++);
+                throw new InvalidOperationException("Retired wrong-key candidate remained eligible to commit");
+            }
+            catch (PlaybackException error) when (error.Code == PlaybackError.Superseded &&
+                error.Message == error.Code && error.InnerException is null) { }
+            await player.DiscardAsync(candidate);
+            var after = kernel.Read(donor);
+            Check(commits == 0 && publications == 0 && kernel.Starts == 1 && failures == 0 && ends == 0 &&
+                player.Scope == donorScope && player.Output?.Scope == donorScope && player.HasOutput &&
+                player.IsPaused && player.LastErrorCode is null && after.State == 3 && after.Error == 0 &&
+                after.SubmittedPictures == before.SubmittedPictures &&
+                Math.Abs(after.Position - before.Position) < .000001 &&
+                Math.Abs(player.PositionSeconds - before.Position) < .000001,
+                "failed candidate never starts or publishes and leaves the healthy donor's actual output, pause and clock unchanged");
+            await player.StopAsync(donorScope);
+            await player.StopAsync();
+            await player.DisposeAsync();
+            Check(kernel.ReleaseCounts.GetValueOrDefault(rejected) == 1 &&
+                kernel.ReleaseCounts.GetValueOrDefault(donor) == 1 && kernel.Releases == 2 &&
+                donorLease.DisposeCalls == 1 && rejectedLease.DisposeCalls == 1 && !player.HasOutput,
+                "discard, stop and disposal never drain either native owner or receipt twice");
+        }));
         yield return Case("film kernel real audio and subtitle track replacement keeps the movie scope", () => WithPlayer(async (player, kernel) =>
         {
             await using var origin = Fixture("dash-tracks");
@@ -171,7 +255,7 @@ public static class FilmKernelIntegrationTests
             await player.SelectSubtitleTrackAsync(scope, tracks.Subtitles[0].Index);
             var selected = await player.ReadTracksAsync();
             Check(selected?.AudioIndex == alternate && selected?.SubtitleIndex == tracks.Subtitles[0].Index &&
-                player.Scope == scope && player.PauseRequested, "track commands preserve identity and pause intent");
+                player.Scope == scope && player.IsPaused, "track commands preserve identity and pause intent");
             try
             {
                 await player.SelectAudioTrackAsync(scope, int.MaxValue);
@@ -320,8 +404,8 @@ public static class FilmKernelIntegrationTests
 
     private static TestCase Case(string name, Func<Task> body) => new(name, () => Sta(body));
     private static RuntimeMediaPlaybackIntent Intent(bool paused = false) =>
-        new("film", Guid.NewGuid().ToString("N"), "Synthetic film", 0, paused);
-    private static NativeVideoInput Input(string format) => new(
+        new("film", Guid.NewGuid().ToString("N"), 0, paused);
+    internal static NativeVideoInput Input(string format) => new(
         format.StartsWith("hls", StringComparison.Ordinal) ? NativeVideoFormat.Hls :
         format.StartsWith("dash", StringComparison.Ordinal) ? NativeVideoFormat.Dash : NativeVideoFormat.Progressive,
         format == "dash-cenc" ? NativeClearKeySet.FromHex(new Dictionary<string, string>
@@ -330,7 +414,11 @@ public static class FilmKernelIntegrationTests
     {
         var kernel = new ObservedKernel();
         var player = new FilmPlayback(Dispatcher.CurrentDispatcher, kernel) { Volume = 5 };
-        var window = new Window { Title = "Meowfilm film kernel validation", Width = 640, Height = 400, Content = player.VideoView };
+        var window = new Window
+        {
+            Title = "Meowfilm film kernel validation", Width = 640, Height = 400, Content = player.VideoView,
+            WindowStartupLocation = WindowStartupLocation.CenterScreen, Topmost = true, ShowActivated = false
+        };
         try
         {
             window.Show(); window.UpdateLayout();
@@ -343,7 +431,7 @@ public static class FilmKernelIntegrationTests
             finally { window.Content = null; window.Close(); }
         }
     }
-    private static Origin Fixture(string format)
+    internal static Origin Fixture(string format)
     {
         var origin = new Origin();
         bool encrypted = format == "dash-cenc";
@@ -396,20 +484,34 @@ public static class FilmKernelIntegrationTests
     private sealed class ObservedKernel : FilmKernelApi
     {
         internal IntPtr Owner;
-        internal int Releases, AvioSeeks;
-        private FilmKernelNative.SeekCallback? seekCallback;
+        internal int Releases, AvioSeeks, Starts, PrepareResult;
+        internal FilmKernelNative.Snapshot Prepared;
+        internal readonly ConcurrentDictionary<IntPtr, int> ReleaseCounts = new();
+        private readonly List<FilmKernelNative.SeekCallback> seekCallbacks = [];
         private bool observed;
         internal override IntPtr Create(ref FilmKernelNative.Callbacks callbacks, Uri address,
             NativeVideoFormat format, byte[] keys, byte[]? defaultKey)
         {
             var seek = Marshal.GetDelegateForFunctionPointer<FilmKernelNative.SeekCallback>(callbacks.Seek);
-            seekCallback = (context, handle, offset, whence) =>
+            FilmKernelNative.SeekCallback seekCallback = (context, handle, offset, whence) =>
             {
                 Interlocked.Increment(ref AvioSeeks);
                 return seek(context, handle, offset, whence);
             };
+            seekCallbacks.Add(seekCallback);
             callbacks.Seek = Marshal.GetFunctionPointerForDelegate(seekCallback);
             return Owner = base.Create(ref callbacks, address, format, keys, defaultKey);
+        }
+        internal override int Prepare(IntPtr owner, double position, IntPtr target)
+        {
+            PrepareResult = base.Prepare(owner, position, target);
+            Prepared = base.Read(owner);
+            return PrepareResult;
+        }
+        internal override int Start(IntPtr owner, int paused)
+        {
+            Interlocked.Increment(ref Starts);
+            return base.Start(owner, paused);
         }
         internal override FilmKernelNative.Snapshot Read(IntPtr owner)
         {
@@ -422,19 +524,26 @@ public static class FilmKernelIntegrationTests
             }
             return value;
         }
-        internal override void Release(IntPtr owner) { base.Release(owner); Interlocked.Increment(ref Releases); }
+        internal override void Release(IntPtr owner)
+        {
+            base.Release(owner);
+            ReleaseCounts.AddOrUpdate(owner, 1, (_, count) => count + 1);
+            Interlocked.Increment(ref Releases);
+        }
     }
     private sealed class Lease(Uri address, IReadOnlyDictionary<string, string> headers) : INativeMediaResourceLease
     {
         private readonly CancellationTokenSource revoked = new();
-        private int disposed;
+        private int disposed, disposeCalls;
         internal int Disposals => Volatile.Read(ref disposed);
+        internal int DisposeCalls => Volatile.Read(ref disposeCalls);
         public Uri Address => address;
         public IReadOnlyDictionary<string, string> Headers => headers;
         public CancellationToken Revoked => revoked.Token;
         internal void Revoke() => revoked.Cancel();
         public ValueTask DisposeAsync()
         {
+            Interlocked.Increment(ref disposeCalls);
             if (Interlocked.Exchange(ref disposed, 1) == 0) { revoked.Cancel(); revoked.Dispose(); }
             return ValueTask.CompletedTask;
         }

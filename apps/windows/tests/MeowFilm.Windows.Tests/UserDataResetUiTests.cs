@@ -22,6 +22,8 @@ public static class UserDataResetUiTests
         yield return Case("failure keeps the old shell locked and explicit retry closes without normal shutdown", Retry);
         yield return Case("failed exit stays locked and requires an explicit successful abort", Exit);
         yield return Case("tray restore and close cannot supersede confirmation or pending cleanup", TrayAndClose);
+        yield return Case("tray exit after failed cleanup shares the explicit abort path", TrayExitAfterFailure);
+        yield return Case("tray exit excludes unconfirmed cleanup and duplicate pending actions", TrayExitSingleFlight);
         yield return Case("a pending close choice cannot overlap a reset", PendingCloseChoice);
         yield return Case("OS session ending retains its existing path during cleanup", SessionEnding);
         yield return Case("confirmation and failed actions fit the window and inherit theme and contrast", Layout);
@@ -205,6 +207,72 @@ public static class UserDataResetUiTests
         release.TrySetResult();
         await Until(() => !f.Dialog.IsPending, "reset failure after tray restore");
         AssertFailed(f);
+    }
+
+    private static async Task TrayExitAfterFailure()
+    {
+        await using var f = await Fixture.Create();
+        f.Force = () => Task.FromException(new InvalidOperationException("private path"));
+        await f.OpenConfirmation();
+        Click(f.Confirm);
+        await Until(() => !f.Dialog.IsPending && f.ResetCalls == 1, "reset failed before tray exit");
+        AssertFailed(f);
+        f.Tray.ExitApplication();
+        await Until(() => !f.Dialog.IsPending && f.ForceCalls == 1, "tray abort failed");
+        AssertFailed(f);
+        Check(f.HasNotice("退出未完成，请重试") && !f.Shell.CleanupCompleted &&
+            f.ResetCalls == 1 && f.ShutdownCalls == 0,
+            "tray exit reports the same abort failure without retrying reset or saving shutdown");
+        await Drain();
+        Check(f.ForceCalls == 1, "failed tray abort is not retried automatically");
+        f.Force = () => Task.CompletedTask;
+        f.Tray.ExitApplication();
+        await Until(() => f.Closed, "explicit tray abort retry completed");
+        Check(f.ForceCalls == 2 && f.ResetCalls == 1 && f.ShutdownCalls == 0 &&
+            f.Shell.CleanupCompleted && !f.Shell.ShutdownSucceeded && f.Tray.Disposals == 1,
+            "only a successful explicit abort closes the old generation and retires its tray");
+    }
+
+    private static async Task TrayExitSingleFlight()
+    {
+        await using var f = await Fixture.Create();
+        var reset = Pending();
+        var abort = Pending();
+        f.Reset = () => reset.Task;
+        f.Force = () => abort.Task;
+        try
+        {
+            await f.OpenConfirmation();
+            f.Tray.ExitApplication(); f.Tray.ExitApplication();
+            await Drain();
+            Check(f.Dialog.IsOpen && !f.Dialog.IsPending && !f.CloseDialog.IsOpen && !f.Root.IsEnabled &&
+                f.ResetCalls == 0 && f.ForceCalls == 0 && f.ShutdownCalls == 0 && !f.Closed,
+                "unconfirmed cleanup cannot authorize a tray abort or normal shutdown");
+            Click(f.Confirm);
+            f.Tray.ExitApplication(); f.Tray.ExitApplication();
+            Click(f.Confirm); Click(f.ExitButton); f.Shell.Close();
+            await Drain();
+            Check(f.Dialog.IsPending && f.ResetCalls == 1 && f.ForceCalls == 0 &&
+                f.ShutdownCalls == 0 && !f.Closed && !f.CloseDialog.IsOpen,
+                "pending cleanup excludes tray abort, repeated cleanup and normal close");
+            reset.TrySetException(new InvalidOperationException());
+            await Until(() => !f.Dialog.IsPending, "held cleanup failed");
+            AssertFailed(f);
+            f.Tray.ExitApplication();
+            await Until(() => f.ForceCalls == 1, "tray abort started");
+            f.Tray.ExitApplication(); f.Tray.ExitApplication();
+            Click(f.ExitButton); Click(f.Confirm); f.Shell.Close();
+            await Drain();
+            Check(f.Dialog.IsPending && !f.Root.IsEnabled && !f.Closed && !f.CloseDialog.IsOpen &&
+                !f.Shell.CleanupCompleted && f.ForceCalls == 1 && f.ResetCalls == 1 && f.ShutdownCalls == 0,
+                "the pending tray abort shares the dialog single flight and waits for actual release");
+            abort.TrySetResult();
+            await Until(() => f.Closed, "held tray abort completed");
+            Check(f.Shell.CleanupCompleted && !f.Shell.ShutdownSucceeded && f.ForceCalls == 1 &&
+                f.ResetCalls == 1 && f.ShutdownCalls == 0 && f.Tray.Disposals == 1,
+                "only the original abort completion closes without saved shutdown or a second reset");
+        }
+        finally { reset.TrySetResult(); abort.TrySetResult(); }
     }
 
     private static async Task PendingCloseChoice()

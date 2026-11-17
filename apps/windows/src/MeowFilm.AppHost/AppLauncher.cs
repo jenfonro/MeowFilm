@@ -176,7 +176,6 @@ public static class AppLauncher
                 var settingsNamespaces = AppIdentity.RuntimeSettingsNamespaces
                     .Where(pair => definition.NativeNamespaces.Contains(pair.Value))
                     .ToDictionary(pair => pair.Key, pair => pair.Value);
-                await AppSettingsMigration.ApplyAsync(store, paths.ScriptRuntime, settingsNamespaces, cancellationToken);
                 runtime = new AppRuntimeConnectionHost(async token =>
                 {
                     // Native pages and business owners never wait for this start:

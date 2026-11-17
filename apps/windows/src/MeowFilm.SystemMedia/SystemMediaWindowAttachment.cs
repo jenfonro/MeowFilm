@@ -1,6 +1,5 @@
 using System.Runtime.CompilerServices;
 using System.Windows;
-using MeowFilm.Media;
 
 [assembly: InternalsVisibleTo("MeowFilm.Windows.Tests")]
 
@@ -11,13 +10,8 @@ public sealed class SystemMediaWindowAttachment : IAsyncDisposable
     private readonly Window window;
     private readonly SystemMediaSession session;
 
-    public SystemMediaWindowAttachment(Window window, NativePlayback playback,
-        IEnumerable<SystemPlaybackOwner> owners, bool enabled = true)
-        : this(window, new SystemMediaSession.NativeSource(playback), new WindowsSystemMediaBackend(window), owners, enabled) { }
-
-    // Tests replace only this module's playback/backend ports; HWND acquisition
-    // remains in the production constructor and lifecycle ownership stays here.
-    internal SystemMediaWindowAttachment(Window window, ISystemPlayback playback,
+    // The App supplies its typed playback projection and OS backend; this module owns the window lifetime.
+    public SystemMediaWindowAttachment(Window window, ISystemPlayback playback,
         ISystemMediaBackend backend, IEnumerable<SystemPlaybackOwner> owners, bool enabled = true)
         : this(window, CreateSession(window, playback, backend, owners, enabled)) { }
 

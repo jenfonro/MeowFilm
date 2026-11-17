@@ -218,13 +218,30 @@ final class FilmTMDBServiceTests: XCTestCase {
         XCTAssertEqual(restored, saved)
     }
 
+    func testMetadataPatchIgnoresExtraAndPreservesExactSavedExtensions() async throws {
+        let opaque = try RuntimeJSON.decode(Data(#"{"n":0.123456789012345678901,"é":1,"e\u0301":2}"#.utf8))
+        for block in [FilmSettingsBlock.tmdb, .douban] {
+            let store = try FilmNativeSettingsStore(self, block: block)
+            let defaults = block == .tmdb ? FilmTMDBSettings.defaultValue : FilmDoubanSettings.defaultValue
+            var settings = try defaults.filmRequiredObject()
+            settings["extra"] = opaque
+            try store.seed(.object(["version": .number(1), "settings": .object(settings), "rootExtra": opaque]))
+            let saved = try FilmMetadataSettingsDocument.update(store.document, defaults: defaults,
+                patch: ["unknown": opaque, "apiBase": .string("https://example.invalid/api")])
+            XCTAssertNil(saved.filmObject?["unknown"])
+            XCTAssertEqual(saved.filmObject?["extra"], opaque)
+            XCTAssertEqual(try store.document.read()?.filmObject?["rootExtra"], opaque)
+            XCTAssertEqual(saved.filmObject?["apiBase"], .string("https://example.invalid/api"))
+        }
+    }
+
     func testMetadataInvalidDraftsCommitNothingAndRetainTheSavedDocument() async throws {
         let tmdbStore = try FilmNativeSettingsStore(self, block: .tmdb)
         let tmdb = FilmTMDBService(settingsDocument: tmdbStore.document, connection: { throw FilmSearchError.unavailable })
         _ = try await tmdb.updateSettings(["apiKey": .string("synthetic")])
         let before = try tmdbStore.document.read()
         for patch: RuntimeObject in [
-            ["apiKey": .number(1)], ["includeAdult": .string("true")], ["unknown": .string("x")],
+            ["apiKey": .number(1)], ["includeAdult": .string("true")],
             ["apiKey": .string("invalid\nvalue")], ["apiBase": .string(" https://example.invalid")],
             ["apiBase": .string("https://example.invalid/?query=1")], ["imageBase": .string("file:///tmp/image")],
             ["apiBase": .string("https://example.invalid/#fragment")], ["apiBase": .string("https://example.invalid/\\path")],

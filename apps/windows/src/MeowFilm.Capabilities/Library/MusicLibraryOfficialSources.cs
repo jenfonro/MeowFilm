@@ -10,9 +10,14 @@ public sealed partial class MusicLibraryOwner
     private readonly object officialSourcesGate = new();
     private OfficialSourcesLease? officialSourcesLease;
 
-    private JsonObject OfficialSources(JsonObject doc) =>
-        Value(doc, OfficialSourcesArea) as JsonObject ??
+    private JsonObject OfficialSources(JsonObject doc)
+    {
+        var value = Area(doc, OfficialSourcesArea) ??
         LJ.Obj(("schema", 1), ("revision", 0), ("enabled", LJ.Arr(OfficialSourcePlatforms)));
+        try { ValidateOfficialSources(value); }
+        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
+        return value;
+    }
 
     private static void ValidateOfficialSources(JsonObject settings)
     {
@@ -36,7 +41,6 @@ public sealed partial class MusicLibraryOwner
         var settings = OfficialSources(doc);
         if (method == "music.officialSources.settings.get")
         {
-            LJ.Fields(p, "");
             RefreshOfficialSources(doc);
             return (LJ.Obj(("settings", settings)), false);
         }

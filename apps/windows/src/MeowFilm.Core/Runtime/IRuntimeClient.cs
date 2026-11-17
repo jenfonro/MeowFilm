@@ -19,6 +19,21 @@ public interface IRuntimeClient
         CancellationToken cancellationToken = default) => throw new BridgeException("METHOD_UNAVAILABLE");
 }
 
+/// <summary>Read-only observation of final App runtime shutdown; does not grant disposal.</summary>
+public interface IRuntimeLifetime
+{
+    /// <summary>Null until final shutdown begins, then the same physical-drain task with any failure retained.
+    /// Closed state or epoch revocation alone is not a successful shutdown receipt.</summary>
+    Task? ShutdownCompletion { get; }
+}
+
+/// <summary>A runtime factory's awaited cleanup failed before session ownership could transfer.
+/// The factory retains cleanup ownership; retirement must preserve failure without disposing again.</summary>
+public sealed class RuntimeStartupCleanupException : Exception
+{
+    public RuntimeStartupCleanupException() : base("INTERNAL") { }
+}
+
 /// <summary>An App-owned script connection; callers never own its lifetime.</summary>
 public interface IRuntimeSession : IRuntimeClient, IRuntimeImageClient, IAsyncDisposable
 {
@@ -36,7 +51,10 @@ public interface IRuntimeConnectionSource
     Task<RuntimeConnection> CaptureConnectionAsync(CancellationToken cancellationToken = default);
 }
 
-public sealed record RuntimeModule(string Id, string Version);
+public sealed record RuntimeModule(string Id, string Version)
+{
+    public IReadOnlyList<string> RequiredMethods { get; init; } = [];
+}
 
 /// <summary>Image bytes from a validated runtime-relative reference, without HTTP access credentials.
 /// Completion includes physical response disposal, including cancellation.</summary>

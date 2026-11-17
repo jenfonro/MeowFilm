@@ -5,7 +5,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
-public static class AppUserDataResetTests
+public static partial class AppUserDataResetTests
 {
     public static IEnumerable<TestCase> Cases()
     {
@@ -15,6 +15,8 @@ public static class AppUserDataResetTests
         yield return new("User data reset: deletion failure retries without reviving or releasing old owners twice", ClearFailure);
         yield return new("User data reset: replacement failure does not erase newly created data on retry", ReopenFailure);
         yield return new("User data reset: both roots wait for accepted cache writes and preserve replacement data", CacheDrain);
+        yield return new("User data reset: real aggregate closes before all native owners and clears both roots",
+            () => MusicQualityConsumerTests.Sta(NativeOwnersReset));
     }
 
     private static async Task Drain()

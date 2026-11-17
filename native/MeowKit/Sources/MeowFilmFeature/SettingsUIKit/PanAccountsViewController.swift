@@ -101,9 +101,10 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
             case .signedIn: status = .success
             case .expired: status = .danger
             case .unverified: status = .warning
-            case .signedOut, nil: status = .neutral
+            case .signedOut: status = .neutral
+            case nil: status = row.account?.errorCode == .corruptStorage ? .danger : .neutral
             }
-            let badge = SettingsStatusBadge(status: status, text: row.account?.status.title ?? "不可用", theme: theme)
+            let badge = SettingsStatusBadge(status: status, text: row.statusTitle, theme: theme)
             badge.accessibilityIdentifier = "pan.accounts.status"
             columns.columns[1].alignment = traitCollection.preferredContentSizeCategory.isAccessibilityCategory ? .fill : .leading
             columns.columns[1].addArrangedSubview(badge)

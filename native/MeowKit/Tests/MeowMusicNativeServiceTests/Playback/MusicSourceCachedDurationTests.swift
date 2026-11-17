@@ -1,6 +1,5 @@
 import Foundation
 import XCTest
-import MeowJSON
 import MeowMusicFeature
 import MeowMusicTestSupport
 import MeowRuntime
@@ -232,7 +231,7 @@ private actor DurationHistoryAccounts: MusicNativeAccountProviding {
     func nativeResolve(platform: MusicAccountPlatform, nativeID: String,
                        selection: MusicPlaybackSelection) throws -> MusicNativeAudio {
         resolutions += 1
-        var fields: [String: JSONValue] = ["url": .string(Self.url.absoluteString), "expiresAt": .null,
+        var fields: RuntimeObject = ["url": .string(Self.url.absoluteString), "expiresAt": .null,
                                           "qualityVerified": .bool(verifiedQuality)]
         if verifiedQuality { fields["actualQuality"] = .string(selection.quality) }
         if let duration { fields["duration"] = .number(duration) }

@@ -1,3 +1,4 @@
+import { stringifyJSONValue, rawJSON } from '@meowfilm/runtime-bridge/json';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
@@ -8,6 +9,7 @@ import { after } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createFilmRulesService } from '../packages/film-playback/src/rules-service.js';
 import { createPlaybackService } from '../packages/film-playback/src/service.js';
+import { createPlaybackLibrary } from '../packages/film-playback/src/library.js';
 import { createPlaybackData } from '../packages/film-playback/src/data.js';
 import { createPlaybackCache } from '../packages/film-playback/src/cache.js';
 import { createFilmCatalog } from '../packages/film-playback/src/catalog.js';
@@ -35,9 +37,35 @@ const detail = (items, line = 'line') => ({ lines: [{ id: line, label: line, epi
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
 const error = code => Object.assign(new Error(code), { code });
 const tick = () => new Promise(resolve => setImmediate(resolve));
+function metadataEpisodeTarget(state, season, episode) {
+  const row = state.metadata?.seasons?.find(row => row.season_number === season)?.episodes
+    ?.find(row => (row.episode_number ?? row.episode) === episode) ??
+    state.episodes.find(row => row.season === season && row.episode === episode);
+  assert.ok(row?.playbackTarget, `Expected owner target for S${season}E${episode}`);
+  return row.playbackTarget;
+}
+async function selectFirstDirectory(f, sessionId) {
+  await until(() => !f.snapshot(sessionId).browsing.loading);
+  const target = f.snapshot(sessionId).browsing.episodes[0]?.playbackTarget;
+  assert.ok(target, 'The selected directory must publish a complete playback target');
+  await f.command(sessionId, 'select.target', { target,
+    metadataSourceId: f.snapshot(sessionId).metadataSourceId });
+}
 async function until(predicate) {
   for (let turn = 0; turn < 1500; turn++) { const value = predicate(); if (value) return value; await delay(2); }
   assert.fail('Expected observable state was not reached');
+}
+
+function historyEntry(target, value = {}) {
+  const episode = value.episode ?? {};
+  const sourceKey = value.sourceKey ?? 'a', candidateId = value.candidateId ?? 'remembered-file';
+  const detailId = value.detailId ?? 'history', lineId = value.lineId ?? 'line';
+  const playbackTarget = { ...target, ...episode, ...(target.kind === 'source' ? {
+    source: { key: sourceKey, engine: 'cat', installationId: `install-${sourceKey}`, siteId: sourceKey,
+      detailId, lineId, candidateId },
+  } : {}) };
+  return { targetId: target.id, title: target.title, sourceKey, detailId, lineId, candidateId, episode,
+    position: 0, duration: 0, paused: false, updatedAt: 1, playbackTarget, ...value };
 }
 function fixture(overrides = {}) {
   let clock = Date.parse('2026-11-08T12:00:00Z');
@@ -47,7 +75,7 @@ function fixture(overrides = {}) {
   const metadataValues = new Map();
   const metadataKey = target => JSON.stringify([target.metadataProvider, target.kind, target.metadataId]);
   let sequence = 0, storageError;
-  const library = {
+  const library = overrides.library ?? {
     read: () => structuredClone(document),
     update(mutator) {
       if (storageError) throw error(storageError);
@@ -66,9 +94,10 @@ function fixture(overrides = {}) {
         cache: { status: 'fresh', components: { detail: { status: 'ready', fetchedAt: clock } } } };
     },
     async metadataSources(target) {
+      const value = metadataValues.get(metadataKey(target));
       return [{ provider: target.metadataProvider, metadataId: target.metadataId,
         kind: target.kind, title: target.title,
-        metadata: structuredClone(metadataValues.get(metadataKey(target))) }];
+        ...(value === undefined ? {} : { metadata: structuredClone(value) }) }];
     },
     async seasonMetadata(target, season) { calls.push(['season', season]); return structuredClone(metadata.seasons.find(row => row.season_number === season)); },
     async seasonMetadataEntry(target, season, options) {
@@ -272,10 +301,15 @@ for (const members of [null, 1, 2]) {
       },
     } });
     t.after(() => f.service.close());
-    const { sessionId } = await f.open({ platform: 'windows', target,
+    const { sessionId } = await f.open({ platform: 'test', target,
       sources: [source('a', '红果短剧'), source('b', '另一站点')],
       results: [{ sourceKey: 'a', items: [{ id: 0, title: '与卡片名称不同的详情' }] }] }, { ruleSnapshot: snapshot });
     assert.equal(f.snapshot(sessionId).browsing.sourceId, f.snapshot(sessionId).sources[0].id);
+    await until(() => !f.snapshot(sessionId).browsing.loading);
+    const row = f.snapshot(sessionId).browsing.episodes[0];
+    assert.ok(row.playbackTarget);
+    assert.equal(f.snapshot(sessionId).candidates.length, 0);
+    await f.command(sessionId, 'select.target', { target: row.playbackTarget });
     const selected = await f.pending(sessionId);
     assert.equal(selected.candidate.source.key, 'a');
     assert.equal(selected.candidate.source.detailId, 0);
@@ -289,7 +323,7 @@ for (const members of [null, 1, 2]) {
 }
 
 for (const output of ['pending', 'current']) {
-  test(`page play accepts the browsed redfruit file instead of the old metadata ${output}, and repeat is idempotent`, async t => {
+  test(`explicit target selection accepts the browsed redfruit file without changing the old metadata ${output}, and repeat is idempotent`, async t => {
     const f = fixture({ data: {
       async detail(value, id) {
         f.calls.push(['detail', value.key, id]);
@@ -310,7 +344,11 @@ for (const output of ['pending', 'current']) {
     assert.equal(f.snapshot(sessionId)[output === 'pending' ? 'attempt' : 'current']
       [output === 'pending' ? 'id' : 'attemptId'], previous.id, 'browsing alone keeps the old output');
     const before = f.calls.length;
+    const target = f.snapshot(sessionId).browsing.episodes[0].playbackTarget;
     await f.command(sessionId, 'play');
+    assert.equal(f.snapshot(sessionId)[output === 'pending' ? 'attempt' : 'current']
+      [output === 'pending' ? 'id' : 'attemptId'], previous.id);
+    await f.command(sessionId, 'select.target', { target, metadataSourceId: f.snapshot(sessionId).metadataSourceId });
     const selected = await f.pending(sessionId);
     assert.notEqual(selected.id, previous.id);
     assert.equal(selected.candidate.source.key, 'redfruit');
@@ -328,7 +366,7 @@ for (const output of ['pending', 'current']) {
     await f.command(sessionId, 'play');
     assert.equal(f.snapshot(sessionId).current.attemptId, selected.id);
     assert.equal(f.calls.filter(row => row[0] === 'resolve').length, resolved);
-    await assert.rejects(f.command(sessionId, 'select.candidate', { candidateId: 'client-forged' }), { code: 'NOT_FOUND' });
+    await assert.rejects(f.command(sessionId, 'select.target', { target: { ...target, source: { ...target.source, candidateId: 'client-forged' } } }), { code: 'NOT_FOUND' });
   });
 }
 
@@ -344,9 +382,11 @@ test('an exact redfruit address error is retained without matching, searching or
     },
   } });
   t.after(() => f.service.close());
-  const { sessionId } = await f.open({ platform: 'windows', target: { id: 'group:error', kind: 'group', title: '卡片',
+  const { sessionId } = await f.open({ platform: 'test', target: { id: 'group:error', kind: 'group', title: '卡片',
     members: [{ sourceKey: 'a', detailId: 0 }, { sourceKey: 'b', detailId: 'B' }] },
   sources: [source('a', '红果短剧'), source('b')] });
+  await until(() => !f.snapshot(sessionId).browsing.loading);
+  await f.command(sessionId, 'select.target', { target: f.snapshot(sessionId).browsing.episodes[0].playbackTarget });
   await until(() => f.snapshot(sessionId).stage === 'unavailable');
   const state = f.snapshot(sessionId);
   assert.equal(state.error, 'ACCESS_DENIED');
@@ -376,7 +416,7 @@ test('a movie metadata refresh retains every ordinary directory file, including 
   await f.command(sessionId, 'browse.metadata', { metadataSourceId: f.snapshot(sessionId).metadataSourceId, keepSource: true });
   await until(() => !f.snapshot(sessionId).browsing.loading);
   assert.deepEqual(f.snapshot(sessionId).browsing.episodes, before);
-  await f.command(sessionId, 'select.candidate', { candidateId: before[1].candidateId });
+  await f.command(sessionId, 'select.target', { target: before[1].playbackTarget });
   const selected = await f.pending(sessionId);
   assert.equal(selected.candidate.name, 'Series.S02E03.720p');
   assert.equal(selected.candidate.source.detailId, 0);
@@ -404,7 +444,7 @@ test('a new page selection supersedes a resolving metadata intent without publis
   const row = f.snapshot(sessionId).sources.find(value => value.source.key === 'a');
   await f.command(sessionId, 'browse', { sourceId: row.id });
   await until(() => !f.snapshot(sessionId).browsing.loading);
-  await f.command(sessionId, 'play');
+  await f.command(sessionId, 'select.target', { target: f.snapshot(sessionId).browsing.episodes[0].playbackTarget });
   const selected = await f.pending(sessionId);
   assert.equal(selected.candidate.source.key, 'a');
   gate.resolve(); await tick();
@@ -419,7 +459,8 @@ test('iOS explicit site prepare and page play share the exact resource without e
     title: '站点', source: { key: 'a', detailId: 0 } }, sources: [source('a', '红果短剧')] });
   await until(() => f.snapshot(sessionId).stage === 'idle');
   assert.equal(f.snapshot(sessionId).browsing.sourceId, f.snapshot(sessionId).sources[0].id);
-  assert.equal(f.calls.some(row => ['detail', 'resolve', 'prepare'].includes(row[0])), false);
+  assert.deepEqual(f.calls.filter(row => row[0] === 'detail'), [['detail', 'a', 0]]);
+  assert.equal(f.calls.some(row => ['resolve', 'prepare'].includes(row[0])), false);
   await f.command(sessionId, 'prepare');
   const prepared = await f.pending(sessionId);
   assert.equal(prepared.prepareOnly, true);
@@ -430,7 +471,7 @@ test('iOS explicit site prepare and page play share the exact resource without e
   assert.equal(f.library.read().history.length, 0);
 });
 
-test('page play uses a newly browsed typed line instead of an old exact file or historical source', async t => {
+test('only explicit target selection replaces an exact file or historical source with a browsed typed line', async t => {
   const f = fixture({ data: { async detail(value, id) {
     f.calls.push(['detail', value.key, id]);
     return { lines: [{ id: 0, episodes: [{ id: `${value.key}-first`, name: '首集.720p' }] },
@@ -440,16 +481,22 @@ test('page play uses a newly browsed typed line instead of an old exact file or 
   const target = { id: 'group:lines', kind: 'group', title: '作品',
     members: [{ sourceKey: 'a', detailId: 0 }, { sourceKey: 'b', detailId: 'B' }] };
   const { sessionId } = await f.open({ platform: 'windows', target });
+  await until(() => !f.snapshot(sessionId).browsing.loading);
+  await f.command(sessionId, 'select.target', { target: f.snapshot(sessionId).browsing.episodes[0].playbackTarget });
   const first = await f.current(sessionId);
   assert.equal(first.candidate.lineId, 0);
   const a = f.snapshot(sessionId).sources.find(row => row.source.key === 'a');
   await f.command(sessionId, 'browse', { sourceId: a.id, lineId: '0' });
   await until(() => !f.snapshot(sessionId).browsing.loading);
   await f.command(sessionId, 'play');
+  assert.equal(f.snapshot(sessionId).current.attemptId, first.id);
+  await f.command(sessionId, 'select.target', { target: f.snapshot(sessionId).browsing.episodes[0].playbackTarget });
   const line = await f.current(sessionId);
   assert.equal(line.candidate.lineId, '0');
   await f.command(sessionId, 'media.progress', { attemptId: line.id, position: 31, duration: 60, paused: true });
-  const reopened = await f.open({ platform: 'windows', target });
+  const reopened = await f.open({ platform: 'windows', target, resumeTarget: f.snapshot(sessionId).target,
+    resultHints: target.members.map(member => ({ sourceKey: member.sourceKey,
+      items: [{ id: member.detailId, title: target.title }] })) });
   const resumed = await f.current(reopened.sessionId);
   assert.equal(resumed.candidate.id, line.candidate.id);
   assert.equal(resumed.position, 31);
@@ -457,6 +504,8 @@ test('page play uses a newly browsed typed line instead of an old exact file or 
   await f.command(reopened.sessionId, 'browse', { sourceId: b.id });
   await until(() => !f.snapshot(reopened.sessionId).browsing.loading);
   await f.command(reopened.sessionId, 'play');
+  assert.equal(f.snapshot(reopened.sessionId).current.attemptId, resumed.id);
+  await f.command(reopened.sessionId, 'select.target', { target: f.snapshot(reopened.sessionId).browsing.episodes[0].playbackTarget });
   const selected = await f.pending(reopened.sessionId);
   assert.equal(selected.candidate.source.key, 'b');
   assert.equal(selected.candidate.lineId, 0);
@@ -585,7 +634,7 @@ for (const superseded of [false, true]) {
     if (superseded) {
       await f.command(sessionId, 'browse', { sourceId: f.snapshot(sessionId).sources[1].id });
       await until(() => !f.snapshot(sessionId).browsing.loading);
-      await f.command(sessionId, 'play');
+      await f.command(sessionId, 'select.target', { target: f.snapshot(sessionId).browsing.episodes[0].playbackTarget });
       selected = await f.pending(sessionId);
     }
     gate.resolve();
@@ -593,11 +642,11 @@ for (const superseded of [false, true]) {
     else await until(() => !f.snapshot(sessionId).browsing.loading);
     const state = f.snapshot(sessionId);
     assert.equal(state.stage, superseded ? 'pending' : 'idle');
-    assert.equal(state.error, superseded ? null : 'TIMEOUT');
+    assert.equal(state.error, null);
     assert.equal(state.target.kind, superseded ? 'source' : 'movie');
     assert.equal(state.browsing.sourceId, state.sources[superseded ? 1 : 0].id);
-    assert.equal(state.browsing.error, null);
-    assert.deepEqual(state.browsing.episodes.map(row => row.name), ['Film.1080p']);
+    assert.equal(state.browsing.error, superseded ? null : 'TIMEOUT');
+    assert.deepEqual(state.browsing.episodes.map(row => row.name), superseded ? ['Film.1080p'] : []);
     assert.equal(state.attempt?.id ?? null, selected?.id ?? null);
     assert.deepEqual(f.calls.filter(row => row[0] === 'resolve').map(row => row[1]), superseded ? ['b'] : []);
     assert.equal(f.calls.filter(row => row[0] === 'prepare').length, superseded ? 1 : 0);
@@ -754,12 +803,12 @@ test('Douban seed settles to a TMDB target or a successful empty aggregate befor
   await assert.rejects(f.command(opened.sessionId, 'search.more'), { code: 'INVALID_REQUEST' });
 
   resolution.resolve(null);
-  await until(() => f.snapshot(opened.sessionId).entryResolution === 'unmatched');
+  await until(() => f.snapshot(opened.sessionId).entryResolution === 'unmatched' && !f.snapshot(opened.sessionId).browsing.loading);
   const unmatched = f.snapshot(opened.sessionId);
   assert.equal(unmatched.target.kind, 'group');
   assert.deepEqual(unmatched.target.members, []);
-  assert.equal(unmatched.stage, 'idle');
-  assert.equal(unmatched.error, null);
+  assert.equal(unmatched.stage, 'unavailable');
+  assert.equal(unmatched.error, 'SOURCE_NOT_FOUND');
   assert.deepEqual(unmatched.sources, []);
   assert.equal(unmatched.search[0].page, 0);
   assert.equal(f.calls.some(row => row[0] === 'search'), false);
@@ -785,11 +834,11 @@ test('public open rejects every supplied empty group while a Douban seed may cre
   await assert.rejects(f.open({ target: seed, resumeTarget: { ...empty, id: `group:${seed.id}` } }),
     { code: 'SOURCE_NOT_FOUND' });
   const opened = await f.open({ target: seed });
-  await until(() => f.snapshot(opened.sessionId).entryResolution === 'unmatched');
+  await until(() => f.snapshot(opened.sessionId).entryResolution === 'unmatched' && !f.snapshot(opened.sessionId).browsing.loading);
   assert.deepEqual(f.snapshot(opened.sessionId).target, { ...empty, id: `group:${seed.id}` });
-  assert.equal(f.snapshot(opened.sessionId).stage, 'idle');
-  assert.equal(f.snapshot(opened.sessionId).error, null);
-  assert.deepEqual(f.calls, []);
+  assert.equal(f.snapshot(opened.sessionId).stage, 'unavailable');
+  assert.equal(f.snapshot(opened.sessionId).error, 'SOURCE_NOT_FOUND');
+  assert.deepEqual(f.calls.filter(row => row[0] !== 'metadata'), []);
 });
 
 test('Douban seed request failure remains an error and browse.refresh retries it before explicit site search', async t => {
@@ -813,9 +862,9 @@ test('Douban seed request failure remains an error and browse.refresh retries it
   assert.equal(f.calls.some(row => row[0] === 'search'), false);
 
   await f.command(opened.sessionId, 'browse.refresh');
-  await until(() => f.snapshot(opened.sessionId).entryResolution === 'unmatched');
+  await until(() => f.snapshot(opened.sessionId).entryResolution === 'unmatched' && !f.snapshot(opened.sessionId).browsing.loading);
   assert.equal(calls, 2);
-  assert.equal(f.snapshot(opened.sessionId).error, null);
+  assert.equal(f.snapshot(opened.sessionId).error, 'SOURCE_NOT_FOUND');
   assert.equal(f.calls.some(row => row[0] === 'search'), false);
   await f.command(opened.sessionId, 'search.more');
   await until(() => f.calls.some(row => row[0] === 'search'));
@@ -880,7 +929,7 @@ test('reopening a Douban seed restores its exact TMDB season and episode without
   assert.equal((await f.pending(first.sessionId)).candidate.episode, 1);
   await f.command(first.sessionId, 'browse.season', { season: 2 });
   await until(() => !f.snapshot(first.sessionId).browsing.loading);
-  await f.command(first.sessionId, 'select.episode', { episode: { season: 2, episode: 3 } });
+  await f.command(first.sessionId, 'select.target', { target: metadataEpisodeTarget(f.snapshot(first.sessionId), 2, 3) });
   const selected = await f.pending(first.sessionId), saved = f.snapshot(first.sessionId);
   assert.equal(selected.candidate.season, 2);
   assert.equal(selected.candidate.episode, 3);
@@ -923,7 +972,7 @@ test('an explicit TMDB resume remains authoritative without looking up the Douba
   assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
 });
 
-test('reopening an unmatched Douban seed preserves exact typed group members, selected file and discovery hints', async t => {
+test('reopening an unmatched Douban seed preserves the exact typed file and scopes restored discovery hints', async t => {
   const seed = { id: 'douban:movie:51', kind: 'movie', title: 'Film', metadataProvider: 'douban', metadataId: '51' };
   const seedMetadata = { id: '51', title: 'Film', poster_path: '/poster.jpg', overview: 'Douban display metadata' };
   let lookups = 0;
@@ -934,7 +983,8 @@ test('reopening an unmatched Douban seed preserves exact typed group members, se
       throw error('UPSTREAM_HTTP');
     },
     async targetMetadataEntry(target) {
-      return target.kind === 'group' ? null : { value: await this.targetMetadata(target) };
+      return target.kind === 'group' ? null : { value: target.metadataProvider === 'douban'
+        ? structuredClone(seedMetadata) : await this.targetMetadata(target) };
     },
     async search(value, query, page) {
       f.calls.push(['search', value.key, query, page]);
@@ -954,11 +1004,11 @@ test('reopening an unmatched Douban seed preserves exact typed group members, se
   const row = f.snapshot(first.sessionId).sources.find(row => row.source.detailId === '0');
   await f.command(first.sessionId, 'browse', { sourceId: row.id });
   await until(() => f.snapshot(first.sessionId).browsing.episodes.length === 2);
-  await f.command(first.sessionId, 'select.candidate',
-    { candidateId: f.snapshot(first.sessionId).browsing.episodes[1].candidateId });
+  await f.command(first.sessionId, 'select.target', { target: f.snapshot(first.sessionId).browsing.episodes[1].playbackTarget });
   const selected = await f.pending(first.sessionId), saved = f.snapshot(first.sessionId);
   assert.equal(selected.candidate.name, 'Film.720p');
-  assert.deepEqual(saved.target.members, [{ sourceKey: 'a', detailId: 0 }, { sourceKey: 'a', detailId: '0' }]);
+  assert.equal(saved.target.kind, 'source');
+  assert.deepEqual(saved.sources.map(row => row.source.detailId), [0, '0']);
   await f.service.release({ sessionId: first.sessionId });
   const before = structuredClone(f.calls);
   const reentered = await f.open({ platform: 'ios', target: seed, metadata: seedMetadata, resumeTarget: saved.target,
@@ -971,11 +1021,12 @@ test('reopening an unmatched Douban seed preserves exact typed group members, se
   assert.deepEqual(current.entryTarget, seed);
   assert.deepEqual(current.target, saved.target);
   assert.deepEqual(current.metadata, f.metadataView(current, seedMetadata));
-  assert.deepEqual(current.sources.map(row => row.source.detailId), [0, '0']);
+  assert.deepEqual(current.sources.map(row => row.source.detailId), ['0']);
   assert.deepEqual(current.search.map(row => [row.page, row.completed]), [[1, true]]);
   assert.equal(current.attempt, null);
   assert.equal(current.current, null);
-  assert.deepEqual(f.calls, before, 'reopening and restoring a directory must not search, fetch detail or resolve media');
+  assert.deepEqual(f.calls, [...before, ['expand', 'a', 'line']],
+    'source reentry reads its selected directory but reuses detail and never searches or resolves media');
   await f.command(reentered.sessionId, 'play');
   const resumed = await f.pending(reentered.sessionId);
   assert.equal(resumed.candidate.id, selected.candidate.id);
@@ -1028,7 +1079,7 @@ test('a resumed group is marked unmatched and cannot restore revoked members on 
   const resumed = { id: `group:${seed.id}`, kind: 'group', title: seed.title,
     members: [{ sourceKey: 'a', detailId: 0 }], source: { key: 'a', detailId: 0, lineId: 'line', candidateId: 'file' } };
   const { sessionId } = await f.open({ target: seed, resumeTarget: resumed, sources: [source('a')] });
-  await until(() => f.snapshot(sessionId).stage === 'idle');
+  await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).stage !== 'loading');
   assert.equal(f.snapshot(sessionId).entryResolution, 'unmatched');
   assert.equal(f.snapshot(sessionId).error, null);
   assert.equal(lookups, 0);
@@ -1036,7 +1087,11 @@ test('a resumed group is marked unmatched and cannot restore revoked members on 
   const revoked = f.snapshot(sessionId);
   await f.command(sessionId, 'browse.refresh');
   await f.service.invalidate('tmdb');
-  assert.deepEqual(f.snapshot(sessionId), revoked);
+  assert.deepEqual(f.snapshot(sessionId).target, revoked.target);
+  assert.deepEqual(f.snapshot(sessionId).sources, revoked.sources);
+  assert.deepEqual(f.snapshot(sessionId).current, revoked.current);
+  assert.deepEqual(f.snapshot(sessionId).attempt, revoked.attempt);
+  assert.equal(f.snapshot(sessionId).error, 'SOURCE_NOT_FOUND');
   assert.deepEqual(revoked.target.members, []);
   assert.equal(revoked.stage, 'unavailable');
   assert.equal(revoked.error, 'SOURCE_NOT_FOUND');
@@ -1044,7 +1099,8 @@ test('a resumed group is marked unmatched and cannot restore revoked members on 
   await assert.rejects(f.open({ target: seed, resumeTarget: resumed, sources: [] }), { code: 'SOURCE_NOT_FOUND' });
   await assert.rejects(f.open({ target: seed, resumeTarget: revoked.target, sources: [source('a')] }),
     { code: 'SOURCE_NOT_FOUND' });
-  assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
+  assert.deepEqual(f.calls.filter(row => row[0] === 'detail'), [['detail', 'a', 0]]);
+  assert.equal(f.calls.some(row => ['search', 'resolve', 'prepare'].includes(row[0])), false);
 });
 
 test('a discovered Douban group cannot become a seed wait state after its last member is revoked', async t => {
@@ -1086,7 +1142,11 @@ test('a discovered Douban group cannot become a seed wait state after its last m
     sources: [source('b')], results: [{ sourceKey: 'b', items: [{ id: 'late-handoff', title: 'Film' }] }],
     search: [{ sourceKey: 'b', page: 1, completed: true }] }), { code: 'SOURCE_NOT_FOUND' });
   assert.equal(lookups, 1);
-  assert.deepEqual(f.snapshot(sessionId), revoked);
+  assert.deepEqual(f.snapshot(sessionId).target, revoked.target);
+  assert.deepEqual(f.snapshot(sessionId).sources, revoked.sources);
+  assert.deepEqual(f.snapshot(sessionId).current, revoked.current);
+  assert.deepEqual(f.snapshot(sessionId).attempt, revoked.attempt);
+  assert.equal(f.snapshot(sessionId).error, 'SOURCE_NOT_FOUND');
 
   gate.resolve();
   await until(() => !f.snapshot(sessionId).search.find(row => row.sourceKey === 'b').loading);
@@ -1138,7 +1198,8 @@ test('Douban seed retries still settle after a failed explicit play has advanced
   } });
   await until(() => f.snapshot(sessionId).entryResolution === 'error');
   await f.command(sessionId, 'play');
-  await until(() => f.snapshot(sessionId).stage === 'error');
+  await until(() => f.snapshot(sessionId).stage === 'unavailable');
+  assert.equal(f.snapshot(sessionId).attempt, null);
   await f.command(sessionId, 'browse.refresh');
   await until(() => f.snapshot(sessionId).entryResolution === 'error' && f.snapshot(sessionId).stage === 'error');
   assert.equal(reads, 2);
@@ -1229,9 +1290,12 @@ test('metadata initialization, seasonal browsing, provider selection and invalid
   await f.command(sessionId, 'browse.metadata', { metadataSourceId: f.snapshot(sessionId).metadataSources[0].id });
   await until(() => !f.snapshot(sessionId).browsing.loading);
   await f.service.invalidate('tmdb');
-  await until(() => f.snapshot(sessionId).metadata !== null);
+  await until(() => reads.filter(row => row[0] === 'target').length === 2 && f.snapshot(sessionId).metadata !== null);
+  await f.command(sessionId, 'browse.refresh');
+  await until(() => reads.filter(row => row[0] === 'target').length === 3 &&
+    reads.filter(row => row[0] === 'season').length === 2 && !f.snapshot(sessionId).browsing.loading);
   assert.equal(reads.filter(row => row[0] === 'target').length, 3);
-  assert.equal(reads.filter(row => row[0] === 'season').length, 3);
+  assert.equal(reads.filter(row => row[0] === 'season').length, 2);
   for (const [, actual] of reads) assert.strictEqual(actual, ruleSnapshot);
 });
 
@@ -1368,7 +1432,7 @@ for (const state of ['idle', 'prepared', 'playing']) {
     assert.deepEqual(updated.current, before.current);
     assert.equal(updated.stage, before.stage);
     assert.equal(updated.metadataSourceId, before.metadataSourceId);
-    await assert.rejects(f.command(sessionId, 'select.episode', { episode: { season: 1, episode: 3 } }),
+    await assert.rejects(f.command(sessionId, 'select.target', { target: metadataEpisodeTarget(f.snapshot(sessionId), 1, 3) }),
       { code: 'NO_MATCH' });
     await f.command(sessionId, 'preview', { enabled: true });
     assert.deepEqual(f.snapshot(sessionId).episodes, f.episodeViews(f.snapshot(sessionId), season.episodes.map(row =>
@@ -1456,7 +1520,7 @@ test('FR-Node-02 real data expired S1 playback preserves the newer full S2 brows
   assert.equal(attempt.prepareOnly, false);
   assert.equal(final.target.season, 1); assert.equal(final.target.episode, 1);
   assert.equal(final.stage, 'pending'); assert.equal(final.error, null);
-  await assert.rejects(f.command(sessionId, 'select.episode', { episode: { season: 2, episode: 3 } }),
+  await assert.rejects(f.command(sessionId, 'select.target', { target: { ...f.snapshot(sessionId).metadataSources[0].playbackTarget, season: 2, episode: 3 } }),
     { code: 'NO_MATCH' });
   await f.command(sessionId, 'preview', { enabled: true });
   assert.deepEqual(f.snapshot(sessionId).episodes, f.episodeViews(f.snapshot(sessionId), seasons[2].episodes.map(row =>
@@ -1488,7 +1552,7 @@ test('G02-C01 real data preserves a selected season-zero episode-zero and an exp
   const f = fixture({ data: runtime.data });
   t.after(async () => { await f.service.close(); await runtime.close(); });
   const { sessionId } = (await f.open({ target: { ...tv, season: 0, episode: 0 }, sources: [] }));
-  await until(() => f.snapshot(sessionId).stage === 'idle');
+  await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).stage !== 'loading');
   const primary = f.snapshot(sessionId).metadataSources[0];
   await f.command(sessionId, 'browse.season', { season: 0 });
   await until(() => !f.snapshot(sessionId).browsing.loading);
@@ -1553,7 +1617,7 @@ test('G02-C01 real data supplements verified Douban episodes without replacing t
   const f = fixture({ data });
   t.after(async () => { await f.service.close(); await data.close(); await cache.close(); });
   const { sessionId } = (await f.open({ target: tv, sources: [] }));
-  await until(() => f.snapshot(sessionId).stage === 'idle' && f.snapshot(sessionId).metadataSources.length === 2);
+  await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).stage !== 'loading' && f.snapshot(sessionId).metadataSources.length === 2);
   const first = f.snapshot(sessionId).metadataSources.find(row => row.provider === 'douban');
   const second = f.snapshot(sessionId).metadataSources.find(row => row.provider === 'tmdb');
   await f.command(sessionId, 'browse.metadata', { metadataSourceId: second.id });
@@ -1562,7 +1626,7 @@ test('G02-C01 real data supplements verified Douban episodes without replacing t
   await f.command(sessionId, 'browse.metadata', { metadataSourceId: first.id });
   await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).metadataSourceId === first.id);
   assert.equal(f.snapshot(sessionId).metadata.id, '20');
-  assert.equal(f.snapshot(sessionId).target.metadataId, '20');
+  assert.equal(f.snapshot(sessionId).target.metadataId, 19);
   const mapped = f.episodeViews(f.snapshot(sessionId), [{ name: 'TMDB episode 1',
     still_path: '/tmdb-1.jpg', air_date: '2020-01-01', season: 1, episode: 1, globalEpisode: 1 }])[0];
   assert.deepEqual(f.snapshot(sessionId).episodes, [mapped]);
@@ -1606,11 +1670,11 @@ for (const pausedAt of ['metadata', 'season']) {
     } } });
     t.after(async () => { gate.resolve(); await f.service.close(); await runtime.close(); });
     const { sessionId } = (await f.open({ target: tv, sources: [] }));
-    await until(() => f.snapshot(sessionId).stage === 'idle');
+    await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).stage !== 'loading');
     const primary = f.snapshot(sessionId).metadataSources[0];
     await runtime.data.invalidate('tmdb');
     hold = true;
-    await f.command(sessionId, 'browse.metadata', { metadataSourceId: primary.id });
+    await f.command(sessionId, 'browse.refresh');
     await until(() => waiting);
     await f.command(sessionId, 'browse.season', { season: 0 });
     await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).browsing.season === 0);
@@ -1674,7 +1738,7 @@ async function mappedMetadataFixture(t, beforeSeason = async () => {}, { secondS
   const { sessionId } = await f.open({ platform: 'ios',
     target: { ...tv, season: 2, episode: 1, ...(secondSeasonCount === 0 ? {} : { globalEpisode: 3 }) },
     sources: [] });
-  await until(() => f.snapshot(sessionId).stage === 'idle' && f.snapshot(sessionId).metadataSources.length === 2);
+  await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).stage !== 'loading' && f.snapshot(sessionId).metadataSources.length === 2);
   return { ...f, sessionId, calls, series, seasons };
 }
 
@@ -1690,8 +1754,7 @@ test('four-season TMDB and Douban lists keep different totals, map available det
   await f.command(id, 'browse.metadata', { metadataSourceId: douban.id });
   await until(() => !f.snapshot(id).browsing.loading && f.snapshot(id).metadataSourceId === douban.id);
   const mapped = f.snapshot(id);
-  assert.deepEqual([mapped.target.metadataProvider, mapped.target.metadataId, mapped.target.season,
-    mapped.target.episode, mapped.target.globalEpisode], ['douban', '20', 2, 1, 4]);
+  assert.deepEqual(mapped.target, before.target);
   assert.equal(mapped.episodes.length, 2);
   assert.deepEqual(mapped.episodes[0], f.episodeViews(mapped, [{ name: 'TMDB S2E1', overview: 'Overview 2/1',
     still_path: '/season-2-episode-1.jpg', runtime: 40, air_date: '2020-01-01',
@@ -1720,8 +1783,7 @@ for (const secondSeasonCount of [0, null]) {
     await f.command(id, 'browse.metadata', { metadataSourceId: douban.id });
     await until(() => !f.snapshot(id).browsing.loading && f.snapshot(id).metadataSourceId === douban.id);
     const mapped = f.snapshot(id);
-    assert.deepEqual([mapped.target.metadataProvider, mapped.target.metadataId, mapped.target.season,
-      mapped.target.episode, mapped.target.globalEpisode], ['douban', '20', 2, 1, 4]);
+    assert.deepEqual(mapped.target, before.target);
     assert.equal(mapped.metadata.id, '20');
     assert.deepEqual(mapped.metadata.doubanSeasons.map(row => [row.season, row.episodeCount, row.metadataId]),
       [[1, 3, '20'], [2, 2, '21'], [3, 2, '22'], [4, 2, '23']]);
@@ -1838,9 +1900,9 @@ test('Windows auto playback waits for output; first media failure continues cach
 
 test('history and manual data are attempted before unresolved search results and new pages', async t => {
   const f = fixture(); t.after(() => f.service.close());
-  f.library.update(document => { document.history.push({ targetId: movie.id, title: 'Film', sourceKey: 'b',
+  f.library.update(document => { document.history.push(historyEntry(movie, { targetId: movie.id, title: 'Film', sourceKey: 'b',
     candidateId: 'previous', detailId: 'from-history', lineId: 'line', episode: {}, position: 35, duration: 90,
-    paused: true, updatedAt: 1 }); });
+    paused: true, updatedAt: 1 })); });
   const { sessionId } = (await f.open({ platform: 'windows', results: [{ sourceKey: 'a', items: [{ id: 'query-result', title: 'Film' }] }] }));
   const attempted = await f.pending(sessionId);
   assert.equal(attempted.candidate.source.detailId, 'from-history');
@@ -1857,8 +1919,8 @@ test('failed cached, history and manual candidates all fall through to another p
       return { url: 'https://media.invalid/good' }; },
   } }); t.after(() => f.service.close());
   f.library.update(document => {
-    document.history.push({ targetId: movie.id, title: 'Film', sourceKey: 'a', candidateId: 'old',
-      detailId: 'history', lineId: 'line', episode: {}, position: 0, duration: 0, paused: false, updatedAt: 1 });
+    document.history.push(historyEntry(movie, { targetId: movie.id, title: 'Film', sourceKey: 'a', candidateId: 'old',
+      detailId: 'history', lineId: 'line', episode: {}, position: 0, duration: 0, paused: false, updatedAt: 1 }));
     document.manual.push({ id: 'manual', targetId: movie.id, sourceKey: 'a', detailId: 'manual', enabled: true, failureCount: 0 });
   });
   const { sessionId } = (await f.open({ results: [{ sourceKey: 'a', items: [{ id: 'cached', title: 'Film' }] }] }));
@@ -1870,7 +1932,7 @@ test('failed cached, history and manual candidates all fall through to another p
   await f.command(sessionId, 'play'); const value = await f.pending(sessionId);
   assert.equal(value.candidate.source.detailId, 'detail-b');
   assert.deepEqual(f.calls.filter(call => call[0] === 'resolve').map(call => call[1]),
-    ['cached', 'history', 'manual', 'detail-a', 'detail-b']);
+    ['history', 'manual', 'cached', 'detail-a', 'detail-b']);
 });
 
 test('same episode replacement keeps progress and paused intent and leaves old lease on failure', async t => {
@@ -2320,13 +2382,13 @@ test('preview uses metadata dates, persists per title, and never fabricates an e
   t.after(() => f.service.close());
   const { sessionId } = (await f.open({ target: tv })); await until(() => f.snapshot(sessionId).stage === 'idle');
   assert.deepEqual(f.snapshot(sessionId).episodes.map(row => row.episode), [1]);
-  await assert.rejects(f.command(sessionId, 'select.episode', { episode: { season: 1, episode: 2 } }), { code: 'NO_MATCH' });
+  await assert.rejects(f.command(sessionId, 'select.target', { target: metadataEpisodeTarget(f.snapshot(sessionId), 1, 2) }), { code: 'NO_MATCH' });
   await f.command(sessionId, 'preview', { enabled: true });
   assert.deepEqual(f.snapshot(sessionId).episodes.map(row => row.episode), [1, 2]);
   assert.deepEqual(f.library.read().previewTargets, [tv.id]);
   const second = (await f.open({ target: tv })); await until(() => f.snapshot(second.sessionId).stage === 'idle');
   assert.equal(f.snapshot(second.sessionId).previewEpisodes, true);
-  await assert.rejects(f.command(sessionId, 'select.episode', { episode: { season: 1, episode: 99 } }), { code: 'NO_MATCH' });
+  await assert.rejects(f.command(sessionId, 'select.target', { target: { ...f.snapshot(sessionId).metadataSources[0].playbackTarget, season: 1, episode: 99 } }), { code: 'NO_MATCH' });
 });
 
 test('first episode cannot be invented when metadata supplies no reliable map', async t => {
@@ -2482,7 +2544,9 @@ test('known special episode zero is selectable without pretending it has a globa
     async detail() { return detail([{ id: 'prologue', name: 'Series Prologue', season: 0, episode: 0 }]); },
   } }); t.after(() => f.service.close());
   const { sessionId } = (await f.open({ target: tv })); await until(() => f.snapshot(sessionId).stage === 'idle');
-  await f.command(sessionId, 'select.episode', { episode: { season: 0, episode: 0 } });
+  await f.command(sessionId, 'browse.season', { season: 0 });
+  await until(() => !f.snapshot(sessionId).browsing.loading);
+  await f.command(sessionId, 'select.target', { target: metadataEpisodeTarget(f.snapshot(sessionId), 0, 0) });
   const attempt = await f.pending(sessionId);
   assert.equal(attempt.candidate.season, 0); assert.equal(attempt.candidate.episode, 0);
   assert.equal(attempt.candidate.globalEpisode, undefined);
@@ -2597,9 +2661,9 @@ for (const { platform = 'ios', name, selected, expected, historyEpisode, positio
     const f = fixture({ data: owner.data });
     t.after(async () => { await f.service.close(); await owner.close(); });
     if (historyEpisode) f.library.update(document => {
-      document.history.push({ targetId: tv.id, title: 'Series', sourceKey: 'a', detailId: 0,
+      document.history.push(historyEntry(tv, { targetId: tv.id, title: 'Series', sourceKey: 'a', detailId: 0,
         candidateId: `previous-s${historyEpisode.season}e${historyEpisode.episode}`, lineId: 'direct', episode: historyEpisode,
-        position: 67, duration: 100, paused: true, updatedAt: 1 });
+        position: 67, duration: 100, paused: true, updatedAt: 1 }));
     });
     const history = f.library.read().history, target = { ...tv, ...selected };
     const { sessionId } = (await f.open({ platform, target, sources: [source('a')],
@@ -2629,8 +2693,8 @@ for (const platform of ['ios', 'windows']) {
     const f = fixture({ data: owner.data });
     t.after(async () => { await f.service.close(); await owner.close(); });
     f.library.update(document => {
-      document.history.push({ targetId: tv.id, episode: { season: 3, episode: 1 },
-        sourceKey: 'a', detailId: 0, position: 67 });
+      document.history.push(historyEntry(tv, { targetId: tv.id, episode: { season: 3, episode: 1 },
+        sourceKey: 'a', detailId: 0, position: 67 }));
     });
     const target = { ...tv, globalEpisode: 5 };
     const { sessionId } = (await f.open({ platform, target, sources: [source('a')] }));
@@ -2659,9 +2723,9 @@ for (const platform of ['ios', 'windows']) {
       } });
       t.after(async () => { gate.resolve({ id: 19, name: 'Series', seasons }); await f.service.close(); });
       f.library.update(document => {
-        document.history.push({ targetId: tv.id, sourceKey: 'a', detailId: 'current', lineId: 'line',
+        document.history.push(historyEntry(tv, { targetId: tv.id, sourceKey: 'a', detailId: 'current', lineId: 'line',
           episode: reliable ? { season: 2, episode: 3, globalEpisode: 5 } : { season: 3, episode: 1 },
-          position: 67 });
+          position: 67 }));
       });
       const { sessionId } = (await f.open({ platform, target, sources: [source('a')],
         results: [{ sourceKey: 'a', items: [{ id: 'current', title: 'Series' }] }],
@@ -2795,11 +2859,11 @@ test('last media end is not rewritten as unfinished when the page closes; releas
 test('library management clears only the selected collection and reports write failure without mutating it', async t => {
   const f = fixture(); t.after(() => f.service.close());
   f.library.update(document => {
-    document.history.push({ targetId: movie.id }, { targetId: tv.id });
+    document.history.push(historyEntry(movie, { targetId: movie.id }), historyEntry(tv, { targetId: tv.id }));
     document.blocks.push({ targetId: movie.id, sourceKey: 'a', detailId: 0, lineId: 0 });
   });
   f.service.removeLibrary({ kind: 'history', id: movie.id });
-  assert.deepEqual(f.library.read().history, [{ targetId: tv.id }]);
+  assert.deepEqual(f.library.read().history, [historyEntry(tv)]);
   f.failStorage('STORAGE_ERROR');
   assert.throws(() => f.service.removeLibrary({ kind: 'blocks' }), { code: 'STORAGE_ERROR' });
   assert.equal(f.library.read().blocks.length, 1);
@@ -2877,7 +2941,7 @@ test('E49 malformed optional metadata content does not block initialization or a
     query: { append_to_response: 'credits,similar,images' }, settings: { revision: 'current-config' },
     fetchedAt: at - 1000, completeness: 'complete', value: { id: 17, title: 'Incomplete' } };
   const { sessionId } = await f.open({ sources: [], cacheEntries: [entry] });
-  await until(() => f.snapshot(sessionId).stage === 'idle');
+  await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).stage !== 'loading');
   assert.equal(f.snapshot(sessionId).metadata.title, 'Loaded 1');
   assert.equal(f.snapshot(sessionId).metadataError, null);
   assert.deepEqual(requests, ['/3/movie/17']);
@@ -2911,7 +2975,7 @@ test('metadata association is independent of primary playback and only verified 
   await f.command(sessionId, 'browse.metadata', { metadataSourceId: other.id });
   await until(() => f.snapshot(sessionId).metadataSourceId === other.id);
   assert.equal(f.snapshot(sessionId).target.id, movie.id, 'the content identity is not replaced by a display mapping');
-  assert.equal(f.snapshot(sessionId).target.metadataProvider, 'douban');
+  assert.equal(f.snapshot(sessionId).target.metadataProvider, 'tmdb');
   assert.equal(f.snapshot(sessionId).metadata.title, 'douban');
   assert.equal(f.snapshot(sessionId).current.attemptId, first.id, 'browsing must not stop an independent live input');
   assert.equal(f.snapshot(sessionId).attempt, null);
@@ -2930,9 +2994,9 @@ test('metadata source failure stays in the third row and switching back clears i
           metadata: { id: '20', title: 'Series', episodes_count: 2 }, seasons: [{ season: 1, episodeCount: 2 }] },
       ];
     },
-    async targetMetadata(target) {
+    async seasonMetadata(target, season) {
       if (target.metadataProvider === 'douban' && failDouban) throw error('UPSTREAM_HTTP');
-      return structuredClone(metadata);
+      return structuredClone(metadata.seasons.find(row => row.season_number === season));
     },
   } }); t.after(() => f.service.close());
   const { sessionId } = (await f.open({ target: tv }));
@@ -3174,7 +3238,7 @@ test('an old episode ending during a newer selection cannot skip that selected e
   const { sessionId } = (await f.open({ platform: 'windows', target: tv }));
   const first = await f.current(sessionId);
   await f.command(sessionId, 'media.progress', { attemptId: first.id, position: 40, duration: 60, paused: false });
-  await f.command(sessionId, 'select.episode', { episode: { season: 1, episode: 2 } });
+  await f.command(sessionId, 'select.target', { target: metadataEpisodeTarget(f.snapshot(sessionId), 1, 2) });
   await entered.promise;
   await f.command(sessionId, 'media.ended', { attemptId: first.id });
   assert.equal(f.snapshot(sessionId).target.episode, 2);
@@ -3217,17 +3281,18 @@ for (const retained of [true, false]) {
     await until(() => f.snapshot(sessionId).stage === 'idle');
     await f.command(sessionId, 'browse', { sourceId: f.snapshot(sessionId).sources[0].id });
     await until(() => f.snapshot(sessionId).browsing.episodes.length === 2);
-    const selected = f.snapshot(sessionId).candidates.find(value => value.name === 'Two');
-    await f.command(sessionId, 'select.candidate', { candidateId: selected.id });
+    const selected = f.snapshot(sessionId).browsing.episodes.find(value => value.name === 'Two');
+    await f.command(sessionId, 'select.target', { target: selected.playbackTarget });
     const current = await f.current(sessionId);
     await f.command(sessionId, 'media.progress', { attemptId: current.id, position: 43, duration: 100, paused: true });
+    const resumeTarget = f.snapshot(sessionId).target;
     await f.command(sessionId, 'stop');
     await f.service.release({ sessionId });
     if (!retained) {
       items = ['One'];
       f.advance(3_600_000);
     }
-    const reopened = (await f.open({ platform: 'windows', target }));
+    const reopened = (await f.open({ platform: 'windows', target, resumeTarget }));
     if (retained) {
       const next = await f.pending(reopened.sessionId);
       assert.equal(next.candidate.name, 'Two');
@@ -3390,7 +3455,7 @@ test('purification changes do not revoke an explicitly selected source outside s
   await until(() => f.snapshot(sessionId).stage === 'idle');
   await f.command(sessionId, 'browse', { sourceId: f.snapshot(sessionId).sources[0].id });
   await until(() => f.snapshot(sessionId).browsing.episodes.length > 0);
-  await f.command(sessionId, 'select.candidate', { candidateId: f.snapshot(sessionId).browsing.episodes[0].candidateId });
+  await f.command(sessionId, 'select.target', { target: f.snapshot(sessionId).browsing.episodes[0].playbackTarget });
   const selected = await f.pending(sessionId);
   (await f.service.updateSourceDisplay('cat', [{ installationId: 'install-a', sites: [{ key: 'a', name: '体育源' }] }]));
   assert.equal(f.snapshot(sessionId).attempt.id, selected.id);
@@ -3515,7 +3580,8 @@ test('M3 first quality discovers only the selected HLS parent, then opaque selec
   t.after(async () => { switchGate.resolve(); await f.service.close(); await owner.close(); });
   const { sessionId } = await f.open({ target: hlsTarget });
   await until(() => f.snapshot(sessionId).stage === 'idle');
-  assert.deepEqual(owner.calls, []);
+  assert.deepEqual(owner.calls.map(row => [row.operation, row.siteId, row.payload.id]),
+    [['detail', 'a', 'hls']]);
   await f.command(sessionId, 'quality', { quality: '1080p' });
   const low = await f.pending(sessionId);
   const candidates = f.snapshot(sessionId).candidates.filter(row => row.name === '正片');
@@ -3534,7 +3600,7 @@ test('M3 first quality discovers only the selected HLS parent, then opaque selec
   await f.command(sessionId, 'media.started', { attemptId: low.id });
   await f.command(sessionId, 'media.progress', { attemptId: low.id, position: 41, duration: 90, paused: true });
   holdHigh = true;
-  await f.command(sessionId, 'select.candidate', { candidateId: high.id });
+  await f.command(sessionId, 'select.target', { target: high.playbackTarget });
   await switching.promise;
   await f.command(sessionId, 'play');
   assert.notEqual(f.snapshot(sessionId).stage, 'playing', 'old sibling output cannot satisfy the new exact variant intent');
@@ -3838,7 +3904,7 @@ test('history/manual linkage cannot turn an unverified hint into candidate evide
   }, async search(value, query, page) { f.calls.push(['search', page]); return { page, hasMore: false, items: [] }; } } });
   t.after(() => f.service.close());
   f.library.update(document => {
-    document.history.push({ targetId: movie.id, sourceKey: 'a', detailId: 'linked', candidateId: 'old', position: 20 });
+    document.history.push(historyEntry(movie, { targetId: movie.id, sourceKey: 'a', detailId: 'linked', candidateId: 'old', position: 20 }));
     document.manual.push({ id: 'manual-linked', targetId: movie.id, sourceKey: 'a', detailId: 'linked',
       enabled: true, failureCount: 0 });
   });
@@ -4070,7 +4136,11 @@ test('raw opaque reopen restores only that exact candidate history rather than a
   const target = f.snapshot(original.sessionId).target;
   await f.service.release({ sessionId: original.sessionId });
   for (const retained of [true, false]) {
-    f.library.update(document => { document.history[0].candidateId = retained ? selected.candidate.id : 'another-file'; });
+    f.library.update(document => {
+      const id = retained ? selected.candidate.id : 'another-file';
+      document.history[0].candidateId = id;
+      document.history[0].playbackTarget.source.candidateId = id;
+    });
     const { sessionId } = (await f.open({ platform: 'windows', target }));
     const resumed = await f.pending(sessionId);
     assert.equal(resumed.candidate.id, selected.candidate.id);
@@ -4222,8 +4292,9 @@ test('E49 group uses its real first file and actual adjacent rows without guessi
   const first = await f.current(sessionId);
   assert.equal(first.candidate.name, raw.lines[0].episodes[0].name);
   assert.equal(first.candidate.episode, undefined);
-  assert.equal(f.snapshot(sessionId).target.kind, 'group');
-  assert.deepEqual(f.snapshot(sessionId).target.members, target.members);
+  assert.equal(f.snapshot(sessionId).target.source.key, 'a');
+  assert.equal(f.snapshot(sessionId).target.source.detailId, 0);
+  assert.deepEqual(f.snapshot(sessionId).entryTarget.members, target.members);
   assert.deepEqual(f.snapshot(sessionId).episodes, []);
   assert.equal(f.snapshot(sessionId).metadata, null);
   await f.command(sessionId, 'media.progress', { attemptId: first.id, position: 48, duration: 100, paused: true });
@@ -4239,14 +4310,16 @@ test('E49 group uses its real first file and actual adjacent rows without guessi
   const saved = f.snapshot(sessionId).target;
   assert.equal(saved.source.candidateId, first.candidate.id);
   assert.equal('playId' in saved.source, false); assert.equal('episodeId' in saved.source, false);
-  assert.deepEqual(saved.members, before.target.members);
+  assert.deepEqual(f.snapshot(sessionId).entryTarget.members, before.target.members);
   assert.equal(owner.calls.filter(row => row.operation === 'detail').length, 1);
   assert.equal(owner.calls.some(row => row.operation === 'search'), false);
   assert.deepEqual({ target, raw }, before);
 });
 
-test('E49 iOS unassociated group remains an actual directory with no automatic source or media requests', async t => {
-  const owner = runtimeDataFixture(() => { assert.fail('An unselected iOS group must not invoke its source'); });
+test('E49 iOS unassociated group loads only its first directory without automatic media requests', async t => {
+  const owner = runtimeDataFixture(({ operation, payload }) => {
+    assert.equal(operation, 'detail'); assert.equal(payload.id, 0); return detail(['First file']);
+  });
   const f = fixture({ data: owner.data });
   t.after(async () => { await f.service.close(); await owner.close(); });
   const target = groupTarget([{ sourceKey: 'a', detailId: 0 }, { sourceKey: 'a', detailId: '0' }]);
@@ -4255,7 +4328,8 @@ test('E49 iOS unassociated group remains an actual directory with no automatic s
   assert.deepEqual(f.snapshot(sessionId).target, target);
   assert.deepEqual(f.snapshot(sessionId).episodes, []);
   assert.equal(f.snapshot(sessionId).attempt, null);
-  assert.deepEqual(owner.calls, []); assert.deepEqual(owner.metadataCalls, []);
+  assert.deepEqual(owner.calls.map(row => [row.operation, row.siteId, row.payload.id]), [['detail', 'a', 0]]);
+  assert.deepEqual(owner.metadataCalls, []);
   assert.equal(f.calls.some(row => row[0] === 'prepare'), false);
 });
 
@@ -4294,7 +4368,7 @@ test('E49 search.update merges only the original typed scope with monotonic page
     await assert.rejects(f.command(sessionId, 'search.update', searchContext(target, 3, { sources: [forbidden] })),
       { code: 'STALE_SOURCE' });
   }
-  assert.equal(f.calls.some(row => ['search', 'detail', 'expand', 'resolve', 'prepare'].includes(row[0])), false);
+  assert.equal(f.calls.some(row => ['search', 'resolve', 'prepare'].includes(row[0])), false);
   assert.deepEqual(update, before);
 });
 
@@ -4331,8 +4405,9 @@ for (const resume of [false, true]) for (const carrier of ['group', 'tmdb']) {
       [['a', 0], ['a', '0']]);
     assert.equal(after.attempt, null);
     assert.equal(after.current, null);
-    assert.deepEqual(computations, [], 'the trusted initial group is not reclassified by playback matching');
-    assert.deepEqual(f.calls, [], 'opening the group menu does not fetch search, detail, pan or media');
+    assert.equal(computations.includes('recognition.matches'), false, 'directory projection must not rematch the trusted group');
+    assert.deepEqual(f.calls, resume ? [['detail', 'a', '0']]
+      : [['detail', 'a', 0], ['expand', 'a', 'line']], 'only the selected first directory is read');
     assert.deepEqual(handoff, unchanged);
   });
 }
@@ -4413,7 +4488,7 @@ for (const output of ['pending', 'current']) for (const carrier of ['group', 'tm
     await f.service.command({ ...handoff, sessionId, action: 'search.update' }, { searchHandoff: handoff });
     await tick();
     const after = f.snapshot(sessionId), members = [...target.members, ...lateMembers];
-    assert.deepEqual(after.target, { ...before.target, members });
+    assert.deepEqual(after.target, before.target.kind === 'group' ? { ...before.target, members } : before.target);
     assert.deepEqual(after.attempt, before.attempt);
     assert.deepEqual(after.current, before.current);
     assert.equal(after.stage, before.stage);
@@ -4427,7 +4502,7 @@ for (const output of ['pending', 'current']) for (const carrier of ['group', 'tm
     });
     await f.service.command({ ...repeated, sessionId, action: 'search.update' }, { searchHandoff: repeated });
     await tick();
-    assert.deepEqual(f.snapshot(sessionId).target, { ...before.target, members });
+    assert.deepEqual(f.snapshot(sessionId).target, before.target.kind === 'group' ? { ...before.target, members } : before.target);
     assert.deepEqual(f.snapshot(sessionId).attempt, before.attempt);
     assert.deepEqual(f.snapshot(sessionId).current, before.current);
     assert.equal(f.snapshot(sessionId).stage, before.stage);
@@ -4482,7 +4557,7 @@ test('E49 client member claims are not trusted and internal handoff facts stay b
   await f.service.command({ ...emptyProof, sessionId, action: 'search.update' }, { searchHandoff: emptyProof });
   assert.deepEqual(f.snapshot(sessionId).target, expectedTarget,
     'an empty selection proof does not replace the card identity or its content-proven typed members');
-  assert.equal(f.calls.some(row => ['search', 'detail', 'expand', 'resolve', 'prepare'].includes(row[0])), false);
+  assert.equal(f.calls.some(row => ['search', 'resolve', 'prepare'].includes(row[0])), false);
 });
 
 test('E49 a late Node search response cannot move a native-confirmed page 3 cursor backwards or reopen completed search', async t => {
@@ -4534,7 +4609,7 @@ for (const keepSource of [false, true]) {
     await f.command(sessionId, 'search.update', searchContext(movie, 1, { metadataTarget: movie }));
     const douban = f.snapshot(sessionId).metadataSources.find(row => row.provider === 'douban');
     if (keepSource) {
-      await f.command(sessionId, 'select.candidate', { candidateId: current.candidate.id });
+      await f.command(sessionId, 'select.target', { target: f.snapshot(sessionId).candidates.find(row => row.id === current.candidate.id).playbackTarget });
       assert.equal(f.snapshot(sessionId).target.kind, 'source');
       assert.deepEqual(f.snapshot(sessionId).current.candidate, current.candidate);
     }
@@ -4542,7 +4617,7 @@ for (const keepSource of [false, true]) {
     await until(() => !f.snapshot(sessionId).browsing.loading &&
       f.snapshot(sessionId).metadataSourceId === douban.id);
     const before = f.snapshot(sessionId), calls = metadataCalls.length;
-    assert.equal(calls, 3);
+    assert.equal(calls, 2);
     const mediaCalls = f.calls.filter(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])).length;
     await f.command(sessionId, 'search.update', searchContext(movie, 2, {
       results: [{ sourceKey: 'b', items: [{ id: 'late-without-carrier', title: 'Film' }] }],
@@ -4591,16 +4666,17 @@ test('E49 group hints require current identity evidence without rematching title
     search: ['a', 'b'].map(sourceKey => ({ sourceKey, page: 3, completed: true })),
   }));
   await delay(2);
-  assert.deepEqual(owner.calls, []);
+  assert.deepEqual(owner.calls.map(row => [row.operation, row.siteId, row.payload.id]),
+    [['detail', 'a', 0]]);
   assert.deepEqual(f.snapshot(sessionId).candidates, []);
-  await f.command(sessionId, 'play');
+  await selectFirstDirectory(f, sessionId);
   const pending = await f.pending(sessionId);
   assert.equal(pending.candidate.source.key, 'a');
   assert.equal(pending.candidate.source.detailId, 0);
   assert.equal(f.snapshot(sessionId).sources[0].error, null);
   assert.deepEqual(owner.calls.map(row => [row.operation, row.siteId, row.payload.id]),
     [['detail', 'a', 0], ['play', 'a', 'a-fresh']]);
-  assert.deepEqual(f.snapshot(sessionId).target.members, target.members);
+  assert.deepEqual(f.snapshot(sessionId).entryTarget.members, target.members);
 });
 
 test('E49 a real late movie carrier upgrades an unselected iOS group through the full shared data cache and prepares only its first hit', async t => {
@@ -4618,7 +4694,8 @@ test('E49 a real late movie carrier upgrades an unselected iOS group through the
   const target = groupTarget([{ sourceKey: 'a', detailId: 0 }, { sourceKey: 'b', detailId: 'unused' }]);
   const { sessionId } = (await f.open({ platform: 'ios', target }));
   await until(() => f.snapshot(sessionId).stage === 'idle');
-  assert.deepEqual(owner.calls, []);
+  assert.deepEqual(owner.calls.map(row => [row.operation, row.siteId, row.payload.id]),
+    [['detail', 'a', 0]]);
   await f.command(sessionId, 'search.update', searchContext(target, 1, {
     metadataTarget: movie, metadata: { id: 17, title: 'Do not trust display as complete' },
   }));
@@ -4703,9 +4780,9 @@ for (const output of ['pending', 'current']) {
     }));
     await until(() => f.snapshot(sessionId).metadata?.runtime === 100);
     const after = f.snapshot(sessionId);
-    assert.equal(after.target.kind, 'group');
+    assert.equal(after.target.kind, before.target.kind);
     assert.equal(after.target.source.candidateId, selected.candidate.id);
-    assert.deepEqual(after.target.members, [...before.target.members, { sourceKey: 'b', detailId: 'late-b' }]);
+    assert.deepEqual(after.sources.map(row => row.source.detailId), [0, 'late-b']);
     assert.deepEqual(after.attempt, before.attempt);
     assert.deepEqual(after.current, before.current);
     assert.deepEqual(after.episodes, []);
@@ -4714,7 +4791,8 @@ for (const output of ['pending', 'current']) {
     assert.deepEqual(f.calls.filter(row => row[0] === 'detail').map(row => row[1]), ['a']);
     assert.equal(f.calls.some(row => row[0] === 'search'), false);
     await f.command(sessionId, 'browse.metadata', { metadataSourceId: after.metadataSources[0].id });
-    await until(() => f.snapshot(sessionId).target.kind === 'movie');
+    await until(() => !f.snapshot(sessionId).browsing.loading);
+    assert.deepEqual(f.snapshot(sessionId).target, after.target);
     assert.equal(f.snapshot(sessionId).target.id, target.id);
     assert.equal(f.calls.filter(row => row[0] === 'resolve').length, resolves);
     if (output === 'current') assert.equal(f.snapshot(sessionId).current.attemptId, selected.id);
@@ -4722,18 +4800,19 @@ for (const output of ['pending', 'current']) {
 }
 
 for (const savedSelection of [false, true]) {
-  test(`E49 user-selected group never auto upgrades after its output disappears (selection restored=${savedSelection})`, async t => {
+  test(`E49 user-selected file from a group never auto upgrades after its output disappears (selection restored=${savedSelection})`, async t => {
     const f = fixture({ data: {
       async targetMetadata(target) { return target.kind === 'group' ? null : { id: 17, title: 'Film', runtime: 100 }; },
       async detail() { return detail(['Film.S01E01']); },
     } });
     t.after(() => f.service.close());
-    const first = (await f.open({ platform: 'ios', target: groupTarget() }));
+    const entryTarget = groupTarget();
+    const first = (await f.open({ platform: 'ios', target: entryTarget }));
     await until(() => f.snapshot(first.sessionId).stage === 'idle');
     await f.command(first.sessionId, 'browse', { sourceId: f.snapshot(first.sessionId).sources[0].id });
     await until(() => f.snapshot(first.sessionId).browsing.episodes.length === 1);
-    await f.command(first.sessionId, 'select.candidate', {
-      candidateId: f.snapshot(first.sessionId).browsing.episodes[0].candidateId,
+    await f.command(first.sessionId, 'select.target', {
+      target: f.snapshot(first.sessionId).browsing.episodes[0].playbackTarget,
     });
     const selected = await f.pending(first.sessionId);
     const saved = f.snapshot(first.sessionId).target;
@@ -4742,13 +4821,13 @@ for (const savedSelection of [false, true]) {
     let sessionId = first.sessionId;
     if (savedSelection) {
       await f.service.release({ sessionId });
-      sessionId = (await f.open({ platform: 'ios', target: saved })).sessionId;
+      sessionId = (await f.open({ platform: 'ios', target: entryTarget, resumeTarget: saved })).sessionId;
       await until(() => f.snapshot(sessionId).stage === 'idle');
     }
     const resolves = f.calls.filter(row => row[0] === 'resolve').length;
-    await f.command(sessionId, 'search.update', searchContext(saved, 1, { metadataTarget: movie }));
+    await f.command(sessionId, 'search.update', searchContext(entryTarget, 1, { metadataTarget: movie }));
     await until(() => f.snapshot(sessionId).metadata?.runtime === 100);
-    assert.equal(f.snapshot(sessionId).target.kind, 'group');
+    assert.equal(f.snapshot(sessionId).target.kind, 'source');
     assert.equal(f.snapshot(sessionId).target.source.candidateId, selected.candidate.id);
     assert.equal(f.snapshot(sessionId).attempt, null); assert.equal(f.snapshot(sessionId).current, null);
     assert.equal(f.calls.filter(row => row[0] === 'resolve').length, resolves);
@@ -4786,7 +4865,7 @@ test('E49 only the latest asynchronous carrier may publish and a revision withou
   const opened = (await g.open({ target }));
   await until(() => g.snapshot(opened.sessionId).stage === 'idle');
   await g.command(opened.sessionId, 'search.update', searchContext(target, 1, { metadataTarget: movie }));
-  await until(() => g.calls.length === 1);
+  await until(() => g.calls.filter(row => row[0] === 'metadata').length === 1);
   await g.command(opened.sessionId, 'search.update', searchContext(target, 2, {
     results: [{ sourceKey: 'b', items: [{ detailId: 'late', title: 'Film' }] }],
   }));
@@ -4794,7 +4873,8 @@ test('E49 only the latest asynchronous carrier may publish and a revision withou
   await until(() => g.snapshot(opened.sessionId).target.kind === 'movie');
   assert.equal(g.snapshot(opened.sessionId).metadata.id, 17);
   assert.equal(g.snapshot(opened.sessionId).target.id, target.id);
-  assert.equal(g.calls.some(row => row[0] === 'search' || row[0] === 'detail'), false);
+  assert.deepEqual(g.calls.filter(row => row[0] === 'detail'), [['detail', 'a', 0]]);
+  assert.equal(g.calls.some(row => row[0] === 'search' || row[0] === 'resolve'), false);
 });
 
 for (const ending of ['stop', 'release', 'source', 'metadata']) {
@@ -4839,7 +4919,7 @@ for (const ending of ['stop', 'release', 'source', 'metadata']) {
         assert.deepEqual(f.snapshot(sessionId), before);
       }
     }
-    assert.deepEqual(f.calls.filter(row => ['metadata', 'search', 'detail', 'resolve', 'prepare'].includes(row[0])),
+    assert.deepEqual(f.calls.filter(row => ['metadata', 'search', 'resolve', 'prepare'].includes(row[0])),
       [['metadata', 17]]);
   });
 }
@@ -4865,7 +4945,7 @@ test('E49 search.update raw scope keeps typed detail zero and refuses metadata a
   ] }));
   await delay(2);
   assert.equal(f.calls.some(row => row[0] === 'handoff'), false);
-  assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
+  assert.equal(f.calls.some(row => ['search', 'resolve', 'prepare'].includes(row[0])), false);
 });
 
 const rawVariants = () => ({ id: 0, title: 'Actual raw', lines: [
@@ -5071,15 +5151,14 @@ for (const kind of ['source', 'group']) {
       const first = await f.current(sessionId), saved = f.snapshot(sessionId).target;
       const receipt = f.service.attempt({ sessionId, attemptId: first.id });
       await f.command(sessionId, 'media.progress', { attemptId: first.id, position: 41, duration: 100, paused: true });
-      if (kind === 'group') {
-        const row = f.snapshot(sessionId).sources.find(value => value.source.key === 'b');
-        await f.command(sessionId, 'browse', { sourceId: row.id });
+      {
+        const row = f.snapshot(sessionId).sources.find(value => value.source.key === (kind === 'group' ? 'b' : 'a'));
+        await f.command(sessionId, 'browse', { sourceId: row.id, lineId: 'b' });
         await until(() => !f.snapshot(sessionId).browsing.loading);
       }
-      const selected = f.snapshot(sessionId).candidates.find(row => row.lineId === 'b' &&
-        row.episode === (selection === 'different-episode' ? 2 : 1));
+      const selected = f.snapshot(sessionId).browsing.episodes.find(row => row.episode === (selection === 'different-episode' ? 2 : 1));
       assert.ok(selected);
-      await f.command(sessionId, 'select.candidate', { candidateId: selected.id });
+      await f.command(sessionId, 'select.target', { target: selected.playbackTarget });
       const second = await f.pending(sessionId), selectedTarget = f.snapshot(sessionId).target;
       assert.equal(second.candidate.id, selected.id);
       await f.command(sessionId, 'media.failed', { attemptId: second.id });
@@ -5092,7 +5171,7 @@ for (const kind of ['source', 'group']) {
     });
   }
 
-  for (const action of ['switch', 'pan', 'quality', 'select.candidate']) {
+  for (const action of ['switch', 'pan', 'quality', 'select.target']) {
     test(`NCR-03 ${kind} old-current failure preserves a newer ${action} resolve and its exact intent`, async t => {
       const gate = deferred(), entered = deferred();
       let firstResolve = true;
@@ -5113,11 +5192,11 @@ for (const kind of ['source', 'group']) {
       const first = await f.current(sessionId);
       const receipt = f.service.attempt({ sessionId, attemptId: first.id });
       await f.command(sessionId, 'media.progress', { attemptId: first.id, position: 41, duration: 100, paused: true });
-      const selected = action === 'select.candidate' ? f.snapshot(sessionId).candidates.find(row =>
+      const selected = action === 'select.target' ? f.snapshot(sessionId).candidates.find(row =>
         row.lineId === 'a' && row.episode === 2 && row.quality === '4k') : null;
       await f.command(sessionId, action, action === 'pan' ? { provider: 'baidu' }
         : action === 'quality' ? { quality: '1080p' }
-          : action === 'select.candidate' ? { candidateId: selected.id } : {});
+          : action === 'select.target' ? { target: selected.playbackTarget } : {});
       await entered.promise;
       const latest = f.snapshot(sessionId);
       assert.equal(latest.attempt, null); assert.equal(latest.stage, 'resolving');
@@ -5134,9 +5213,9 @@ for (const kind of ['source', 'group']) {
       assert.equal(f.library.read().history[0].ended, false);
       gate.resolve();
       const replacement = await f.pending(sessionId);
-      assert.equal(replacement.candidate.episode, action === 'select.candidate' ? 2 : 1);
-      assert.equal(replacement.position, action === 'select.candidate' ? 0 : 41);
-      assert.equal(replacement.paused, action !== 'select.candidate');
+      assert.equal(replacement.candidate.episode, action === 'select.target' ? 2 : 1);
+      assert.equal(replacement.position, action === 'select.target' ? 0 : 41);
+      assert.equal(replacement.paused, action !== 'select.target');
       if (action === 'pan') assert.equal(replacement.candidate.provider, 'baidu');
       if (action === 'quality') assert.equal(replacement.candidate.quality, '1080p');
       if (selected) assert.equal(replacement.candidate.id, selected.id);
@@ -5171,7 +5250,7 @@ test('E49 group replacement crosses accurate members in its original scope but o
   assert.equal(second.candidate.source.key, 'b'); assert.equal(second.candidate.episode, 1);
   assert.equal(second.position, 36); assert.equal(second.paused, true);
   const saved = f.snapshot(sessionId).target;
-  assert.equal(saved.kind, 'group'); assert.deepEqual(saved.members, target.members);
+  assert.deepEqual(f.snapshot(sessionId).entryTarget.members, target.members);
   assert.equal(saved.source.candidateId, second.candidate.id);
   assert.equal(owner.calls.some(row => row.operation === 'search'), false);
   const current = runtimeDataFixture(({ operation, siteId, payload }) => {
@@ -5200,13 +5279,14 @@ test('E49 a newly discovered same-content group source plays precisely without s
   const other = f.snapshot(sessionId).sources.find(row => row.source.detailId === 'same-film');
   await f.command(sessionId, 'browse', { sourceId: other.id });
   await until(() => f.snapshot(sessionId).browsing.episodes.length === 2);
-  await f.command(sessionId, 'select.candidate', {
-    candidateId: f.snapshot(sessionId).browsing.episodes[0].candidateId,
+  await f.command(sessionId, 'select.target', {
+    target: f.snapshot(sessionId).browsing.episodes[0].playbackTarget,
   });
   const selected = await f.pending(sessionId);
   assert.equal(selected.candidate.source.key, 'b');
   assert.equal(selected.candidate.source.detailId, 'same-film');
-  assert.deepEqual(f.snapshot(sessionId).target.members, [...target.members, { sourceKey: 'b', detailId: 'same-film' }]);
+  assert.equal(f.snapshot(sessionId).target.kind, 'source');
+  assert.equal(f.snapshot(sessionId).target.id, target.id);
   assert.deepEqual(f.calls.filter(row => row[0] === 'resolve').map(row => row[1]), ['b']);
   assert.equal(f.calls.some(row => row[0] === 'search'), false);
 });
@@ -5232,8 +5312,8 @@ test('one card keeps only its own content across raw search pages and other play
   assert.deepEqual(f.snapshot(other.sessionId).sources.map(row => row.source.detailId), ['0']);
   const alien = f.snapshot(other.sessionId).sources[0];
   await f.command(first.sessionId, 'browse', { sourceId: alien.id });
-  await until(() => f.snapshot(first.sessionId).error === 'NOT_FOUND');
-  assert.equal(f.calls.some(row => row[0] === 'detail'), false);
+  await until(() => f.snapshot(first.sessionId).browsing.error === 'NOT_FOUND');
+  assert.deepEqual(f.calls.filter(row => row[0] === 'detail'), [['detail', 'a', 0], ['detail', 'a', '0']]);
   assert.deepEqual(f.snapshot(first.sessionId).sources.map(row => row.source.detailId), [0, 'extra']);
   assert.deepEqual(rows.map(row => row.vod_name), ['Film', 'Another Film', 'Film']);
 });
@@ -5300,7 +5380,8 @@ test('a group content member does not bypass smart season checks after metadata 
   assert.equal(after.target.episode, 1);
   assert.equal(after.error, 'NO_MATCH');
   assert.deepEqual(after.sources.map(row => row.source.detailId), ['season-two']);
-  assert.equal(f.calls.some(row => ['detail', 'resolve', 'prepare'].includes(row[0])), false,
+  assert.deepEqual(f.calls.filter(row => row[0] === 'detail'), [['detail', 'a', 'season-two']]);
+  assert.equal(f.calls.some(row => ['resolve', 'prepare'].includes(row[0])), false,
     'a second-season title cannot smart-play E01 as the first season');
 });
 
@@ -5324,7 +5405,8 @@ test('a proven carrier retains the original card title as an alias for later sou
   assert.equal(f.snapshot(sessionId).target.metadataId, 19);
   assert.deepEqual(f.snapshot(sessionId).entryTarget, target);
   assert.equal(f.calls.filter(row => row[0] === 'search').length, 1);
-  assert.equal(f.calls.some(row => ['detail', 'resolve', 'prepare'].includes(row[0])), false);
+  assert.deepEqual(f.calls.filter(row => row[0] === 'detail'), [['detail', 'a', 'first']]);
+  assert.equal(f.calls.some(row => ['resolve', 'prepare'].includes(row[0])), false);
 });
 
 test('ordinary more continues past unrelated raw hits and retains content scope after exact playback', async t => {
@@ -5344,7 +5426,7 @@ test('ordinary more continues past unrelated raw hits and retains content scope 
   await until(() => f.snapshot(id).stage === 'idle');
   await f.command(id, 'browse', { sourceId: f.snapshot(id).sources[0].id });
   await until(() => f.snapshot(id).browsing.episodes.length === 2);
-  await f.command(id, 'select.candidate', { candidateId: f.snapshot(id).browsing.episodes[0].candidateId });
+  await f.command(id, 'select.target', { target: f.snapshot(id).browsing.episodes[0].playbackTarget });
   const playing = await f.current(id);
   assert.equal(f.snapshot(id).target.kind, 'source');
   await f.command(id, 'search.more');
@@ -5396,6 +5478,7 @@ test('starting an exact file does not cancel in-flight content-source admission 
   await f.command(sessionId, 'search.more');
   await entered.promise;
   await f.command(sessionId, 'play');
+  await selectFirstDirectory(f, sessionId);
   const playing = await f.current(sessionId);
   gate.resolve();
   await until(() => !f.snapshot(sessionId).search[0].loading);
@@ -5418,8 +5501,8 @@ test('exact source preparation reports directory loading and resolving, never sm
     },
   } });
   t.after(async () => { directory.resolve(); resolution.resolve(); await f.service.close(); });
-  const { sessionId: id } = await f.open({ target: groupTarget() });
-  await until(() => f.snapshot(id).stage === 'idle');
+  const { sessionId: id } = await f.open({ target: { id: 'raw:load', kind: 'source', title: 'Film', source: { key: 'a', detailId: 0 } } });
+  assert.equal(f.snapshot(id).stage, 'loading');
   const stream = f.service.events(id);
   t.after(() => stream.dispose());
   stream.body.on('data', chunk => frames.push(JSON.parse(/data: (.+)\n/.exec(chunk.toString())[1])));
@@ -5448,13 +5531,15 @@ test('E49 removing A preserves B as the original group member and live owner wit
   const target = groupTarget([{ sourceKey: 'a', detailId: 0 }, { sourceKey: 'b', detailId: 'B' }]);
   const { sessionId } = (await f.open({ platform: 'windows', target }));
   const first = await f.current(sessionId);
-  await f.command(sessionId, 'switch');
+  const other = f.snapshot(sessionId).sources.find(row => row.source.key === 'b');
+  await f.command(sessionId, 'browse', { sourceId: other.id });
+  await selectFirstDirectory(f, sessionId);
   const b = await f.current(sessionId);
   assert.equal(b.candidate.source.key, 'b');
   const aDetails = f.calls.filter(row => row[0] === 'detail' && row[1] === 'a').length;
   const receipt = f.service.attempt({ sessionId, attemptId: b.id });
   await f.service.invalidate({ kind: 'source', engine: 'cat', installationId: 'install-a' }, []);
-  assert.deepEqual(f.snapshot(sessionId).target.members, [{ sourceKey: 'b', detailId: 'B' }]);
+  assert.deepEqual(f.snapshot(sessionId).sources.map(row => [row.source.key, row.source.detailId]), [['b', 'B']]);
   assert.equal(f.snapshot(sessionId).current.attemptId, b.id);
   assert.equal(f.resources.has(receipt.id), true);
   assert.equal(f.snapshot(sessionId).candidates.every(row => row.source.key === 'b'), true);
@@ -5463,7 +5548,7 @@ test('E49 removing A preserves B as the original group member and live owner wit
   await f.command(sessionId, 'next');
   const next = await f.pending(sessionId);
   assert.equal(next.candidate.source.key, 'b'); assert.equal(next.candidate.episode, 2);
-  assert.deepEqual(f.snapshot(sessionId).target.members, [{ sourceKey: 'b', detailId: 'B' }]);
+  assert.deepEqual(f.snapshot(sessionId).sources.map(row => [row.source.key, row.source.detailId]), [['b', 'B']]);
   assert.notEqual(first.candidate.id, next.candidate.id);
   assert.equal(f.calls.filter(row => row[0] === 'detail' && row[1] === 'a').length, aDetails);
 });
@@ -5489,12 +5574,13 @@ for (const knownEpisode of [true, false]) {
       [{ installationId: 'install-a', generation: 2, state: 'ready', sites: [{ key: 'a' }] }]);
     const saved = f.snapshot(sessionId).target;
     assert.equal(saved.source.candidateId, first.candidate.id);
-    assert.deepEqual(saved.members, [{ sourceKey: 'b', detailId: 'B' }]);
+    assert.deepEqual(f.snapshot(sessionId).sources.map(row => [row.source.key, row.source.detailId]), [['b', 'B']]);
     assert.equal(f.snapshot(sessionId).current, null);
     assert.equal(f.resources.has(receipt.id), false);
     await f.command(sessionId, 'play');
-    await until(() => f.snapshot(sessionId).stage === 'unavailable');
+    await until(() => f.snapshot(sessionId).stage === 'error');
     assert.equal(f.snapshot(sessionId).error, 'SOURCE_NOT_FOUND');
+    assert.equal(f.snapshot(sessionId).attempt, null);
     assert.deepEqual(owner.calls.map(row => row.siteId), ['a', 'a']);
     await f.command(sessionId, 'switch');
     if (knownEpisode) {
@@ -5513,10 +5599,15 @@ for (const knownEpisode of [true, false]) {
     const reopenedOwner = runtimeDataFixture(() => assert.fail('An unavailable exact selection must not fetch another member'));
     const g = fixture({ data: reopenedOwner.data });
     t.after(async () => { await g.service.close(); await reopenedOwner.close(); });
-    const reopened = (await g.open({ platform: 'windows', target: saved, sources: [source('b')] }));
-    await until(() => g.snapshot(reopened.sessionId).stage === 'unavailable');
-    assert.equal(g.snapshot(reopened.sessionId).error, 'SOURCE_NOT_FOUND');
-    assert.deepEqual(g.snapshot(reopened.sessionId).target.members, saved.members);
+    if (saved.kind === 'source') {
+      await assert.rejects(g.open({ platform: 'windows', target: saved, sources: [source('b')] }),
+        { code: 'SOURCE_NOT_FOUND' });
+    } else {
+      const reopened = await g.open({ platform: 'windows', target: saved, sources: [source('b')] });
+      await until(() => g.snapshot(reopened.sessionId).stage === 'error');
+      assert.equal(g.snapshot(reopened.sessionId).error, 'SOURCE_NOT_FOUND');
+      assert.deepEqual(g.snapshot(reopened.sessionId).target, saved);
+    }
     assert.deepEqual(reopenedOwner.calls, []);
   });
 }
@@ -5534,7 +5625,7 @@ test('E49 a group with every original member revoked reports SOURCE_NOT_FOUND wi
   await until(() => f.snapshot(sessionId).stage === 'unavailable');
   assert.equal(f.snapshot(sessionId).error, 'SOURCE_NOT_FOUND');
   assert.equal(f.snapshot(sessionId).attempt, null);
-  assert.equal(f.calls.some(row => ['search', 'detail', 'resolve', 'prepare'].includes(row[0])), false);
+  assert.equal(f.calls.some(row => ['search', 'resolve', 'prepare'].includes(row[0])), false);
 });
 
 test('E49 a manual share outside the original group source scope is not fetched or added as a synthetic member', async t => {
@@ -5549,7 +5640,7 @@ test('E49 a manual share outside the original group source scope is not fetched 
   const { sessionId } = (await f.open({ platform: 'windows', target }));
   const pending = await f.pending(sessionId);
   assert.equal(pending.candidate.source.key, 'a');
-  assert.deepEqual(f.snapshot(sessionId).target.members, target.members);
+  assert.deepEqual(f.snapshot(sessionId).entryTarget.members, target.members);
   assert.deepEqual(f.calls.filter(row => row[0] === 'expand'), [['expand', 'a', 'line']],
     'only the selected ordinary directory is expanded, never the manual share');
   assert.equal(f.calls.some(row => row[0] === 'search'), false);
@@ -5578,8 +5669,8 @@ test('E02 raw history and manual linkage cannot schedule another detail or a man
   t.after(() => f.service.close());
   const target = { id: 'raw:old-links', kind: 'source', title: 'Raw', source: { key: 'a', detailId: 0 } };
   f.library.update(document => {
-    document.history.push({ targetId: target.id, sourceKey: 'a', detailId: '0', candidateId: 'old',
-      lineId: 'line', episode: {}, position: 80, duration: 100, paused: true, updatedAt: 1 });
+    document.history.push(historyEntry(target, { targetId: target.id, sourceKey: 'a', detailId: '0', candidateId: 'old',
+      lineId: 'line', episode: {}, position: 80, duration: 100, paused: true, updatedAt: 1 }));
     document.manual.push({ id: 'old-site', targetId: target.id, sourceKey: 'a', detailId: 'different', enabled: true, failureCount: 0 },
       { id: 'old-share', targetId: target.id, provider: 'quark', share: { url: 'https://pan.invalid/synthetic' },
         enabled: true, failureCount: 0 });
@@ -5770,7 +5861,7 @@ test('an expired season makes otherwise fresh TV metadata stale and is refreshed
   assert.equal(f.snapshot(sessionId).metadataCache.status, 'fresh');
   assert.equal(selected.candidate.season, 1);
   assert.equal(selected.candidate.episode, 1);
-  assert.equal(seasonReads, 3, 'refresh and playback both consult the shared season owner');
+  assert.equal(seasonReads, 2, 'cached browsing does not refresh the actual playback season');
 });
 
 test('browsing a newly declared count-unknown season loads real episodes without changing the playing target', async t => {
@@ -5841,7 +5932,7 @@ test('refreshing a browsed source refreshes only its detail and line and keeps o
   assert.deepEqual(expansions.at(-1), ['a', 'line', true]);
   failRefresh = true;
   await f.command(sessionId, 'browse.refresh');
-  await until(() => f.snapshot(sessionId).error === 'NETWORK_ERROR');
+  await until(() => f.snapshot(sessionId).browsing.error === 'NETWORK_ERROR');
   assert.deepEqual(f.snapshot(sessionId).browsing.episodes, old);
   assert.equal(reads.some(row => row[0] === 'b'), false);
   assert.equal(f.calls.some(row => row[0] === 'resolve'), false);
@@ -5865,7 +5956,7 @@ test('only a unique verified TMDB association supplements an explicitly selected
   await f.command(sessionId, 'browse.metadata', { metadataSourceId: selected.id });
   await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).metadataSupplement !== null);
   assert.equal(f.snapshot(sessionId).metadataSupplement.metadata.overview, 'Supplement');
-  assert.deepEqual(f.snapshot(sessionId).target, { ...movie, metadataProvider: 'douban', metadataId: 51 });
+  assert.deepEqual(f.snapshot(sessionId).target, movie);
   assert.deepEqual(f.snapshot(sessionId).entryTarget, movie);
   assert.equal(f.calls.some(row => row[0] === 'resolve'), false);
 });
@@ -5893,7 +5984,7 @@ test('cache refresh replaces association proof rather than retaining a removed a
   await f.command(sessionId, 'browse.refresh');
   await until(() => f.snapshot(sessionId).metadataSources.length === 1);
   assert.equal(f.snapshot(sessionId).metadataSupplement, null);
-  assert.deepEqual(f.snapshot(sessionId).target, { ...movie, metadataProvider: 'douban', metadataId: 51 });
+  assert.deepEqual(f.snapshot(sessionId).target, movie);
 });
 
 for (const ending of ['stop', 'source']) {
@@ -5976,7 +6067,7 @@ test('cache directory expansion failure keeps old buttons and does not interfere
   const buttons = f.snapshot(sessionId).browsing.episodes;
   failed = true;
   await f.command(sessionId, 'browse.refresh');
-  await until(() => f.snapshot(sessionId).error === 'NETWORK_ERROR');
+  await until(() => f.snapshot(sessionId).browsing.error === 'NETWORK_ERROR');
   assert.deepEqual(f.snapshot(sessionId).browsing.episodes, buttons);
   assert.equal(f.snapshot(sessionId).current.attemptId, current.id);
   await f.command(sessionId, 'media.ended', { attemptId: current.id });
@@ -5985,4 +6076,282 @@ test('cache directory expansion failure keeps old buttons and does not interfere
   assert.equal(f.snapshot(sessionId).attempt, null);
   assert.deepEqual(f.snapshot(sessionId).browsing.episodes, buttons);
   assert.equal(f.calls.filter(row => row[0] === 'resolve').length, 1);
+});
+
+
+test('source initialization publishes loading, then only the selected line menu before file expansion', async t => {
+  const detailGate = deferred(), filesGate = deferred();
+  const f = fixture({ data: {
+    async detail(value, id) { f.calls.push(['detail', value.key, id]); await detailGate.promise;
+      return { lines: [
+        { id: 'first', label: 'First', episodes: [{ id: 'share', share: { provider: 'quark', url: 'https://share.invalid/first' } }] },
+        { id: 'second', label: 'Second', episodes: [{ id: 'unused', name: 'Unused file' }] },
+      ] }; },
+    async expand(value, line) { f.calls.push(['expand', value.key, line.id]); await filesGate.promise;
+      return { ...line, episodes: [{ id: 'file', name: 'Loaded file' }] }; },
+  } });
+  t.after(async () => { detailGate.resolve(); filesGate.resolve(); await f.service.close(); });
+  const opened = await f.open({ target: { id: 'raw:loading', kind: 'source', title: 'Raw',
+    source: { key: 'a', detailId: 0 } } });
+  assert.equal(opened.browsing.loading, true);
+  assert.deepEqual(opened.browsing.episodes, []);
+  assert.deepEqual(opened.candidates, []);
+  detailGate.resolve();
+  await until(() => f.snapshot(opened.sessionId).browsing.lines.length === 2);
+  const menu = f.snapshot(opened.sessionId);
+  assert.equal(menu.browsing.loading, true);
+  assert.equal(menu.browsing.lineId, 'first');
+  assert.deepEqual(menu.browsing.episodes, []);
+  assert.deepEqual(menu.candidates, []);
+  filesGate.resolve();
+  await until(() => !f.snapshot(opened.sessionId).browsing.loading);
+  const loaded = f.snapshot(opened.sessionId);
+  assert.equal(loaded.browsing.episodes[0].name, 'Loaded file');
+  assert.ok(loaded.browsing.episodes[0].playbackTarget.source.candidateId);
+  assert.deepEqual(loaded.candidates, []);
+  assert.deepEqual(f.calls.filter(row => ['detail', 'expand'].includes(row[0])),
+    [['detail', 'a', 0], ['expand', 'a', 'first']]);
+  assert.equal(f.calls.some(row => ['resolve', 'prepare'].includes(row[0])), false);
+});
+
+test('first source expansion failure reports a local directory error without a fake share file', async t => {
+  const f = fixture({ data: {
+    async detail() { return { lines: [{ id: 'share-line', label: 'Share', episodes: [
+      { id: 'share', name: 'Not a file', share: { provider: 'quark', url: 'https://share.invalid/failed' } },
+    ] }] }; },
+    async expand() { throw error('NETWORK_ERROR'); },
+  } });
+  t.after(() => f.service.close());
+  const opened = await f.open({ target: { id: 'raw:failed-directory', kind: 'source', title: 'Raw',
+    source: { key: 'a', detailId: 0 } } });
+  assert.equal(opened.browsing.loading, true);
+  await until(() => !f.snapshot(opened.sessionId).browsing.loading);
+  const failed = f.snapshot(opened.sessionId);
+  assert.equal(failed.browsing.error, 'NETWORK_ERROR');
+  assert.equal(failed.browsing.lines.length, 1);
+  assert.deepEqual(failed.browsing.episodes, []);
+  assert.deepEqual(failed.candidates, []);
+  assert.equal(failed.attempt, null); assert.equal(failed.current, null);
+  assert.equal(f.calls.some(row => ['resolve', 'prepare'].includes(row[0])), false);
+});
+
+for (const related of [false, true]) {
+  test(`workInfo keeps TMDB identity and total counts while browsing and fills an empty summary only with verified Douban (related=${related})`, async t => {
+    const primary = { ...metadata, name: 'Primary series', overview: '', number_of_seasons: 4, number_of_episodes: 93 };
+    const secondary = { id: '20', title: 'Other series', intro: 'Douban summary', episodes_count: 20 };
+    const f = fixture({ data: {
+      async targetMetadata() { return structuredClone(primary); },
+      async metadataSources() { return [
+        { provider: 'tmdb', metadataId: 19, kind: 'tv', title: 'Primary series', metadata: primary },
+        { provider: 'douban', metadataId: '20', kind: 'tv', title: 'Other series', metadata: secondary,
+          seasons: [{ season: 1, episodeCount: 20 }],
+          ...(related ? { association: { kind: 'title-year', targetProvider: 'tmdb', targetMetadataId: 19 } } : {}) },
+      ]; },
+      async detail() { return { ...detail(['Series.S01E01']), intro: 'Never the work summary' }; },
+    } });
+    t.after(() => f.service.close());
+    const { sessionId } = await f.open({ target: tv, results: [{ sourceKey: 'a', items: [{ id: 0, title: 'Series' }] }] });
+    await until(() => f.snapshot(sessionId).metadataSources.length === 2 && !f.snapshot(sessionId).browsing.loading);
+    const before = f.snapshot(sessionId);
+    assert.deepEqual(before.workInfo, { provider: 'tmdb', metadataId: '19', kind: 'tv', title: 'Primary series',
+      summary: related ? 'Douban summary' : '', seasonCount: 4, episodeCount: 93 });
+    const secondarySource = before.metadataSources.find(row => row.provider === 'douban');
+    await f.command(sessionId, 'browse.metadata', { metadataSourceId: secondarySource.id });
+    await until(() => !f.snapshot(sessionId).browsing.loading);
+    await f.command(sessionId, 'browse', { sourceId: before.sources[0].id });
+    await until(() => !f.snapshot(sessionId).browsing.loading);
+    const after = f.snapshot(sessionId);
+    assert.deepEqual(after.workInfo, before.workInfo);
+    assert.deepEqual(after.target, before.target);
+    assert.deepEqual(after.constraint, before.constraint);
+    assert.deepEqual(after.attempt, before.attempt);
+    assert.deepEqual(after.current, before.current);
+    assert.deepEqual(after.prefetch, before.prefetch);
+    assert.deepEqual(after.candidates, before.candidates);
+    assert.equal(f.calls.some(row => ['resolve', 'prepare'].includes(row[0])), false);
+  });
+}
+
+test('select.target rejects forged source coordinates and identity without changing the selected output', async t => {
+  const f = fixture(); t.after(() => f.service.close());
+  const { sessionId } = await f.open({ results: [{ sourceKey: 'a', items: [{ id: 0, title: 'Film' }] }] });
+  await until(() => !f.snapshot(sessionId).browsing.loading);
+  await f.command(sessionId, 'browse', { sourceId: f.snapshot(sessionId).sources[0].id });
+  await until(() => !f.snapshot(sessionId).browsing.loading);
+  const target = f.snapshot(sessionId).browsing.episodes[0].playbackTarget;
+  await f.command(sessionId, 'select.target', { target, metadataSourceId: f.snapshot(sessionId).metadataSourceId });
+  const current = await f.current(sessionId), before = f.snapshot(sessionId);
+  for (const [forged, code] of [
+    [{ ...target, id: 'tmdb:movie:99' }, 'NO_MATCH'],
+    [{ ...target, source: { ...target.source, candidateId: 'forged-file' } }, 'NOT_FOUND'],
+    [{ ...target, source: { ...target.source, lineId: 'forged-line' } }, 'NO_MATCH'],
+    [{ ...target, source: { ...target.source, installationId: 'forged-installation' } }, 'NO_MATCH'],
+    [{ ...target, episode: 99 }, 'NO_MATCH'],
+  ]) {
+    await assert.rejects(f.command(sessionId, 'select.target', { target: forged }), { code });
+    assert.deepEqual(f.snapshot(sessionId).target, before.target);
+    assert.equal(f.snapshot(sessionId).current.attemptId, current.id);
+    assert.equal(f.snapshot(sessionId).attempt, null);
+  }
+  assert.equal(f.calls.filter(row => row[0] === 'resolve').length, 1);
+});
+
+
+test('generic prepare preserves the selected target and lease while another source directory is loading', async t => {
+  const gate = deferred(), entered = deferred();
+  const f = fixture({ data: {
+    async detail(value) {
+      if (value.key === 'b') { entered.resolve(); await gate.promise; }
+      return detail(['Film.1080p']);
+    },
+  } });
+  t.after(async () => { gate.resolve(); await f.service.close(); });
+  const { sessionId } = await f.open({ platform: 'ios', results: [
+    { sourceKey: 'a', items: [{ id: 'A', title: 'Film' }] },
+    { sourceKey: 'b', items: [{ id: 'B', title: 'Film' }] },
+  ] });
+  const first = await f.pending(sessionId), before = f.snapshot(sessionId);
+  const other = before.sources.find(row => row.source.key === 'b');
+  await f.command(sessionId, 'browse', { sourceId: other.id });
+  await entered.promise;
+  assert.equal(f.snapshot(sessionId).browsing.loading, true);
+  await f.command(sessionId, 'prepare');
+  const during = f.snapshot(sessionId);
+  assert.equal(during.attempt.id, first.id);
+  assert.equal(during.attempt.prepareOnly, true);
+  assert.deepEqual(during.target, before.target);
+  assert.deepEqual(during.constraint, before.constraint);
+  assert.deepEqual(during.prefetch, before.prefetch);
+  gate.resolve();
+  await until(() => !f.snapshot(sessionId).browsing.loading);
+  await f.command(sessionId, 'play');
+  assert.equal(f.snapshot(sessionId).attempt.id, first.id);
+  assert.equal(f.snapshot(sessionId).attempt.prepareOnly, false);
+  assert.equal(f.calls.filter(row => row[0] === 'resolve').length, 1);
+  assert.equal(f.calls.filter(row => row[0] === 'prepare').length, 1);
+});
+
+for (const secondCount of [7, null]) {
+  test(`Douban workInfo totals use all real seasons and do not invent an unknown count (${secondCount})`, async t => {
+    const seasons = [{ season: 1, episodeCount: 3, metadataId: '20' },
+      { season: 2, episodeCount: secondCount, metadataId: '21' }];
+    const value = { id: '20', title: 'Douban series', intro: 'Primary Douban summary', doubanSeasons: seasons };
+    const f = fixture({ data: {
+      async tmdbTargetEntry() { return null; },
+      async targetMetadata() { return structuredClone(value); },
+      async metadataSources() { return [{ provider: 'douban', metadataId: '20', kind: 'tv',
+        title: value.title, metadata: value, seasons }]; },
+      async seasonMetadata(_target, season) { return { season_number: season,
+        episodes: [1, 2, 3].map(episode_number => ({ season_number: season, episode_number })) }; },
+    } });
+    t.after(() => f.service.close());
+    const { sessionId } = await f.open({ target: { id: 'douban:tv:20', kind: 'tv', title: value.title,
+      metadataProvider: 'douban', metadataId: '20' } });
+    await until(() => f.snapshot(sessionId).metadataSources[0]?.seasons?.length === 2 && !f.snapshot(sessionId).browsing.loading);
+    assert.deepEqual(f.snapshot(sessionId).workInfo, { provider: 'douban', metadataId: '20', kind: 'tv',
+      title: value.title, summary: value.intro, seasonCount: 2, episodeCount: secondCount === null ? null : 10 });
+    assert.equal(f.snapshot(sessionId).attempt, null);
+    assert.equal(f.calls.some(row => ['resolve', 'prepare'].includes(row[0])), false);
+  });
+}
+
+test('real library edits and playback writes retain corrupt siblings and exact unedited extension materials after restart', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'film-library-service-'));
+  const library = createPlaybackLibrary({ dataRoot: root });
+  const f = fixture({ library });
+  t.after(async () => { await f.service.close(); library.close(); rmSync(root, { recursive: true }); });
+  library.update(document => {
+    document.extension = rawJSON('1e400');
+    document.preferences.extension = rawJSON('9007199254740993');
+    document.manual.push(null, { id: 'bad-sibling', failureCount: 'broken' },
+      { id: 'edited', targetId: 'another-target', sourceKey: 'a', detailId: 'old', failureCount: 0,
+        extension: rawJSON('9007199254740993') });
+    document.history.push(null, { targetId: 'bad-sibling', position: 'broken' });
+    document.blocks.push(null, { targetId: 'unrelated', extension: rawJSON('1e400') });
+  });
+  await f.service.updateManual({ action: 'save', item: { id: 'edited', targetId: 'another-target', sourceKey: 'a', detailId: 'new' } });
+  await f.service.setSettings({ ...defaultPreferences(), iosAutoPrepare: false });
+  const { sessionId } = await f.open({ platform: 'windows' });
+  const playing = await f.current(sessionId);
+  library.update(document => { document.history[0].extension = rawJSON('0.123456789012345678901'); });
+  await f.command(sessionId, 'stop');
+  assert.equal(f.resources.size, 0);
+  const restarted = createPlaybackLibrary({ dataRoot: root });
+  t.after(() => restarted.close());
+  const stored = restarted.read();
+  assert.equal(stringifyJSONValue(stored.extension), '1e400');
+  assert.equal(stringifyJSONValue(stored.preferences.extension), '9007199254740993');
+  assert.equal(stored.preferences.iosAutoPrepare, false);
+  assert.deepEqual(stored.manual.slice(0, 2), [null, { id: 'bad-sibling', failureCount: 'broken' }]);
+  assert.equal(stored.manual[2].detailId, 'new');
+  assert.equal(stringifyJSONValue(stored.manual[2].extension), '9007199254740993');
+  assert.deepEqual(stored.history.slice(1), [null, { targetId: 'bad-sibling', position: 'broken' }]);
+  assert.equal(stored.history[0].playbackTarget.source.candidateId, playing.candidate.id);
+  assert.equal(stringifyJSONValue(stored.history[0].extension), '0.123456789012345678901');
+  assert.equal(stored.blocks[0], null);
+});
+
+for (const item of [
+  { share: { url: 'file:///private/share' } },
+  { share: { url: 'https://name:secret@pan.quark.cn/s/test' } },
+  { share: { url: 'https://pan.quark.cn/s/test', password: false } },
+  { enabled: 'yes' }, { autoDisable: 1 }, { seasonHint: -1 }, { seasonHint: 0.5 },
+]) test(`manual save checks edited operational fields ${stringifyJSONValue(item)}`, async t => {
+  const f = fixture(); t.after(() => f.service.close());
+  await assert.rejects(f.service.updateManual({ action: 'save', item: { id: 'edited', targetId: movie.id,
+    provider: 'quark', share: { url: 'https://pan.quark.cn/s/test' }, ...item } }), { code: 'INVALID_REQUEST' });
+  assert.deepEqual(f.library.read().manual, []);
+  assert.equal(f.calls.length, 0);
+});
+
+test('a corrupt manual failure counter does not block a healthy match or get overwritten', async t => {
+  const f = fixture(); t.after(() => f.service.close());
+  f.library.update(document => { document.manual.push(
+    { id: 'bad', targetId: movie.id, sourceKey: 'a', detailId: 'must-not-fetch', failureCount: 'broken' },
+    { id: 'good', targetId: movie.id, sourceKey: 'a', detailId: 'good', failureCount: 0 }); });
+  const { sessionId } = await f.open({ platform: 'windows', sources: [source('a')] });
+  const attempt = await f.pending(sessionId);
+  assert.equal(attempt.candidate.source.detailId, 'good');
+  assert.deepEqual(f.calls.filter(row => row[0] === 'detail'), [['detail', 'a', 'good']]);
+  assert.equal(f.library.read().manual[0].failureCount, 'broken');
+});
+
+test('ambiguous manual identity cannot silently replace and discard either stored row', async t => {
+  const f = fixture(); t.after(() => f.service.close());
+  const item = { id: 'duplicate', targetId: movie.id, sourceKey: 'a', detailId: 0, failureCount: 0 };
+  f.library.update(document => { document.manual.push({ ...item, extension: 'first' }, { ...item, extension: 'second' }); });
+  const before = f.library.read();
+  await assert.rejects(f.service.updateManual({ action: 'save', item }), { code: 'CORRUPT_STORAGE' });
+  assert.deepEqual(f.library.read(), before);
+});
+
+test('manual save replaces known selection fields while retaining unedited record/share extensions', async t => {
+  const f = fixture(); t.after(() => f.service.close());
+  const share = { id: 'edited', targetId: movie.id, kind: 'share', provider: 'quark',
+    share: { url: 'https://pan.quark.cn/s/test', password: 'synthetic-only', extension: { keep: true } },
+    extension: { keep: true }, seasonHint: 2 };
+  await f.service.updateManual({ action: 'save', item: share });
+  await f.service.updateManual({ action: 'save', item: { id: share.id, targetId: movie.id,
+    provider: 'quark', share: { url: share.share.url } } });
+  assert.deepEqual(f.library.read().manual[0].share, { url: share.share.url, extension: { keep: true } });
+  assert.equal('seasonHint' in f.library.read().manual[0], false);
+  await f.service.updateManual({ action: 'save', item: { id: share.id, targetId: movie.id, sourceKey: 'a', detailId: 'actual' } });
+  const row = f.library.read().manual[0];
+  assert.equal('share' in row, false);
+  assert.equal('provider' in row, false);
+  assert.deepEqual(row.extension, { keep: true });
+  const { sessionId } = await f.open({ platform: 'windows', sources: [source('a')] });
+  assert.equal((await f.pending(sessionId)).candidate.source.detailId, 'actual');
+  assert.equal(f.calls.some(row => row[0] === 'expand'), false);
+});
+
+for (const position of [-1, 'broken']) test(`only a consumed history resume position is checked (${position})`, async t => {
+  const f = fixture(); t.after(() => f.service.close());
+  f.library.update(document => { document.history.push({ targetId: movie.id, position }); });
+  const { sessionId } = await f.open({ platform: 'windows', sources: [source('a')] });
+  await until(() => f.snapshot(sessionId).stage === 'error');
+  assert.equal(f.snapshot(sessionId).error, 'CORRUPT_STORAGE');
+  assert.equal(f.snapshot(sessionId).attempt, null);
+  assert.equal(f.calls.some(row => row[0] === 'prepare'), false);
+  assert.equal(f.library.read().history[0].position, position);
 });

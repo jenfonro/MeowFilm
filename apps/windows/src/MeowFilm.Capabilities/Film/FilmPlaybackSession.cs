@@ -67,6 +67,37 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     private Exception? releaseFailure;
     private double rate = 1;
     private string? aspect;
+    private TaskCompletionSource browseChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private void WakeBrowsing()
+    {
+        var previous = browseChanged;
+        browseChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        previous.TrySetResult();
+    }
+
+    internal async Task WaitForBrowsingAsync(FilmPlaybackPage targetPage,
+        Func<FilmPlaybackSnapshot, bool> matches, CancellationToken token)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, connection!.Revoked);
+        while (true)
+        {
+            linked.Token.ThrowIfCancellationRequested();
+            RequirePage(targetPage);
+            if (targetPage.ConnectionFailed) throw new FilmPlaybackException("DISCONNECTED");
+            var changed = browseChanged.Task;
+            if (snapshot is { } failed && !FilmJson.Bool(failed.Browsing, "loading") &&
+                FilmJson.Text(failed.Browsing, "error") is { Length: > 0 } failure)
+                throw new FilmPlaybackException(failure);
+            if (snapshot is { } state && matches(state) && !FilmJson.Bool(state.Browsing, "loading"))
+            {
+                string error = FilmJson.Text(state.Browsing, "error");
+                if (error.Length > 0) throw new FilmPlaybackException(error);
+                return;
+            }
+            await changed.WaitAsync(linked.Token);
+        }
+    }
 
     internal FilmPlaybackSession(Func<CancellationToken, Task<RuntimeConnection>> capture, IFilmNativeMedia media,
         Func<FilmPlaybackPage, JsonElement, bool, CancellationToken, Task<FilmPlaybackOpen>>? prepareOpen = null)
@@ -243,7 +274,10 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
                 Apply(next);
             }
             if (!token.IsCancellationRequested && generation == ownerGeneration)
+            {
                 page?.SetConnectionError("DISCONNECTED");
+                WakeBrowsing();
+            }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
@@ -254,6 +288,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
             if (generation == ownerGeneration)
             {
                 page?.SetConnectionError(Code(error));
+                WakeBrowsing();
                 if (connection?.Revoked.IsCancellationRequested == true) RevokeMedia();
             }
         }
@@ -455,7 +490,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     }
 
     private static bool ChangesPlayback(string action) => action is "play" or "prepare" or "stop" or
-        "select.episode" or "select.candidate" or "next" or "previous" or "pan" or "quality" or "switch" or "block" or "media.retry";
+        "select.target" or "next" or "previous" or "pan" or "quality" or "switch" or "block" or "media.retry";
 
     private async Task EnterMediaCommitAsync(CancellationToken token)
     {
@@ -478,6 +513,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
         string previousError = snapshot is { } old ? DisplayError(old) : "";
         snapshot = next;
         page?.Apply(next);
+        WakeBrowsing();
         if (error.Length > 0 && error != previousError)
             OperationFailed?.Invoke(this, error);
         NotifyMedia();
@@ -525,7 +561,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
             if (receipt.AttemptId != id) throw new FilmPlaybackException("INVALID_RESPONSE");
             var candidate = FilmCandidateItem.Read(FilmJson.Member(candidateSnapshot.Attempt, "candidate"));
             var lifetime = CancellationTokenSource.CreateLinkedTokenSource(connection!.Revoked, publication.Token);
-            input = new(receipt, candidate, candidateSnapshot.Target, candidateSnapshot.ContentKind,
+            input = new(receipt, candidate, candidateSnapshot.Target, candidateSnapshot.WorkInfo?.Kind ?? candidateSnapshot.Target.Kind,
                 FilmJson.Member(FilmJson.Member(candidateSnapshot.Attempt, "candidate"), "source").Clone(),
                 lifetime, publication, connection.Revoked);
             pending = input;
@@ -538,7 +574,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
                 input.Lease = input.Authority.CreateLease(receipt.ResourceId, receipt.Address, lifetime.Token);
             }
             bool sameEpisode = HasOutput && current is { } acceptedDonor && SameEpisode(acceptedDonor, input);
-            intent = new RuntimeMediaPlaybackIntent("film", id, receipt.Title,
+            intent = new RuntimeMediaPlaybackIntent("film", id,
                 receipt.Position, receipt.Paused, sameEpisode ? current!.NativeScope : null);
             await media.PrepareAsync(intent, receipt, input.Lease, lifetime.Token);
             prepared = true;
@@ -582,6 +618,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
         }
         catch (OperationCanceledException) when (!committed && (publication.IsCancellationRequested ||
             input?.Lifetime.IsCancellationRequested == true || generation != ownerGeneration)) { }
+        catch (PlaybackException error) when (!committed && error.Code == PlaybackError.Superseded) { }
         catch (Exception error)
         {
             if (committed)
@@ -832,7 +869,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
             }));
         }
         NotifyMedia();
-        if (args.PropertyName is "PositionSeconds" or "DurationSeconds" or "PauseRequested") QueueProgress();
+        if (args.PropertyName is "PositionSeconds" or "DurationSeconds" or "IsPaused") QueueProgress();
     }
     private void QueueProgress()
     {

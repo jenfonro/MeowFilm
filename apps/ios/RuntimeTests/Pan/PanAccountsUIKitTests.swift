@@ -22,9 +22,9 @@ final class PanAccountsUIKitTests: XCTestCase {
         page.loadViewIfNeeded()
         defer { PageViewController.invalidatePages(in: page); model.close() }
         XCTAssertNil(page.table.backgroundView)
-        XCTAssertEqual(model.rows.count, 7)
+        XCTAssertEqual(model.rows.map(\.id), [.baidu, .quark, .uc, .tianyi, .yidong])
         XCTAssertEqual(model.rows[0].account?.status, .unverified)
-        for index in 1...7 {
+        for index in 1...5 {
             let cell = page.tableView(page.table, cellForRowAt: IndexPath(row: index, section: 0))
             XCTAssertFalse(descendants(cell).contains { $0 is UIActivityIndicatorView })
         }
@@ -50,7 +50,7 @@ final class PanAccountsUIKitTests: XCTestCase {
         defer { PageViewController.invalidatePages(in: page); model.close() }
         XCTAssertTrue(page.table is SettingsTableView)
         XCTAssertEqual(page.table.separatorStyle, .none)
-        XCTAssertEqual(page.tableView(page.table, numberOfRowsInSection: 0), 8)
+        XCTAssertEqual(page.tableView(page.table, numberOfRowsInSection: 0), 6)
         let header = page.tableView(page.table, cellForRowAt: IndexPath(row: 0, section: 0))
         XCTAssertEqual(descendants(header).compactMap { ($0 as? UILabel)?.text }, ["平台", "状态", "操作"])
         XCTAssertTrue(descendants(header).compactMap { $0 as? UILabel }.allSatisfy(\.adjustsFontForContentSizeCategory))
@@ -316,6 +316,63 @@ final class PanAccountsUIKitTests: XCTestCase {
         XCTAssertEqual(try statusLabel(in: cell).text, "不可用")
         XCTAssertEqual(try statusLabel(in: cell).textColor, UIColor(page.theme.settings.muted))
         XCTAssertTrue(descendants(cell).compactMap { $0 as? UIButton }.isEmpty)
+        let calls = await runtime.operations
+        XCTAssertTrue(calls.isEmpty)
+    }
+
+    func testCorruptAccountUsesDangerBadgeAndKeepsLongStatusReadableWithoutActions() async throws {
+        let runtime = try PanUIKitRuntime()
+        let document = RuntimeValue.object(["version": .number(1), "accounts": .object([
+            "baidu": .object(["revision": .number(1), "credentials": .object(["cookie": .number(1)])]),
+        ])])
+        try runtime.storage.store.write(RuntimeJSON.encode(document), key: FilmSettingsDocument.key)
+        let model = PanAccountsModel(service: runtime.service)
+        let page = PanAccountsViewController(model: model, themeProvider: PanAccountsTheme())
+        let window = mount(page)
+        defer { unmount(page, window: window); model.close() }
+        await eventually { page.isPageVisible }
+        XCTAssertEqual(model.rows[0].account?.errorCode, .corruptStorage)
+        XCTAssertNil(model.rows[0].account?.status)
+        XCTAssertEqual(model.rows[0].actions, [])
+        XCTAssertEqual(model.rows[1].statusTitle, "未登录")
+        XCTAssertEqual(model.rows[1].actions, [.login])
+        XCTAssertNil(model.notice)
+        for category in [UIContentSizeCategory.large, .accessibilityExtraExtraExtraLarge] {
+            page.traitOverrides.preferredContentSizeCategory = category
+            for style in [UIUserInterfaceStyle.light, .dark] {
+                page.overrideUserInterfaceStyle = style; page.applyTheme()
+                for width in [CGFloat(320), 390, 430] {
+                    window.frame = CGRect(x: 0, y: 0, width: width, height: 844)
+                    page.view.frame = window.bounds
+                    window.setNeedsLayout(); window.layoutIfNeeded(); page.view.layoutIfNeeded()
+                    let path = IndexPath(row: 1, section: 0)
+                    page.table.scrollToRow(at: path, at: .top, animated: false)
+                    page.table.layoutIfNeeded()
+                    let cell = try XCTUnwrap(page.table.cellForRow(at: path))
+                    cell.layoutIfNeeded(); cell.contentView.layoutIfNeeded()
+                    let columns = try XCTUnwrap(descendants(cell).compactMap { $0 as? PanAccountColumns }.first)
+                    let badge = try statusBadge(in: cell)
+                    let label = try statusLabel(in: cell)
+                    XCTAssertEqual(label.text, "账号数据损坏")
+                    XCTAssertEqual(badge.accessibilityLabel, label.text)
+                    XCTAssertEqual(label.textColor, UIColor(page.theme.settings.danger))
+                    XCTAssertEqual(badge.backgroundColor, UIColor(page.theme.settings.surface.mixed(
+                        with: page.theme.settings.danger, ratio: page.theme.dark ? 0.12 : 0.08)))
+                    XCTAssertTrue(label.adjustsFontForContentSizeCategory)
+                    XCTAssertFalse(label.font.fontDescriptor.symbolicTraits.contains(.traitBold))
+                    XCTAssertFalse(badge.hasAmbiguousLayout, "\(width)pt / \(category.rawValue) / \(style.rawValue)")
+                    XCTAssertEqual(badge.layer.cornerRadius, min(badge.bounds.width, badge.bounds.height) / 2, accuracy: 0.5)
+                    assertContained(badge, in: columns.columns[1])
+                    try assertTextFits(label, in: badge, maximumLines: category.isAccessibilityCategory ? 2 : 4)
+                    let icon = try XCTUnwrap(descendants(badge).compactMap { $0 as? UIImageView }.first)
+                    XCTAssertEqual(icon.tintColor, UIColor(page.theme.settings.danger))
+                    assertContained(icon, in: badge); assertSymbolFits(icon, size: 12)
+                    XCTAssertTrue(descendants(cell).compactMap { $0 as? UIButton }.isEmpty)
+                    if width == 320 { attach(page, name: "pan-account-corrupt-\(category.rawValue)-\(style.rawValue)") }
+                }
+            }
+        }
+        XCTAssertEqual(try runtime.storage.read(), document)
         let calls = await runtime.operations
         XCTAssertTrue(calls.isEmpty)
     }
@@ -620,7 +677,6 @@ private func panUIProvider(_ id: PanProviderID) -> RuntimeValue {
     case .baidu, .quark, .uc: fields = ["cookie"]
     case .tianyi: fields = ["cookie", "username", "password"]
     case .yidong: fields = ["authorization", "refreshedAt"]
-    case .quarkTV, .ucTV: fields = ["refreshToken", "deviceId", "accessToken", "expiresAt"]
     }
     return .object(["provider": .string(id.rawValue), "credentialFields": .array(fields.map(RuntimeValue.string)),
                     "login": .bool([PanProviderID.baidu, .quark, .uc].contains(id)), "refresh": .bool(true)])
@@ -629,7 +685,6 @@ private func panUICredentials(_ id: PanProviderID) -> RuntimeValue {
     switch id {
     case .baidu, .quark, .uc, .tianyi: return .object(["cookie": .string("synthetic-ui-cookie")])
     case .yidong: return .object(["authorization": .string("synthetic-ui-authorization")])
-    case .quarkTV, .ucTV: return .object(["refreshToken": .string("synthetic-ui-refresh"), "deviceId": .string("synthetic-ui-device")])
     }
 }
 private func panUIAccount(_ id: PanProviderID, _ status: PanAccountStatus = .signedOut, revision: Int = 0,

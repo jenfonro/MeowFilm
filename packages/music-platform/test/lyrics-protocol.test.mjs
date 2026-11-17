@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { deflateSync } from 'node:zlib';
+import { deflateSync, inflateSync } from 'node:zlib';
 import { fixture, response, rpc, kgHash, seedClients, krc, kuwo, md5, gate } from './support.mjs';
 
 // HEAD Windows MusicNativeLyricsTests and Swift NativeService Lyrics tests.
@@ -93,19 +93,100 @@ test('KG required lyric and chorus status conversion fails at consumption withou
   }
 });
 
-test('QQ actual lyric fields reject XML declarations, duplicate content, malformed cipher and damaged optional tracks without executing data', async () => {
+test('QQ actual lyric fields reject XML declarations, duplicate content, malformed main cipher without executing data', async () => {
   for (const lyric of ['01', '0'.repeat(16), 'WzAwOjAxXXg=',
     '<x LyricContent="[00:01]a" LyricContent="[00:01]b"/>', '<!DOCTYPE x><x LyricContent="[00:01]x"/>']) {
     const f = fixture(() => rpc({ lyric })); seedClients(f);
     await assert.rejects(f.request('tx', 'lyrics', { id: 'mid' }), { code: 'INVALID_RESPONSE' });
     assert.equal(f.requests.length, 1); await f.close();
   }
-  const damaged = fixture(() => rpc({ lyric: '[00:01]main', trans: 'not-hex' })); seedClients(damaged);
-  await assert.rejects(damaged.request('tx', 'lyrics', { id: 'mid' }), { code: 'INVALID_RESPONSE' }); await damaged.close();
   const xml = fixture(() => rpc({ lyric: '<x LyricContent="[00:01]A &amp; B"/>', roma: '[00:01]yuan', qrc_t: 999999 }));
   seedClients(xml);
   assert.deepEqual(await xml.request('tx', 'lyrics', { id: 'mid' }),
     { text: '[00:01]A & B', translation: '', romanization: '[00:01]yuan' }); await xml.close();
+});
+
+test('QQ damaged auxiliary lyric tracks retain the main and healthy sibling with finite error facts', async t => {
+  for (const [trans, roma, errors] of [
+    ['not-hex', '[00:01]roman', { translation: 'INVALID_RESPONSE' }],
+    ['[00:01]translated', 'not-hex', { romanization: 'INVALID_RESPONSE' }],
+    ['not-hex', 'not-hex', { translation: 'INVALID_RESPONSE', romanization: 'INVALID_RESPONSE' }],
+  ]) {
+    const f = fixture(() => rpc({ lyric: '[00:01]main', trans, roma })); seedClients(f); t.after(() => f.close());
+    assert.deepEqual(await f.request('tx', 'lyrics', { id: 'mid' }), { text: '[00:01]main',
+      translation: errors.translation ? '' : trans, romanization: errors.romanization ? '' : roma, errors });
+    assert.equal(f.requests.length, 1);
+  }
+  const invalid = fixture(() => rpc({ lyric: '', trans: 'not-hex', roma: 'not-hex' }));
+  seedClients(invalid); t.after(() => invalid.close());
+  await assert.rejects(invalid.request('tx', 'lyrics', { id: 'mid' }), { code: 'INVALID_RESPONSE' });
+  const limited = fixture(() => rpc({ lyric: '[00:01]main', trans: 'x'.repeat(512 * 1024) }));
+  seedClients(limited); t.after(() => limited.close());
+  await assert.rejects(limited.request('tx', 'lyrics', { id: 'mid' }), { code: 'LIMIT' });
+});
+
+test('KRC and Kuwo accept equivalent Base64 whitespace and omitted padding but reject ignored junk', async t => {
+  const plain = '[00:01.00]A', kw = kuwo(plain), header = Buffer.from('tp=content\r\n\r\n');
+  const cases = [
+    ['kg', krc('[1000,300]A'), encoded => encoded, '[1000,300]A'],
+    ['kw', inflateSync(kw.subarray(header.length)).toString(), encoded =>
+      Buffer.concat([header, deflateSync(Buffer.from(encoded))]), '[00:01.000]A'],
+  ];
+  for (const [platform, original, wrap, expected] of cases) {
+    for (const encoded of [original.replace(/=+$/, ''), ' \n' + original.replace(/(.{5})/g, '$1 \t\r\n')]) {
+      const f = platform === 'kg' ? kgFixture(wrap(encoded)) : fixture(() => response(wrap(encoded)));
+      t.after(() => f.close());
+      const result = platform === 'kg' ? await readKg(f) : await f.request('kw', 'lyrics', { id: '123' });
+      assert.equal(result.text, expected);
+    }
+    for (const encoded of [original.slice(0, 4) + '!' + original.slice(4), original + '=', 'A', '=AAA', 'AA=A']) {
+      const f = platform === 'kg' ? kgFixture(wrap(encoded)) : fixture(() => response(wrap(encoded)));
+      t.after(() => f.close());
+      await assert.rejects(platform === 'kg' ? readKg(f) : f.request('kw', 'lyrics', { id: '123' }), { code: 'INVALID_RESPONSE' });
+    }
+  }
+});
+
+test('Migu failed optional translation preserves main lyrics and records its actual error', async t => {
+  for (const [reply, code] of [
+    [() => response('missing', { status: 503 }), 'UPSTREAM_HTTP'],
+    [() => response(Buffer.from([255])), 'INVALID_RESPONSE'],
+    [() => { throw new Error('synthetic network failure'); }, 'NETWORK_ERROR'],
+  ]) {
+    const f = fixture(request => {
+      const path = new URL(request.url).pathname;
+      if (path.endsWith('/resourceinfo.do')) return response({ code: '000000', data: { resource: [
+        { lrcUrl: 'https://lyrics.invalid/main', trcUrl: 'https://lyrics.invalid/translation' },
+      ] } });
+      return path === '/main' ? response('[00:01]main') : reply();
+    });
+    t.after(() => f.close());
+    assert.deepEqual(await f.request('mg', 'lyrics', { id: '1' }),
+      { text: '[00:01]main', translation: '', romanization: '', errors: { translation: code } });
+    assert.equal(f.requests.length, 3);
+  }
+});
+
+test('Migu translation cancellation and retirement remain failures and wait for physical release', async t => {
+  for (const cancel of [false, true]) {
+    const held = gate(), controller = new AbortController();
+    const f = fixture(async request => {
+      const path = new URL(request.url).pathname;
+      if (path.endsWith('/resourceinfo.do')) return response({ code: '000000', data: { resource: [
+        { lrcUrl: 'https://lyrics.invalid/main', trcUrl: 'https://lyrics.invalid/translation' },
+      ] } });
+      if (path === '/main') return response('[00:01]main');
+      await held.wait(); return response(Buffer.from([255]));
+    });
+    t.after(async () => { held.release(); await f.close(); });
+    const work = f.request('mg', 'lyrics', { id: '1' }, { signal: controller.signal }); work.catch(() => {});
+    await held.entered;
+    const publication = cancel ? null : f.owner.sessionUpdate({ platform: 'mg', session: null });
+    if (cancel) controller.abort();
+    assert.equal(f.requests.at(-1).signal.aborted, true); held.release();
+    await assert.rejects(work, { code: cancel ? 'CANCELLED' : 'STALE_SESSION' }); await publication;
+    assert.equal(f.requests.length, 3);
+  }
 });
 
 test('Kuwo independent zlib/XOR golden, plain entities, duplicate translation and overlap retain fixed semantics', async () => {

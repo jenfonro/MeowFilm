@@ -246,7 +246,8 @@ test('Windows packaging preserves common files byte-for-byte and is reproducible
     .includes("from './native-settings.mjs'"));
   assert.deepEqual(first.relocations.find(item => item.source === 'apps/windows/runtime/native-settings.mjs'), {
     source: 'apps/windows/runtime/native-settings.mjs', path: 'app/windows/native-settings.mjs',
-    imports: [{ from: '@meowfilm/runtime-bridge', to: '@meowfilm/runtime-bridge' }],
+    imports: [{ from: '@meowfilm/runtime-bridge', to: '@meowfilm/runtime-bridge' },
+      { from: '@meowfilm/runtime-bridge/json', to: '@meowfilm/runtime-bridge/json' }],
   });
 });
 

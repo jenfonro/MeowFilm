@@ -90,7 +90,7 @@ public struct FilmPlaybackTarget: Equatable, Codable, Sendable {
     }
 }
 
-public struct FilmEpisodePosition: Equatable, Sendable {
+public struct FilmEpisodePosition: Hashable, Sendable {
     public let season: Int?
     public let episode: Int?
     public let globalEpisode: Int?
@@ -449,6 +449,12 @@ public struct FilmPlaybackBrowsing: Equatable, Sendable {
     public let lines: [FilmPlaybackLine]
     public let files: [FilmPlaybackFile]
     public let originalFiles: [FilmPlaybackFile]
+    init(sourceID: String?, lineID: FilmPlaybackIdentifier?, season: Int?,
+         lines: [FilmPlaybackLine], loading: Bool = true, error: String? = nil) {
+        self.sourceID = sourceID; self.lineID = lineID; self.season = season
+        self.lines = lines; self.loading = loading; self.error = error
+        refreshing = false; files = []; originalFiles = []
+    }
     init(_ value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
         sourceID = fields["sourceId"]?.filmText
@@ -537,6 +543,32 @@ public struct FilmPlaybackMetadataSupplement: Equatable, Sendable {
     }
 }
 
+public struct FilmPlaybackWorkInfo: Equatable, Sendable {
+    public let provider: FilmMetadataProvider
+    public let metadataID: FilmPlaybackIdentifier
+    public let kind: FilmPlaybackKind
+    public let title: String
+    public let summary: String
+    public let seasonCount: Int?
+    public let episodeCount: Int?
+
+    init(_ value: RuntimeValue) throws {
+        let fields = try value.filmRequiredObject()
+        guard let provider = FilmMetadataProvider(rawValue: try fields.filmString("provider")),
+              let kind = FilmPlaybackKind(rawValue: try fields.filmString("kind")),
+              kind == .movie || kind == .tv else { throw FilmPlaybackError.invalidResponse }
+        self.provider = provider; self.kind = kind
+        metadataID = try FilmPlaybackIdentifier(fields.filmValue("metadataId"))
+        title = try fields.filmString("title"); summary = try fields.filmString("summary")
+        func count(_ key: String) throws -> Int? {
+            guard let value = try fields.filmOptional(key) else { return nil }
+            guard let count = value.filmInteger else { throw FilmPlaybackError.invalidResponse }
+            return count
+        }
+        seasonCount = try count("seasonCount"); episodeCount = try count("episodeCount")
+    }
+}
+
 public struct FilmPlaybackSnapshot: Equatable, Sendable {
     public let sessionID: UUID
     public let sequence: Int64
@@ -546,6 +578,7 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
     public private(set) var entryResolution: String?
     public let stage: String
     public let error: String?
+    public private(set) var workInfo: FilmPlaybackWorkInfo?
     public private(set) var metadata: RuntimeValue
     public private(set) var metadataCache: FilmMetadataCache?
     public private(set) var metadataSupplement: FilmPlaybackMetadataSupplement?
@@ -574,6 +607,7 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
         entrySurface = fields["entrySurface"]?.filmText
         entryResolution = fields["entryResolution"]?.filmText
         stage = try fields.filmString("stage"); error = fields["error"]?.filmText
+        workInfo = try fields.filmOptional("workInfo").map(FilmPlaybackWorkInfo.init)
         metadata = try fields.filmValue("metadata")
         if let cache = fields["metadataCache"], cache != .null {
             metadataCache = FilmMetadataCache(value: cache)
@@ -622,6 +656,10 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
             result.metadataSources = previous.metadataSources
             result.metadataSourceID = previous.metadataSourceID
         }
+        if workInfo == nil, stage == "loading" || stage == "error" ||
+            browsing.loading || browsing.error != nil || metadataError != nil {
+            result.workInfo = previous.workInfo
+        }
         if entryResolution == "loading" || entryResolution == "error",
            previous.entryResolution != "loading", previous.entryResolution != "error" {
             result.entryResolution = previous.entryResolution
@@ -636,6 +674,33 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
             result.episodes = previous.episodes
             result.candidates = previous.candidates
         }
+        return result
+    }
+
+    func displaying(_ directory: FilmPlaybackDirectorySlice) -> Self {
+        var result = self
+        result.browsing = directory.browsing
+        result.metadata = directory.metadata
+        result.metadataCache = directory.metadataCache
+        result.metadataSupplement = directory.metadataSupplement
+        result.metadataSourceID = directory.key.metadata
+        result.metadataSources = directory.metadataSources
+        result.episodes = directory.episodes
+        result.candidates = directory.candidates
+        result.entryResolution = directory.entryResolution
+        return result
+    }
+
+    func loadingDirectory(_ key: FilmPlaybackDirectoryKey, error: String? = nil) -> Self {
+        var result = self
+        result.browsing = .init(sourceID: key.source, lineID: key.line, season: key.season,
+            lines: key.source == browsing.sourceID ? browsing.lines : [], loading: error == nil, error: error)
+        if key.metadata != metadataSourceID {
+            result.metadata = .null; result.metadataCache = nil; result.metadataSupplement = nil
+        }
+        result.metadataSourceID = key.metadata
+        result.episodes = []; result.candidates = []
+        result.entryResolution = nil
         return result
     }
 }

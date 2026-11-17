@@ -34,6 +34,7 @@ public static class FilmPlayerOverlayTests
         yield return Test("keyboard seek cancels on focus loss and cannot cross a media replacement", KeyboardSeekCancellation);
         yield return Test("range pointer previews before release and cancels on focus loss or occurrence replacement", PointerSeek);
         yield return Test("real HWND foreground survives two fullscreen and PiP round trips without decoding", NativeHostRoundTrips);
+        yield return Test("picture and controls share child coordinates during owner movement without a layout pass", NativeHostMovement);
         yield return Test("real HWND foreground clips to the page and releases hidden and replaced views", NativeHostVisibility);
         yield return Test("owner window can close before the film surface is disposed", NativeHostOwnerClose);
     }
@@ -503,7 +504,7 @@ public static class FilmPlayerOverlayTests
         Check(seek.Value == 0 && scene.Rig.Native.Position == 0 && scene.NativeCount("seek") == seeks,
             $"an old keyboard release cannot seek the replacement occurrence; slider={seek.Value} native={scene.Rig.Native.Position} " +
             $"page={scene.Rig.Page.Position} seeks={scene.NativeCount("seek")}/{seeks} identity={scene.Rig.Page.MediaIdentity} " +
-            $"preserve={scene.Rig.Native.Intents.Last().PreserveCurrent}");
+            $"preserve={scene.Rig.Native.Intents.Last().PreserveFrom is not null}");
         RouteKey(seek, Key.Right);
         RouteKey(seek, Key.Right, release: true);
         await Until(() => Math.Abs(scene.Rig.Native.Position - .1) < .001);
@@ -561,7 +562,7 @@ public static class FilmPlayerOverlayTests
             $"an old occurrence's pointer transaction cannot seek or leave its preview on the replacement; slider={seek.Value} " +
             $"native={scene.Rig.Native.Position} page={scene.Rig.Page.Position} seeks={scene.NativeCount("seek")}/{seeks} " +
             $"scopeChanged={scene.Rig.Native.Scope != oldScope} identity={scene.Rig.Page.MediaIdentity} " +
-            $"time={scene.Element<TextBlock>("PlayerTime").Text}/{scene.Rig.Page.ProgressLabel} preserve={scene.Rig.Native.Intents.Last().PreserveCurrent}");
+            $"time={scene.Element<TextBlock>("PlayerTime").Text}/{scene.Rig.Page.ProgressLabel} preserve={scene.Rig.Native.Intents.Last().PreserveFrom is not null}");
     }
 
     private static async Task NativeHostRoundTrips()
@@ -581,23 +582,23 @@ public static class FilmPlayerOverlayTests
         for (int round = 0; round < 2; round++)
         {
             Click(scene.Element<Button>("FullscreenButton"));
-            await Until(() => scene.PlayerWindow is { IsVisible: true } owner && ForegroundOwnedBy(scene, owner));
+            await Until(() => scene.PlayerWindow is { IsVisible: true } owner && ForegroundInWindow(scene, owner));
             AssertNativeMount(scene, native, scene.PlayerWindow!);
             Check(AutomationProperties.GetName(scene.Element<Button>("FullscreenButton")) == "退出全屏" &&
                 Equals(scene.Element<Button>("FullscreenButton").ToolTip, "退出全屏"),
                 "the stable fullscreen button exposes its current exit action");
             await scene.ClosePlayerWindow();
-            await Until(() => ForegroundOwnedBy(scene, scene.Window) && VisibleWindow(Foreground(scene)));
+            await Until(() => ForegroundInWindow(scene, scene.Window) && VisibleWindow(Foreground(scene)));
             AssertNativeMount(scene, native, scene.Window);
             Click(scene.Element<Button>("PipButton"));
-            await Until(() => scene.PlayerWindow is { IsVisible: true } owner && ForegroundOwnedBy(scene, owner));
+            await Until(() => scene.PlayerWindow is { IsVisible: true } owner && ForegroundInWindow(scene, owner));
             Check(scene.Rig.Session.CanRetainMedia &&
                 AutomationProperties.GetName(scene.Element<Button>("PipButton")) == "退出画中画" &&
                 Equals(scene.Element<Button>("PipButton").ToolTip, "退出画中画"),
                 "the real-HWND PiP window retains the explicit owner and exposes its current exit action");
             AssertNativeMount(scene, native, scene.PlayerWindow!);
             await scene.ClosePlayerWindow();
-            await Until(() => ForegroundOwnedBy(scene, scene.Window) && VisibleWindow(Foreground(scene)));
+            await Until(() => ForegroundInWindow(scene, scene.Window) && VisibleWindow(Foreground(scene)));
             AssertNativeMount(scene, native, scene.Window);
             Check(ReferenceEquals(native.VideoView, surface) && ReferenceEquals(scene.Element<Grid>("PlayerOverlay"), overlay) &&
                 ReferenceEquals(scene.Element<Grid>("PlayerFrame"), frame) && !scene.Rig.Session.CanRetainMedia &&
@@ -612,6 +613,37 @@ public static class FilmPlayerOverlayTests
         }
         Check(!native.HasOutput && native.Scope is null && native.Output is null,
             "these real-HWND round trips never initialize a native decoding session");
+    }
+
+    private static async Task NativeHostMovement()
+    {
+        await using var native = new FilmPlayback();
+        await using var scene = await Scene.Create(native.VideoView);
+        await scene.Play();
+        await scene.Pause();
+        await Until(() => VisibleWindow(Foreground(scene)));
+        var picture = ((FilmVideoSurface)native.VideoView).PictureHandle;
+        var foreground = Foreground(scene)!.Handle;
+        var parent = GetParent(picture);
+        GetWindowRect(picture, out var before);
+        scene.Window.Left += 67;
+        scene.Window.Top += 43;
+        // Native parent movement is synchronous; no layout/dispatcher wait may repair this assertion.
+        GetWindowRect(picture, out var moved);
+        Check(moved.Left != before.Left && moved.Top != before.Top, "the fixture really moved its native owner");
+        AssertChildCoordinates(picture, foreground, parent);
+        await NativeDesktopCapture.SaveAsync(scene.Element<Grid>("VideoPicture"), "overlay-moved");
+        Check(((FilmVideoSurface)native.VideoView).PictureHandle == picture && Foreground(scene)!.Handle == foreground &&
+            scene.Rig.Native.Commits == 1 && scene.Rig.Native.Stops == 0 && !native.HasOutput,
+            "native owner movement preserves both HWNDs and does not start or drain media");
+        foreach (double width in new[] { 860d, 1150d })
+        {
+            scene.Window.Width = width;
+            await Pump();
+            scene.View.UpdateLayout();
+            AssertNativeMount(scene, native, scene.Window);
+            await NativeDesktopCapture.SaveAsync(scene.Element<Grid>("VideoPicture"), $"overlay-width-{width}");
+        }
     }
 
     private static async Task NativeHostVisibility()
@@ -630,11 +662,16 @@ public static class FilmPlayerOverlayTests
         await Until(() => scroll.VerticalOffset >= 79);
         var clipped = overlay.Clip?.Bounds ?? Rect.Empty;
         Check(!clipped.IsEmpty && clipped.Top > 0, "scrolling clips the foreground's portion above the page viewport");
+        AssertNativeMount(scene, native, scene.Window);
+        AssertNativeRegions(scene, native);
         AssertViewportClip(scene);
+        await NativeDesktopCapture.SaveAsync(scene.Element<Grid>("VideoPicture"), "overlay-scrolled");
         scroll.ScrollToTop();
         await Until(() => scroll.VerticalOffset == 0);
         Check(overlay.Clip is { } restoredClip && restoredClip.Bounds.Top == 0 && restoredClip.Bounds.Height > clipped.Height,
             "returning to the top restores the picture portion formerly outside the viewport");
+        AssertNativeRegions(scene, native);
+        await NativeDesktopCapture.SaveAsync(scene.Element<Grid>("VideoPicture"), "overlay-restored");
         var front = Foreground(scene)!.Handle;
         scene.View.Visibility = Visibility.Collapsed;
         await Until(() => !IsWindowVisible(front));
@@ -686,7 +723,9 @@ public static class FilmPlayerOverlayTests
             Check(IsWindow(picture) && !foreground.IsDisposed, "both production HWNDs exist before owner teardown");
             window.Close();
             await Pump();
-            Check(foreground.IsDisposed, "closing the real owner releases its owned foreground source");
+            Check(foreground.IsDisposed, "closing the native container releases its child foreground source");
+            Check(IsWindow(picture) && !IsWindowVisible(picture),
+                "container teardown parks the stable picture HWND until the media owner drains and disposes it");
             await native.DisposeAsync();
             await native.DisposeAsync();
             Check(!IsWindow(picture) && PresentationSource.FromVisual(controls) is null &&
@@ -707,7 +746,7 @@ public static class FilmPlayerOverlayTests
         bool insideForeground = front?.RootVisual is Visual root && overlay.IsDescendantOf(root);
         bool insidePicture = overlay.IsDescendantOf(scene.Element<Grid>("VideoPicture"));
         nint foregroundHandle = front?.Handle ?? 0;
-        nint actualOwnerHandle = foregroundHandle == 0 ? 0 : GetWindow(foregroundHandle, 4);
+        nint actualOwnerHandle = foregroundHandle == 0 ? 0 : GetAncestor(foregroundHandle, 2);
         nint expectedOwnerHandle = new WindowInteropHelper(owner).Handle;
         Console.WriteLine($"OVERLAY native sessionId={Process.GetCurrentProcess().SessionId} userInteractive={Environment.UserInteractive} " +
             $"content={Describe(native.VideoView.Content)} surface={Describe(native.VideoView)} loaded={native.VideoView.IsLoaded} " +
@@ -720,19 +759,59 @@ public static class FilmPlayerOverlayTests
         Check(VisibleWindow(front), $"the real foreground HWND must be visible; hwnd=0x{foregroundHandle:X}");
         Check(foregroundHandle != expectedOwnerHandle, "the controls have a separate native window");
         Check(actualOwnerHandle == expectedOwnerHandle,
-            $"the foreground must belong to the current playback owner; actual=0x{actualOwnerHandle:X} expected=0x{expectedOwnerHandle:X}");
+            $"the foreground child must descend from the current playback window; actual=0x{actualOwnerHandle:X} expected=0x{expectedOwnerHandle:X}");
         Check(insideForeground, $"the foreground visual tree must own the overlay; parent={Describe(VisualTreeHelper.GetParent(overlay))}");
         Check(!insidePicture, "the native overlay must not remain a WPF sibling in VideoPicture");
         Check(sameHostContent, "VideoHost.Content must retain the exact real VideoView instance");
         Check(host is not null, $"PART_Picture must contain the production HwndHost; actual={Describe(part)}");
         Check(host is not null && host.Handle != 0, "the real video host must have a nonzero HWND");
-        Check(IsWindowVisible(((FilmVideoSurface)native.VideoView).PictureHandle),
+        var picture = ((FilmVideoSurface)native.VideoView).PictureHandle;
+        AssertChildCoordinates(picture, foregroundHandle, host!.Handle);
+        Check(GetWindow(host.Handle, 5) == foregroundHandle, "the native controls are above the picture in their shared container");
+        Check(IsWindowVisible(picture),
             "the persistent picture HWND is mounted and visible with its controls");
         Check(samePage, $"the mounted overlay must retain the exact playback page; actual={Describe(overlay.DataContext)}");
         Check(ReferenceEquals(scene.Element<Slider>("SeekSlider").DataContext, scene.Rig.Page) &&
             scene.Element<Slider>("SeekSlider").Maximum == scene.Rig.Page.Duration &&
             Equals(scene.Element<Button>("PanButton").Content, scene.Rig.Page.PlayerPanLabel),
             "the native foreground carries the page bindings into its controls after every mount");
+    }
+
+    private static void AssertChildCoordinates(nint picture, nint foreground, nint parent)
+    {
+        Check(GetParent(picture) == parent && GetParent(foreground) == parent,
+            "picture and controls have the same real child HWND parent");
+        int style = GetWindowLong(foreground, -16), extendedStyle = GetWindowLong(foreground, -20);
+        Check((style & 0x40000000) != 0 && (style & unchecked((int)0x80000000)) == 0 &&
+            (extendedStyle & 0x00080000) != 0,
+            "controls are a per-pixel transparent child, not an owned popup");
+        GetWindowRect(picture, out var pictureRect);
+        GetWindowRect(foreground, out var foregroundRect);
+        GetWindowRect(parent, out var parentRect);
+        Check(pictureRect.Equals(foregroundRect) && pictureRect.Left == parentRect.Left && pictureRect.Top == parentRect.Top,
+            "both native layers occupy the same local origin and dimensions inside the container");
+    }
+
+    private static void AssertNativeRegions(Scene scene, FilmPlayback native)
+    {
+        var surface = (FilmVideoSurface)native.VideoView;
+        var clip = scene.Element<Grid>("PlayerOverlay").Clip!.Bounds;
+        var dpi = VisualTreeHelper.GetDpi(surface);
+        var expected = new NativeRect
+        {
+            Left = (int)Math.Ceiling(clip.Left * dpi.DpiScaleX), Top = (int)Math.Ceiling(clip.Top * dpi.DpiScaleY),
+            Right = (int)Math.Floor(clip.Right * dpi.DpiScaleX), Bottom = (int)Math.Floor(clip.Bottom * dpi.DpiScaleY)
+        };
+        var region = CreateRectRgn(0, 0, 0, 0);
+        try
+        {
+            foreach (var window in new[] { surface.PictureHandle, GetParent(surface.PictureHandle), Foreground(scene)!.Handle })
+            {
+                Check(GetWindowRgn(window, region) > 1 && GetRgnBox(region, out var actual) > 1 && actual.Equals(expected),
+                    "picture container and controls apply the same local pixel viewport clip");
+            }
+        }
+        finally { DeleteObject(region); }
     }
 
     private static void AssertViewportClip(Scene scene)
@@ -755,8 +834,8 @@ public static class FilmPlayerOverlayTests
             ? source : null;
     }
 
-    private static bool ForegroundOwnedBy(Scene scene, Window owner) =>
-        Foreground(scene) is { } source && GetWindow(source.Handle, 4) == new WindowInteropHelper(owner).Handle;
+    private static bool ForegroundInWindow(Scene scene, Window owner) =>
+        Foreground(scene) is { } source && GetAncestor(source.Handle, 2) == new WindowInteropHelper(owner).Handle;
     private static bool VisibleWindow(HwndSource? source) =>
         source is not null && source.Handle != 0 && IsWindowVisible(source.Handle);
     private static void Shot(FrameworkElement element, string name)
@@ -783,6 +862,27 @@ public static class FilmPlayerOverlayTests
     private static extern bool IsWindow(nint window);
     [DllImport("user32.dll")]
     private static extern nint GetWindow(nint window, uint command);
+    [DllImport("user32.dll")]
+    private static extern nint GetParent(nint window);
+    [DllImport("user32.dll")]
+    private static extern nint GetAncestor(nint window, uint flags);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+    private static extern int GetWindowLong(nint window, int index);
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(nint window, out NativeRect rect);
+    [DllImport("user32.dll")]
+    private static extern int GetWindowRgn(nint window, nint region);
+    [DllImport("gdi32.dll")]
+    private static extern nint CreateRectRgn(int left, int top, int right, int bottom);
+    [DllImport("gdi32.dll")]
+    private static extern int GetRgnBox(nint region, out NativeRect rect);
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(nint value);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        internal int Left, Top, Right, Bottom;
+    }
 
     private sealed class Scene : IAsyncDisposable
     {
@@ -799,6 +899,7 @@ public static class FilmPlayerOverlayTests
                 Top = surface is FilmVideoSurface ? 40 : -10000,
                 ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None
             };
+            if (surface is FilmVideoSurface) Window.Topmost = true;
         }
         internal static async Task<Scene> Create(ContentControl? surface = null)
         {

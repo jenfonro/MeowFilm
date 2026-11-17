@@ -1,4 +1,5 @@
 import { tmdbQuery } from '@meowfilm/film-playback/metadata-query';
+import { isRawJSON, parseJSONText } from '@meowfilm/runtime-bridge/json';
 
 const imageFields = new Set([
   'poster_path', 'backdrop_path', 'profile_path', 'logo_path', 'still_path', 'file_path',
@@ -15,7 +16,7 @@ const control = /[\u0000-\u001f\u007f\u2028\u2029]/;
 const sizePattern = /^(?:original|[wh][1-9]\d*)$/;
 const filePattern = /^\/[A-Za-z0-9_-]+\.[A-Za-z0-9]+$/;
 const imagePrefix = '/v1/tmdb/images/';
-const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const object = value => value !== null && typeof value === 'object' && !Array.isArray(value) && !isRawJSON(value);
 const record = value => object(value) &&
   (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
 
@@ -116,7 +117,7 @@ function responseData(response, path, size) {
   requireValue(response.status >= 200 && response.status < 300, 'UPSTREAM_HTTP');
   requireValue(!html && Buffer.from(text, 'utf8').equals(response.body), 'UPSTREAM_FORMAT');
   let value;
-  try { value = JSON.parse(text); } catch { throw new Failure('UPSTREAM_FORMAT'); }
+  try { value = parseJSONText(text); } catch { throw new Failure('UPSTREAM_FORMAT'); }
   requireValue(object(value) || Array.isArray(value), 'UPSTREAM_FORMAT');
   requireValue(value.success !== false, 'UPSTREAM_HTTP');
   try { value = rewriteImages(value, size, path); }

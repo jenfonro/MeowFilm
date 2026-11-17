@@ -13,8 +13,8 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music online settings missing area stays absent on reads and reconciliation", OnlineSettingsMissingArea);
         yield return new("Native music online settings current reads preserve active library state across reopen", OnlineSettingsCurrentState);
         yield return new("Native music online settings missing required values fail every owner entry without writes", OnlineSettingsMissingRequired);
-        yield return new("Native music online settings reject damaged active neighboring areas", OnlineSettingsInvalidDocument);
-        yield return new("Native music online settings current schema rejects extra fields and unknown versions", OnlineSettingsInvalidCurrent);
+        yield return new("Native music online settings ignore unrelated damaged areas until selected", OnlineSettingsInvalidDocument);
+        yield return new("Native music online settings current schema consumes extras and rejects unusable current values", OnlineSettingsInvalidCurrent);
         yield return new("Native music online settings save before commit failure settles without replay", () => OnlineSettingsUnknownCommit(false));
         yield return new("Native music online settings save after commit failure settles without replay", () => OnlineSettingsUnknownCommit(true));
         yield return new("Native music online settings save CAS conflict preserves the competing document and pending attempt", () => OnlineSettingsConflict(true));
@@ -36,9 +36,7 @@ public static partial class MusicNativeLibraryTests
 
     private static void CheckOnlineSettings(JsonElement settings, long revision, bool lyrics)
     {
-        Check(settings.EnumerateObject().Select(p => p.Name).Order(StringComparer.Ordinal)
-            .SequenceEqual(new[] { "lyrics", "revision", "schema" }));
-        Check(settings.GetProperty("schema").GetInt32() == 3 &&
+        Check(settings.GetProperty("schema").GetDouble() == 3 &&
             settings.GetProperty("revision").GetInt64() == revision &&
             settings.GetProperty("lyrics").GetBoolean() == lyrics);
     }
@@ -67,7 +65,10 @@ public static partial class MusicNativeLibraryTests
         f.Store.Bytes = Document(("library", (await CurrentDocuments()).Library));
         byte[] before = f.Store.Bytes.ToArray();
         var owner = f.Owner();
-        CheckOnlineSettings((await Ok(owner, "music.settings.get")).GetProperty("settings"), 0, true);
+        var fresh = (await Ok(owner, "music.settings.get")).GetProperty("settings");
+        Check(fresh.EnumerateObject().Select(p => p.Name).Order(StringComparer.Ordinal)
+            .SequenceEqual(new[] { "lyrics", "revision", "schema" }));
+        CheckOnlineSettings(fresh, 0, true);
         await owner.ReconcileAsync();
         CheckOnlineSettings((await Ok(owner, "music.settings.get")).GetProperty("settings"), 0, true);
         await owner.DisposeAsync();
@@ -115,14 +116,16 @@ public static partial class MusicNativeLibraryTests
         }
     }
 
-    private static async Task RejectOnlineSettingsDocument(byte[] bytes, string code = "CORRUPT_STORAGE")
+    private static async Task RejectOnlineSettingsDocument(byte[] bytes, string code = "CORRUPT_STORAGE", bool rootCorrupt = false)
     {
         await using var f = new Fixture();
         f.Store.Bytes = bytes.ToArray();
         var owner = f.Owner();
         await Error(owner, "music.settings.get", null, code);
         await Error(owner, "music.settings.save", new { ifRevision = 7, lyrics = true }, code);
-        await Throws(code, () => owner.ReconcileAsync());
+        if (rootCorrupt) await Throws(code, () => owner.ReconcileAsync());
+        else await owner.ReconcileAsync();
+        await Error(owner, "music.settings.get", null, code);
         Check(f.Store.WriteCalls == 0 && bytes.SequenceEqual(f.Store.Bytes!));
     }
 
@@ -145,7 +148,14 @@ public static partial class MusicNativeLibraryTests
         {
             var doc = JsonNode.Parse(await OnlineSettingsDocument(CurrentOnlineSettings()))!.AsObject();
             doc["entries"]!.AsArray().Single(e => e!["key"]!.GetValue<string>() == AreaKey(area))!["value"] = invalid;
-            await RejectOnlineSettingsDocument(JsonSerializer.SerializeToUtf8Bytes(doc, PersistedJson), code);
+            await using var f = new Fixture();
+            f.Store.Bytes = JsonSerializer.SerializeToUtf8Bytes(doc, PersistedJson);
+            var owner = f.Owner();
+            CheckOnlineSettings((await Ok(owner, "music.settings.get")).GetProperty("settings"), 7, false);
+            await Ok(owner, "music.settings.save", new { ifRevision = 7, lyrics = true });
+            Check(JsonNode.DeepEquals(f.Store.Root["entries"]!.AsArray().OfType<JsonObject>()
+                .Single(e => e["key"]!.GetValue<string>() == AreaKey(area))["value"], invalid));
+            await Error(owner, area == "library" ? "music.library.list" : "music.officialSources.settings.get", null, code);
         }
     }
 
@@ -154,8 +164,7 @@ public static partial class MusicNativeLibraryTests
         foreach (var (field, value) in new (string, JsonNode?)[]
         {
             ("schema", JsonValue.Create(0)), ("schema", JsonValue.Create(2)), ("schema", JsonValue.Create(4)), ("schema", JsonValue.Create("3")),
-            ("target", null), ("target", O(new { installationId = "test-install-a", platform = "wy" })),
-            ("extra", JsonValue.Create(true)), ("lyrics", null), ("lyrics", JsonValue.Create("false")),
+            ("lyrics", null), ("lyrics", JsonValue.Create("false")),
             ("revision", JsonValue.Create(-1)), ("revision", JsonValue.Create(1.5)), ("revision", JsonValue.Create("7"))
         })
         {
@@ -171,9 +180,15 @@ public static partial class MusicNativeLibraryTests
         }
         byte[] valid = await OnlineSettingsDocument(CurrentOnlineSettings());
         await RejectOnlineSettingsDocument(Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(valid)
-            .Replace("\"lyrics\":false", "\"lyrics\":false,\"lyrics\":false", StringComparison.Ordinal)));
-        await RejectOnlineSettingsDocument(Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(valid)
-            .Replace("\"schema\":3", "\"schema\":3.0", StringComparison.Ordinal)));
+            .Replace("\"lyrics\":false", "\"lyrics\":false,\"lyrics\":false", StringComparison.Ordinal)), rootCorrupt: true);
+        await using var f = new Fixture();
+        var extended = CurrentOnlineSettings(); extended["target"] = null; extended["extra"] = new JsonObject { ["nested"] = true };
+        f.Store.Bytes = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(await OnlineSettingsDocument(extended))
+            .Replace("\"schema\":3", "\"schema\":3.0", StringComparison.Ordinal));
+        var owner = f.Owner();
+        CheckOnlineSettings((await Ok(owner, "music.settings.get")).GetProperty("settings"), 7, false);
+        await Ok(owner, "music.settings.save", new { ifRevision = 7, lyrics = true, unused = new { value = 1 } });
+        Check(JsonNode.DeepEquals(f.Store.State("online-settings")["extra"], extended["extra"]));
     }
 
     private static async Task OnlineSettingsUnknownCommit(bool committed)

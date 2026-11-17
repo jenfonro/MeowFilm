@@ -3,15 +3,16 @@ import Combine
 import MeowUI
 import MeowMusicFeature
 import MeowFilmFeature
+import MeowNovelFeature
 
 @MainActor
 enum MeowfilmSidebarContent {
     case music(source: MusicHomeSourceSettingsModel, selectedPage: MeowfilmPrimaryPage)
-    case novel(home: () -> Void, shelf: () -> Void)
+    case novel(feature: NovelFeature, home: () -> Void)
     case film(home: FilmHomeModel, settings: FilmSettingsModel?)
 }
 
-/// One layout for both domains. Business choices stay in their existing owners.
+/// One layout for all domains. Business choices stay in their existing owners.
 @MainActor
 final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
     var onDismiss: (() -> Void)?
@@ -27,10 +28,12 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
     private let upper = UIStackView()
     private let lower = UIStackView()
     private let videos = UIStackView()
+    private let books = UIStackView()
     private let settings = UIButton(type: .system)
     private var sourceButton: UIButton?
     private var buttons: [UIButton] = []
     private var videoRows: [FilmSourceKey: UIStackView] = [:]
+    private var bookRows: [String: UIStackView] = [:]
     private var observations: Set<AnyCancellable> = []
     private var observing = false
     private var animator: UIViewPropertyAnimator?
@@ -81,11 +84,30 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         scroll.contentInsetAdjustmentBehavior = .never
         panel.addSubview(scroll)
         scroll.translatesAutoresizingMaskIntoConstraints = false
+        configureButton(settings, title: "设置", symbol: "gearshape")
+        settings.configuration?.contentInsets.trailing = 38
+        settings.accessibilityIdentifier = "app.sidebar.settings"
+        settings.addAction(UIAction { [weak self] _ in self?.onSettings?() }, for: .touchUpInside)
+        panel.addSubview(settings)
+        settings.translatesAutoresizingMaskIntoConstraints = false
+        let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
+        chevron.preferredSymbolConfiguration = .init(pointSize: 14, weight: .regular)
+        chevron.contentMode = .scaleAspectFit
+        chevron.accessibilityIdentifier = "app.sidebar.settings.chevron"
+        settings.addSubview(chevron)
+        chevron.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: panel.safeAreaLayoutGuide.topAnchor),
-            scroll.bottomAnchor.constraint(equalTo: panel.safeAreaLayoutGuide.bottomAnchor),
+            scroll.bottomAnchor.constraint(equalTo: settings.topAnchor, constant: -16),
             scroll.leadingAnchor.constraint(equalTo: panel.safeAreaLayoutGuide.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: panel.safeAreaLayoutGuide.trailingAnchor),
+            settings.leadingAnchor.constraint(equalTo: panel.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            settings.trailingAnchor.constraint(equalTo: panel.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            settings.bottomAnchor.constraint(equalTo: panel.safeAreaLayoutGuide.bottomAnchor, constant: -16),
+            chevron.trailingAnchor.constraint(equalTo: settings.trailingAnchor, constant: -14),
+            chevron.centerYAnchor.constraint(equalTo: settings.centerYAnchor),
+            chevron.widthAnchor.constraint(equalToConstant: 12),
+            chevron.heightAnchor.constraint(equalToConstant: 18),
         ])
         let column = UIView()
         scroll.addSubview(column)
@@ -97,10 +119,6 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
             column.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
         ])
         column.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor).isActive = true
-        let fill = column.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor)
-        fill.priority = .defaultLow
-        fill.isActive = true
-        column.heightAnchor.constraint(greaterThanOrEqualTo: scroll.frameLayoutGuide.heightAnchor).isActive = true
 
         let icon = UIImageView(image: UIImage(named: "SidebarAppIcon"))
         icon.contentMode = .scaleAspectFit
@@ -109,24 +127,22 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         icon.isAccessibilityElement = true
         icon.accessibilityLabel = "meowfilm"
         icon.accessibilityIdentifier = "app.sidebar.icon"
-        card.layer.cornerRadius = 20
         card.accessibilityIdentifier = "app.sidebar.card"
-        for stack in [upper, lower, videos] { stack.axis = .vertical }
+        for stack in [upper, lower, videos, books] {
+            stack.axis = .vertical
+            stack.spacing = 4
+        }
         upper.accessibilityIdentifier = "app.sidebar.upper"
         lower.accessibilityIdentifier = "app.sidebar.lower"
-        card.addSubview(upper)
-        card.addSubview(lower)
-        configureButton(settings, title: "设置", symbol: nil)
-        settings.contentHorizontalAlignment = .center
-        settings.configuration?.titleAlignment = .center
-        settings.layer.cornerRadius = 20
-        settings.accessibilityIdentifier = "app.sidebar.settings"
-        settings.addAction(UIAction { [weak self] _ in self?.onSettings?() }, for: .touchUpInside)
-        for item in [icon, card, settings] {
+        let groups = UIStackView(arrangedSubviews: [upper, lower])
+        groups.axis = .vertical
+        groups.spacing = 20
+        card.addSubview(groups)
+        groups.pinEdges(to: card)
+        for item in [icon, card] {
             column.addSubview(item)
             item.translatesAutoresizingMaskIntoConstraints = false
         }
-        for stack in [upper, lower] { stack.translatesAutoresizingMaskIntoConstraints = false }
         NSLayoutConstraint.activate([
             icon.centerXAnchor.constraint(equalTo: column.centerXAnchor),
             icon.topAnchor.constraint(equalTo: column.topAnchor, constant: 20),
@@ -135,17 +151,7 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
             card.topAnchor.constraint(equalTo: icon.bottomAnchor, constant: 24),
             card.leadingAnchor.constraint(equalTo: column.leadingAnchor, constant: 16),
             card.trailingAnchor.constraint(equalTo: column.trailingAnchor, constant: -16),
-            upper.topAnchor.constraint(equalTo: card.topAnchor, constant: 8),
-            upper.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 4),
-            upper.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -4),
-            lower.leadingAnchor.constraint(equalTo: upper.leadingAnchor),
-            lower.trailingAnchor.constraint(equalTo: upper.trailingAnchor),
-            lower.topAnchor.constraint(greaterThanOrEqualTo: upper.bottomAnchor, constant: 24),
-            lower.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -8),
-            settings.topAnchor.constraint(equalTo: card.bottomAnchor, constant: 16),
-            settings.leadingAnchor.constraint(equalTo: card.leadingAnchor),
-            settings.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-            settings.bottomAnchor.constraint(equalTo: column.bottomAnchor, constant: -16),
+            card.bottomAnchor.constraint(equalTo: column.bottomAnchor, constant: -16),
         ])
     }
 
@@ -163,37 +169,41 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
             sourceButton = button
             lower.addArrangedSubview(button)
             renderMusicSource()
-        case .novel(let home, let shelf):
-            for (title, symbol, action) in [("首页", "house", home), ("书架", "books.vertical", shelf)] {
-                let button = UIButton(type: .system); configureButton(button, title: title, symbol: symbol)
-                button.addAction(UIAction { [weak self] _ in action(); self?.onDismiss?() }, for: .touchUpInside)
-                upper.addArrangedSubview(button)
-            }
-            lower.heightAnchor.constraint(equalToConstant: 0).isActive = true
+        case .novel(let feature, let home):
+            let button = UIButton(type: .system)
+            configureButton(button, title: "首页", symbol: "house")
+            button.accessibilityIdentifier = "app.sidebar.home"
+            button.addAction(UIAction { [weak self] _ in home(); self?.onDismiss?() }, for: .touchUpInside)
+            upper.addArrangedSubview(button)
+            upper.addArrangedSubview(displayRow(title: "分类", symbol: "square.grid.2x2",
+                                               identifier: "app.sidebar.category"))
+            upper.addArrangedSubview(books)
+            renderBooks(feature.sources)
+            lower.isHidden = true
         case .film(let home, let model):
             let button = UIButton(type: .system)
             configureButton(button, title: "影视数据源", symbol: "film")
             button.accessibilityIdentifier = "app.sidebar.filmSource"
             button.showsMenuAsPrimaryAction = true
             sourceButton = button
-            upper.addArrangedSubview(button)
+            lower.addArrangedSubview(button)
             upper.addArrangedSubview(navigationButton(title: "首页", symbol: "house", page: .film, selected: true))
             upper.addArrangedSubview(videos)
             renderFilmSource(home)
             renderVideos(model?.snapshot?.homeVideos ?? [])
-            lower.heightAnchor.constraint(equalToConstant: 0).isActive = true
         }
     }
 
-    private func configureButton(_ button: UIButton, title: String, symbol: String?) {
+    private func configureButton(_ button: UIButton, title: String, symbol: String) {
         var configuration = UIButton.Configuration.plain()
         configuration.title = title
+        configuration.titleAlignment = .leading
         configuration.titleLineBreakMode = .byWordWrapping
         configuration.subtitleLineBreakMode = .byWordWrapping
-        configuration.image = symbol.flatMap { UIImage(systemName: $0) }
-        configuration.preferredSymbolConfigurationForImage = .init(pointSize: 20)
-        configuration.imagePadding = 12
-        configuration.contentInsets = .init(top: 14, leading: 14, bottom: 14, trailing: 14)
+        configuration.background = .clear()
+        configuration.background.cornerRadius = 28
+        configuration.cornerStyle = .fixed
+        configuration.contentInsets = .init(top: 14, leading: 50, bottom: 14, trailing: 14)
         configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { [weak button] attributes in
             var value = attributes
             value.font = UIFont.preferredFont(forTextStyle: .body, compatibleWith: button?.traitCollection)
@@ -208,10 +218,50 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         button.contentHorizontalAlignment = .leading
         button.titleLabel?.numberOfLines = 0
         button.titleLabel?.adjustsFontForContentSizeCategory = true
-        button.heightAnchor.constraint(greaterThanOrEqualToConstant: 52).isActive = true
+        let icon = rowIcon(symbol)
+        button.addSubview(icon)
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 14),
+            icon.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+        ])
+        button.heightAnchor.constraint(greaterThanOrEqualToConstant: 56).isActive = true
         button.setContentHuggingPriority(.defaultHigh, for: .vertical)
         button.setContentCompressionResistancePriority(.required, for: .vertical)
         buttons.append(button)
+    }
+
+    private func rowIcon(_ symbol: String) -> UIImageView {
+        let icon = UIImageView(image: UIImage(systemName: symbol)?.withAlignmentRectInsets(.zero))
+        icon.preferredSymbolConfiguration = .init(pointSize: 20, weight: .regular)
+        icon.contentMode = .scaleAspectFit
+        icon.accessibilityIdentifier = "app.sidebar.rowIcon"
+        NSLayoutConstraint.activate([
+            icon.widthAnchor.constraint(equalToConstant: 24),
+            icon.heightAnchor.constraint(equalToConstant: 24),
+        ])
+        return icon
+    }
+
+    private func displayRow(title: String, symbol: String, identifier: String) -> UIStackView {
+        let label = UILabel()
+        label.text = title
+        label.font = .preferredFont(forTextStyle: .body)
+        label.adjustsFontForContentSizeCategory = true
+        label.numberOfLines = 0
+        let row = UIStackView(arrangedSubviews: [rowIcon(symbol), label])
+        row.alignment = .center
+        row.spacing = 12
+        row.isLayoutMarginsRelativeArrangement = true
+        row.directionalLayoutMargins = .init(top: 14, leading: 14, bottom: 14, trailing: 14)
+        row.heightAnchor.constraint(greaterThanOrEqualToConstant: 56).isActive = true
+        row.setContentHuggingPriority(.defaultHigh, for: .vertical)
+        row.setContentCompressionResistancePriority(.required, for: .vertical)
+        row.isAccessibilityElement = true
+        row.accessibilityTraits = .staticText
+        row.accessibilityIdentifier = identifier
+        row.accessibilityLabel = title
+        return row
     }
 
     private func navigationButton(title: String, symbol: String, page: MeowfilmPrimaryPage, selected: Bool) -> UIButton {
@@ -240,7 +290,9 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
             source.objectWillChange.receive(on: RunLoop.main)
                 .sink { [weak self] in self?.renderMusicSource() }.store(in: &observations)
             source.activate()
-        case .novel: break
+        case .novel(let feature, _):
+            feature.$sources.receive(on: RunLoop.main)
+                .sink { [weak self] in self?.renderBooks($0) }.store(in: &observations)
         case .film(let home, let settings):
             home.$selectedSourceID.receive(on: RunLoop.main)
                 .sink { [weak self, weak home] _ in
@@ -294,25 +346,9 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
             let row: UIStackView
             if let existing = videoRows[source.key] { row = existing }
             else {
-                let icon = UIImageView(image: UIImage(systemName: "play.rectangle"))
-                icon.contentMode = .scaleAspectFit
-                icon.widthAnchor.constraint(equalToConstant: 22).isActive = true
-                let label = UILabel()
-                label.font = .preferredFont(forTextStyle: .body)
-                label.adjustsFontForContentSizeCategory = true
-                label.numberOfLines = 0
-                row = UIStackView(arrangedSubviews: [icon, label])
-                row.alignment = .center
-                row.spacing = 12
-                row.isLayoutMarginsRelativeArrangement = true
-                row.directionalLayoutMargins = .init(top: 14, leading: 14, bottom: 14, trailing: 14)
-                row.heightAnchor.constraint(greaterThanOrEqualToConstant: 52).isActive = true
-                row.setContentHuggingPriority(.defaultHigh, for: .vertical)
-                row.setContentCompressionResistancePriority(.required, for: .vertical)
-                row.isAccessibilityElement = true
-                row.accessibilityTraits = .staticText
                 let key = source.key
-                row.accessibilityIdentifier = "app.sidebar.video.\(Data(key.installationId.utf8).base64EncodedString()).\(Data(key.siteKey.utf8).base64EncodedString())"
+                row = displayRow(title: source.name, symbol: "play.rectangle",
+                    identifier: "app.sidebar.video.\(Data(key.installationId.utf8).base64EncodedString()).\(Data(key.siteKey.utf8).base64EncodedString())")
                 videoRows[key] = row
             }
             (row.arrangedSubviews.last as? UILabel)?.text = source.name
@@ -324,16 +360,39 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         applyTheme()
     }
 
+    private func renderBooks(_ sources: [NovelSource]) {
+        books.isHidden = sources.isEmpty
+        let keys = Set(sources.map(\.id))
+        for (key, row) in bookRows where !keys.contains(key) {
+            row.removeFromSuperview()
+            bookRows[key] = nil
+        }
+        for (index, source) in sources.enumerated() {
+            let row = bookRows[source.id] ?? displayRow(title: source.name, symbol: "book.closed",
+                identifier: "app.sidebar.book.\(Data(source.id.utf8).base64EncodedString())")
+            bookRows[source.id] = row
+            (row.arrangedSubviews.last as? UILabel)?.text = source.name
+            row.accessibilityLabel = source.name
+            if books.arrangedSubviews.count <= index || books.arrangedSubviews[index] !== row {
+                books.insertArrangedSubview(row, at: index)
+            }
+        }
+        applyTheme()
+    }
+
     private func applyTheme() {
         let theme = panel.theme
-        card.backgroundColor = UIColor(theme.surface)
-        settings.backgroundColor = UIColor(theme.surface)
         for button in buttons {
             button.configuration?.baseForegroundColor = UIColor(button.isSelected ? theme.accent : theme.ink)
+            button.tintColor = UIColor(button.isSelected ? theme.accent : theme.ink)
+            button.configuration?.background.backgroundColor = button.isSelected ? UIColor(theme.buttonSelected) : .clear
         }
-        for row in videoRows.values {
-            (row.arrangedSubviews.first as? UIImageView)?.tintColor = UIColor(theme.muted)
-            (row.arrangedSubviews.last as? UILabel)?.textColor = UIColor(theme.ink)
+        settings.configuration?.background.backgroundColor = UIColor(theme.surface)
+        for stack in [upper, videos, books] {
+            for row in stack.arrangedSubviews.compactMap({ $0 as? UIStackView }) {
+                (row.arrangedSubviews.first as? UIImageView)?.tintColor = UIColor(theme.ink)
+                (row.arrangedSubviews.last as? UILabel)?.textColor = UIColor(theme.ink)
+            }
         }
     }
 

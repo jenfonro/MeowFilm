@@ -110,9 +110,87 @@ final class NativeMusicStorageTests: XCTestCase {
         }
     }
 
+    func testLocalCollectionEditPreservesUnknownFieldsAndUnconsumedBrokenAreas() async throws {
+        var document = try MusicDocument(nil, runID: "fixture")
+        let extra = try MJ.parse(Data(#"{"precise":1.234567890123456789,"large":9007199254740993,"huge":1e999}"#.utf8))
+        document.envelope["extra"] = extra
+        document.envelope["records"]["unknown"] = extra
+        document.library["library"]["songs"]["unrelated"] = .obj([("sources", .string("unused")), ("extra", extra)])
+        document.library["sync"] = try MusicNativeSyncLedger().json()
+        document.library["sync"]["fences"] = .string("not consumed by a local rename")
+        document.library["sync"]["extra"] = extra
+        var row = MusicModel.freshCollection("playlist:1", "Before")
+        row["extra"] = extra
+        document.library["library"]["collections"] = .array(document.library["library"]["collections"].array + [row])
+        document.library["library"]["nextId"] = .n(2)
+        document.queue["entries"] = .string("not consumed by collection browsing")
+        document.playback["sourceExclusions"] = .string("not consumed by collection browsing")
+        document.history["playlists"] = .string("not consumed by collection browsing")
+        let bytes = try document.encode(changed: ["library", "queue", "playback", "history"])
+        let store = NativeMusicMemoryDocument(bytes), service = try await NativeMusicFixture.service(store)
+        let listed = try await service.collections()
+        let selected = try XCTUnwrap(listed.first { $0.id == "playlist:1" })
+        let changed = try await service.editPlaylist(selected, name: "After", refs: nil, order: nil)
+        XCTAssertEqual(changed.title, "After")
+        let saved = try MJ.parse(XCTUnwrap(store.snapshot().0)), before = try MJ.parse(bytes)
+        XCTAssertEqual(saved["extra"], extra); XCTAssertEqual(saved["records"]["unknown"], extra)
+        XCTAssertEqual(saved["records"][MusicModel.key("queue")], before["records"][MusicModel.key("queue")])
+        XCTAssertEqual(saved["records"][MusicModel.key("playback")], before["records"][MusicModel.key("playback")])
+        XCTAssertEqual(saved["records"][MusicModel.key("history")], before["records"][MusicModel.key("history")])
+        let library = saved["records"][MusicModel.key("library")]
+        XCTAssertEqual(library["library"]["songs"], document.library["library"]["songs"])
+        XCTAssertEqual(library["sync"]["fences"], document.library["sync"]["fences"])
+        XCTAssertEqual(library["sync"]["extra"], extra)
+        XCTAssertEqual(library["library"]["collections"].array.last?["extra"], extra)
+        XCTAssertEqual(extra["precise"].json, "1.234567890123456789")
+        await assertMusicFailure(.corruptDocument) { _ = try await service.queue() }
+        await assertMusicFailure(.corruptDocument) { _ = try await service.sourceExclusions() }
+        await assertMusicFailure(.corruptDocument) { _ = try await service.playedPlaylists() }
+        await service.close()
+    }
+    func testSelectedCollectionIdentityAndMissingSongCannotBecomeEmptySuccess() async throws {
+        for duplicate in [false, true] {
+            var document = try MusicDocument(nil, runID: "fixture")
+            var selected = MusicModel.freshCollection("playlist:1", "Selected")
+            selected["order"] = .strings([UUID().uuidString.lowercased()])
+            document.library["library"]["collections"] = .array([selected] + (duplicate ? [selected] : []))
+            let store = NativeMusicMemoryDocument(try document.encode(changed: ["library"]))
+            let service = try await NativeMusicFixture.service(store)
+            await assertMusicFailure(duplicate ? .corruptDocument : .notFound) {
+                _ = try await service.tracks(in: .init(id: "playlist:1", title: "Selected", revision: 0))
+            }
+            XCTAssertEqual(store.snapshot().2, 0)
+            await service.close()
+        }
+    }
+    func testUnreadableLibraryListCannotBecomeSuccessfulEmptyCatalogue() async throws {
+        for damaged in [MJ.null, .obj(), .array([.null])] {
+            var document = try MusicDocument(nil, runID: "fixture")
+            document.library["library"]["collections"] = .array([])
+            document.library["library"]["networkReferences"] = damaged
+            let bytes = try document.encode(changed: ["library"]), store = NativeMusicMemoryDocument(bytes)
+            let service = try await NativeMusicFixture.service(store)
+            await assertMusicFailure(.corruptDocument) { _ = try await service.collections() }
+            XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
+            await service.close()
+        }
+    }
+    func testSelectedFavoritesIdentityCannotBeReinterpretedAsRemovablePlaylist() async throws {
+        var document = try MusicDocument(nil, runID: "fixture")
+        var favorites = document.library["library"]["collections"].array[0]
+        favorites["kind"] = .string("playlist")
+        document.library["library"]["collections"] = .array([favorites])
+        let bytes = try document.encode(changed: ["library"]), store = NativeMusicMemoryDocument(bytes)
+        let service = try await NativeMusicFixture.service(store)
+        await assertMusicFailure(.favoritesProtected) {
+            try await service.removePlaylist(.init(id: "favorites", title: "", revision: 0))
+        }
+        XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
+        await service.close()
+    }
     func testCorruptCurrentEnvelopeNeverCreatesNewLibrary() async throws {
         for input in [
-            #"{"version":1,"scope":"device","revision":0,"records":{"unknown":{}}}"#,
+            #"{"version":1,"scope":"device","revision":0,"records":[]}"#,
             #"{"version":1,"scope":"device","revision":9007199254740993,"records":{}}"#
         ] {
             let bytes = Data(input.utf8), store = NativeMusicMemoryDocument(bytes)
@@ -129,7 +207,7 @@ final class NativeMusicStorageTests: XCTestCase {
         let valid = try document.encode(changed: [])
         _ = try await service.state()
         _ = try await service.queue()
-        let corrupt = Data(#"{"version":1,"scope":"device","revision":0,"records":{"unknown":{}}}"#.utf8)
+        let corrupt = Data(#"{"version":1,"scope":"device","revision":0,"records":[]}"#.utf8)
         store.replace(corrupt)
         do { _ = try await service.queue(); XCTFail("Changed corrupt bytes must be revalidated") }
         catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
@@ -142,8 +220,7 @@ final class NativeMusicStorageTests: XCTestCase {
         let song = try NativeMusicFixture.song()
         let invalid: [(String, MJ)] = [
             ("serial", .n(0)), ("currentId", .string("entry-99")),
-            ("priority", .strings(["entry-1"])), ("history", .strings(["entry-99"])),
-            ("failed", .strings(["entry-99"]))
+            ("priority", .strings(["entry-1"]))
         ]
         for (field, value) in invalid {
             var document = try MusicDocument(nil, runID: "fixture")

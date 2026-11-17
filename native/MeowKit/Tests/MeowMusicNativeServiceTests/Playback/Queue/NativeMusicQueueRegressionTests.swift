@@ -57,7 +57,7 @@ final class NativeMusicQueueRegressionTests: XCTestCase {
             document.queue["currentId"] = .string("entry-1")
             document.queue["serial"] = .n(2); document.queue["revision"] = .n(1)
             let bytes = try document.encode(changed: ["library", "queue"])
-            XCTAssertThrowsError(try MusicDocument(bytes, runID: "fixture")) {
+            XCTAssertThrowsError(try MusicDocument(bytes, runID: "fixture").requireQueue()) {
                 XCTAssertEqual($0 as? MusicServiceError, .corruptDocument)
             }
         }

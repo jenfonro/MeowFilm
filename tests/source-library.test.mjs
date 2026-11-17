@@ -571,7 +571,7 @@ test('Cookie, source values, cache and management flags recover through an App d
   let item = await importSource(rpc, { ...source, loginUrl: 'https://books.invalid/login', searchUrl: `@js:
     if (key === 'write') {
       cookie.setCookie('https://books.invalid/', 'fixture=persisted; Path=/; Secure; HttpOnly; SameSite=Lax');
-      cookie.setCookie('https://books.invalid/legacy/page', 'legacy=old; Path=/legacy; Secure');
+      cookie.setCookie('https://books.invalid/nested/page', 'nested=stored; Path=/nested; Secure');
       cache.put('private', 'cache-value');
       source.put('private', 'source-value');
       source.setVariable('source-variable');
@@ -587,11 +587,6 @@ test('Cookie, source values, cache and management flags recover through an App d
   const disabled = await importSource(rpc, { ...source, bookSourceName: 'Disabled',
     bookSourceUrl: 'https://disabled.invalid/', enabled: false });
   value(await module.close());
-  const file = join(dataRoot, 'source/library.json'), stored = JSON.parse(readFileSync(file, 'utf8'));
-  const legacy = stored.sources[0].private.cookies[0][1].find(([, cookie]) => cookie.name === 'legacy')[1];
-  delete legacy.httpOnly;
-  delete legacy.sameSite;
-  writeFileSync(file, JSON.stringify(stored));
   const childSource = `
     import { createSourceRuntimeModule } from './apps/runtime/modules/source-runtime.mjs';
     const module = createSourceRuntimeModule({dataRoot:process.argv[1],
@@ -637,7 +632,7 @@ test('Cookie, source values, cache and management flags recover through an App d
   assert.equal(restored.sources[0].enabledExplore, false);
   assert.equal(restored.observed, 'fixture=persisted|cache-value|source-value|source-variable');
   assert.deepEqual(restored.cookies, [
-    { name: 'legacy', value: 'old', domain: 'books.invalid', hostOnly: true, path: '/legacy',
+    { name: 'nested', value: 'stored', domain: 'books.invalid', hostOnly: true, path: '/nested',
       secure: true, httpOnly: false, sameSite: null, expires: null },
     { name: 'fixture', value: 'persisted', domain: 'books.invalid', hostOnly: true, path: '/',
       secure: true, httpOnly: true, sameSite: 'Lax', expires: null },
@@ -645,6 +640,129 @@ test('Cookie, source values, cache and management flags recover through an App d
   assert.equal(restored.sources[1].installationId, disabled.installationId);
   assert.equal(restored.sources[1].enabled, false);
   denied(restored.disabled, 'SOURCE_DISABLED');
+});
+
+test('real Reader SDK keeps unused permanent fields lazy and preserves exact values on variable writes', async t => {
+  const dataRoot = temp(t), first = setup(t, { dataRoot });
+  const item = await importSource(first.rpc, { ...source,
+    coverDecodeJs: 'result === "read" ? source.get("retained") : ' +
+      'result === "number" ? typeof source.get("unused") : source.setVariable(result)' });
+  value(await first.module.close());
+  const path = join(dataRoot, 'source/library.json');
+  const document = JSON.parse(readFileSync(path, 'utf8'));
+  const raw = '{"values":{"retained":"value","unused":9007199254740993},"variable":false,' +
+    '"extension":1.234567890123456789}';
+  document.sources[0].private.storage = [['storage', [['reader.source.values', raw]]]];
+  writeFileSync(path, JSON.stringify(document));
+  const second = setup(t, { dataRoot });
+  assert.equal(value(await second.rpc('library.list')).sources[0].errorCode, undefined);
+  assert.equal(value(await invoke(second.rpc, item, 'search', { keyword: 'unused' })).books[0].name, 'Result');
+  assert.equal(value(await invoke(second.rpc, item, 'image', { body: 'read' })).body, 'value');
+  assert.equal(value(await invoke(second.rpc, item, 'image', { body: 'number' })).body, 'number');
+  assert.equal(value(await invoke(second.rpc, item, 'image', { body: 'updated' })).body, 'updated');
+  const saved = JSON.parse(readFileSync(path, 'utf8')).sources[0].private.storage[0][1]
+    .find(([key]) => key === 'reader.source.values')[1];
+  assert.match(saved, /9007199254740993/);
+  assert.match(saved, /1\.234567890123456789/);
+  assert.equal(JSON.parse(saved).variable, 'updated');
+});
+
+test('source private storage stays exact across restart, actual script reads and unrelated writes', async t => {
+  const dataRoot = temp(t), first = setup(t, { dataRoot });
+  const item = await importSource(first.rpc, { ...source, coverDecodeJs:
+    'const value = await cache.get("unread"); const type = typeof value.number; ' +
+    'value.number = 0; await cache.put("other", "updated"); return type;' });
+  value(await first.module.close());
+  const path = join(dataRoot, 'source/library.json');
+  const document = JSON.parse(readFileSync(path, 'utf8'));
+  document.sources[0].private.storage = [['storage', [['unread', 'exact-placeholder']]]];
+  writeFileSync(path, JSON.stringify(document).replace('"exact-placeholder"', '{"number":9007199254740993}'));
+  const second = setup(t, { dataRoot });
+  assert.equal(value(await second.rpc('library.list')).sources[0].errorCode, undefined);
+  assert.equal(value(await invoke(second.rpc, item, 'search', { keyword: 'unused' })).books[0].name, 'Result');
+  assert.match(readFileSync(path, 'utf8'), /9007199254740993/);
+  assert.equal(value(await invoke(second.rpc, item, 'image', { body: '' })).body, 'number');
+  const saved = readFileSync(path, 'utf8');
+  assert.match(saved, /9007199254740993/);
+  assert.equal(JSON.parse(saved).sources[0].private.storage[0][1].find(([key]) => key === 'other')[1], 'updated');
+});
+
+test('definition previews and unrelated library edits preserve exact numbers and stored envelopes', async t => {
+  const dataRoot = temp(t);
+  const first = setup(t, { dataRoot });
+  const original = JSON.stringify({ ...source, enabled: false }).replace(/}$/, ',"unused":9007199254740993}');
+  const preview = value(await first.rpc('library.previewImport', { text: `[${original}]` }));
+  assert.deepEqual(preview.failures, []);
+  assert.match(preview.items[0].definition, /9007199254740993/);
+  let item = value(await first.rpc('library.import', { text: preview.items[0].definition })).sources[0];
+  value(await first.module.close());
+  const path = join(dataRoot, 'source/library.json');
+  const document = JSON.parse(readFileSync(path, 'utf8'));
+  document.sources[0].actions = [123];
+  document.sources[0].private.extension = 'exact-placeholder';
+  document.sources.push(null, { installationId: 'bad', revision: false, sourceUrl: 'https://bad.invalid/' });
+  writeFileSync(path, JSON.stringify(document).replace('"exact-placeholder"', '1.234567890123456789')
+    .replace(/}$/, ',"extension":9007199254740995}'));
+  const second = setup(t, { dataRoot });
+  const list = value(await second.rpc('library.list')).sources;
+  assert.equal(list.length, 1);
+  assert.deepEqual(list[0].actions, []);
+  item = value(await second.rpc('library.update', { installationId: item.installationId,
+    expectedRevision: item.revision, patch: { name: '', order: 1.5, group: 'changed' } })).source;
+  assert.equal(item.name, '');
+  assert.equal(item.order, 1.5);
+  for (const text of [
+    value(await second.rpc('library.get', { installationId: item.installationId })).definition,
+    value(await second.rpc('library.export', { installationIds: [item.installationId] })).text,
+  ]) assert.match(text, /9007199254740993/);
+  const stored = readFileSync(path, 'utf8');
+  assert.equal(JSON.parse(stored).sources[0].definition, document.sources[0].definition);
+  for (const token of ['9007199254740993', '9007199254740995', '1.234567890123456789']) {
+    assert.ok(stored.includes(token), token);
+  }
+  assert.equal(JSON.parse(stored).sources[1], null);
+  assert.equal(JSON.parse(stored).sources[2].revision, false);
+});
+
+test('disabled malformed definitions remain untouched by unrelated management updates', async t => {
+  const dataRoot = temp(t), first = setup(t, { dataRoot });
+  let item = await importSource(first.rpc, { ...source, enabled: false });
+  value(await first.module.close());
+  const path = join(dataRoot, 'source/library.json');
+  const document = JSON.parse(readFileSync(path, 'utf8'));
+  document.sources[0].definition = '{broken';
+  writeFileSync(path, JSON.stringify(document));
+  const second = setup(t, { dataRoot });
+  item = value(await second.rpc('library.update', { installationId: item.installationId,
+    expectedRevision: item.revision, patch: { name: '', group: 'changed', order: 1.5 } })).source;
+  assert.equal(item.errorCode, undefined);
+  assert.equal(item.name, '');
+  assert.equal(item.order, 1.5);
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).sources[0].definition, '{broken');
+  denied(await second.rpc('library.get', { installationId: item.installationId }), 'INVALID_REQUEST');
+  denied(await second.rpc('library.export', { installationIds: [item.installationId] }), 'INVALID_REQUEST');
+  denied(await second.rpc('library.update', { installationId: item.installationId,
+    expectedRevision: item.revision, patch: { enabled: true } }), 'UNSUPPORTED_PROTOCOL');
+  assert.equal(value(await second.rpc('library.list')).sources[0].enabled, false);
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).sources[0].definition, '{broken');
+});
+
+test('a failed private restore keeps its original material while healthy sources continue', async t => {
+  const dataRoot = temp(t), first = setup(t, { dataRoot });
+  const broken = await importSource(first.rpc);
+  const healthy = await importSource(first.rpc, { ...source, bookSourceUrl: 'https://healthy.invalid/' });
+  value(await first.module.close());
+  const path = join(dataRoot, 'source/library.json');
+  const document = JSON.parse(readFileSync(path, 'utf8'));
+  document.sources[0].private.storage = false;
+  writeFileSync(path, JSON.stringify(document));
+  const second = setup(t, { dataRoot });
+  const restored = value(await second.rpc('library.list')).sources;
+  assert.equal(restored.find(item => item.installationId === broken.installationId).errorCode, 'SOURCE_FAILURE');
+  assert.equal(restored.find(item => item.installationId === healthy.installationId).errorCode, undefined);
+  denied(await invoke(second.rpc, broken, 'search', { keyword: 'broken' }), 'SOURCE_FAILURE');
+  assert.equal(value(await invoke(second.rpc, healthy, 'search', { keyword: 'healthy' })).books[0].name, 'Result');
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).sources[0], document.sources[0]);
 });
 
 test('corrupt persistent storage is reported and is never replaced by an empty library', async t => {
@@ -751,20 +869,28 @@ test('default URL preview follows HTTP redirects without executing candidates or
   assert.deepEqual(paths, ['/redirect', '/definitions']);
 });
 
-test('default URL preview validates initial and redirected protocols and credentials', async t => {
+test('default URL preview rejects non-HTTP protocols and passes credentials to actual transport', async t => {
   const paths = [];
   const { socketOrigin } = await serverFor(t, (request, response) => {
     paths.push(request.url);
-    response.writeHead(302, { location: request.url === '/protocol'
-      ? 'file:///source.json' : 'http://user:password@127.0.0.1/source.json' }).end();
+    if (request.url === '/protocol') response.writeHead(302, { location: 'file:///source.json' }).end();
+    else if (request.url === '/credentials') {
+      const target = new URL('/definitions', socketOrigin);
+      target.username = 'fixture'; target.password = 'fixture';
+      response.writeHead(302, { location: target.href }).end();
+    } else response.end(JSON.stringify({ ...source, enabled: false }));
   });
   const rpc = moduleHttp(t, createSourceRuntimeModule({ platform: 'fixture' }));
-  for (const url of ['not a URL', 'file:///source.json', 'https://user:password@example.invalid/source.json'])
+  for (const url of ['not a URL', 'file:///source.json'])
     denied(await rpc('library.previewImport', { url }), 'INVALID_REQUEST');
   assert.deepEqual(paths, []);
-  for (const path of ['/protocol', '/credentials'])
-    denied(await rpc('library.previewImport', { url: socketOrigin + path }), 'INVALID_REQUEST');
-  assert.deepEqual(paths, ['/protocol', '/credentials']);
+  denied(await rpc('library.previewImport', { url: socketOrigin + '/protocol' }), 'INVALID_REQUEST');
+  const direct = new URL('/definitions', socketOrigin);
+  direct.username = 'fixture'; direct.password = 'fixture';
+  for (const url of [direct.href, socketOrigin + '/credentials']) {
+    assert.equal(value(await rpc('library.previewImport', { url })).items.length, 1);
+  }
+  assert.deepEqual(paths, ['/protocol', '/definitions', '/credentials', '/definitions']);
   assert.deepEqual(value(await rpc('library.list')).sources, []);
 });
 

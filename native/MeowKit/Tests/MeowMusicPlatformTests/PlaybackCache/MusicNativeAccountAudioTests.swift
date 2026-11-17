@@ -1,18 +1,18 @@
 import Foundation
+import MeowRuntime
 import XCTest
 import MeowMusicFeature
-import MeowJSON
 @testable import MeowMusicPlatform
 
 final class MusicNativeAccountAudioTests: XCTestCase {
-    private func candidate(expiry: JSONValue? = .null) -> JSONValue {
-        var value: [String: JSONValue] = ["url": .string("https://media.example.invalid/synthetic.flac")]
+    private func candidate(expiry: RuntimeValue? = .null) -> RuntimeValue {
+        var value: RuntimeObject = ["url": .string("https://media.example.invalid/synthetic.flac")]
         value["expiresAt"] = expiry
         return .object(value)
     }
 
     func testAbsentAndNullLifetimeStayUnknownWithoutInventingTTL() throws {
-        for expiry: JSONValue? in [nil, .null] {
+        for expiry: RuntimeValue? in [nil, .null] {
             let audio = try MusicNativeAccountURLCache.audio(candidate(expiry: expiry))
             XCTAssertNil(audio.expiresAt); XCTAssertTrue(audio.headers.isEmpty)
             XCTAssertEqual(audio.url.absoluteString, "https://media.example.invalid/synthetic.flac")
@@ -27,7 +27,7 @@ final class MusicNativeAccountAudioTests: XCTestCase {
     }
 
     func testUnconsumedFieldsDoNotBecomeMediaGatesOrTransportHeaders() throws {
-        for extra: JSONValue in [.null, .bool(true), .object(["Cookie": .string("synthetic-secret")])] {
+        for extra: RuntimeValue in [.null, .bool(true), .object(["Cookie": .string("synthetic-secret")])] {
             guard case .object(var fields) = candidate() else { return XCTFail("Fixture") }
             fields["headers"] = extra; fields["qualityVerified"] = extra; fields["unused"] = extra
             let audio = try MusicNativeAccountURLCache.audio(.object(fields))
@@ -37,7 +37,7 @@ final class MusicNativeAccountAudioTests: XCTestCase {
     }
 
     func testActualQualityAndFullResourceFactsControlDeliveryWithoutMembershipRequests() throws {
-        let value: JSONValue = .object(["url": .string("https://media.example.invalid/full.flac"),
+        let value: RuntimeValue = .object(["url": .string("https://media.example.invalid/full.flac"),
             "expiresAt": .null, "full": .bool(true), "actualQuality": .string("flac"),
             "bitrate": .number(900_000), "sampleRate": .number(44_100), "duration": .number(180)])
         let audio = try MusicNativeAccountURLCache.audio(value)
@@ -46,7 +46,7 @@ final class MusicNativeAccountAudioTests: XCTestCase {
     }
 
     func testMissingURLAndCredentialBearingOrNonMediaLocationsRemainFailures() {
-        for value: JSONValue in [.object([:]), .object(["url": .number(123)])] {
+        for value: RuntimeValue in [.object([:]), .object(["url": .number(123)])] {
             XCTAssertThrowsError(try MusicNativeAccountURLCache.audio(value))
         }
         for address in ["file:///private/file.mp3", "https://user:secret@media.invalid/a",

@@ -63,21 +63,15 @@ enum FilmPlaybackPresentation {
             (succeeded(snapshot.metadataCache, component: "similar") ? [] : baseline.similarItems)
         let logo = logo(fields) ?? logo(supplement) ??
             (fields["images"] == nil && !succeeded(snapshot.metadataCache, component: "images") ? baseline.logoURL : nil)
-        let summary = field(fields, "overview", "intro")
-        let summaryText = summary?.filmText ?? ""
-        let displaySummary = summaryText.isEmpty
-            ? text(supplement, "overview") ?? (summary == nil && !hasDetail ? baseline.summary : "")
-            : summaryText
         let releaseDate = field(fields, "release_date", "first_air_date", "pubdate")
-        let episodeCount = field(fields, "number_of_episodes", "episodes_count")
         return FilmDetail(item: item,
                           backdropURL: artwork(fields["backdrop_path"]) ?? artwork(supplement["backdrop_path"]) ??
                             (fields["backdrop_path"] == nil && !hasDetail ? baseline.backdropURL : nil),
-                          title: title, logoURL: logo, summary: displaySummary,
+                          title: snapshot.workInfo?.title ?? title, logoURL: logo, summary: snapshot.workInfo?.summary ?? "",
                           releaseDate: releaseDate == nil && !hasDetail ? baseline.releaseDate : releaseDate?.filmText ??
                             releaseDate?.filmArray?.compactMap(\.filmText).joined(separator: " · "),
-                          seasonCount: fields["number_of_seasons"] == nil && !hasDetail ? baseline.seasonCount : integer(fields["number_of_seasons"]),
-                          episodeCount: episodeCount == nil && !hasDetail ? baseline.episodeCount : integer(episodeCount),
+                          seasonCount: snapshot.workInfo?.seasonCount,
+                          episodeCount: snapshot.workInfo?.episodeCount,
                           seasons: seasons, cast: cast, similarItems: similar)
     }
 
@@ -163,6 +157,45 @@ enum FilmPlaybackPresentation {
         guard let text = value?.filmText, !text.isEmpty,
               text.utf8.allSatisfy({ (48...57).contains($0) }) else { return nil }
         return Int(text)
+    }
+}
+
+struct FilmPlaybackDirectoryKey: Hashable {
+    let source: String?
+    let line: FilmPlaybackIdentifier?
+    let metadata: String?
+    let season: Int?
+    init(source: String?, line: FilmPlaybackIdentifier?, metadata: String?, season: Int?) {
+        self.source = source; self.line = line; self.metadata = metadata; self.season = season
+    }
+    init(_ snapshot: FilmPlaybackSnapshot) {
+        self.init(source: snapshot.browsing.sourceID, line: snapshot.browsing.lineID,
+                  metadata: snapshot.metadataSourceID, season: snapshot.browsing.season)
+    }
+    func accepts(_ actual: Self) -> Bool {
+        source == actual.source && (metadata == nil || metadata == actual.metadata) &&
+            (line == nil || line == actual.line) && (season == nil || season == actual.season)
+    }
+}
+
+/// Only successful display data; never a stored live playback snapshot.
+struct FilmPlaybackDirectorySlice {
+    let key: FilmPlaybackDirectoryKey
+    let browsing: FilmPlaybackBrowsing
+    let metadata: RuntimeValue
+    let metadataCache: FilmMetadataCache?
+    let metadataSupplement: FilmPlaybackMetadataSupplement?
+    let metadataSources: [FilmPlaybackMetadataSource]
+    let episodes: [FilmPlaybackEpisode]
+    let candidates: [FilmPlaybackCandidate]
+    let entryResolution: String?
+
+    init(_ snapshot: FilmPlaybackSnapshot) {
+        key = .init(snapshot); browsing = snapshot.browsing
+        metadata = snapshot.metadata; metadataCache = snapshot.metadataCache
+        metadataSupplement = snapshot.metadataSupplement; metadataSources = snapshot.metadataSources
+        episodes = snapshot.episodes; candidates = snapshot.candidates
+        entryResolution = snapshot.entryResolution
     }
 }
 

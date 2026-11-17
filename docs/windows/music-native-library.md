@@ -51,11 +51,11 @@ ValueTask DisposeAsync();
 
 `AppendQueueAsync` 是完整歌单的进程内 next 入口，返回 `{ok:true,currentId,version,mode}`，不返回全量 entryIds。它在唯一串行边界核对 `expectedVersion`，创建独立 occurrence 并将整段按输入顺序插在当前曲之后，一次 CAS、一次版本递增；当前曲、模式及旧优先队列保留，新段优先于旧 priority。空队列选中首曲且 priority 为空，不调用媒体播放。失败不分批落盘；CAS 准入前取消不写入，准入后报告真实结果，未知写入使用既有 reconcile 机制，不重放。
 
-普通 `music.queue.append` 接受 `songs/context/next`，保持 `entryIds` 回执与 512KiB 输入字节边界，不接受 `expectedVersion`。完整入口沿现有 16MiB 完整输入、8MiB 文档资源边界；两者不以歌曲条数截断，空输入不允许。队列当前 schema 为 1，entry 只存 `id/songId/context`，读取时由唯一歌曲仓库投影资料。
+普通 `music.queue.append` 接受 `songs/context/next`，保持 `entryIds` 回执与 512KiB 输入字节边界，不使用调用方传入的 `expectedVersion`。完整入口沿现有 16MiB 完整输入、8MiB 文档资源边界；两者不以歌曲条数截断，空输入不允许。队列当前 schema 为 1，entry 只存 `id/songId/context`，读取时由唯一歌曲仓库投影资料。
 
 ## 唯一当前文档
 
-根文档严格为：
+根文档读取以下必要容器：
 
 ```json
 {
@@ -68,10 +68,11 @@ ValueTask DisposeAsync();
 
 要求：
 
-- UTF-8 字节必须等于当前 canonical JSON 编码；重复属性、非规范持久整数、额外根字段和未知 entry 均拒绝。
-- entry key 必须属于当前 owner 的明确 area；脚本实例私有存储不在此文档。
+- UTF-8 JSON 保留实际字节／深度预算与重复属性检查，不要求重新编码后字节全等。未消费的根、entry、area 和歌曲扩展随本次保存保留，包括未转换的大整数与高精度小数；身份摘要与文档 CAS 指纹分别计算。
+- 仅选择当前动作涉及的 area；未知 key 不获得命令权限，也不阻断其他 area。所选 key 重复是歧义，明确失败。脚本实例私有存储不在此文档。
 - 缺少可选 area 表示该 area 尚未创建；entry 已存在但值为 `null`、错误类型或错误 schema 时不是空状态。
-- 按各 area 当前字段、schema 及引用约束校验；不符合契约的文档保持原字节不变并明确失败，读取不执行格式转换或回退。
+- 在实际消费时读取当前 schema、字段及引用关系，不在加载／每次提交时遍历所有 area 或要求歌曲等于 Normalize 投影。所选歌曲身份、录音唯一 owner、队列引用／current、修订与账号绑定仍须成立；坏根或所选材料损坏不当作缺省空状态。整库同步仍核对其实际遍历的集合／绑定／journal 关系。
+- 独立歌曲登记只索引可用候选，未选坏记录原样保留；该记录的 UUID、录音 key 或本地文件身份被再次选中时明确失败，不为它另建 owner。封面策略只应用本次集合成员；显式全库策略变更由其消费者读取全部歌曲。
 
 当前普通 area：
 
@@ -193,7 +194,7 @@ version ownerId revision nextId collections songs accounts networkPlaylists
 
 ### 网络引用字段与回执
 
-`networkPlaylists` 是独立数组，每项严格为：
+`networkPlaylists` 是独立数组，每项消费以下字段：
 
 ```text
 id platform remoteId name cover count revision present subscription intent
@@ -301,7 +302,7 @@ music.online.song
 
 `native-appearance` 使用 schema 1、revision CAS：`playlistView` 为 grid/list，`playerTheme` 为 starlight，`colorMode` 为 song/fixed；`colorPalette` 接受当前预设键或严格不透明 `#RRGGBB`（UI 提交统一大写），沿同一外观保存／权威重读路径消费。程序背景主题不属于音乐库，见[桌面接线](desktop-shell.md)。
 
-`native-desktop-lyrics` 是独立 schema 1 area，含 `schema`、`revision`、`layout`（single/double）、`normalColor`、`highlightColor`，以及可选窗口 `geometry`。几何对象含显示器设备名 `monitor`、相对该显示器工作区左上角的 DIP 偏移 `x`／`y` 和 DIP 尺寸 `width`／`height`；不带几何的既有设置仍可读取。颜色为不透明 `#RRGGBB`，保存规范为大写；缺失 area 只读返回单行、普通色 `#FFB5C5`、高亮色 `#FFF2A8`，不迁移或重写其他 area。`music.lyrics.desktop.settings.save` 接受 `ifRevision`、三个原设置值和可选 `geometry`，返回权威 `settings`；未知字段拒绝，无变化不写盘。歌词校正、锁定与源译文开关不跨重启保存。消费者在成功回执或对应权威读取后才安装值，失败通过现有通知通道报告；具体窗口交互见[原生歌词应用链](music-lyric-application.md)。
+`native-desktop-lyrics` 是独立 schema 1 area，含 `schema`、`revision`、`layout`（single/double）、`normalColor`、`highlightColor`，以及可选窗口 `geometry`。几何对象含显示器设备名 `monitor`、相对该显示器工作区左上角的 DIP 偏移 `x`／`y` 和 DIP 尺寸 `width`／`height`；不带几何的既有设置仍可读取。颜色为不透明 `#RRGGBB`，保存规范为大写；缺失 area 只读返回单行、普通色 `#FFB5C5`、高亮色 `#FFF2A8`，不迁移或重写其他 area。`music.lyrics.desktop.settings.save` 接受 `ifRevision`、三个原设置值和可选 `geometry`，返回权威 `settings`；未消费字段不作为拒绝条件，已有扩展保留；无变化不写盘。歌词校正、锁定与源译文开关不跨重启保存。消费者在成功回执或对应权威读取后才安装值，失败通过现有通知通道报告；具体窗口交互见[原生歌词应用链](music-lyric-application.md)。
 
 ## CAS、取消与关闭
 

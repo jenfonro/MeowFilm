@@ -8,9 +8,9 @@ import { fixture, response, rpc, qq, seedClients, xeapi, encrypt, gate, now } fr
 const audio = { code: 200, data: [{ code: 200, url: 'https://audio.invalid/full', level: 'lossless', time: 240000 }] };
 const resolve = f => f.request('wy', 'audio', { id: '123', quality: 'flac' });
 
-test('XEAPI authenticates canonical positive safe millisecond values before any media request', async () => {
-  const invalid = [true, 0, -1, 1.5, 9007199254740992, '001700000000000', '1e12', 'not-a-time'];
-  for (const timestamp of [now, String(now), ...invalid]) {
+test('XEAPI authenticates timestamp text without normalizing its signed representation', async () => {
+  const invalid = [true, {}, [], ''];
+  for (const timestamp of [now, String(now), 0, -1, 1.5, '9007199254740993', '001700000000000', '1e12', 'not-a-time', ...invalid]) {
     const server = xeapi();
     const f = fixture(request => {
       const path = new URL(request.url).pathname;
@@ -20,7 +20,7 @@ test('XEAPI authenticates canonical positive safe millisecond values before any 
     }); seedClients(f);
     if (invalid.includes(timestamp)) {
       await assert.rejects(resolve(f), { code: 'INVALID_RESPONSE' });
-      assert.equal(f.requests.length, 2, 'even an authenticated malformed timestamp cannot reach media');
+      assert.equal(f.requests.length, 2, 'unreadable signature input cannot reach media');
     } else {
       assert.equal((await resolve(f)).full, true);
       assert.equal(f.requests.length, 3);
@@ -151,7 +151,7 @@ test('encrypted audio consumes one gzip JSON document and rejects corruption, tr
   }
 });
 
-const qimei = () => response({ code: 0, data: JSON.stringify({ code: 0, data: { q16: 'new-q16', q36: 'new-q36' } }) });
+const qimei = () => response({ code: 0, data: JSON.stringify({ code: 0, data: { q36: 'new-q36' } }) });
 const method = request => new URL(request.url).hostname === 'api.tencentmusic.com' ? 'GetQimei' : qq(request).req_0.method;
 const search = f => f.request('tx', 'search', { keyword: 'synthetic' });
 function qqReply(request) {
@@ -166,6 +166,23 @@ function qqReply(request) {
   return rpc({ body: { item_song: [] }, meta: { sum: 0, nextpage: -1 } });
 }
 
+test('QQ preparation consumes q36 without requiring or saving unused q16', async t => {
+  for (const q16 of [undefined, null, { unused: true }, 'ignored']) {
+    const f = fixture(request => method(request) === 'GetQimei' ?
+      response({ data: JSON.stringify({ data: { q36: 'new-q36', q16 } }) }) : qqReply(request));
+    t.after(() => f.close());
+    await search(f);
+    assert.deepEqual(JSON.parse(f.files.get('clients.json')).tx.qimei, { q36: 'new-q36', savedAt: now });
+    assert.deepEqual(f.requests.map(method), ['GetQimei', 'GetSession', 'DoSearchForQQMusicMobile']);
+  }
+  for (const q36 of [undefined, {}, '']) {
+    const f = fixture(() => response({ data: JSON.stringify({ data: { q36, q16: 'unused' } }) }));
+    t.after(() => f.close());
+    await assert.rejects(search(f), { code: 'INVALID_RESPONSE' });
+    assert.equal(f.requests.length, 1); assert.equal(JSON.parse(f.files.get('clients.json')).tx.qimei, null);
+  }
+});
+
 test('QIMEI optional status separates conversion failures and explicit refusals without dependent requests or successful state saves', async t => {
   const values = [
     ['missing', undefined, null], ['null', null, null], ['success-string', '0', null],
@@ -175,7 +192,7 @@ test('QIMEI optional status separates conversion failures and explicit refusals 
   ];
   for (const stage of ['outer', 'inner']) for (const [name, value, code] of values) await t.test(stage + ':' + name, async t => {
     const reply = { code: stage === 'outer' ? value : 0, data: JSON.stringify({
-      code: stage === 'inner' ? value : 0, data: { q16: 'new-q16', q36: 'new-q36' },
+      code: stage === 'inner' ? value : 0, data: { q36: 'new-q36' },
     }) };
     const f = fixture(request => method(request) === 'GetQimei' ? response(reply) : qqReply(request));
     seedClients(f);
@@ -191,7 +208,7 @@ test('QIMEI optional status separates conversion failures and explicit refusals 
       assert.deepEqual((await search(f)).items, []);
       assert.deepEqual(f.requests.map(method), ['GetQimei', 'GetSession', 'DoSearchForQQMusicMobile']);
       const saved = JSON.parse(f.files.get('clients.json')).tx;
-      assert.deepEqual(saved.qimei, { q16: 'new-q16', q36: 'new-q36', savedAt: now });
+      assert.deepEqual(saved.qimei, { q36: 'new-q36', savedAt: now });
       assert.deepEqual(saved.session, { uid: 'new-uid', sid: 'new-sid', savedAt: now });
     }
   });

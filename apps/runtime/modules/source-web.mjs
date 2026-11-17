@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { ScriptHostError } from '@meowfilm/script-host';
+import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 
 /** Pending native presentation belongs to the exact request signal and profile. */
 export function createSourceWebBroker() {
@@ -18,14 +19,14 @@ export function createSourceWebBroker() {
         };
         const abort = () => finish(new ScriptHostError('CANCELLED'));
         pending.set(id, { profile, signal,
-          value: { id, installationId: scope.installationId, mode, request: structuredClone(request) },
+          value: { id, installationId: scope.installationId, mode, request: cloneJSONValue(request) },
           finish });
         signal.addEventListener('abort', abort, { once: true });
         if (signal.aborted) abort();
       });
     },
     pending() {
-      return { requests: [...pending.values()].map(item => structuredClone(item.value)) };
+      return { requests: [...pending.values()].map(item => cloneJSONValue(item.value)) };
     },
     respond({ id, result, cancelled }) {
       const item = pending.get(id);

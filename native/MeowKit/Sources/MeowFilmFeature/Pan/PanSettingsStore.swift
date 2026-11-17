@@ -19,8 +19,14 @@ final class PanSettingsStore: @unchecked Sendable {
     func accounts() throws -> [PanAccount] {
         let root = try read()
         return try PanProviderID.allCases.map { id in
-            let account = Self.snapshot(root, id)
-            let signature = try Self.signature(root, id)
+            let account: PanAccount, signature: Data
+            do {
+                account = try Self.snapshot(root, id); signature = try Self.signature(root, id)
+            } catch {
+                guard error as? RuntimeHTTPError == .remote("CORRUPT_STORAGE") else { throw error }
+                lock.lock(); verified[id] = nil; lock.unlock()
+                return PanAccount(corrupt: id)
+            }
             lock.lock(); defer { lock.unlock() }
             guard let prior = verified[id], prior.signature == signature else {
                 verified[id] = nil
@@ -31,6 +37,11 @@ final class PanSettingsStore: @unchecked Sendable {
     }
 
     func replace(_ provider: PanProviderID, credentials: RuntimeValue) throws -> PanAccount {
+        guard let supplied = credentials.panObject else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
+        let fields = PanProvider.all.first { $0.id == provider }!.credentialFields
+        let credentials = RuntimeValue.object(RuntimeObject(uniqueKeysWithValues: fields.compactMap { field in
+            supplied[field.rawValue].map { (field.rawValue, $0) }
+        }))
         try Self.validateCredentials(provider, credentials)
         let root: RuntimeValue
         do {
@@ -38,15 +49,19 @@ final class PanSettingsStore: @unchecked Sendable {
                 let root = value ?? Self.empty
                 try Self.validate(root)
                 var accounts = root.panField("accounts")!.panObject!
-                let revision = Self.snapshot(root, provider).revision
+                guard let revision = try Self.snapshot(root, provider).revision else {
+                    throw RuntimeHTTPError.remote("CORRUPT_STORAGE")
+                }
                 guard revision < 9_007_199_254_740_991 else { throw RuntimeHTTPError.remote("STORAGE_ERROR") }
-                accounts[provider.rawValue] = .object([
-                    "revision": .number(Double(revision + 1)), "credentials": credentials,
-                ])
-                return .object(["version": .number(1), "accounts": .object(accounts)])
+                var record = accounts[provider.rawValue]?.panObject ?? RuntimeObject()
+                record["revision"] = .number(Double(revision + 1)); record["credentials"] = credentials
+                accounts[provider.rawValue] = .object(record)
+                var envelope = root.panObject!
+                envelope["accounts"] = .object(accounts)
+                return .object(envelope)
             }
         } catch { throw Self.storageError(error) }
-        return Self.snapshot(root, provider)
+        return try Self.snapshot(root, provider)
     }
 
     func signature(_ provider: PanProviderID) throws -> Data { try Self.signature(read(), provider) }
@@ -54,9 +69,12 @@ final class PanSettingsStore: @unchecked Sendable {
     /// The runtime's success is not sufficient: its credential CAS must already
     /// be visible in this same document, at the receipt's revision and fields.
     func accept(_ account: PanAccount) throws -> PanAccount {
-        let root = try read(), current = Self.snapshot(root, account.provider)
+        if let error = account.errorCode { throw RuntimeHTTPError.remote(error.rawValue) }
+        guard let fields = account.fields else { throw PanAccountError.unconfirmed }
+        let root = try read(), current = try Self.snapshot(root, account.provider)
         guard current.revision == account.revision else { throw RuntimeHTTPError.remote("STALE_ACCOUNT") }
-        guard current.configured == account.configured, Set(current.fields) == Set(account.fields) else {
+        guard current.configured == account.configured, let currentFields = current.fields,
+              Set(currentFields) == Set(fields) else {
             throw PanAccountError.unconfirmed
         }
         let signature = try Self.signature(root, account.provider)
@@ -68,9 +86,9 @@ final class PanSettingsStore: @unchecked Sendable {
     func expire(_ provider: PanProviderID, expected: Data) throws {
         let root = try read()
         guard try Self.signature(root, provider) == expected else { throw RuntimeHTTPError.remote("STALE_ACCOUNT") }
-        let current = Self.snapshot(root, provider)
-        guard current.configured else { return }
-        let account = PanAccount(provider: provider, revision: current.revision, fields: current.fields, status: .expired)
+        let current = try Self.snapshot(root, provider)
+        guard current.configured == true, let revision = current.revision, let fields = current.fields else { return }
+        let account = PanAccount(provider: provider, revision: revision, fields: fields, status: .expired)
         lock.lock(); defer { lock.unlock() }
         verified[provider] = Verified(signature: expected, account: account)
     }
@@ -93,17 +111,9 @@ final class PanSettingsStore: @unchecked Sendable {
     }
 
     static func validate(_ root: RuntimeValue) throws {
-        guard let fields = root.panObject, Set(fields.keys) == ["version", "accounts"],
-              fields["version"] == .number(1), let accounts = fields["accounts"]?.panObject else {
+        guard let fields = root.panObject, fields["version"] == .number(1),
+              fields["accounts"]?.panObject != nil else {
             throw RuntimeHTTPError.remote("CORRUPT_STORAGE")
-        }
-        for (id, record) in accounts {
-            guard let provider = PanProviderID(rawValue: id), let fields = record.panObject,
-                  Set(fields.keys) == ["revision", "credentials"],
-                  let revision = fields["revision"]?.panInteger, revision > 0,
-                  let credentials = fields["credentials"] else { throw RuntimeHTTPError.remote("CORRUPT_STORAGE") }
-            do { try validateCredentials(provider, credentials) }
-            catch { throw RuntimeHTTPError.remote("CORRUPT_STORAGE") }
         }
     }
 
@@ -111,9 +121,7 @@ final class PanSettingsStore: @unchecked Sendable {
         guard let fields = credentials.panObject else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
         let allowed = PanProvider.all.first { $0.id == provider }!.credentialFields
         for (name, value) in fields {
-            guard let field = allowed.first(where: { $0.rawValue == name }) else {
-                throw RuntimeHTTPError.remote("INVALID_REQUEST")
-            }
+            guard let field = allowed.first(where: { $0.rawValue == name }) else { continue }
             if field.isNumber {
                 guard value.panInteger != nil else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
             } else {
@@ -125,10 +133,18 @@ final class PanSettingsStore: @unchecked Sendable {
         }
     }
 
-    private static func snapshot(_ root: RuntimeValue, _ provider: PanProviderID) -> PanAccount {
+    private static func snapshot(_ root: RuntimeValue, _ provider: PanProviderID) throws -> PanAccount {
         let record = root.panField("accounts")?.panField(provider.rawValue)
+        if let record {
+            guard record.panField("revision")?.panInteger.map({ $0 > 0 }) == true,
+                  let credentials = record.panField("credentials") else { throw RuntimeHTTPError.remote("CORRUPT_STORAGE") }
+            do { try validateCredentials(provider, credentials) }
+            catch { throw RuntimeHTTPError.remote("CORRUPT_STORAGE") }
+        }
         let credentials = record?.panField("credentials")?.panObject ?? RuntimeObject()
-        let fields = credentials.filter { _, value in
+        let allowed = PanProvider.all.first { $0.id == provider }!.credentialFields.map(\.rawValue)
+        let fields = credentials.filter { key, value in
+            guard allowed.contains(key) else { return false }
             if let text = value.panString { return !text.isEmpty }
             return (value.panInteger ?? 0) > 0
         }.map(\.key).sorted()
@@ -137,6 +153,7 @@ final class PanSettingsStore: @unchecked Sendable {
     }
 
     private static func signature(_ root: RuntimeValue, _ provider: PanProviderID) throws -> Data {
+        _ = try snapshot(root, provider)
         let record = root.panField("accounts")?.panField(provider.rawValue)
         let fields = PanProvider.all.first { $0.id == provider }!.credentialFields
         let value = RuntimeValue.array([record?.panField("revision") ?? .number(0)] +

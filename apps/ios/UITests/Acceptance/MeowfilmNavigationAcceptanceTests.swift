@@ -456,7 +456,7 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
             XCTAssertTrue(app.otherElements["app.page." + page].waitForExistence(timeout: 5))
             openSidebar()
             let controls = page == "film"
-                ? ["app.sidebar.filmSource", "app.sidebar.home"]
+                ? ["app.sidebar.home", "app.sidebar.filmSource"]
                 : ["app.sidebar.home", "app.sidebar.channels", "app.sidebar.musicSource"]
             assertSidebarStructure(controls: controls, matching: frames)
             attach("20-sidebar-" + page)
@@ -1059,7 +1059,8 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         let icon = sidebar.descendants(matching: .any)["app.sidebar.icon"]
         let card = sidebar.otherElements["app.sidebar.card"]
         let settings = sidebar.buttons["app.sidebar.settings"]
-        for element in [icon, card, settings] {
+        let scroll = sidebar.scrollViews["app.sidebar.scroll"]
+        for element in [icon, card, settings, scroll] {
             XCTAssertTrue(element.exists, file: file, line: line)
             XCTAssertGreaterThan(element.frame.width, 0, file: file, line: line)
             XCTAssertGreaterThan(element.frame.height, 0, file: file, line: line)
@@ -1069,7 +1070,13 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         XCTAssertEqual(sidebar.buttons["app.sidebar.home"].label, "首页", file: file, line: line)
         XCTAssertEqual(icon.frame.midX, card.frame.midX, accuracy: 1, file: file, line: line)
         XCTAssertLessThan(icon.frame.maxY, card.frame.minY, file: file, line: line)
-        XCTAssertLessThan(card.frame.maxY, settings.frame.minY, file: file, line: line)
+        XCTAssertEqual(scroll.frame.maxY, settings.frame.minY - 16, accuracy: 1, file: file, line: line)
+        XCTAssertTrue(sidebar.frame.contains(settings.frame), file: file, line: line)
+        XCTAssertTrue(settings.isHittable, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(settings.frame.height, 56, file: file, line: line)
+        XCTAssertTrue(scroll.descendants(matching: .any)["app.sidebar.icon"].exists, file: file, line: line)
+        XCTAssertTrue(scroll.otherElements["app.sidebar.card"].exists, file: file, line: line)
+        XCTAssertFalse(scroll.buttons["app.sidebar.settings"].exists, file: file, line: line)
         XCTAssertEqual(card.frame.minX, settings.frame.minX, accuracy: 1, file: file, line: line)
         XCTAssertEqual(card.frame.maxX, settings.frame.maxX, accuracy: 1, file: file, line: line)
         XCTAssertEqual(card.descendants(matching: .button).allElementsBoundByIndex.map(\.identifier).sorted(),
@@ -1078,6 +1085,7 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         for row in rows {
             XCTAssertTrue(row.exists, file: file, line: line)
             XCTAssertTrue(card.frame.contains(row.frame), file: file, line: line)
+            XCTAssertGreaterThanOrEqual(row.frame.height, 56, file: file, line: line)
         }
         for (upper, lower) in zip(rows, rows.dropFirst()) {
             XCTAssertLessThanOrEqual(upper.frame.maxY, lower.frame.minY, file: file, line: line)
@@ -1091,22 +1099,37 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
             }
             XCTAssertEqual(icon.frame.minY, expectedFrames[0].minY, accuracy: 1, file: file, line: line)
             XCTAssertEqual(card.frame.minY, expectedFrames[1].minY, accuracy: 1, file: file, line: line)
+            XCTAssertEqual(settings.frame.minY, expectedFrames[2].minY, accuracy: 1, file: file, line: line)
+            XCTAssertEqual(settings.frame.height, expectedFrames[2].height, accuracy: 1, file: file, line: line)
         }
         for row in rows { revealSidebarElement(row, file: file, line: line) }
-        revealSidebarElement(settings, file: file, line: line)
+        XCTAssertTrue(settings.isHittable, file: file, line: line)
+        XCTAssertEqual(settings.frame.minY, frames[2].minY, accuracy: 1, file: file, line: line)
         revealSidebarElement(rows[0], file: file, line: line)
+        XCTAssertEqual(settings.frame.minY, frames[2].minY, accuracy: 1, file: file, line: line)
         return frames
     }
 
     private func revealSidebarElement(_ element: XCUIElement,
                                       file: StaticString = #filePath, line: UInt = #line) {
-        let scroll = app.otherElements["app.sidebar"].scrollViews.firstMatch
+        let sidebar = app.otherElements["app.sidebar"]
+        let scroll = sidebar.scrollViews["app.sidebar.scroll"]
+        let settings = sidebar.buttons["app.sidebar.settings"]
+        let fixedFrame = settings.frame
+        if element.identifier == "app.sidebar.settings" {
+            XCTAssertTrue(element.isHittable, "The fixed footer must not require scrolling", file: file, line: line)
+            return
+        }
         while !element.isHittable {
             let before = element.frame
             if before.midY > scroll.frame.midY { scroll.swipeUp() } else { scroll.swipeDown() }
             if abs(element.frame.minY - before.minY) < 1 { break }
         }
         XCTAssertTrue(element.isHittable, file: file, line: line)
+        XCTAssertTrue(settings.isHittable, file: file, line: line)
+        XCTAssertEqual(settings.frame.minX, fixedFrame.minX, accuracy: 1, file: file, line: line)
+        XCTAssertEqual(settings.frame.minY, fixedFrame.minY, accuracy: 1, file: file, line: line)
+        XCTAssertEqual(settings.frame.height, fixedFrame.height, accuracy: 1, file: file, line: line)
     }
 
     private func waitSelected(_ button: XCUIElement) {

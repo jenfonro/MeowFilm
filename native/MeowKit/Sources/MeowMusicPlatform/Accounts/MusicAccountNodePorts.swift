@@ -1,7 +1,7 @@
 import Foundation
+import MeowRuntime
 import MeowAccounts
 import MeowMusicFeature
-import MeowJSON
 
 protocol MusicAccountSMSProvider: MusicAccountProvider {
     func sendSMS(countryCode: String, phone: String, attemptID: UUID) async throws -> MusicSMSSendReceipt
@@ -19,7 +19,7 @@ protocol MusicAccountChorusProvider: Sendable {
     func chorus(nativeID: String) async throws -> MusicChorusPoint?
 }
 protocol MusicNeteasePublicAudioProvider: Sendable {
-    func publicStandardAudio(nativeID: String) async throws -> MeowJSON.JSONValue
+    func publicStandardAudio(nativeID: String) async throws -> RuntimeValue
     func publicChorus(nativeID: String) async throws -> MusicChorusPoint?
 }
 protocol MusicNeteaseHomeProvider: Sendable {

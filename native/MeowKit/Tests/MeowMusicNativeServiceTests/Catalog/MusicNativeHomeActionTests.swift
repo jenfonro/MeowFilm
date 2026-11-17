@@ -179,7 +179,11 @@ final class MusicNativeHomeActionTests: XCTestCase {
         let peer = NativeMusicResultFixture([NativeDiscoveryFixture.page([NativeDiscoveryFixture.section("s", items: [
             item(.object(["type": .string("similar"), "sourceType": .string("song")]))])])])
         let service = try await NativeMusicFixture.service(platform: peer)
-        await assertMusicFailure(.upstreamInvalid) { _ = try await service.homePage(cursor: nil, refresh: true) }
+        let page = try await service.homePage(cursor: nil, refresh: true)
+        XCTAssertEqual(page.sections.count, 1)
+        let section = try XCTUnwrap(page.sections.first)
+        XCTAssertEqual(section.error, .upstreamInvalid)
+        XCTAssertTrue(section.items.isEmpty); XCTAssertTrue(section.tabs.isEmpty)
         let calls = await peer.calls(); XCTAssertEqual(calls.count, 1); await service.close()
     }
     func testFiniteSongCollectionIsNotAPlaylistAndKeepsOrderAndOccurrences() async throws {

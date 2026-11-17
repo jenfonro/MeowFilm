@@ -76,12 +76,12 @@ test('E36 each ordered dimension controls default selection and ties preserve en
   assert.equal(compareCandidates(candidate(), candidate({ id: 'different-identity' })), 0);
 });
 
-test('E36 pan order is explicit, including TV families, and labels never determine provider', () => {
+test('E36 pan order is explicit and labels never determine provider', () => {
   const preferences = normalizePreferences({ ruleOrder: ['pan', 'quality', 'keyword'], panOrder: ['baidu', 'quark'] });
   const items = [candidate({ id: 'misleading', lineLabel: '百度移动夸克', name: '百度文件' }),
-    candidate({ id: 'quark-tv', provider: 'quark_tv' }), candidate({ id: 'baidu', provider: 'baidu' }),
+    candidate({ id: 'quark', provider: 'quark' }), candidate({ id: 'baidu', provider: 'baidu' }),
     candidate({ id: 'unknown', provider: '139', lineLabel: '移动' })];
-  assert.deepEqual(sorted(items, { preferences }), ['baidu', 'quark-tv', 'misleading', 'unknown']);
+  assert.deepEqual(sorted(items, { preferences }), ['baidu', 'quark', 'misleading', 'unknown']);
   assert.equal(isCandidateAllowed(items[0], { target, constraint: { action: 'pan', provider: 'baidu' } }), false);
   assert.equal(isCandidateAllowed(items[1], { target, constraint: { action: 'pan', provider: 'quark' } }), true);
   assert.equal(isCandidateAllowed(items[3], { target, constraint: { action: 'pan', provider: 'yidong' } }), false);
@@ -110,7 +110,7 @@ test('E16 fixed pan never admits another family and prefers current quality befo
 test('E17 fixed quality keeps current pan first and never silently downgrades', () => {
   const preferences = normalizePreferences({ panOrder: ['baidu', 'quark'] });
   const items = [candidate({ id: 'preferred-pan', provider: 'baidu', quality: '4K' }),
-    candidate({ id: 'current-pan', provider: 'quark_tv', quality: '2160P' }),
+    candidate({ id: 'current-pan', provider: 'quark', quality: '2160P' }),
     candidate({ id: 'wrong-quality', provider: 'quark', quality: '1080P' }),
     candidate({ id: 'different-quality', provider: 'quark', quality: '4K·HDR' })];
   const options = { preferences, constraint: { action: 'quality', quality: '4K' }, current: { provider: 'quark' } };

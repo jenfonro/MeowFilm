@@ -1,5 +1,7 @@
 import Foundation
 import CryptoKit
+import CoreFoundation
+import MeowJSON
 import MeowMusicFeature
 
 /// Ordered JSON keeps locator hashes stable. Foundation Dictionary and
@@ -92,11 +94,6 @@ indirect enum MJ: Sendable, Equatable {
     func integer(_ maximum: Int = 9_007_199_254_740_991) throws -> Int {
         guard isInteger, number <= Double(maximum) else { throw MusicServiceError.invalidResponse }; return int
     }
-    func requireFields(_ allowed: [String], required: [String] = []) throws {
-        guard isObject, fields.allSatisfy({ allowed.contains($0.0) }), required.allSatisfy(contains) else {
-            throw MusicServiceError.corruptDocument
-        }
-    }
     var stable: MJ {
         switch self {
         case .object(let v): return .object(v.sorted { $0.0.utf16.lexicographicallyPrecedes($1.0.utf16) }.map { ($0.0, $0.1.stable) })
@@ -159,72 +156,25 @@ indirect enum MJ: Sendable, Equatable {
     }
     static func parse(_ data: Data, maximum: Int = maximumBytes) throws -> MJ {
         guard data.count <= maximum, String(data: data, encoding: .utf8) != nil else { throw MusicServiceError.limit }
-        var parser = Parser(bytes: Array(data))
-        let value = try parser.value()
-        parser.space(); guard parser.i == parser.bytes.count else { throw MusicServiceError.corruptDocument }
-        return value
-    }
-    private struct Parser {
-        let bytes: [UInt8]
-        var i = 0
-        mutating func space() { while i < bytes.count && [9, 10, 13, 32].contains(bytes[i]) { i += 1 } }
-        mutating func take(_ c: UInt8) -> Bool { space(); if i < bytes.count && bytes[i] == c { i += 1; return true }; return false }
-        mutating func string() throws -> String {
-            space(); let start = i
-            guard take(34) else { throw MusicServiceError.corruptDocument }
-            while i < bytes.count {
-                let c = bytes[i]; i += 1
-                if c == 34 {
-                    do { return try JSONDecoder().decode(String.self, from: Data(bytes[start..<i])) }
-                    catch { throw MusicServiceError.corruptDocument }
-                }
-                if c == 92 { i += 1 }
-                if c < 32 { throw MusicServiceError.corruptDocument }
+        func value(_ raw: Any) throws -> MJ {
+            if let fields = raw as? JSONObject.Fields {
+                return .object(try fields.map { ($0.key, try value($0.value)) })
             }
+            if let rows = raw as? [Any] { return .array(try rows.map(value)) }
+            if let text = raw as? String { return .string(text) }
+            if let number = raw as? JSONNumber {
+                return number.exactDouble.map(MJ.number) ?? .upstreamNumber(number.literal)
+            }
+            if let boolean = raw as? NSNumber, CFGetTypeID(boolean) == CFBooleanGetTypeID() {
+                return .bool(boolean.boolValue)
+            }
+            if raw is NSNull { return .null }
             throw MusicServiceError.corruptDocument
         }
-        mutating func value() throws -> MJ {
-            space()
-            guard i < bytes.count else { throw MusicServiceError.corruptDocument }
-            switch bytes[i] {
-            case 34: return .string(try string())
-            case 123:
-                i += 1; var rows: [(String, MJ)] = [], positions: [Data: Int] = [:]
-                if take(125) { return .obj() }
-                repeat {
-                    let key = try string()
-                    guard take(58) else { throw MusicServiceError.corruptDocument }
-                    let child = try value()
-                    // Keep insertion order and byte-exact Unicode keys while
-                    // using the last value of a repeated JSON member.
-                    let identity = Data(key.utf8)
-                    if let position = positions[identity] { rows[position].1 = child }
-                    else { positions[identity] = rows.count; rows.append((key, child)) }
-                } while take(44)
-                guard take(125) else { throw MusicServiceError.corruptDocument }; return .object(rows)
-            case 91:
-                i += 1; var rows: [MJ] = []
-                if take(93) { return .array([]) }
-                repeat { rows.append(try value()) } while take(44)
-                guard take(93) else { throw MusicServiceError.corruptDocument }; return .array(rows)
-            default:
-                let start = i
-                while i < bytes.count && ![9, 10, 13, 32, 44, 93, 125].contains(bytes[i]) { i += 1 }
-                let token = String(decoding: bytes[start..<i], as: UTF8.self)
-                if token == "null" { return .null }; if token == "true" { return .bool(true) }; if token == "false" { return .bool(false) }
-                guard token.range(of: #"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$"#, options: .regularExpression) != nil else {
-                    throw MusicServiceError.corruptDocument
-                }
-                // Unused numeric metadata never rejects a response. Consumers
-                // still obtain exact decimal IDs rather than rounded Doubles.
-                guard let n = Double(token), n.isFinite, abs(n) <= 9_007_199_254_740_991,
-                      n < 0 || n.rounded() != n || MJ.exactIntegerID(token) == String(Int64(n)) else {
-                    return .upstreamNumber(token)
-                }
-                return .number(n)
-            }
-        }
+        do { return try value(JSONObject.decodeValue(data)) }
+        catch { throw MusicServiceError.corruptDocument }
     }
+
 }
 
 func musicRequire(_ condition: @autoclosure () throws -> Bool, _ error: MusicServiceError = .invalidRequest) throws {

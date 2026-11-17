@@ -59,6 +59,7 @@ public static partial class MusicNativeSyncTests
         yield return new("Music sync unknown after CAS durable fence recovers without replay", () => UnknownCas(true));
         yield return new("Music sync pending write partial acknowledgement survives reopen", PartialAck);
         yield return new("Music sync independent queue changes survive sync envelope commit", QueuePreserved);
+        yield return new("Music sync preserves unconsumed document extensions", SyncExtensions);
         foreach (var corruption in SyncCorruptions())
         {
             var current = corruption;
@@ -750,7 +751,7 @@ public static partial class MusicNativeSyncTests
     {
         yield return new("with an unsupported schema", (_, sync, _) => sync["schema"] = -1);
         yield return new("with a missing root field", (_, sync, _) => sync.Remove("status"));
-        yield return new("with an extra document field", (_, sync, _) => sync["unexpected"] = true);
+
         yield return new("with an incomplete platform row", (_, sync, _) =>
             sync["platforms"]!["tx"]!.AsObject().Remove("accountId"));
         yield return new("with a non-boolean platform switch", (_, sync, _) =>
@@ -843,6 +844,24 @@ public static partial class MusicNativeSyncTests
             entries.Remove(libraryEntry);
         });
     }
+    private static async Task SyncExtensions()
+    {
+        await using var f = new Fixture();
+        await f.Enable();
+        await f.Sync.DisposeAsync();
+        await f.Owner.AbortAsync();
+        var root = JsonNode.Parse(f.Store.Data!)!.AsObject();
+        var sync = root["entries"]!.AsArray().Single(entry =>
+            entry!["key"]!.GetValue<string>().Contains("\"library-sync\"", StringComparison.Ordinal))!["value"]!.AsObject();
+        sync["unexpected"] = JsonNode.Parse("{\"exact\":900719925474099312345}");
+        f.Store.Data = LJ.Bytes(root);
+        f.Owner = new(f.Store);
+        f.Sync = new(f.Owner, f.Sessions, f.Runtime.Client);
+        Ok(await f.Owner.ExecuteAsync("music.library.list"));
+        Ok(await f.Sync.ExecuteAsync("music.librarySync.get"));
+        Ok(await f.Sync.ExecuteAsync("music.librarySync.run"));
+        Check(Encoding.UTF8.GetString(f.Store.Data!).Contains("900719925474099312345", StringComparison.Ordinal));
+    }
     private static async Task Corrupt(Action<JsonObject, JsonObject, JsonObject> apply)
     {
         await using var f = new Fixture();
@@ -862,7 +881,7 @@ public static partial class MusicNativeSyncTests
         f.Server.Reads = f.Server.Writes = f.Server.Creates = 0;
         f.Owner = new(f.Store);
         f.Sync = new(f.Owner, f.Sessions, f.Runtime.Client);
-        Code(await f.Owner.ExecuteAsync("music.library.list"), "CORRUPT_SYNC");
+        Ok(await f.Owner.ExecuteAsync("music.library.list"));
         Code(await f.Sync.ExecuteAsync("music.librarySync.get"), "CORRUPT_SYNC");
         Code(await f.Sync.ExecuteAsync("music.librarySync.run"), "CORRUPT_SYNC");
         Code(await f.Sync.ExecuteAsync("music.librarySync.cancel"), "CORRUPT_SYNC");

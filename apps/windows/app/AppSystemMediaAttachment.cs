@@ -8,7 +8,7 @@ using MeowFilm.SystemMedia;
 internal sealed class AppSystemMediaAttachment : IAsyncDisposable
 {
     private readonly AppSystemPlayback source;
-    private readonly SystemMediaSession session;
+    private readonly SystemMediaWindowAttachment session;
 
     internal AppSystemMediaAttachment(Window window, NativeAudioPlayback music, FilmPlayback video, FilmCapability film,
         Func<string?> activeOwner, SystemPlaybackOwner[] owners, bool enabled = true)
@@ -20,12 +20,10 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
         Func<string?> activeOwner, ISystemMediaBackend backend, SystemPlaybackOwner[] owners, bool enabled = true)
     {
         source = new(music, video, film, activeOwner);
-        try
-        {
-            source.Attach();
-            session = new(source, backend, owners, window.Dispatcher, enabled);
-        }
+        try { source.Attach(); }
         catch { source.Dispose(); backend.Dispose(); throw; }
+        try { session = new(window, source, backend, owners, enabled); }
+        catch { source.Dispose(); throw; }
     }
 
     public void SetEnabled(bool enabled) => session.SetEnabled(enabled);
@@ -95,7 +93,7 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
     private sealed class VideoSource(FilmPlayback native) : ISystemPlayback
     {
         public SystemPlaybackState State => new("film", native.Identity, "", native.HasOutput,
-            native.HasOutput && !native.PauseRequested, native.PositionSeconds, native.DurationSeconds,
+            native.HasOutput && !native.IsPaused, native.PositionSeconds, native.DurationSeconds,
             Kind: SystemPlaybackKind.Video);
         public event PropertyChangedEventHandler? PropertyChanged
         {

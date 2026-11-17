@@ -18,6 +18,7 @@ public partial class FilmPlaybackView : UserControl
     private (bool Top, bool Bottom, double Height) metadataFade;
     private FilmPlaybackPage? boundPage, seekingPage;
     private FilmEpisodeDirectory? shownDirectory;
+    private ItemsControl? episodeList;
     private bool restoringDirectory, restoringPage, shownList;
     private FilmDirectoryDialog? directory;
     private Window? playerWindow;
@@ -205,17 +206,43 @@ public partial class FilmPlaybackView : UserControl
 
     private void RestoreDirectory()
     {
-        bool list = boundPage?.ShowEpisodeList == true;
-        bool changedLayout = list && !shownList;
-        shownList = list;
+        bool showingList = boundPage?.ShowEpisodeList == true;
+        bool changedLayout = showingList && !shownList;
+        shownList = showingList;
         if (!changedLayout && ReferenceEquals(shownDirectory, boundPage?.EpisodeDirectory)) return;
         shownDirectory = boundPage?.EpisodeDirectory;
+        DirectoryHost.Children.Clear();
+        foreach (string name in new[] { "EpisodeShelf", "EpisodeList", "MovieCandidates" })
+            if (FindName(name) is not null) UnregisterName(name);
+        episodeList = null;
+        if (shownDirectory is { } selected)
+        {
+            if (selected.Presentation is null)
+            {
+                var root = (FrameworkElement)((DataTemplate)FindResource("Film.DirectoryPresentation")).LoadContent();
+                var shelf = (Shelf)root.FindName("EpisodeShelf");
+                var list = (ItemsControl)root.FindName("EpisodeList");
+                var movies = (ItemsControl)root.FindName("MovieCandidates");
+                shelf.SetBinding(Shelf.ItemsSourceProperty, new Binding(nameof(FilmEpisodeDirectory.Episodes)) { Source = selected });
+                shelf.SetBinding(Shelf.HorizontalOffsetProperty, new Binding(nameof(FilmEpisodeDirectory.HorizontalOffset))
+                    { Source = selected, Mode = BindingMode.TwoWay });
+                list.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(FilmEpisodeDirectory.Episodes)) { Source = selected });
+                movies.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(FilmEpisodeDirectory.Candidates)) { Source = selected });
+                selected.Presentation = root;
+            }
+            var presentation = selected.Presentation;
+            presentation.DataContext = boundPage;
+            DirectoryHost.Children.Add(presentation);
+            foreach (string name in new[] { "EpisodeShelf", "EpisodeList", "MovieCandidates" })
+                RegisterName(name, presentation.FindName(name));
+            episodeList = (ItemsControl)presentation.FindName("EpisodeList");
+        }
         restoringDirectory = true;
         var directory = shownDirectory;
         _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
         {
             if (!ReferenceEquals(directory, shownDirectory)) return;
-            if (FindScroll(EpisodeList) is { } scroll)
+            if (episodeList is { } list && FindScroll(list) is { } scroll)
             {
                 scroll.ScrollToVerticalOffset(directory?.VerticalOffset ?? 0);
                 scroll.UpdateLayout();
@@ -226,14 +253,14 @@ public partial class FilmPlaybackView : UserControl
 
     private void EpisodeList_ScrollChanged(object sender, ScrollChangedEventArgs e)
     {
-        if (!restoringDirectory && EpisodeList.IsVisible && ReferenceEquals(shownDirectory, boundPage?.EpisodeDirectory) &&
+        if (!restoringDirectory && episodeList?.IsVisible == true && ReferenceEquals(shownDirectory, boundPage?.EpisodeDirectory) &&
             shownDirectory is { } directory && e.OriginalSource is ScrollViewer scroll)
             directory.VerticalOffset = scroll.VerticalOffset;
     }
 
     private void EpisodeList_MouseWheel(object sender, MouseWheelEventArgs e)
     {
-        if (FindScroll(EpisodeList) is not { } scroll ||
+        if (episodeList is not { } list || FindScroll(list) is not { } scroll ||
             e.Delta > 0 && scroll.VerticalOffset > .5 ||
             e.Delta < 0 && scroll.ScrollableHeight - scroll.VerticalOffset > .5) return;
         PageScroll.RaiseEvent(new MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta)

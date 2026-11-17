@@ -1,3 +1,4 @@
+import { parseJSONText, stringifyJSONValue, cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 import { Worker } from 'node:worker_threads';
 import { clone, deferred, fault, requireValue, safeError, ScriptHostError } from './errors.js';
 import { cancel, errorFromResponse, event, request, response, validateMessage } from './worker-protocol.js';
@@ -36,7 +37,7 @@ export class WorkerSession {
     this.stopping = null;
     this.stopRequested = false;
     this.input = input;
-    this.startParams = clone(input.startParams ?? {});
+    this.startParams = cloneJSONValue(input.startParams ?? {});
     this.lifecycle = new AbortController();
     this.proxyLifecycle = new AbortController();
     this.stoppedNotified = false;
@@ -74,9 +75,9 @@ export class WorkerSession {
         { awaitProbe: true });
       this.capabilities = clone(value.capabilities ?? {});
       this.alert = clone(value.alert ?? null);
-      if (value.cat) this.catSnapshot = clone(value.cat);
+      if (value.cat) this.catSnapshot = cloneJSONValue(value.cat);
       this.statsSnapshot = { ...clone(value.stats ?? this.statsSnapshot), live: this.live };
-      const cat = clone(this.catSnapshot ?? value.cat ?? null);
+      const cat = cloneJSONValue(this.catSnapshot ?? value.cat ?? null);
       this.input.onStart?.(this, cat);
       return this;
     } catch (error) {
@@ -106,8 +107,8 @@ export class WorkerSession {
     try {
       const response = await this.#call('invoke', {
         installationId: this.installationId,
-        request: clone(value),
-        options: { timeoutMs: options.timeoutMs, associationId },
+        request: value,
+        options: { ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }), associationId },
       }, linked.signal, options.timeoutMs ?? this.limits.requestTimeoutMs,
         'invocation', { associationId });
       return this.#workerResult('invoke', response);
@@ -150,7 +151,7 @@ export class WorkerSession {
 
   publishSettings(value) {
     const { settings, aggregate } = value ?? {};
-    if (settings !== undefined) this.startParams.settings = { value: clone(settings) };
+    if (settings !== undefined) this.startParams.settings = { value: cloneJSONValue(settings) };
     if (aggregate !== undefined) this.startParams.aggregate = clone(aggregate);
     if (!this.worker || this.stopRequested || !this.live) return;
     // Settings use the same ordered MessagePort as requests. This event has
@@ -158,7 +159,7 @@ export class WorkerSession {
     // any later request observes the snapshot because it is enqueued after it.
     const message = event('settings', {
       installationId: this.installationId,
-      ...(settings !== undefined ? { settings: clone(settings) } : {}),
+      ...(settings !== undefined ? { settings: cloneJSONValue(settings) } : {}),
       ...(aggregate !== undefined ? { aggregate: clone(aggregate) } : {}),
     });
     try { this.#send(message); }
@@ -242,7 +243,7 @@ export class WorkerSession {
       const processed = this.input.processWorkerResult(method, value, this);
       if (processed?.[processedWorkerResult]) return processed.value;
     }
-    return clone(value);
+    return cloneJSONValue(value);
   }
 
   async whenAdaptersIdle() {
@@ -385,7 +386,12 @@ export class WorkerSession {
   #send(message, transfer = []) {
     const worker = this.worker;
     if (!worker) throw fault('STALE_SESSION');
-    try { worker.postMessage(message, transfer); }
+    try {
+      if (message.kind === 'request') message = { ...message, params: stringifyJSONValue(message.params, -2) };
+      else if (message.kind === 'event' && message.event === 'settings')
+        message = { ...message, value: stringifyJSONValue(message.value, -2) };
+      worker.postMessage(message, transfer);
+    }
     catch (error) { throw safeError(error); }
   }
 
@@ -414,7 +420,10 @@ export class WorkerSession {
     // it is not a caller cancellation. Worker-owned transport failures still
     // cancel their adapters explicitly.
     pending.detach();
-    if (message.ok) pending.settle(null, message.value);
+    if (message.ok) {
+      try { pending.settle(null, parseJSONText(message.value)); }
+      catch (error) { pending.settle(safeError(error, 'SCRIPT_PROTOCOL_ERROR')); }
+    }
     else pending.settle(errorFromResponse(message));
   }
 

@@ -89,15 +89,16 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IDocumentStore s
             {
                 var saved = await document.UpdateAsync(current =>
                 {
-                    var values = (current?.GetProperty("settings") ?? defaults).EnumerateObject()
-                        .ToDictionary(item => item.Name, item => (object?)item.Value.Clone());
+                    var next = current?.GetProperty("settings") ?? defaults;
                     foreach (var (key, value) in patch)
                     {
-                        if (!values.ContainsKey(key)) throw new BridgeException("INVALID_REQUEST");
-                        values[key] = value;
+                        if (!defaults.TryGetProperty(key, out var fallback)) continue;
+                        var normalized = NormalizeSettings(FilmJson.Encode(new Dictionary<string, object?> { [key] = value }),
+                            FilmJson.Encode(new Dictionary<string, JsonElement> { [key] = fallback }),
+                            block == "tmdb");
+                        next = FilmDocument.Set(next, key, normalized.GetProperty(key));
                     }
-                    var next = NormalizeSettings(FilmJson.Encode(values), defaults);
-                    return FilmJson.Encode(new { version = 1, settings = next });
+                    return FilmDocument.Set(current ?? FilmJson.Encode(new { version = 1 }), "settings", next);
                 }, token);
                 settings = saved.GetProperty("settings");
                 (runtime as IRuntimeSettingsNotifications)?.SettingsChanged(block!);
@@ -106,7 +107,7 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IDocumentStore s
         }
     }
 
-    private static JsonElement NormalizeSettings(JsonElement value, JsonElement defaults)
+    private static JsonElement NormalizeSettings(JsonElement value, JsonElement defaults, bool tmdb)
     {
         var result = new Dictionary<string, object?>();
         foreach (var property in defaults.EnumerateObject())
@@ -127,7 +128,7 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IDocumentStore s
                 result[property.Name] = text.Trim(InputWhitespace);
                 continue;
             }
-            if (text.Length == 0 && defaults.TryGetProperty("includeAdult", out _)) text = property.Value.GetString()!;
+            if (text.Length == 0 && tmdb) text = property.Value.GetString()!;
             if (text.Length == 0 && proxy) { result[property.Name] = text; continue; }
             var slots = Regex.Matches(text, @"\{(?:url|encodedUrl)\}");
             string address = Regex.Replace(text, @"\{(?:url|encodedUrl)\}", "https%3A%2F%2Fexample.invalid%2F");

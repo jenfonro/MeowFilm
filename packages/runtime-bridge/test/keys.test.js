@@ -16,11 +16,9 @@ test('Unicode dictionary keys preserve canonically equivalent code point sequenc
   assert.deepEqual(Object.keys(decode(raw('{"\\u00e9":1,"e\\u0301":2}'))), ['é', 'e\u0301']);
 });
 
-test('duplicate keys including escapes are rejected before JSON discards them', () => {
-  for (const json of ['{"same":1,"same":2}', '{"same":1,"\\u0073ame":2}', '{"nested":{"x":1,"x":2}}']) {
-    assert.throws(() => decode(raw(json)), { code: 'INVALID_REQUEST' });
-  }
-
+test('duplicate keys use the JSON parser semantics without an independent schema gate', () => {
+  assert.deepEqual(decode(raw('{"same":1,"\\u0073ame":2}')), { same: 2 });
+  assert.deepEqual(decode(raw('{"nested":{"x":1,"x":2}}')), { nested: { x: 2 } });
 });
 
 test('key scanning preserves legal escapes, value punctuation and separate object scopes', () => {

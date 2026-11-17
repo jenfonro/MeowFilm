@@ -4,7 +4,6 @@ import MeowAccounts
 import MeowMusicFeature
 import MeowMusicTestSupport
 import MeowRuntime
-import MeowJSON
 @testable import MeowMusicPlatform
 
 @MainActor final class MusicNativeHomeOwnerTests: XCTestCase {
@@ -641,10 +640,10 @@ private actor MusicHomeOwnerProvider: MusicAccountProvider, MusicNeteaseHomeProv
         if let recommendationFailure { throw recommendationFailure }
         return .init(rows: [], nextPage: nil)
     }
-    func collectionRows() throws -> [JSONValue] { throw MusicServiceError.unsupported }
-    func tracks(collectionID: String) throws -> [JSONValue] { throw MusicServiceError.unsupported }
+    func collectionRows() throws -> [RuntimeValue] { throw MusicServiceError.unsupported }
+    func tracks(collectionID: String) throws -> [RuntimeValue] { throw MusicServiceError.unsupported }
     func capabilities(mid: String) throws -> [String] { throw MusicServiceError.unsupported }
-    func resolve(mid: String, quality: String) throws -> JSONValue { throw MusicServiceError.unsupported }
+    func resolve(mid: String, quality: String) throws -> RuntimeValue { throw MusicServiceError.unsupported }
 }
 
 private struct MusicHomeOwnerFixture {

@@ -1,7 +1,7 @@
 using System.Runtime.CompilerServices;
 
 [assembly: InternalsVisibleTo("MeowFilm.Windows.Tests")]
-[assembly: InternalsVisibleTo("MeowFilm.VideoKernel.Tests")]
+[assembly: InternalsVisibleTo("MeowFilm.FilmKernel.Tests")]
 
 namespace MeowFilm.Media;
 

@@ -73,6 +73,8 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     private var episodeButtons: [String: FilmEpisodeButton] = [:]
     private var episodeDirectory: EpisodeDirectoryKey?
     private var episodeOffsets: [EpisodeDirectoryKey: CGPoint] = [:]
+    private var episodeListOffsets: [EpisodeDirectoryKey: CGPoint] = [:]
+    private var episodeLayouts: [EpisodeDirectoryKey: Bool] = [:]
     private var shownEpisodeList = false
     private var castViews: [FilmCastView] = []
     private var similarViews: [FilmRelatedButton] = []
@@ -438,13 +440,19 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     private func playSelection() {
         guard let model, let snapshot = model.presentation, canPlay(snapshot) else { return }
         if snapshot.browsing.sourceID != nil {
-            guard let id = playbackCandidateID(snapshot) else { return }
-            model.selectCandidate(id)
-        } else { model.send("play") }
+            guard let file = playbackFile(snapshot) else { return }
+            model.selectTarget(file.playbackTarget, metadataSourceID: snapshot.metadataSourceID)
+        } else {
+            let target = snapshot.episodes.first { $0.position == model.snapshot?.target.position }?.playbackTarget ??
+                snapshot.episodes.first?.playbackTarget ??
+                snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }?.playbackTarget
+            guard let target else { return }
+            model.selectTarget(target, metadataSourceID: snapshot.metadataSourceID)
+        }
         onPresentPlayback?()
     }
 
-    private func playbackCandidateID(_ snapshot: FilmPlaybackSnapshot) -> String? {
+    private func playbackFile(_ snapshot: FilmPlaybackSnapshot) -> FilmPlaybackFile? {
         let selected = [
             snapshot.target.value["source"]?.filmObject?["candidateId"]?.filmText,
             snapshot.attempt?.candidate.id,
@@ -452,16 +460,14 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         ].compactMap { $0 }.first { id in
             snapshot.browsing.files.contains { $0.candidateID == id }
         }
-        return selected ?? snapshot.browsing.files.first(where: { $0.candidateID != nil })?.candidateID
+        return selected.flatMap { id in snapshot.browsing.files.first { $0.candidateID == id } } ??
+            snapshot.browsing.files.first(where: { $0.candidateID != nil })
     }
 
     private func canPlay(_ snapshot: FilmPlaybackSnapshot) -> Bool {
-        guard model?.executionStage != nil, let execution = model?.snapshot,
-              execution.entryResolution != "loading", execution.entryResolution != "error",
-              !(execution.browsing.loading && !execution.browsing.refreshing), execution.browsing.error == nil,
-              !(snapshot.browsing.loading && !snapshot.browsing.refreshing) else { return false }
+        guard model?.canSelectFromPresentation == true, model?.directoryHasNoVideoSource != true else { return false }
         if snapshot.browsing.sourceID != nil {
-            return playbackCandidateID(snapshot) != nil
+            return playbackFile(snapshot) != nil
         }
         guard snapshot.metadataCache?.status != .stale,
               let selected = snapshot.metadataSources.first(where: { $0.id == snapshot.metadataSourceID }) else { return false }
@@ -492,6 +498,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         guard let model, let browsing = model.presentation?.browsing, browsing.error == nil,
               let sourceID = browsing.sourceID, !browsing.originalFiles.isEmpty else { return }
         let page = FilmDirectoryViewController(model: model, sourceID: sourceID, lineID: browsing.lineID,
+                                               metadataSourceID: model.presentation?.metadataSourceID, season: browsing.season,
                                                themeProvider: themeProvider)
         page.onPresentPlayback = onPresentPlayback
         navigationController?.pushViewController(page, animated: true)
@@ -505,23 +512,18 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
             play.configuration?.title = model.opening ? "准备中" : "播放"
             playbackState.text = model.opening ? "加载中" : nil
             if model.opening { loadingIndicator.startAnimating() } else { loadingIndicator.stopAnimating() }
+            showEpisodeState(model.opening ? "加载中" : nil)
             presentPlaybackError()
             return
         }
         play.isEnabled = canPlay(snapshot)
-        play.configuration?.title = play.isEnabled ? "播放" : "暂无片源"
-        play.accessibilityLabel = play.isEnabled ? "播放" : "播放，暂无可用片源"
-        let busy = model.opening || ["loading", "searching", "resolving", "pending"].contains(model.executionStage ?? "")
+        play.configuration?.title = model.directoryHasNoVideoSource ? "无可用视频源" : "播放"
+        play.accessibilityLabel = model.directoryHasNoVideoSource ? "播放，无可用视频源" : "播放"
+        let busy = model.opening || model.playbackStatus.busy
         if busy { loadingIndicator.startAnimating() } else { loadingIndicator.stopAnimating() }
-        switch model.executionStage {
-        case "prepared": playbackState.text = "地址已准备"
-        case "playing": playbackState.text = "播放中"
-        case "searching": playbackState.text = "匹配片源"
-        case "resolving", "pending": playbackState.text = "准备中"
-        case "ended": playbackState.text = "播放结束"
-        default: playbackState.text = nil
-        }
-        let metadataChanged = displayedSnapshot?.metadata != snapshot.metadata ||
+        playbackState.text = model.playbackStatus.title
+        let metadataChanged = displayedSnapshot?.workInfo != snapshot.workInfo ||
+            displayedSnapshot?.metadata != snapshot.metadata ||
             displayedSnapshot?.metadataCache != snapshot.metadataCache ||
             displayedSnapshot?.metadataSupplement != snapshot.metadataSupplement ||
             displayedSnapshot?.target.metadataProvider != snapshot.target.metadataProvider ||
@@ -561,22 +563,20 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     }
 
     private func updateEpisodeAvailability() {
-        guard let execution = model?.snapshot else {
+        guard let model else {
             for button in episodeViews { button.isEnabled = false }
             return
         }
-        let available = model?.executionStage != nil &&
-            execution.entryResolution != "loading" && execution.entryResolution != "error" &&
-            !(execution.browsing.loading && !execution.browsing.refreshing) && execution.browsing.error == nil &&
-            (execution.browsing.sourceID != nil || execution.metadataCache?.status != .stale)
+        let available = model.canSelectFromPresentation && !model.directoryHasNoVideoSource
         for button in episodeViews { button.isEnabled = available && button.onSelect != nil }
     }
 
     private func renderMetadata() {
         titleLabel.text = detail.title; pageTitle = detail.title
         var facts: [String] = []
-        if let count = detail.seasonCount, count > 0 { facts.append("\(count) 季") }
-        if let count = detail.episodeCount, count > 0 { facts.append("\(count) 集") }
+        if let count = detail.seasonCount, count > 0 {
+            facts.append("共 \(count) 季" + (detail.episodeCount.map { " \($0) 集" } ?? ""))
+        } else if let count = detail.episodeCount, count > 0 { facts.append("共 \(count) 集") }
         if facts.isEmpty, !detail.item.subtitle.isEmpty { facts.append(detail.item.subtitle) }
         if !detail.item.score.isEmpty { facts.append("评分 \(detail.item.score)") }
         metadata.text = facts.joined(separator: " · "); metadata.isHidden = facts.isEmpty
@@ -628,7 +628,9 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
             sourceButton.accessibilityValue = "加载中..."
             sourceButton.isEnabled = false
             sourceButton.menu = nil
-            lineButton.isHidden = true
+            lineButton.isHidden = false
+            lineButton.setTitle("加载中...", for: .normal)
+            lineButton.isEnabled = false; lineButton.menu = nil
             return
         }
         var actions: [UIMenuElement] = snapshot.metadataSources.map { row in
@@ -662,11 +664,17 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
             selectedTitle = snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }
                 .map { "\($0.provider.title) · \($0.title)" }
         }
-        sourceButton.setTitle(selectedTitle ?? "加载中...", for: .normal)
-        sourceButton.accessibilityValue = selectedTitle ?? "加载中..."
-        sourceButton.isEnabled = selectedTitle != nil
-        lineButton.isHidden = snapshot.browsing.sourceID == nil
-        lineButton.setTitle(snapshot.browsing.lines.first { $0.id == snapshot.browsing.lineID }?.label ?? "网盘源", for: .normal)
+        let waiting = snapshot.browsing.loading || snapshot.stage == "loading" || snapshot.entryResolution == "loading"
+        let emptyTitle = waiting ? "加载中..." :
+            snapshot.browsing.error != nil || snapshot.entryResolution == "error" ? "加载失败" : "无可用视频源"
+        sourceButton.setTitle(selectedTitle ?? emptyTitle, for: .normal)
+        sourceButton.accessibilityValue = selectedTitle ?? emptyTitle
+        sourceButton.isEnabled = !snapshot.metadataSources.isEmpty || !snapshot.sources.isEmpty
+        lineButton.isHidden = snapshot.browsing.sourceID == nil && snapshot.entryResolution != "loading" &&
+            snapshot.stage != "loading"
+        lineButton.setTitle(snapshot.browsing.lines.first { $0.id == snapshot.browsing.lineID }?.label ??
+            emptyTitle, for: .normal)
+        lineButton.isEnabled = !snapshot.browsing.lines.isEmpty
         lineButton.menu = UIMenu(title: "网盘源", children: snapshot.browsing.lines.map { line in
             UIAction(title: line.label, state: line.id == snapshot.browsing.lineID ? .on : .off) { [weak model] _ in
                 model?.browse(sourceID: snapshot.browsing.sourceID, lineID: line.id)
@@ -706,16 +714,33 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         seasonButton.menu = UIMenu(title: "季度", children: choices)
         if snapshot.entryResolution == "loading" { showEpisodeState("加载中"); return }
         if snapshot.entryResolution == "error" { showEpisodeState(nil); return }
-        if browsing.loading && !browsing.refreshing { showEpisodeState("加载中"); return }
+        if browsing.loading || snapshot.stage == "loading" { showEpisodeState("加载中"); return }
         if browsing.error != nil { showEpisodeState(nil); return }
+        if model?.directoryHasNoVideoSource == true { showEpisodeState("无可用视频源"); return }
+        let key = EpisodeDirectoryKey(
+            source: snapshot.sources.first { $0.id == browsing.sourceID }?.businessID ?? browsing.sourceID,
+            line: browsing.lineID,
+            metadata: snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }?.businessID ?? snapshot.metadataSourceID,
+            season: number)
+        if episodeDirectory != key {
+            if let previous = episodeDirectory { episodeLayouts[previous] = episodeListVisible }
+            episodeListVisible = episodeLayouts[key] ?? false
+        }
         var next: [FilmEpisodeButton] = []
         if browsing.sourceID != nil {
+            var mappedEpisodes: [FilmEpisodePosition: FilmPlaybackEpisode] = [:]
+            for episode in snapshot.episodes {
+                let coordinate = FilmEpisodePosition(season: episode.position.season, episode: episode.position.episode)
+                if mappedEpisodes[coordinate] == nil { mappedEpisodes[coordinate] = episode }
+            }
             for file in browsing.files {
                 let button = runtimeEpisodeButton(displayedEpisode(position: file.position,
-                    id: file.businessID, name: file.name, target: file.playbackTarget))
+                    id: file.businessID, name: file.name, target: file.playbackTarget,
+                    metadataEpisode: mappedEpisodes[.init(season: file.position.season, episode: file.position.episode)]))
                 button.accessibilityIdentifier = "film.file.\(file.id)"
-                button.onSelect = file.candidateID.map { id in { [weak self] in
-                    self?.model?.selectCandidate(id); self?.onPresentPlayback?()
+                button.onSelect = file.candidateID.map { _ in { [weak self] in
+                    self?.model?.selectTarget(file.playbackTarget, metadataSourceID: snapshot.metadataSourceID)
+                    self?.onPresentPlayback?()
                 } }
                 next.append(button)
             }
@@ -729,7 +754,8 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
                 let button = runtimeEpisodeButton(episode)
                 button.accessibilityIdentifier = "film.candidate.\(candidate.id)"
                 button.onSelect = { [weak self] in
-                    self?.model?.selectCandidate(candidate.id); self?.onPresentPlayback?()
+                    self?.model?.selectTarget(candidate.playbackTarget, metadataSourceID: snapshot.metadataSourceID)
+                    self?.onPresentPlayback?()
                 }
                 next.append(button)
             }
@@ -738,22 +764,18 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
                 let button = runtimeEpisodeButton(FilmPlaybackPresentation.episode(episode,
                     fallbackArtworkURL: episodeArtwork(season: episode.position.season)))
                 button.onSelect = { [weak self] in
-                    self?.model?.selectEpisode(episode.position); self?.onPresentPlayback?()
+                    self?.model?.selectTarget(episode.playbackTarget, metadataSourceID: snapshot.metadataSourceID)
+                    self?.onPresentPlayback?()
                 }
                 next.append(button)
             }
         }
-        let key = EpisodeDirectoryKey(
-            source: snapshot.sources.first { $0.id == browsing.sourceID }?.businessID ?? browsing.sourceID,
-            line: browsing.lineID,
-            metadata: snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }?.businessID ?? snapshot.metadataSourceID,
-            season: number)
         applyEpisodeViews(next, directory: key)
         if episodeViews.isEmpty {
             let manualSearch = snapshot.entryResolution == "unmatched" && snapshot.error != "SOURCE_NOT_FOUND" &&
                 browsing.sourceID == nil && snapshot.sources.isEmpty
             showEpisodeState(manualSearch || !snapshot.sources.isEmpty ? nil :
-                (metadataKind ?? snapshot.target.kind) == .tv ? "暂无集数" : "暂无片源")
+                "无可用视频源")
             searchButton.isHidden = !manualSearch
             if manualSearch { episodeStateContainer.isHidden = false }
         }
@@ -777,6 +799,9 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         if !shownEpisodeList, let previous = episodeDirectory, changed || layoutChanged {
             episodeOffsets[previous] = episodeRail.contentOffset
         }
+        if shownEpisodeList, let previous = episodeDirectory, changed || layoutChanged {
+            episodeListOffsets[previous] = scroll.contentOffset
+        }
         episodeRail.isHidden = episodeListVisible
         episodeListContainer.isHidden = !episodeListVisible
         episodeStateContainer.isHidden = true
@@ -792,6 +817,10 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
                     episodeList.removeArrangedSubview(button)
                     episodeList.insertArrangedSubview(button, at: index)
                 }
+            }
+            if changed || layoutChanged, let offset = episodeListOffsets[directory] {
+                scroll.layoutIfNeeded()
+                scroll.setContentOffset(offset, animated: false)
             }
         } else {
             for child in episodeList.arrangedSubviews {
@@ -813,10 +842,8 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     }
 
     private func displayedEpisode(position: FilmEpisodePosition, id: String, name: String,
-                                  target: FilmPlaybackTarget?) -> FilmEpisode {
-        if let episode = model?.presentation?.episodes.first(where: {
-            $0.position.season == position.season && $0.position.episode == position.episode
-        }) {
+                                  target: FilmPlaybackTarget?, metadataEpisode: FilmPlaybackEpisode?) -> FilmEpisode {
+        if let episode = metadataEpisode {
             let display = FilmPlaybackPresentation.episode(episode, fallbackArtworkURL: episodeArtwork(season: position.season))
             return .init(id: id, title: display.title, number: display.number, summary: display.summary,
                          artworkURL: display.artworkURL, releaseDate: display.releaseDate,

@@ -28,6 +28,30 @@ final class FilmSearchStableIdentityTests: XCTestCase {
         await service.close()
     }
 
+    func testDetailUsesAvailableOriginalPosterWithoutChangingCardOrTarget() async throws {
+        let card: RuntimeValue = .object(["businessId": .string("tmdb:movie:7"),
+            "playbackTarget": .object(["id": .string("tmdb:movie:7"), "kind": .string("movie"),
+                "title": .string("影片"), "metadataProvider": .string("tmdb"), "metadataId": .string("7")]),
+            "displayKey": .string("tmdb:movie:7"), "id": .string("7"), "sourceKind": .string("tmdb"),
+            "tmdbId": .number(7), "tmdbType": .string("movie"), "title": .string("影片"),
+            "poster": .string("/v1/tmdb/images/w500/poster.jpg")])
+        var fields = try F.snapshot(metadata: "completed", cards: [card]).filmRequiredObject()
+        fields["metadataDetails"] = .object(["movie:7": .object([
+            "poster_path": .string("/v1/tmdb/images/original/poster.jpg"),
+            "backdrop_path": .string("/v1/tmdb/images/original/backdrop.jpg")])])
+        let rpc = FilmSearchRPCFixture(.object(fields)), service = filmSearchService(rpc)
+        let session = try service.session(for: "原查询")
+        await session.drain()
+        let selected = try XCTUnwrap(session.snapshot.cards.first)
+        let detail = session.context(for: selected).detail
+        XCTAssertEqual(detail.item.posterURL?.absoluteString, "/v1/tmdb/images/original/poster.jpg")
+        XCTAssertEqual(detail.backdropURL?.absoluteString, "/v1/tmdb/images/original/backdrop.jpg")
+        XCTAssertEqual(detail.item.playbackTarget, selected.playbackTarget)
+        XCTAssertEqual(detail.item.businessID, selected.businessID)
+        XCTAssertEqual(selected.filmItem(imageURL: session.imageURL).posterURL?.absoluteString, "/v1/tmdb/images/w500/poster.jpg")
+        await service.close()
+    }
+
     func testDisplayCodeUnitArraysNeverReplaceTheOriginalCardValue() throws {
         let units: RuntimeValue = .array([.number(0xD800), .number(120), .number(0xDFFF)])
         let card = FilmSearchCard(value: .object(["displayKey": .string("opaque"), "title": units, "raw": .object(["kept": units])]))

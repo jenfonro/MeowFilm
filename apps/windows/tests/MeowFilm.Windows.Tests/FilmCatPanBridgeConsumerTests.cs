@@ -141,11 +141,12 @@ public static class FilmCatPanBridgeConsumerTests
         }
         await scene.Ready(() => scene.Native.Inputs.All(input => scene.Traffic.EventSnapshots.Any(snapshot =>
             FilmJson.Text(FilmJson.Member(snapshot, "current"), "attemptId") == input.Receipt.AttemptId)));
-        Check(scene.Traffic.Commands("select.candidate").Select(row => FilmJson.Text(row.Input, "candidateId"))
+        Check(scene.Traffic.Commands("select.target").Select(row => FilmJson.Text(row.Input.GetProperty("target").GetProperty("source"), "candidateId"))
                 .SequenceEqual(scene.Native.Inputs.Skip(1).Select(input => scene.Traffic.Snapshots.First(snapshot =>
                     FilmJson.Text(FilmJson.Member(snapshot, "attempt"), "id") == input.Receipt.AttemptId)
                     .GetProperty("attempt").GetProperty("candidate").GetProperty("id").GetString())) &&
-            !scene.Traffic.Commands("search.more").Any() && !scene.Traffic.Commands("select.episode").Any(),
+            !scene.Traffic.Commands("search.more").Any() && scene.Traffic.Commands("select.target").All(row =>
+                !row.Input.TryGetProperty("candidateId", out _) && row.Input.GetProperty("target").ValueKind == JsonValueKind.Object),
             "file controls send opaque candidate IDs with their current session, not guessed metadata coordinates");
         await scene.Close();
         Check(!scene.Session.HasSession && !scene.Native.HasOutput && scene.Native.Stops == 1 &&

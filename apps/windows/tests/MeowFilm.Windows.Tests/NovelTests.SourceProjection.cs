@@ -70,10 +70,12 @@ public static partial class NovelTests
                 var expected = Source() with { Protocol = protocol, Actions = actions, Weight = weight, LastUpdateTime = updated,
                     RespondTime = response, HasExplore = explore };
                 var projected = sources.Sources.Single();
-                CheckSourceProjection(projected, expected);
-                Check(NovelCapability.CanExplore(projected) == explore && runtime.Calls.Count == 0 && runtime.SourceStore.Reads == 1);
+                var configured = expected with { Actions = [], Weight = 0, LastUpdateTime = 0, RespondTime = 180000, HasExplore = false };
+                CheckSourceProjection(projected, configured);
+                Check(!NovelCapability.CanExplore(projected) && runtime.Calls.Count == 0 && runtime.SourceStore.Reads == 1,
+                    "cold management reads do not parse definitions or claim execution capabilities");
                 var current = await sources.GetAsync(projected);
-                CheckSourceProjection(NovelJson.Decode<NovelSource>(current.GetProperty("source")), expected);
+                CheckSourceProjection(NovelJson.Decode<NovelSource>(current.GetProperty("source")), configured);
                 Check(current.GetProperty("definition").GetString() == definition.Definition && runtime.Calls.Count == 0);
                 var result = await sources.InvokeAsync(projected, "search", new { keyword = "合成", page = 1 });
                 Check(result.GetProperty("books").ValueKind == JsonValueKind.Array);

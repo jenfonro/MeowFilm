@@ -49,14 +49,14 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | 模块 | 职责 | 依赖 |
 | --- | --- | --- |
 | `MeowContracts` | 通用请求、生命周期和错误契约 | 无 |
-| `MeowJSON` | Codable DTO 值、外部字典 JSON 解析与数字原文转发 | 无 |
+| `MeowJSON` | Codable DTO 值、JSON 语法解析、UTF-8 成员与数字原文转发 | 无 |
 | `MeowStorage` | 普通及加密文档存储 | Contracts |
 | `MeowAccounts` | 凭据与账号状态基础设施 | Contracts |
 | `MeowAudio` | 独立音频解码、有界 PCM、原生保音高变速与 AVAudioEngine 输出 | CMeowAudioKernel |
 | `MeowPlayback` | 受控媒体输入、音乐播放、唯一系统媒体会话与播放所有权 | Contracts、MeowAudio |
 | `MeowPlaybackVideo` | 显式注入共享协调器的视频解码／原生视图输出适配 | Playback、MeowVideoKernel |
 | `MeowUI` | 中性主题、窗口渐变、页面生命周期、自绘页头、导航栈与转场、搜索页与呈现机制 | 无 |
-| `MeowRuntime` | runtime.http.v1 客户端、严格 JSON、事件观察／取消／关闭与单次内嵌启动机制；fd 仅交接受信启动及生命期 | 无 |
+| `MeowRuntime` | runtime.http.v1 客户端、精确 JSON 值、事件观察／取消／关闭与单次内嵌启动机制；fd 仅交接受信启动及生命期 | JSON |
 | `MeowMusicFeature` | 音乐界面、交互、公开业务契约与音乐外观策略 | Contracts、Storage、Playback、UI |
 | `MeowMusicPlatform` | 网易、QQ、酷狗协议、账号、加密、HTTP 与文件缓存 | Feature、Audio、Contracts、JSON、Accounts、Storage |
 | `MeowMusicNativeService` | 曲库、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | Contracts、JSON、Feature、Runtime、Storage |
@@ -76,7 +76,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 
 原生源码检查仅覆盖 `apps/ios` 和 `native/MeowKit`，不遍历 Windows 专属源码。Node 根测试可用 `node scripts/test-root.mjs --platform ios` 选择 iOS 与共享契约测试；共享 packager 用例不读取 Windows 入口源码，iOS 入口及生成载荷由本端 wrapper 用例验证。
 
-平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器使用 `MeowRuntime.RuntimeValue`／`RuntimeObject`／`RuntimeJSON`：对象键按原始 UTF-8 区分，保留 Unicode 规范等价但标量不同的成员；严格 UTF-8、Unicode 标量、安全整数、重复键和业务深度遵循[公共 HTTP 契约](../runtime/runtime-bridge.md)。该边界不增加普通 JSON 总字节配额，也不改变平台／账号 DTO 的 JSON 语义。
+平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器使用 `MeowRuntime.RuntimeValue`／`RuntimeObject`／`RuntimeJSON`：对象键按原始 UTF-8 区分，保留 Unicode 规范等价但标量不同的成员；语法解析复用 `JSONObject.decodeValue`／`Fields`，同一 UTF-8 键重复时采用末值。`Fields` 按首次插入顺序迭代，同键更新不重排，删除后重插追加到末尾；`JSONObject.encode` 仍按键排序输出。无法无损表示的数字由 `JSONNumber`／`RuntimeValue.exactNumber` 保留原文，不因未消费数字拒绝整棵树。普通数字、身份与资源由实际消费者检查；解码深度 64 和私密帧字节预算保留。HTTP 只解析一次 envelope，核对 request-id、contract、ok 与 value/code，不再次全树校验。共同语义见[公共 HTTP 契约](../runtime/runtime-bridge.md)。`JSONObject.decode` 是供既有 DTO 使用的 Foundation 字典投影，不用于原始文档保留；持久原文使用 `decodeValue` 或 `RuntimeJSON`。该边界不增加普通 JSON 总字节配额。
 
 ## UI 技术选型
 
@@ -116,7 +116,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 - 推荐／频道／影视／我的是四个独立页面；切换时各页连同自己的页头按页面顺序左右滑动，页头不在页面间移动或共用，底部栏选中态在切换开始时同步；减少动态效果时直接切换。底部入口为「首页／影视／我的」，「首页」进入推荐页；频道页也高亮「首页」，但仍保持真实频道页面身份和不透明 dock 背景。
 - 推荐页头依次为菜单、搜索胶囊与原功能按钮；频道页头依次为菜单、频道滚动条、频道选择及圆形搜索按钮，不再提供「推荐／频道」页面切换控件。频道切换条在频道数据到达后显示，搜索进入既有搜索页。频道通过现有内容入口或侧边栏「频道」进入；底部「首页」、音乐侧边栏「首页」及屏幕左边缘右滑均返回推荐。边缘返回沿用统一距离／速度规则，短滑或取消保留当前频道；频道内容区横滑切换频道，分页、栏目、轮播和列表滚动都等待边缘手势失败后才接管触摸。
 - 影视页头为菜单与占据其余标题区域的搜索胶囊；菜单打开影视侧边栏，胶囊暂时进入既有音乐搜索页，返回保留原影视页面与滚动位置。影视侧边栏「首页」返回影视首页，数据源选择位于侧边栏。播放器与底部栏固定在屏幕底部，不随键盘升起，键盘只增加内容的底部避让。进入／返回非主页面时底部栏只做上下收放，按钮行保持固定高度与横向位置，不随页面左右滑动；这是既定效果。
-- 音乐与影视共用侧边栏框架：顶部居中 App 图标、含上下分组及弹性留白的圆角主卡片、卡片外等宽且文字居中的“设置”按钮。紧凑高度和辅助大字压缩留白，必要时整栏滚动。音乐上组为首页／频道，下组为音乐数据源；“我的”沿用音乐内容。影视上组为数据源／首页／视频源展示列表。二级页仍使用返回入口。
+- 音乐、影视与小说共用侧边栏框架：保留原窗口底色和顶部居中 App 图标，菜单按内容高度排列，图标槽与文字列统一对齐，选中项使用圆角底色与主题强调色；普通文字保持系统 Regular。菜单区域可独立滚动，带图标、左对齐文字和尾部箭头的“设置”固定在底部安全区上方，不随列表滚动。音乐主菜单为首页／频道，快捷音乐数据源另组保留；“我的”沿用音乐内容。影视主菜单为首页／视频源，快捷影视数据源另组保留。小说主菜单为首页／分类／已添加书源。视频源、书源与小说分类当前仅展示，不接入首页切源或分类导航；二级页仍使用返回入口。
 - 页面跳转由路由显式调用，不通过业务状态标志触发。
 - 上层呈现通过视图层级阻挡下层触摸。
 - 资源活跃、页面可见及浮层呈现时机分别管理；待处理的错误在页面稳定出现或导航／呈现转场完成后处理，不因此重新加载业务。

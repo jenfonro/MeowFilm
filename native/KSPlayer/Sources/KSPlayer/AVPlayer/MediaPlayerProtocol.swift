@@ -76,24 +76,14 @@ public protocol MediaPlayerProtocol: MediaPlayback {
     var seekable: Bool { get }
     //    var numberOfBytesTransferred: Int64 { get }
     var isMuted: Bool { get set }
-    var allowsExternalPlayback: Bool { get set }
-    var usesExternalPlaybackWhileExternalScreenIsActive: Bool { get set }
-    var isExternalPlaybackActive: Bool { get }
     var playbackRate: Float { get set }
     var playbackVolume: Float { get set }
     var contentMode: ContentMode { get set }
     var subtitleDataSouce: SubtitleDataSouce? { get }
-    @available(macOS 12.0, iOS 15.0, tvOS 15.0, *)
-    var playbackCoordinator: AVPlaybackCoordinator { get }
-    @available(tvOS 14.0, *)
-    var pipController: KSPictureInPictureController? { get }
     var dynamicInfo: DynamicInfo? { get }
     init(url: URL, options: KSOptions)
-    func replace(url: URL, options: KSOptions)
     func play()
     func pause()
-    func enterBackground()
-    func enterForeground()
     func thumbnailImageAtCurrentTime() async -> CGImage?
     func tracks(mediaType: AVFoundation.AVMediaType) -> [MediaPlayerTrack]
     func select(track: some MediaPlayerTrack)
