@@ -13,6 +13,7 @@ SHARED_TARGETS = {"MeowContracts", "MeowJSON", "MeowStorage", "MeowAccounts", "M
 LOCAL_PRODUCTS = {
     "MeowVideoKernel": ("videokernel", "../VideoKernel"),
     "CMeowAudioKernel": ("audiokernel", "../AudioKernel"),
+    "MeowAetherKernel": ("aetherkernel", "../AetherKernel"),
 }
 SYSTEM_TARGETS = {"CSQLite": {"MeowMusicNativeService"}}
 
@@ -108,6 +109,35 @@ def evaluate_package(package):
         ["swift", "package", "--package-path", str(package), "dump-package"],
         check=True, capture_output=True, text=True, encoding="utf-8")
     return json.loads(result.stdout)
+
+
+def aether_membership(root):
+    """Aether and its FFmpeg references must stay behind one dynamic product."""
+    failures = []
+    manifest = evaluate_package(root / "native/AetherKernel")
+    products = manifest["products"]
+    if (len(products) != 1 or products[0]["name"] != "MeowAetherKernel"
+            or products[0]["type"] != {"library": ["dynamic"]}
+            or products[0]["targets"] != ["MeowAetherKernel"]):
+        failures.append("Aether must expose only the dynamic MeowAetherKernel product")
+    if manifest["dependencies"]:
+        failures.append("Aether package must not resolve remote or secondary packages")
+    declarations = {item["name"]: item for item in manifest["targets"]}
+    binary = {name for name, item in declarations.items() if item["type"] == "binary"}
+    lock = json.loads((root / "scripts/ios-aether-kernel.json").read_text())
+    if binary != set(lock["libraries"]) | {"Dovi"}:
+        failures.append("Aether binary closure differs from the lock")
+    regular = {name for name, item in declarations.items() if item["type"] == "regular"}
+    if regular != {"MeowAetherKernel", "AetherEngine", "AetherFFmpegBuild"}:
+        failures.append("Unexpected Aether source target")
+    for name, path in (("AetherEngine", ".cache/AetherEngine"),
+                       ("AetherFFmpegBuild", ".cache/AetherFFmpegBuild")):
+        if declarations.get(name, {}).get("path") != path:
+            failures.append("Aether source must use the locked preparation: " + name)
+    for name in binary:
+        if declarations[name].get("path") != ".cache/binaries/" + name + ".xcframework":
+            failures.append("Aether binary must use the locked preparation: " + name)
+    return failures
 
 
 def check(root):
@@ -227,14 +257,24 @@ def check(root):
             closure(dependency, seen)
         return seen
     for name in ("MeowAudio", "MeowPlayback", "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicNativeService"):
-        if name in sources and closure(name) & {"MeowVideoKernel", "MeowPlaybackVideo"}:
+        if name in sources and closure(name) & {"MeowVideoKernel", "MeowPlaybackVideo", "MeowAetherKernel"}:
             failures.append("Music/audio closure depends on video: " + name)
+    if "MeowAetherKernel" in external:
+        try:
+            failures.extend(aether_membership(root))
+        except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
+            failures.append("Cannot evaluate Aether package boundary: " + str(error))
     for parent in (root / "apps/ios", package / "Sources", package / "Tests"):
         for path in parent.rglob("*"):
             if parent == root / "apps/ios" and path.relative_to(parent).parts[0] == ".cache":
                 continue
             if path.is_symlink() or path.resolve() != path.absolute():
                 failures.append("Linked source: " + str(path.relative_to(root)))
+            if path.is_file() and path.suffix == ".swift":
+                if re.search(r"^\s*(?:(?:@testable|@preconcurrency|public|internal|package|fileprivate|private)\s+)*"
+                             r"import (?:AetherEngine|AetherFFmpegBuild|AetherLib\w+|Dovi)\b",
+                             path.read_text(encoding="utf-8"), re.M):
+                    failures.append("Aether raw imports bypass dynamic boundary: " + str(path.relative_to(root)))
     project = root / "apps/ios/Meowfilm.xcodeproj/project.pbxproj"
     if project.exists():
         text = project.read_text(encoding="utf-8")

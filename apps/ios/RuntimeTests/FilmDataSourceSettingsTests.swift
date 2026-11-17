@@ -203,7 +203,7 @@ final class FilmDataSourceSettingsTests: XCTestCase {
         XCTAssertEqual(notifications, 3)
     }
 
-    func testDataSourceFormStacksFullWidthFieldsAndKeepsProviderDraftsAndCustomExpansionIndependent() async throws {
+    func testDataSourceWholeFormKeepsProviderDraftsAndCustomExpansionIndependent() async throws {
         let storage = try DataSourceSettingsStorage(self)
         try storage.seed(tmdbInitialSettings, for: .tmdb)
         let before = try storage.bytes(.tmdb)
@@ -220,9 +220,14 @@ final class FilmDataSourceSettingsTests: XCTestCase {
         defer { PageViewController.invalidatePages(in: page) }
         XCTAssertEqual(page.pageTitle, "刮削设置")
         let form = try XCTUnwrap(page.children.compactMap { $0 as? FilmDataSourceFormController }.first)
-        let provider = try XCTUnwrap(form.sections.first?.rows.first?.content as? UISegmentedControl)
+        let provider = try XCTUnwrap(descendants(form.view).first {
+            $0.accessibilityIdentifier == "film.dataSources.provider"
+        } as? UISegmentedControl)
         XCTAssertEqual(provider.numberOfSegments, 2)
         XCTAssertEqual(provider.titleForSegment(at: 0), "TMDB"); XCTAssertEqual(provider.titleForSegment(at: 1), "豆瓣")
+        XCTAssertTrue(provider.superview === form.view, "The provider capsule must not be nested in a settings card")
+        XCTAssertNil(form.table.superview)
+        XCTAssertFalse(form.form.boxedInputs)
         let api = try field(form, "film.tmdb.apiBase")
         let key = try field(form, "film.tmdb.apiToken")
         XCTAssertEqual(api.keyboardType, .URL); XCTAssertFalse(key.isSecureTextEntry)
@@ -230,20 +235,63 @@ final class FilmDataSourceSettingsTests: XCTestCase {
         let stack = try XCTUnwrap(api.superview as? UIStackView)
         XCTAssertEqual(stack.axis, .vertical); XCTAssertEqual(stack.alignment, .fill)
         XCTAssertEqual((stack.arrangedSubviews.first as? UILabel)?.text, "TMDB 数据代理地址")
-        XCTAssertTrue(api.constraints.contains { $0.firstAttribute == .height && $0.constant >= 44 })
+        XCTAssertTrue(api.constraints.contains { $0.firstAttribute == .height && $0.constant >= 36 })
+        page.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        page.view.layoutIfNeeded()
+        XCTAssertGreaterThan(provider.bounds.height, 0)
+        XCTAssertEqual(provider.layer.cornerRadius, provider.bounds.height / 2, accuracy: 0.5)
+        XCTAssertGreaterThan(api.bounds.width, api.bounds.height)
+        XCTAssertEqual(api.layer.cornerRadius, api.bounds.height / 2, accuracy: 0.5)
+        XCTAssertFalse(descendants(form.view).compactMap { $0 as? UILabel }.contains {
+            $0.text == "TMDB 设置" || $0.text == "豆瓣配置"
+        })
         api.text = "https://draft.example.invalid/nested"; api.sendActions(for: .editingChanged)
         key.text = "synthetic-unsaved-key"; key.sendActions(for: .editingChanged)
         provider.selectedSegmentIndex = 1; provider.sendActions(for: .valueChanged)
         XCTAssertEqual(try field(form, "film.douban.cookie").text, "")
         XCTAssertFalse(try field(form, "film.douban.cookie").isSecureTextEntry)
-        XCTAssertFalse(form.sections.flatMap(\.rows).contains { $0.id == "film.douban.apiBase.row" })
+        XCTAssertFalse(descendants(form.view).contains { $0.accessibilityIdentifier == "film.douban.apiBase" })
+        let dataProxy = try field(form, "film.douban.apiProxy")
+        let imageProxy = try field(form, "film.douban.imageProxy")
+        XCTAssertTrue(try XCTUnwrap(dataProxy.superview).isHidden)
+        XCTAssertTrue(try XCTUnwrap(imageProxy.superview).isHidden)
         try select(form, "film.douban.data.custom")
-        XCTAssertNotNil(try field(form, "film.douban.apiProxy"))
-        XCTAssertFalse(form.sections.flatMap(\.rows).contains { $0.id == "film.douban.imageBase.row" })
+        XCTAssertFalse(try XCTUnwrap(dataProxy.superview).isHidden)
+        XCTAssertTrue(try XCTUnwrap(imageProxy.superview).isHidden)
+        XCTAssertFalse(descendants(form.view).contains { $0.accessibilityIdentifier == "film.douban.imageBase" })
         try select(form, "film.douban.image.custom")
-        XCTAssertNotNil(try field(form, "film.douban.imageProxy"))
+        XCTAssertFalse(try XCTUnwrap(imageProxy.superview).isHidden)
+        dataProxy.text = "https://data.example.invalid/draft/"; dataProxy.sendActions(for: .editingChanged)
+        imageProxy.text = "https://images.example.invalid/draft/"; imageProxy.sendActions(for: .editingChanged)
         let cookie = try field(form, "film.douban.cookie")
         cookie.text = "synthetic_cookie=draft"; cookie.sendActions(for: .editingChanged)
+        form.applyTheme(); form.render()
+        form.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+        form.applyTheme()
+        page.view.frame = CGRect(x: 0, y: 0, width: 320, height: 480)
+        page.view.layoutIfNeeded(); form.view.layoutIfNeeded()
+        for id in ["film.douban.dataRoute", "film.douban.imageRoute"] {
+            let button = try XCTUnwrap(descendants(form.view).first { $0.accessibilityIdentifier == id } as? UIButton)
+            let label = try XCTUnwrap(button.titleLabel)
+            let fitted = label.sizeThatFits(.init(width: label.bounds.width, height: .greatestFiniteMagnitude))
+            let insets = try XCTUnwrap(button.configuration).contentInsets
+            let labelFrame = label.convert(label.bounds, to: button)
+            XCTAssertGreaterThan(label.bounds.width, 0)
+            XCTAssertGreaterThan(fitted.height, label.font.lineHeight, "Narrow accessibility options must exercise wrapping")
+            XCTAssertGreaterThanOrEqual(label.bounds.height + 1, fitted.height, "The option must not crop wrapped text")
+            XCTAssertGreaterThanOrEqual(labelFrame.minY + 1, insets.top)
+            XCTAssertLessThanOrEqual(labelFrame.maxY, button.bounds.height - insets.bottom + 1)
+        }
+        XCTAssertTrue(try field(form, "film.douban.cookie") === cookie)
+        XCTAssertTrue(try field(form, "film.douban.apiProxy") === dataProxy)
+        XCTAssertTrue(try field(form, "film.douban.imageProxy") === imageProxy)
+        XCTAssertEqual(cookie.text, "synthetic_cookie=draft")
+        try select(form, "film.douban.data.direct")
+        XCTAssertTrue(try XCTUnwrap(dataProxy.superview).isHidden)
+        XCTAssertFalse(try XCTUnwrap(imageProxy.superview).isHidden)
+        try select(form, "film.douban.data.custom")
+        XCTAssertEqual(dataProxy.text, "https://data.example.invalid/draft/")
+        XCTAssertEqual(imageProxy.text, "https://images.example.invalid/draft/")
         provider.selectedSegmentIndex = 0; provider.sendActions(for: .valueChanged)
         XCTAssertEqual(try field(form, "film.tmdb.apiBase").text, "https://draft.example.invalid/nested")
         XCTAssertEqual(try field(form, "film.tmdb.apiToken").text, "synthetic-unsaved-key")
@@ -255,16 +303,21 @@ final class FilmDataSourceSettingsTests: XCTestCase {
     }
 
     private func field(_ form: FilmDataSourceFormController, _ id: String) throws -> UITextField {
-        func fields(_ view: UIView) -> [UITextField] {
-            if let field = view as? UITextField { return [field] }
-            return view.subviews.flatMap(fields)
-        }
-        return try XCTUnwrap(form.sections.flatMap(\.rows).compactMap(\.content).flatMap(fields).first { $0.accessibilityIdentifier == id })
+        try XCTUnwrap(descendants(form.view).first { $0.accessibilityIdentifier == id } as? UITextField)
     }
     private func select(_ form: FilmDataSourceFormController, _ id: String) throws {
-        let row = try XCTUnwrap(form.sections.flatMap(\.rows).first { $0.id == id })
-        XCTAssertTrue(row.enabled)
-        try XCTUnwrap(row.action)()
+        let button = try XCTUnwrap(descendants(form.view).compactMap { $0 as? UIButton }.first {
+            $0.menu?.children.contains { ($0 as? UIAction)?.identifier.rawValue == id } == true
+        })
+        XCTAssertTrue(button.isEnabled)
+        let action = try XCTUnwrap(button.menu?.children.compactMap { $0 as? UIAction }.first {
+            $0.identifier.rawValue == id
+        })
+        let control = UIButton(type: .system)
+        control.addAction(action, for: .touchUpInside); control.sendActions(for: .touchUpInside)
+    }
+    private func descendants(_ view: UIView) -> [UIView] {
+        view.subviews.flatMap { [$0] + descendants($0) }
     }
 }
 

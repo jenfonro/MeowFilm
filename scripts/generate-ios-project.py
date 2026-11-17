@@ -18,6 +18,9 @@ PROJECT_NOTICES = "../../LICENSES/NOTICE.md"
 PROJECT_LICENSE = "../../LICENSES/GPL-3.0-only.txt"
 VIDEO_LICENSES = ("LGPL-2.1-only.txt", "LGPL-3.0-only.txt", "FFmpeg-LICENSE.md", "FFmpeg-IJG-NOTICE.txt")
 AUDIO_LICENSES = ("FFmpeg-audio-NOTICES.txt",)
+AETHER_LICENSES = ("AetherEngine-EXCEPTION.txt", "Aether-THIRD-PARTY-NOTICES.txt",
+                   "WTFPL-2.0.txt", "Aether-libzvbi-ure-MIT.txt",
+                   "libxml2-MIT.txt", "FilmKernel-THIRD-PARTY-NOTICES.txt")
 
 
 def source_paths(root, directories):
@@ -132,7 +135,7 @@ def generate():
     obj("projectLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['projectLicense']};")
     obj("nodeLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['nodeLicense']};")
     media_license_references, media_license_builds = [], []
-    for filename in VIDEO_LICENSES + AUDIO_LICENSES:
+    for filename in VIDEO_LICENSES + AUDIO_LICENSES + AETHER_LICENSES:
         reference, build = identifier(f"{product}:license:{filename}"), identifier(f"{product}:license-build:{filename}")
         media_license_references.append(reference)
         media_license_builds.append(build)
@@ -153,7 +156,7 @@ def generate():
     obj("frameworks", f"isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = {seq(framework_ids + [ids['nodeFrameworkLink']])}; runOnlyForDeploymentPostprocessing = 0;")
     obj("resources", f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = {seq([ids["assetsBuild"], ids["runtimePayloadBuild"], ids["nodeLicenseBuild"], ids["javascriptLicenseBuild"], ids["unicodeLicenseBuild"], ids["projectNoticesBuild"], ids["projectLicenseBuild"]] + media_license_builds)}; runOnlyForDeploymentPostprocessing = 0;')
     obj("package", 'isa = XCLocalSwiftPackageReference; relativePath = ../../native/MeowKit;')
-    common_project = "CLANG_ENABLE_MODULES = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0;"
+    common_project = "CLANG_ENABLE_MODULES = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0;"
     conditions = "FEATURE_MUSIC"
     app_info = plistlib.loads(plistlib.dumps(base_info))
     app_info["NSAppTransportSecurity"] = {"NSAllowsArbitraryLoads": True}
@@ -217,7 +220,7 @@ def generate():
     obj("uiTestDependency", f'isa = PBXTargetDependency; target = {ids["target"]}; targetProxy = {ids["uiTestProxy"]};')
     test_settings = (
         f'PRODUCT_BUNDLE_IDENTIFIER = {bundle_identifier}.acceptance-tests; PRODUCT_NAME = {test_name}; '
-        'GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; TARGETED_DEVICE_FAMILY = 1; '
+        'GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.0; TARGETED_DEVICE_FAMILY = 1; '
         'SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; '
         'CODE_SIGN_STYLE = Automatic; '
         'SWIFT_INCLUDE_PATHS = ("$(inherited)", "$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)",); '
@@ -242,7 +245,7 @@ def generate():
     obj("runtimeTestDependency", f'isa = PBXTargetDependency; target = {ids["target"]}; targetProxy = {ids["runtimeTestProxy"]};')
     runtime_test_settings = (
         f'PRODUCT_BUNDLE_IDENTIFIER = {bundle_identifier}.runtime-tests; PRODUCT_NAME = {runtime_test_name}; '
-        'GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; TARGETED_DEVICE_FAMILY = 1; '
+        'GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.0; TARGETED_DEVICE_FAMILY = 1; '
         'INFOPLIST_KEY_NSPrincipalClass = MeowfilmRuntimeTestBundle; '
         'SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; CODE_SIGN_STYLE = Automatic; '
         # The test shares the App's products directory, so the host and its

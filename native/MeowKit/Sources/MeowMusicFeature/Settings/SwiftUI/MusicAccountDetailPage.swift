@@ -187,6 +187,7 @@ private struct MusicAccountSyncSection: View {
                 .frame(minHeight: SettingsVisualMetrics.rowHeight)
         }
         .disabled(!ready)
+        .toggleStyle(SettingsToggleStyle())
     }
 }
 

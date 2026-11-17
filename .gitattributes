@@ -41,6 +41,8 @@ LICENSES/KuGouMusicApi-MIT.txt -text whitespace=cr-at-eol
 # Preserve the pinned SkiaSharp package notices, including their original whitespace.
 LICENSES/SkiaSharp-MIT.txt -text whitespace=-blank-at-eol,-blank-at-eof,cr-at-eol
 LICENSES/SkiaSharp-THIRD-PARTY-NOTICES.txt -text whitespace=-blank-at-eol,-blank-at-eof,cr-at-eol
+# Preserve the pinned WTFPL text's upstream trailing blank line.
+LICENSES/WTFPL-2.0.txt whitespace=-blank-at-eof
 # Native engine sources are verified byte-for-byte, including on autocrlf hosts.
 native/JavaScript/quickjs/* -text
 native/JavaScript/*.c text eol=lf

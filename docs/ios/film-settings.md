@@ -1,10 +1,46 @@
 # iOS 影视设置
 
-设置首页提供音乐设置、影视设置，以及通用分组的偏好设置、缓存管理；底部独立分组为清空本机数据。影视下提供搜索净化设置、智能匹配设置、猫源、视频源、刮削设置、网盘账号和智能播放设置。智能播放设置收纳偏好、自动准备、Manual 匹配源管理和匹配禁用管理。智能匹配下为剧集列表净化规则、集数匹配规则、电影匹配规则、站点净化设置；后者仍编辑站点名关键词，不是正则。历史继续由 Node 记录，但不在设置显示入口。播放设置及资料遵循[统一播放契约](../runtime/film-playback.md)。
+设置首页提供音乐设置、影视设置，以及通用分组的偏好设置、缓存管理；底部独立分组为清空本机数据。影视下提供搜索净化设置、智能匹配设置、猫源、视频源、刮削设置、网盘账号、播放器设置和智能播放设置。智能播放设置收纳偏好、自动准备、Manual 匹配源管理和匹配禁用管理，与本端播放器控制分开。智能匹配下为剧集列表净化规则、集数匹配规则、电影匹配规则、站点净化设置；后者仍编辑站点名关键词，不是正则。历史继续由 Node 记录，但不在设置显示入口。播放设置及资料遵循[统一播放契约](../runtime/film-playback.md)。
 
 普通配置直接读写原生设置文档，不以运行器在线为前提；唯一 owner、离线提交及通知规则见[共同设置契约](../common/settings-storage.md)，实际 namespace、保护和文档消费见[存储](storage.md#影视设置)。本文保留 iOS 现有界面，不套用 Windows 列表或弹框调整。
 
-手机一般三级，智能匹配规则和来源详情可到第四级，规则测试从编辑页进入独立页面。当前标题放 App 自有页头，内容只保留实际分组。分组采用公共设置卡片、动态字体与至少 44 pt 点击区；字段、选择与开关遵循[设置语义配色](architecture.md#设置语义配色)，背景／页头继续跟随主题。返回保持位置；规则草稿由 App 持有的 `FilmSettingsModel.rules` 保留，不随页面销毁。
+手机一般三级，智能匹配规则和来源详情可到第四级；规则测试直接更新当前卡片标题，不进入独立页面。当前标题放 App 自有页头，内容只保留实际分组。分组采用公共设置卡片、动态字体与至少 44 pt 点击区；字段、选择与开关遵循[设置语义配色](architecture.md#设置语义配色)，背景／页头继续跟随主题。返回保持位置；规则草稿由 App 持有的 `FilmSettingsModel.rules` 保留，不随页面销毁。
+
+## 播放器设置
+
+「影视设置 → 播放器设置」提供「默认内核」与「播放控制」入口，由 `FilmPlayerSettingsController` 消费 App 共享的 `FilmPlayerPreferencesStore`。未保存时默认 KSPlayer，可选 AetherEngine；只在此设置页选择内核，播放器内没有切核入口。保存后的首选值在下一次创建媒体候选时读取，包括新播放、切集、换源；不热切当前健康实例，也不重新获取当前播放地址。持久化位置、错误及校正写入见[本地存储](storage.md#播放器偏好)。
+
+「播放控制」共17项；下表为完整产品选项，倍率还须与所选内核能力取交集。
+
+| 分组 | 项目 | 可选值 | 默认值 |
+| --- | --- | --- | --- |
+| 播放控制 | 默认倍速 | 1X、1.25X、1.5X、2X、3X | 1X |
+| 播放控制 | 长按倍速 | 2X、3X、4X、6X、8X | 2X |
+| 播放控制 | 快进/快退步长 | 5、10、15、20、30、60 秒 | 15 秒 |
+| 播放控制 | 控制中心显示 | 开/关 | 开 |
+| 播放控制 | 自动识别片头片尾 | 开/关 | 开 |
+| 单击手势 | 单击屏幕中间 | 无操作、显示/隐藏播放栏、播放/暂停 | 显示/隐藏播放栏 |
+| 单击手势 | 单击屏幕两边 | 无操作、显示/隐藏播放栏、播放/暂停、快进/快退 | 显示/隐藏播放栏 |
+| 双击手势 | 双击屏幕中间 | 无操作、播放/暂停 | 播放/暂停 |
+| 双击手势 | 双击屏幕两边 | 无操作、播放/暂停、快进/快退 | 播放/暂停 |
+| 滑动手势 | 滑动调节音量 | 开/关 | 开 |
+| 滑动手势 | 滑动调节亮度 | 开/关 | 开 |
+| 滑动手势 | 滑动调节进度 | 开/关 | 开 |
+| 滑动手势 | 短剧滑动切集 | 开/关 | 开 |
+| 震动反馈 | 长按屏幕 | 开/关 | 开 |
+| 震动反馈 | 滑动调节亮度 | 开/关 | 开 |
+| 震动反馈 | 滑动调节音量 | 开/关 | 开 |
+| 震动反馈 | 滑动调节进度 | 开/关 | 开 |
+
+### 能力过滤与生效
+
+- 设置按首选内核过滤：KSPlayer 显示完整默认／长按倍率；Aether 视频上限2X，默认倍率只显示 1／1.25／1.5／2X，长按只显示2X。应用提供的滑动与触觉能力不因内核名称而隐藏。
+- KS 切选 Aether 时，保存边界将默认3X和长按3／4／6／8X降为2X并保存；其余支持值不变。切回 KS 只恢复选项，不恢复旧高倍率，不为每内核保存另一套倍率。
+- 播放页菜单按 `FilmMediaState.engine` 的实际内核过滤，保留既有0.5／0.75X低倍速；格式回退后的实际 KS 不改变全局 Aether 首选。命令入口也按实际能力限制，接管 Aether 时超限的会话基础倍率校正为2X，校正反映到当前状态，不因校正恢复播放。
+- 默认倍率用于新影视会话的首次候选；同会话切集／换源继承当前基础倍率并按实际内核校正。播放页手动倍率只修改会话基础倍率；长按使用独立临时倍率，不改默认偏好，结束还原基础倍率。取消、设置变化、attempt 变化或页面失活会撤销临时倍率，迟到结束不能恢复旧媒体。
+- 步长、点按、滑动及触觉从共享偏好读取；偏好变化取消进行中的手势，新手势使用新值。控制中心开关更新当前影视卡片显隐，章节开关重新更新当前章节识别；二者分别见[系统媒体](system-media.md#影视卡片与内核边界)与[真实章节](film.md#真实章节与跳过)。
+
+KSPlayer 的临时倍率上限8X；偏好持久化、UIKit触摸、取消／换代、实际倍率与音视频时钟分别验收，不以菜单选中值或属性赋值代替实际输出。
 
 ## Node 规则与原生草稿
 
@@ -12,7 +48,9 @@
 
 共享载体保留锁定派生源码的正则编译／执行／全局空替换中断能力，普通构建不现场下载或打补丁；中断不冒充正则语法错误。异常、取消或截止后排空真实资源并恢复同一程序。App 资源分发共享原生引擎 MIT 与 Unicode 表许可。
 
-原生编辑分为搜索净化、剧集列表净化、集数匹配、电影匹配四个独立页面。每页纵向排列规则块，标题行右侧提供删除；匹配规则和替换内容在同块内纵向编辑。`flags` 不显示，编辑时保留原值，缺省仍由运行器按 `i` 处理。添加、修改、删除均只改本页草稿；页头唯一保存一次提交本页整组，失败保留编辑。恢复默认只读取当前组默认到草稿，仍需保存才生效。独立测试页使用公共菜单行容纳测试文本、测试按钮与最终结果，使用本页草稿与必要关联组的已保存配置，不混用其他页草稿、不保存；隐藏或退出取消测试并拒绝迟到结果。
+原生编辑分为搜索净化、剧集列表净化、集数匹配、电影匹配四个独立页面。每条规则使用独立卡片，标题左侧“规则 N”、右侧删除，`pattern` 标签及多行胶囊输入在上；匹配组的 `replace`／`flags` 在下方同排，辅助字号时可纵排。净化组仍只有现有 pattern 字段。`flags` 可编辑并保留原值，空值仍由运行器按 `i` 处理。规则列表下方为独立添加按钮，再下方为恢复默认及测试，页头保留唯一保存。添加、修改、删除及恢复只改本组草稿，保存才提交，失败保留编辑。
+
+测试文本及搜索查询词在当前页输入；测试使用本组草稿和必要关联组的已保存配置，不混用其他页草稿、不保存。各卡片在“规则 N”后留布局间距显示“测试结果：结果”，长结果在标题区换行，不另建输出列表。净化组消费逐条累计预览，匹配组根据同组错误与首命中索引区分未命中、实际输出及命中后的未执行；空字符串保留为有效结果。编辑规则／输入、换代、保存规范化、隐藏或失活使旧结果失效并取消测试，迟到结果不能覆盖当前快照，刷新结果不重建正在输入的字段。本地保存不等待在线测试，真实执行失败仍走统一错误与重试反馈。
 
 `FilmRuleSettings` 在原生保存边界完成同语义的纯字符串规范化、默认值及新规则文本解析，不编译正则；草稿测试不提前套用保存归一化，匹配规则 JSON 内的 pattern／replace 保持原文。空集数匹配组仍返回清理结果与 previews，同时报告“无匹配规则”，不自动回填规则。
 
@@ -54,9 +92,9 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 
 ### 数据源与智能播放设置
 
-`FilmDataSourceSettingsViewController` 同页切换 TMDB／豆瓣，字段采用上方标签、下方全宽输入。字段及代理含义以[元数据运行器](../runtime/metadata-data.md#设置与凭据)为准：TMDB 单一明文 API TOKEN 支持 v3/v4，附数据／图片代理、语言、地区和成人开关；豆瓣 Cookie 明文回显，数据／图片代理独立选择，默认“无”，自定义只展开普通代理前缀。无服务器代理、密码遮罩、configured 占位或单独清除按钮；空凭据保存即清空。`FilmTMDBService(settingsDocument:connection:)` 和 `FilmDoubanSettingsService(settingsDocument:)` 直接访问各自加密原生文档；失败保留输入与 saved 状态，已提交保存不因离页丢回执，不在启动时经 HTTP 回灌。
+`FilmDataSourceSettingsViewController` 顶部以独立完整胶囊切换 TMDB／豆瓣，不外套设置卡片；下方使用书源编辑共用的 `ManagementFormView` 整体表单，无重复供应商节头。字段采用上方标签、下方胶囊输入，供应商字段实例及草稿分别保留，切换和主题变化不重建输入。字段及代理含义以[元数据运行器](../runtime/metadata-data.md#设置与凭据)为准：TMDB 单一明文 API TOKEN 支持 v3/v4，附数据／图片代理、语言、地区和成人开关；豆瓣 Cookie 明文回显，数据／图片代理独立选择，默认“无”，自定义只展开普通代理前缀。无服务器代理、密码遮罩、configured 占位或单独清除按钮；空凭据保存即清空。`FilmTMDBService(settingsDocument:connection:)` 和 `FilmDoubanSettingsService(settingsDocument:)` 直接访问各自加密原生文档；失败保留输入与 saved 状态，已提交保存不因离页丢回执，不在启动时经 HTTP 回灌。
 
-偏好关键词和站点净化词用单行逗号分隔，键入不重建正在编辑的行，恢复默认只改选定组。`FilmPlaybackSettingsModel(transport:settingsDocument:)` 在原生文档读取／保存偏好，只规范化实际编辑字段、保留其他原始 JSON；preferencesBusy 与在线业务 busy 分开，挂起的资料库请求不阻塞本地偏好读写。人工匹配按目标分组，分享链接／提取码直接编辑，仍经运行器管理。设置不展示或删除历史／收藏；原业务 owner 不变。
+偏好优先片源与网盘排序共用音乐歌词／封面的 `SettingsOrderingSection` 直接拖动列表，只修改各组草稿，由页头保存；不新增启用开关，也不保留偏好页的恢复默认入口。偏好关键词和站点净化词用单行逗号分隔，键入不重建输入；站点净化及其他组仍保留各自恢复能力。`FilmPlaybackSettingsModel(transport:settingsDocument:)` 在原生文档读取／保存偏好，只规范化实际编辑字段、保留其他原始 JSON；preferencesBusy 与在线业务 busy 分开，挂起的资料库请求不阻塞本地偏好读写。人工匹配按目标分组，添加／编辑使用同一 `ManagementFormView` 整体表单，短选项紧凑组织，长身份及分享链接保留全宽，仍经运行器管理。设置不展示或删除历史／收藏；原业务 owner 不变。
 
 `FilmPlaybackLibrary` 只投影当前 Manual 或屏蔽页面所需的列表；偏好走独立设置入口。Manual 选影片只读取历史的 targetId/title，不校验位置、时长或时间；无法读取这两个字段的辅助历史不进入选项。当前列表可分离坏项不阻断健康兄弟，真实空列表有效，坏根／列表形状错误及非空但全部不可用仍报错。读取投影不回写资料，删除仍提交原始 typed block 身份，保存失败不发布。
 
@@ -68,7 +106,7 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 
 ### 网盘账号
 
-列表保留平台、状态、操作三列，适配窄屏；登录沿用音乐账号浮层、输入和按钮的共享视觉组件，不依赖音乐账号服务或存储。刷新、整份替换、退出与二维码取消以[网盘公共契约](../runtime/pan-runtime.md#设置页)为唯一来源。
+普通字号保留平台、状态、操作三列，适配窄屏；辅助字号改为三个全宽纵向内容区，避免平台名与操作逐字竖排，不压缩字体。平台主文字及操作仍为 Body Regular，表头为 Subheadline Regular，平台图标保持 24pt。操作表头及按钮在同一内容区居中，离散状态采用公共小胶囊、浅色底及同色深文字／图标。未登录／不可用为中性，已登录为成功，未验证为警告，失效／配置损坏为错误；busy 继续显示真实操作进度。登录沿用音乐账号浮层、输入和按钮的共享视觉组件，不依赖音乐账号服务或存储。刷新、整份替换、退出与二维码取消以[网盘公共契约](../runtime/pan-runtime.md#设置页)为唯一来源。
 
 原生 `PanProviderID` 只声明百度、普通夸克、普通 UC、天翼、移动五个平台；登录表单直接按各平台现行凭证字段生成。`PanAccountService` 只消费所选平台的真实 revision 和已知凭据，手动输入先投影本平台凭据，再整份替换所选已知凭据。其他账号及原文档的未知平台／字段材料原样保留，不注册能力、不转为请求凭据，也不作为旧数据兼容。
 
@@ -95,16 +133,16 @@ App 关闭先停止接纳并排空规则执行／来源任务；规则适配的 
 规则载体的精确 `MeowfilmAcceptance` 选择如下；每项须实际执行，编译或跳过不算规则载体通过：
 
 ```text
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testGroupDraftSurvivesNavigationAndRestoreAndSeparateTestNeverSave
+-only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testGroupDraftSurvivesNavigationAndRestoreAndInlineTestNeverSave
 -only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testRulesGroupSaveFailureRetainsDraftAndRetryPreservesOtherSavedGroups
 -only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testModelLoadsNativeRulesAndLocalSourcesAndCloseDoesNotCloseServices
 -only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testNarrowWideLargeTypeAndEmptyScreensProduceRealUIKitAttachments
 -only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testPageSaveNormalizesClearedRowsAndStaleFieldsCannotChangeSuccessor
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testAddAndDefaultsOnlyChangeCurrentGroupDraftAndTestOpensSeparatePage
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testSeparateEpisodeTestsUseThisGroupDraftAndAssociatedSavedGroupOnly
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testSeparateRuleTestCancellationOnHiddenPageDoesNotPublishOrSave
+-only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testAddAndDefaultsOnlyChangeCurrentGroupDraftAndTestStaysInline
+-only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testInlineEpisodeTestsUseThisGroupDraftAndAssociatedSavedGroupOnly
+-only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testInlineRuleTestCancellationOnHiddenPageDoesNotPublishOrSave
 -only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testNativeGroupSaveWhilePreviewHeldKeepsReceiptAfterPageRemovalAndWaiterCancellation
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testRuleFieldsHideFlagsAndKeepReplacementInTheSameEditor
+-only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testRuleFieldsShowEditableFlagsBesideReplacementInTheSameCard
 -only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testRuleResultDisplayDoesNotReplaceLosslessBusinessText
 -only-testing:MeowfilmRuntimeTests/MeowfilmFilmSettingsHostTests/testNodeMobileRulesUseSameSavedAndDraftEntryAndKeepIsolatedUTF16
 -only-testing:MeowfilmRuntimeTests/MeowfilmFilmSettingsHostTests/testNodeMobileGroupSaveAndDraftPreviewPreserveAssociatedSavedGroups

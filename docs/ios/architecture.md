@@ -2,6 +2,8 @@
 
 meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持有；页面内容综合性能、可控性、实现复杂度和维护成本选择 UIKit 或 SwiftUI。业务、平台、账号、播放、缓存和持久化位于 Swift Package `native/MeowKit`。
 
+App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行，不新增 Mac 客户端。构建输入与工具链验证边界见[发布](release.md)。
+
 共同规则分别见[页面数据请求](../common/pages/data-requests.md)和[音乐平台客户端上下文](../common/music/platform-client-context.md)。本文件说明 Swift Package 与 UIKit 的端侧装配，不把目标契约视为已完成实现。
 
 ## 应用工程
@@ -30,7 +32,9 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 
 `SettingsVisualMetrics`、`SettingsRowBackgroundView` 共同定义卡片轮廓、行内间距和分割线；UIKit 设置表使用 `SettingsTableView`／`SettingsTableCell`，SwiftUI 音乐设置保留 `List` 并使用薄适配绘制同一底板。设置根页及其下级页面隐藏胶囊播放器，同时撤销其底部占位；导航与播放器均不显示时，Dock 的背景及触摸层也不再覆盖页面。返回设置栈外恢复原播放器状态，不停止播放。
 
-全部设置子页以设置首页的文字角色为基准：主标签和操作为系统 Body Regular，次要资料和分组标题为 Subheadline Regular，继续响应 Dynamic Type。普通单行采用首页实际的 44pt 基准，多行资料和控件按内容增长，不压缩触控区。音乐设置的共享行和操作标签显式采用同一文字角色，分组标题不采用系统 increased／加粗样式；首组不重复叠加顶部内容间距，公共页头高度不变。
+全部设置子页以设置首页的文字角色为基准：主标签和操作为系统 Body Regular，次要资料和分组标题为 Subheadline Regular，继续响应 Dynamic Type。普通单行由正文行高、上下各 12pt 内边距及 44pt 最小行框决定；菜单、开关和数字附件使用紧凑视觉高度，不额外撑大普通行，触达区与视觉尺寸分离。两行账号及真实多行表单可按内容增长。同级主文字字号一致，分组标题不采用系统 increased／加粗样式；SwiftUI 与 UIKit 沿用同一 insetGrouped 首组布局，不单独清零音乐顶部间距，公共页头高度不变。
+
+浅色设置输入为白色，深色使用对应输入表面，边框与文字继续由公共主题提供。UIKit 的 `SettingsTextField`／`SettingsTextView` 在真实布局后更新两端半圆及文本内边距；SwiftUI 使用原生 `Capsule`。整体表单、管理搜索和编辑浮层遵守相同输入外观，多行输入保留换行、滚动及编辑空间。离散状态由业务选择语义，`SettingsStatusBadge` 统一呈现小图标、同色浅底／深字及动态胶囊。
 
 ### 启动与首页发布
 
@@ -52,21 +56,22 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `MeowAccounts` | 凭据与账号状态基础设施 | Contracts |
 | `MeowAudio` | 独立音频解码、有界 PCM、原生保音高变速与 AVAudioEngine 输出 | CMeowAudioKernel |
 | `MeowPlayback` | 受控媒体输入、音乐播放、唯一系统媒体会话与播放所有权 | Contracts、MeowAudio |
-| `MeowPlaybackVideo` | 显式注入共享协调器的视频解码／原生视图输出适配 | Playback、MeowVideoKernel |
+| `MeowPlaybackVideo` | 显式注入共享协调器的视频解码／原生视图输出、候选内核选择与有界能力回退 | Contracts、Playback、MeowVideoKernel、MeowAetherKernel |
 | `MeowUI` | 中性主题、窗口渐变、页面生命周期、自绘页头、导航栈与转场、搜索页与呈现机制 | 无 |
 | `MeowRuntime` | runtime.http.v1 客户端、精确 JSON 值、事件观察／取消／关闭与单次内嵌启动机制；fd 仅交接受信启动及生命期 | JSON |
 | `MeowMusicFeature` | 音乐界面、交互、公开业务契约与音乐外观策略 | Contracts、Storage、Playback、UI |
 | `MeowMusicPlatform` | 网易、QQ、酷狗协议、账号、加密、HTTP 与文件缓存 | Feature、Audio、Contracts、JSON、Accounts、Storage |
 | `MeowMusicNativeService` | SQLite 曲库、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | 系统 CSQLite、Contracts、JSON、Feature、Runtime、Storage |
-| `MeowFilmFeature` | 影视页面、规则／搜索 RPC 消费者及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | UI、JSON、Storage、Runtime |
+| `MeowFilmFeature` | 影视页面、播放器偏好、规则／搜索 RPC 消费者及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | Contracts、UI、JSON、Storage、Runtime |
 | `native/VideoKernel` | 电影候选准备／提交、实际首帧、轨道与关闭适配 | 固定源码 KSPlayer，无业务或系统媒体会话 owner |
 | `native/KSPlayer` | core-only KSPlayer：解码、轨道／字幕、缓冲／同步、原生音频与 Metal／sample-buffer 输出 | FFmpeg 8.1.2 与 Apple 系统媒体框架，不编译上游播放控件 |
+| `native/AetherKernel` | 唯一公开 dynamic `MeowAetherKernel`、Aether 宿主生命周期与输出适配 | AetherEngine 7.68.0、动态 FFmpegBuild 3.15.0、内部静态 Dovi；无业务或系统媒体 owner |
 | `native/AudioKernel` | 锁定 FFmpeg 9.0.1 音频闭包、隐藏上游符号的动态框架与最小 C ABI | 无业务或视频依赖 |
 | `packages/film-rules`／`packages/film-search` | Node 加载的共享规则／搜索程序，不再作为 SwiftPM 依赖 | 共享 script-host 原生载体 |
 
 共享模块不依赖音乐模块。业务差异通过显式参数、契约或注入实现表达；模块边界由 `scripts/check-source-scope.py` 检查。
 
-音乐依赖闭包不包含视频目标；应用装配通过 `makePlaybackVideoDecoder` 注入现行视频适配，不迁移视频内核。音乐 PCM／输出与取消排空边界见[独立音乐核心](music-audio-core.md)，系统会话仍由[系统媒体控制](system-media.md)说明。
+音乐依赖闭包不包含视频目标；应用装配共享一个 `FilmPlayerPreferencesStore` 给设置、播放模型与媒体桥接，候选工厂通过 `makePlaybackVideoDecoder(engine:)` 读取首选内核。出厂默认 KSPlayer，设置变更只对下一媒体候选生效，当前实例不热切；播放页消费事件里的实际内核，不用首选值代替运行事实。选择、能力过滤及控制生效时机见[播放器设置](film-settings.md#播放器设置)，候选回退见[影视](film.md#内核选择与候选回退)。音乐 PCM／输出与取消排空边界见[独立音乐核心](music-audio-core.md)，系统会话仍由[系统媒体控制](system-media.md)说明。
 
 影视可编辑配置由原生 owner 保存；六块身份、离线读写和按块通知遵循[设置存储共同契约](../common/settings-storage.md)，具体文档与保护见[本地存储](storage.md#影视设置)。规则执行、搜索调度／聚合、智能播放、业务数据缓存及历史／人工匹配／屏蔽仍由 Node film owner 管理，不因配置迁移转移业务 owner。规则与通用脚本使用同一 `MeowScriptHost.framework` 内的 QuickJS-NG 0.18.0 核心，各自独立 Runtime／Context，不链接客户端规则引擎。共用约束见[影视播放契约](../runtime/film-playback.md)，视频内核构建输入见[发布](release.md)。平台验证仍须单独记录，不以九模块装配或内核版本代替实跑证据。
 
@@ -105,7 +110,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 - 每个页面由 `PageViewController.pageHeader` 绘制可见页头，背景与页面对齐；返回符号、`×`、文字按钮和菜单按钮均为自绘，无胶囊底、无系统按压高亮。
 - 页面标题使用 `pageTitle`，不设置 UIKit 的 `UIViewController.title`；系统导航栈保留 UIKit 自身唯一的空 `navigationItem`，不覆盖为另一套替身元数据。
 - 页头内部统一使用 Auto Layout；背景铺满页面，按钮与标题行遵守水平安全区，横屏避开刘海。页面内容从 `contentTopAnchor`（自身页头底部）开始，不重复增加顶部安全区。窗口根容器与主页面外壳不安装页头；推荐、频道、影视、我的各自持有页头，嵌套的领域页面共用所在主页面的页头；模态页使用自身安全区而非窗口状态栏高度。
-- 书源、音源、视频源和猫源管理共用 `ManagementListView`；列表表面延伸到页面底边，批量操作栏遵守实际底部安全区，滚动范围为操作栏和播放器预留空间。音源的 SwiftUI 桥接不重复裁去底部安全区域；没有附加工具时搜索框占据工具行可用宽度。
+- 书源、音源、视频源和猫源管理共用 `ManagementListView`；列表在实际底部安全区内留 4pt 收口并显示完整边框／圆角，批量操作栏位于卡片内、靠近其底边，滚动范围避让操作栏。键盘升起时卡片及操作栏共同避让，不靠把白色列表表面铺到屏幕底边减少空白。音源的 SwiftUI 桥接不重复裁去底部安全区域；没有附加工具时搜索框占据工具行可用宽度。
 - 窗口根容器和 `PageNavigationController` 把状态栏样式交给栈顶页面；页面未覆盖时保持系统默认，捕获状态栏的模态页自行决定。
 - 推入和返回使用应用自有的横向转场。返回时上一页静止，不变暗、不加阴影；当前页连同页头跟手划开。
 - 左边缘与内容区右滑都由自有手势驱动，复用同一距离／速度判定；可与横向分页协调，在分页到达首屏前不触发返回。系统返回手势保持禁用。

@@ -66,16 +66,22 @@ struct MusicSourceExclusionsContent: View {
     var body: some View {
         List {
             Section {
-                Picker("歌曲", selection: $state.song) {
+                MusicSettingsMenuRow(selection: $state.song, selectedTitle: state.model.queue
+                    .first { $0.id == state.song }.map { $0.track.title + " — " + $0.track.artist } ?? "") {
                     ForEach(state.model.queue) { entry in Text(entry.track.title + " — " + entry.track.artist).tag(entry.id) }
-                }.pickerStyle(.menu).modifier(MusicSettingsRowStyle(theme: theme, first: true, last: false))
-                Picker("音源", selection: $state.provider) {
+                } label: { Text("歌曲") }
+                .modifier(MusicSettingsRowStyle(theme: theme, first: true, last: false))
+                MusicSettingsMenuRow(selection: $state.provider, selectedTitle: state.provider == "official:"
+                    ? "官方音源" : state.scripts.first { $0.id == state.provider }?.name ?? "") {
                     Text("官方音源").tag("official:")
                     ForEach(state.scripts) { item in Text(item.name).tag(item.id) }
-                }.pickerStyle(.menu).modifier(MusicSettingsRowStyle(theme: theme, first: false, last: false))
-                Picker("平台", selection: $state.platform) {
+                } label: { Text("音源") }
+                .modifier(MusicSettingsRowStyle(theme: theme, first: false, last: false))
+                MusicSettingsMenuRow(selection: $state.platform, selectedTitle: MusicPublicBrowsePlatform
+                    .allCases.first { $0.rawValue == state.platform }?.title ?? "") {
                     ForEach(MusicPublicBrowsePlatform.allCases) { Text($0.title).tag($0.rawValue) }
-                }.pickerStyle(.menu).modifier(MusicSettingsRowStyle(theme: theme, first: false, last: false))
+                } label: { Text("平台") }
+                .modifier(MusicSettingsRowStyle(theme: theme, first: false, last: false))
                 Button("添加", action: add).disabled(state.song.isEmpty)
                     .foregroundStyle(Color(uiColor: UIColor(theme.settings.accent)))
                     .modifier(MusicSettingsRowStyle(theme: theme, first: false, last: true))

@@ -154,6 +154,9 @@ struct MusicSearchSettingsNumberRow: View {
     var maximum = Int.max
     let identifier: String
     let theme: PageTheme
+    @ScaledMetric(relativeTo: .body) private var controlHeight = UIFont.preferredFont(
+        forTextStyle: .body, compatibleWith: UITraitCollection(preferredContentSizeCategory: .large)
+    ).lineHeight
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
@@ -178,8 +181,9 @@ struct MusicSearchSettingsNumberRow: View {
     private var capsule: some View {
         AccountInputCapsule(theme: theme) {
             Button { change(by: -1) } label: {
-                Image(systemName: "minus").frame(width: 44, height: 44)
+                Image(systemName: "minus").frame(width: 44, height: max(44, controlHeight))
                     .contentShape(Rectangle())
+                    .frame(height: controlHeight)
             }
             .disabled(value == 1)
             .accessibilityLabel("减少\(title)")
@@ -191,13 +195,14 @@ struct MusicSearchSettingsNumberRow: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.2)
                 .padding(.horizontal, 8)
-                .frame(minWidth: 36, maxWidth: .infinity, minHeight: 44)
+                .frame(minWidth: 36, maxWidth: .infinity, minHeight: controlHeight)
                 .accessibilityLabel(Text(verbatim: title + "，" + String(value)))
                 .accessibilityIdentifier("\(identifier).value")
             divider
             Button { change(by: 1) } label: {
-                Image(systemName: "plus").frame(width: 44, height: 44)
+                Image(systemName: "plus").frame(width: 44, height: max(44, controlHeight))
                     .contentShape(Rectangle())
+                    .frame(height: controlHeight)
             }
             .disabled(value == maximum)
             .accessibilityLabel("增加\(title)")
@@ -212,7 +217,7 @@ struct MusicSearchSettingsNumberRow: View {
 
     private var divider: some View {
         Rectangle().fill(Color(uiColor: UIColor(theme.settings.inputBorder)))
-            .frame(width: SettingsVisualMetrics.separatorHeight, height: 24)
+            .frame(width: SettingsVisualMetrics.separatorHeight, height: controlHeight * 0.6)
             .accessibilityHidden(true)
     }
 

@@ -52,7 +52,7 @@ Windows 只使用内置原生输出，不提供外部播放器入口或子进程
 | operation | 输入与结果 |
 | --- | --- |
 | `session.open` | `{platform,entrySurface?,target,sources,query?,results?,resultHints?,search?,metadata?,cacheEntries?,searchReference?,resumeTarget?,restoreOnly?,browsing?}` → 当前 snapshot；规则由 Node 捕获 |
-| `session.command` | `{sessionId,action,...}` → 受理后的 snapshot，后续由事件推进 |
+| `session.command` | `{sessionId,action,...}` → 受理后的 snapshot，后续由事件推进；只读 `media.chapters` 返回下述区间结果 |
 | `session.snapshot` | `{sessionId}` → 当前 snapshot |
 | `session.attempt` | `{sessionId,attemptId}` → 私有媒体 receipt |
 | `session.media.release` | `{sessionId,attemptId,resourceId}` → `{released:true}`，重复释放幂等 |
@@ -83,6 +83,32 @@ Windows 只使用内置原生输出，不提供外部播放器入口或子进程
 | `data.metadata.entry` | 同 metadata 输入 → 投影后的 `value`、请求身份、成功时间、完整度及 `cache` 状态；刷新失败可返回同身份旧成功值 |
 | `data.cache.entry` | 缓存请求身份 → 带原始时间、完整度的有效记录，未命中为 null |
 | `data.invalidate` | `{domain}` → 撤指定来源、账号或 metadata 域并等待排空 |
+
+### 真实媒体章节识别
+
+`session.command` 的只读动作 `media.chapters` 接收
+`{sessionId,action:"media.chapters",attemptId,resourceId,chapters:[{title,start,end}]}`，
+返回 `{segments:[{kind:"intro"|"outro",start,end}]}`。必须同时匹配此会话仍有效的
+current／pending attempt、resource 与媒体租约；其他会话、已替换或已释放的 receipt
+返回 `STALE_SESSION`，不存在／已释放的会话沿用 `NOT_FOUND`。没有章节返回空数组。
+不创建媒体租约、不写历史、不发布 snapshot，也不触发播放、跳转或 `media.ended`。
+
+章节来自内核读取的真实容器元数据，时间为同一播放时间轴的秒数。最多 256 条，
+每条标题最多 256 个 UTF-16 code units，`start/end` 必须是有限数，
+`start>=0`、`end>start`；不符合时整体返回 `INVALID_REQUEST`。
+Node 影视 owner 只匹配完整标准标签：片头／片头曲／片尾／片尾曲、
+Opening／Opening Credits／Ending／Ending Credits／Intro／Outro／OP／ED（英文忽略大小写）。
+允许空白、最多三位章节编号前缀（如 `Chapter 01: Opening`、`01. 片尾`）
+或空白分隔的最多三位编号后缀（如 `Opening 2`）；不匹配任意描述性前后缀。
+结果保留原区间，去掉完全相同的重复项并按时间排序，不合并、扩展或猜测章节。
+普通首末章节、Credits、序章、预告或没有标记的媒体不因此成为可跳区间。
+
+iOS `FilmPlaybackChapterModel` 借用现有 transport 请求此动作，不在 Swift 复制分类规则。
+同一身份及章节快照不重复请求；更换身份／章节、禁用或关闭时立即清空并取消，
+迟到回复不能覆盖新媒体。回复仅接受来自该输入快照的有限有效区间；
+无效回复／请求错误通过 model 的 `error` 状态提供给统一反馈消费者，不插入页面说明文本。
+此 model 不拥有内核章节采集、设置开关或跳过按钮；它们由播放器消费者接线，
+跳过操作只 seek 到区间末尾，真实媒体结束仍由内核反馈驱动。
 
 ### 规则与搜索
 

@@ -13,6 +13,7 @@ python3 -I -B scripts/generate-ios-project.py         # 生成 apps/ios/Meowfilm
 python3 -I -B scripts/prepare-ios-runtime.py          # Node 24 + npm ci：准备内嵌运行器构建输入
 python3 -I -B scripts/prepare-ios-audio-kernel.py --target ios-arm64 # 锁定独立音乐内核；测试入口选择对应 Mac/模拟器目标
 python3 -I -B scripts/prepare-ios-video-kernel.py --target ios-arm64 # 锁定源码准备视频内核；测试入口选择对应 Mac/模拟器目标
+python3 -I -B scripts/prepare-ios-aether-kernel.py --target ios-arm64 # 锁定可选 Aether 内核及动态依赖；不代表编译或播放验收
 python3 -I -B scripts/check-source-scope.py           # 源码、依赖与工程成员检查
 python3 -I -B -m unittest discover -s scripts/tests -p "test_<area>.py" -v
 bash scripts/test-native.sh test --filter <pattern> # macOS：受影响的 Swift 测试
@@ -22,7 +23,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 ```
 
 - Windows 将 `python3` 换为 `python -X utf8`。
-- 需要 macOS、Xcode、Node 24 与 `npm ci --ignore-scripts`；参考环境为 Xcode 26.1.1。iOS 部署目标 17.0，macOS 仅用于原生单测执行。
+- 需要 macOS、Xcode、Node 24 与 `npm ci --ignore-scripts`；参考环境为 Xcode 26.1.1。iOS 部署目标 18.0，macOS 15.0 仅用于原生单测执行，不提供 Mac 客户端。
 
 ### Windows
 
@@ -60,6 +61,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `native/AudioKernel/` — 独立音乐解码 C ABI 与锁定音频依赖，不拥有业务或系统媒体会话
 - `native/VideoKernel/` — 电影静默候选、实际首帧、命令与资源排空适配，不拥有业务或系统媒体会话
 - `native/KSPlayer/` — 固定源码播放核心、FFmpeg 依赖及原生音视频输出，不编译上游播放控件或 Demo
+- `native/AetherKernel/` — 可选 Aether 核心的动态封装、锁定依赖与宿主补丁，不拥有业务或系统媒体会话
 - `apps/windows/app/` — Windows 应用入口与装配
 - `apps/windows/native/FilmKernel/` — Windows 电影独立解复用、解码、WASAPI 时钟与 D3D11 原生 HDR 输出；固定 KSPlayer 机制来源及静态依赖，不包含上游 UI 或音乐 owner
 - `apps/windows/src/` — Windows 原生库

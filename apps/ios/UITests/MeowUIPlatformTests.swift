@@ -9,6 +9,43 @@ final class MeowUIPlatformTests: XCTestCase {
     private var window: UIWindow?
     private weak var previousKeyWindow: UIWindow?
 
+    func testCompactSwitchKeepsNativeActionsAndFortyFourPointHitRegion() throws {
+        let toggle = SettingsSwitch()
+        toggle.frame = CGRect(x: 0, y: 0, width: 44, height: 21)
+        toggle.layoutIfNeeded()
+        XCTAssertLessThanOrEqual(toggle.control.frame.height, 21)
+        for y in [-11.0, 10.5, 32.0] {
+            let hit = toggle.hitTest(CGPoint(x: 22, y: y), with: nil)
+            XCTAssertTrue(hit === toggle.control || hit?.isDescendant(of: toggle.control) == true,
+                "The native switch must receive touches at y=\(y), actual hit: \(String(describing: hit))")
+        }
+        XCTAssertNil(toggle.hitTest(CGPoint(x: 22, y: 33), with: nil))
+        var values: [Bool] = []
+        toggle.changed = { values.append($0) }
+        toggle.control.setOn(true, animated: false)
+        toggle.control.sendActions(for: .valueChanged)
+        XCTAssertEqual(values, [true])
+        toggle.control.setOn(false, animated: false)
+        toggle.control.sendActions(for: .valueChanged)
+        XCTAssertEqual(values, [true, false])
+    }
+
+    func testSettingsTextFieldKeepsCompactCapsuleAndFortyFourPointHitRegion() throws {
+        let host = UIViewController(), window = try display(host)
+        let field = SettingsTextField(frame: CGRect(x: 20, y: 40, width: 200, height: 36))
+        field.font = .preferredFont(forTextStyle: .body)
+        host.view.addSubview(field)
+        window.layoutIfNeeded(); field.layoutIfNeeded()
+        XCTAssertEqual(field.bounds.height, 36)
+        XCTAssertEqual(field.layer.cornerRadius, 18)
+        for y in [37.0, 58.0, 79.0] {
+            XCTAssertTrue(host.view.hitTest(CGPoint(x: 120, y: y), with: nil) === field)
+        }
+        XCTAssertNil(field.hitTest(CGPoint(x: 100, y: -5), with: nil))
+        field.isUserInteractionEnabled = false
+        XCTAssertFalse(host.view.hitTest(CGPoint(x: 120, y: 37), with: nil) === field)
+    }
+
     func testSettingsCardsRoundOnlyOuterCornersAndKeepDividersInsideTheGroup() throws {
         for dark in [false, true] {
             let theme = PageTheme(palette: .coral, dark: dark)
@@ -157,6 +194,9 @@ final class MeowUIPlatformTests: XCTestCase {
                 }
                 XCTAssertEqual(manager.search.searchTextField.textColor, UIColor(theme.settings.ink))
                 XCTAssertEqual(manager.search.searchTextField.backgroundColor, UIColor(theme.settings.input))
+                XCTAssertEqual(manager.search.searchTextField.layer.cornerRadius,
+                    min(manager.search.searchTextField.bounds.width, manager.search.searchTextField.bounds.height) / 2,
+                    accuracy: 0.5)
                 XCTAssertTrue(manager.search.searchTextField.adjustsFontForContentSizeCategory)
                 for button in descendants(manager).compactMap({ $0 as? UIButton }).filter({
                     ["management.selectAll", "management.invert", "management.delete"].contains($0.accessibilityIdentifier ?? "")
@@ -209,7 +249,10 @@ final class MeowUIPlatformTests: XCTestCase {
             host.additionalSafeAreaInsets.bottom = bottomInset
             host.view.setNeedsLayout(); host.view.layoutIfNeeded()
             manager.layoutIfNeeded(); table.layoutIfNeeded()
-            XCTAssertEqual(table.frame.maxY, manager.bounds.maxY, accuracy: 0.5)
+            XCTAssertEqual(table.frame.maxY, manager.safeAreaLayoutGuide.layoutFrame.maxY - 4, accuracy: 0.5)
+            XCTAssertLessThan(table.frame.maxY, manager.bounds.maxY)
+            XCTAssertEqual(table.layer.borderWidth, SettingsVisualMetrics.cardBorderWidth)
+            XCTAssertEqual(footer.frame.maxY, table.frame.maxY - 4, accuracy: 0.5)
             XCTAssertLessThanOrEqual(footer.frame.maxY, manager.safeAreaLayoutGuide.layoutFrame.maxY)
             let input = manager.search.searchTextField
             XCTAssertFalse(manager.search.isHidden)
@@ -322,12 +365,13 @@ final class MeowUIPlatformTests: XCTestCase {
                         XCTAssertTrue(button.isEnabled)
                         XCTAssertEqual(button.titleColor(for: .normal), UIColor(settings.ink))
                     }
-                    if boxed {
-                        for input in [name as UIView, pattern, result] {
-                            XCTAssertEqual(input.backgroundColor, UIColor(settings.input))
-                            XCTAssertEqual(input.layer.borderColor, UIColor(settings.inputBorder).cgColor)
-                        }
-                    } else {
+                    for input in [name as UIView, pattern, result] {
+                        XCTAssertEqual(input.backgroundColor, UIColor(settings.input))
+                        XCTAssertEqual(input.layer.borderColor, UIColor(settings.inputBorder).cgColor)
+                        XCTAssertEqual(input.layer.cornerRadius, min(input.bounds.width, input.bounds.height) / 2,
+                            accuracy: 0.5)
+                    }
+                    if !boxed {
                         let separators = form.fields.arrangedSubviews.filter { !($0 is UIStackView) && !($0 is UIButton) }
                         XCTAssertFalse(separators.isEmpty)
                         for separator in separators {
