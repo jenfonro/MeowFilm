@@ -56,6 +56,15 @@ public static class MusicEntryCardPresentationTests
             await f.Load();
             Check(!CardMotion.IsPointerActive(f.Entry) && !DesktopTestUi.HasFocus(f.Entry) && CardMotion.GetProgress(f.Surface) == 0,
                 "contrast is present without pointer hover or keyboard focus");
+            var bottom = (Border)f.Entry.FindName("BottomShade");
+            var stops = ((LinearGradientBrush)bottom.Background).GradientStops;
+            var offsets = stops.Select(stop => stop.Offset).ToArray();
+            // WinUI stores gradient stop offsets at single precision.
+            Check(offsets.SequenceEqual(new[] { (double).62f, (double).82f, 1d }),
+                $"resting gradient stop offsets: {string.Join(", ", offsets)}");
+            Check(stops.Last().Color == ((SolidColorBrush)f.Surface.Background).Color && bottom.Opacity == 1 &&
+                stops.Select(stop => stop.Color.A).SequenceEqual(new byte[] { 0, 112, 255 }),
+                "resting color and alpha geometry are independent of hover");
             var title = f.Text(model.Title);
             var titleBounds = f.Bounds(title);
             var cover = f.Bounds(f.Cover);
@@ -77,12 +86,6 @@ public static class MusicEntryCardPresentationTests
                 var firstFooter = frame.At(new Point(sampleX, cover.Bottom + 2));
                 Check(Contrast(lastCover, firstFooter) < 1.12,
                     "the resting gradient reaches the same RGB as the footer without a hard boundary");
-                var bottom = (Border)f.Entry.FindName("BottomShade");
-                var stops = ((LinearGradientBrush)bottom.Background).GradientStops;
-                Check(((LinearGradientBrush)bottom.Background).GradientStops.Last().Color == ((SolidColorBrush)f.Surface.Background).Color && bottom.Opacity == 1 &&
-                    stops.Select(stop => stop.Offset).SequenceEqual(new[] { .62, .82, 1d }) &&
-                    stops.Select(stop => stop.Color.A).SequenceEqual(new byte[] { 0, 112, 255 }),
-                    "resting color and alpha geometry are independent of hover");
             }
             Check(f.Loader.Addresses.Count == 1 && f.Opens == 0 && f.Plays == 0,
                 "rendering all DPI variants uses one acquired cover and no business intent");
