@@ -41,6 +41,12 @@ final class MeowfilmSettingsViewController: PageViewController, UITableViewDataS
     }
     func numberOfSections(in tableView: UITableView) -> Int { resetUserData == nil ? 2 : 3 }
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { section == 0 ? 3 : section == 1 ? 2 : 1 }
+    func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
+        table.heightForHeader(in: section)
+    }
+    func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+        table.viewForHeader(in: section, title: nil, theme: theme)
+    }
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let label: String, identifier: String
         switch (indexPath.section, indexPath.row) {

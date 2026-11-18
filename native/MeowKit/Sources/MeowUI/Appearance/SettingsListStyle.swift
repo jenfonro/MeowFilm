@@ -25,7 +25,15 @@ public struct SettingsListSectionHeader: View {
     public let title: String
     public let theme: PageTheme
     public init(title: String, theme: PageTheme) { self.title = title; self.theme = theme }
-    public var body: some View {
+    @ViewBuilder public var body: some View {
+        // The list owns the gap above the title, including the first section.
+        if #available(iOS 26.0, *) {
+            titleText.listRowInsets(.top, 0)
+        } else {
+            titleText.listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 8, trailing: 16))
+        }
+    }
+    private var titleText: some View {
         Text(title).font(.subheadline.weight(.regular))
             .foregroundStyle(Color(uiColor: UIColor(theme.settings.muted)))
             .textCase(nil).fixedSize(horizontal: false, vertical: true)
@@ -37,8 +45,10 @@ public struct SettingsListStyle: ViewModifier {
     public init(theme: PageTheme) { self.theme = theme }
     public func body(content: Content) -> some View {
         content.listStyle(.insetGrouped).scrollContentBackground(.hidden)
+            .contentMargins(.top, SettingsVisualMetrics.contentTopSpacing, for: .scrollContent)
             .listSectionSpacing(SettingsVisualMetrics.sectionSpacing)
             .environment(\.defaultMinListRowHeight, SettingsVisualMetrics.rowHeight)
+            .environment(\.defaultMinListHeaderHeight, 0)
             .font(.body.weight(.regular)).fontWeight(.regular).textCase(nil)
             .foregroundStyle(Color(uiColor: UIColor(theme.settings.ink)))
             .tint(Color(uiColor: UIColor(theme.settings.accent)))

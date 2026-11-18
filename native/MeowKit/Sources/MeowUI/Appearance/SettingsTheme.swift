@@ -33,10 +33,13 @@ public extension SettingsTheme {
     func apply(to field: UITextField) {
         field.textColor = UIColor(ink)
         field.tintColor = UIColor(accent)
-        field.backgroundColor = UIColor(input)
-        field.layer.cornerRadius = min(field.bounds.width, field.bounds.height) / 2
-        field.layer.borderWidth = 1
-        field.layer.borderColor = UIColor(inputBorder).cgColor
+        if let input = field as? SettingsTextField { input.applyInputTheme(self) }
+        else {
+            field.backgroundColor = UIColor(input)
+            field.layer.cornerRadius = min(field.bounds.width, field.bounds.height) / 2
+            field.layer.borderWidth = 1
+            field.layer.borderColor = UIColor(inputBorder).cgColor
+        }
         if let placeholder = field.placeholder {
             field.attributedPlaceholder = NSAttributedString(string: placeholder,
                 attributes: [.foregroundColor: UIColor(muted)])
@@ -46,10 +49,13 @@ public extension SettingsTheme {
     func apply(to field: UITextView) {
         field.textColor = UIColor(ink)
         field.tintColor = UIColor(accent)
-        field.backgroundColor = UIColor(input)
-        field.layer.cornerRadius = min(field.bounds.width, field.bounds.height) / 2
-        field.layer.borderWidth = 1
-        field.layer.borderColor = UIColor(inputBorder).cgColor
+        if let input = field as? SettingsTextView { input.applyInputTheme(self) }
+        else {
+            field.backgroundColor = UIColor(input)
+            field.layer.cornerRadius = 0
+            field.layer.borderWidth = 1
+            field.layer.borderColor = UIColor(inputBorder).cgColor
+        }
     }
 }
 #endif

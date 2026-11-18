@@ -123,7 +123,7 @@ final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDeleg
 final class NovelRuleEditor: ManagementPageViewController {
     private var rule: NovelRule
     private let feature: NovelFeature
-    private let form = ManagementFormView()
+    private let form = ManagementFormView(contentTopSpacing: SettingsVisualMetrics.contentTopSpacing)
     private var timeout: String, saving = false
     init(rule: NovelRule, feature: NovelFeature, themeProvider: any PageThemeProviding) { self.rule = rule; self.feature = feature; timeout = String(rule.timeoutMillisecond); super.init(themeProvider: themeProvider); pageTitle = "替换规则编辑" }
     override func viewDidLoad() {

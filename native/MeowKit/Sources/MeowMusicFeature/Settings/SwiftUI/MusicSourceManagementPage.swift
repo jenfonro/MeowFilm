@@ -113,7 +113,7 @@ final class MusicSourceManagementViewController: MusicSettingsPageViewController
         input.keyboardType = .URL; input.textContentType = .URL
         input.autocapitalizationType = .none; input.autocorrectionType = .no
         input.accessibilityLabel = "网络地址"; input.accessibilityIdentifier = "music.sources.url"
-        dialog.body.addArrangedSubview(input)
+        dialog.addInput(input, title: "网络地址")
         dialog.accepted = { [weak self] in
             guard let self, self.isPageActive, self.isPageVisible, let text = input.text,
                   presentation == self.presentationGeneration,
@@ -143,21 +143,13 @@ final class MusicSourceManagementViewController: MusicSettingsPageViewController
                 let name = ManagementDialog.input(placeholder: "名称")
                 name.text = detail.item.name; name.accessibilityLabel = "名称"
                 name.accessibilityIdentifier = "music.sources.edit.name"
-                let nameTitle = UILabel(); nameTitle.text = "名称"
-                nameTitle.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).ink) }
-                nameTitle.font = .preferredFont(forTextStyle: .subheadline)
-                nameTitle.adjustsFontForContentSizeCategory = true
-                dialog.body.addArrangedSubview(nameTitle); dialog.body.addArrangedSubview(name)
+                dialog.addInput(name, title: "名称")
                 let address = detail.networkURL.map { url in
                     let input = ManagementDialog.input(placeholder: "网络地址")
                     input.text = url; input.keyboardType = .URL; input.textContentType = .URL
                     input.autocapitalizationType = .none; input.autocorrectionType = .no
                     input.accessibilityLabel = "网络地址"; input.accessibilityIdentifier = "music.sources.edit.url"
-                    let title = UILabel(); title.text = "网络地址"
-                    title.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).ink) }
-                    title.font = .preferredFont(forTextStyle: .subheadline)
-                    title.adjustsFontForContentSizeCategory = true
-                    dialog.body.addArrangedSubview(title); dialog.body.addArrangedSubview(input)
+                    dialog.addInput(input, title: "网络地址")
                     return input
                 }
                 dialog.accepted = { [weak self] in

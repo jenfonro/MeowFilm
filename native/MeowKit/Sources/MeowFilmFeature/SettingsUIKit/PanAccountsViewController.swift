@@ -3,7 +3,7 @@ import UIKit
 import MeowUI
 
 @MainActor
-public final class PanAccountsViewController: PageViewController, UITableViewDataSource {
+public final class PanAccountsViewController: PageViewController, UITableViewDataSource, UITableViewDelegate {
     let model: PanAccountsModel
     let table = SettingsTableView()
     private weak var loginCard: PanLoginViewController?
@@ -16,7 +16,7 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
         super.viewDidLoad()
         view.accessibilityIdentifier = "pan.accounts"
         table.accessibilityIdentifier = "pan.accounts.table"
-        table.dataSource = self
+        table.dataSource = self; table.delegate = self
         table.rowHeight = UITableView.automaticDimension; table.estimatedRowHeight = 110
         table.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(table)
         NSLayoutConstraint.activate([
@@ -47,6 +47,12 @@ public final class PanAccountsViewController: PageViewController, UITableViewDat
         if showError(notice.message) { displayedNotice = notice.id }
     }
     public func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { model.rows.count + 1 }
+    public func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
+        table.heightForHeader(in: section)
+    }
+    public func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+        table.viewForHeader(in: section, title: nil, theme: theme)
+    }
     public func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
         let last = indexPath.row == model.rows.count
