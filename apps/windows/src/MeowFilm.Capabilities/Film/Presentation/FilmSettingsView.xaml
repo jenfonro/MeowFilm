@@ -87,7 +87,7 @@
           <TextBlock Text="语言" Margin="0,0,0,8" />
           <TextBox x:Name="MetadataLanguage" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB 语言" />
          </StackPanel>
-         <StackPanel Style="{StaticResource Settings.PairRight}">
+         <StackPanel>
           <TextBlock Text="地区" Margin="0,0,0,8" />
           <TextBox x:Name="MetadataRegion" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB 地区" />
          </StackPanel>

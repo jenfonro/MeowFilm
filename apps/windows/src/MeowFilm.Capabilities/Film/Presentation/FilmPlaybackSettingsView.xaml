@@ -69,7 +69,7 @@
         </Grid>
         <local:SettingsPriorityList x:Name="RuleOrder" Title="优先片源规则" ShowTitle="False" Tag="rule" ShowToggle="False" CanEdit="{Binding Idle}" MoveRequested="Order_Move" />
        </StackPanel>
-       <StackPanel Style="{StaticResource Settings.PairRight}">
+       <StackPanel>
         <Grid Margin="0,0,0,12">
          <Grid.ColumnDefinitions>
           <ColumnDefinition Width="*" />
