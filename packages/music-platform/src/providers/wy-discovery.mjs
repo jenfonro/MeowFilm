@@ -1,23 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 jenfonro and iWebPlus contributors; derived from iWebPlayer.
 // Data-only translation of the pinned discovery recipes; no URL/DSL execution.
-import { decodeJSON, first, image, input, number, optionalNumber, protocolInteger, required, rows, scalar, text, wySong } from '../model.mjs';
+import { array, decodeJSON, first, image, images, input, number, optionalNumber, protocolInteger, record, scalar, text, wySong } from '../model.mjs';
 import { fail } from '../errors.mjs';
 import { wyDetails } from './wy.mjs';
 
-const array = value => Array.isArray(value) ? value : [];
 const title = value => text(first(value?.name, value?.title, value?.uiElement?.mainTitle?.title));
-const cover = value => [
+const cover = (value, banner = false) => images(
+  ...(banner ? [value?.imageUrl, value?.uiElement?.image?.imageUrl,
+    ...array(value?.uiElement?.images).flatMap(row => [row?.imageUrl, row?.url])] : []),
   value?.cover, value?.coverImg, value?.coverUrl, value?.picUrl, value?.coverImgUrl, value?.img1v1Url,
-  value?.background, value?.uiElement?.image?.imageUrl,
-  ...array(value?.uiElement?.images).map(row => first(row.imageUrl, row.url)),
-].map(image).find(Boolean) ?? '';
+  value?.imageUrl, value?.background, value?.uiElement?.image?.imageUrl,
+  ...array(value?.uiElement?.images).flatMap(row => [row?.imageUrl, row?.url]));
 const nested = value => {
   if (typeof value !== 'string') return value;
   try { return decodeJSON(Buffer.from(value)); } catch { return null; }
 };
 const section = (id, title, type, items, layout = 'rail', action = null) => ({ id, title, type, layout, items, action });
 const emptyPage = id => ({ platform: 'wy', id, entries: [], sections: [], more: false, continuation: null });
+const fmMode = value => ({ DEFAULT: 'default', FAMILIAR: 'familiar', EXPLORE: 'explore',
+  PUZZLE: 'puzzle', PUZZLE_MODE_RCMD: 'puzzle', SCENE: 'scene', SCENE_RCMD: 'scene' })[text(value).toUpperCase()] ?? 'default';
 const supportedChannel = kind => ['featured', 'cube', 'playlists', 'rankings', 'new-songs', 'artists', 'artist-activity', 'vip'].includes(kind);
 const descriptor = row => ({ id: row.id, name: row.name, pageCode: row.pageCode ?? '', kind: 'channel',
   channelKind: row.kind, available: supportedChannel(row.kind), placement: row.placement ?? 'more' });
@@ -57,18 +59,23 @@ function action(value) {
       'rn-playlist-square': 'playlists', 'rn-playlistsquare': 'playlists',
       'rn-vip-portal': 'vip', 'rn-music-homepage': 'featured' };
     if (component === 'cube-renderer-rn' && q('page'))
-      return { type: 'channel', channel: { id: q('page'), kind: 'cube', pageCode: q('page') } };
-    if (kinds[component]) return { type: 'channel', channel: { id: kinds[component], kind: kinds[component] } };
+      return { type: 'channel', channel: { id: q('page'), channelKind: 'cube', pageCode: q('page') } };
+    if (kinds[component]) return { type: 'channel', channel: { id: kinds[component], channelKind: kinds[component] } };
   }
-  if (path === 'nm/mainTab/select' && q('tab') === 'music')
-    return { type: 'channel', channel: { id: first(q('musicTabCode'), q('subTab')) } };
+  if (path === 'nm/mainTab/select' && q('tab') === 'music') {
+    const id = scalar(first(q('musicTabCode'), q('subTab')));
+    const channelKind = { feature: 'featured', playlist: 'playlists', chart: 'rankings',
+      artist: 'artists', vip: 'vip', newsong: 'new-songs' }[id] ?? 'unsupported';
+    return { type: 'channel', channel: { id, channelKind } };
+  }
   return null;
 }
 function nativeSong(raw, resourceCover = '') {
-  const s = first(raw.songInfo, raw.songData, raw.song, raw);
+  raw = record(raw);
+  const s = record(first(raw.songInfo, raw.songData, raw.song, raw));
   return wySong({ ...s, id: first(s.id, s.songId, s.resourceId), name: first(s.name, s.title),
     artistName: first(s.artistName, s.subTitle),
-    coverUrl: first(s.coverUrl, cover(s), resourceCover) });
+    coverUrl: images(s.coverUrl, cover(s), resourceCover) });
 }
 function entry(value, c) {
   const type = value.action?.type;
@@ -76,20 +83,20 @@ function entry(value, c) {
   const display = !requiresAccount || Boolean(c.account);
   return { ...value, presentation: ['playlist', 'daily', 'album'].includes(type) ? 'preview' :
     type === 'similar' ? 'overlay' : ['fm', 'heartbeat'].includes(type) ? 'animated' : 'static',
-  requiresAccount, display, available: type !== 'unsupported' && display,
+  requiresAccount, display, available: Boolean(type) && type !== 'unsupported' && display,
   ...(display ? {} : { errorCode: 'AUTH_REQUIRED' }) };
 }
-function resource(r, { modern = false, channel = false } = {}) {
+function resource(r, { banner = false } = {}) {
   if (!r || typeof r !== 'object') return null;
   const ext = r.resourceExtInfo ?? {}, play = nested(r.playBtnData);
   const kind = text(first(r.resourceType, r.targetType, r.type, r.creativeType)).toLowerCase();
   if (/video|podcast|voice|djradio|djprogram|mv/.test(kind)) return null;
   const declared = action(first(r.action, r.url, r.orpheus, r.clickAction)) ?? action(play?.detailUrl);
   const id = scalar(first(r.rankId, r.resourceId, r.id, r.resource));
-  const result = { id, name: title(r), cover: cover(r), subtitle: text(first(r.subTitle, r.subtitle)),
-    badge: modern ? text(array(r.tags)[0]) : '', source: 'wy', engine: 'Netease' };
+  const result = { id, label: title(r), name: title(r), cover: cover(r, banner), subtitle: text(first(r.subTitle, r.subtitle)),
+    badge: text(array(r.tags)[0]), source: 'wy', engine: 'Netease' };
   const finish = (type, action) => ({ ...result, kind: type, action });
-  if (modern && text(r.singleLineTitle)) {
+  if (text(r.singleLineTitle)) {
     result.name = kind === 'dailysongs' && r.dayOfMonth != null ? result.name.split(/\s*\|\s*/)[0] :
       result.subtitle || result.name;
     result.subtitle = r.singleLineTitle;
@@ -102,17 +109,22 @@ function resource(r, { modern = false, channel = false } = {}) {
     if (raw) {
       result.entrySong = nativeSong(raw, cover(r));
       return finish('collection', { type: 'heartbeat', entry: 'favorites',
-        songId: result.entrySong.sources[0].musicInfo.songmid });
+        ...(result.entrySong.sources[0] ? { songId: result.entrySong.sources[0].musicInfo.songmid } : {}) });
     }
     return finish('collection', { type: 'heartbeat', entry: 'favorites' });
   }
-  if (ext.songData || ext.song || kind === 'song' || declared?.type === 'song') {
-    const raw = first(ext.songData, ext.song) ?? { ...r, id: declared?.id ?? id };
+  if (ext.songData || ext.song || r.songData || r.songInfo || kind === 'song' || declared?.type === 'song') {
+    const raw = first(ext.songData, ext.song, r.songData, r.songInfo) ?? { ...r, id: declared?.id ?? id };
     result.song = nativeSong(raw, cover(r));
-    result.id = result.song.sources[0].musicInfo.songmid;
+    result.id = result.song.sources[0]?.musicInfo.songmid ?? '';
+    if (!banner) {
+      result.name ||= result.song.title;
+      result.subtitle ||= result.song.artist;
+      result.cover ||= result.song.cover_url;
+    }
     const source = action(play?.detailUrl);
     if (source?.type === 'playlist') result.playbackSource = source;
-    return finish('song', { type: 'song', id: result.id });
+    return finish('song', result.id ? { type: 'song', id: result.id } : null);
   }
   if (kind === 'dailysongs' || declared?.type === 'daily') {
     result.dayOfMonth = optionalNumber(r.dayOfMonth);
@@ -123,20 +135,20 @@ function resource(r, { modern = false, channel = false } = {}) {
     if (scalar(r.ruleId) || scalar(r.tabTagId))
       return finish('fm', { type: 'fm', provider: 'rule', ruleId: scalar(r.ruleId), tabTagId: scalar(r.tabTagId),
         sourceName: result.coverLabel || result.name });
-    return finish('fm', { type: 'fm', mode: channel ? text(r.mode) || declared?.mode || 'default' : 'default',
-      submode: channel ? text(first(r.subMode, r.submode)) : '' });
+    return finish('fm', { type: 'fm', mode: fmMode(text(r.mode) || declared?.mode),
+      submode: text(first(r.subMode, r.submode)) || declared?.submode || '' });
   }
   if (['playlist', 'play_list', 'song_list', 'list', 'scroll_playlist', 'toplist'].includes(kind) || declared?.type === 'playlist') {
     const pid = declared?.id ?? id;
     if (!pid) {
       const ids = first(play?.playAction?.songIds, r.songIds);
-      if (!Array.isArray(ids) || !ids.length) fail('INVALID_RESPONSE');
+      if (!Array.isArray(ids) || !ids.length) return finish(kind === 'toplist' ? 'ranking' : 'playlist', null);
       result.id = 'songs:' + scalar(r.resourceId);
       result.engine = 'NeteaseCollection'; result.collectionType = 'songs'; result.count = ids.length;
       return finish(kind === 'toplist' ? 'ranking' : 'collection', { type: 'song-collection', ids: ids.map(scalar) });
     }
     result.id = pid;
-    if (r.coverType === 'ALBUM_LOGO') {
+    if (!banner && r.coverType === 'ALBUM_LOGO') {
       for (const value of [r.action, r.url, play?.detailUrl]) {
         try {
           const url = new URL(value), supplied = image(url.searchParams.get('coverUrl'));
@@ -148,7 +160,7 @@ function resource(r, { modern = false, channel = false } = {}) {
     }
     result.count = optionalNumber(first(r.trackCount, r.songCount, ext.songCount));
     result.creator = text(r.creator?.nickname);
-    result.preview = array(first(r.rankItems, r.trackRankList)).map(row => ({
+    result.preview = array(first(r.rankItems, r.trackRankList)).map(record).map(row => ({
       id: scalar(first(row.trackId, row.songId)), title: text(first(row.songName, row.title)),
       artist: text(first(row.artistName, row.subTitle)), cover: cover(row),
       rank: optionalNumber(row.rank), lastRank: optionalNumber(row.lastRank),
@@ -160,7 +172,7 @@ function resource(r, { modern = false, channel = false } = {}) {
   if (['album', 'digitalbum', 'digitalalbum'].includes(kind) || declared?.type === 'album') {
     result.id = declared?.id ?? id; result.engine = 'NeteaseAlbum';
     result.artist = text(first(r.artistName, r.subtitle)); result.count = optionalNumber(r.songCount);
-    return finish('album', { type: 'album', id: required(result.id) });
+    return finish('album', result.id ? { type: 'album', id: result.id } : null);
   }
   if (declared?.type === 'channel') {
     result.id = declared.channel.id;
@@ -170,25 +182,7 @@ function resource(r, { modern = false, channel = false } = {}) {
     const selected = action(first(r.uiElement?.mainTitle?.action, r.action));
     if (selected) return finish('entry', selected);
   }
-  return null;
-}
-function resourceReader() {
-  let failure;
-  return {
-    read(...args) {
-      try { return resource(...args); }
-      catch (error) {
-        if (error.code !== 'INVALID_RESPONSE') throw error;
-        failure ??= error;
-        return null;
-      }
-    },
-    finish(result) {
-      if (failure && !result.entries.length && !result.sections.some(row => row.items.length) && !result.feed?.request)
-        throw failure;
-      return result;
-    },
-  };
+  return finish('unsupported', null);
 }
 // These traversals read the displayed DSL's resource/component tree only.
 function* leaves(node) {
@@ -209,8 +203,8 @@ function roots(value) {
   return (selected.length ? selected : candidates).map(value => value.blockResource ?? value);
 }
 function contentPage(raw, target, c, cursor = '') {
-  const data = raw.data ?? raw, blocks = rows(data.blocks), result = emptyPage(target), occurrences = new Map();
-  const resources = resourceReader();
+  const data = record(raw?.data ?? raw), blocks = array(data.blocks).map(record), result = emptyPage(target), occurrences = new Map();
+  c.observe('blocks', data.blocks);
   blocks.forEach((block, bi) => {
     const code = text(first(block.positionCode, block.blockCode, block.code, block.id)) || 'block-' + bi;
     const nth = occurrences.get(code) ?? 0; occurrences.set(code, nth + 1);
@@ -218,19 +212,21 @@ function contentPage(raw, target, c, cursor = '') {
     const groups = block.dslData ? roots(block.dslData) : [block];
     groups.forEach((group, ri) => {
       const native = block.dslData ? [...leaves(group)] : array(block.creatives).flatMap(creative =>
-        array(creative.resources).length ? creative.resources.map(value => ({ ...creative, ...value, creativeType: creative.creativeType })) :
+        creative == null ? [] : array(creative.resources).length ?
+          creative.resources.flatMap(value => value == null ? [] : [{ ...creative, ...value, creativeType: creative.creativeType }]) :
           [{ ...creative, resourceId: creative.creativeId }]);
-      const items = native.map(value => resources.read(value, { modern: Boolean(block.dslData), channel: target !== 'wy:home' })).filter(Boolean);
+      const banner = /BANNER|CAROUSEL/i.test(text(block.showType));
+      const items = native.map(value => resource(value, { banner })).filter(Boolean);
       const entrance = items.some(value => ['daily', 'heartbeat', 'fm', 'similar'].includes(value.action?.type)) ||
         native.some(value => value.resourceType === 'dragon_ball') ||
         nested(block.dslData)?.dslShowTitle === false && !text(block.showType).startsWith('PLAYLIST_SQUARE_');
-      if (entrance) {
+      if (entrance && !banner) {
         result.entries.push(...items.map((value, index) => entry({ ...value, key: `${base}:entry:${ri}:${index}` }, c)));
         return;
       }
       let run;
       for (const value of items) {
-        const type = value.kind === 'song' ? 'songs' : value.kind === 'ranking' ? 'rankings' : 'playlists';
+        const type = banner ? 'banner' : value.kind === 'song' ? 'songs' : value.kind === 'ranking' ? 'rankings' : 'playlists';
         if (!run || run.type !== type) {
           const heading = block.hideTitle ? '' : text(first(group.title, group.header?.title, group.block?.title,
             block.uiElement?.subTitle?.title, block.uiElement?.mainTitle?.title));
@@ -239,16 +235,15 @@ function contentPage(raw, target, c, cursor = '') {
             action(first(group.action, group.header?.action)));
           result.sections.push(run);
         }
-        run.items.push(type === 'songs' && !value.playbackSource ? value.song : value);
+        run.items.push(value);
       }
     });
   });
   result.more = Boolean(data.hasMore);
-  result.continuation = result.more ? { cursor: required(data.cursor),
-    blockCodeOrderList: first(data.blockCodeOrderList, ''),
+  result.continuation = result.more && scalar(data.cursor) ? { cursor: scalar(data.cursor),
+    blockCodeOrderList: scalar(data.blockCodeOrderList),
     loadedPositionCodes: JSON.stringify(blocks.map(row => text(row.positionCode)).filter(Boolean)) } : null;
-  if (result.more && scalar(data.cursor) === cursor) fail('INVALID_RESPONSE');
-  return resources.finish(result);
+  return result;
 }
 async function content(c, params, kind, target) {
   const prev = params.continuation ?? {}, cursor = scalar(prev.cursor) || '0';
@@ -265,13 +260,15 @@ async function content(c, params, kind, target) {
 async function directory(c) {
   return c.cached(['channel-directory'], async () => {
     const raw = await c.wy('/api/link/position/show/resource', { positionCode: 'music_top_tab_full' });
-    const data = raw.data ?? raw, scene = data.generalizedSceneShow ?? data;
-    const channels = rows(first(scene.generalizedMap?.nowChannelItems, data.nowChannelItems, data.channels));
+    const data = record(raw?.data ?? raw), scene = data.generalizedSceneShow ?? data;
+    const source = first(scene.generalizedMap?.nowChannelItems, data.nowChannelItems, data.channels);
+    c.observe('channels', source);
+    const channels = array(source).map(record);
     const items = channels.map((row, index) => {
       const selected = action(first(row.url, row.action));
       const code = text(row.code);
       const kind = { chart: 'rankings', playlist: 'playlists', feature: 'featured',
-        artist: 'artists', vip: 'vip', newsong: 'new-songs' }[code] ?? selected?.channel?.kind ?? 'unsupported';
+        artist: 'artists', vip: 'vip', newsong: 'new-songs' }[code] ?? selected?.channel?.channelKind ?? 'unsupported';
       return { id: code || selected?.channel?.id || 'channel-' + index,
         name: code === 'playlist' ? '歌单广场' : title(row), kind, pageCode: selected?.channel?.pageCode ?? '' };
     });
@@ -297,11 +294,11 @@ export async function wyChannels(c) {
   ] };
 }
 function rankings(raw, target) {
-  const result = emptyPage(target), resources = resourceReader();
-  for (const [index, group] of rows(first(raw.data, raw.list)).entries()) {
-    const items = array(group.list).map(row => {
+  const result = emptyPage(target);
+  for (const [index, group] of array(first(raw?.data, raw?.list)).map(record).entries()) {
+    const items = array(group.list).map(record).map(row => {
       if (row.targetType === 'PLAYLIST') {
-        const card = resources.read({ ...row, resourceType: 'playlist' });
+        const card = resource({ ...row, resourceType: 'playlist' });
         if (card) card.canPlay = row.canPlay == null || Boolean(row.canPlay);
         return card;
       }
@@ -313,7 +310,7 @@ function rankings(raw, target) {
       } catch { /* Not a native destination. */ }
       return { id: scalar(row.toplistCode), name: title(row), cover: cover(row), kind: kind ? 'chart' : 'unsupported',
         action: { type: kind ? 'chart' : 'unsupported', id: kind || scalar(row.toplistCode) },
-        preview: array(row.trackRankList).map(track => ({ title: text(first(track.songName, track.itemName, track.title)),
+        preview: array(row.trackRankList).map(record).map(track => ({ title: text(first(track.songName, track.itemName, track.title)),
           artist: text(track.artistName), cover: cover(track), rank: optionalNumber(track.rank), lastRank: optionalNumber(track.lastRank),
           ...(first(track.trackId, track.songId) ? { song: wySong({ ...track, id: first(track.trackId, track.songId),
             name: first(track.songName, track.itemName, track.title), picUrl: cover(track) }) } : {}) })),
@@ -322,7 +319,7 @@ function rankings(raw, target) {
     if (items.length) result.sections.push(section(target + ':' + (text(group.categoryCode) || index), text(group.name),
       'rankings', items, text(first(group.frontDisplayType, group.displayType)) || 'ONLY_COVER'));
   }
-  return resources.finish(result);
+  return result;
 }
 function artistTags(selection) {
   const groups = { area: [[-1, '全部'], [7, '华语'], [96, '欧美'], [8, '日本'], [16, '韩国'], [0, '其他']],
@@ -334,9 +331,11 @@ function artistTags(selection) {
   }));
 }
 function cube(raw, target, selectedTag, c) {
-  const protocol = first(raw.data?.pageProtocol, raw.pageProtocol), pages = rows(protocol?.pages);
-  const groups = [], parents = new Map(), resources = resourceReader();
+  const protocol = record(first(raw?.data?.pageProtocol, raw?.pageProtocol)), pages = array(protocol.pages);
+  c.observe('pageProtocol.pages', protocol.pages);
+  const groups = [], parents = new Map();
   function collect(node, parent) {
+    node = record(node);
     if (['MusicGenreSongListItem', 'TabItem'].includes(node.componentName)) {
       groups.push(node); parents.set(node, parent); return;
     }
@@ -354,24 +353,27 @@ function cube(raw, target, selectedTag, c) {
     const items = values.filter(Boolean);
     if (items.length) result.sections.push(section(`${target}:${text(node.id) || result.sections.length}:${type}`, heading, type, items, layout));
   }
-  const componentResource = node => resources.read({ ...node.props,
-    resourceType: node.componentName === 'Entrance' ? '' : text(node.componentName).toLowerCase() }, { channel: true });
+  const componentResource = node => resource({ ...node.props,
+    resourceType: node.componentName === 'Entrance' ? '' : text(node.componentName).toLowerCase() });
   function walk(node, heading = '') {
+    node = record(node);
     if (groups.includes(node) && node !== chosen) return;
-    const p = node.props ?? {}, children = array(node.children);
+    const p = node.props ?? {}, children = array(node.children).map(record);
     if (p.songList?.ruleId != null) result.feed = { id: target + ':feed:' + text(node.id), title: text(p.songList.title),
       songs: [], more: true, cursor: 0, request: { ruleId: scalar(p.songList.ruleId),
-        pointIds: array(p.songList.pointId).map(row => scalar(row.id)).join(','), tabTagId: '', algTagIds: '' } };
+        pointIds: array(p.songList.pointId).map(row => scalar(row?.id)).join(','), tabTagId: '', algTagIds: '' } };
     if (Array.isArray(p.carousel)) {
-      add(node, 'banner', p.carousel.map(row => resources.read(row))); return;
+      add(node, 'banner', p.carousel.map(row => resource(row, { banner: true }))); return;
     }
     if (Array.isArray(p.recommendModule)) {
-      const tabs = p.recommendModule.map((group, i) => ({ id: text(node.id) + ':group:' + i,
+      const tabs = p.recommendModule.map(record).map((group, i) => ({ id: text(node.id) + ':group:' + i,
         name: text(group.title), selected: Boolean(group.isDefaultTab),
         items: array(group.modules).map((row, index) => {
-          const value = resources.read({ ...row, resourceType: row.type,
+          if (row == null) return null;
+          row = record(row);
+          const value = resource({ ...row, resourceType: row.type,
             ...(row.type === 'fm' && !row.mode && !row.ruleId && !row.tabTagId && !action(first(row.action, row.url, row.orpheus)) ?
-              { tabTagId: p.tab } : {}) }, { channel: true });
+              { tabTagId: p.tab } : {}) });
           return value ? entry({ ...value, key: `${target}:${text(node.id)}:entry:${i}:${index}` }, c) : null;
         }).filter(Boolean) })).filter(row => row.items.length);
       const tab = tabs.find(row => row.selected) ?? tabs[0];
@@ -384,18 +386,19 @@ function cube(raw, target, selectedTag, c) {
     if (text(p.playlistIds)) {
       const names = text(p.titles).split(',');
       add(node, 'rankings', p.playlistIds.split(',').map((id, index) =>
-        resources.read({ id, name: names[index] ?? '', resourceType: 'playlist' })), 'ranked-songs', text(p.rankModuleTitle)); return;
+        resource({ id, name: names[index] ?? '', resourceType: 'playlist' })), 'ranked-songs', text(p.rankModuleTitle)); return;
     }
     if (node.componentName === 'BillboardSingleSongList' && scalar(p.id)) {
-      add(node, 'playlists', [resources.read({ id: p.id, name: p.cardTitle, subtitle: p.cardSubTitle, resourceType: 'playlist' })],
+      add(node, 'playlists', [resource({ id: p.id, name: p.cardTitle, subtitle: p.cardSubTitle, resourceType: 'playlist' })],
         'rail', text(p.cardTitle)); return;
     }
-    if (p.albumData) { add(node, 'playlists', [resources.read({ ...p.albumData, resourceType: 'album' })], 'rail', heading); return; }
+    if (p.albumData) { add(node, 'playlists', [resource({ ...p.albumData, resourceType: 'album' })], 'rail', heading); return; }
     if (node.componentName === 'InfiniteScrollList') {
       const songs = [];
       function collectSongs(value) {
+        value = record(value);
         if (value.componentName === 'Song') {
-          const selected = componentResource(value); if (selected?.song) songs.push(selected.song);
+          const selected = componentResource(value); if (selected?.song) songs.push(selected);
         } else for (const child of array(value.children)) collectSongs(child);
       }
       for (const child of children.filter(row => ['Grid', 'Song'].includes(row.componentName))) collectSongs(child);
@@ -407,7 +410,7 @@ function cube(raw, target, selectedTag, c) {
     if (['Grid', 'Scroll'].includes(node.componentName)) {
       const direct = ['Playlist', 'Song', 'Album', 'Entrance'];
       const resources = children.filter(row => direct.includes(row.componentName)).map(componentResource).filter(Boolean);
-      add(node, 'songs', resources.filter(row => row.kind === 'song').map(row => row.song), 'rail', heading);
+      add(node, 'songs', resources.filter(row => row.kind === 'song'), 'rail', heading);
       add(node, 'playlists', resources.filter(row => row.kind !== 'song'), node.componentName === 'Grid' ? 'grid' : 'rail', heading);
       for (const child of children.filter(row => !direct.includes(row.componentName))) walk(child);
       return;
@@ -418,7 +421,7 @@ function cube(raw, target, selectedTag, c) {
     }
   }
   for (const node of pages) walk(node);
-  return resources.finish(result);
+  return result;
 }
 export async function wyChannelPage(c, params) {
   const id = input(params.id), prev = params.continuation ?? {}, selectedTag = params.tag ?? prev.tag ?? '';
@@ -435,7 +438,7 @@ export async function wyChannelPage(c, params) {
     case 'rankings': result = rankings(await c.wy('/api/toplist/detail/v2', {}, true), target); break;
     case 'new-songs': {
       const raw = await c.wy('/api/v1/discovery/new/songs', { areaId: 0, total: true }, true);
-      result = emptyPage(target); result.sections.push(section(target + ':songs', channel.name, 'songs', rows(raw.data).map(wySong), 'list')); break;
+      result = emptyPage(target); result.sections.push(section(target + ':songs', channel.name, 'songs', array(raw?.data).map(wySong), 'list')); break;
     }
     case 'playlists': {
       const tag = selectedTag || '推荐';
@@ -450,10 +453,10 @@ export async function wyChannelPage(c, params) {
       const values = input(selectedTag || '-1:-1:-1').split(':').map(value => number(value, undefined, 'INVALID_REQUEST'));
       const [area, type, initial] = values, offset = number(prev.offset, 0, 'INVALID_REQUEST');
       const raw = await c.wy('/api/v1/artist/list', { area, type, initial, offset, limit: 40, total: true }, true);
-      const data = raw.data ?? raw, source = rows(first(data.artists, raw.artists)), more = Boolean(first(data.more, raw.more));
+      const data = record(raw?.data ?? raw), source = array(first(data.artists, raw?.artists)), more = Boolean(first(data.more, raw?.more));
       result = { ...emptyPage(target), tags: artistTags(values), selectedTag: values.join(':'), more,
         continuation: more ? { offset: offset + 40, tag: values.join(':') } : null };
-      result.sections.push(section(target + ':artists', '', 'artists', source.map(row => ({ id: required(first(row.id, row.artistId)),
+      result.sections.push(section(target + ':artists', '', 'artists', source.map(record).map(row => ({ id: scalar(first(row.id, row.artistId)),
         name: title(row), cover: cover(row), kind: 'artist', source: 'wy',
         subtitle: optionalNumber(first(row.musicSize, row.songCount)) == null ? '' : '单曲：' + first(row.musicSize, row.songCount) })), 'artist-grid'));
       break;
@@ -461,26 +464,14 @@ export async function wyChannelPage(c, params) {
     case 'cube': {
       result = cube(await c.wy('/api/cube/render/page/protocol', { pageCode: input(channel.pageCode), scene: 'music' }, true), target, selectedTag, c);
       const offset = result.feed?.request ? number(prev.offset, 0, 'INVALID_REQUEST') : undefined;
-      // Missing display data is filled only for actual visible collection cards.
-      const cards = result.sections.flatMap(row => row.items).filter(row => row.action?.type === 'playlist');
-      const ids = [...new Set(cards.filter(row => !row.name).map(row => row.action.id))];
-      for (let at = 0; at < ids.length; at += 100) {
-        const summaries = await c.wy('/api/tag/tab/playlists', { ids: ids.slice(at, at + 100).join(',') });
-        for (const row of rows(summaries.data)) for (const card of cards.filter(card => card.action.id === scalar(row.id))) {
-          if (!card.name) card.name = title(row);
-          if (!card.cover) card.cover = cover(row);
-          if (!card.creator) card.creator = text(first(row.creator?.nickname, row.userName));
-          card.count ??= optionalNumber(first(row.trackCount, row.songCount));
-        }
-      }
       if (result.feed?.request) {
         const request = result.feed.request, layoutTag = result.tags.some(row => row.id === selectedTag);
         request.algTagIds = layoutTag ? '' : selectedTag;
         let tags = [];
         try {
           const tagData = await c.wy('/api/tag/tab/tags', { ruleId: request.ruleId, ruleType: 1, tabTagId: '' });
-          tags = array(first(tagData.data?.algTagInfos, tagData.algTagInfos)).flatMap(row => array(row.children).length ?
-            row.children.map(child => ({ id: scalar(child.algTagId), name: text(child.algTagName), group: text(row.algTagName) })) :
+          tags = array(first(tagData?.data?.algTagInfos, tagData?.algTagInfos)).map(record).flatMap(row => array(row.children).length ?
+            row.children.map(record).map(child => ({ id: scalar(child.algTagId), name: text(child.algTagName), group: text(row.algTagName) })) :
             [{ id: scalar(row.algTagId), name: text(row.algTagName), group: '' }]);
         } catch (error) {
           c.signal.throwIfAborted();
@@ -498,7 +489,9 @@ export async function wyChannelPage(c, params) {
           const feed = await c.wy('/api/tag/tab/alg/recommends', { ruleType: 1, ruleId: request.ruleId, tabTagId: '',
             algTagIds: request.algTagIds, extMap: JSON.stringify({ pointIds: request.pointIds }),
             limit: 30, offset, trialMode: 103, source: offset > 0 ? 'nextPage' : 'reset' });
-          const data = feed.data ?? feed, items = rows(data.songs).map(wySong), more = Boolean(data.hasMore);
+          const data = record(feed?.data ?? feed);
+          c.observe('feed.songs', data.songs);
+          const items = array(data.songs).map(wySong), more = Boolean(data.hasMore);
           Object.assign(result.feed, { songs: items, more, cursor: more ? offset + 30 : null });
           feedSection.items = items;
           result.more = more; result.continuation = more ? { offset: offset + 30, tag: selectedTag,
@@ -522,8 +515,8 @@ export async function wyChannelPage(c, params) {
       c.signal.throwIfAborted();
       if (reads.every(row => row.status === 'rejected')) throw reads[0].reason;
       if (reads[0].status === 'fulfilled') {
-        const raw = reads[0].value, data = raw.data ?? raw;
-        const items = rows(first(data.songInfoList, raw.songInfoList)).map(wySong);
+        const raw = reads[0].value, data = record(raw?.data ?? raw);
+        const items = array(first(data.songInfoList, raw?.songInfoList)).map(wySong);
         if (items.length) result.sections.push(section(target + ':recommend', text(data.title) || '黑胶VIP 每日推荐', 'songs', items, 'vip-songs'));
       }
       if (reads[1].status === 'fulfilled') {
@@ -545,17 +538,17 @@ export async function wyCharts(c, { kind, period = 'daily', year }) {
     if (!route) fail('UNSUPPORTED');
     const raw = await c.wy('/api/feealbum/songsaleboard/' + route + '/type' + (period === 'yearly' ? '/' : ''),
       { albumType: kind === 'albums' ? 0 : 1, limit: 50, ...(period === 'yearly' ? { year: year ?? new Date(c.clock()).getUTCFullYear() } : {}) }, true);
-    items = rows(raw.products).map((row, index) => ({ id: required(row.albumId), name: text(row.albumName),
+    items = array(raw?.products).map(record).map((row, index) => ({ id: scalar(row.albumId), name: text(row.albumName),
       cover: image(row.coverUrl), subtitle: text(row.artistName), rankText: String(index + 1),
       salesText: optionalNumber(row.saleNum) == null ? '' : Number(row.saleNum).toLocaleString('en-US') + ' 张',
-      kind: 'album', action: { type: 'album', id: scalar(row.albumId) } }));
+      kind: 'album', action: scalar(row.albumId) ? { type: 'album', id: scalar(row.albumId) } : null }));
     name = kind === 'albums' ? '数字专辑畅销榜' : '数字单曲榜'; type = 'albums'; layout = 'ranking';
   } else if (kind === 'song-sales') {
     const raw = await c.wy('/api/single/sales-ranking/get', {}, true);
-    items = await wyDetails(c, rows(raw.data.itemList).map(row => required(row.songId))); name = '歌曲畅销指数榜';
+    items = await wyDetails(c, array(raw?.data?.itemList).map(row => scalar(row?.songId)).filter(Boolean)); name = '歌曲畅销指数榜';
   } else if (kind === 'user-recommendations') {
     const raw = await c.wy('/api/charts/user/rcmd/song/detail', { chartCode: 'USER_RCMD_SONG', period: '' }, true);
-    items = rows(raw.data.charts).map(row => wySong(row.songData)); name = '全民热推榜';
+    items = array(raw?.data?.charts).map(row => wySong(row?.songData)); name = '全民热推榜';
   } else fail('UNSUPPORTED');
   result.name = name; result.chartKind = kind; result.count = items.length; result.total = items.length;
   result.sections.push(section(result.id, name, type, items, layout));

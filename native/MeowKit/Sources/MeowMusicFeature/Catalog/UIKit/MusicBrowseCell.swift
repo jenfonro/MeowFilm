@@ -211,7 +211,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         artwork.layer.cornerRadius = layout == .banner || layout == .artistUpdates ? 0 : 8
         artwork.backgroundColor = layout == .artistUpdates ? .clear : UIColor.white.withAlphaComponent(0.18)
         featurePaletteRole = MusicBrowseFeaturePalette.Role(item)
-        if case .track(let track) = item.content { representedTrack = track }
+        if item.kind == nil, case .track(let track) = item.content { representedTrack = track }
         else { representedTrack = nil }
         rankingShowsFallback = false
         if layout != .rankingStack { loadArtwork(artworkURL ?? item.artwork) }
@@ -223,7 +223,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         subtitle.text = layout == .rankingStack ? item.ranking?.updateFrequency ?? "" : item.subtitle
         subtitle.font = .systemFont(ofSize: layout == .rankingStack ? 12 : 11)
         subtitle.textAlignment = layout == .rankingStack ? .right : .natural
-        subtitle.isHidden = layout == .playlistRail || layout == .grid || layout == .rankingSmall || layout == .banner
+        subtitle.isHidden = layout == .playlistRail || [.grid, .artistGrid, .channelGrid].contains(layout) || layout == .rankingSmall || layout == .banner
         preview.text = item.ranking?.preview.enumerated().map { index, entry in
             let change = entry.rankingMovement?.symbol ?? ""
             return "\(entry.rank ?? index + 1). \(entry.title)" +
@@ -278,10 +278,8 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
             row.configure(entries.indices.contains(index) ? entries[index] : nil, fallbackRank: index + 1, theme: theme)
         }
         if layout == .rankingStack {
-            let covers = entries.compactMap(\.artwork)
-            let url = covers.first ?? item.ranking?.songArtwork ?? item.artwork
-            representedTrack = item.previewSongs.first { $0.artwork == url }
-            loadArtwork(url)
+            representedTrack = nil
+            loadArtwork(artworkURL ?? item.artwork)
         }
         title.textColor = UIColor(theme.ink); subtitle.textColor = UIColor(theme.muted)
         preview.textColor = UIColor(theme.ink)
@@ -627,14 +625,7 @@ private enum MusicBrowseFeaturePalette {
         case standard
 
         init(_ item: MusicPublicBrowseItem) {
-            switch item.content {
-            case .collection, .daily:
-                self = .preview
-            case .action(.daily):
-                self = .preview
-            default:
-                self = .standard
-            }
+            self = item.presentation == "preview" ? .preview : .standard
         }
     }
 
@@ -774,7 +765,7 @@ private final class MusicBrowsePreviewButton: UIButton {
     private func updatePlaybackLoading() {
         let loading = playbackLoading && window != nil && !isHidden
         cover.alpha = loading ? 0 : 1
-        isEnabled = !loading
+        isEnabled = !loading && !reference.id.isEmpty
         accessibilityValue = loading ? "加载中" : nil
         if loading { if !spinner.isAnimating { spinner.startAnimating() } }
         else { spinner.stopAnimating() }

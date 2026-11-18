@@ -32,7 +32,7 @@ final class MusicNativeKugouDiscoveryTests: XCTestCase {
     }
     func testPlaylistTagsRetainGroupsAndSelectionWithoutReadingAnotherDirectory() async throws {
         let tags: [RuntimeValue] = [.object(["id": .string("0"), "name": .string("推荐")]), .object(["id": .string("587"), "name": .string("学习"), "group": .string("场景")])]
-        let peer = KugouDiscoveryPeer { request, _ in F.page([F.section("playlists", items: [F.collection(1)], layout: "grid")], tags: tags, selected: request.parameters[music: "tag"].musicText) }
+        let peer = KugouDiscoveryPeer { request, _ in F.page([F.section("playlists", items: [F.collection(1)], layout: "playlist-grid")], tags: tags, selected: request.parameters[music: "tag"].musicText) }
         let service = try await kugouService(peer), page = try await service.publicDiscovery(.channel(.kugou("playlist", .playlists), tag: "587"), cursor: nil)
         XCTAssertEqual(page.selectedFilter, "587"); XCTAssertEqual(page.filters.map(\.group), ["", "场景"]); XCTAssertEqual(page.filters.map(\.id), ["0", "587"])
         await finishKugou(service, peer, operations: ["channel"])
@@ -96,7 +96,7 @@ final class MusicNativeKugouDiscoveryTests: XCTestCase {
     func testExplicitEmptyTerminalPagesStaySuccessful() async throws {
         for target in [MusicPublicBrowseDestination.home, .channels, .channel(.kugou("newsong", .newSongs), tag: "")] {
             let peer = KugouDiscoveryPeer { _, _ in F.page([]) }, service = try await kugouService(peer)
-            let page = try await service.publicDiscovery(target, cursor: nil); XCTAssertTrue(page.sections.isEmpty); XCTAssertNil(page.cursor)
+            let page = try await service.publicDiscovery(target, cursor: nil); XCTAssertTrue(page.sections.flatMap(\.items).isEmpty); XCTAssertNil(page.cursor)
             await finishKugou(service, peer)
         }
     }
@@ -109,14 +109,17 @@ final class MusicNativeKugouDiscoveryTests: XCTestCase {
             await finishKugou(service, peer, operations: ["channel", "channel"])
         }
     }
-    func testRequiredCanonicalSongLocatorFailureIsNotEmptySuccessOrPartialAdoption() async throws {
-        let peer = KugouDiscoveryPeer { _, _ in F.page([F.section("songs", items: [.object(["sources": .array([.object(["source": .string("kg"), "musicInfo": .object(["name": .string("broken")])])])])], layout: "songs")]) }
+    func testMissingCanonicalSongLocatorKeepsDisplayWithoutPermanentAdoption() async throws {
+        let peer = KugouDiscoveryPeer { _, _ in F.page([F.section("songs", items: [.object(["kind": .string("song"), "title": .string("broken"),
+                "action": .object(["type": .string("song")]), "song": .object(["sources": .array([])])])], layout: "song-columns")]) }
         let document = NativeMusicTestLibrary(), service = try await kugouService(peer, document: document), writes = document.snapshot().2
         let page = try await service.homePage(cursor: nil, refresh: true)
         XCTAssertEqual(page.sections.count, 1)
         let section = try XCTUnwrap(page.kugouSection("songs"))
-        XCTAssertEqual(section.error, .upstreamInvalid)
-        XCTAssertTrue(section.items.isEmpty); XCTAssertTrue(section.tabs.isEmpty)
+        XCTAssertNil(section.error)
+        XCTAssertEqual(section.items.map(\.title), ["broken"])
+        guard case .unavailable = section.items[0].content else { return XCTFail("display only") }
+        XCTAssertTrue(section.tabs.isEmpty)
         XCTAssertEqual(document.snapshot().2, writes); await finishKugou(service, peer, operations: ["home"])
     }
     func testRealUpstreamErrorsPreserveMeaningWithoutRetryOrFallback() async throws {

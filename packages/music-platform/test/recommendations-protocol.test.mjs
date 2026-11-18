@@ -26,7 +26,7 @@ test('FM modes and opaque scene selectors reach their own recipe with no guessed
   assert.equal(f.requests.length, 6); await f.close();
 });
 
-test('wrapped FM hydration keeps occurrence order and original outer/nested attribution, not detail metadata attribution', async t => {
+test('wrapped FM retains sparse metadata, occurrence order and original attribution without detail reads', async t => {
   fixedEntropy(t);
   const f = fixture(request => {
     if (new URL(request.url).pathname === '/eapi/v1/radio/get') return response({ code: 200, data: [
@@ -35,19 +35,17 @@ test('wrapped FM hydration keeps occurrence order and original outer/nested attr
       { songInfo: wySong('103'), source: '' },
       { songInfo: { id: huge }, alg: 'duplicate-alg' },
     ] });
-    assert.equal(new URL(request.url).pathname, '/weapi/v3/song/detail');
-    assert.equal(weapi(request).c, '[{"id":' + huge + '}]');
-    return response({ code: 200, songs: [wySong(huge, { alg: 'metadata-ignored',
-      source: 'metadata-ignored', sourceId: 'metadata-ignored' })] });
+    assert.fail('FM display omissions must not trigger detail reads');
   });
   const result = await f.request('wy', 'fm');
   assert.deepEqual(result.items.map(idOf), [huge, '102', '103', huge]);
-  assert.ok(result.items.every(song => song.title && song.artist));
+  assert.deepEqual(result.items.map(song => song.title), ['', 'Synthetic (Live)', 'Synthetic (Live)', '']);
+  assert.deepEqual(result.items.map(song => song.artist), ['', 'A / B', 'A / B', '']);
   assert.deepEqual(result.recommendations.map(row => row.alg), ['outer-alg', 'song-alg', '', 'duplicate-alg']);
   assert.deepEqual(result.recommendations.map(row => row.feedbackSource ?? ''),
     ['row-source', 'song-source', '', 'userfm']);
   assert.deepEqual(result.recommendations.map(row => row.feedbackSourceId ?? ''), ['row-id', '502', '', '']);
-  assert.equal(f.requests.length, 2); await f.close();
+  assert.equal(f.requests.length, 1); await f.close();
 });
 
 test('rule FM cover reads no songs or metadata, while actual rule rows keep only proven sources', async t => {
@@ -73,9 +71,9 @@ test('rule FM cover reads no songs or metadata, while actual rule rows keep only
   assert.equal(f.requests.length, 2); await f.close();
 });
 
-test('scene queue metadata hydrates across the real 100-song batch boundary without losing maps or long IDs', async t => {
+test('scene queue preserves sparse large batches, maps and long IDs without display-driven detail reads', async t => {
   fixedEntropy(t);
-  const ids = Array.from({ length: 103 }, (_, index) => String(1001 + index)), detailCounts = [];
+  const ids = Array.from({ length: 103 }, (_, index) => String(1001 + index));
   const f = fixture(request => {
     const path = new URL(request.url).pathname;
     if (path === '/eapi/homepage/scene/more/rcmd/song') {
@@ -87,17 +85,15 @@ test('scene queue metadata hydrates across the real 100-song batch boundary with
         hasMore: true, offset: 15, algMap: '{"1001":"first-alg","1103":"last-alg"}',
         sourceMap: { 1103: 'real-source', unused: { notConsumed: true } } } });
     }
-    assert.equal(path, '/weapi/v3/song/detail');
-    const batch = JSON.parse(weapi(request).c); detailCounts.push(batch.length);
-    return response({ code: 200, songs: batch.map(row => wySong(String(row.id))) });
+    assert.fail('queue display omissions must not trigger detail reads');
   }); await f.session('wy');
   const value = await f.request('wy', 'queueRecommendations', { seedSongId: huge });
-  assert.deepEqual(value.items.map(idOf), ids); assert.deepEqual(detailCounts, [100, 3]);
-  assert.ok(value.items.every(song => song.artist === 'A / B'));
+  assert.deepEqual(value.items.map(idOf), ids);
+  assert.ok(value.items.every(song => song.artist === '' && song.title === 'Incomplete'));
   assert.equal(value.recommendations[0].alg, 'first-alg'); assert.equal(value.recommendations.at(-1).alg, 'last-alg');
   assert.ok(value.recommendations.every(row => row.source === 'moreRcmd'));
   assert.equal(value.recommendations.at(-1).feedbackSource, 'real-source');
-  assert.equal(value.offset, 15); assert.equal(value.hasMore, true); assert.equal(f.requests.length, 3);
+  assert.equal(value.offset, 15); assert.equal(value.hasMore, true); assert.equal(f.requests.length, 1);
   await f.close();
 });
 
@@ -118,7 +114,7 @@ test('scene continuation uses server offsets, allows a large dynamic batch and d
   assert.equal(f.requests.length, 3); await f.close();
 });
 
-test('scene maps consume only used values; actual JSON conversion and missing continuation remain failures', async t => {
+test('scene maps retain JSON errors while missing or repeated continuation does not reject songs', async t => {
   for (const map of [{ 101: null }, null, [], 1, { unused: ['arbitrary', { content: true }] }]) {
     const f = fixture(() => response({ code: 200, data: { songList: [wySong('101')],
       offset: '15', hasMore: 1, algMap: map, sourceMap: JSON.stringify(map) } })); await f.session('wy');
@@ -130,7 +126,14 @@ test('scene maps consume only used values; actual JSON conversion and missing co
     { hasMore: true, offset: -1 }]) await t.test(JSON.stringify(fields), async () => {
     const f = fixture(() => response({ code: 200, data: { songList: [wySong('101')],
       offset: 15, hasMore: false, ...fields } })); await f.session('wy');
-    await assert.rejects(f.request('wy', 'queueRecommendations', { seedSongId: '102' }), { code: 'INVALID_RESPONSE' });
+    if ('algMap' in fields || 'sourceMap' in fields)
+      await assert.rejects(f.request('wy', 'queueRecommendations', { seedSongId: '102' }), { code: 'INVALID_RESPONSE' });
+    else {
+      const value = await f.request('wy', 'queueRecommendations', { seedSongId: '102' });
+      assert.deepEqual(value.items.map(idOf), ['101']);
+      assert.equal(value.offset, 'offset' in fields ? fields.offset : 15);
+      assert.equal(value.hasMore, fields.hasMore === true);
+    }
     assert.equal(f.requests.length, 1); await f.close();
   });
 });
@@ -174,17 +177,13 @@ test('heartbeat finds a later directory page, hydrates every batch and inserts t
   assert.equal(f.requests.length, 6); await f.close();
 });
 
-test('heartbeat moves a supplied current seed first, hydrates sparse songInfo and continues outside likes without reinserting a seed', async t => {
+test('heartbeat moves a supplied current seed first, retains sparse songInfo and continues without reinserting a seed', async t => {
   fixedEntropy(t);
   let round = 0;
   const f = fixture(request => {
     const path = new URL(request.url).pathname;
     if (path === '/eapi/v6/playlist/detail') return response({ code: 200, playlist: {
       id: '10', name: 'Likes', tracks: [wySong('101'), wySong('102')], trackCount: 999 } });
-    if (path === '/weapi/v3/song/detail') {
-      assert.equal(weapi(request).c, '[{"id":103}]');
-      return response({ code: 200, songs: [wySong('103', { alg: 'ignored-detail-alg' })] });
-    }
     assert.equal(path, '/eapi/playmode/intelligence/list');
     const { data } = eapi(request);
     assert.equal(data.startMusicId, '102'); assert.equal(data.count, 2); assert.equal(data.type, 'fromPlayOne');
@@ -194,10 +193,11 @@ test('heartbeat moves a supplied current seed first, hydrates sparse songInfo an
   }); await f.session('wy');
   const value = await f.request('wy', 'heartbeat', { entry: 'current', playlistId: '10', songId: '102' });
   assert.deepEqual(value.items.map(idOf), ['102', '103']);
+  assert.deepEqual(value.items.map(song => song.title), ['', '']);
   assert.deepEqual(value.recommendations.map(row => row.alg), ['seed-alg', 'sparse-alg']);
   const next = await f.request('wy', 'heartbeat', { entry: 'current', songId: '103', continuation: value.continuation });
   assert.deepEqual(next.items.map(idOf), ['999']); assert.equal(next.continuation.startMusicId, '102');
-  assert.equal(f.requests.length, 4); await f.close();
+  assert.equal(f.requests.length, 3); await f.close();
 });
 
 test('home heartbeat seed uses only one needed member and empty likes never request metadata', async t => {

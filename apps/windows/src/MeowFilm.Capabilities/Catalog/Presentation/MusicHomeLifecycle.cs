@@ -162,6 +162,9 @@ public sealed partial class MusicCapability
         _ = Presentation.Dispatcher.InvokeAsync(() =>
         {
             if (stopping) return;
+            foreach (var pair in catalogOptionalSnapshots.Where(pair => pair.Value.Platform == platform &&
+                pair.Value.Observation < observation).ToArray())
+                RetireCatalogOptionalReads(pair.Key);
             changedCatalogAccounts.Add(platform);
             // The notification fences authority immediately; delayed UI cleanup
             // must not retire a read or action admitted after that fence.
@@ -197,7 +200,7 @@ public sealed partial class MusicCapability
                 existing.Items.SequenceEqual(projected.Items, ReferenceEqualityComparer.Instance) &&
                 ReferenceEquals(existing.Action, projected.Action)) return existing;
             return homeProjection[source] = projected;
-        }).Where(section => section.Items.Count > 0).ToArray();
+        }).ToArray();
         foreach (var obsolete in homeProjection.Keys.Where(source =>
             !homeSections.Contains(source, ReferenceEqualityComparer.Instance)).ToArray())
             homeProjection.Remove(obsolete);
@@ -215,6 +218,7 @@ public sealed partial class MusicCapability
 
     private void RetireHomeAuthority()
     {
+        RetireCatalogOptionalReads("catalog-home");
         homeRefreshRequired = true;
         homePage = 1; homeCursors = [null];
         if (publishedHomeState is { } home)

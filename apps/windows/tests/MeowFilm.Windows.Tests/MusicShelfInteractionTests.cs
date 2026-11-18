@@ -26,6 +26,7 @@ public static class MusicShelfInteractionTests
         yield return Case("hidden shelves retain nearby containers and stop paging until shown", HiddenRetention);
         yield return Case("hidden resize and context changes restore only the latest geometric target", HiddenRestore);
         yield return Case("banners snap by pages and report continuous progress through the short final page", BannerSnapping);
+        yield return Case("banner final page rejects forward keyboard navigation", BannerKeyboardBoundary);
         yield return Case("switching shelf types settles the outgoing offset with its own geometry", BannerContextRestore);
         yield return Case("distant banners retain virtualized containers and page targets across hidden resize", BannerDistantRestore);
     }
@@ -518,7 +519,10 @@ public static class MusicShelfInteractionTests
                 await Until(() =>
                     observations.Skip(start).Any(sample => Math.Abs(sample.Offset - columns * pitch) < .5) &&
                     Math.Abs(f.Rail.HorizontalOffset - finalColumn * pitch) < .5 && f.IsSettled,
-                    $"banner offset {columns} settles on page {finalPage}");
+                    $"banner offset {columns} settles on page {finalPage}",
+                    () => $"pitch={pitch}, actualPitch={f.Shelf.CardWidth}, offset={f.Rail.HorizontalOffset}, " +
+                        $"saved={f.Section.HorizontalOffset}, animating={!f.Shelf.IsSettled}, " +
+                        $"samples={string.Join(';', observations.Skip(start).Select(sample => $"{sample.Offset:0.###}/{sample.Position:0.###}"))}");
                 Check(observations.Skip(start).Any(sample => Math.Abs(sample.Offset - columns * pitch) < .5 &&
                     Math.Abs(sample.Position - position) < .01 && !sample.Animated),
                     "indicator follows the actual offset continuously, including the short last interval, without its own clock");
@@ -528,7 +532,7 @@ public static class MusicShelfInteractionTests
         }
         finally { f.Rail.ScrollChanged -= observe; }
         Check(Math.Abs(f.Rail.HorizontalOffset - 7 * pitch) < .5 &&
-            f.Next.Visibility == Visibility.Collapsed && !f.Key(Key.Right),
+            f.Next.Visibility == Visibility.Collapsed,
             "the odd final page stops at the actual end with no empty forward move");
         var last = (ListBoxItem)f.Items.ItemContainerGenerator.ContainerFromIndex(8);
         Check(Math.Abs(last.TranslatePoint(new Point(last.ActualWidth - 20, 0), f.Rail).X -
@@ -566,12 +570,22 @@ public static class MusicShelfInteractionTests
         CheckRealized(f);
     }
 
+    private static async Task BannerKeyboardBoundary()
+    {
+        using var f = new Fixture(9, banner: true);
+        await f.Load();
+        f.Rail.ScrollToRightEnd();
+        await Until(() => Math.Abs(f.Rail.HorizontalOffset - f.Shelf.MaximumOffset) < .5 && f.IsSettled,
+            "the final banner page is settled before checking keyboard access");
+        Check(!f.Key(Key.Right), "the final banner page rejects an empty forward keyboard move");
+    }
+
     private static async Task BannerContextRestore()
     {
         using var f = new Fixture(9, banner: true);
         await f.Load(updateLayout: false);
         var bannerPitch = f.Shelf.CardWidth;
-        var normal = f.Section with { Type = "playlists", HorizontalOffset = 0 };
+        var normal = f.Section with { Layout = "playlist-rail", HorizontalOffset = 0 };
         await SwitchAt(1.2 * bannerPitch, normal, 720);
         Check(Math.Abs(f.Section.HorizontalOffset - 2 * bannerPitch) < .5,
             "an outgoing banner settles to a whole page even when the incoming context is not a banner");
@@ -736,7 +750,7 @@ public static class MusicShelfInteractionTests
         {
             Section = new MusicCatalogSection("歌单", Enumerable.Range(1, itemCount)
                 .Select(i => new MusicCatalogCard(i.ToString(), "歌单" + i, "", "", "playlist", "wy"))
-                .ToArray(), Type: banner ? "banner" : "playlists");
+                .ToArray(), Layout: banner ? "banner" : "playlist-rail");
             Shelf = new Shelf
             {
                 MinimumCardWidth = 124, Height = banner ? 204 : 180, Margin = new Thickness(40), DataContext = Section,

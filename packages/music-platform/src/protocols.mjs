@@ -3,7 +3,7 @@
 import { createHash, createCipheriv, createDecipheriv, publicEncrypt, constants, randomBytes, randomInt } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { fail } from './errors.mjs';
-import { decodeJSON, encodeProtocolJSON, object, protocolInteger, required, scalar } from './model.mjs';
+import { decodeJSON, encodeProtocolJSON, protocolInteger, required, scalar } from './model.mjs';
 
 export const md5 = value => createHash('md5').update(value).digest('hex');
 export const hex = size => randomBytes(size).toString('hex');
@@ -134,7 +134,7 @@ export function txSuccess(data) {
       20450: 'FORBIDDEN', 20279: 'DEVICE_LIMIT', 20271: 'VERIFICATION_REQUIRED', 20276: 'VERIFICATION_REQUIRED',
       104604: 'RATE_LIMITED', 100001: 'RATE_LIMITED', 20272: 'INVALID_CREDENTIALS', 20274: 'INVALID_CREDENTIALS' })[code] ?? 'UPSTREAM_ERROR');
   }
-  return object(data.req_0.data);
+  return data.req_0.data;
 }
 export function kgRequest(path, params, client, account, clock, router, body, origin = 'https://gateway.kugou.com', salt = kgSalt) {
   const cookies = cookieFields(account?.cookie), time = String(Math.floor(clock() / 1000));

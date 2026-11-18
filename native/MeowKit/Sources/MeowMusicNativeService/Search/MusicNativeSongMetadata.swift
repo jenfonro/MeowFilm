@@ -22,10 +22,17 @@ extension NativeMusicService {
         return try songs.map { try repositorySong($0["songId"].string, state) }
     }
     func metadataPage(_ value: MusicNativeTrackPage) async throws -> MusicBrowsePage {
-        let songs = try adoptSongs(value.items.map(MusicModel.normalize), authoritative: true)
-        return .init(items: try zip(songs, value.items).map {
-            try repositoryTrack($0.0, occurrence: UUID().uuidString, sourcePosition: $0.1.sourcePosition)
-        }, cursor: value.cursor, dailyStyle: value.dailyStyle)
+        let candidates = value.items.map { try? MusicModel.normalize($0) }
+        let songs = try adoptSongs(candidates.compactMap { $0 }, authoritative: true)
+        return .init(items: try displayTracks(value.items, candidates: candidates, songs: songs),
+            cursor: value.cursor, dailyStyle: value.dailyStyle)
+    }
+    func displayTracks(_ tracks: [MusicNativeTrackData], candidates: [MJ?], songs: [MJ]) throws -> [MusicRemoteTrack] {
+        var adopted = songs.makeIterator()
+        return try zip(tracks, candidates).map { track, candidate in
+            guard candidate != nil, let song = adopted.next() else { return MusicModel.displayTrack(track) }
+            return try repositoryTrack(song, occurrence: UUID().uuidString, sourcePosition: track.sourcePosition)
+        }
     }
     func metadataTracks(_ songs: [MJ], cursor: String? = nil) throws -> MusicBrowsePage {
         .init(items: try songs.map { try repositoryTrack($0, occurrence: UUID().uuidString) }, cursor: cursor)
@@ -37,7 +44,7 @@ extension NativeMusicService {
     @discardableResult
     func recordSearchPage(_ page: MusicNativeTrackPage, observation: MusicSearchObservation) async throws -> [MJ] {
         let own = epoch
-        let rows = try page.items.map(MusicModel.normalize)
+        let rows = page.items.compactMap { try? MusicModel.normalize($0) }
         // A single snapshot keeps row decisions together; no await intervenes
         // between the final owner read and applying the complete page.
         let checks = await sourceDiscovery.entries()

@@ -4,6 +4,9 @@ import { parseJSONText } from '@meowfilm/runtime-bridge/json';
 import { decodeJSON } from '../src/model.mjs';
 import { fixture, response, rpc, eapi, qq, kg, seedClients, huge, kgHash, wySong, txSong, kgSong, kwSong, mgSong, idOf, gate } from './support.mjs';
 
+// Extraction diagnostics describe this request, not the cached content value.
+const content = ({ diagnostics, ...value }) => value;
+
 test('all five public search recipes consume only fields needed by the result', async t => {
   for (const platform of ['wy', 'tx', 'kg', 'kw', 'mg']) {
     await t.test(platform, async () => {
@@ -37,7 +40,8 @@ test('all five public search recipes consume only fields needed by the result', 
       assert.deepEqual(first, second);
       assert.equal(first.items.length, 1);
       assert.ok(idOf(first.items[0]));
-      assert.equal(first.items[0].song?.songId ?? first.items[0].songId, undefined, 'provider does not allocate permanent identities');
+      assert.equal(first.items[0].song, undefined, 'all platforms publish the same single Song item');
+      assert.equal(first.items[0].songId, undefined, 'provider does not allocate permanent identities');
       assert.equal(f.requests.length, 2, 'search does not gain an API cache');
       assert.ok(f.requests.every(row => !JSON.stringify(row.headers).includes('not-forwarded')));
       if (platform !== 'tx') assert.deepEqual(recipes[0], recipes[1]);
@@ -98,12 +102,12 @@ test('TX and KG playlist caches distinguish effective offsets and reuse explicit
       { page: '1', limit: '30', continuation: { offset: '30' } },
       { page: 1, limit: 30, offset: '30', continuation: { offset: { toString: null } }, unused: { offset: 'bad' } },
       { page: 1, limit: 30, offset: null, continuation: { offset: 30 } },
-    ]) assert.deepEqual(await f.request(platform, 'playlist', { id: '123', ...params }), second);
-    assert.deepEqual(await f.request(platform, 'playlist', { id: '123', limit: 30 }), first);
-    assert.deepEqual(await f.request(platform, 'playlist', { id: '123', limit: 30, offset: 0, continuation: { offset: 30 } }), first);
+    ]) assert.deepEqual(content(await f.request(platform, 'playlist', { id: '123', ...params })), content(second));
+    assert.deepEqual(content(await f.request(platform, 'playlist', { id: '123', limit: 30 })), content(first));
+    assert.deepEqual(content(await f.request(platform, 'playlist', { id: '123', limit: 30, offset: 0, continuation: { offset: 30 } })), content(first));
     const next = await f.request(platform, 'playlist', { id: '123', page: 2, limit: 30 });
     assert.equal(next.page, 2); assert.deepEqual(next.items.map(idOf), [secondId, secondId]);
-    assert.deepEqual(await f.request(platform, 'playlist', { id: '123', page: '2', limit: '30', offset: '30' }), next);
+    assert.deepEqual(content(await f.request(platform, 'playlist', { id: '123', page: '2', limit: '30', offset: '30' })), content(next));
     for (const offset of ['not-a-number', {}, { toString: null }])
       await assert.rejects(f.request(platform, 'playlist', { id: '123', limit: 30, offset }), { code: 'INVALID_REQUEST' });
     assert.deepEqual(offsets, [0, 30, 30]); assert.equal(f.requests.length, 3);
@@ -135,7 +139,7 @@ test('signed-in TX and KG playlist flights do not mix offsets and share synonymo
     held.release();
     const [a, b, c] = await Promise.all([first, second, same]);
     assert.deepEqual(a.items.map(idOf), [firstId]); assert.deepEqual(b.items.map(idOf), [secondId]);
-    assert.deepEqual(c, b);
+    assert.deepEqual(content(c), content(b));
   });
 });
 
@@ -161,7 +165,7 @@ test('KG owned playlist flights follow pages and ignore unconsumed explicit and 
   assert.deepEqual(pages, [1, 2]); assert.equal(f.requests.length, 2);
   held.release();
   const [a, b, c] = await Promise.all([first, same, next]);
-  assert.deepEqual(b, a); assert.deepEqual(a.memberIds, ['11']); assert.deepEqual(c.memberIds, ['22']);
+  assert.deepEqual(content(b), content(a)); assert.deepEqual(a.memberIds, ['11']); assert.deepEqual(c.memberIds, ['22']);
   assert.equal(c.page, 2);
 });
 
@@ -229,7 +233,7 @@ test('WY canonical song aliases remain actual records without fabricated members
   await f.close();
 });
 
-test('WY pages consume selected members without parsing later IDs or metadata, while complete reads still require member identity', async t => {
+test('WY pages and complete reads preserve actual songs when member IDs are missing', async t => {
   for (const bad of [{ id: {} }, null, { id: '2' }]) await t.test(JSON.stringify(bad), async t => {
     const f = fixture(request => {
       assert.equal(new URL(request.url).pathname, '/eapi/v6/playlist/detail');
@@ -243,8 +247,12 @@ test('WY pages consume selected members without parsing later IDs or metadata, w
     assert.deepEqual(first.memberIds, ['1']); assert.equal(first.consumed, 1); assert.equal(first.more, true);
     assert.equal(f.requests.length, 1);
     if (bad?.id !== '2') {
-      await assert.rejects(f.request('wy', 'playlist', { id: 'list', page: 2, limit: 1 }), { code: 'INVALID_RESPONSE' });
-      await assert.rejects(f.request('wy', 'playlist.complete', { id: 'list' }), { code: 'INVALID_RESPONSE' });
+      const later = await f.request('wy', 'playlist', { id: 'list', page: 2, limit: 1 });
+      assert.deepEqual(later.items, []); assert.deepEqual(later.memberIds, ['']);
+      const complete = await f.request('wy', 'playlist.complete', { id: 'list' });
+      assert.deepEqual(complete.items.map(idOf), ['1', '2']);
+      assert.deepEqual(complete.sourcePositions, [0, null]); assert.deepEqual(complete.memberIds, ['1', '']);
+      assert.equal(f.requests.length, 3, 'missing IDs never become detail requests');
     }
   });
 });
@@ -274,7 +282,7 @@ test('optional artist and Migu format members do not discard locatable songs or 
     seedClients(f); t.after(() => f.close());
     const result = await f.request(platform, 'search', { keyword: 'synthetic' });
     assert.deepEqual(result.items.map(idOf), ['1', '2', '3']);
-    const songs = result.items.map(row => row.song ?? row);
+    const songs = result.items;
     assert.deepEqual(songs[0].artistNames, ['Artist']); assert.deepEqual(songs[1].artistNames, []);
     if (platform === 'mg') {
       const info = songs[0].sources[0].musicInfo;
@@ -282,7 +290,8 @@ test('optional artist and Migu format members do not discard locatable songs or 
       assert.deepEqual(info.types, [{ type: 'flac', size: '1.00 MB' }]);
     }
     const invalid = fixture(() => reply([{}])); seedClients(invalid); t.after(() => invalid.close());
-    await assert.rejects(invalid.request(platform, 'search', { keyword: 'synthetic' }), { code: 'INVALID_RESPONSE' });
+    const sparse = await invalid.request(platform, 'search', { keyword: 'synthetic' });
+    assert.equal(sparse.items.length, 1); assert.deepEqual(sparse.items[0].sources, []);
     const broken = fixture(() => response('{"broken":')); seedClients(broken); t.after(() => broken.close());
     await assert.rejects(broken.request(platform, 'search', { keyword: 'synthetic' }), { code: 'INVALID_RESPONSE' });
   });
@@ -342,7 +351,7 @@ test('MG collection recipes resolve their documented root-relative artwork witho
   for (const [address, expected] of [
     ['/cover.jpg?size=large', 'https://d.musicapp.migu.cn/cover.jpg?size=large'],
     ['https://independent-cdn.invalid/cover.jpg?size=small', 'https://independent-cdn.invalid/cover.jpg?size=small'],
-    ['//cdn.invalid/cover.jpg', ''],
+    ['//cdn.invalid/cover.jpg', 'https://cdn.invalid/cover.jpg'],
     ['file:///cover.jpg', ''],
     ['https://user:secret@cdn.invalid/cover.jpg', ''],
     [null, ''],
@@ -383,7 +392,7 @@ test('MG real script metadata retains content identity and mapped formats withou
     }
     return response({ code: '000000', songResultData: { totalCount: 1, resultList: [[raw]] } });
   });
-  for (const result of [(await f.request('mg', 'search', { keyword: 'x' })).items[0].song,
+  for (const result of [(await f.request('mg', 'search', { keyword: 'x' })).items[0],
     await f.request('mg', 'song', { id: 'alias' })]) {
     assert.equal(idOf(result), 'actual-resource');
     const info = result.sources[0].musicInfo;
@@ -425,15 +434,15 @@ test('KW metadata fallback reads data-only Nuxt literals and never executes scri
   await malicious.close();
 });
 
-test('KW SSR unusable object aliases, missing aliases and trailing code are data failures without expression execution', async () => {
+test('KW SSR keeps sparse display material while unresolved aliases and executable code remain failures', async () => {
   // HEAD Windows MusicKwMgCatalogTests.KwUnsafePage. Duplicate-property and
   // canonical-ID admission expectations are not retained.
   const page = '<html><script>window.__NUXT__=(function(a,b){return {data:[{songinfo:{rid:a,musicrid:"MUSIC_1",name:"Synthetic",artist:"A",album:"B",duration:180,formats:b}}]}}("1","MP3128"));</script></html>';
-  for (const html of [
+  for (const [index, html] of [
     page.replace('"1","MP3128"', '{"id":1},"MP3128"'),
     page.replace('rid:a,', 'rid:c,'),
     page.replace('duration:180', 'duration:180;globalThis.catalogPageInjected=true'),
-  ]) {
+  ].entries()) {
     const f = fixture(request => {
       const url = new URL(request.url);
       if (url.host === 'm.kuwo.cn') {
@@ -443,7 +452,10 @@ test('KW SSR unusable object aliases, missing aliases and trailing code are data
       assert.equal(url.href, 'https://www.kuwo.cn/play_detail/1');
       return response(html);
     });
-    await assert.rejects(f.request('kw', 'song', { id: '1' }), { code: 'INVALID_RESPONSE' });
+    if (index === 0) {
+      const value = await f.request('kw', 'song', { id: '1' });
+      assert.equal(value.title, 'Synthetic'); assert.deepEqual(value.sources, []);
+    } else await assert.rejects(f.request('kw', 'song', { id: '1' }), { code: 'INVALID_RESPONSE' });
     assert.equal(globalThis.catalogPageInjected, undefined); assert.equal(f.requests.length, 2);
     await f.close();
   }
@@ -461,11 +473,13 @@ test('mandatory material, JSON, transport, upstream denial and byte limits keep 
     [{ code: 500 }, {}, 'UPSTREAM_ERROR'],
     ['denied', { status: 503 }, 'UPSTREAM_HTTP'],
     ['x'.repeat(4 * 1024 * 1024 + 1), {}, 'LIMIT'],
-    [{ code: 200, result: { songs: [{ name: 'missing actual ID' }], songCount: 1 } }, {}, 'INVALID_RESPONSE'],
   ]) {
     const f = fixture(() => response(body, options));
     await assert.rejects(f.request('wy', 'search', { keyword: 'x' }), { code }); await f.close();
   }
+  const sparse = fixture(() => response({ code: 200, result: { songs: [{ name: 'missing actual ID' }], songCount: 1 } }));
+  const value = await sparse.request('wy', 'search', { keyword: 'x' });
+  assert.equal(value.items[0].title, 'missing actual ID'); assert.deepEqual(value.items[0].sources, []); await sparse.close();
   const network = fixture(() => { throw Error('synthetic network'); });
   await assert.rejects(network.request('wy', 'search', { keyword: 'x' }), { code: 'NETWORK_ERROR' }); await network.close();
 });
@@ -545,7 +559,7 @@ test('KW and MG unknown optional durations retain usable locators, while positiv
       const f = fixture(() => platform === 'kw' ? response({ TOTAL: 1, abslist: [row] }) :
         response({ code: '000000', data: { songResultData: { totalCount: 1, resultList: [[row]] } } }));
       const result = (await f.request(platform, 'search', { keyword: 'x' })).items[0];
-      const song = result.song ?? result;
+      const song = result;
       assert.equal(idOf(song), 'usable'); assert.equal(song.duration, duration === 240.25 ? 240.25 : null);
       assert.equal(song.sources[0].musicInfo.duration, song.duration);
       assert.equal(f.requests.length, 1); await f.close();
@@ -553,14 +567,15 @@ test('KW and MG unknown optional durations retain usable locators, while positiv
     const invalid = fixture(() => platform === 'kw' ?
       response({ TOTAL: 1, abslist: [{ SONGNAME: 'missing locator', DURATION: 'unknown' }] }) :
       response({ code: '000000', data: { songResultData: { totalCount: 1, resultList: [[{ songName: 'missing locator', duration: 'unknown' }]] } } }));
-    await assert.rejects(invalid.request(platform, 'search', { keyword: 'x' }), { code: 'INVALID_RESPONSE' });
+    const sparse = (await invalid.request(platform, 'search', { keyword: 'x' })).items[0];
+    assert.equal(sparse.title, 'missing locator'); assert.deepEqual(sparse.sources, []); assert.equal(sparse.duration, null);
     assert.equal(invalid.requests.length, 1); await invalid.close();
   }
   for (const [length, expected] of [['unknown', null], ['04:unknown', null], ['1:-2', null], ['00:00', null],
     ['04:00.25', 240.25]]) {
     const f = fixture(() => response({ code: '000000', data: { songResultData: { totalCount: 1,
       resultList: [[mgSong('usable', { duration: undefined, length })]] } } }));
-    const song = (await f.request('mg', 'search', { keyword: 'x' })).items[0].song;
+    const song = (await f.request('mg', 'search', { keyword: 'x' })).items[0];
     assert.equal(idOf(song), 'usable'); assert.equal(song.duration, expected);
     assert.equal(song.sources[0].musicInfo.duration, expected); await f.close();
   }

@@ -43,7 +43,8 @@ public struct MusicPublicBrowseCollection: Codable, Sendable, Hashable, Identifi
 
 public struct MusicPublicBrowseChannel: Codable, Sendable, Hashable, Identifiable {
     public enum Kind: String, Codable, Sendable {
-        case featured, playlists, rankings, newSongs, cube, vip, unsupported
+        case featured, playlists, rankings, artists, chart, cube, vip, unsupported
+        case newSongs = "new-songs"
         case artistActivity = "artist-activity"
     }
     public let id: String
@@ -109,6 +110,18 @@ public struct MusicPublicBrowseRanking: Codable, Sendable {
 }
 
 public struct MusicPublicBrowseItem: Sendable, Identifiable {
+    public enum Kind: String, Codable, Sendable {
+        case song, playlist, album, artist, channel, chart, daily, fm, similar, heartbeat, unsupported
+        case songCollection = "song-collection"
+    }
+    public struct CoverReference: Codable, Sendable, Hashable {
+        public let platform: MusicPublicBrowsePlatform
+        public let kind: MusicPublicBrowseCollection.Kind
+        public let id: String
+        public init(platform: MusicPublicBrowsePlatform, kind: MusicPublicBrowseCollection.Kind = .playlist, id: String) {
+            self.platform = platform; self.kind = kind; self.id = id
+        }
+    }
     public let id: String
     public let title: String
     public let subtitle: String
@@ -120,14 +133,21 @@ public struct MusicPublicBrowseItem: Sendable, Identifiable {
     public let coverLabel: String
     /// Runtime-declared display scope; never an action or playback grant.
     public let requiresAccount: Bool
+    /// Nil identifies a native song-list projection, rather than a runtime Card.
+    public let kind: Kind?
+    public let label: String
+    public let presentation: String
+    public let coverRef: CoverReference?
     public init(id: String, title: String, subtitle: String = "", artwork: URL? = nil, content: MusicPublicBrowseContent,
                 ranking: MusicPublicBrowseRanking? = nil, previewSongs: [MusicRemoteTrack] = [],
-                recommendationReason: String = "", coverLabel: String = "", requiresAccount: Bool = false) {
+                recommendationReason: String = "", coverLabel: String = "", requiresAccount: Bool = false,
+                kind: Kind? = nil, label: String = "", presentation: String = "", coverRef: CoverReference? = nil) {
         self.id = id; self.title = title; self.subtitle = subtitle; self.artwork = artwork; self.content = content
         self.ranking = ranking; self.previewSongs = Array(previewSongs.prefix(3))
         self.recommendationReason = recommendationReason
         self.coverLabel = coverLabel
         self.requiresAccount = requiresAccount
+        self.kind = kind; self.label = label; self.presentation = presentation; self.coverRef = coverRef
     }
 }
 public struct MusicPublicBrowseSectionTab: Sendable, Identifiable {
@@ -144,9 +164,11 @@ public struct MusicPublicBrowseSectionTab: Sendable, Identifiable {
 }
 public struct MusicPublicBrowseSection: Sendable, Identifiable {
     public enum Layout: String, Codable, Sendable {
-        case list, featureRail, playlistRail, songColumns, grid, banner, artistUpdates
-        case rankingStack, rankedSongs, rankingSmall
-        case vipSongs, vipRankedSongs
+        case list = "song-list", featureRail = "feature-rail", playlistRail = "playlist-rail"
+        case songColumns = "song-columns", grid = "playlist-grid", banner
+        case artistGrid = "artist-grid", channelGrid = "channel-grid", artistUpdates = "artist-updates"
+        case rankingStack = "ranking", rankedSongs = "ranked-songs", rankingSmall = "ranking-small"
+        case vipSongs = "vip-songs", vipRankedSongs = "vip-ranked-songs", albumRanking = "album-ranking"
     }
     public let id: String
     public let title: String
@@ -236,6 +258,10 @@ public protocol MusicPublicPlaylistSearching: Sendable {
 }
 public protocol MusicPublicBrowseRefreshing: Sendable {
     func refreshPublicCollection(_ collection: MusicPublicBrowseCollection) async
+}
+
+public protocol MusicPublicPlaylistSummaryReading: Sendable {
+    func publicPlaylistSummaries(platform: MusicPublicBrowsePlatform, ids: [String]) async throws -> [MusicPublicBrowseCollection]
 }
 
 public extension MusicPublicBrowsing {

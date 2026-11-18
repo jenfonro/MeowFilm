@@ -52,11 +52,11 @@ private actor NativeDailyStyleOwner: MusicNativeAccountProviding, MusicNativeHom
 
 final class MusicNativeHomeActionTests: XCTestCase {
     private func item(_ action: RuntimeValue, key: String = "entrance") -> RuntimeValue {
-        .object(["key": .string(key), "name": .string("实际入口"), "action": action])
+        .object(["key": .string(key), "title": .string("实际入口"), "kind": action[music: "type"], "action": action])
     }
     private func load(_ actions: [RuntimeValue]) async throws -> (NativeMusicService, NativeMusicResultFixture, MusicPublicBrowsePage) {
         let response = NativeDiscoveryFixture.page([NativeDiscoveryFixture.section("entries",
-            items: actions.enumerated().map { item($0.element, key: "entrance-\($0.offset)") }, type: "entries")])
+            items: actions.enumerated().map { item($0.element, key: "entrance-\($0.offset)") }, layout: "feature-rail")])
         let peer = NativeMusicResultFixture([response]), service = try await NativeMusicFixture.service(platform: peer)
         return (service, peer, try await service.homePage(cursor: nil, refresh: true))
     }
@@ -175,15 +175,17 @@ final class MusicNativeHomeActionTests: XCTestCase {
             await source.close(); await service.close()
         }
     }
-    func testMissingConsumedSeedArrayIsAParseFailureNotAnotherAction() async throws {
+    func testMissingActionMembersDoNotRejectTheCard() async throws {
         let peer = NativeMusicResultFixture([NativeDiscoveryFixture.page([NativeDiscoveryFixture.section("s", items: [
             item(.object(["type": .string("similar"), "sourceType": .string("song")]))])])])
         let service = try await NativeMusicFixture.service(platform: peer)
         let page = try await service.homePage(cursor: nil, refresh: true)
         XCTAssertEqual(page.sections.count, 1)
         let section = try XCTUnwrap(page.sections.first)
-        XCTAssertEqual(section.error, .upstreamInvalid)
-        XCTAssertTrue(section.items.isEmpty); XCTAssertTrue(section.tabs.isEmpty)
+        XCTAssertNil(section.error)
+        XCTAssertEqual(section.items.count, 1)
+        guard case .action(.similar(let ids, _)) = section.items[0].content else { return XCTFail("declared action") }
+        XCTAssertTrue(ids.isEmpty); XCTAssertTrue(section.tabs.isEmpty)
         let calls = await peer.calls(); XCTAssertEqual(calls.count, 1); await service.close()
     }
     func testFiniteSongCollectionIsNotAPlaylistAndKeepsOrderAndOccurrences() async throws {
@@ -226,12 +228,12 @@ final class MusicNativeHomeActionTests: XCTestCase {
     func testCanonicalKeysKeepDistinctOccurrencesAcrossReorderingAndPresentationChanges() async throws {
         func row(_ key: String, title: String) -> RuntimeValue {
             var value = item(.object(["type": .string("fm"), "mode": .string("EXPLORE")]), key: key)
-            if case .object(var fields) = value { fields["name"] = .string(title); value = .object(fields) }
+            if case .object(var fields) = value { fields["title"] = .string(title); value = .object(fields) }
             return value
         }
         let peer = NativeMusicResultFixture([
-            NativeDiscoveryFixture.page([NativeDiscoveryFixture.section("stable", items: [row("one", title: "旧"), row("two", title: "另一个")], type: "entries")]),
-            NativeDiscoveryFixture.page([NativeDiscoveryFixture.section("stable", items: [row("two", title: "改名"), row("one", title: "新")], type: "entries")])])
+            NativeDiscoveryFixture.page([NativeDiscoveryFixture.section("stable", items: [row("one", title: "旧"), row("two", title: "另一个")], layout: "feature-rail")]),
+            NativeDiscoveryFixture.page([NativeDiscoveryFixture.section("stable", items: [row("two", title: "改名"), row("one", title: "新")], layout: "feature-rail")])])
         let service = try await NativeMusicFixture.service(platform: peer)
         let first = try await service.homePage(cursor: nil, refresh: true), next = try await service.homePage(cursor: nil, refresh: true)
         XCTAssertEqual(first.sections[0].id, next.sections[0].id)

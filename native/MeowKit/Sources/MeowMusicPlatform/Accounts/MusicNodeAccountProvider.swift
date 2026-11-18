@@ -160,22 +160,24 @@ actor MusicNodeAccountProvider: MusicAccountProvider, MusicAccountSessionPublish
             let value = try await call("personalPlaylists", ["page": .number(Double(page)),
                 "kind": .string("all"), "continuation": continuation])
             guard own == epoch else { throw MusicServiceError.staleResult }
-            for row in try value[music: "items"].musicRequiredArray() {
-                let id = try row[music: "id"].musicRequiredText()
+            for row in value[music: "items"].musicArray {
+                let id = row[music: "id"].musicText
                 let action = row[music: "action"]
                 var target: RuntimeObject = ["id": action[music: "id"] == .null ? .string(id) : action[music: "id"]]
                 if row[music: "owned"].musicBool, row[music: "locator"] != .null {
                     target["personal"] = row[music: "locator"]
                 }
-                if action[music: "type"] != .string("unsupported") { targets[id] = target }
+                if !id.isEmpty, action[music: "type"] != .string("unsupported") { targets[id] = target }
                 result.append(.object(["id": .string(id),
                     "title": .string(row[music: "name"].musicText), "owned": .bool(row[music: "owned"].musicBool),
                     "count": row[music: "count"]]))
             }
-            guard value[music: "more"].musicBool else { collectionTargets = targets; return result }
             continuation = value[music: "continuation"]
-            let next = try MusicPlatformDTO.count(continuation[music: "page"])
-            guard next > page else { throw MusicServiceError.upstreamInvalid }; page = next
+            guard value[music: "more"].musicBool,
+                  let next = MusicPlatformDTO.optionalCount(continuation[music: "page"]), next > page else {
+                collectionTargets = targets; return result
+            }
+            page = next
         }
     }
     func tracks(collectionID: String) async throws -> [RuntimeValue] {
@@ -247,20 +249,20 @@ actor MusicNodeAccountProvider: MusicAccountProvider, MusicAccountSessionPublish
         let value = try await call(operation, params); try await authorize()
         let context = value[music: "continuation"], heartbeat: MusicSimilarHeartbeatContext?
         if case .heartbeat = request, context != .null {
-            heartbeat = .init(playlistID: try context[music: "playlistId"].musicRequiredText(),
-                seedID: try context[music: "startMusicId"].musicRequiredText(),
-                count: try MusicPlatformDTO.count(context[music: "count"]))
+            heartbeat = .init(playlistID: context[music: "playlistId"].musicText,
+                seedID: context[music: "startMusicId"].musicText,
+                count: MusicPlatformDTO.optionalCount(context[music: "count"]) ?? 0)
         } else { heartbeat = nil }
         return .init(items: try MusicPlatformDTO.tracks(value), heartbeatContext: heartbeat,
             hasMore: { if case .bool(let result) = value[music: "hasMore"] { return result }; return nil }(),
-            offset: value[music: "offset"] == .null ? nil : try MusicPlatformDTO.count(value[music: "offset"]))
+            offset: MusicPlatformDTO.optionalCount(value[music: "offset"]))
     }
     func dailyStyleCategories(authorize: @escaping @Sendable () async throws -> Void) async throws -> [MusicDailyStyleCategory] {
         try await authorize(); let value = try await call("dailyStyle.get"); try await authorize()
-        return try value[music: "categories"].musicRequiredArray().map { row in
-            .init(id: try row[music: "id"].musicRequiredText(), name: row[music: "name"].musicText,
-                  tags: try row[music: "tags"].musicRequiredArray().map {
-                      .init(id: try $0[music: "id"].musicRequiredText(), name: $0[music: "name"].musicText)
+        return value[music: "categories"].musicArray.map { row in
+            .init(id: row[music: "id"].musicText, name: row[music: "name"].musicText,
+                  tags: row[music: "tags"].musicArray.map {
+                      .init(id: $0[music: "id"].musicText, name: $0[music: "name"].musicText)
                   })
         }
     }

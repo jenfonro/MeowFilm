@@ -13,9 +13,9 @@ final class MusicNativePublicBrowseCubeParityTests: XCTestCase {
             "tabs": .array(groups.map { .object(["id": .string($0.0), "name": .string($0.0), "items": .array($0.1)]) })])
     }
     func testCanonicalTabsKeepNumericFMSelectorAndDeclaredCoverLabelsWithoutNativeHydration() async throws {
-        let fm: RuntimeValue = .object(["name": .string("规则封面"), "coverLabel": .string("规则封面"),
+        let fm: RuntimeValue = .object(["title": .string("规则封面"), "kind": .string("fm"), "coverLabel": .string("规则封面"),
             "action": .object(["type": .string("fm"), "provider": .string("rule"), "ruleId": .string(""), "tabTagId": .string("17001"), "sourceName": .string("规则封面")])])
-        let inherited: RuntimeValue = .object(["name": .string("继承封面"), "coverLabel": .string("继承封面"),
+        let inherited: RuntimeValue = .object(["title": .string("继承封面"), "kind": .string("fm"), "coverLabel": .string("继承封面"),
             "action": .object(["type": .string("fm"), "provider": .string("rule"), "tabTagId": .string("electronic"), "sourceName": .string("继承封面")])])
         let response = D.page([tabs([("一", [try D.song("11"), D.collection("41", title: "水合歌单")]), ("二", [try D.song("12"), fm, inherited])], selected: "二")])
         let peer = NativeMusicResultFixture([response]), service = try await NativeMusicFixture.service(platform: peer), page = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
@@ -34,8 +34,8 @@ final class MusicNativePublicBrowseCubeParityTests: XCTestCase {
         let calls = await peer.calls(); XCTAssertEqual(calls.count, 1); await service.close()
     }
     func testCanonicalGridAndScrollKeepSongCollectionAndAlbumSectionsSeparate() async throws {
-        let response = D.page([D.section("songs", items: [try D.song("11")], type: "songs", title: "混排"),
-            D.section("grid", items: [D.collection("41"), D.collection("42", album: true)], title: "混排", layout: "grid"),
+        let response = D.page([D.section("songs", items: [try D.song("11")], title: "混排", layout: "song-columns"),
+            D.section("grid", items: [D.collection("41"), D.collection("42", album: true)], title: "混排", layout: "playlist-grid"),
             D.section("rail", items: [D.collection("43")], title: "混排")])
         let service = try await NativeMusicFixture.service(platform: NativeMusicResultFixture([response])), page = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
         XCTAssertEqual(page.sections.map(\.layout), [.songColumns, .grid, .playlistRail]); XCTAssertEqual(page.sections.map(\.title), ["混排", "混排", "混排"])
@@ -44,7 +44,7 @@ final class MusicNativePublicBrowseCubeParityTests: XCTestCase {
     func testFiniteFeedKeepsHeaderSeparateAndDoesNotInventContinuationOrAlgorithmRead() async throws {
         var header = D.collection("43", title: "专辑", album: true)
         if case .object(var row) = header { row["subtitle"] = .string("副标题"); header = .object(row) }
-        let response = D.page([D.section("header", items: [header]), D.section("feed", items: [try D.song("11"), try D.song("12")], type: "songs", layout: "list")])
+        let response = D.page([D.section("header", items: [header]), D.section("feed", items: [try D.song("11"), try D.song("12")], layout: "song-list")])
         let peer = NativeMusicResultFixture([response]), service = try await NativeMusicFixture.service(platform: peer), page = try await service.publicDiscovery(.channel(channel, tag: ""), cursor: nil)
         XCTAssertNil(page.cursor); XCTAssertNil(page.notice); XCTAssertEqual(page.sections.count, 2); XCTAssertEqual(page.sections[0].items[0].subtitle, "副标题")
         XCTAssertEqual(page.sections[1].layout, .list); XCTAssertEqual(page.sections[1].items.count, 2)

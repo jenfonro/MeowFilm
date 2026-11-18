@@ -45,6 +45,16 @@ public actor MusicPlatformClient {
     public func bindSessions(_ prepare: @escaping @Sendable (String) async throws -> Void) {
         prepareSession = prepare
     }
+    /// Local metadata reuse is scoped to the same published account session as reads.
+    public func contentRevision(platform: String) async throws -> UUID? {
+        guard !closed, !shuttingDown else { throw MusicServiceError.closed }
+        try await prepareSession?(platform)
+        let revision = publicationOrder[platform]
+        if let publication = publications[platform] { try await publication.task.value }
+        guard !closed, !shuttingDown, revision == publicationOrder[platform] else { throw MusicServiceError.staleResult }
+        try Task.checkCancellation()
+        return revision
+    }
 
     public func publish(platform: String, session: RuntimeValue?,
                         authorize: (@Sendable () throws -> Void)? = nil) async throws {

@@ -16,7 +16,7 @@ public static class MusicHomeSnapshotTests
         yield return new("Music home optional cache reopens ordered pages without account or runtime authority", Roundtrip);
         yield return new("Music home cache reopens through its independent local cache namespace and root", LocalReopen);
         yield return new("Music home bad cached content misses and fresh pages repair it", Damaged);
-        yield return new("Music home foreign root pages miss without replacing accepted snapshots", PlatformMismatch);
+        yield return new("Music home cache uses its native platform scope without rejecting partial page fields", PlatformMismatch);
         yield return new("Music home song cards and previews resolve current cross-platform repository references", SongReferences);
         yield return new("Music home display cache keeps empty results and has no arbitrary page cap", EmptyAndMany);
         yield return new("Music home cache write does not wait for initial read or persistent receipt", SlowDisk);
@@ -32,12 +32,12 @@ public static class MusicHomeSnapshotTests
         await using var store = new CacheDocumentStore(backing);
         var owner = new MusicHomeSnapshotStore(store);
         var first = Page("wy", "first");
-        first["entries"]!.AsArray().Add(new JsonObject
+        first["sections"]!.AsArray().Insert(0, Feature(new JsonObject
         {
-            ["id"] = "daily", ["name"] = "每日推荐", ["requiresAccount"] = true,
+            ["id"] = "daily", ["kind"] = "daily", ["label"] = "每日推荐", ["title"] = "每日推荐", ["requiresAccount"] = true,
             ["display"] = true, ["available"] = true, ["presentation"] = "static",
             ["action"] = new JsonObject { ["type"] = "daily", ["branch"] = "default" }
-        });
+        }));
         await owner.SaveAsync(Snapshot("wy", first, Page("wy", "second")));
         await store.DrainAsync();
         await using var reopened = new CacheDocumentStore(backing);
@@ -72,7 +72,7 @@ public static class MusicHomeSnapshotTests
             Check(accountSnapshot.Platform == "wy" && accountSnapshot.Pages.Length == 1 &&
                 PageId(accountSnapshot.Pages[0]) == content);
             Check(accountSnapshot.Pages[0].EnumerateObject().Select(property => property.Name)
-                .Order(StringComparer.Ordinal).SequenceEqual(new[] { "entries", "platform", "sections" }));
+                .Order(StringComparer.Ordinal).SequenceEqual(new[] { "platform", "sections" }));
             string text = Encoding.UTF8.GetString(backing.Data[MusicHomeSnapshotStore.Namespace]);
             Check(!text.Contains(account, StringComparison.Ordinal));
             foreach (string field in new[] { "ok", "scope", "accountStamp", "credentials", "cookie", "cursor",
@@ -92,9 +92,9 @@ public static class MusicHomeSnapshotTests
         {
             await using var songs = new MusicRecordTestStore(Path.Combine(root, "songs"));
             var first = Page("wy", "disk-first");
-            first["entries"] = new JsonArray(new JsonObject
+            first["sections"]!.AsArray().Insert(0, Feature(new JsonObject
             {
-                ["id"] = "daily-entry", ["key"] = "daily-key", ["name"] = "每日推荐",
+                ["id"] = "daily-entry", ["key"] = "daily-key", ["kind"] = "daily", ["title"] = "每日推荐", ["label"] = "每日推荐",
                 ["presentation"] = "preview", ["dayOfMonth"] = 7, ["decoration"] = "calendar",
                 ["requiresAccount"] = true, ["display"] = true, ["available"] = true,
                 ["action"] = new JsonObject { ["type"] = "daily", ["branch"] = "style" },
@@ -103,8 +103,8 @@ public static class MusicHomeSnapshotTests
                     ["title"] = "Preview", ["artist"] = "Artist", ["cover"] = "https://image.invalid/preview.jpg",
                     ["rank"] = 2, ["lastRank"] = 3
                 })
-            });
-            var section = first["sections"]![0]!;
+            }));
+            var section = first["sections"]![1]!;
             section["action"] = new JsonObject
             {
                 ["type"] = "channel",
@@ -112,11 +112,20 @@ public static class MusicHomeSnapshotTests
             };
             section["items"]!.AsArray().Add(new JsonObject
             {
-                ["id"] = "song-card", ["key"] = "song-key",
+                ["id"] = "song-card", ["key"] = "song-key", ["kind"] = "song", ["title"] = "Card title",
+                ["action"] = new JsonObject { ["type"] = "song", ["id"] = "101" },
                 ["song"] = MusicSongFixture.Online("wy", "101", "Song", "Artist", cover: "https://image.invalid/song.jpg"),
                 ["playbackSource"] = new JsonObject { ["type"] = "playlist", ["id"] = "202" }
             });
-            first["items"] = new JsonArray(MusicSongFixture.Online("wy", "303", "Root song"));
+            first["sections"]!.AsArray().Add(new JsonObject
+            {
+                ["layout"] = "song-list", ["items"] = new JsonArray(new JsonObject
+                {
+                    ["kind"] = "song", ["title"] = "Root song",
+                    ["action"] = new JsonObject { ["type"] = "song", ["id"] = "303" },
+                    ["song"] = MusicSongFixture.Online("wy", "303", "Root song")
+                })
+            });
             first["expiresAt"] = 1; // Past service lifetime is not a display-cache TTL.
             await using (var backing = new LocalDocumentStore(root, AppIdentity.CacheNamespaces,
                 protectedNamespaces: AppIdentity.CacheProtectedNamespaces))
@@ -142,8 +151,6 @@ public static class MusicHomeSnapshotTests
                 Check((await library.ExecuteAsync("music.library.list")).GetProperty("ok").GetBoolean());
                 var saved = (await new MusicHomeSnapshotStore(store).ReadAsync(library.SongSnapshot))!;
                 Check(saved.Platform == "wy" && saved.Pages.Select(PageId).SequenceEqual(new[] { "disk-first", "disk-second" }));
-                foreach (string field in new[] { "entries", "items" })
-                    Check(JsonNode.DeepEquals(first[field], JsonNode.Parse(saved.Pages[0].GetProperty(field).GetRawText())));
                 var sections = MusicCatalogDto.Read(saved.Pages[0], "wy", "home", "");
                 var daily = sections[0].Items.Single();
                 Check(daily.CanOpen && daily.RequiresAccount && daily.ActionId == "daily" &&
@@ -173,7 +180,7 @@ public static class MusicHomeSnapshotTests
     private static async Task Damaged()
     {
         foreach (byte[] data in new[] { "{"u8.ToArray(), "[]"u8.ToArray(), "{\"pages\":null}"u8.ToArray(),
-            "{\"platform\":\"wy\",\"pages\":[{}]}"u8.ToArray() })
+            "{\"platform\":\"unknown\",\"pages\":[{}]}"u8.ToArray() })
         {
             await using var backing = new MusicOfficialAudioTests.MemoryStore();
             backing.Data[MusicHomeSnapshotStore.Namespace] = data;
@@ -188,7 +195,7 @@ public static class MusicHomeSnapshotTests
     {
         await using var store = new CacheDocumentStore();
         var owner = new MusicHomeSnapshotStore(store);
-        await owner.SaveAsync(Snapshot("wy", new JsonObject { ["platform"] = "wy", ["entries"] = new JsonArray() }));
+        await owner.SaveAsync(Snapshot("wy", new JsonObject { ["platform"] = "wy", ["sections"] = new JsonArray() }));
         Check(MusicCatalogDto.Read((await owner.ReadAsync(_ => null))!.Pages.Single(), "wy", "home", "").Count == 0);
         var pages = Enumerable.Range(0, 1025).Select(i => Page("wy", i.ToString())).ToArray();
         await owner.SaveAsync(Snapshot("wy", pages));
@@ -198,34 +205,18 @@ public static class MusicHomeSnapshotTests
     }
     private static async Task PlatformMismatch()
     {
-        foreach (var invalid in new[]
-        {
-            Snapshot("wy", Page("kg", "mismatch")),
-            Snapshot("wy", Page("wy", "first"), Page("kg", "mixed"))
-        })
-        {
-            await using var backing = new MusicOfficialAudioTests.MemoryStore();
-            await using var store = new CacheDocumentStore(backing);
-            var owner = new MusicHomeSnapshotStore(store);
-            await owner.SaveAsync(Snapshot("wy", Page("wy", "safe")));
-            await store.DrainAsync();
-            byte[] safe = backing.Data[MusicHomeSnapshotStore.Namespace].ToArray();
-            await owner.SaveAsync(invalid);
-            var retained = (await owner.ReadAsync(_ => null))!;
-            Check(retained.Platform == "wy" && PageId(retained.Pages.Single()) == "safe");
-            await store.DrainAsync();
-            Check(backing.Data[MusicHomeSnapshotStore.Namespace].SequenceEqual(safe));
-            await using (var reopened = new CacheDocumentStore(backing))
-            {
-                var restored = (await new MusicHomeSnapshotStore(reopened).ReadAsync(_ => null))!;
-                Check(restored.Platform == "wy" && PageId(restored.Pages.Single()) == "safe");
-            }
-
-            backing.Data[MusicHomeSnapshotStore.Namespace] =
-                JsonSerializer.SerializeToUtf8Bytes(new { platform = invalid.Platform, pages = invalid.Pages });
-            await using var damaged = new CacheDocumentStore(backing);
-            Check(await new MusicHomeSnapshotStore(damaged).ReadAsync(_ => null) is null);
-        }
+        await using var backing = new MusicOfficialAudioTests.MemoryStore();
+        await using var store = new CacheDocumentStore(backing);
+        var owner = new MusicHomeSnapshotStore(store);
+        var partial = Page("kg", "partial");
+        partial["sections"]!.AsArray().Add(new JsonObject { ["title"] = "Empty section" });
+        await owner.SaveAsync(Snapshot("wy", partial, new JsonObject()));
+        var restored = (await owner.ReadAsync(_ => null))!;
+        Check(restored.Platform == "wy" && restored.Pages.Length == 2 && PageId(restored.Pages[0]) == "partial");
+        Check(restored.Pages.All(page => page.GetProperty("platform").GetString() == "wy"));
+        Check(MusicCatalogDto.Read(restored.Pages[0], "wy", "home", "").Count == 2);
+        await owner.SaveAsync(Snapshot("unknown", Page("wy", "invalid-scope")));
+        Check(PageId((await owner.ReadAsync(_ => null))!.Pages[0]) == "partial");
     }
     private static async Task SongReferences()
     {
@@ -234,10 +225,14 @@ public static class MusicHomeSnapshotTests
         var song = await library.AdoptSongAsync(MusicSongFixture.Online("kg", "canonical-other-platform",
             "Initial title", "Artist", duration: 180, cover: "https://images.invalid/initial.png"), default);
         var page = Page("wy", "current");
-        page["sections"]![0]!["items"] = new JsonArray(song.DeepClone());
-        page["entries"] = new JsonArray(new JsonObject
+        page["sections"]![0]!["items"] = new JsonArray(new JsonObject
         {
-            ["id"] = "chart", ["name"] = "Current chart", ["presentation"] = "preview",
+            ["kind"] = "song", ["title"] = "Independent card", ["cover"] = "https://images.invalid/card.png",
+            ["song"] = song.DeepClone()
+        });
+        page["sections"]!.AsArray().Add(Feature(new JsonObject
+        {
+            ["id"] = "chart", ["kind"] = "playlist", ["title"] = "Current chart", ["presentation"] = "preview",
             ["action"] = new JsonObject { ["type"] = "playlist", ["id"] = "chart" },
             ["preview"] = new JsonArray(new JsonObject
             {
@@ -245,7 +240,7 @@ public static class MusicHomeSnapshotTests
                 ["cover"] = "https://images.invalid/stale-preview.png", ["rank"] = 1,
                 ["song"] = song.DeepClone()
             })
-        });
+        }));
         await using (var cache = new CacheDocumentStore(backing))
         {
             await new MusicHomeSnapshotStore(cache).SaveAsync(Snapshot("wy", page));
@@ -255,7 +250,7 @@ public static class MusicHomeSnapshotTests
         Check(saved.Contains(LJ.S(song["songId"]), StringComparison.Ordinal) &&
             !saved.Contains("sources", StringComparison.Ordinal) &&
             !saved.Contains("Initial title", StringComparison.Ordinal) &&
-            !saved.Contains("Stale preview", StringComparison.Ordinal) &&
+            saved.Contains("Stale preview", StringComparison.Ordinal) &&
             !saved.Contains("initial.png", StringComparison.Ordinal));
         await library.AdoptPlatformResultAsync(JsonSerializer.SerializeToElement(MusicSongFixture.Online(
             "kg", "canonical-other-platform", "Corrected title", "Artist", duration: 180,
@@ -265,8 +260,8 @@ public static class MusicHomeSnapshotTests
         var cards = MusicCatalogDto.Read(restored.Pages.Single(), "wy", "home", "").SelectMany(section => section.Items).ToArray();
         var current = cards.Single(card => card.Song is not null);
         var preview = cards.Single(card => card.Id == "chart").PreviewSongs.Single();
-        Check(current.Title == "Corrected title" && current.Platform == "kg" &&
-            current.Song!.Id == LJ.S(song["songId"]) && preview.Title == current.Title &&
+        Check(current.Title == "Independent card" && current.Cover == "https://images.invalid/card.png" &&
+            current.Song!.Title == "Corrected title" && current.Song.Id == LJ.S(song["songId"]) && preview.Title == current.Song.Title &&
             preview.Cover == "https://images.invalid/corrected.png" && preview.Song!.Id == current.Song.Id);
     }
     private static async Task SlowDisk()
@@ -339,7 +334,8 @@ public static class MusicHomeSnapshotTests
         var owner = new MusicHomeSnapshotStore(store);
         var page = Page("wy", "boundary"); page.Remove("ok");
         page["sections"]![0]!["items"]![0]!["subtitle"] = "";
-        int overhead = JsonSerializer.SerializeToUtf8Bytes(new { platform = "wy", pages = new[] { page } }).Length;
+        await owner.SaveAsync(Snapshot("wy", page));
+        int overhead = store.ReadMemory(MusicHomeSnapshotStore.Namespace).Data!.Length;
         page["sections"]![0]!["items"]![0]!["subtitle"] = new string('x', LocalDocumentStore.MaximumDocumentBytes - overhead);
         await owner.SaveAsync(Snapshot("wy", page));
         Check(store.ReadMemory(MusicHomeSnapshotStore.Namespace).Data!.Length == LocalDocumentStore.MaximumDocumentBytes);
@@ -405,20 +401,26 @@ public static class MusicHomeSnapshotTests
     }
     private static JsonObject Page(string platform, string id) => new()
     {
-        ["ok"] = true, ["platform"] = platform, ["entries"] = new JsonArray(),
+        ["ok"] = true, ["platform"] = platform,
         ["sections"] = new JsonArray(new JsonObject
         {
-            ["id"] = id, ["title"] = "Home " + id, ["type"] = "playlists", ["layout"] = "rail",
+            ["id"] = id, ["title"] = "Home " + id, ["layout"] = "playlist-rail",
             ["items"] = new JsonArray(new JsonObject
             {
-                ["id"] = id, ["name"] = "Playlist " + id, ["cover"] = "https://image.invalid/playlist.jpg",
+                ["id"] = id, ["kind"] = "playlist", ["title"] = "Playlist " + id, ["cover"] = "https://image.invalid/playlist.jpg",
                 ["action"] = new JsonObject { ["type"] = "playlist", ["id"] = id }
             })
         })
     };
 
+    private static JsonObject Feature(params JsonObject[] cards) => new()
+    {
+        ["id"] = "features", ["layout"] = "feature-rail",
+        ["items"] = new JsonArray(cards.Cast<JsonNode?>().ToArray())
+    };
     private static MusicHomeSnapshot Snapshot(string platform, params JsonObject[] pages) =>
         new(platform, pages.Select(page => JsonSerializer.SerializeToElement(page)).ToArray());
-    private static string PageId(JsonElement page) => page.GetProperty("sections")[0].GetProperty("id").GetString()!;
+    private static string PageId(JsonElement page) => page.GetProperty("sections").EnumerateArray().First(section =>
+        MusicCatalogDto.Text(section, "layout") == "playlist-rail").GetProperty("id").GetString()!;
     private static void Check(bool value) { if (!value) throw new InvalidOperationException("Home cache assertion"); }
 }

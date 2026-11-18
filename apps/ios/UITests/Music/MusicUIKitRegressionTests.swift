@@ -3197,7 +3197,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let collection = MusicPublicBrowseCollection(platform: .netease, nativeID: "1",
             title: "标题")
         let overlay = MusicPublicBrowseItem(id: "overlay", title: "标题", subtitle: "副标题",
-                                            content: .collection(collection))
+                                            content: .collection(collection), presentation: "preview")
 
         cell.configure(item: overlay, layout: .featureRail, theme: PageTheme(), onPlay: {})
         let provider = try XCTUnwrap(CGDataProvider(data: Data([250, 200, 100, 255]) as CFData))
@@ -3232,6 +3232,12 @@ final class MusicUIKitRegressionTests: XCTestCase {
         XCTAssertTrue(standardBottom.getRed(&red, green: &green, blue: &blue, alpha: &alpha))
         XCTAssertEqual(0.2126 * red + 0.7152 * green + 0.0722 * blue, 96.0 / 255.0, accuracy: 0.01)
         XCTAssertEqual(cell.contentView.backgroundColor, standardBottom)
+
+        let samePresentation = MusicPublicBrowseItem(id: "same-presentation", title: "另一动作",
+            content: .action(.fm(mode: .default, submode: "", entry: nil)), presentation: "preview")
+        cell.configure(item: samePresentation, layout: .featureRail, theme: PageTheme(), onPlay: {})
+        artwork.onImage?(UIImage(cgImage: source), nil)
+        XCTAssertEqual(UIColor(cgColor: try XCTUnwrap((gradient.colors as? [CGColor])?.last)), bottom)
 
         cell.configure(item: overlay, layout: .playlistRail, theme: PageTheme(), onPlay: {})
         cell.layoutIfNeeded()
@@ -3435,6 +3441,42 @@ final class MusicUIKitRegressionTests: XCTestCase {
         }
     }
 
+    func testDeclaredSongListKeepsRowGeometryWithUnavailableMembers() async throws {
+        let cards = [
+            MusicPublicBrowseItem(id: "display", title: "仅展示歌曲", content: .unavailable),
+            MusicPublicBrowseItem(id: "playlist", title: "歌单",
+                content: .collection(.init(platform: .netease, nativeID: "1", title: "歌单"))),
+        ]
+        let service = MusicUIKitRegressionService(browse: .init(sections: [
+            .init(id: "songs", title: "歌曲", items: cards, layout: .list),
+        ]))
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let controller = MusicBrowseViewController(
+            title: "频道", model: model, browser: service, request: .discovery(.home),
+            appearance: MusicAppearancePreferencesStore(), router: MusicUIKitRegressionRouter(), embedded: true
+        )
+        let window = mount(controller)
+        defer { release(controller, window: window) }
+        let collection = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UICollectionView }.first)
+        let loaded = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                collection.layoutIfNeeded()
+                return collection.numberOfSections > 0 && collection.numberOfItems(inSection: 0) == 2
+            }
+        }, evaluatedWith: collection)
+        await fulfillment(of: [loaded], timeout: 2)
+        controller.view.layoutIfNeeded(); collection.layoutIfNeeded()
+        let frames = try (0..<2).map { index in
+            try XCTUnwrap(collection.collectionViewLayout.layoutAttributesForItem(
+                at: IndexPath(item: index, section: 0))).frame
+        }
+        XCTAssertEqual(frames[0].height, 64, accuracy: 0.5)
+        XCTAssertEqual(frames[1].height, 64, accuracy: 0.5)
+        XCTAssertEqual(frames[0].width, frames[1].width, accuracy: 0.5)
+        XCTAssertGreaterThan(frames[1].minY, frames[0].minY)
+        await model.close()
+    }
+
     func testVIPRankedSongsStackVerticallyAtFullWidthWithoutHorizontalScrolling() async throws {
         let cards = (0..<3).map { index in
             MusicPublicBrowseItem(
@@ -3535,6 +3577,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
                     .init(id: "banner", title: "电音", content: .collection(
                         .init(platform: .netease, nativeID: "1", title: "电音")
                     )),
+                    .init(id: "display-only-banner", title: "无动作横幅", content: .unavailable),
                 ], layout: .banner),
             ], filters: values, selectedFilter: values.first?.id ?? ""))
             let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
@@ -3571,6 +3614,10 @@ final class MusicUIKitRegressionTests: XCTestCase {
             XCTAssertEqual(tags.frame.minY, contentTop, accuracy: 0.5)
             XCTAssertEqual(collection.frame.minY, contentTop + (values.isEmpty ? 0 : 56), accuracy: 0.5)
             XCTAssertEqual(cell.contentView.layer.cornerRadius, 14)
+            let scroll = try XCTUnwrap(descendants(cell).compactMap { $0 as? UIScrollView }.first)
+            XCTAssertTrue(scroll.isPagingEnabled)
+            XCTAssertEqual(scroll.contentSize.width, attributes.frame.width * 2, accuracy: 0.5)
+            XCTAssertEqual(descendants(cell).compactMap { $0 as? UIPageControl }.first?.numberOfPages, 2)
             XCTAssertFalse(descendants(cell).compactMap { $0 as? UIButton }.contains {
                 $0.accessibilityIdentifier?.hasPrefix("music.browse.play.") == true && !$0.isHidden
             })

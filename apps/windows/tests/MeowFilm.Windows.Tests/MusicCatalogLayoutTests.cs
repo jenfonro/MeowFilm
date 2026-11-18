@@ -18,9 +18,11 @@ public static class MusicCatalogLayoutTests
     {
         yield return Case("section more retains full bounds at narrow and wide layouts across display scales", SectionMoreGeometry);
         yield return Case("first-load templates match real two-banner and card geometry without artwork", SkeletonGeometry);
-        yield return Case("banner artwork dimensions drive full-image aspect ratio after asynchronous arrival", BannerAspect);
+        yield return Case("banner frame stays 2.56 to 1 with wide square and portrait artwork", BannerAspect);
         yield return Case("two-banner paging retains final resources resize and indicator position", BannerPaging);
         yield return Case("indicator keeps the active anchor while neighboring dots slide and scale", IndicatorDrawing);
+        yield return Case("fixed entry labels captions and resting gradient bind without input", EntryRoles);
+        yield return Case("artwork demand visibility respects clipping hiding and reentry without input", ArtworkVisibility);
     }
 
     private static TestCase Case(string name, Func<Task> run) =>
@@ -99,7 +101,7 @@ public static class MusicCatalogLayoutTests
             {
                 var section = new MusicCatalogSection("", Enumerable.Range(1, 3).Select(i =>
                     new MusicCatalogCard(i.ToString(), "横幅" + i, "", "", "playlist", "wy", ActionId: i.ToString()))
-                    .ToArray(), Type: "banner");
+                    .ToArray(), Layout: "banner");
                 var shelf = new Shelf { DataContext = section, CardTemplate = (DataTemplate)template.FindResource(key) };
                 using var shelfScene = new Scene(shelf, width);
                 await Until(() => shelf.ScrollHost is not null && Math.Abs(shelf.CardWidth - pitch) < .5);
@@ -126,7 +128,7 @@ public static class MusicCatalogLayoutTests
     private static async Task BannerAspect()
     {
         var template = new MusicCatalogView();
-        foreach (var (width, height) in new[] { (1029, 399), (800, 200) })
+        foreach (var (width, height) in new[] { (1029, 399), (800, 200), (400, 400), (200, 800) })
         {
             var card = (FrameworkElement)((DataTemplate)template.FindResource("Catalog.Banner")).LoadContent();
             card.DataContext = new MusicCatalogCard("banner", "横幅", "", "https://art.example.test/banner", "playlist", "wy", ActionId: "1");
@@ -143,8 +145,8 @@ public static class MusicCatalogLayoutTests
             {
                 scene.Layout(viewport); await Drain(); scene.Layout(viewport);
                 Check(Math.Abs(artwork.AspectRatio - (double)width / height) < .0001, "decoded dimensions retain the real source ratio");
-                Check(artwork.Stretch == Stretch.Uniform && Math.Abs(artwork.ActualHeight - artwork.ActualWidth * height / width) < 1,
-                    "the full source fits the dynamically measured frame without cropping or stretching");
+                Check(artwork.Stretch == Stretch.Uniform && Math.Abs(artwork.ActualHeight - artwork.ActualWidth / 2.56) < 1,
+                    "the full source fits the fixed frame without cropping or stretching");
             }
             Check(loader.Reads == 1, "resizing does not reacquire artwork");
         }
@@ -159,11 +161,59 @@ public static class MusicCatalogLayoutTests
     private sealed class BannerLease(BitmapSource image) : IArtworkLease
     { public BitmapSource Image => image; public void Dispose() { } }
 
+    private static async Task EntryRoles()
+    {
+        foreach (bool home in new[] { false, true })
+        {
+            var fixture = MusicNativeCatalogTests.ContentFixture(home ? "home-page" : "browse-page");
+            var sections = MusicCatalogDto.Read(fixture, "wy", home ? "home" : "channel", "");
+            var model = sections.First(section => section.IsEntrySection).Items[0] with { Cover = "", Decoration = "" };
+            var card = new EntryCard { DataContext = model, Width = 152 };
+            using var scene = new Scene(card, 152);
+            await Drain(); scene.Layout(152);
+            var header = (Grid)card.FindName("TitleHeader");
+            var caption = (TextBlock)card.FindName("Caption");
+            var surface = (Grid)card.FindName("Surface");
+            var shade = (Border)card.FindName("BottomShade");
+            Check(header.Visibility == (home ? Visibility.Visible : Visibility.Collapsed),
+                "only home labels occupy the upper title slot");
+            Check(caption.Text == (home ? model.Subtitle : model.Title), "the lower caption uses the fixed role");
+            if (home) Check(Descendants<TextBlock>(header).Any(text => text.Text == model.Label), "home label is rendered");
+            Check(Descendants<TextBlock>(card).All(text => text.FontWeight == FontWeights.Normal),
+                "ordinary card typography remains regular");
+            Check(CardMotion.GetProgress(surface) == 0 && shade.Visibility == Visibility.Visible &&
+                !shade.IsHitTestVisible && ReferenceEquals(surface.Background, shade.Background),
+                "the resting gradient is present without hover and shares the footer color");
+            var mask = (LinearGradientBrush)shade.OpacityMask;
+            Check(mask.GradientStops.Select(stop => stop.Offset).SequenceEqual([.62, .82, 1d]) &&
+                mask.GradientStops.Select(stop => stop.Color.A).SequenceEqual(new byte[] { 0, 112, 255 }),
+                "the frozen alpha stops are not an animated hover effect");
+        }
+    }
+
+    private static async Task ArtworkVisibility()
+    {
+        var viewport = new Canvas { Width = 200, Height = 180, ClipToBounds = true };
+        var slot = new Border { Width = 152, Height = 152 };
+        viewport.Children.Add(slot);
+        using var scene = new Scene(viewport, 200);
+        await Drain();
+        Check(MusicCatalogView.InCatalogViewport(slot), "the loaded visible slot creates demand");
+        Canvas.SetTop(slot, 200); scene.Layout(200);
+        Check(!MusicCatalogView.InCatalogViewport(slot), "a realized but clipped slot cannot create demand");
+        Canvas.SetTop(slot, 160); scene.Layout(200);
+        Check(MusicCatalogView.InCatalogViewport(slot), "partial visibility creates demand");
+        viewport.Visibility = Visibility.Collapsed; scene.Layout(200);
+        Check(!MusicCatalogView.InCatalogViewport(slot), "hidden ancestors stop new demand");
+        viewport.Visibility = Visibility.Visible; Canvas.SetTop(slot, 0); scene.Layout(200);
+        Check(MusicCatalogView.InCatalogViewport(slot), "redisplay restores visibility without reconstructing the slot");
+    }
+
     private static async Task BannerPaging()
     {
         var template = new MusicCatalogView();
         var section = new MusicCatalogSection("", Enumerable.Range(1, 9).Select(i =>
-            new MusicCatalogCard(i.ToString(), "横幅" + i, "", "", "playlist", "wy", ActionId: i.ToString())).ToArray(), Type: "banner");
+            new MusicCatalogCard(i.ToString(), "横幅" + i, "", "", "playlist", "wy", ActionId: i.ToString())).ToArray(), Layout: "banner");
         var shelf = new Shelf { DataContext = section, CardTemplate = (DataTemplate)template.FindResource("Catalog.Banner") };
         using var scene = new Scene(shelf, 826);
         await Until(() => shelf.ScrollHost is not null && shelf.MaximumOffset > 0);

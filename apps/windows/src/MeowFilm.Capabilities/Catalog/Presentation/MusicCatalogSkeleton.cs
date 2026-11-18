@@ -25,7 +25,7 @@ public sealed class MusicCatalogSkeleton : Panel
         {
             var (_, pitch) = Shelf.MeasureCards(width, 260, 20, banner: true);
             var cardWidth = Math.Max(0, pitch - 20);
-            const double height = 160; // Unknown until artwork publishes its intrinsic ratio.
+            double height = cardWidth / 2.56;
             for (int i = 0; i < 2; i++) bounds.Add(new(i * pitch, y, cardWidth, height));
             y += height + 56;
         }

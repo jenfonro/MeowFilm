@@ -63,6 +63,7 @@ public sealed record MusicSearchPaging(int PageSize, int PagesPerRequest)
     };
 }
 public sealed record MusicSongRequest(string Platform, string Id, bool Refresh = false);
+public sealed record MusicPlaylistsRequest(string Platform, IReadOnlyList<string> Ids);
 public sealed record MusicPlaylistRequest(string Platform, string Id, int Page = 1, int Limit = 100,
     bool Refresh = false, JsonElement? Personal = null, JsonElement? Continuation = null);
 public sealed record MusicHomeRequest(string Platform, JsonElement? Continuation = null, bool Refresh = false);
@@ -98,6 +99,7 @@ public interface IMusicPlatformCatalog : IDisposable
 {
     Task<JsonElement> SearchAsync(MusicSearchRequest request, CancellationToken cancellationToken = default);
     Task<JsonElement> SongAsync(MusicSongRequest request, CancellationToken cancellationToken = default);
+    Task<JsonElement> PlaylistsAsync(MusicPlaylistsRequest request, CancellationToken cancellationToken = default);
     Task<JsonElement> PlaylistAsync(MusicPlaylistRequest request, CancellationToken cancellationToken = default);
     Task<JsonElement> CompletePlaylistAsync(MusicPlaylistRequest request, CancellationToken cancellationToken = default);
     Task<JsonElement> HomeAsync(MusicHomeRequest request, CancellationToken cancellationToken = default);

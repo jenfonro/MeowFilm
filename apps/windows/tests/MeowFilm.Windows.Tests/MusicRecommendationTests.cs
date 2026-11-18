@@ -1808,6 +1808,7 @@ internal static class RecommendationTest
         public Task<JsonElement> QueueRecommendationsAsync(MusicQueueRecommendationsRequest r, CancellationToken ct = default) => Read(new(r), ct);
         public Task<JsonElement> SearchAsync(MusicSearchRequest r, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<JsonElement> SongAsync(MusicSongRequest r, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<JsonElement> PlaylistsAsync(MusicPlaylistsRequest r, CancellationToken t = default) => throw new NotSupportedException();
         public Task<JsonElement> PlaylistAsync(MusicPlaylistRequest r, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<JsonElement> CompletePlaylistAsync(MusicPlaylistRequest r, CancellationToken token = default) => throw new NotSupportedException();
         public Task<JsonElement> HomeAsync(MusicHomeRequest r, CancellationToken ct = default) => throw new NotSupportedException();

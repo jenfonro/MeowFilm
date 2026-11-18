@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Fixed LX public metadata/lyrics recipes; see LICENSES/NOTICE.md.
-import { durationSeconds, first, image, input, number, optionalNumber, page, pageNumber, required, rows, scalar, song, text } from '../model.mjs';
+import { array, record, durationSeconds, first, image, images, input, optionalNumber, page, pageNumber, required, scalar, song, text } from '../model.mjs';
 import { form } from '../protocols.mjs';
 import { entities, kuwoJSON, kuwoPage } from '../literal.mjs';
 import { kuwoLyrics } from '../lyrics.mjs';
@@ -8,7 +8,8 @@ import { fail } from '../errors.mjs';
 
 const agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36';
 export function kwSong(raw) {
-  const id = required(first(raw.MUSICRID, raw.id, raw.rid, raw.musicrid)).replace(/^MUSIC_/, '');
+  raw = record(raw);
+  const id = scalar(first(raw.MUSICRID, raw.id, raw.rid, raw.musicrid)).replace(/^MUSIC_/, '');
   const minfo = text(raw.N_MINFO), formats = text(first(raw.FORMATS, raw.formats));
   const types = [], nativeTypes = {};
   for (const match of minfo.matchAll(/level:(\w+),bitrate:(\d+),format:(\w+),size:([\w.]+)/g)) {
@@ -22,7 +23,7 @@ export function kwSong(raw) {
     if (type && !nativeTypes[type]) { nativeTypes[type] = { format }; types.push({ type }); }
   }
   const relative = text(raw.web_albumpic_short);
-  let cover = first(image(raw.pic), image(raw.img));
+  let cover = images(raw.pic, raw.img);
   if (!cover && relative) {
     try { cover = image(new URL(relative, 'http://img1.kwcdn.kuwo.cn/star/albumcover/').href); }
     catch { /* An unusable optional image is not a failed song locator. */ }
@@ -33,7 +34,8 @@ export function kwSong(raw) {
     { id, albumId: scalar(first(raw.ALBUMID, raw.albumid, raw.albumId)), types, _types: nativeTypes });
 }
 function kwCollection(raw) {
-  return { id: required(first(raw.playlistid, raw.id)), name: entities(text(first(raw.name, raw.title))),
+  raw = record(raw);
+  return { id: scalar(first(raw.playlistid, raw.id)), name: entities(text(first(raw.name, raw.title))),
     cover: image(raw.pic), count: optionalNumber(first(raw.songnum, raw.total)),
     creator: entities(text(first(raw.nickname, raw.uname))), description: entities(text(first(raw.intro, raw.info))),
     source: 'kw', engine: 'Kuwo' };
@@ -41,9 +43,10 @@ function kwCollection(raw) {
 async function listPage(c, id, batch) {
   const raw = kuwoJSON(await read(c, 'http://nplserver.kuwo.cn/pl.svc', { op: 'getlistinfo', pid: id, pn: batch,
     rn: 1000, encode: 'utf8', keyset: 'pl2012', identity: 'kuwo', pcmp4: '1', vipver: 'MUSIC_9.0.5.0_W1', newver: '1' }));
-  if (required(raw.result) !== 'ok') fail('UPSTREAM_ERROR');
-  return { raw, members: rows(raw.musiclist ?? []), total: number(raw.total),
-    more: raw.more == null ? (batch + 1) * 1000 < number(raw.total) : Boolean(Number(raw.more)) };
+  if (required(raw?.result) !== 'ok') fail('UPSTREAM_ERROR');
+  c.observe('musiclist', raw.musiclist);
+  return { raw, members: array(raw.musiclist), total: optionalNumber(raw.total),
+    more: raw.more == null ? (batch + 1) * 1000 < optionalNumber(raw.total) : (raw.more === true || Boolean(optionalNumber(raw.more))) };
 }
 export const kwProvider = {
   async search(c, { keyword, kind = 'songs', page: current = 1, limit = 30 }) {
@@ -53,17 +56,18 @@ export const kwProvider = {
       : { ver: 'mbox', vipver: 'MUSIC_8.7.7.0_BCS37', plat: 'pc', devid: '28156413', ft: 'playlist', pay: '0', needliveshow: '0' };
     const data = kuwoJSON(await read(c, 'http://search.kuwo.cn/r.s',
       { all: keyword, pn: current - 1, rn: limit, rformat: 'json', encoding: 'utf8', ...recipe }));
-    const total = number(data.TOTAL);
-    return page('kw', rows(data.abslist ?? []).map(kind === 'songs' ? kwSong : kwCollection),
+    const total = optionalNumber(data?.TOTAL);
+    c.observe('abslist', data?.abslist);
+    return page('kw', array(data?.abslist).map(kind === 'songs' ? kwSong : kwCollection),
       { page: current, limit }, { total, more: current * limit < total });
   },
   async song(c, { id }) {
     id = input(id);
     return c.cached(['song', id], async () => {
       const root = await c.read({ url: 'https://m.kuwo.cn/newh5/singles/songinfoandlrc?' + form({ musicId: id }), headers: headers() });
-      if (scalar(root.status) === '301' && root.msg === '音乐查询失败')
+      if (scalar(root?.status) === '301' && root.msg === '音乐查询失败')
         return kwSong(kuwoPage(await read(c, 'https://www.kuwo.cn/play_detail/' + encodeURIComponent(id))));
-      if (required(root.status) !== '200') fail('UPSTREAM_ERROR');
+      if (required(root?.status) !== '200') fail('UPSTREAM_ERROR');
       return kwSong(root.data?.songinfo);
     }, 3600000);
   },
@@ -79,17 +83,19 @@ export const kwProvider = {
     return c.cached(['playlist', id, current, firstBatch, firstIndex, limit], async () => {
       // The protocol serves 1000 members per hop. That is not a whole-collection limit.
       const items = [];
-      let batch = firstBatch, index = firstIndex, info, total = 0, more = false;
+      let batch = firstBatch, index = firstIndex, info, total = null, more = false, stalled = false;
       do {
         const result = await listPage(c, id, batch), { raw, members } = result;
-        info ??= kwCollection(raw); total = number(raw.total);
+        info ??= kwCollection(raw); total = result.total;
         const selected = members.slice(index, index + limit - items.length);
         items.push(...selected.map(kwSong)); index += selected.length;
         if (index < members.length) { more = true; break; }
-        more = result.more; batch++; index = 0;
+        more = result.more;
+        if (!selected.length && more) { stalled = true; break; }
+        batch++; index = 0;
       } while (items.length < limit && more);
       return { ...page('kw', items, { page: current, limit }, { total, more, ...info }),
-        consumed: items.length, continuation: more ? { page: current + 1, batch, index } : null };
+        consumed: items.length, continuation: more && !stalled ? { page: current + 1, batch, index } : null };
     }, 3600000);
   },
   async 'playlist.complete'(c, { id }) {
@@ -101,9 +107,9 @@ export const kwProvider = {
         result = await listPage(c, id, batch++);
         info ??= kwCollection(result.raw);
         items.push(...result.members.map(kwSong));
-      } while (result.more);
+      } while (result.more && result.members.length);
       return { platform: 'kw', ...info, items, total: result.total, count: items.length,
-        more: false, continuation: null, complete: true };
+        more: result.more, continuation: null, complete: !result.more };
     }, 3600000);
   },
   async lyrics(c, { id, musicInfo = {} }) {

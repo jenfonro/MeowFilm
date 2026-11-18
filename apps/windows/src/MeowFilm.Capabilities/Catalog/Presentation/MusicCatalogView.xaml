@@ -218,7 +218,7 @@
   <DataTemplate x:Key="Catalog.Banner">
    <Button Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" Margin="0,0,20,0" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
     <Grid x:Name="BannerFrame" Background="#E7EAF0" local:CardClip.Radius="8">
-     <Grid.Height><MultiBinding Converter="{StaticResource Catalog.BannerHeight}"><Binding Path="ActualWidth" ElementName="BannerFrame"/><Binding Path="AspectRatio" ElementName="BannerImage"/></MultiBinding></Grid.Height>
+     <Grid.Height><MultiBinding Converter="{StaticResource Catalog.BannerHeight}"><Binding Path="ActualWidth" ElementName="BannerFrame"/></MultiBinding></Grid.Height>
      <art:ArtworkImage x:Name="BannerImage" Address="{Binding Cover}" DisplayIdentity="{Binding Song.Id,TargetNullValue='',FallbackValue=''}" Stretch="Uniform"/>
      <TextBlock Text="{Binding Title}" VerticalAlignment="Bottom" Margin="12" TextWrapping="Wrap"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding Cover}" Value=""><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
     </Grid>
@@ -345,6 +345,11 @@
     <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource Catalog.PlaylistRow}"
                   AutomationProperties.Name="封面列表"/>
    </DataTemplate>
+   <DataTemplate x:Key="Catalog.Section.Grid">
+    <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource Catalog.PlaylistCard}">
+     <ItemsControl.ItemsPanel><ItemsPanelTemplate><local:AdaptiveCardPanel MinimumCardWidth="124" MaximumCardWidth="168" RowGap="16"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+    </ItemsControl>
+   </DataTemplate>
    <DataTemplate x:Key="Catalog.Section.AlbumChart">
     <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource Catalog.AlbumRankRow}"/>
    </DataTemplate>
@@ -376,6 +381,12 @@
    <Style x:Key="Catalog.SectionPresenter" TargetType="ContentControl">
     <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.Shelf}"/>
     <Style.Triggers>
+     <DataTrigger Binding="{Binding IsGridSection}" Value="True">
+      <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.Grid}"/>
+     </DataTrigger>
+     <DataTrigger Binding="{Binding IsArtistUpdatesSection}" Value="True">
+      <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.PlaylistRows}"/>
+     </DataTrigger>
      <MultiDataTrigger>
       <MultiDataTrigger.Conditions>
        <Condition Binding="{Binding IsPlaylistSection}" Value="True"/>
@@ -423,6 +434,12 @@
         <Button Content="&#xE76C;" Tag="{Binding Action}" Click="Card_Click" Width="24" Height="24" Style="{StaticResource MeowFilm.IconButton}" Visibility="{Binding Action.CanOpen,Converter={StaticResource Visible},FallbackValue=Collapsed}" IsEnabled="{Binding Action.CanOpen}" AutomationProperties.Name="更多内容"/>
        </StackPanel>
       </DockPanel>
+       <ItemsControl ItemsSource="{Binding Tabs}" Margin="0,0,0,12" Visibility="{Binding HasTabs,Converter={StaticResource Visible}}">
+        <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+        <ItemsControl.ItemTemplate><DataTemplate>
+         <Button Content="{Binding Title}" Tag="{Binding}" Click="SectionTab_Click" Style="{StaticResource MeowFilm.Button}" Margin="0,0,8,0"/>
+        </DataTemplate></ItemsControl.ItemTemplate>
+       </ItemsControl>
        <local:AdaptiveCardPanel MinimumCardWidth="124" MaximumCardWidth="168" RowGap="16" ClipToBounds="True">
         <local:AdaptiveCardPanel.Style><Style TargetType="local:AdaptiveCardPanel"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers>
          <MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding Items.Count}" Value="0"/><Condition Binding="{Binding Title}" Value="单曲"/><Condition Binding="{Binding (local:MusicCatalogSurface.IsOverview),RelativeSource={RelativeSource Self}}" Value="True"/><Condition Binding="{Binding DataContext.SearchSongsLoading,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" Value="True"/></MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger>

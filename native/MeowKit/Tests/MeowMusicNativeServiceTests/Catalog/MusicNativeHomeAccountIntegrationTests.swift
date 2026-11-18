@@ -301,10 +301,10 @@ private actor HomeAccountIntegrationProvider: MusicAccountProvider, MusicNetease
 
 private func homeAccountPayload(id: Int) -> Data {
     Data("""
-    {"entries":[{"key":"account-daily","name":"Synthetic entry","requiresAccount":true,
-    "display":\(id == 11),"available":\(id == 11),"action":{"type":"daily","branch":"default"}}],
-    "sections":[{"id":"playlists","type":"playlists","items":[
-    {"id":"\(id)","name":"Synthetic \(id)","cover":"https://p1.music.126.net/\(id).jpg","action":{"type":"playlist"}}
+    {"sections":[{"id":"entries","layout":"feature-rail","items":[{"key":"account-daily","title":"Synthetic entry","kind":"daily","requiresAccount":true,
+    "display":\(id == 11),"available":\(id == 11),"action":{"type":"daily","branch":"default"}}]},
+    {"id":"playlists","layout":"playlist-rail","items":[
+    {"id":"\(id)","title":"Synthetic \(id)","kind":"playlist","cover":"https://p1.music.126.net/\(id).jpg","action":{"type":"playlist","id":"\(id)"}}
     ]}]}
     """.utf8)
 }

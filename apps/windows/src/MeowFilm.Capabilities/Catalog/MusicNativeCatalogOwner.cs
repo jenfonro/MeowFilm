@@ -56,8 +56,23 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
         {
             Guard(request.Token, captured);
             if (catalog is not IMusicDailyStylePreferences preferences) throw new MusicPlatformException("UNSUPPORTED");
+            long observation = library.BeginSongObservation();
             var result = await action(preferences, request.Token).ConfigureAwait(false);
             if (!write) Guard(CancellationToken.None, captured);
+            if (write && result is MusicDailyStyleSaveResult { Readback: { } readback } receipt)
+            {
+                try
+                {
+                    Guard(request.Token, captured);
+                    var songs = await library.AdoptPlatformResultAsync(readback, request.Token,
+                        observation: observation).ConfigureAwait(false);
+                    Guard(request.Token, captured);
+                    return (T)(object)(receipt with { Readback = songs });
+                }
+                catch (OperationCanceledException) { return (T)(object)(receipt with { Readback = null, ErrorCode = "CANCELLED" }); }
+                catch (CatalogFailure error) { return (T)(object)(receipt with { Readback = null, ErrorCode = error.Code }); }
+                catch (MusicLibraryException error) { return (T)(object)(receipt with { Readback = null, ErrorCode = error.Code }); }
+            }
             return result;
         }
         catch (CatalogFailure error) { throw new MusicPlatformException(error.Code); }
@@ -109,6 +124,8 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
                 case "music.catalog.chorus":
                     if (catalog is not IMusicChorusCatalog chorus) throw new CatalogFailure("UNSUPPORTED");
                     result = await chorus.ChorusAsync(Platform(input), Text(input, "id"), signal).ConfigureAwait(false); break;
+                case "music.catalog.playlists":
+                    result = await catalog.PlaylistsAsync(new(Platform(input), Strings(input, "ids")), signal).ConfigureAwait(false); break;
                 case "music.catalog.song":
                     var song = await catalog.SongAsync(new(Platform(input), Text(input, "id"), Flag(input, "refresh")), signal).ConfigureAwait(false);
                     result = JsonSerializer.SerializeToElement(new { song }); break;
@@ -212,17 +229,14 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
             var songShape = method switch
             {
                 "music.catalog.describe" or "music.catalog.chorus" or "music.catalog.channels" or
+                    "music.catalog.playlists" or "music.catalog.personalPlaylists" or
                     "music.catalog.playlist.prepare" or "music.catalog.playlist.discard" => MusicLibraryOwner.PlatformSongShape.None,
                 "music.catalog.song" => MusicLibraryOwner.PlatformSongShape.SongDetail,
                 "music.catalog.search" => Text(input, "kind", "songs") == "songs"
                     ? MusicLibraryOwner.PlatformSongShape.Page : MusicLibraryOwner.PlatformSongShape.None,
-                _ => MusicLibraryOwner.PlatformSongShape.Catalog
+                "music.catalog.home" or "music.catalog.channel" or "music.catalog.chart" => MusicLibraryOwner.PlatformSongShape.Catalog,
+                _ => MusicLibraryOwner.PlatformSongShape.Page
             };
-            if (method is "music.catalog.playlist" or "music.catalog.search" or "music.catalog.channels" or
-                "music.catalog.personalPlaylists" or "music.catalog.daily" or "music.catalog.fm" or
-                "music.catalog.similar" or "music.catalog.heartbeat" or "music.catalog.queueRecommendations" or "music.catalog.album")
-                Check(result.ValueKind == JsonValueKind.Object && result.TryGetProperty("items", out var items) &&
-                    items.ValueKind == JsonValueKind.Array, "INVALID_RESPONSE");
             result = await library.AdoptPlatformResultAsync(result, signal,
                 authoritative: method != "music.catalog.search" || SearchSongs is null, observation: observation,
                 shape: songShape).ConfigureAwait(false);

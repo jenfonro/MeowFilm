@@ -189,7 +189,11 @@ public partial class Shelf : UserControl
     }
     internal void OnNativeScroll()
     {
-        if (!restorePending && !dragging && !animating) ScheduleSnap();
+        if (!restorePending && !dragging)
+        {
+            if (animating) StopMotion();
+            ScheduleSnap();
+        }
     }
     private void OnSystemSettingChanged(object? sender, PropertyChangedEventArgs e)
     {
@@ -534,7 +538,6 @@ public static class CardClip
 public sealed class BannerHeightConverter : System.Windows.Data.IMultiValueConverter
 {
     public object Convert(object[] values, Type targetType, object parameter, System.Globalization.CultureInfo culture) =>
-        values.Length == 2 && values[0] is double width && width > 0 && values[1] is double ratio && ratio > 0
-            ? width / ratio : 160d; // An unloaded placeholder only; decoded dimensions own the final geometry.
+        values.Length > 0 && values[0] is double width && width > 0 ? width / 2.56 : 0d;
     public object[] ConvertBack(object value, Type[] targetTypes, object parameter, System.Globalization.CultureInfo culture) => throw new NotSupportedException();
 }

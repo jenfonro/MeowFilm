@@ -40,15 +40,81 @@ import MeowRuntime
         _ = await f.service.close()
     }
 
+    func testAccountCollectionsRetainDisplayWhenIdentityAndContinuationAreMissing() async throws {
+        let continuations: [RuntimeValue] = [.null, .object(["page": .number(1)]),
+                                            .object(["page": .string("changed")])]
+        for continuation in continuations {
+            let f = try MusicNativeFixture(); try await f.enable()
+            await f.platform.replies("personalPlaylists", .object(["items": .array([
+                .object(["name": .string("Visible without identity")]),
+                .null,
+                .object(["id": .string("identified"), "name": .string("Current"), "owned": .bool(true)])
+            ]), "more": .bool(true), "continuation": continuation]))
+            let page = try await f.service.nativeCollections(platform: .qq, cursor: nil)
+            XCTAssertEqual(page.items.map(\.id), ["", "", "identified"])
+            XCTAssertEqual(page.items.map(\.title), ["Visible without identity", "", "Current"])
+            XCTAssertEqual(page.items.map(\.owned), [false, false, true])
+            XCTAssertNil(page.cursor)
+            let requests = await f.platform.recorded()
+            XCTAssertEqual(requests.filter { $0.operation == "personalPlaylists" }.count, 1)
+            _ = await f.service.close()
+        }
+    }
+
+    func testAccountRecommendationsRetainRowsWhenContinuationCannotAdvance() async throws {
+        let continuations: [RuntimeValue] = [.null, .object(["page": .number(0)]),
+                                            .object(["page": .number(1)]), .object(["page": .string("changed")])]
+        for continuation in continuations {
+            let f = try MusicNativeFixture(); try await f.enable()
+            let song = try MusicPlatformFixture.song(MusicAccountFixture.track())
+            await f.platform.replies("recommendations", .object([
+                "items": .array([song]), "continuation": continuation
+            ]))
+            let page = try await f.service.nativeRecommendations(platform: .qq, kind: "radar", cursor: nil)
+            XCTAssertEqual(page.items.count, 1); XCTAssertEqual(page.total, 1); XCTAssertNil(page.cursor)
+            let requests = await f.platform.recorded()
+            XCTAssertEqual(requests.filter { $0.operation == "recommendations" }.count, 1)
+            _ = await f.service.close()
+        }
+    }
+
+    func testDailyStyleReadsRetainCategoriesAndTagsWithoutFieldCompletenessGate() async throws {
+        let categories: [RuntimeValue] = [.null, .object(["changed": .bool(true)]), .array([
+            .object(["name": .string("Current"), "tags": .array([
+                .object(["name": .string("Visible tag")]), .null
+            ])]),
+            .object(["id": .string("other"), "tags": .object(["changed": .bool(true)])]),
+            .null
+        ])]
+        for rows in categories {
+            let fixture = try MusicPlatformFixture { request in
+                XCTAssertEqual(request.operation, "dailyStyle.get")
+                return .object(["categories": rows])
+            }
+            let client = fixture.makeClient(), provider = MusicNodeAccountProvider(platform: .netease, client: client)
+            let result = try await provider.dailyStyleCategories(authorize: {})
+            XCTAssertEqual(result.count, rows.musicArray.count)
+            if result.count == 3 {
+                XCTAssertEqual(result.map(\.id), ["", "other", ""])
+                XCTAssertEqual(result[0].name, "Current")
+                XCTAssertEqual(result[0].tags.map(\.name), ["Visible tag", ""])
+                XCTAssertTrue(result[1].tags.isEmpty)
+            }
+            XCTAssertEqual(fixture.requests().count, 1)
+            try await client.close(); await fixture.runtime.close()
+        }
+    }
+
     func testConsumedOpaqueNumbersCannotBecomeRoundedCountsPositionsOrUnknownExpiry() throws {
         let song = try MusicPlatformFixture.song(MusicAccountFixture.track())
         for token in ["9007199254740993", "1.234567890123456789", "1e999"] {
             let value = try RuntimeJSON.decode(Data(token.utf8))
             XCTAssertNil(value.musicNumber)
             XCTAssertThrowsError(try MusicPlatformDTO.count(value))
-            XCTAssertThrowsError(try MusicPlatformDTO.tracks(.object([
+            let tracks = try MusicPlatformDTO.tracks(.object([
                 "items": .array([song]), "sourcePositions": .array([value])
-            ])))
+            ]))
+            XCTAssertEqual(tracks.count, 1); XCTAssertNil(tracks[0].sourcePosition)
             for key in ["expiresAt", "licenseExpiresAt"] {
                 var fields: RuntimeObject = ["url": .string("https://media.invalid/synthetic.mp3")]
                 fields[key] = value

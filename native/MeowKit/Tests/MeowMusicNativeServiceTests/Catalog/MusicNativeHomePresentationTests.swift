@@ -19,8 +19,8 @@ final class MusicNativeHomePresentationTests: XCTestCase {
     }
     func testHeaderActionsUseDirectoryChannelIdentityAndPreserveCardDestinations() async throws {
         let (service, peer, page) = try await load([
-            section("lists", channel: "playlist", items: [NativeDiscoveryFixture.collection("41")]),
-            section("ranks", channel: "chart", items: [NativeDiscoveryFixture.collection("42")])])
+            section("lists", channel: "playlists", items: [NativeDiscoveryFixture.collection("41")]),
+            section("ranks", channel: "rankings", items: [NativeDiscoveryFixture.collection("42")])])
         XCTAssertEqual(page.sections.compactMap { $0.channel?.kind }, [.playlists, .rankings])
         for (section, id) in zip(page.sections, ["41", "42"]) {
             guard case .collection(let value) = section.items[0].content else { return XCTFail("collection required") }
@@ -33,7 +33,7 @@ final class MusicNativeHomePresentationTests: XCTestCase {
         let (service, _, page) = try await load([
             section("lists", items: [NativeDiscoveryFixture.collection("41")], title: "排行榜"),
             section("songs", items: [try NativeDiscoveryFixture.song("42")], title: "推荐歌单"),
-            section("declared", channel: "chart", items: [NativeDiscoveryFixture.collection("43")], title: "任意标题")])
+            section("declared", channel: "rankings", items: [NativeDiscoveryFixture.collection("43")], title: "任意标题")])
         XCTAssertNil(page.sections[0].channel); XCTAssertNil(page.sections[1].channel)
         XCTAssertEqual(page.sections[2].channel?.kind, .rankings)
         XCTAssertEqual(page.sections.map { $0.items.count }, [1, 1, 1])
@@ -63,7 +63,7 @@ final class MusicNativeHomePresentationTests: XCTestCase {
         }
     }
     func testCanonicalMixedRunsAndAllSectionsKeepTheirDeclaredOrder() async throws {
-        let layouts = ["banner", "list", "grid", "artist-updates", "ranked-songs"]
+        let layouts = ["banner", "song-list", "playlist-grid", "artist-updates", "ranked-songs"]
         let sections = try (0..<25).map { index -> RuntimeValue in
             .object(["id": .string("section-\(index)"), "title": .string("栏目\(index)"),
                 "layout": .string(layouts[index % layouts.count]), "items": .array([

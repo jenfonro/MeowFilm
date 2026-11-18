@@ -157,6 +157,7 @@ public static partial class MusicSearchTests
         public void Dispose() => Disposed++;
         private static Task<JsonElement> Unused() => throw new InvalidOperationException("UNEXPECTED_NON_SEARCH_CALL");
         public Task<JsonElement> SongAsync(MusicSongRequest r, CancellationToken t = default) => Unused();
+        public Task<JsonElement> PlaylistsAsync(MusicPlaylistsRequest r, CancellationToken t = default) => throw new NotSupportedException();
         public Task<JsonElement> PlaylistAsync(MusicPlaylistRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> CompletePlaylistAsync(MusicPlaylistRequest r, CancellationToken token = default) => throw new NotSupportedException();
         public Task<JsonElement> HomeAsync(MusicHomeRequest r, CancellationToken t = default) => Unused();

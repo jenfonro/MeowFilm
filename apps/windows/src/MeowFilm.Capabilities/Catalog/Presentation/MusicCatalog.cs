@@ -39,7 +39,7 @@ public sealed partial class MusicCapability
     public bool IsCatalogHome => location.Route == "catalog-home";
     public ObservableCollection<MusicCatalogCard> ChannelTabs { get; } = [];
     public bool IsChannelDirectory => location.Route == "catalog-channels";
-    public bool IsVipChannel => location.Route == "catalog-channel/wy/vip";
+    public bool IsVipChannel => IsChannelLanding && catalogChannelKinds.GetValueOrDefault(location.Route) == "vip";
     public string CurrentChannelKey => location.Route.StartsWith("catalog-channel/", StringComparison.Ordinal) ? location.Route[16..] : "";
     public IEnumerable<MusicCatalogCard> VisibleChannelTabs =>
         ChannelTabs.Where(card => card.Placement == "primary");
@@ -83,10 +83,15 @@ public sealed partial class MusicCapability
     public string DetailSubtitle => IsCatalogDetailPage ? catalogSubtitle : "";
     private readonly Dictionary<string, CatalogLocation> catalogLocations = [];
     private readonly Dictionary<string, string> catalogChannelCodes = [];
+    private readonly Dictionary<string, string> catalogChannelKinds = [];
     private readonly Dictionary<int, CatalogPageState> catalogPages = [];
     private sealed record CatalogPageState(MusicCatalogSection[] Sections, MusicCatalogTag[] Tags,
         string Tag, string Title, string Artwork, bool More, JsonElement? Next, int Total, double Scroll = 0,
-        CatalogTarget? Target = null, string AccountStamp = "", long? ExpiresAt = null, JsonElement? DailySelection = null);
+        CatalogTarget? Target = null, string AccountStamp = "", long? ExpiresAt = null, JsonElement? DailySelection = null)
+    {
+        public CatalogOptionalReads OptionalReads { get; init; } = new();
+        public bool ContinuationBlocked { get; init; }
+    }
     private sealed record CatalogLocation(string Route, string Platform, string Query, string Kind, string PageCode,
         int Page, Dictionary<int, CatalogPageState> Pages, JsonElement?[] Cursors);
     private sealed record CatalogLoadKey(string Route, string Query, int Number, string Continuation,
@@ -190,6 +195,14 @@ public sealed partial class MusicCapability
     private bool ContainsCatalogCard(MusicCatalogCard card) =>
         HasChannelTabs && ChannelTabs.Any(item => ReferenceEquals(item, card)) || DisplayCatalogSections.Any(section =>
         ReferenceEquals(section.Action, card) || section.Items.Any(item => ReferenceEquals(item, card)));
+    internal void SelectCatalogSectionTab(MusicCatalogTab tab)
+    {
+        var section = CatalogSections.FirstOrDefault(section => section.Tabs?.Contains(tab) == true);
+        if (section is null) return;
+        section.SelectTab(tab);
+        if (IsCatalogHome) RefreshHomeDisplay();
+        visibleCatalogCards.RemoveWhere(card => !ContainsCatalogCard(card));
+    }
     public Task OpenCatalogCardAsync(MusicCatalogCard card)
     {
         if (!CanCatalogBrowse || card is null || !card.CanOpen || !ContainsCatalogCard(card)) return Task.CompletedTask;
@@ -207,7 +220,7 @@ public sealed partial class MusicCapability
         {
             try { RequireCatalogContent(); } catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
         }
-        if (card.Song is not null)
+        if (card.Kind == "song" && card.Song is not null)
         {
             if (IsCatalogPlaylist)
             {
@@ -229,6 +242,7 @@ public sealed partial class MusicCapability
         RememberCatalogLocation();
         var destination = "catalog-" + card.Kind + "/" + card.Platform + "/" + Uri.EscapeDataString(card.ActionId);
         catalogChannelCodes[destination] = card.PageCode;
+        catalogChannelKinds[destination] = card.ChannelKind;
         while (catalogChannelCodes.Count > 100) catalogChannelCodes.Remove(catalogChannelCodes.Keys.First());
         return RequestNavigationAsync(destination);
     }
@@ -299,6 +313,7 @@ public sealed partial class MusicCapability
     {
         if (stopping) return;
         if (IsSearchPage) { _ = CancelSearchAsync(); return; }
+        RetireCatalogOptionalReads(location.Route);
         RetireCatalogLoad();
         InvalidateCatalogAction();
         status = "已取消"; RefreshBindings(); CatalogBindings();
@@ -308,6 +323,8 @@ public sealed partial class MusicCapability
 
     private void RetireCatalogSourcePages()
     {
+        RetireCatalogOptionalReads();
+        catalogChannelKinds.Clear();
         // A shown or loading landing of the retired source reloads when the page is shown again.
         catalogSourceReload |= IsCatalogLanding && catalogLoadedPlatform.Length > 0;
         if (catalogLoadFlight is { } flight && IsCatalogSourceRoute(flight.Request.Key.Route))
@@ -371,6 +388,7 @@ public sealed partial class MusicCapability
     }
     private void RetireCatalogContent()
     {
+        RetireCatalogOptionalReads();
         RetireDailyStyleEditor(); dailyStyleSelected = []; dailyStyleSelectedCategory = ""; dailyStyleNeedsRead = false;
         RetireSearchTracked();
         var wasPublishing = publishing; publishing = true;
@@ -378,7 +396,7 @@ public sealed partial class MusicCapability
         {
             RetireCatalogLoad();
             RetireHomeAuthority();
-            catalogLocations.Clear(); catalogChannelCodes.Clear(); catalogPages.Clear(); catalogCursors.Clear(); catalogCursors.Add(null);
+            catalogLocations.Clear(); catalogChannelCodes.Clear(); catalogChannelKinds.Clear(); catalogPages.Clear(); catalogCursors.Clear(); catalogCursors.Add(null);
             catalogTargets.Clear(); catalogLoadedTarget = null;
             catalogArtwork = catalogSubtitle = ""; catalogSummaryCount = null; catalogMembersLoaded = false; catalogAccountStamp = ""; catalogExpiresAt = null;
             catalogTag = catalogPageCode = catalogQuery = ""; catalogContinuation = null; catalogMore = false; catalogPage = 1;
@@ -637,27 +655,29 @@ public sealed partial class MusicCapability
             if (stopping || generation != loadGeneration || key.AccountObservation != CatalogAccountObservation(platform)) return;
             if (accountStamp != CatalogAccountKey(platform)) throw new MusicOperationException("STALE_SESSION");
             var sections = MusicCatalogDto.Read(reply, platform, operation, title, kind == "歌单" ? "playlists" : "songs").ToArray();
-            bool more = reply.TryGetProperty("more", out var hasMore) && hasMore.GetBoolean();
-            JsonElement? next = reply.TryGetProperty("continuation", out var c) && c.ValueKind == JsonValueKind.Object ? c.Clone() : null;
-            if (more && (next is null ||
-                catalogCursors.Take(number).Any(old => MusicCatalogDto.CursorKey(old) == MusicCatalogDto.CursorKey(next))))
-                throw new MusicOperationException("PAGINATION_STALLED");
+            bool more = MusicCatalogDto.Boolean(reply, "more", false);
+            var c = MusicCatalogDto.Field(reply, "continuation");
+            JsonElement? next = c.ValueKind == JsonValueKind.Object ? c.Clone() : null;
+            bool continuationBlocked = more && (next is null ||
+                catalogCursors.Take(number).Any(old => MusicCatalogDto.CursorKey(old) == MusicCatalogDto.CursorKey(next)));
             if (number > 1)
             {
                 if (operation is "home" or "channel" or "playlist")
                     sections = MergeCatalogSections(CatalogSections, sections);
             }
             var tags = target?.Operation == "daily" ? Array.Empty<MusicCatalogTag>() : MusicCatalogDto.Tags(reply).ToArray();
-            var selected = reply.TryGetProperty("feed", out var feed) && feed.ValueKind == JsonValueKind.Object
-                ? MusicCatalogDto.Text(feed, "selectedTag") : MusicCatalogDto.Text(reply, "selectedTag");
-            var name = MusicCatalogDto.Text(reply, "name");
-            if (name.Length == 0) name = MusicCatalogDto.Text(reply, "title");
+            var selected = MusicCatalogDto.Text(reply, "selectedTag");
+            var name = MusicCatalogDto.Text(reply, operation is "home" or "channel" or "artistActivity" or "chart" or "charts" ? "title" : "name");
             var state = new CatalogPageState(sections, tags, selected, name.Length > 0 ? name : title,
                 MusicCatalogDto.Text(reply, "cover"), more, next,
-                reply.TryGetProperty("total", out var sum) && sum.ValueKind != JsonValueKind.Null
-                    ? MusicDto.Count(reply, "total") : sections.Sum(s => s.Items.Count),
+                MusicCatalogDto.Number(reply, "total") ?? sections.Sum(s => s.Items.Count),
                 Scroll: number > 1 && operation is ("home" or "channel" or "playlist") ? Presentation.CaptureScroll() : 0,
-                Target: target, AccountStamp: accountStamp, ExpiresAt: CatalogExpiry(reply), DailySelection: target?.Operation == "daily" ? DailySelectionSnapshot(reply) : null);
+                Target: target, AccountStamp: accountStamp, ExpiresAt: CatalogExpiry(reply), DailySelection: target?.Operation == "daily" ? DailySelectionSnapshot(reply) : null)
+                { ContinuationBlocked = continuationBlocked };
+            if (number > 1 && catalogPages.TryGetValue(catalogPage, out var previousPage))
+                state = state with { OptionalReads = previousPage.OptionalReads };
+            if (operation == "playlist")
+                RememberCatalogCollectionCover(platform, MusicCatalogDto.Text(reply, "id"), state.Artwork);
             if (operation == "channels")
             {
                 ChannelTabs.Clear();
@@ -669,6 +689,7 @@ public sealed partial class MusicCapability
                 {
                     lastChannelRoute = "catalog-channel/" + first.Platform + "/" + Uri.EscapeDataString(first.ActionId);
                     catalogChannelCodes[lastChannelRoute] = first.PageCode;
+                    catalogChannelKinds[lastChannelRoute] = first.ChannelKind;
                     catalogPageCode = first.PageCode;
                     location = new(lastChannelRoute);
                     catalogLoadedPlatform = first.Platform;
@@ -793,7 +814,7 @@ public sealed partial class MusicCapability
             if (route.StartsWith("catalog-channel/", StringComparison.Ordinal))
             { lastChannelRoute = route; channelEntryError = ""; }
             catalogQuery = query; catalogLoadedPlatform = platform; catalogLoadedKind = kind; CatalogSearchKind = kind;
-            catalogPage = number; catalogMore = state.More; catalogContinuation = state.Next;
+            catalogPage = number; catalogMore = state.More && !state.ContinuationBlocked; catalogContinuation = state.Next;
             catalogTag = state.Tag;
             catalogArtwork = state.Artwork.Length > 0 ? state.Artwork : state.Target?.Artwork ?? "";
             catalogSubtitle = state.Target?.Subtitle ?? "";
@@ -830,10 +851,11 @@ public sealed partial class MusicCapability
                 ? homeDisplaySections.Sum(section => section.Items.Count)
                 : state.Sections.Sum(section => section.Items.Count);
             if (!append) status = visibleCount == 0 ? "暂无内容" : "";
+            if (state.ContinuationBlocked) status = MusicCatalogDto.ErrorText("PAGINATION_STALLED");
             Changed(nameof(SelectedSong)); RefreshBindings(); CatalogBindings();
         }
         finally { publishing = false; }
-        if (initializeEntries) InitializeCatalogEntries();
+        ActivateCatalogOptionalReads(route, platform, state, initializeEntries);
         if (append) return;
         var generation = loadGeneration;
         _ = Presentation.Dispatcher.InvokeAsync(() => { if (!stopping && generation == loadGeneration) Presentation.RestoreScroll(state.Scroll); }, DispatcherPriority.Loaded);

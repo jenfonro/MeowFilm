@@ -30,13 +30,13 @@ extension NativeMusicAccountService: MusicNativeAccountProviding {
     }
     private func nativePage(_ result: RuntimeObject, platform: MusicAccountPlatform,
                             dailyStyle: MusicDailyStyleSelection? = nil) throws -> MusicNativeTrackPage {
-        let rows = try MusicAccountFields.array(result["items"])
-        let cursor = try MusicAccountFields.nullableString(result["cursor"])
+        let value = RuntimeValue.object(result), rows = value[music: "items"].musicArray
+        let cursor = value[music: "cursor"].musicText
         // A replay of the same immutable cursor snapshot must not change its
         // public bytes merely because a JSON object enumerates keys differently.
         return .init(items: try rows.map { .init(platform: platform.rawValue, data: try RuntimeJSON.encode($0)) },
-                     total: try MusicAccountFields.integer(result["total"] ?? .number(0)),
-                     cursor: cursor, dailyStyle: dailyStyle)
+                     total: MusicPlatformDTO.optionalCount(value[music: "total"]) ?? 0,
+                     cursor: cursor.isEmpty ? nil : cursor, dailyStyle: dailyStyle)
     }
     public func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) async throws -> MusicNativeTrackPage {
         let result = try await nativeBusiness("recommendations", platform: platform,
@@ -45,14 +45,14 @@ extension NativeMusicAccountService: MusicNativeAccountProviding {
     }
     public func nativeCollections(platform: MusicAccountPlatform, cursor: String?) async throws -> MusicAccountCollectionPage {
         let result = try await nativeBusiness("collections", platform: platform, fields: ["cursor": cursor.map(RuntimeValue.string) ?? .null])
-        let rows = try MusicAccountFields.array(result["items"]).map { value -> MusicAccountCollection in
-            let row = try MusicAccountFields.object(value)
-            guard case .string(let title)? = row["title"] else { throw MusicServiceError.invalidResponse }
-            return .init(id: try MusicAccountFields.string(row["id"]), title: title,
-                         count: try? MusicAccountFields.integer(row["count"]),
-                         owned: try MusicAccountFields.bool(row["owned"]))
+        let value = RuntimeValue.object(result)
+        let rows = value[music: "items"].musicArray.map { row in
+            MusicAccountCollection(id: row[music: "id"].musicText, title: row[music: "title"].musicText,
+                                   count: MusicPlatformDTO.optionalCount(row[music: "count"]),
+                                   owned: row[music: "owned"].musicBool)
         }
-        return .init(items: rows, cursor: try MusicAccountFields.nullableString(result["cursor"]))
+        let next = value[music: "cursor"].musicText
+        return .init(items: rows, cursor: next.isEmpty ? nil : next)
     }
     public func nativeTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) async throws -> MusicNativeTrackPage {
         let result = try await nativeBusiness("tracks", platform: platform,
@@ -1099,10 +1099,10 @@ public actor NativeMusicAccountService: MusicAccountsServing {
                       pending.continuationRequest == continuation.request,
                       pending.expires > now() else { throw MusicServiceError.staleResult }
             }
-            if let next = value.nextPage, next <= pageNumber { throw MusicServiceError.invalidResponse }
             let key = UUID().uuidString.lowercased()
             result = try page(value.rows, platform: platform, token: token, operation: operation, argument: argument,
-                              nextPage: value.nextPage, expiresAt: value.expiresAt, queueLeaseID: queueLease?.id, key: key)
+                              nextPage: value.nextPage.flatMap { $0 > pageNumber ? $0 : nil },
+                              expiresAt: value.expiresAt, queueLeaseID: queueLease?.id, key: key)
             if let continuation { pages[continuation.key]?.continuationKey = key }
         case .collections:
             let value = try await authenticated(platform, token: token, own: own, revision: revision) { try await provider.collectionRows() }

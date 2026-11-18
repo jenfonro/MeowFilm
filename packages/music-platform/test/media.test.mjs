@@ -58,7 +58,7 @@ test('audio consumes quality arrays before dependencies and retains the existing
   });
 });
 
-test('KG lyric duration conversion reports request failures before HTTP and keeps absent, fractional and response-error semantics', async t => {
+test('KG lyric duration conversion retains request checks while absent candidates produce no lyric', async t => {
   const invalid = fixture(() => assert.fail('unusable request duration must not dispatch lyric search'));
   t.after(() => invalid.close());
   for (const duration of ['not-a-number', '1e400', {}, { toString: null }])
@@ -78,8 +78,8 @@ test('KG lyric duration conversion reports request failures before HTTP and keep
   assert.deepEqual(durations, ['0', '0', '240250']); assert.equal(f.requests.length, 3);
   const damaged = fixture(() => response({ status: 200, error_code: 0, candidates: 'not-a-list' }));
   t.after(() => damaged.close());
-  await assert.rejects(damaged.request('kg', 'lyrics', { id: kgHash, musicInfo: { duration: '240.25' } }),
-    { code: 'INVALID_RESPONSE' });
+  assert.deepEqual(await damaged.request('kg', 'lyrics', { id: kgHash, musicInfo: { duration: '240.25' } }),
+    { text: '', translation: '', romanization: '' });
   assert.equal(damaged.requests.length, 1);
 });
 
