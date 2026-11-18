@@ -50,7 +50,7 @@ function card(value, platform, key, sectionLayout, home) {
   return {
     key: text(row.key) || key, id, kind,
     label: home && sectionLayout === 'feature-rail' ? text(row.label) || title : '',
-    title, subtitle: standaloneSong ? text(row.artist) : text(row.subtitle), cover,
+    title, subtitle: standaloneSong ? text(row.artist) : text(row.subtitle), contextText: text(row.contextText), cover,
     coverRef: platform === 'wy' && kind === 'playlist' && id && sectionLayout !== 'banner'
       ? { kind: 'playlist', id } : null,
     action: action(row.action, kind, id), song,
@@ -59,7 +59,7 @@ function card(value, platform, key, sectionLayout, home) {
     canPlay: row.canPlay !== false,
     requiresAccount: row.requiresAccount === true, errorCode: text(row.errorCode),
     source: platform, engine: text(row.engine), creator: text(row.creator),
-    count: optionalNumber(row.count), dayOfMonth: optionalNumber(row.dayOfMonth),
+    count: optionalNumber(row.count), playCount: optionalNumber(row.playCount), dayOfMonth: optionalNumber(row.dayOfMonth),
     decoration: text(row.decoration), badge: text(row.badge), coverLabel: text(row.coverLabel),
     recommendationReason: text(row.recommendationReason),
     preview: array(row.preview).map(value => {

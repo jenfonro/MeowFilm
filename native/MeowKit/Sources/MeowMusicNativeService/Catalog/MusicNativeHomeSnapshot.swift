@@ -11,7 +11,7 @@ public protocol MusicHomeSnapshotStoring: Sendable {
 }
 
 public final class MusicNativeHomeSnapshotDocument: MusicHomeSnapshotStoring, @unchecked Sendable {
-    public static let namespace = "music.home.display.v1"
+    public static let namespace = "music.home.display.v2"
     private let lock = NSLock()
     private let factory: @Sendable () throws -> DocumentStore
     private var store: DocumentStore?
@@ -154,7 +154,7 @@ private enum HomeContent: Codable {
             self = .collection(.init(platform: value.platform, nativeID: value.nativeID, kind: value.kind,
                 title: value.title, creator: value.creator,
                 artwork: MusicArtworkURL.normalized(MusicModel.publicURL(.string(value.artwork?.absoluteString ?? "")).string),
-                count: value.count))
+                count: value.count, playCount: value.playCount))
         case .record(let id): self = .record(id)
         case .channel(let channel): self = .channel(channel)
         case .daily: self = .daily
@@ -187,6 +187,8 @@ private struct HomeItem: Codable {
     let requiresAccount: Bool
     let kind: MusicPublicBrowseItem.Kind?
     let label: String
+    let contextText: String
+    let playCount: Int?
     let presentation: String
     let coverRef: MusicPublicBrowseItem.CoverReference?
     let displayOnlyPreviews: [MusicNativeTrackData.Display]
@@ -200,6 +202,7 @@ private struct HomeItem: Codable {
         ranking = value.ranking; previewSongIDs = value.previewSongIDs
         recommendationReason = value.recommendationReason; coverLabel = value.coverLabel
         requiresAccount = value.requiresAccount
+        contextText = value.contextText; playCount = value.playCount
         kind = value.kind; label = value.label; presentation = value.presentation; coverRef = value.coverRef
         displayOnlyPreviews = value.previewSongs.compactMap(\.display)
     }
@@ -209,6 +212,7 @@ private struct HomeItem: Codable {
                   .init(platform: "", data: Data("null".utf8), display: $0)
               }, recommendationReason: recommendationReason, coverLabel: coverLabel,
               previewSongIDs: previewSongIDs, requiresAccount: requiresAccount,
-              kind: kind, label: label, presentation: presentation, coverRef: coverRef)
+              kind: kind, label: label, contextText: contextText, playCount: playCount,
+              presentation: presentation, coverRef: coverRef)
     }
 }

@@ -17,6 +17,7 @@
           "label": "私人雷达",
           "title": "私人雷达",
           "subtitle": "今天的歌单内容",
+          "contextText": "今日动态歌单",
           "cover": "",
           "coverRef": {
             "kind": "playlist",
@@ -37,6 +38,7 @@
           "engine": "",
           "creator": "",
           "count": null,
+          "playCount": 3031000,
           "dayOfMonth": null,
           "decoration": "",
           "badge": "",

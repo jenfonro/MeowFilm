@@ -95,6 +95,7 @@ public static class MusicHomeSnapshotTests
             first["sections"]!.AsArray().Insert(0, Feature(new JsonObject
             {
                 ["id"] = "daily-entry", ["key"] = "daily-key", ["kind"] = "daily", ["title"] = "每日推荐", ["label"] = "每日推荐",
+                ["contextText"] = "每日推荐 | 从「今日歌曲」听起", ["playCount"] = 3031000, ["coverLabel"] = "推荐",
                 ["presentation"] = "preview", ["dayOfMonth"] = 7, ["decoration"] = "calendar",
                 ["requiresAccount"] = true, ["display"] = true, ["available"] = true,
                 ["action"] = new JsonObject { ["type"] = "daily", ["branch"] = "style" },
@@ -156,6 +157,8 @@ public static class MusicHomeSnapshotTests
                 Check(daily.CanOpen && daily.RequiresAccount && daily.ActionId == "daily" &&
                     daily.Action!.Value.GetProperty("branch").GetString() == "style" &&
                     daily.DayOfMonth == 7 && daily.PreviewSongs.Single().Movement == "↑");
+                Check(daily.ContextText == "每日推荐 | 从「今日歌曲」听起" && daily.Caption == daily.ContextText &&
+                    daily.PlayCount == 3031000 && daily.CoverLabel == "推荐");
                 Check(sections[1].Action is { ActionId: "feature", PageCode: "HOME_DISCOVERY_PAGE" });
                 var song = sections[1].Items.Single(card => card.Song is not null);
                 Check(song.ActionId == "101" && song.Song!.Title == "Current title" &&

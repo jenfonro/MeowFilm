@@ -47,7 +47,8 @@ extension MusicPublicBrowseItem {
         return .init(id: id, title: nextTitle, subtitle: nextSubtitle, artwork: nextArtwork,
             content: nextContent, ranking: nextRanking, previewSongs: previews,
             recommendationReason: recommendationReason, coverLabel: coverLabel, requiresAccount: requiresAccount,
-            kind: kind, label: label, presentation: presentation, coverRef: coverRef)
+            kind: kind, label: label, presentation: presentation, coverRef: coverRef,
+            contextText: contextText, playCount: playCount)
     }
 }
 

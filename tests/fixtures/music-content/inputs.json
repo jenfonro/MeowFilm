@@ -91,7 +91,8 @@
               "id": "synthetic-list"
             },
             "presentation": "preview",
-            "count": null
+            "count": null,
+            "playCount": 0
           }
         ],
         "tabs": [
@@ -253,7 +254,9 @@
           "id": "synthetic-list"
         },
         "presentation": "preview",
-        "count": null
+        "count": null,
+        "contextText": "今日动态歌单",
+        "playCount": 3031000
       }
     ],
     "sections": [],

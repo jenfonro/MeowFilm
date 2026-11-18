@@ -126,7 +126,7 @@ internal static class MusicLiveAcceptance
             Grid.SetRow(module.PlayerView, 1);
             layout.Children.Add(module.PlayerView);
             window = new Window { Title = "MeowFilm music live acceptance", Width = 1100, Height = 800,
-                Content = layout, ShowActivated = false };
+                Content = layout, ShowActivated = false, Topmost = catalogOnly, WindowStartupLocation = WindowStartupLocation.CenterScreen };
             var rendered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             window.ContentRendered += (_, _) => rendered.TrySetResult();
             window.Show();
@@ -326,11 +326,11 @@ internal static class MusicLiveAcceptance
                     return Cards(module).Count();
                 });
                 await report.StepAsync("guest.wy.channel.restore.artwork", () => WaitForVisibleArtworkAsync(window));
-                foreach (string target in new[] { "playlist-square", "electronic" })
+                foreach (var (target, title) in new[] { ("playlist-square", ""), ("electronic", "电音"), ("euro", "欧美"), ("chinese", "华语") })
                     await report.StepAsync("guest.wy." + target + ".ui", async () =>
                     {
                         var selected = module.ChannelTabs.FirstOrDefault(card => target == "playlist-square"
-                            ? card.ChannelKind == "playlists" : card.Title.Contains("电音", StringComparison.Ordinal));
+                            ? card.ChannelKind == "playlists" : card.Title.StartsWith(title, StringComparison.Ordinal));
                         Require(selected is not null, "NOT_COVERED");
                         await module.OpenCatalogCardAsync(selected);
                         await RenderAsync(window);
@@ -340,6 +340,31 @@ internal static class MusicLiveAcceptance
                         Require(module.Status.Length == 0 && Cards(module).Any(),
                             report.Failures > errors ? report.LastError : "NOT_COVERED");
                         await CaptureCatalogAsync(module, window, report, "wy-" + target);
+                        if (target != "playlist-square")
+                        {
+                            var slots = Descendants(module.View).OfType<EntryCard>().Where(MusicCatalogView.InCatalogViewport).ToArray();
+                            Require(slots.Any(slot => slot.DataContext is MusicCatalogCard { Kind: "fm", HasCoverLabel: true }), "NOT_COVERED");
+                            var playlists = slots.Where(slot => slot.DataContext is MusicCatalogCard { Kind: "playlist" }).ToArray();
+                            Require(playlists.Length > 0 && playlists.All(slot => slot.DataContext is MusicCatalogCard
+                                { HasPlayCount: true, Title.Length: > 0, HasLabel: false }), "NOT_COVERED");
+                            if (target == "euro")
+                            {
+                                var slot = playlists.FirstOrDefault(slot => slot.DataContext is MusicCatalogCard model &&
+                                    model.PreviewSongs.Count == 3 && model.Title.Contains("红心")) ?? playlists.First();
+                                var model = (MusicCatalogCard)slot.DataContext;
+                                var surface = (Grid)slot.FindName("Surface");
+                                CardMotion.Transition(surface, true, false);
+                                try
+                                {
+                                    await RenderAsync(window);
+                                    var block = (Border)slot.FindName("PreviewBlock");
+                                    Require(model.PreviewSongs.Count == 3 && block.IsVisible && block.Opacity == 1 &&
+                                        Descendants(block).OfType<TextBlock>().Select(text => text.Text).SequenceEqual(model.PreviewTitles), "NOT_COVERED");
+                                    await NativeDesktopCapture.SaveAsync(slot, "music-content-wy-euro-preview");
+                                }
+                                finally { CardMotion.Reset(surface); }
+                            }
+                        }
                         return Cards(module).Count();
                     });
             }
@@ -369,15 +394,15 @@ internal static class MusicLiveAcceptance
             return images.Length;
         }
         finally { foreach (var lease in held) lease.Dispose(); }
+    }
 
-        static IEnumerable<DependencyObject> Descendants(DependencyObject parent)
+    private static IEnumerable<DependencyObject> Descendants(DependencyObject parent)
+    {
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
         {
-            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
-            {
-                var child = VisualTreeHelper.GetChild(parent, i);
-                yield return child;
-                foreach (var descendant in Descendants(child)) yield return descendant;
-            }
+            var child = VisualTreeHelper.GetChild(parent, i);
+            yield return child;
+            foreach (var descendant in Descendants(child)) yield return descendant;
         }
     }
 
@@ -594,16 +619,7 @@ internal static class MusicLiveAcceptance
 
     private static async Task CaptureCatalogAsync(MusicCapability module, Window window, Report report, string name)
     {
-        static IEnumerable<ArtworkImage> Images(DependencyObject parent)
-        {
-            for (int index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
-            {
-                var child = VisualTreeHelper.GetChild(parent, index);
-                if (child is ArtworkImage image) yield return image;
-                foreach (var nested in Images(child)) yield return nested;
-            }
-        }
-        var images = Images(module.View).Where(image =>
+        var images = Descendants(module.View).OfType<ArtworkImage>().Where(image =>
         {
             if (!image.IsVisible || image.Address.Length == 0 || image.ActualWidth <= 0 || image.ActualHeight <= 0) return false;
             for (DependencyObject? parent = VisualTreeHelper.GetParent(image); parent is not null; parent = VisualTreeHelper.GetParent(parent))

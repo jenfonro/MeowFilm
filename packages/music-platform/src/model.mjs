@@ -203,6 +203,7 @@ export function collection(platform, raw) {
   return { id: scalar(id), name: text(first(raw.name, raw.title, raw.dissname, raw.dirName, raw.specialname)),
     cover: images(raw.picUrl, raw.coverImgUrl, raw.picurl, raw.imgurl, raw.img, raw.cover, raw.logo, raw.pic),
     count: optionalNumber(first(raw.trackCount, raw.songCount, raw.songnum, raw.songNum, raw.song_cnt, raw.songcount, raw.song_count, raw.count)),
+    playCount: optionalNumber(raw.playCount),
     creator: text(first(raw.creator?.nickname, raw.nickname, raw.creator_nick, raw.list_create_username)),
     source: platform, engine: { wy: 'Netease', tx: 'QQ', kg: 'Kugou', kw: 'Kuwo', mg: 'Migu' }[platform] };
 }

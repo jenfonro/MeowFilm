@@ -22,6 +22,8 @@ struct MusicNativePublicBrowseItem: Sendable {
     var requiresAccount = false
     var kind: MusicPublicBrowseItem.Kind? = nil
     var label = ""
+    var contextText = ""
+    var playCount: Int? = nil
     var presentation = ""
     var coverRef: MusicPublicBrowseItem.CoverReference? = nil
 }

@@ -10,7 +10,7 @@ internal sealed record MusicHomeSnapshot(string Platform, JsonElement[] Pages);
 // Display content only. Restored actions still require current account authority.
 internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
 {
-    internal const string Namespace = "music.home.v2";
+    internal const string Namespace = "music.home.v3";
     private readonly SemaphoreSlim gate = new(1, 1);
 
     internal async Task<MusicHomeSnapshot?> ReadAsync(Func<string, JsonElement?> song, CancellationToken token = default)
@@ -120,7 +120,7 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
             "locator" => "kind id playlistId dirId listId version totalVersion creatorId creatorListId",
             "preview" => "title artist cover rank lastRank",
             "song" => "songId",
-            _ => "id key title label subtitle creator cover kind pageCode channelKind available errorCode requiresAccount display placement canPlay rankText salesText relationship count presentation dayOfMonth decoration updateFrequency"
+            _ => "id key title label subtitle contextText creator cover coverLabel kind pageCode channelKind available errorCode requiresAccount display placement canPlay rankText salesText relationship count playCount presentation dayOfMonth decoration updateFrequency"
         };
         var result = new JsonObject();
         foreach (string field in fields.Split(' '))

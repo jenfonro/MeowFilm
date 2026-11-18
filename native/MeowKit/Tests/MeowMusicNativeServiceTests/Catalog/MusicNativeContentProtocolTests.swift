@@ -53,6 +53,8 @@ final class MusicNativeContentProtocolTests: XCTestCase {
         let page = try await service.homePage(cursor: nil, refresh: true)
         let item = try XCTUnwrap(page.sections.first?.items.first)
         XCTAssertEqual(item.label, "私人雷达")
+        XCTAssertEqual(item.title, "私人雷达"); XCTAssertEqual(item.subtitle, "今天的歌单内容")
+        XCTAssertEqual(item.contextText, "今日动态歌单"); XCTAssertEqual(item.playCount, 3031000)
         let display = await service.homeDisplay
         let native = try XCTUnwrap(display?.page)
         let encoded = try MusicNativeHomeSnapshot.encode(native, source: .netease)
@@ -61,6 +63,9 @@ final class MusicNativeContentProtocolTests: XCTestCase {
         XCTAssertEqual(saved.title, item.title); XCTAssertEqual(saved.label, item.label)
         XCTAssertEqual(saved.kind, item.kind); XCTAssertEqual(saved.coverRef, item.coverRef)
         XCTAssertEqual(saved.presentation, item.presentation)
+        XCTAssertEqual(saved.contextText, item.contextText); XCTAssertEqual(saved.playCount, item.playCount)
+        guard case .collection(let collection) = saved.content else { return XCTFail("Expected collection") }
+        XCTAssertEqual(collection.playCount, 3031000)
         await service.close()
     }
 
