@@ -1,8 +1,11 @@
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
+using System.Net.Http;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Security.Principal;
+using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -257,6 +260,14 @@ internal static class MusicLiveAcceptance
             if (home)
                 await report.StepAsync("guest." + platform + ".home.artwork", () => WaitForVisibleArtworkAsync(window));
             if (platform != "wy") continue;
+            await report.StepAsync("guest.wy.home.visual", async () =>
+            {
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                await module.CatalogEntryInitialization;
+                await RenderAsync(window);
+                await CaptureCatalogAsync(module, window, report, "wy-home");
+                return 1;
+            });
             int directoryReads = runtime.Successes("wy", "channels"), channelReads = runtime.Successes("wy", "channel");
             int errors = report.Failures;
             MusicCatalogCard? channel = null;
@@ -315,6 +326,22 @@ internal static class MusicLiveAcceptance
                     return Cards(module).Count();
                 });
                 await report.StepAsync("guest.wy.channel.restore.artwork", () => WaitForVisibleArtworkAsync(window));
+                foreach (string target in new[] { "playlist-square", "electronic" })
+                    await report.StepAsync("guest.wy." + target + ".ui", async () =>
+                    {
+                        var selected = module.ChannelTabs.FirstOrDefault(card => target == "playlist-square"
+                            ? card.ChannelKind == "playlists" : card.Title.Contains("电音", StringComparison.Ordinal));
+                        Require(selected is not null, "NOT_COVERED");
+                        await module.OpenCatalogCardAsync(selected);
+                        await RenderAsync(window);
+                        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                        await module.CatalogEntryInitialization;
+                        await RenderAsync(window);
+                        Require(module.Status.Length == 0 && Cards(module).Any(),
+                            report.Failures > errors ? report.LastError : "NOT_COVERED");
+                        await CaptureCatalogAsync(module, window, report, "wy-" + target);
+                        return Cards(module).Count();
+                    });
             }
             else report.Record("guest.wy.channel.ui", "NOT_COVERED", "NOT_COVERED");
         }
@@ -563,6 +590,84 @@ internal static class MusicLiveAcceptance
     {
         await window.Dispatcher.InvokeAsync(window.UpdateLayout, DispatcherPriority.Render);
         Require(window.IsVisible && window.ActualWidth > 0 && window.ActualHeight > 0, "NOT_COVERED");
+    }
+
+    private static async Task CaptureCatalogAsync(MusicCapability module, Window window, Report report, string name)
+    {
+        static IEnumerable<ArtworkImage> Images(DependencyObject parent)
+        {
+            for (int index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+            {
+                var child = VisualTreeHelper.GetChild(parent, index);
+                if (child is ArtworkImage image) yield return image;
+                foreach (var nested in Images(child)) yield return nested;
+            }
+        }
+        var images = Images(module.View).Where(image =>
+        {
+            if (!image.IsVisible || image.Address.Length == 0 || image.ActualWidth <= 0 || image.ActualHeight <= 0) return false;
+            for (DependencyObject? parent = VisualTreeHelper.GetParent(image); parent is not null; parent = VisualTreeHelper.GetParent(parent))
+                if (parent is FrameworkElement element && (element.ClipToBounds || element is ScrollContentPresenter || element == window) &&
+                    !image.TransformToAncestor(element).TransformBounds(new Rect(image.RenderSize))
+                        .IntersectsWith(new Rect(element.RenderSize))) return false;
+            return true;
+        }).ToArray();
+        var finished = new HashSet<ArtworkImage>();
+        var changed = new SemaphoreSlim(0);
+        void Completed(object? sender, ArtworkLoadEventArgs _) { if (sender is ArtworkImage image) finished.Add(image); changed.Release(); }
+        foreach (var image in images) image.LoadCompleted += Completed;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            while (images.Any(image => image.Source is null && !finished.Contains(image)))
+                try { await changed.WaitAsync(timeout.Token); }
+                catch (OperationCanceledException) { break; }
+            report.Record("guest." + name + ".visible-image-urls", "PASS", count: images.Length);
+            report.Record("guest." + name + ".decoded-images", "PASS", count: images.Count(image => image.Source is not null));
+            int unresolved = images.Count(image => image.Source is null);
+            report.Record("guest." + name + ".unresolved-images", unresolved == 0 ? "PASS" : "NOT_COVERED",
+                unresolved == 0 ? null : "NOT_COVERED", count: unresolved);
+            foreach (var image in images.Where(image => image.Source is null))
+            {
+                string code = System.Windows.Automation.AutomationProperties.GetHelpText(image) switch
+                {
+                    "图片格式不支持或已损坏" => "ARTWORK_FORMAT",
+                    "图片超出资源限制" => "ARTWORK_LIMIT",
+                    "图片地址不可用" => "ARTWORK_ADDRESS",
+                    "图片重定向不可用" => "ARTWORK_REDIRECT",
+                    "图片访问被拒绝" => "ARTWORK_DENIED",
+                    "图片服务已关闭" => "ARTWORK_CLOSED",
+                    "图片网络加载失败" => "ARTWORK_NETWORK",
+                    "图片加载超时" => "ARTWORK_TIMEOUT",
+                    "图片加载失败" => "ARTWORK_UNKNOWN",
+                    _ => "ARTWORK_PENDING"
+                };
+                string kind = image.DataContext is MusicCatalogCard card && card.Kind is ("playlist" or "album" or "song" or "fm")
+                    ? card.Kind : "other";
+                string layer = image.Name is ("Cover" or "DecorationLayer" or "BannerImage") ? image.Name : "artwork";
+                string key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(image.Address)))[..12];
+                Console.WriteLine($"LIVE_IMAGE_FAILURE page={name}; kind={kind}; layer={layer}; key={key}; code={code}");
+                if (code == "ARTWORK_NETWORK" && Uri.TryCreate(image.Address, UriKind.Absolute, out var uri) &&
+                    uri.Scheme is ("http" or "https") && uri.UserInfo.Length == 0)
+                {
+                    try
+                    {
+                        using var handler = new SocketsHttpHandler { UseCookies = false, UseProxy = false, AllowAutoRedirect = false };
+                        using var probe = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
+                        using var message = new HttpRequestMessage(HttpMethod.Head, uri);
+                        using var response = await probe.SendAsync(message, HttpCompletionOption.ResponseHeadersRead);
+                        Console.WriteLine($"LIVE_IMAGE_HEAD key={key}; status={(int)response.StatusCode}");
+                    }
+                    catch { Console.WriteLine($"LIVE_IMAGE_HEAD key={key}; status=unavailable"); }
+                }
+            }
+            await NativeDesktopCapture.SaveAsync(module.View, "music-content-" + name);
+        }
+        finally
+        {
+            foreach (var image in images) image.LoadCompleted -= Completed;
+            changed.Dispose();
+        }
     }
 
     private static JsonElement Reply(JsonElement reply)

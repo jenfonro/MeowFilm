@@ -43,7 +43,8 @@ def locked(path):
 
 
 def extract(archive, output, expected):
-    destination = Path(output)
+    resolved = os.path.abspath(output)
+    destination = Path("\\\\?\\" + resolved if os.name == "nt" and not resolved.startswith("\\\\?\\") else output)
     destination.mkdir(parents=True, exist_ok=False)
     entries = {}
     with tarfile.open(archive, "r:*") as contents:

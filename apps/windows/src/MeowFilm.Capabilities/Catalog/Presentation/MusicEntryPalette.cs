@@ -3,50 +3,33 @@ using System.Windows.Media.Imaging;
 
 namespace MeowFilm.Capabilities;
 
-// Palette-style muted roles, evaluated only when an entry receives new artwork.
+// Shared entry roles, evaluated only when an entry receives new artwork.
 // Shared artwork/player palettes keep their original semantics.
 internal static class MusicEntryPalette
 {
-    internal static SolidColorBrush Sample(BitmapSource? source)
+    internal static SolidColorBrush Sample(BitmapSource? source, bool preview = false)
     {
         if (source is null) return Brushes.Gray;
-        var small = new TransformedBitmap(source, new ScaleTransform(
-            Math.Min(32, source.PixelWidth) / (double)source.PixelWidth,
-            Math.Min(32, source.PixelHeight) / (double)source.PixelHeight));
+        var small = new TransformedBitmap(source, new ScaleTransform(48d / source.PixelWidth, 48d / source.PixelHeight));
+        // Bgra32 is straight alpha in sRGB, matching the shared 48x48 sampling rule.
         var rgba = new FormatConvertedBitmap(small, PixelFormats.Bgra32, null, 0);
         var bytes = new byte[rgba.PixelWidth * rgba.PixelHeight * 4];
         rgba.CopyPixels(bytes, rgba.PixelWidth * 4, 0);
-        var bins = new Dictionary<int, Swatch>();
+        double red = 0, green = 0, blue = 0, weight = 0;
         for (int i = 0; i < bytes.Length; i += 4)
         {
-            int b = bytes[i], g = bytes[i + 1], r = bytes[i + 2], alpha = bytes[i + 3];
-            if (alpha == 0) continue;
-            int key = (r >> 3) << 10 | (g >> 3) << 5 | b >> 3;
-            var prior = bins.GetValueOrDefault(key);
-            bins[key] = new(prior.Red + r * alpha, prior.Green + g * alpha,
-                prior.Blue + b * alpha, prior.Weight + alpha);
+            double alpha = bytes[i + 3];
+            blue += bytes[i] * alpha; green += bytes[i + 1] * alpha; red += bytes[i + 2] * alpha;
+            weight += alpha;
         }
-        if (bins.Count == 0) return Brushes.Gray;
-        var swatches = bins.OrderBy(pair => pair.Key).Select(pair =>
-        {
-            var s = pair.Value;
-            return (Color: Lab.FromRgb(s.Red / (255d * s.Weight),
-                s.Green / (255d * s.Weight), s.Blue / (255d * s.Weight)), s.Weight);
-        }).ToArray();
-        double total = swatches.Sum(s => s.Weight);
-        double lightness = swatches.Sum(s => s.Color.L * s.Weight) / total;
-        // White/black padding and tiny accent flecks must not win over a real color region.
-        var candidates = swatches.Where(s => s.Weight >= total * .01 &&
-            s.Color.L is > .15 and < .96 && s.Color.Chroma >= .018).ToArray();
-        if (candidates.Length == 0) candidates = swatches;
-        double population = candidates.Max(s => s.Weight);
-        var selected = candidates.MaxBy(s => .6 * s.Weight / population +
-            .25 * (1 - Math.Min(1, Math.Abs(s.Color.Chroma - .06) / .2)) +
-            .15 * (1 - Math.Abs(s.Color.L - lightness))).Color;
-        double tone = Math.Clamp(selected.L * .75 + lightness * .25, .42, .76);
-        double chroma = Math.Min(selected.Chroma * .65, .07);
-        var color = selected.WithTone(tone, chroma);
-        var brush = new SolidColorBrush(color); brush.Freeze(); return brush;
+        if (weight == 0) return Brushes.Gray;
+        red /= weight; green /= weight; blue /= weight;
+        if (!preview) { red = red * .35 + 75 * .65; green = green * .35 + 56 * .65; blue = blue * .35 + 50 * .65; }
+        double luminance = .2126 * red + .7152 * green + .0722 * blue;
+        double scale = Math.Min(1, (preview ? 170d : 96d) / luminance);
+        static byte Channel(double value) => (byte)Math.Clamp(Math.Round(value, MidpointRounding.AwayFromZero), 0, 255);
+        var brush = new SolidColorBrush(Color.FromRgb(Channel(red * scale), Channel(green * scale), Channel(blue * scale)));
+        brush.Freeze(); return brush;
     }
 
     internal static Color TitleShade(Color source)
@@ -55,8 +38,6 @@ internal static class MusicEntryPalette
         // Protect the title using its own backdrop, without lifting dark artwork.
         return color.WithTone(Math.Min(color.L * .8, .44), .035);
     }
-
-    private readonly record struct Swatch(int Red, int Green, int Blue, int Weight);
 
     // Standard Oklab transforms: change lightness/chroma without rotating the source hue.
     private readonly record struct Lab(double L, double A, double B)

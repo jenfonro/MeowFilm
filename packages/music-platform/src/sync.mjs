@@ -28,6 +28,7 @@ async function directory(c) {
   let continuation = null, page = 1;
   do {
     const result = await provider.personalPlaylists(c, { kind: 'all', page, limit: c.platform === 'kg' ? 30 : 100, continuation });
+    for (const row of result.items) required(row.id);
     items.push(...result.items);
     if (result.more && !result.continuation) fail('INVALID_RESPONSE');
     continuation = result.continuation;
@@ -45,19 +46,28 @@ function subscription(row) {
 }
 async function readEntry(c, row) {
   const result = await providers[c.platform]['playlist.complete'](c, { id: row.id, personal: row.locator, refresh: true });
-  const info = song => song.sources.find(source => source.source === c.platform)?.musicInfo;
-  const known = new Map(result.items.map(song => [scalar(info(song)?.songmid), song]));
+  if (!result.complete || result.more || result.continuation) fail('INVALID_RESPONSE');
+  const info = song => song?.sources.find(source => source.source === c.platform)?.musicInfo;
+  const known = new Map();
+  for (const song of result.items) {
+    const songId = scalar(info(song)?.songmid);
+    if (songId) known.set(songId, song);
+  }
   const ids = result.memberIds ?? result.items.map(song => scalar(info(song)?.songmid));
   const occurrences = new Map();
-  const members = ids.map((memberId, at) => {
-    const song = c.platform === 'kg' ? result.items[at] : known.get(memberId);
+  const members = ids.map((rawId, at) => {
+    const memberId = required(rawId);
+    const candidate = c.platform === 'kg' ? result.items[at] : known.get(memberId);
+    const candidateId = scalar(info(candidate)?.songmid);
+    const song = candidateId ? candidate : null;
+    const recordingId = c.platform === 'kg' ? required(candidateId) : memberId;
     const occurrence = occurrences.get(memberId) ?? 0;
     occurrences.set(memberId, occurrence + 1);
-    return { id: song ? scalar(info(song).songmid) : memberId,
+    return { id: recordingId,
       key: c.platform === 'kg' ? memberId : JSON.stringify([memberId, occurrence]),
       // Membership is a real locator even when optional matching metadata is absent.
       // Empty metadata is not an invented title, artist, or duration.
-      song: song ?? minimalSong(c.platform, memberId, '', '', '', null, ''),
+      song: song ?? minimalSong(c.platform, recordingId, '', '', '', null, ''),
       sort: result.memberSorts?.[at] ?? null, hasMetadata: song != null };
   });
   return { id: row.id, name: result.name || row.name, kind: row.kind ?? 'playlist', writable: row.writable || row.kind === 'favorites',
@@ -271,7 +281,8 @@ export function createSyncOperations() {
             for (const { hash, hint } of requested) {
               const exact = hash.toUpperCase(), usable = value => value != null && value !== '' && scalar(value) !== '0';
               if (first(hint.hash, hint.songmid) && scalar(first(hint.hash, hint.songmid)).toUpperCase() !== exact) fail('REMOTE_CHANGED');
-              let source = (await kgProvider.song(c, { id: exact })).sources[0].musicInfo;
+              let source = (await kgProvider.song(c, { id: exact })).sources[0]?.musicInfo;
+              if (!source) fail('NOT_FOUND');
               if (source.hash !== exact) fail('REMOTE_CHANGED');
               const checkHints = value => {
                 for (const key of ['albumId', 'albumAudioId'])
@@ -280,7 +291,7 @@ export function createSyncOperations() {
               checkHints(source);
               if (!source.name || source.name === '未知歌曲' || !usable(source.albumId) || !usable(source.albumAudioId)) {
                 const raw = await c.kgMixRow(exact, scalar(first(hint.albumAudioId, source.albumAudioId)));
-                const next = kgSong(raw).sources[0].musicInfo;
+                const next = kgSong({ ...raw, hash: first(raw?.hash, raw?.FileHash, raw?.audio_info?.hash, raw?.audio_info?.hash_128, exact) }).sources[0].musicInfo;
                 if (source.duration > 0 && next.duration > 0 && Math.abs(source.duration - next.duration) > 10) fail('REMOTE_CHANGED');
                 for (const key of ['albumId', 'albumAudioId', 'audioId'])
                   if (usable(source[key]) && usable(next[key]) && source[key] !== next[key]) fail('REMOTE_CHANGED');

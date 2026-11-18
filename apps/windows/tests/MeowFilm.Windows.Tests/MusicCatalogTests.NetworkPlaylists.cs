@@ -269,8 +269,8 @@ public static partial class MusicCatalogTests
             await using var f = await Fixture.Create();
             f.Client.Transform("music.catalog.home", reply => Edit(reply, page =>
                 page["sections"]!.AsArray().Add(JsonSerializer.SerializeToNode(new {
-                    id = "owned-fixture", title = "Owned", type = "playlists", items = new[] {
-                        new { id = "500", name = "Owned", kind = "playlist", relationship = "owned", writable = true, count = 205 }
+                    id = "owned-fixture", title = "Owned", layout = "playlist-rail", items = new[] {
+                        new { id = "500", title = "Owned", kind = "playlist", action = new { type = "playlist", id = "500" }, relationship = "owned", writable = true, count = 205 }
                     }
                 }))));
             await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;

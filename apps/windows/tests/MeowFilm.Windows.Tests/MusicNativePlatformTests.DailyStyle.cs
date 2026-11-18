@@ -24,6 +24,27 @@ public static partial class MusicNativePlatformTests
             var result = await f.Catalog.SaveDailyStyleAsync(editor, new("3000", ["1"]));
             Equal(MusicDailyStyleWriteStatus.NotSent, result.Status); Equal("STALE_SESSION", result.ErrorCode); Equal(1, f.Requests.Count);
         });
+        yield return Case("style reads retain categories and tags without a field completeness gate", async () =>
+        {
+            foreach (var categories in new object?[] { null, new { changed = true }, new object?[] {
+                new { name = "Current", tags = new object?[] { new { name = "Visible tag" }, null } },
+                new { id = "other", tags = new { changed = true } }, null
+            } })
+            {
+                await using var f = Peer(_ => Json(new { categories }), Session("wy"));
+                var editor = await f.Catalog.OpenDailyStyleEditorAsync();
+                Equal(categories is object?[] ? 3 : 0, editor.Categories.Count);
+                if (editor.Categories.Count == 3)
+                {
+                    Equal("", editor.Categories[0].Id); Equal("Current", editor.Categories[0].Name);
+                    Equal(2, editor.Categories[0].Tags.Count); Equal("Visible tag", editor.Categories[0].Tags[0].Name);
+                    Equal("", editor.Categories[0].Tags[1].Name);
+                    Equal("other", editor.Categories[1].Id); Equal(0, editor.Categories[1].Tags.Count);
+                    Equal("", editor.Categories[2].Id);
+                }
+                Equal(1, f.Requests.Count);
+            }
+        });
         foreach (string status in new[] { "confirmed", "rejected", "notSent", "unknown", "bad" })
         {
             string s = status;

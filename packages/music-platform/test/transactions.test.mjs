@@ -472,3 +472,59 @@ test('WY public feedback upload preserves the NCBL container and exact semantic 
   assert.equal(JSON.parse(lines[1][2]).time, 10); assert.equal(f.requests.length, 1);
   await f.close();
 });
+
+test('sync snapshots require complete collections and real member identities while ordinary reads stay permissive', async t => {
+  fixedEntropy(t);
+  const wy = fixture(request => {
+    const path = new URL(request.url).pathname;
+    if (path === '/eapi/user/playlist')
+      return response({ code: 200, more: false, playlist: [{ id: '10', name: 'Owned', creator: { userId: 42 } }] });
+    if (path === '/eapi/v6/playlist/detail')
+      return response({ code: 200, playlist: { id: '10', trackIds: [{ id: '101' }], tracks: [{ name: 'Display only' }] } });
+    assert.equal(path, '/weapi/v3/song/detail');
+    return response({ code: 200, songs: [{ name: 'Still missing ID' }] });
+  });
+  t.after(() => wy.close()); await wy.session('wy');
+  const wySnapshot = await wy.request('wy', 'sync.read', { kinds: ['playlist'] });
+  assert.equal(wySnapshot.collections[0].members.length, 1);
+  assert.equal(wySnapshot.collections[0].members[0].id, '101');
+  assert.equal(wySnapshot.collections[0].members[0].hasMetadata, false);
+  assert.equal(idOf(wySnapshot.collections[0].members[0].song), '101');
+
+  const stalledTx = fixture(request => {
+    const { method } = qq(request).req_0;
+    if (method === 'GetPlaylistByUin') return rpc({ v_playlist: [{ tid: '501', dirid: 8, uin: 42, name: 'Owned' }] });
+    if (method === 'CgiGetPlaylistFavInfo') return rpc({ hasmore: 0, total: 0, v_list: [] });
+    return rpc({ dirinfo: { id: '501' }, songlist: [], hasmore: 1, total_song_num: 5 });
+  });
+  seedClients(stalledTx); t.after(() => stalledTx.close()); await stalledTx.session('tx');
+  const partial = await stalledTx.request('tx', 'playlist.complete', { id: '501' });
+  assert.equal(partial.complete, false); assert.equal(partial.more, true);
+  await assert.rejects(stalledTx.request('tx', 'sync.read', { kinds: ['playlist'] }), { code: 'INVALID_RESPONSE' });
+
+  for (const [platform, missingDirectoryId] of [['tx', true], ['tx', false], ['kg', false]]) {
+    const f = fixture(request => {
+      if (platform === 'tx') {
+        const { method } = qq(request).req_0;
+        if (method === 'GetPlaylistByUin')
+          return rpc({ v_playlist: [missingDirectoryId ? { dirid: 8, uin: 42, name: 'No ID' } : { tid: '501', dirid: 8, uin: 42, name: 'Owned' }] });
+        if (method === 'CgiGetPlaylistFavInfo') return rpc({ hasmore: 0, total: 0, v_list: [] });
+        return rpc({ dirinfo: { id: '501' }, songlist: [{ title: 'No MID' }], hasmore: 0, total_song_num: 1 });
+      }
+      const value = kg(request);
+      if (value.path === '/v7/get_all_list')
+        return response({ status: 1, data: { total_ver: '1', has_more: 0, info: [{ type: 0, listid: 7, list_create_userid: 42, name: 'Owned' }] } });
+      return response({ status: 1, data: { has_more: 0, info: [{ fileid: '11', audio_name: 'No hash' }] } });
+    });
+    seedClients(f); t.after(() => f.close()); await f.session(platform);
+    await assert.rejects(f.request(platform, 'sync.read', { kinds: ['playlist'] }), { code: 'INVALID_RESPONSE' });
+  }
+
+  const kgMissing = fixture(request => {
+    assert.equal(kg(request).path, '/v1/audio/audio');
+    return response({ status: 1, data: [{ audio_name: 'Display only' }] });
+  });
+  seedClients(kgMissing); t.after(() => kgMissing.close()); await kgMissing.session('kg');
+  assert.deepEqual(await kgMissing.request('kg', 'sync.write', { action: 'add', id: '0:7', ids: [kgHash] }),
+    { status: 'notSent', errorCode: 'NOT_FOUND' });
+});

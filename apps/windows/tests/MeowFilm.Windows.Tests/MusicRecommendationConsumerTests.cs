@@ -503,14 +503,18 @@ public static partial class MusicUiTests
                     return MusicPlatformRuntimeFixture.Json(observation);
                 }
                 else if (call.Operation == "home")
-                    return MusicPlatformRuntimeFixture.Json(new { platform = "wy", more = false, items = new object[]
+                    return MusicPlatformRuntimeFixture.Json(new { platform = "wy", more = false, sections = new[] { new
                     {
-                        new { id = "fm", name = "游客漫游", requiresAccount = false, action = new { type = "fm" } },
-                        new { id = "similar", name = "相似推荐", requiresAccount = false,
-                            action = new { type = "similar", sourceIds = new[] { "77" }, sourceType = "song" } },
-                        new { id = "heartbeat", name = "心动模式", requiresAccount = true,
-                            action = new { type = "heartbeat" } }
-                    } });
+                        id = "entries", title = "", layout = "feature-rail", items = new object[]
+                        {
+                            new { key = "fm", id = "fm", kind = "fm", label = "游客漫游", title = "游客漫游",
+                                cover = "https://images.invalid/fm.jpg", requiresAccount = false, action = new { type = "fm" } },
+                            new { key = "similar", id = "similar", kind = "similar", label = "相似推荐", title = "相似推荐",
+                                requiresAccount = false, action = new { type = "similar", sourceIds = new[] { "77" }, sourceType = "song" } },
+                            new { key = "heartbeat", id = "heartbeat", kind = "heartbeat", label = "心动模式", title = "心动模式",
+                                requiresAccount = true, action = new { type = "heartbeat" } }
+                        }
+                    } } });
                 else
                 {
                     True(call.Operation is "fm" or "similar", "canonical recommendation operation");

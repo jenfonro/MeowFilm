@@ -199,6 +199,7 @@ public sealed partial class MusicCapability
                 recommendationDisplayedVersion = wanted;
             }
         }
+        catch (OperationCanceledException) when (recommendationLifetime.IsCancellationRequested) { }
         finally { recommendationDisplayRunning = false; }
     }
 

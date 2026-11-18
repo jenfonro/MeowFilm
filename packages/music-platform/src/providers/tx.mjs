@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Pinned QQMusicApi / meowmusic recipes; see LICENSES/NOTICE.md.
 import { randomInt } from 'node:crypto';
-import { collection, first, image, input, mediaURL, number, page, pageNumber, protocolInteger, required, rows, scalar, text, txSong } from '../model.mjs';
+import { array, record, collection, first, images, input, mediaURL, number, optionalNumber, page, pageNumber, protocolInteger, required, rows, scalar, text, txSong } from '../model.mjs';
 import { cookieFields, hex } from '../protocols.mjs';
 import { lyricTracks, qrcLyrics } from '../lyrics.mjs';
 import { fail } from '../errors.mjs';
@@ -9,9 +9,8 @@ import { fail } from '../errors.mjs';
 async function details(c, id) {
   const data = await c.tx('music.trackInfo.UniformRuleCtrl', 'CgiGetTrackInfo',
     { ctx: 0, client: 1, types: [0], modify_stamp: [0], mids: [id] });
-  const row = rows(data.tracks)[0];
-  if (!row) fail('NOT_FOUND');
-  return row;
+  c.observe('tracks', data?.tracks);
+  return record(array(data?.tracks)[0]);
 }
 async function playlist(c, p) {
   const { id, page: current, limit, offset } = p;
@@ -22,18 +21,19 @@ async function playlist(c, p) {
     const cookies = cookieFields(c.accountRequired().cookie);
     args.enc_host_uin = input(first(cookies.encrypt_uin, cookies.encryptUin));
   } else args.onlysonglist = 0;
-  const data = await c.tx('music.srfDissInfo.DissInfo', 'CgiGetDiss', args);
-  const info = data.dirinfo ?? {}, items = rows(data.songlist ?? []).map(txSong);
-  const more = Boolean(Number(data.hasmore));
-  if (more && !items.length) fail('INVALID_RESPONSE');
-  return { ...page('tx', items, { page: current, limit }, { id: favorites ? 'favorites' : required(first(info.id, info.tid, info.dissid)),
+  const data = record(await c.tx('music.srfDissInfo.DissInfo', 'CgiGetDiss', args));
+  c.observe('songlist', data.songlist);
+  const info = record(data.dirinfo), items = array(data.songlist).map(txSong);
+  const more = (data.hasmore === true || Boolean(optionalNumber(data.hasmore)));
+  return { ...page('tx', items, { page: current, limit }, { id: favorites ? 'favorites' : scalar(first(info.id, info.tid, info.dissid)),
     name: text(first(info.title, info.dissname, info.name, favorites ? '我喜欢' : '')),
-    cover: image(first(info.picurl, info.cover, info.logo)), total: number(data.total_song_num),
+    cover: images(info.picurl, info.cover, info.logo), total: optionalNumber(data.total_song_num),
     more, consumed: items.length,
-    memberIds: items.map(song => song.sources[0].musicInfo.songmid), source: 'tx', engine: 'QQ' }),
-  continuation: more ? { page: current + 1, offset: offset + items.length } : null };
+    memberIds: items.map(song => song.sources[0]?.musicInfo.songmid ?? ''), source: 'tx', engine: 'QQ' }),
+  continuation: more && items.length ? { page: current + 1, offset: offset + items.length } : null };
 }
 function personalItem(raw, uid, owned) {
+  raw = record(raw);
   const card = collection('tx', raw);
   return { ...card, ownerId: scalar(raw.uin), relationship: owned ? 'owned' : 'subscribed',
     owned, writable: owned && scalar(raw.uin) === uid, kind: 'playlist', available: !raw.invalid,
@@ -48,10 +48,12 @@ export const txProvider = {
     const data = await c.tx('music.search.SearchCgiService', 'DoSearchForQQMusicMobile', {
       searchid, query: input(keyword), search_type: kind === 'songs' ? 0 : 3, num_per_page: limit,
       page_num: current, highlight: 0, grp: 1, selectors: {}, vec_selectors: [] }, true);
-    const next = number(data.meta?.nextpage, -1);
-    return page('tx', rows(data.body?.[kind === 'songs' ? 'item_song' : 'item_songlist'] ?? [])
+    const next = optionalNumber(data?.meta?.nextpage) ?? -1;
+    const source = data?.body?.[kind === 'songs' ? 'item_song' : 'item_songlist'];
+    c.observe('body.' + (kind === 'songs' ? 'item_song' : 'item_songlist'), source);
+    return page('tx', array(source)
       .map(kind === 'songs' ? txSong : row => collection('tx', row)), { page: current, limit },
-    { total: number(data.meta?.sum), more: next !== -1, next });
+    { total: optionalNumber(data?.meta?.sum), more: next !== -1, next });
   },
   async song(c, { id }) {
     id = input(id);
@@ -69,10 +71,10 @@ export const txProvider = {
     do {
       result = await playlist(c, { ...p, id, page: current, offset, limit: 100 });
       items.push(...result.items); members.push(...result.memberIds);
-      if (result.more && !result.consumed) fail('INVALID_RESPONSE');
+      if (!result.consumed) break;
       offset += result.consumed; current++;
     } while (result.more);
-    return { ...result, page: 1, items, memberIds: members, count: items.length, more: false, continuation: null, complete: true };
+    return { ...result, page: 1, items, memberIds: members, count: items.length, complete: !result.more };
   },
   async personalPlaylists(c, { kind = 'all', page: current = 1, limit = 30, continuation }) {
     const account = c.accountRequired(), uid = account.userId, cookies = cookieFields(account.cookie);
@@ -87,7 +89,8 @@ export const txProvider = {
         ownerId: uid, owned: true, relationship: 'owned', kind: 'favorites', writable: true, available: true,
         locator: { kind: 'qq-favorites', listId: '201', playlistId: 'favorites', dirId: '201' },
         action: { type: 'playlist', id: 'favorites' } },
-      ...rows(data.v_playlist).filter(row => scalar(first(row.dirid, row.dirId)) !== '201').map(row => personalItem(row, uid, true))];
+      ...array(data?.v_playlist).filter(row => scalar(first(row?.dirid, row?.dirId)) !== '201').map(row => personalItem(row, uid, true))];
+      c.observe('v_playlist', data?.v_playlist);
     }
     if (kind === 'created') return page('tx', created.slice((current - 1) * limit, current * limit),
       { page: current, limit }, { total: created.length, more: current * limit < created.length, accountId: uid });
@@ -101,11 +104,13 @@ export const txProvider = {
     if (phase === 'subscribed' && items.length < limit) {
       const data = await c.tx('music.musicasset.PlaylistFavRead', 'CgiGetPlaylistFavInfo',
         { uin: input(first(cookies.encrypt_uin, cookies.encryptUin)), offset, size: limit - items.length });
-      if (data.hide) fail('FORBIDDEN');
-      const source = rows(data.v_list);
+      if (data?.hide) fail('FORBIDDEN');
+      c.observe('v_list', data?.v_list);
+      const source = array(data?.v_list);
       items.push(...source.map(row => personalItem(row, uid, false)).filter(row => !created.some(own => own.id === row.id)));
-      offset += source.length; more = Boolean(Number(data.hasmore)); total = kind === 'subscribed' ? number(data.total) : null;
-      if (more && !source.length) fail('INVALID_RESPONSE'); // An offset cannot advance without consumed rows.
+      offset += source.length; more = (data?.hasmore === true || Boolean(optionalNumber(data?.hasmore))); total = kind === 'subscribed' ? optionalNumber(data?.total) : null;
+      if (more && !source.length)
+        return { platform: 'tx', accountId: uid, collection: kind, items, page: current, limit, total, more, continuation: null };
     }
     return { platform: 'tx', accountId: uid, collection: kind, items, page: current, limit, total, more,
       continuation: more ? { page: current + 1, txPhase: phase, txOffset: offset } : null };
@@ -117,11 +122,13 @@ export const txProvider = {
     if (kind === 'guess') {
       data = await c.tx('music.radioProxy.MbTrackRadioSvr', 'get_radio_track',
         { id: 99, num: 5, from: 0, scene: 0, song_ids: [] });
-      source = rows(data.tracks); more = false;
+      c.observe('tracks', data?.tracks);
+      source = array(data?.tracks); more = false;
     } else if (kind === 'radar') {
       data = await c.tx('music.recommend.TrackRelationServer', 'GetRadarSong',
         { Page: current, ReqType: 0, FavSongs: [], EntranceSongs: [] });
-      source = rows(data.VecSongs).map(row => row.Track); more = Boolean(data.HasMore);
+      c.observe('VecSongs', data?.VecSongs);
+      source = array(data?.VecSongs).map(row => row?.Track); more = Boolean(data?.HasMore);
     } else fail('UNSUPPORTED');
     return page('tx', source.map(txSong), { page: current, limit: 30 }, { more });
   },
@@ -129,9 +136,9 @@ export const txProvider = {
     const data = await c.tx('music.musichallSong.PlayLyricInfo', 'GetPlayLyricInfo', {
       songMid: input(first(id, musicInfo.songmid)), type: 1, crypt: 1, lrc_t: 0, qrc: 1, qrc_t: 0,
       trans: 1, trans_t: 0, roma: 1, roma_t: 0, needSingingAnnotations: false }, false);
-    return lyricTracks(await qrcLyrics(text(data.lyric), c.signal), {
-      translation: () => qrcLyrics(text(data.trans), c.signal),
-      romanization: () => qrcLyrics(text(data.roma), c.signal),
+    return lyricTracks(await qrcLyrics(text(data?.lyric), c.signal), {
+      translation: () => qrcLyrics(text(data?.trans), c.signal),
+      romanization: () => qrcLyrics(text(data?.roma), c.signal),
     }, c.signal);
   },
   async chorus(c, { id, musicInfo = {} }) {
@@ -169,6 +176,6 @@ export const txProvider = {
   async 'audio.options'(c, { id }) {
     const track = await details(c, input(id)), file = track.file ?? {};
     return { qualities: ['128k', ...[['320k', file.size_320mp3], ['flac', file.size_flac], ['master', file.size_new?.[0]]]
-      .filter(([, size]) => Number(size) > 0).map(([quality]) => quality)] };
+      .filter(([, size]) => optionalNumber(size) > 0).map(([quality]) => quality)] };
   },
 };

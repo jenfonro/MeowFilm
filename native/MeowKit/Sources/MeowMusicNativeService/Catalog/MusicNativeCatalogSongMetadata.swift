@@ -18,9 +18,13 @@ extension NativeMusicService {
                 tracks += item.previewSongs
             }
         }
-        let songs = try adoptSongs(tracks.map(MusicModel.normalize), authoritative: true)
+        let candidates = tracks.compactMap { track -> (MusicNativeTrackData, MJ)? in
+            guard let song = try? MusicModel.normalize(track) else { return nil }
+            return (track, song)
+        }
+        let songs = try adoptSongs(candidates.map(\.1), authoritative: true)
         var result: [Data: MJ] = [:]
-        for (track, song) in zip(tracks, songs) { result[publicSongMetadataKey(track)] = song }
+        for (candidate, song) in zip(candidates, songs) { result[publicSongMetadataKey(candidate.0)] = song }
         return result
     }
 }

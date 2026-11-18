@@ -22,7 +22,7 @@ public static class MusicEntryCardPresentationTests
 
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Case("resting covers keep a light title shade and a separate muted footer", BrightCoverContrast);
+        yield return Case("resting covers blend into the same footer color with fixed gradient stops", BrightCoverContrast);
         yield return Case("entry captions share two lines with single line text on the second baseline", SubtitleWrapping);
         yield return Case("official decoration drives the title palette and failed decoration falls back to the cover", DecorationPalette);
         yield return Case("decorative fades preserve open and explicit play hit regions", HitAndPlayIntent);
@@ -69,10 +69,14 @@ public static class MusicEntryCardPresentationTests
 
                 var lastCover = frame.At(new Point(sampleX, cover.Bottom - 2));
                 var firstFooter = frame.At(new Point(sampleX, cover.Bottom + 2));
-                Check(Math.Abs(Luminance(lastCover) - Luminance(middle)) < .04,
-                    "the resting cover remains intact through its bottom edge");
-                Check(Contrast(lastCover, firstFooter) > 1.2,
-                    "the cover and footer retain a clear boundary instead of a permanent fade");
+                Check(Contrast(lastCover, firstFooter) < 1.12,
+                    "the resting gradient reaches the same RGB as the footer without a hard boundary");
+                var bottom = (Border)f.Entry.FindName("BottomShade");
+                var stops = ((LinearGradientBrush)bottom.OpacityMask).GradientStops;
+                Check(ReferenceEquals(bottom.Background, f.Surface.Background) && bottom.Opacity == 1 &&
+                    stops.Select(stop => stop.Offset).SequenceEqual(new[] { .62, .82, 1d }) &&
+                    stops.Select(stop => stop.Color.A).SequenceEqual(new byte[] { 0, 112, 255 }),
+                    "resting color and alpha geometry are independent of hover");
             }
             Check(f.Loader.Addresses.Count == 1 && f.Opens == 0 && f.Plays == 0,
                 "rendering all DPI variants uses one acquired cover and no business intent");
@@ -235,10 +239,8 @@ public static class MusicEntryCardPresentationTests
         }
         foreach (object invalid in new object[] { -1, 0, 32, 1.5, "29", true })
         {
-            bool rejected = false;
-            try { ReadDaily(invalid); }
-            catch (MusicOperationException error) when (error.Code == "INVALID_RESPONSE") { rejected = true; }
-            Check(rejected, "malformed or out-of-range provider dates are rejected before presentation");
+            var card = ReadDaily(invalid);
+            Check(!card.HasCalendarDay && card.Title == "每日推荐", "an unusable calendar value only omits its own glyph");
         }
         Check(f.Loader.Addresses.Count == 1, "date rebinding does not reacquire the cover or request songs");
     }
@@ -425,10 +427,11 @@ public static class MusicEntryCardPresentationTests
                 "cover shading neither reaches the footer nor moves text or replaces artwork");
             var sample = new Point(5, 100);
             var shaded = expanded.At(sample);
-            var expected = Color.FromRgb((byte)Math.Round(cover.R * 199 / 255d),
-                (byte)Math.Round(cover.G * 199 / 255d), (byte)Math.Round(cover.B * 199 / 255d));
+            var resting = rest.At(sample);
+            var expected = Color.FromRgb((byte)Math.Round(resting.R * 199 / 255d),
+                (byte)Math.Round(resting.G * 199 / 255d), (byte)Math.Round(resting.B * 199 / 255d));
             Check(Math.Abs(shaded.R - expected.R) <= 1 && Math.Abs(shaded.G - expected.G) <= 1 &&
-                Math.Abs(shaded.B - expected.B) <= 1, "the actual cover receives the existing playlist's neutral 0x38 shade");
+                Math.Abs(shaded.B - expected.B) <= 1, "the resting artwork gradient receives the existing playlist's neutral 0x38 shade");
             Check(expanded.At(new Point(5, 190)) == rest.At(new Point(5, 190)),
                 "the footer pixels stay unchanged while the cover dims");
             Check(ReferenceEquals(f.HitButton(new Point(5, 100)), f.Open) &&
@@ -550,7 +553,7 @@ public static class MusicEntryCardPresentationTests
                 Luminance(brightPatch) > Luminance(BrightCover) * .4,
                 "a local bright patch behind the lower title glyphs is visibly softened, not blacked out");
             Check(a.At(new Point(145, 72)) == BrightCover && b.At(new Point(145, 72)) == BrightCover,
-                "resting title protection fades out before the image body, without a permanent lower gradient");
+                "resting title protection fades out before the image body, above the lower gradient");
         }
         foreach (var f in new[] { warm, cool })
         {
@@ -572,7 +575,7 @@ public static class MusicEntryCardPresentationTests
             var shade = f.TitleShade.Background;
             var resting = Capture(f.Entry);
             var headerPoint = new Point(145, 28);
-            var lowerPoint = new Point(5, 100);
+            var lowerPoint = new Point(5, 92);
             Check(resting.At(lowerPoint) == bottom && Luminance(resting.At(headerPoint)) < Luminance(BrightCover) * .75,
                 "the initial card protects its title while leaving the lower image untouched");
             foreach (bool active in new[] { true, false })
@@ -684,31 +687,31 @@ public static class MusicEntryCardPresentationTests
             Preview: new[] { "第一首", "第二首", "Waking Up", "第四首" }
                 .Select((title, i) => new MusicRankPreview(title, "歌手", "", i + 1, 0)).ToArray(),
             Presentation: MusicCatalogEntryPresentation.Preview,
-            DayOfMonth: 29);
+            DayOfMonth: 29, Label: "每日推荐");
 
     private static IEnumerable<MusicCatalogCard> Cards()
     {
         yield return DailyCard();
-        yield return DailyCard() with { Id = "daily-style", Title = "电音日推", DayOfMonth = null };
+        yield return DailyCard() with { Id = "daily-style", Title = "电音日推", Label = "电音日推", DayOfMonth = null };
         yield return new("similar", "心动模式", "你的红心歌曲和相似推荐", CoverAddress, "similar", "wy",
-            ActionId: "similar", Presentation: MusicCatalogEntryPresentation.Overlay);
+            ActionId: "similar", Presentation: MusicCatalogEntryPresentation.Overlay, Label: "心动模式");
         yield return new("similar-song", "相似歌曲", "从你喜欢的歌听起", CoverAddress, "similar", "wy",
-            ActionId: "similar", Presentation: MusicCatalogEntryPresentation.Overlay);
+            ActionId: "similar", Presentation: MusicCatalogEntryPresentation.Overlay, Label: "相似歌曲");
         yield return new("fm", "私人雷达", "你爱的歌值得反复聆听", CoverAddress, "fm", "wy",
-            ActionId: "fm", Presentation: MusicCatalogEntryPresentation.Animated);
+            ActionId: "fm", Presentation: MusicCatalogEntryPresentation.Animated, Label: "私人雷达");
         yield return new("china", "国风频道", "国风歌曲", CoverAddress, "channel", "wy",
-            ActionId: "china", PageCode: "MUSIC_CHINA", Presentation: MusicCatalogEntryPresentation.Static);
+            ActionId: "china", PageCode: "MUSIC_CHINA", Presentation: MusicCatalogEntryPresentation.Static, Label: "国风频道");
     }
 
     private static MusicCatalogCard ReadDaily(object? day, bool includeDay = true)
     {
         var entry = new Dictionary<string, object?>
         {
-            ["id"] = "daily", ["name"] = "每日推荐", ["subtitle"] = "符合你口味的新鲜好歌",
+            ["id"] = "daily", ["kind"] = "daily", ["title"] = "每日推荐", ["label"] = "每日推荐", ["subtitle"] = "符合你口味的新鲜好歌",
             ["cover"] = CoverAddress, ["presentation"] = "preview", ["action"] = new { type = "daily" }
         };
         if (includeDay) entry["dayOfMonth"] = day;
-        var reply = JsonSerializer.SerializeToElement(new { platform = "wy", entries = new[] { entry } });
+        var reply = JsonSerializer.SerializeToElement(new { platform = "wy", sections = new[] { new { layout = "feature-rail", items = new[] { entry } } } });
         return MusicCatalogDto.Read(reply, "wy", "home", "").Single().Items.Single();
     }
 

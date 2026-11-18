@@ -22,6 +22,8 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog, IMusic
             p.Page, p.Limit, p.Pages, p.Refresh }, cancellationToken);
     public Task<JsonElement> SongAsync(MusicSongRequest p, CancellationToken cancellationToken = default) =>
         Read(p.Platform, "song", new { p.Id, p.Refresh }, cancellationToken);
+    public Task<JsonElement> PlaylistsAsync(MusicPlaylistsRequest p, CancellationToken cancellationToken = default) =>
+        Read(p.Platform, "playlists", new { p.Ids }, cancellationToken);
     public Task<JsonElement> PlaylistAsync(MusicPlaylistRequest p, CancellationToken cancellationToken = default) =>
         Read(p.Platform, "playlist", new { p.Id, p.Page, p.Limit, p.Refresh, p.Personal, p.Continuation }, cancellationToken);
     public Task<JsonElement> CompletePlaylistAsync(MusicPlaylistRequest p, CancellationToken cancellationToken = default) =>

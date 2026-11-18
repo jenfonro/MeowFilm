@@ -39,12 +39,16 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
         await service.close()
     }
 
-    func testMissingCanonicalRequiredLocatorFailsWithoutPublishingPartialRepository() async throws {
+    func testMissingCanonicalLocatorKeepsDisplayAndOnlyAdoptsIdentifiedRows() async throws {
         let valid = try MusicPlatformFixture.song(NativeMusicFixture.track())
         let peer = NativeMusicResultFixture([.object(["items": .array([valid, .object(["sources": .array([])])]), "total": .number(2)])])
         let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
-        await assertMusicFailure(.upstreamInvalid) { _ = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30) }
-        XCTAssertEqual(store.snapshot().2, 0)
+        let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
+        XCTAssertEqual(page.items.count, 2)
+        XCTAssertFalse(page.items[0].songId.isEmpty); XCTAssertTrue(page.items[1].songId.isEmpty)
+        XCTAssertTrue(page.items[1].sources.isEmpty)
+        let state = try await service.read()
+        XCTAssertEqual(try state.songRows.allSongIDs().count, 1)
         await service.close()
     }
 

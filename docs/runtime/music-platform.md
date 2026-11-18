@@ -15,7 +15,11 @@
 
 以上返回沿现有 HTTP module envelope `{ok,contract,value}`；失败沿现有有限 code。`candidate` 只用于候选账号认证交接，session 材料不进入普通展示 DTO 或日志。operation 以 providers、accounts 和 mutations 的实际公开派发为准，不另建第二份配方表。
 
-`operation:"home"` 返回当前平台的 `entries`、`sections` 及真实 `continuation`，顶部入口无需另行查询目录或在客户端拼固定列表。网易首页入口及 Cube 推荐组统一附带 `requiresAccount`、`display`、`available`；其中账号入口的显示声明取自原生已发布 session。登录／退出沿既有 session 更新失效缓存和旧请求，下一次首页读取返回当前声明。显示隐藏不替代 `daily`、`heartbeat` 等操作自身的实际账号准入。
+首页／频道等浏览操作通过 `content.mjs` 发布[固定内容协议](../common/music/platform-client-context.md#固定内容协议)的 `sections` 与真实 `continuation`。顶部入口是最终 `layout:"feature-rail"` 栏目，不额外返回 `entries` 或要求客户端拼固定列表。网易首页入口及 Cube 推荐组的 `requiresAccount/display/available` 取自当前已发布 session；显示声明不替代动作自身的账号准入。
+
+`operation:"playlists", params:{ids:[...]}` 是客户端显式请求的网易集合摘要，内部按上游每批 100 个 ID 执行，返回规范 Collection 列表。首页／频道提取不主动调用该配方补图或标题；适配器记录的结构统计仅以可选 `diagnostics` 返回，不阻断内容。
+
+FM 封面需求使用既有 `operation:"fm", params:{preview:true,...}`：规则 FM 的 `ruleId/tabTagId` 选择封面配方，普通 FM 选择已有单曲预览配方。运行器不在首页／频道中触发它；客户端仅消费返回的 `cover`，按需与生命周期见[共同展示资源](../common/music/presentation-resources.md#缺少图片引用的按需读取)。
 
 `operation:"lyrics"` 保持 `{text,translation,romanization}`；QQ／咪咕附属轨失败时额外返回 `errors`，以 `translation`／`romanization` 为键、有限错误码为值。失败轨为空字符串，健康主轨及兄弟轨继续返回；没有任何可用轨的解析失败仍抛错。取消、超时、会话失效及资源超限不降级为轨道错误。原生可继续消费原三个字段，不能把 `errors` 中的附属失败解释成主轨失败。
 

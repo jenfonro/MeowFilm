@@ -130,6 +130,13 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     private var issuedIntent: UUID?
     private var songObservation: Task<Void, Never>?
     private var songProjectionID = UUID()
+    enum ArtworkReadState {
+        case loading, settled(URL?), failed(MusicServiceError)
+    }
+    private(set) var artworkReads: [MusicPublicBrowseItem.CoverReference: ArtworkReadState] = [:]
+    private var artworkDemand: Set<MusicPublicBrowseItem.CoverReference> = []
+    private var artworkEpoch = UUID()
+    private var artworkTask: Task<Void, Never>?
     private let queuePage: (@MainActor (MusicRemoteQueueSource, String?) async throws -> MusicBrowsePage)?
     private let releaseSource: @MainActor (MusicRemoteQueueSource) -> Void
     private struct Loaded: Sendable {
@@ -164,6 +171,9 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     /// Personal queues use account leases. Public pages remain untouched;
     /// home/featured/channel account invalidation already has its native stream.
     @discardableResult public func invalidateAccount(_ platform: MusicAccountPlatform) -> Bool {
+        if artworkReads.keys.contains(where: { $0.platform == .init(accountPlatform: platform) }) {
+            retireArtwork()
+        }
         let dependency: MusicAccountPlatform
         switch request {
         case .accountRecommendation(let value, _, _), .discovery(.daily(let value)): dependency = value
@@ -178,12 +188,93 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     public func appear() {
         if !visible, case .detail(let collection) = request, collection.kind == .playlist { playlistNeedsRefresh = true }
         visible = true; displayVisible = true
+        publishArtwork()
         observeSongs()
     }
     /// Resource ownership and actual display demand are separate. A retained
     /// page may keep its owner active while a covered page must not refill
     /// display-only content.
-    public func setDisplayVisible(_ value: Bool) { displayVisible = value }
+    public func setDisplayVisible(_ value: Bool) {
+        displayVisible = value
+        if value { publishArtwork(); loadArtworkDemand() }
+        else { artworkDemand = [] }
+    }
+    /// UIKit reports actual visible cards. Retained pages/tabs share the same
+    /// content snapshot, but configuring a cell alone never starts a read.
+    func setVisibleArtworkItems(_ items: [MusicPublicBrowseItem]) {
+        let current = sections.flatMap(\.items)
+        artworkDemand = Set(items.compactMap { item in
+            guard displayVisible, item.artwork == nil, let ref = item.coverRef,
+                  current.contains(where: { $0.id == item.id && $0.coverRef == ref && $0.artwork == nil }) else { return nil }
+            return ref
+        })
+        let known = (sections + loadedPages.values.flatMap { $0.page.sections }).flatMap {
+            $0.items + $0.tabs.flatMap(\.items)
+        }.compactMap { item -> MusicPublicBrowseCollection? in
+            if case .collection(let value) = item.content { return value }; return nil
+        } + loadedPages.values.compactMap(\.collection)
+        for ref in artworkDemand where artworkReads[ref] == nil {
+            if let cover = known.first(where: {
+                $0.platform == ref.platform && $0.kind == ref.kind && $0.nativeID == ref.id && $0.artwork != nil
+            })?.artwork { artworkReads[ref] = .settled(cover) }
+        }
+        publishArtwork()
+        loadArtworkDemand()
+    }
+    private func loadArtworkDemand() {
+        guard available, visible, displayVisible, contentIsCurrent, canLoadDisplayPreviews, !isLoading,
+              artworkTask == nil, let reader = service as? any MusicPublicPlaylistSummaryReading else { return }
+        let missing = artworkDemand.filter { artworkReads[$0] == nil }
+            .sorted { ($0.platform.rawValue, $0.id) < ($1.platform.rawValue, $1.id) }
+        guard let first = missing.first else { return }
+        let batch = Array(missing.filter { $0.platform == first.platform }.prefix(30))
+        let own = artworkEpoch, access = generation
+        for ref in batch { artworkReads[ref] = .loading }
+        artworkTask = Task { [weak self] in
+            let result: Result<[MusicPublicBrowseCollection], Error>
+            do { result = .success(try await reader.publicPlaylistSummaries(platform: first.platform, ids: batch.map(\.id))) }
+            catch { result = .failure(error) }
+            guard let self, !Task.isCancelled, self.available, self.generation == access,
+                  self.artworkEpoch == own else { return }
+            for ref in batch {
+                switch result {
+                case .success(let rows):
+                    self.artworkReads[ref] = .settled(rows.first {
+                        $0.platform == ref.platform && $0.kind == ref.kind && $0.nativeID == ref.id && $0.artwork != nil
+                    }?.artwork)
+                case .failure(let error): self.artworkReads[ref] = .failed(MusicServiceError.sanitized(error))
+                }
+            }
+            self.artworkTask = nil
+            self.publishArtwork()
+            self.loadArtworkDemand()
+        }
+    }
+    private func publishArtwork() {
+        guard displayVisible else { return }
+        let covers = artworkReads.compactMapValues { state -> URL? in
+            if case .settled(let url) = state { return url }; return nil
+        }
+        guard !covers.isEmpty else { return }
+        let needsFill: (MusicPublicBrowseSection) -> Bool = { section in
+            (section.items + section.tabs.flatMap(\.items)).contains {
+                $0.artwork == nil && $0.coverRef.flatMap { covers[$0] } != nil
+            }
+        }
+        if sections.contains(where: needsFill) { sections = sections.map { $0.fillingArtwork(covers) } }
+        for key in Array(loadedPages.keys) {
+            guard var value = loadedPages[key], value.page.sections.contains(where: needsFill) else { continue }
+            value.page = .init(sections: value.page.sections.map { $0.fillingArtwork(covers) },
+                cursor: value.page.cursor, filters: value.page.filters, selectedFilter: value.page.selectedFilter,
+                notice: value.page.notice, consumed: value.page.consumed)
+            loadedPages[key] = value
+        }
+    }
+    private func retireArtwork() {
+        artworkEpoch = UUID()
+        artworkTask?.cancel(); artworkTask = nil
+        artworkDemand = []; artworkReads = [:]
+    }
     public var needsDateRefresh: Bool {
         guard isDaily, let contentDay else { return false }
         return !Calendar.current.isDate(contentDay, inSameDayAs: Date())
@@ -213,6 +304,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                 scoped = [.featured, .artistActivity, .vip].contains(channel.kind)
             default: scoped = false
             }
+            retireArtwork()
             guard scoped else { continue }
             if isHome {
                 do {
@@ -296,6 +388,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         }
     }
     private func invalidate(clear: Bool) {
+        retireArtwork()
         pageEpoch = UUID(); actionEpoch = UUID(); loadEpoch = UUID()
         issuedIntent = nil
         homeTask?.work.cancel(); homeTask = nil
@@ -324,6 +417,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     /// Home display and captured actions outlive a background read. Only a
     /// navigation/source/access change retires their page identity.
     private func invalidateHomeRead() {
+        retireArtwork()
         loadEpoch = UUID()
         homeTask?.work.cancel(); homeTask = nil
         task?.cancel(); task = nil
@@ -422,6 +516,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                 loadedPages[key] = cached
             }
             sectionDiagnosticIDs[sectionID] = nil
+            publishArtwork()
             if let repository = service as? any MusicSongRepositoryReading {
                 await refreshSongProjections(repository, access: access)
             }
@@ -722,7 +817,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                     try Task.checkCancellation()
                     let items = result.items.enumerated().map { index, track in
                         MusicPublicBrowseItem(id: "\(offset + index):\(track.songId)", title: track.title,
-                            subtitle: track.artist, artwork: track.artwork, content: .track(track))
+                            subtitle: track.artist, artwork: track.artwork, content: track.songId.isEmpty ? .unavailable : .track(track))
                     }
                     return .init(page: .init(sections: [.init(id: source.context.id, title: title, items: items)],
                         cursor: result.cursor), source: source)
@@ -741,7 +836,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                     try Task.checkCancellation()
                     let items = result.items.enumerated().map { index, track in
                         MusicPublicBrowseItem(id: "\(offset + index):\(track.songId)", title: track.title,
-                            subtitle: track.artist, artwork: track.artwork, content: .track(track))
+                            subtitle: track.artist, artwork: track.artwork, content: track.songId.isEmpty ? .unavailable : .track(track))
                     }
                     return .init(page: .init(sections: [.init(id: source.context.id, title: title, items: items)],
                                             cursor: result.cursor), source: source,
@@ -751,16 +846,19 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                 }
             case .playlists(let platform, let query):
                 let result = try await service.publicPlaylists(platform: platform, query: query, cursor: cursor)
-                let items = result.items.map { value in
-                    MusicPublicBrowseItem(id: value.id, title: value.title, subtitle: value.creator, artwork: value.artwork, content: .collection(value))
+                let items = result.items.enumerated().map { index, value in
+                    MusicPublicBrowseItem(id: "\(cursor ?? "first"):\(index):\(value.id)",
+                        title: value.title, subtitle: value.creator, artwork: value.artwork,
+                        content: value.nativeID.isEmpty ? .unavailable : .collection(value))
                 }
-                return .init(page: .init(sections: [.init(id: "playlists", title: platform.title, items: items)], cursor: result.cursor), total: result.total)
+                return .init(page: .init(sections: [.init(id: "playlists", title: platform.title, items: items,
+                    layout: .playlistRail)], cursor: result.cursor), total: result.total)
             case .detail(let collection):
                 let result = try await service.publicDetail(collection, cursor: cursor)
                 let items = result.members.enumerated().map { index, member in
                     let track = member.track
                     return MusicPublicBrowseItem(id: "\(cursor ?? "first"):\(index):\(track.songId)", title: track.title,
-                        subtitle: track.artist, artwork: track.artwork, content: .track(track))
+                        subtitle: track.artist, artwork: track.artwork, content: track.songId.isEmpty ? .unavailable : .track(track))
                 }
                 return .init(page: .init(sections: [.init(id: collection.id, title: result.collection.title, items: items)],
                              cursor: result.cursor, notice: result.notice),
@@ -782,7 +880,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                         try Task.checkCancellation()
                         let items = result.items.enumerated().map { index, track in
                             MusicPublicBrowseItem(id: "\(offset + index):\(track.songId)", title: track.title,
-                                subtitle: track.artist, artwork: track.artwork, content: .track(track))
+                                subtitle: track.artist, artwork: track.artwork, content: track.songId.isEmpty ? .unavailable : .track(track))
                         }
                         return .init(page: .init(sections: [.init(id: "daily", title: "每日推荐", items: items)], cursor: result.cursor),
                                      source: source)
@@ -799,7 +897,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         var unpublished: MusicRemoteQueueSource?
         defer {
             if let unpublished, unpublished.id != remoteSource?.id { releaseSource(unpublished) }
-            if own == loadEpoch { task = nil; isLoading = false }
+            if own == loadEpoch { task = nil; isLoading = false; publishArtwork(); loadArtworkDemand() }
         }
         do {
             let result = try await withTaskCancellationHandler { try await newTask.value } onCancel: { newTask.cancel() }
@@ -974,7 +1072,31 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             }
         }
     }
-    deinit { songObservation?.cancel() }
+    deinit { songObservation?.cancel(); artworkTask?.cancel() }
+}
+
+private extension MusicPublicBrowseSection {
+    func fillingArtwork(_ covers: [MusicPublicBrowseItem.CoverReference: URL]) -> Self {
+        .init(id: id, title: title, items: items.map { $0.fillingArtwork(covers) }, layout: layout,
+            avatars: avatars, channel: channel, filters: filters, selectedFilter: selectedFilter, error: error,
+            tabs: tabs.map { .init(id: $0.id, title: $0.title, items: $0.items.map { $0.fillingArtwork(covers) },
+                                   loadItems: $0.loadItems) }, selectedTab: selectedTab)
+    }
+}
+private extension MusicPublicBrowseItem {
+    func fillingArtwork(_ covers: [CoverReference: URL]) -> Self {
+        guard artwork == nil, let ref = coverRef, let cover = covers[ref] else { return self }
+        let next: MusicPublicBrowseContent
+        if case .collection(let value) = content, value.platform == ref.platform,
+           value.kind == ref.kind, value.nativeID == ref.id, value.artwork == nil {
+            next = .collection(.init(platform: value.platform, nativeID: value.nativeID, kind: value.kind,
+                title: value.title, creator: value.creator, artwork: cover, count: value.count))
+        } else { next = content }
+        return .init(id: id, title: title, subtitle: subtitle, artwork: cover, content: next,
+            ranking: ranking, previewSongs: previewSongs, recommendationReason: recommendationReason,
+            coverLabel: coverLabel, requiresAccount: requiresAccount, kind: kind, label: label,
+            presentation: presentation, coverRef: coverRef)
+    }
 }
 
 @MainActor public extension MusicViewModel {

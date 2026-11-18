@@ -5,10 +5,13 @@ using System.Windows.Media.Imaging;
 
 namespace MeowFilm.Capabilities;
 
-public sealed class MusicCatalogPaletteConverter : IValueConverter
+public sealed class MusicCatalogPaletteConverter : IValueConverter, IMultiValueConverter
 {
     public object Convert(object value, Type type, object parameter, CultureInfo culture) =>
         MusicEntryPalette.Sample(value as BitmapSource);
+    public object Convert(object[] values, Type type, object parameter, CultureInfo culture) =>
+        MusicEntryPalette.Sample(values.ElementAtOrDefault(0) as BitmapSource, values.ElementAtOrDefault(1) is true);
+    public object[] ConvertBack(object value, Type[] types, object parameter, CultureInfo culture) => throw new NotSupportedException();
     public object ConvertBack(object value, Type type, object parameter, CultureInfo culture) => throw new NotSupportedException();
 }
 

@@ -562,6 +562,7 @@ public static class MusicSongFactsTests
         private static Task<JsonElement> Unused() => throw new InvalidOperationException("unexpected catalog acquisition");
         public Task<JsonElement> SearchAsync(MusicSearchRequest r, CancellationToken t = default)
         { Calls++; return Search(r); }
+        public Task<JsonElement> PlaylistsAsync(MusicPlaylistsRequest r, CancellationToken t = default) => throw new NotSupportedException();
         public Task<JsonElement> PlaylistAsync(MusicPlaylistRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> CompletePlaylistAsync(MusicPlaylistRequest r, CancellationToken token = default) => throw new NotSupportedException();
         public Task<JsonElement> HomeAsync(MusicHomeRequest r, CancellationToken t = default) => Unused();

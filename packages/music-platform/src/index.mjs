@@ -12,6 +12,7 @@ import { kwProvider } from './providers/kw.mjs';
 import { mgProvider } from './providers/mg.mjs';
 import { createAccountOperations } from './accounts.mjs';
 import { createMutations } from './mutations.mjs';
+import { projectContent } from './content.mjs';
 
 export { MusicPlatformError, musicPlatformCodes };
 const providers = { wy: wyProvider, tx: txProvider, kg: kgProvider, kw: kwProvider, mg: mgProvider };
@@ -66,6 +67,14 @@ export function createMusicPlatform({ documents, transport = createMusicTranspor
     const c = {
       platform, account: entry.account, signal, clock, transport,
       client: () => { assertCurrent(); return clients.get(platform); }, errorCode,
+      observe(path, value) {
+        const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+        const key = path + ':' + type;
+        if (entry.observations.size < 32 || entry.observations.has(key))
+          entry.observations.set(key, { stage: 'extract', path, type,
+            ...(Array.isArray(value) ? { count: value.length } : {}) });
+        return value;
+      },
       cancel() { controller.abort(new MusicPlatformError('CANCELLED')); },
       drain() { return entry.work.catch(() => {}); },
       isCurrent() { return !signal.aborted && (entry.candidate || session === sessions.get(platform)); },
@@ -229,7 +238,8 @@ export function createMusicPlatform({ documents, transport = createMusicTranspor
     const controller = new AbortController(), session = sessions.get(platform);
     if (expectedSession !== undefined && (expectedSession === null ? session !== undefined :
       expectedSession.scope !== session?.scope || expectedSession.generation !== session?.generation)) fail('STALE_SESSION');
-    const entry = { platform, operation, controller, session, committed: false, readback: null, candidate: candidate !== undefined,
+    const entry = { platform, operation, controller, session, committed: false, readback: null,
+      observations: new Map(), candidate: candidate !== undefined,
       account: candidate === undefined ? session : candidate === null ? null :
         { userId: scalar(candidate.userId), cookie: input(candidate.cookie) } };
     const timer = setTimeout(() => controller.abort(new MusicPlatformError('TIMEOUT')),
@@ -241,7 +251,11 @@ export function createMusicPlatform({ documents, transport = createMusicTranspor
     signal?.addEventListener('abort', abort, { once: true });
     active.add(entry);
     const work = Promise.resolve().then(async () => {
-      const c = context(entry, params), value = await action(c, params);
+      const c = context(entry, params);
+      let value = projectContent(platform, operation, await action(c, params));
+      if (Object.hasOwn(providers[platform], operation) && !writes.has(operation) &&
+          entry.observations.size && value && typeof value === 'object' && !Array.isArray(value))
+        value = { ...value, diagnostics: [...entry.observations.values()] };
       // Only the already projected public result is inspected for credential
       // reflection. Unconsumed upstream branches are never walked or validated.
       if (c.account && !['account.verify', 'account.profile', 'account.refresh', 'sms.login', 'qr.poll'].includes(operation)) {

@@ -28,9 +28,12 @@ extension MusicPublicBrowseItem {
         var nextTitle = title, nextSubtitle = subtitle, nextArtwork = artwork
         if case .track(let previous) = content {
             let track = previous.projected(songs)
-            nextContent = .track(track); nextTitle = track.title; nextArtwork = track.artwork
-            nextSubtitle = [track.artist, layout == .vipSongs ? "" : track.album]
-                .filter { !$0.isEmpty }.joined(separator: " · ")
+            nextContent = .track(track)
+            if kind == nil {
+                nextTitle = track.title; nextArtwork = track.artwork
+                nextSubtitle = [track.artist, layout == .vipSongs ? "" : track.album]
+                    .filter { !$0.isEmpty }.joined(separator: " · ")
+            }
         } else { nextContent = content }
         let previews = previewSongs.map { $0.projected(songs) }
         let nextRanking = ranking.map { value in
@@ -43,7 +46,8 @@ extension MusicPublicBrowseItem {
         }
         return .init(id: id, title: nextTitle, subtitle: nextSubtitle, artwork: nextArtwork,
             content: nextContent, ranking: nextRanking, previewSongs: previews,
-            recommendationReason: recommendationReason, coverLabel: coverLabel, requiresAccount: requiresAccount)
+            recommendationReason: recommendationReason, coverLabel: coverLabel, requiresAccount: requiresAccount,
+            kind: kind, label: label, presentation: presentation, coverRef: coverRef)
     }
 }
 

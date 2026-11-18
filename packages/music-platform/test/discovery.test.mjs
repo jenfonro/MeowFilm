@@ -23,13 +23,13 @@ test('WY dynamic home preserves current sections and actions, without layout or 
     return response({ code: 200, data: { blocks, hasMore: false }, unused: { changed: ['anything'] } });
   });
   const first = await f.request('wy', 'home');
-  assert.equal(first.sections.length, 37); assert.equal(first.entries.length, 2);
-  assert.equal(first.entries[0].available, true); assert.equal(first.entries[0].requiresAccount, false);
-  assert.equal(first.entries[0].action.type, 'fm'); assert.equal(first.entries[1].action.type, 'similar');
-  assert.equal(first.sections[0].items[0].cover_url, '');
+  assert.equal(first.sections.length, 38); assert.equal(first.sections.find(row => row.layout === 'feature-rail').items.length, 2);
+  assert.equal(first.sections.find(row => row.layout === 'feature-rail').items[0].available, true); assert.equal(first.sections.find(row => row.layout === 'feature-rail').items[0].requiresAccount, false);
+  assert.equal(first.sections.find(row => row.layout === 'feature-rail').items[0].action.type, 'fm'); assert.equal(first.sections.find(row => row.layout === 'feature-rail').items[1].action.type, 'similar');
+  assert.equal(first.sections[1].items[0].cover, '');
   revision++;
   const current = await f.request('wy', 'home', { refresh: true });
-  assert.equal(current.sections.length, 39); assert.equal(idOf(current.sections[0].items[0]), '2');
+  assert.equal(current.sections.length, 40); assert.equal(idOf(current.sections[1].items[0]), '2');
   assert.equal(f.requests.length, 2); await f.close();
 });
 
@@ -48,14 +48,14 @@ test('WY home declares account-only entrances from the published session and inv
   });
   t.after(() => f.close());
   const check = (page, loggedIn) => {
-    assert.deepEqual(page.entries.map(row => row.name), ['每日推荐', '风格日推', '心动推荐', '私人漫游', '相似歌曲', '歌单']);
-    assert.deepEqual(page.entries.map(row => row.requiresAccount), [true, true, true, false, false, false]);
-    assert.deepEqual(page.entries.map(row => row.display), [loggedIn, loggedIn, loggedIn, true, true, true]);
-    assert.deepEqual(page.entries.map(row => row.available), [loggedIn, loggedIn, loggedIn, true, true, true]);
-    assert.deepEqual(page.entries.map(row => row.errorCode), [
-      ...Array(3).fill(loggedIn ? undefined : 'AUTH_REQUIRED'), undefined, undefined, undefined,
+    assert.deepEqual(page.sections.find(row => row.layout === 'feature-rail').items.map(row => row.title), ['每日推荐', '风格日推', '心动推荐', '私人漫游', '相似歌曲', '歌单']);
+    assert.deepEqual(page.sections.find(row => row.layout === 'feature-rail').items.map(row => row.requiresAccount), [true, true, true, false, false, false]);
+    assert.deepEqual(page.sections.find(row => row.layout === 'feature-rail').items.map(row => row.display), [loggedIn, loggedIn, loggedIn, true, true, true]);
+    assert.deepEqual(page.sections.find(row => row.layout === 'feature-rail').items.map(row => row.available), [loggedIn, loggedIn, loggedIn, true, true, true]);
+    assert.deepEqual(page.sections.find(row => row.layout === 'feature-rail').items.map(row => row.errorCode), [
+      ...Array(3).fill(loggedIn ? '' : 'AUTH_REQUIRED'), '', '', '',
     ]);
-    assert.deepEqual(page.entries[1].action, { type: 'daily', branch: 'style' });
+    assert.deepEqual(page.sections.find(row => row.layout === 'feature-rail').items[1].action, { type: 'daily', branch: 'style' });
   };
   check(await f.request('wy', 'home'), false);
   check(await f.request('wy', 'home'), false);
@@ -123,15 +123,15 @@ test('WY nested home actions, DSL and play buttons retain exact IDs through the 
   });
   t.after(() => f.close());
   const home = await f.request('wy', 'home');
-  assert.equal(home.entries.length, 6); assert.deepEqual(home.sections, []);
-  assert.deepEqual(home.entries[0].action, { type: 'playlist', id: secondId });
-  assert.deepEqual(home.entries[1].action.sourceIds, [firstId, secondId, firstId]);
-  assert.deepEqual(home.entries[2].playbackSource, { type: 'playlist', id: secondId });
-  assert.equal(idOf(home.entries[2]), '123');
-  assert.equal(home.entries[3].action.id, '123');
-  assert.equal(home.entries[4].action.type, 'unsupported'); assert.equal(home.entries[4].available, false);
-  assert.equal(idOf(home.entries[5]), '456'); assert.equal(home.entries[5].playbackSource, undefined);
-  const similar = await f.request('wy', 'similar', home.entries[1].action);
+  assert.equal(home.sections.find(row => row.layout === 'feature-rail').items.length, 6); assert.deepEqual(home.sections.map(row => row.layout), ['feature-rail']);
+  assert.deepEqual(home.sections.find(row => row.layout === 'feature-rail').items[0].action, { type: 'playlist', id: secondId });
+  assert.deepEqual(home.sections.find(row => row.layout === 'feature-rail').items[1].action.sourceIds, [firstId, secondId, firstId]);
+  assert.deepEqual(home.sections.find(row => row.layout === 'feature-rail').items[2].playbackSource, { type: 'playlist', id: secondId });
+  assert.equal(idOf(home.sections.find(row => row.layout === 'feature-rail').items[2]), '123');
+  assert.equal(home.sections.find(row => row.layout === 'feature-rail').items[3].action.id, '123');
+  assert.equal(home.sections.find(row => row.layout === 'feature-rail').items[4].action, null); assert.equal(home.sections.find(row => row.layout === 'feature-rail').items[4].available, false);
+  assert.equal(idOf(home.sections.find(row => row.layout === 'feature-rail').items[5]), '456'); assert.equal(home.sections.find(row => row.layout === 'feature-rail').items[5].playbackSource, null);
+  const similar = await f.request('wy', 'similar', home.sections.find(row => row.layout === 'feature-rail').items[1].action);
   assert.deepEqual(similar.items.map(idOf), [firstId, secondId, firstId]);
   assert.equal(f.requests.length, 2);
 });
@@ -174,7 +174,9 @@ test('WY home continuation follows real cursor and carries only actual protocol 
   const second = await f.request('wy', 'home', { continuation: first.continuation });
   assert.equal(second.more, false); assert.equal(f.requests.length, 2); await f.close();
   const stalled = fixture(() => response({ code: 200, data: { blocks: [], hasMore: true, cursor: '0' } }));
-  await assert.rejects(stalled.request('wy', 'home'), { code: 'INVALID_RESPONSE' }); await stalled.close();
+  const repeated = await stalled.request('wy', 'home');
+  assert.equal(repeated.more, true); assert.equal(repeated.continuation.cursor, '0');
+  assert.deepEqual(repeated.sections, []); await stalled.close();
 });
 
 test('WY home and playlist channel continuations remain wire JSON without optional block order', async t => {
@@ -213,22 +215,24 @@ test('WY malformed optional URI actions leave actual resource locators and healt
   t.after(() => f.close());
   const result = await f.request('wy', 'home');
   assert.deepEqual(result.sections[0].items.map(row => row.action), [
-    { type: 'playlist', id: '1' }, { type: 'playlist', id: 'actual id' },
+    { type: 'playlist', id: '1' }, { type: 'playlist', id: 'actual id' }, null,
   ]);
   assert.equal(result.sections[0].action, null);
   assert.equal(idOf(result.sections[1].items[0]), '3');
-  assert.equal(result.sections[1].items[0].artist, 'Singer');
+  assert.equal(result.sections[1].items[0].song.artist, 'Singer');
   for (const data of [{ blocks: 'broken' }, { blocks: [{ creatives: [{ resources: [
     { resourceType: 'song', resourceExtInfo: { songData: {} } },
   ] }] }] }, { blocks: [{ creatives: [{ resources: [
     { resourceType: 'playlist', action: 'orpheus://playlist/%ZZ' },
   ] }] }] }]) {
     const invalid = fixture(() => response({ code: 200, data })); t.after(() => invalid.close());
-    await assert.rejects(invalid.request('wy', 'home'), { code: 'INVALID_RESPONSE' });
+    const partial = await invalid.request('wy', 'home');
+    assert.equal(partial.sections.length, Array.isArray(data.blocks) ? 1 : 0);
+    if (partial.sections.length) assert.equal(partial.sections[0].items[0].action, null);
   }
 });
 
-test('WY cube optional actions isolate unusable cards without hiding an entirely unlocatable response', async t => {
+test('WY cube retains cards with unavailable actions alongside healthy cards or on their own', async t => {
   for (const healthy of [true, false]) {
     const f = fixture(() => response({ code: 200, data: { pageProtocol: { pages: [
       { componentName: 'Grid', children: [
@@ -238,8 +242,8 @@ test('WY cube optional actions isolate unusable cards without hiding an entirely
     ] } } }));
     t.after(() => f.close());
     const work = f.request('wy', 'channel', { id: 'custom', pageCode: 'PAGE' });
-    if (healthy) assert.deepEqual((await work).sections[0].items.map(row => row.action), [{ type: 'playlist', id: '1' }]);
-    else await assert.rejects(work, { code: 'INVALID_RESPONSE' });
+    assert.deepEqual((await work).sections[0].items.map(row => row.action),
+      [null, ...(healthy ? [{ type: 'playlist', id: '1' }] : [])]);
     assert.equal(f.requests.length, 1);
   }
 });
@@ -287,11 +291,11 @@ test('WY cube algorithm feed uses actual rule/tags, consumes empty visible pages
   });
   const first = await f.request('wy', 'channel', { id: 'custom', pageCode: 'PAGE', tag: 'tag' });
   assert.equal(first.more, true); assert.equal(first.continuation.offset, 30);
-  assert.equal(first.sections[0].errorCode, null);
+  assert.equal(first.sections[0].errorCode, '');
   assert.deepEqual(first.sections[0].tags.map(row => row.name), ['全部歌曲', 'Tag']);
   assert.equal(first.sections[0].selectedTag, 'tag');
   const next = await f.request('wy', 'channel', { id: 'custom', pageCode: 'PAGE', continuation: first.continuation });
-  assert.equal(next.more, false); assert.equal(idOf(next.feed.songs[0]), '123');
+  assert.equal(next.more, false); assert.equal(idOf(next.sections[0].items[0]), '123');
   assert.equal(f.requests.length, 6); await f.close();
 });
 
@@ -306,7 +310,7 @@ const partialCube = { code: 200, data: { pageProtocol: { pages: [
 
 test('WY initial cube feed failures remain section-local with explicit errors, filters and unrelated content intact', async t => {
   for (const [failure, code] of [
-    [{ code: 500 }, 'UPSTREAM_ERROR'], [{ code: 200, songs: 'not-a-list' }, 'INVALID_RESPONSE'],
+    [{ code: 500 }, 'UPSTREAM_ERROR'], ['broken-json', 'INVALID_RESPONSE'],
     [null, 'NETWORK_ERROR'],
   ]) await t.test(code, async () => {
     const f = fixture(request => {
@@ -323,7 +327,7 @@ test('WY initial cube feed failures remain section-local with explicit errors, f
     assert.equal(page.sections.length, 2); assert.equal(page.sections[0].items[0].action.id, '41');
     const feed = page.sections[1];
     assert.deepEqual(feed.items, []); assert.equal(feed.errorCode, code);
-    assert.deepEqual(feed.tags, [{ id: '', name: '全部歌曲', group: '' }]);
+    assert.deepEqual(feed.tags, [{ id: '', name: '全部歌曲', group: '', selected: false }]);
     assert.equal(feed.selectedTag, ''); assert.equal(page.more, false); assert.equal(page.continuation, null);
     assert.equal(f.requests.length, 3); await f.close();
   });
@@ -343,7 +347,7 @@ test('WY optional algorithm-tag failures still read songs; authentication and fa
       ...(stage === 'continuation' ? { continuation: { offset: 30 } } : {}) });
     if (stage === 'tags-optional') {
       const page = await work, feed = page.sections[1];
-      assert.equal(idOf(feed.items[0]), '6'); assert.equal(feed.errorCode, null);
+      assert.equal(idOf(feed.items[0]), '6'); assert.equal(feed.errorCode, '');
       assert.deepEqual(feed.tags.map(row => row.name), ['全部歌曲']);
     } else await assert.rejects(work, { code: stage === 'continuation' ? 'UPSTREAM_ERROR' : 'AUTH_REQUIRED' });
     assert.equal(f.requests.length, stage === 'tags-auth' ? 2 : 3); await f.close();
@@ -411,8 +415,12 @@ test('WY artist list, new songs and logged-in artist activity consume their own 
   await f.session('wy');
   const works = await f.request('wy', 'artistActivity');
   assert.equal(idOf(works.sections[0].items[0].song), '456');
+  assert.equal(works.sections[0].items[0].title, 'Synthetic (Live)');
+  assert.equal(works.sections[0].items[0].subtitle, 'Current artist');
   assert.deepEqual(works.continuation, { before: '100' });
-  await assert.rejects(f.request('wy', 'artistActivity', { before: '100' }), { code: 'INVALID_RESPONSE' });
+  const repeated = await f.request('wy', 'artistActivity', { before: '100' });
+  assert.equal(idOf(repeated.sections[0].items[0].song), '456');
+  assert.deepEqual(repeated.continuation, { before: '100' });
   await f.close();
 });
 
@@ -778,7 +786,7 @@ test('KG home consumes flat and nested artist records without requiring an unuse
       seedClients(f);
       try {
         const home = await f.request('kg', 'home');
-        const song = home.sections[1].items[0];
+        const song = home.sections[1].items[0].song;
         assert.equal(idOf(song), kgHash);
         assert.equal(song.title, 'Synthetic (Live)');
         assert.equal(song.artist, 'A、B');
@@ -840,7 +848,7 @@ test('KG home and category continuation accept a successful exhausted page witho
   }
 });
 
-test('KG recommendation list remains required for continuation and malformed supplied lists still fail', async t => {
+test('KG missing or malformed recommendation lists retain the upstream continuation declaration', async t => {
   for (const data of [{ has_next: 1 }, { has_next: 1, special_list: null },
     { has_next: 0, special_list: {} }, { has_next: 0, special_list: false }]) {
     await t.test(JSON.stringify(data), async () => {
@@ -850,9 +858,10 @@ test('KG recommendation list remains required for continuation and malformed sup
       });
       seedClients(f);
       try {
-        await assert.rejects(f.request('kg', 'home', { continuation: { page: 2 } }),
-          error => error.code === 'INVALID_RESPONSE');
-        assert.equal(f.requests.length, 1, 'a failed page is not retried or replaced with another request');
+        const page = await f.request('kg', 'home', { continuation: { page: 2 } });
+        assert.deepEqual(page.sections[0].items, []); assert.equal(page.more, Boolean(data.has_next));
+        assert.deepEqual(page.continuation, data.has_next ? { page: 3 } : null);
+        assert.equal(f.requests.length, 1, 'content omissions do not trigger replacement requests');
       } finally { await f.close(); }
     });
   }
@@ -918,7 +927,7 @@ test('KG new-song continuation sends the actual rank POST and keeps filename met
   assert.equal(first.sections[0].items.length, 30); assert.equal(first.more, true);
   const second = await f.request('kg', 'channel', { id: 'newsong', continuation: first.continuation });
   assert.equal(second.sections[0].items.length, 1); assert.equal(second.more, false); assert.equal(second.continuation, null);
-  for (const [song, id] of [[first.sections[0].items[0], 1], [second.sections[0].items[0], 31]]) {
+  for (const [song, id] of [[first.sections[0].items[0].song, 1], [second.sections[0].items[0].song, 31]]) {
     assert.equal(idOf(song), hash(id)); assert.equal(song.title, 'Synthetic new song ' + id);
     assert.equal(song.artist, 'Synthetic singer'); assert.equal(song.duration, 279);
     const info = song.sources[0].musicInfo;

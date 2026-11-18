@@ -178,7 +178,10 @@ public static partial class MusicCatalogTests
                 new { platform = "wy", id = "500", page = 1, limit = 3 })).GetProperty("items");
             f.Client.Transform("music.catalog.home", reply => Edit(reply, page =>
                 page["sections"]!.AsArray().Add(JsonSerializer.SerializeToNode(new {
-                    id = "menu-song-section", title = "菜单歌曲栏目", type = "songs", items = songs
+                    id = "menu-song-section", title = "菜单歌曲栏目", layout = "song-list", items = songs.EnumerateArray().Select(song => new {
+                        kind = "song", title = MusicCatalogDto.Text(song, "title"), subtitle = MusicCatalogDto.Text(song, "artist"),
+                        cover = MusicCatalogDto.Text(song, "cover_url"), song, action = new { type = "song", id = SongJson.NativeId(song) }
+                    }).ToArray()
                 }))));
             await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization;
             await f.Module.CatalogEntryInitialization;
@@ -238,9 +241,9 @@ public static partial class MusicCatalogTests
             await using var f = await Fixture.Create();
             f.Client.Transform("music.catalog.channel", reply => Edit(reply, node =>
                 node["sections"] = JsonSerializer.SerializeToNode(new[] {
-                    new { id = "menu-playlists", title = "频道歌单", type = "playlists", items = new[] {
-                        new { id = "500", name = "频道歌单A", kind = "playlist", action = new { type = "playlist", id = "500" } },
-                        new { id = "501", name = "频道歌单B", kind = "playlist", action = new { type = "playlist", id = "501" } }
+                    new { id = "menu-playlists", title = "频道歌单", layout = "playlist-rail", items = new[] {
+                        new { id = "500", title = "频道歌单A", kind = "playlist", action = new { type = "playlist", id = "500" } },
+                        new { id = "501", title = "频道歌单B", kind = "playlist", action = new { type = "playlist", id = "501" } }
                     } } })));
             await f.Module.NavigateAsync("catalog-channel/wy/rock", default);
             using var source = new HwndSource(new HwndSourceParameters("channel-menu-fixture")
@@ -636,10 +639,14 @@ public static partial class MusicCatalogTests
                 var brush = (SolidColorBrush)converter.Convert(image, typeof(Brush), null!, System.Globalization.CultureInfo.InvariantCulture);
                 True(brush.IsFrozen, "sampled palettes are shared immutable render input");
                 Equal(color, raw.Color);
+                Equal(MusicEntryPalette.Sample(image).Color, brush.Color);
+                var preview = (SolidColorBrush)converter.Convert(new object[] { image, true },
+                    typeof(Brush), null!, System.Globalization.CultureInfo.InvariantCulture);
+                Equal(MusicEntryPalette.Sample(image, preview: true).Color, preview.Color);
                 tones.Add(brush.Color);
             }
-            True(tones[2].G > 150 && tones[2].G > tones[0].G + 50 && tones[1].R > tones[1].B,
-                "light and dark images retain distinct roles, while a warm image retains its color family");
+            True(tones[2].G <= 96 && tones[2].G > tones[0].G && tones[1].R > tones[1].B,
+                "standard entries obey the shared luminance ceiling while retaining the artwork color family");
             return Task.CompletedTask;
         });
         yield return Case("home headings use system typography and unclipped refresh without extra options", async () =>
@@ -1013,17 +1020,17 @@ public static partial class MusicCatalogTests
             };
             var cases = new[]
             {
-                (new MusicCatalogSection("歌单", [playlist], Type: "playlists"), "Catalog.Section.Shelf", MusicCatalogSectionPresentation.Shelf),
-                (new MusicCatalogSection("榜单推荐", [ranking], Type: "rankings", Layout: "ONLY_COVER"), "Catalog.Section.Shelf", MusicCatalogSectionPresentation.RankingCovers),
-                (new MusicCatalogSection("精选榜", [playlist], Type: "rankings", Layout: "ONLY_COVER"), "Catalog.Section.Shelf", MusicCatalogSectionPresentation.RankingCovers),
-                (new MusicCatalogSection("曲风榜", [playlist], Type: "rankings", Layout: "ONLY_COVER"), "Catalog.Section.Shelf", MusicCatalogSectionPresentation.RankingCovers),
-                (new MusicCatalogSection("官方榜", [playlist], Type: "rankings", Layout: "ranked-songs"), "Catalog.Section.Rankings", MusicCatalogSectionPresentation.RankingPreviews),
-                (new MusicCatalogSection("会员榜", [playlist], Type: "rankings", Layout: "vip-ranked-songs"), "Catalog.Section.Rankings", MusicCatalogSectionPresentation.RankingPreviews),
-                (new MusicCatalogSection("官方榜数据", [ranking], Type: "rankings", Layout: "TOP_3"), "Catalog.Section.Rankings", MusicCatalogSectionPresentation.RankingPreviews),
-                (new MusicCatalogSection("歌曲", [new MusicCatalogCard("s", "歌曲", "歌手", "", "song", "wy", song)]), "Catalog.Section.Songs", MusicCatalogSectionPresentation.Songs),
+                (new MusicCatalogSection("歌单", [playlist], Layout: "playlist-rail"), "Catalog.Section.Shelf", MusicCatalogSectionPresentation.Shelf),
+                (new MusicCatalogSection("榜单推荐", [ranking], Layout: "ranking-small"), "Catalog.Section.Shelf", MusicCatalogSectionPresentation.RankingCovers),
+                (new MusicCatalogSection("精选榜", [playlist], Layout: "ranking-small"), "Catalog.Section.Shelf", MusicCatalogSectionPresentation.RankingCovers),
+                (new MusicCatalogSection("曲风榜", [playlist], Layout: "ranking-small"), "Catalog.Section.Shelf", MusicCatalogSectionPresentation.RankingCovers),
+                (new MusicCatalogSection("官方榜", [playlist], Layout: "ranked-songs"), "Catalog.Section.Rankings", MusicCatalogSectionPresentation.RankingPreviews),
+                (new MusicCatalogSection("会员榜", [playlist], Layout: "vip-ranked-songs"), "Catalog.Section.Rankings", MusicCatalogSectionPresentation.RankingPreviews),
+                (new MusicCatalogSection("官方榜数据", [ranking], Layout: "ranking"), "Catalog.Section.Rankings", MusicCatalogSectionPresentation.RankingPreviews),
+                (new MusicCatalogSection("歌曲", [new MusicCatalogCard("s", "歌曲", "歌手", "", "song", "wy", song)], Layout: "song-list"), "Catalog.Section.Songs", MusicCatalogSectionPresentation.Songs),
                 (new MusicCatalogSection("歌曲摘要", [new MusicCatalogCard("s", "歌曲", "歌手", "", "song", "wy", song)],
-                    Type: "songs", Layout: "rail"), "Catalog.Section.SongShelf", MusicCatalogSectionPresentation.Songs),
-                (new MusicCatalogSection("", [artist], Type: "artists", Layout: "artist-grid"), "Catalog.Section.Artists", MusicCatalogSectionPresentation.Artists)
+                    Layout: "song-columns"), "Catalog.Section.SongShelf", MusicCatalogSectionPresentation.Songs),
+                (new MusicCatalogSection("", [artist], Layout: "artist-grid"), "Catalog.Section.Artists", MusicCatalogSectionPresentation.Artists)
             };
             foreach (var (section, resource, presentation) in cases)
             {
@@ -1051,7 +1058,7 @@ public static partial class MusicCatalogTests
                 return new MusicCatalogCard(index.ToString(), song.Title, song.Artist, song.Cover,
                     "song", "wy", song, ActionId: index.ToString());
             }).ToArray();
-            var section = new MusicCatalogSection("歌曲", cards, Type: "songs", Layout: "rail");
+            var section = new MusicCatalogSection("歌曲", cards, Layout: "song-columns");
             Equal("1,2,3|4,5,6|7", string.Join("|",
                 section.SongColumns.Select(column => string.Join(",", column.Items.Select(item => item.Id)))));
 
@@ -1398,7 +1405,7 @@ public static partial class MusicCatalogTests
             var cards = Enumerable.Range(1, 7)
                 .Select(i => new MusicCatalogCard(i.ToString(), "榜" + i, "不应显示", "", "playlist", "wy", ActionId: i.ToString()))
                 .ToArray();
-            var section = new MusicCatalogSection("曲风榜", cards, Type: "rankings", Layout: "ONLY_COVER");
+            var section = new MusicCatalogSection("曲风榜", cards, Layout: "ranking-small");
             var shelf = (Shelf)((DataTemplate)view.FindResource("Catalog.Section.Shelf")).LoadContent();
             shelf.DataContext = section;
             view.Content = shelf;
@@ -1591,7 +1598,9 @@ public static partial class MusicCatalogTests
             JsonElement reply = default;
             f.Client.Transform("music.catalog.playlist", value => { reply = value; return value; });
             await f.Module.NavigateAsync("catalog-home", default);
-            await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
+            await f.Module.HomeInitialization;
+            f.Module.UpdateCatalogVisibleCards(f.Module.DisplayCatalogSections.SelectMany(section => section.Items));
+            await f.Module.CatalogEntryInitialization;
             var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
             True(reply.GetProperty("ok").GetBoolean(), "initialization receives real native metadata");
             Equal(3, card.PreviewTitles.Count);
@@ -1608,12 +1617,14 @@ public static partial class MusicCatalogTests
         {
             await using var f = await Fixture.Create(); await f.Configure(new { detailLimit = 3, homePages = 1 });
             f.Client.Transform("music.catalog.home", value => Edit(value, page => {
-                var entries = page["entries"]!.AsArray();
+                var entries = page["sections"]!.AsArray().First(section => section?["layout"]?.GetValue<string>() == "feature-rail")!["items"]!.AsArray();
                 var card = entries.First(entry => entry?["action"]?["type"]?.GetValue<string>() == "playlist")!;
                 var copy = card.DeepClone(); copy["key"] = "duplicate-preview"; entries.Add(copy);
             }));
             var hold = f.Client.Hold("music.catalog.playlist");
             await f.Module.NavigateAsync("catalog-home", default);
+            await f.Module.HomeInitialization;
+            f.Module.UpdateCatalogVisibleCards(f.Module.DisplayCatalogSections.SelectMany(section => section.Items));
             var pending = f.Module.CatalogEntryInitialization;
             await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
             var cards = f.Module.CatalogSections.SelectMany(s => s.Items).Where(c => c.CanRequestPreview).ToArray();
@@ -1625,21 +1636,23 @@ public static partial class MusicCatalogTests
             hold.Release(); await pending;
             True(cards.Length >= 2 && cards.All(card => card.PreviewTitles.Count == 3), "shared result publishes to each card");
         });
-        yield return Case("entry initialization bounds physical concurrency and cancels queued reads on retirement", async () =>
+        yield return Case("entry initialization bounds physical concurrency and stops queued reads while hidden", async () =>
         {
             await using var f = await Fixture.Create(); await f.Configure(new { homePages = 1, detailLimit = 3 });
             f.Client.Transform("music.catalog.home", value => Edit(value, page => {
-                page["entries"] = JsonSerializer.SerializeToNode(Enumerable.Range(500, 8).Select(id => new {
-                    id = id.ToString(), name = "入口 " + id, presentation = "preview", action = new { type = "playlist", id = id.ToString() }
+                page["sections"]!.AsArray().First(section => section?["layout"]?.GetValue<string>() == "feature-rail")!["items"] = JsonSerializer.SerializeToNode(Enumerable.Range(500, 8).Select(id => new {
+                    id = id.ToString(), kind = "playlist", title = "入口 " + id, presentation = "preview", action = new { type = "playlist", id = id.ToString() }
                 }).ToArray());
             }));
             var holds = Enumerable.Range(0, 4).Select(_ => f.Client.Hold("music.catalog.playlist")).ToArray();
             await f.Module.NavigateAsync("catalog-home", default);
+            await f.Module.HomeInitialization;
+            f.Module.UpdateCatalogVisibleCards(f.Module.DisplayCatalogSections.SelectMany(section => section.Items));
             var pending = f.Module.CatalogEntryInitialization;
             await Task.WhenAll(holds.Select(hold => hold.Arrived.Task)).WaitAsync(TimeSpan.FromSeconds(5));
             Equal(4, f.Client.Count("music.catalog.playlist"));
             await f.Module.NavigateAsync("favorites", default);
-            await Task.WhenAll(holds.Select(hold => hold.Cancelled.Task)).WaitAsync(TimeSpan.FromSeconds(5));
+            True(holds.All(hold => !hold.Cancelled.Task.IsCompleted), "hiding retains admitted physical work");
             foreach (var hold in holds) hold.Release();
             await pending; Equal(4, f.Client.Count("music.catalog.playlist")); Equal(0, f.Playback.Opens.Count);
         });
@@ -1648,6 +1661,8 @@ public static partial class MusicCatalogTests
             await using var f = await Fixture.Create(); await f.Configure(new { detailLimit = 3 });
             var hold = f.Client.Hold("music.catalog.playlist");
             await f.Module.NavigateAsync("catalog-home", default);
+            await f.Module.HomeInitialization;
+            f.Module.UpdateCatalogVisibleCards(f.Module.DisplayCatalogSections.SelectMany(section => section.Items));
             var pending = f.Module.CatalogEntryInitialization;
             var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
             await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -1658,32 +1673,41 @@ public static partial class MusicCatalogTests
             hold.Release(); await pending; await shutdown;
             True(!card.HasPreview, "cancelled initialization cannot publish");
         });
-        yield return Case("page generation cancels physical initialization and blocks late publication", async () =>
+        yield return Case("hidden page retains physical initialization without publishing until redisplay", async () =>
         {
             await using var f = await Fixture.Create(); await f.Configure(new { detailLimit = 3, homePages = 1 });
             var hold = f.Client.Hold("music.catalog.playlist");
             await f.Module.NavigateAsync("catalog-home", default);
+            await f.Module.HomeInitialization;
+            f.Module.UpdateCatalogVisibleCards(f.Module.DisplayCatalogSections.SelectMany(section => section.Items));
             var pending = f.Module.CatalogEntryInitialization;
             var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
             await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
             await f.Module.NavigateAsync("favorites", default);
-            await hold.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            True(!pending.IsCompleted, "logical retirement must retain physical drain");
+            True(!hold.Cancelled.Task.IsCompleted, "hiding does not retire the content snapshot");
+            True(!pending.IsCompleted, "hidden content retains physical drain");
             hold.Release(); await pending;
-            True(!card.HasPreview, "late response cannot mutate the retired card");
-            await f.Module.NavigateAsync("catalog-home", default); await f.Module.CatalogEntryInitialization;
+            True(!card.HasPreview, "hidden response does not publish to its card");
+            await f.Module.NavigateAsync("catalog-home", default);
+            await f.Module.HomeInitialization;
+            f.Module.UpdateCatalogVisibleCards(f.Module.DisplayCatalogSections.SelectMany(section => section.Items));
+            await f.Module.CatalogEntryInitialization;
             Equal(3, f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview).PreviewTitles.Count);
-            Equal(2, f.Client.Count("music.catalog.playlist")); Equal(0, f.Playback.Opens.Count);
+            Equal(1, f.Client.Count("music.catalog.playlist")); Equal(0, f.Playback.Opens.Count);
         });
         yield return Case("refresh retires pending initialization without clearing newer card data", async () =>
         {
             await using var f = await Fixture.Create(); await f.Configure(new { detailLimit = 3, homePages = 1 });
             var hold = f.Client.Hold("music.catalog.playlist");
             await f.Module.NavigateAsync("catalog-home", default);
+            await f.Module.HomeInitialization;
+            f.Module.UpdateCatalogVisibleCards(f.Module.DisplayCatalogSections.SelectMany(section => section.Items));
             var pending = f.Module.CatalogEntryInitialization;
             var old = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
             await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            await f.Module.RefreshCatalogAsync(); await f.Module.CatalogEntryInitialization;
+            await f.Module.RefreshCatalogAsync();
+            f.Module.UpdateCatalogVisibleCards(f.Module.DisplayCatalogSections.SelectMany(section => section.Items));
+            await f.Module.CatalogEntryInitialization;
             var current = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
             await hold.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
             True(!ReferenceEquals(old, current) && current.PreviewTitles.Count == 3, "new generation owns its cards");
@@ -1724,7 +1748,9 @@ public static partial class MusicCatalogTests
             await using var f = await Fixture.Create();
             await f.Configure(new { detailLimit = 3 });
             await f.Module.NavigateAsync("catalog-home", default);
-            await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
+            await f.Module.HomeInitialization;
+            f.Module.UpdateCatalogVisibleCards(f.Module.DisplayCatalogSections.SelectMany(section => section.Items));
+            await f.Module.CatalogEntryInitialization;
             var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
             var view = new MusicCatalogView { DataContext = f.Module };
             var entry = (EntryCard)((DataTemplate)view.FindResource("Catalog.Entry")).LoadContent();
@@ -1749,7 +1775,10 @@ public static partial class MusicCatalogTests
         {
             await using var f = await Fixture.Create(); await f.Configure(new { detailLimit = 3 });
             f.Client.Transform("music.catalog.playlist", _ => JsonSerializer.SerializeToElement(new { ok = false, error = new { code = "UNAVAILABLE" } }));
-            await f.Module.NavigateAsync("catalog-home", default); await f.Module.CatalogEntryInitialization;
+            await f.Module.NavigateAsync("catalog-home", default);
+            await f.Module.HomeInitialization;
+            f.Module.UpdateCatalogVisibleCards(f.Module.DisplayCatalogSections.SelectMany(section => section.Items));
+            await f.Module.CatalogEntryInitialization;
             var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.CanRequestPreview);
             Equal(0, card.PreviewTitles.Count);
             int calls = f.Client.Count("music.catalog.playlist");
@@ -1864,8 +1893,8 @@ public static partial class MusicCatalogTests
         yield return Case("desktop catalog preserves real ranking previews and responsive section types", async () =>
         {
             var reply = JsonSerializer.SerializeToElement(new { platform = "wy", sections = new[] {
-                new { id = "rank", title = "榜单", type = "rankings", layout = "ranked-songs", items = new[] {
-                    new { id = "123", name = "测试榜", kind = "ranking", cover = "", updateFrequency = "每日更新",
+                new { id = "rank", title = "榜单", layout = "ranked-songs", items = new[] {
+                    new { id = "123", title = "测试榜", kind = "playlist", cover = "", updateFrequency = "每日更新",
                         action = new { type = "playlist", id = "123" },
                         preview = new[] { new { title = "测试歌曲", artist = "测试歌手", cover = "", rank = 1, lastRank = 3 } } } } } } });
             var section = MusicCatalogDto.Read(reply, "wy", "home", "推荐").Single();
@@ -1877,7 +1906,7 @@ public static partial class MusicCatalogTests
             var columns = new ColumnsConverter();
             Equal(2, columns.Convert(1000d, typeof(int), null!, System.Globalization.CultureInfo.InvariantCulture));
             Equal(2, columns.Convert(1490d, typeof(int), null!, System.Globalization.CultureInfo.InvariantCulture));
-            var shelf = new Shelf { MinimumCardWidth = 124, DataContext = section with { Type = "playlists" } };
+            var shelf = new Shelf { MinimumCardWidth = 124, DataContext = section with { Layout = "playlist-rail" } };
             await WithMountedShelf(shelf, 1000, () =>
                 True(shelf.CardWidth is >= 140 and <= 146, "ordinary covers use seven columns at 1000 pixels"));
             var view = new MusicCatalogView();
@@ -1914,17 +1943,17 @@ public static partial class MusicCatalogTests
             await using var f = await Fixture.Create();
             f.Client.Transform("music.catalog.channel", reply => Edit(reply, node =>
                 node["sections"] = JsonSerializer.SerializeToNode(new[] {
-                    new { id = "electronic", title = "电音旗舰", type = "entries", layout = "rail", items = new object[] {
-                        new { id = "800", name = "电音歌单", subtitle = "精选电子音乐",
+                    new { id = "electronic", title = "电音旗舰", layout = "feature-rail", items = new object[] {
+                        new { id = "800", kind = "playlist", title = "电音歌单", subtitle = "精选电子音乐",
                             cover = "https://art.example.test/channel-playlist.jpg", presentation = "preview",
                             action = new { type = "playlist", id = "800" },
                             preview = new[] {
                                 new { title = "第一首电音", artist = "歌手一", cover = "", rank = 1, lastRank = 0 },
                                 new { title = "第二首电音", artist = "歌手二", cover = "", rank = 2, lastRank = 0 } } },
-                        new { id = "801", name = "无副标题歌单", subtitle = "",
+                        new { id = "801", kind = "playlist", title = "无副标题歌单", subtitle = "",
                             cover = "https://art.example.test/channel-empty-subtitle.jpg", presentation = "preview",
                             action = new { type = "playlist", id = "801" } },
-                        new { id = "radio", name = "电音电台", subtitle = "连续播放",
+                        new { id = "radio", kind = "unsupported", title = "电音电台", subtitle = "连续播放",
                             cover = "https://art.example.test/channel-radio.jpg", presentation = "static",
                             action = new { type = "unsupported", id = "radio" } }
                     } }
@@ -1981,8 +2010,8 @@ public static partial class MusicCatalogTests
         yield return Case("entry presentation consumes known values and defaults missing or unknown values", async () =>
         {
             var ordinaryReply = JsonSerializer.SerializeToElement(new { platform = "wy", sections = new[] {
-                new { id = "section", title = "普通栏目", type = "playlists", items = new[] {
-                    new { id = "1", name = "普通歌单", kind = "playlist", presentation = "preview",
+                new { id = "section", title = "普通栏目", layout = "playlist-rail", items = new[] {
+                    new { id = "1", title = "普通歌单", kind = "playlist", presentation = "preview",
                         action = new { type = "playlist", id = "1" } } } } } });
             Equal(MusicCatalogEntryPresentation.Preview,
                 MusicCatalogDto.Read(ordinaryReply, "wy", "home", "").Single().Items.Single().Presentation);
@@ -1993,23 +2022,14 @@ public static partial class MusicCatalogTests
             Equal(MusicCatalogEntryPresentation.Static, nested.Presentation);
             var song = nested.Song!.Raw;
 
-            void DefaultPresentation(JsonElement reply) => Equal(MusicCatalogEntryPresentation.Static,
-                MusicCatalogDto.Read(reply, "wy", "home", "").Single().Items.Single().Presentation);
-            DefaultPresentation(JsonSerializer.SerializeToElement(new { platform = "wy", entries = new[] {
-                new { id = "1", name = "缺失展示类型", action = new { type = "playlist", id = "1" } } } }));
-            DefaultPresentation(JsonSerializer.SerializeToElement(new { platform = "wy", entries = new[] {
-                new { song, presentation = "Preview" } } }));
-            DefaultPresentation(JsonSerializer.SerializeToElement(new { platform = "wy", sections = new[] {
-                new { id = "entries", type = "entries", items = new[] {
-                    new { id = "1", name = "分组缺失展示类型", action = new { type = "playlist", id = "1" } } } } } }));
-            DefaultPresentation(JsonSerializer.SerializeToElement(new { platform = "wy", sections = new[] {
-                new { id = "entries", type = "entries", items = new[] {
-                    new { id = "1", name = "分组展示类型错误", presentation = "Preview",
-                        action = new { type = "playlist", id = "1" } } } } } }));
-            var valid = JsonSerializer.SerializeToElement(new { platform = "wy", entries = new[] {
-                new { song, presentation = "static" } } });
-            Equal(MusicCatalogEntryPresentation.Static,
-                MusicCatalogDto.Read(valid, "wy", "home", "").Single().Items.Single().Presentation);
+            foreach (string? presentation in new string?[] { null, "Preview", "static" })
+            {
+                var reply = JsonSerializer.SerializeToElement(new { platform = "wy", sections = new[] {
+                    new { id = "entry", layout = "feature-rail", items = new[] {
+                        new { id = "1", kind = "song", title = "固定卡片", song, presentation } } } } });
+                Equal(MusicCatalogEntryPresentation.Static,
+                    MusicCatalogDto.Read(reply, "wy", "home", "").Single().Items.Single().Presentation);
+            }
         });
         yield return Case("home nested songs and unavailable actions use actual provider DTO", async () =>
         {
@@ -2025,7 +2045,7 @@ public static partial class MusicCatalogTests
             var cards = f.Module.CatalogSections.SelectMany(s => s.Items).ToArray();
             var song = cards.Single(c => c.Song is not null);
             Equal("1001", MusicSongFixture.NativeId(song.Song!.Raw));
-            True(song.Id != song.ActionId && song.ActionId == "1001", "domain identity not upstream locator");
+            True(song.Song!.Id != song.ActionId && song.ActionId == "1001", "permanent song identity is distinct from the card and action IDs");
             var daily = cards.Single(c => c.Kind == "daily");
             True(daily.Display && daily.RequiresAccount && f.Module.HomeSections.SelectMany(section => section.Items)
                 .Any(card => ReferenceEquals(card, daily)), "the unavailable action is part of the actual displayed home");
@@ -2246,7 +2266,7 @@ public static partial class MusicCatalogTests
             Equal("30", f.Module.SelectedCatalogTag?.Id);
             Equal("30", f.Client.Last("music.catalog.channel").GetProperty("tag").GetString());
         });
-        yield return Case("repeated cursor is rejected even if opaque fields differ", async () =>
+        yield return Case("repeated cursor stops further reads while retaining returned content", async () =>
         {
             await using var f = await Fixture.Create();
             f.Client.Transform("music.catalog.home", value => value);
@@ -2256,7 +2276,8 @@ public static partial class MusicCatalogTests
             await f.Module.NavigateAsync("catalog-home", default);
             var before = f.Module.CatalogSections.ToArray();
             await f.Module.HomeInitialization;
-            True(before.SequenceEqual(f.Module.CatalogSections), "stalled page cannot replace old content");
+            True(f.Module.CatalogSections.SelectMany(section => section.Items).Count() >= before.Sum(section => section.Items.Count),
+                "a stalled continuation never discards already returned cards");
             Equal("分页未前进", f.Module.Status); Equal(2, f.Client.Count("music.catalog.home"));
         });
         yield return Case("home follows continuation through page 101 without scrolling", async () =>
@@ -2657,8 +2678,8 @@ public static partial class MusicCatalogTests
                 var buttons = Descendants<Button>(view).ToArray();
                 True(!buttons.Any(b => b.Tag is MusicCatalogCard { Kind: "daily" }), "login-only entry not rendered");
                 True(!Descendants<TextBlock>(view).Any(t => t.Text == "当前内容需要平台登录"), "no login warning tiles");
-                True(!f.Module.CatalogSections.SelectMany(s => s.Items).Any(c => c.Kind == "daily"),
-                    "hidden account entries are not materialized as actionable cards");
+                True(!f.Module.DisplayCatalogSections.SelectMany(s => s.Items).Any(c => c.Kind == "daily"),
+                    "hidden account entries are excluded from the display projection");
                 True(buttons.Any(b => b.Tag is MusicCatalogCard { Song: not null } && b.IsEnabled), "nested song actual WPF card enabled");
                 True(!loader.Addresses.Contains(privateCover), "hidden account artwork is never requested");
                 Equal(0, f.Client.Count("music.catalog.playlist"));
@@ -2706,16 +2727,16 @@ public static partial class MusicCatalogTests
         {
             var row = new MusicCatalogCard("1", "入口标题", "真实描述", "", "playlist", "wy", ActionId: "1");
             var view = new MusicCatalogView();
-            foreach (var (type, width, height) in new[] { ("Catalog.Entry", 168d, 200d), ("Catalog.PlaylistCard", 140d, 172d), ("Catalog.Banner", 282d, 160d) })
+            foreach (var (type, width, height) in new[] { ("Catalog.Entry", 168d, 200d), ("Catalog.PlaylistCard", 140d, 172d), ("Catalog.Banner", 282d, 262d / 2.56) })
             {
                 var card = (FrameworkElement)((DataTemplate)view.FindResource(type)).LoadContent();
                 card.DataContext = row; card.Measure(new Size(width, double.PositiveInfinity));
                 card.Arrange(new Rect(0, 0, width, card.DesiredSize.Height)); card.UpdateLayout();
                 True(Math.Abs(card.ActualHeight - height) <= 1, type + " reference height " + card.ActualHeight);
             }
-            foreach (var (type, expected) in new[] { ("entries", 168.4), ("playlists", 140.333333), ("banner", 423d) })
+            foreach (var (type, expected) in new[] { ("feature-rail", 168.4), ("playlist-rail", 140.333333), ("banner", 423d) })
             {
-                var shelf = new Shelf { MinimumCardWidth = 124, DataContext = new MusicCatalogSection("", [row], Type: type) };
+                var shelf = new Shelf { MinimumCardWidth = 124, DataContext = new MusicCatalogSection("", [row], Layout: type) };
                 await WithMountedShelf(shelf, 826, () =>
                     True(Math.Abs(shelf.CardWidth - expected) < .01, type + " reference pitch"));
             }
@@ -2740,20 +2761,18 @@ public static partial class MusicCatalogTests
                 {
                     new
                     {
-                        id = "private-section", title = "账号栏目", type = "playlists",
+                        id = "private-section", title = "账号栏目", layout = "playlist-rail",
                         available = false, errorCode = "AUTH_REQUIRED",
                         requiresAccount = true, display = false,
                         action = new { type = "daily" },
-                        items = new[] { new { id = "1", name = "公开歌单", kind = "playlist" } }
+                        items = new[] { new { id = "1", title = "公开歌单", kind = "playlist" } }
                     }
                 }
             });
-            Equal(0, MusicCatalogDto.Read(reply, "wy", "home", "").Count);
+            Equal(1, MusicCatalogDto.Read(reply, "wy", "home", "").Count);
             var visible = Edit(reply, page => page["sections"]![0]!["display"] = true);
             var action = MusicCatalogDto.Read(visible, "wy", "home", "").Single().Action!;
-            True(action.RequiresAccount && action.Display && !action.Available &&
-                !action.CanOpen && !action.CanPlay && action.ErrorCode == "AUTH_REQUIRED",
-                "section action display and account admission survive DTO projection");
+            True(action.RequiresAccount, "section action retains declared account requirements");
 
         });
     }
@@ -3097,10 +3116,14 @@ public static partial class MusicCatalogTests
         private static JsonObject Track(string platform, int id) => MusicSongFixture.Online(platform, id.ToString(),
             "合成曲 " + id, "合成艺人", "合成专辑", 185,
             native: platform == "kg" ? new JsonObject { ["hash"] = id.ToString("X").PadLeft(32, '0') } : null);
+        private static object TrackCard(string platform, int id) => new {
+            id = id.ToString(), kind = "song", title = "合成曲 " + id, subtitle = "合成艺人", cover = "",
+            song = Track(platform, id), action = new { type = "song", id = id.ToString() }
+        };
         private static object Playlist(string platform, string id, string name = "完整云歌单", string cover = "https://img.invalid/playlist.jpg") =>
-            new { id, name, source = platform, count = 205, cover, kind = "playlist", action = new { type = "playlist", id } };
-        private static object Section(string id, string title, string type, IEnumerable<object> items, string layout = "rail") =>
-            new { id, title, type, layout, items = items.ToArray() };
+            new { id, name, title = name, source = platform, count = 205, cover, kind = "playlist", action = new { type = "playlist", id } };
+        private static object Section(string id, string title, string layout, IEnumerable<object> items) =>
+            new { id, title, layout, items = items.ToArray() };
         private static object Channels()
         {
             string[] ids = ("feature,playlist,chart,artist,vip,euro,djR,huayu,qingge,acg," +
@@ -3110,7 +3133,7 @@ public static partial class MusicCatalogTests
             ids = [.. ids, "music_top_tab_acg", "newsong", "origin"];
             names = [.. names, "二次元", "新歌", "原创"];
             return new { platform = "wy", items = ids.Select((id, index) => new {
-                id, name = names[index], kind = "channel", available = true,
+                id, name = names[index], kind = "channel", channelKind = id == "vip" ? "vip" : id == "artist" ? "artists" : "music", available = true,
                 pageCode = id == "rock" ? "MUSIC_ROCK" : index < 5 ? "" : "MUSIC_" + id.ToUpperInvariant(),
                 placement = index < 10 ? "primary" : "more" }).ToArray() };
         }
@@ -3170,30 +3193,30 @@ public static partial class MusicCatalogTests
                         int[] next = chosen.ToArray(); next[component] = value;
                         tags.Add(new { id = string.Join(":", next), name = value.ToString(), group, selected = value == chosen[component] });
                     }
-                result = new { platform, id = "artist", name = "歌手", tags, selectedTag = selected,
-                    sections = new[] { Section("artists", "", "artists", Enumerable.Range(1 + first, 40).Select(id => (object)new {
-                        id = id.ToString(), name = "合成歌手 " + id, cover = "https://img.invalid/artist-" + id + ".jpg",
-                        kind = "artist", action = new { type = "artist", id = id.ToString() } }), "artist-grid") },
+                result = new { platform, id = "artist", title = "歌手", tags, selectedTag = selected,
+                    sections = new[] { Section("artists", "", "artist-grid", Enumerable.Range(1 + first, 40).Select(id => (object)new {
+                        id = id.ToString(), title = "合成歌手 " + id, cover = "https://img.invalid/artist-" + id + ".jpg",
+                        kind = "artist", action = new { type = "artist", id = id.ToString() } })) },
                     more = first / 40 + 1 < pages, continuation = first / 40 + 1 < pages ? new { offset = first + 40 } : null };
             }
             else if (operation == "channel" && Text("id") == "vip")
-                result = new { platform, id = "vip", name = "VIP", more = false,
+                result = new { platform, id = "vip", title = "VIP", more = false,
                     sections = new[] {
-                        Section("vip-songs", "黑胶VIP 每日推荐", "songs", new[] { Track(platform, 3001), Track(platform, 3002) }),
-                        Section("vip-ranks", "黑胶VIP 排行榜", "rankings", new[] { 700, 701 }.Select((id, index) => (object)new {
-                            id = id.ToString(), name = index == 0 ? "黑胶VIP 热歌榜" : "黑胶SVIP 飙升榜", kind = "playlist",
+                        Section("vip-songs", "黑胶VIP 每日推荐", "vip-songs", new[] { TrackCard(platform, 3001), TrackCard(platform, 3002) }),
+                        Section("vip-ranks", "黑胶VIP 排行榜", "vip-ranked-songs", new[] { 700, 701 }.Select((id, index) => (object)new {
+                            id = id.ToString(), title = index == 0 ? "黑胶VIP 热歌榜" : "黑胶SVIP 飙升榜", kind = "playlist",
                             action = new { type = "playlist", id = id.ToString() },
                             preview = new[] { new { title = "会员歌曲", artist = "会员歌手", cover = "", rank = 1, lastRank = index == 0 ? 2 : 0,
-                                song = Track(platform, 3001 + index) } } }), "vip-ranked-songs") } };
+                                song = Track(platform, 3001 + index) } } })) } };
             else if (operation == "channel")
             {
                 int offset = Cursor(); string tag = Text("tag", "30");
                 if (tag.Length == 0) tag = "30";
                 if (State["tagFailure"]?.GetValue<bool>() == true && tag == "31") throw new MeowFilm.Capabilities.Platforms.MusicPlatformException("UPSTREAM_ERROR");
                 var sections = new List<object>();
-                if (offset == 0) sections.Add(Section("banner", "", "banner", new[] { Track(platform, 1001) }));
-                sections.Add(Section("feed", "频道歌曲", "songs", new[] { Track(platform, 2001 + offset + int.Parse(tag)) }));
-                result = new { platform, id = Text("id"), name = "摇滚", sections,
+                if (offset == 0) sections.Add(Section("banner", "", "banner", new[] { TrackCard(platform, 1001) }));
+                sections.Add(Section("feed", "频道歌曲", "song-columns", new[] { TrackCard(platform, 2001 + offset + int.Parse(tag)) }));
+                result = new { platform, id = Text("id"), title = "摇滚", sections,
                     tags = new[] { new { id = "30", name = "风格一" }, new { id = "31", name = "风格二" } }, selectedTag = tag,
                     more = offset == 0, continuation = offset == 0 ? new { offset = 1, ruleId = "11", pointIds = new[] { "22" }, algTagIds = tag,
                         tag, scope = "public", target = Text("id") } : null };
@@ -3210,12 +3233,12 @@ public static partial class MusicCatalogTests
                     entry["presentation"] = "preview";
                     entries.Add(entry);
                 }
-                entries.Add(new { id = "daily", name = "每日推荐", kind = "daily", cover = "https://art.example.test/private-daily.jpg",
+                entries.Add(new { id = "daily", title = "每日推荐", label = "每日推荐", kind = "daily", cover = "https://art.example.test/private-daily.jpg",
                     action = new { type = "daily", branch = "default" }, presentation = "preview", requiresAccount = true, display = false, available = false, errorCode = "AUTH_REQUIRED" });
-                entries.Add(new { song = Track(platform, 1001 + cursor), action = new { type = "song", id = (1001 + cursor).ToString() } });
+                entries.Add(TrackCard(platform, 1001 + cursor));
                 result = new { platform, sections = new[] {
-                    Section("PLAYLIST", "推荐歌单", "playlists", new[] { Playlist(platform, (Number("homePlaylistStart", 500) + cursor).ToString(), "合成歌单", "https://art.example.test/public-playlist.jpg") }),
-                    Section("ENTRANCE", "", "entries", entries) }, more = cursor < Number("homePages", 2) - 1,
+                    Section("PLAYLIST", "推荐歌单", "playlist-rail", new[] { Playlist(platform, (Number("homePlaylistStart", 500) + cursor).ToString(), "合成歌单", "https://art.example.test/public-playlist.jpg") }),
+                    Section("ENTRANCE", "", "feature-rail", entries) }, more = cursor < Number("homePages", 2) - 1,
                     continuation = cursor < Number("homePages", 2) - 1 ? new { cursor = cursor + 1 } : null };
             }
             else throw new InvalidOperationException("Unexpected canonical catalog operation: " + operation);

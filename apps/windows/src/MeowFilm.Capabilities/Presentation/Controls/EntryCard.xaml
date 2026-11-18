@@ -30,7 +30,9 @@
  </Style></UserControl.Style>
  <Grid x:Name="Surface" local:CardMotion.Enabled="True" local:CardClip.Radius="8">
   <Grid.Style><Style TargetType="Grid">
-   <Setter Property="Background" Value="{Binding Source,ElementName=Cover,Converter={StaticResource EntryPalette}}"/>
+   <Setter Property="Background"><Setter.Value><MultiBinding Converter="{StaticResource EntryPalette}">
+    <Binding Path="Source" ElementName="Cover"/><Binding Path="IsPreviewEntry"/>
+   </MultiBinding></Setter.Value></Setter>
    <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
     <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
    </Trigger></Style.Triggers>
@@ -43,6 +45,11 @@
     <art:ArtworkImage x:Name="DecorationLayer" Address="{Binding Decoration}" ShowRetry="False" Height="{Binding ActualHeight,ElementName=ArtworkFrame}" VerticalAlignment="Top"/>
    </Grid>
   </Grid>
+  <Border x:Name="BottomShade" Background="{Binding Background,ElementName=Surface}" IsHitTestVisible="False">
+   <Border.OpacityMask><LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#00FFFFFF" Offset=".62"/><GradientStop Color="#70FFFFFF" Offset=".82"/><GradientStop Color="White" Offset="1"/>
+   </LinearGradientBrush></Border.OpacityMask>
+  </Border>
   <Border x:Name="CoverShade" Background="{StaticResource Card.CoverHover}" IsHitTestVisible="False"
           Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Surface}">
    <Border.Style><Style TargetType="Border">
@@ -66,7 +73,7 @@
     </Trigger></Style.Triggers>
    </Style></Border.Style>
   </Border>
-  <Border x:Name="TitleShade" Height="64" VerticalAlignment="Top" IsHitTestVisible="False">
+  <Border x:Name="TitleShade" Visibility="{Binding HasLabel,Converter={StaticResource Visible}}" Height="64" VerticalAlignment="Top" IsHitTestVisible="False">
    <Border.Style><Style TargetType="Border">
     <Setter Property="Background"><Setter.Value><MultiBinding Converter="{StaticResource EntryTitleShade}">
      <Binding Path="HasTopPalette" ElementName="DecorationLayer"/><Binding Path="TopPaletteBrush" ElementName="DecorationLayer"/>
@@ -77,14 +84,14 @@
     </Trigger></Style.Triggers>
    </Style></Border.Style>
   </Border>
-   <Grid x:Name="TitleHeader" Panel.ZIndex="1" Margin="10,10,10,0" VerticalAlignment="Top" IsHitTestVisible="False">
+   <Grid x:Name="TitleHeader" Visibility="{Binding HasLabel,Converter={StaticResource Visible}}" Panel.ZIndex="1" Margin="10,10,10,0" VerticalAlignment="Top" IsHitTestVisible="False">
     <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/></Grid.ColumnDefinitions>
     <Grid Width="17" Height="18" Margin="0,2,6,0" VerticalAlignment="Top" Visibility="{Binding HasCalendarDay,Converter={StaticResource Visible}}">
      <Border BorderBrush="{Binding Foreground,ElementName=Entry}" BorderThickness="1" CornerRadius="2" Margin="0,3,0,0"/>
      <Path Data="M 0,7 L 17,7 M 4,0 L 4,5 M 13,0 L 13,5" Stroke="{Binding Foreground,ElementName=Entry}" StrokeThickness="1"/>
      <TextBlock Text="{Binding DayOfMonth}" Foreground="{Binding Foreground,ElementName=Entry}" FontSize="9" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,1"/>
     </Grid>
-    <TextBlock Grid.Column="1" Text="{Binding Title}" Foreground="{Binding Foreground,ElementName=Entry}" FontSize="17" LineHeight="24" LineStackingStrategy="BlockLineHeight" TextTrimming="CharacterEllipsis"/>
+    <TextBlock Grid.Column="1" Text="{Binding Label}" Foreground="{Binding Foreground,ElementName=Entry}" FontSize="17" LineHeight="24" LineStackingStrategy="BlockLineHeight" TextTrimming="CharacterEllipsis"/>
    </Grid>
   <Canvas x:Name="CaptionHost" Grid.Row="1" Margin="10,6" IsHitTestVisible="False">
    <StackPanel x:Name="ContentBlock" Width="{Binding ActualWidth,ElementName=CaptionHost}">
@@ -93,7 +100,7 @@
      <Binding Path="(local:CardMotion.Progress)" ElementName="Surface"/>
     </MultiBinding></TranslateTransform.Y></TranslateTransform></StackPanel.RenderTransform>
     <Grid x:Name="CaptionSlot" Height="36">
-     <TextBlock x:Name="Caption" Text="{Binding Subtitle}" Foreground="{Binding Foreground,ElementName=Entry}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" LineHeight="18" LineStackingStrategy="BlockLineHeight"
+     <TextBlock x:Name="Caption" Text="{Binding Caption}" Foreground="{Binding Foreground,ElementName=Entry}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" LineHeight="18" LineStackingStrategy="BlockLineHeight"
       VerticalAlignment="Bottom" MaxHeight="36" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
     </Grid>
     <Border x:Name="PreviewBlock" Padding="0,8,40,0" MinHeight="44" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Surface}">

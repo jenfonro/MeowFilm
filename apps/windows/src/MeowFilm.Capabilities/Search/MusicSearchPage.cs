@@ -10,7 +10,6 @@ internal sealed record MusicSearchPage(SearchCandidate[] Items, bool More, int N
     internal static MusicSearchPage Read(JsonElement response, string platform, MusicSearchKind kind, int page)
     {
         var data = JsonNode.Parse(response.GetRawText())!.AsObject();
-        bool groups = LJ.S(data["totalUnit"]) == "groups";
         bool more = data["more"]!.GetValue<bool>();
         int next = more ? data["continuation"]!["page"]!.GetValue<int>() : page;
         // Only the actual cursor can establish progress; row counts do not.
@@ -21,8 +20,8 @@ internal sealed record MusicSearchPage(SearchCandidate[] Items, bool More, int N
         foreach (var (node, index) in data["items"]!.AsArray().Select((node, index) => (node, index)))
         {
             var raw = node!.AsObject();
-            var content = groups ? raw["song"]!.AsObject() : raw;
-            double rank = groups ? raw["rank"]!.GetValue<double>() : offset + index + 1;
+            var content = raw;
+            double rank = raw["rank"] is null ? offset + index + 1 : raw["rank"]!.GetValue<double>();
             JsonObject item;
             string key;
             if (kind == MusicSearchKind.Songs)

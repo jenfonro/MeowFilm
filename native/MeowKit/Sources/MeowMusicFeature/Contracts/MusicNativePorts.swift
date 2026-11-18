@@ -2,12 +2,25 @@ import Foundation
 
 /// Public, credential-free native locator. JSON is data, never executable code.
 public struct MusicNativeTrackData: Sendable {
+    public struct Display: Codable, Sendable {
+        public let title: String
+        public let artist: String
+        public let album: String
+        public let duration: Double
+        public let artwork: URL?
+        public init(title: String, artist: String, album: String, duration: Double, artwork: URL?) {
+            self.title = title; self.artist = artist; self.album = album
+            self.duration = duration; self.artwork = artwork
+        }
+    }
     public let platform: String
     public let data: Data
+    /// Canonical Song presentation survives even without a repository locator.
+    public let display: Display?
     /// Optional collection occurrence position, never part of song identity.
     public let sourcePosition: Int?
-    public init(platform: String, data: Data, sourcePosition: Int? = nil) {
-        self.platform = platform; self.data = data; self.sourcePosition = sourcePosition
+    public init(platform: String, data: Data, sourcePosition: Int? = nil, display: Display? = nil) {
+        self.platform = platform; self.data = data; self.sourcePosition = sourcePosition; self.display = display
     }
 }
 public struct MusicNativeTrackPage: Sendable {

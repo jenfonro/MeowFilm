@@ -82,6 +82,7 @@ public static partial class MusicNativePlatformTests
             var reads = new (string Operation, Func<Task<JsonElement>> Read)[] {
                 ("search", () => f.Catalog.SearchAsync(new("wy", "关键词"))),
                 ("playlist", () => f.Catalog.PlaylistAsync(new("wy", "list"))),
+                ("playlists", () => f.Catalog.PlaylistsAsync(new("wy", ["list-a", "list-b"]))),
                 ("album", () => f.Catalog.AlbumAsync(new("wy", "album"))),
                 ("artist", () => f.Catalog.ArtistAsync(new("wy", "artist"))),
                 ("daily", () => f.Catalog.DailyAsync(new())),

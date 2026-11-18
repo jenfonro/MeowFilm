@@ -57,6 +57,7 @@ public partial class MusicCatalogView : UserControl
         }), true);
         Loaded += (_, _) =>
         {
+            LayoutUpdated += ReportVisibleCatalogCards;
             Observe();
             SystemParameters.StaticPropertyChanged += HomeAnimationSettingsChanged;
             RefreshSearchPlaylistHost(restoreOffset: true);
@@ -64,6 +65,7 @@ public partial class MusicCatalogView : UserControl
         };
         DataContextChanged += (_, _) =>
         {
+            observed?.UpdateCatalogVisibleCards([]);
             ClearHomeTransition();
             SearchPlaylistList.ItemsSource = null;
             ResetSearchPlaylistProjection();
@@ -73,6 +75,7 @@ public partial class MusicCatalogView : UserControl
         {
             if (!IsVisible)
             {
+                Owner?.UpdateCatalogVisibleCards([]);
                 ChannelMorePopup.IsOpen = false;
                 ResetChannelMoreReveal();
                 scrollIntent.Clear();
@@ -83,6 +86,8 @@ public partial class MusicCatalogView : UserControl
         HomeContent.IsVisibleChanged += (_, _) => { if (!HomeContent.IsVisible) ClearHomeTransition(); };
         Unloaded += (_, _) =>
         {
+            LayoutUpdated -= ReportVisibleCatalogCards;
+            observed?.UpdateCatalogVisibleCards([]);
             SystemParameters.StaticPropertyChanged -= HomeAnimationSettingsChanged;
             ClearHomeTransition();
             ChannelMorePopup.IsOpen = false;
@@ -97,6 +102,42 @@ public partial class MusicCatalogView : UserControl
             SuspendSearchPlaylistList();
             if (Owner is not { HasSearchSession: true }) ResetSearchPlaylistProjection();
         };
+    }
+    private void ReportVisibleCatalogCards(object? sender, EventArgs e)
+    {
+        if (!IsVisible || Owner is not { } owner) return;
+        var cards = new HashSet<MusicCatalogCard>(ReferenceEqualityComparer.Instance);
+        Visit(this);
+        owner.UpdateCatalogVisibleCards(cards);
+        void Visit(DependencyObject parent)
+        {
+            if (parent is FrameworkElement element)
+            {
+                if (!element.IsVisible) return;
+                if (element.DataContext is MusicCatalogCard card && element.ActualWidth > 0 && element.ActualHeight > 0)
+                {
+                    if (InCatalogViewport(element)) cards.Add(card);
+                    return;
+                }
+            }
+            for (int index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+                Visit(VisualTreeHelper.GetChild(parent, index));
+        }
+    }
+    internal static bool InCatalogViewport(FrameworkElement slot)
+    {
+        if (!slot.IsLoaded || !slot.IsVisible || slot.ActualWidth <= 0 || slot.ActualHeight <= 0) return false;
+        try
+        {
+            for (DependencyObject? parent = VisualTreeHelper.GetParent(slot); parent is not null; parent = VisualTreeHelper.GetParent(parent))
+                if (parent is FrameworkElement element && (element.ClipToBounds || element is ScrollContentPresenter))
+                {
+                    var bounds = slot.TransformToAncestor(element).TransformBounds(new Rect(0, 0, slot.ActualWidth, slot.ActualHeight));
+                    if (!bounds.IntersectsWith(new Rect(0, 0, element.ActualWidth, element.ActualHeight))) return false;
+                }
+            return true;
+        }
+        catch (InvalidOperationException) { return false; }
     }
     private void Observe()
     {
@@ -379,6 +420,11 @@ public partial class MusicCatalogView : UserControl
     {
         if (Owner is { } owner && sender is Button { Tag: MusicCatalogTag tag })
             await owner.CatalogTagAsync(tag);
+    }
+    private void SectionTab_Click(object sender, RoutedEventArgs e)
+    {
+        if (Owner is { } owner && sender is Button { Tag: MusicCatalogTab tab })
+            owner.SelectCatalogSectionTab(tab);
     }
     private void CatalogScroll_Changed(object sender, ScrollChangedEventArgs e)
     {

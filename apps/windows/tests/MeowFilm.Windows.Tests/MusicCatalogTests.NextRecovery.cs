@@ -47,9 +47,9 @@ public static partial class MusicCatalogTests
                 await using var f = await Fixture.Create();
                 f.Client.Transform("music.catalog.channel", reply => Edit(reply, node =>
                     node["sections"] = JsonSerializer.SerializeToNode(new[] {
-                        new { id = "retained-menu-playlists", title = "频道歌单", type = "playlists", items = new[] {
-                            new { id = "500", name = "歌单A", kind = "playlist", action = new { type = "playlist", id = "500" } },
-                            new { id = "501", name = "歌单B", kind = "playlist", action = new { type = "playlist", id = "501" } }
+                        new { id = "retained-menu-playlists", title = "频道歌单", layout = "playlist-rail", items = new[] {
+                            new { id = "500", title = "歌单A", kind = "playlist", action = new { type = "playlist", id = "500" } },
+                            new { id = "501", title = "歌单B", kind = "playlist", action = new { type = "playlist", id = "501" } }
                         } }
                     })));
                 await f.Module.NavigateAsync("catalog-channel/wy/rock", default);
