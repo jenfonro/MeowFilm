@@ -230,11 +230,11 @@ await check('music-platform-default-http-json-and-close', async () => {
     const home = await call('home');
     assert.equal(home.more, true);
     assert.equal(home.continuation.cursor, id);
-    assert.deepEqual(home.sections.flatMap(section => section.items).map(song => song.sources[0].musicInfo.songmid), ['42']);
+    assert.deepEqual(home.sections.flatMap(section => section.items).map(item => item.song.sources[0].musicInfo.songmid), ['42']);
     const next = await call('home', { continuation: home.continuation });
     assert.equal(next.more, false);
     assert.equal(next.continuation, null);
-    assert.deepEqual(next.sections.flatMap(section => section.items).map(song => song.sources[0].musicInfo.songmid), ['43']);
+    assert.deepEqual(next.sections.flatMap(section => section.items).map(item => item.song.sources[0].musicInfo.songmid), ['43']);
     const plain = await call('search', { keyword: 'Node 18 music' });
     assert.deepEqual(plain.items.map(song => song.sources[0].musicInfo.songmid), [id, adjacentId]);
     assert.deepEqual(await call('search', { keyword: 'Node 18 music', unused: { nested: null } }), plain);

@@ -160,8 +160,23 @@ public static partial class MusicUiTests
             Equal(0, f.Http.Requests.Count);
             await f.Open(); await f.Module.SearchAsync("", default);
             True(f.Module.IsDiscovery && f.Module.CanUseDiscovery, "online empty query");
-            var bad = await f.App.ExecuteAsync("music.discovery.read", new { refresh = false, cookie = "not-a-credential" });
-            Equal("INVALID_REQUEST", bad.GetProperty("code").GetString());
+        });
+        yield return Case("native discovery consumes named inputs and ignores unused extra fields", async () =>
+        {
+            await using var f = await DiscoveryScene.Create();
+            var read = await f.Call("music.discovery.read", new { cookie = "not-a-credential", refresh = false,
+                extra = new { nested = new[] { 1, 2 } } });
+            long generation = read.GetProperty("snapshot").GetProperty("generation").GetInt64();
+            True(f.App.IsDiscoveryCurrent(generation), "read issues the current generation");
+            int requests = f.Http.Requests.Count;
+            var rotated = await f.Call("music.discovery.rotate", new { extra = new { generation = -1 }, generation });
+            True(f.App.IsDiscoveryCurrent(rotated.GetProperty("snapshot").GetProperty("generation").GetInt64()),
+                "rotation uses the named generation");
+            Equal(requests, f.Http.Requests.Count);
+            var badRead = await f.App.ExecuteAsync("music.discovery.read", new { refresh = "false", extra = true });
+            Equal("INVALID_REQUEST", badRead.GetProperty("code").GetString());
+            var badRotate = await f.App.ExecuteAsync("music.discovery.rotate", new { generation = 0, extra = true });
+            Equal("INVALID_REQUEST", badRotate.GetProperty("code").GetString());
         });
         yield return Case("native discovery view reactivation during retiring HTTP waits and then restores exactly once", async () =>
         {

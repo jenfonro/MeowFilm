@@ -63,23 +63,21 @@ public sealed partial class MusicNativeApplication
     {
         var input = parameters is JsonElement element ? element : JsonSerializer.SerializeToElement(parameters);
         if (input.ValueKind != JsonValueKind.Object) return Failed("INVALID_REQUEST");
-        var fields = input.EnumerateObject().ToArray();
-        if (fields.Length != 1) return Failed("INVALID_REQUEST");
         bool refresh = false;
         long generation = 0;
         if (method == "music.discovery.read")
         {
-            if (fields[0].Name != "refresh" || fields[0].Value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            if (!input.TryGetProperty("refresh", out var value) || value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
                 return Failed("INVALID_REQUEST");
-            refresh = fields[0].Value.GetBoolean();
+            refresh = value.GetBoolean();
             // Initial durable-load notifications must run before a new discovery flight is admitted.
             var restored = await accounts.RestoreForDiscoveryAsync(token).ConfigureAwait(false);
             if (!Okay(restored)) return restored;
         }
         else if (method == "music.discovery.rotate")
         {
-            if (fields[0].Name != "generation" || fields[0].Value.ValueKind != JsonValueKind.Number ||
-                !fields[0].Value.TryGetInt64(out generation) || generation < 1) return Failed("INVALID_REQUEST");
+            if (!input.TryGetProperty("generation", out var value) || value.ValueKind != JsonValueKind.Number ||
+                !value.TryGetInt64(out generation) || generation < 1) return Failed("INVALID_REQUEST");
         }
         else return Failed("INVALID_REQUEST");
         long account, serial, previousIssued;

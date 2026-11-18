@@ -15,6 +15,7 @@ public static class MusicHomeSnapshotTests
     {
         yield return new("Music home optional cache reopens ordered pages without account or runtime authority", Roundtrip);
         yield return new("Music home cache reopens through its independent local cache namespace and root", LocalReopen);
+        yield return new("Music home cold cache retains recommendation action parameters without credentials", ActionParameters);
         yield return new("Music home bad cached content misses and fresh pages repair it", Damaged);
         yield return new("Music home cache uses its native platform scope without rejecting partial page fields", PlatformMismatch);
         yield return new("Music home song cards and previews resolve current cross-platform repository references", SongReferences);
@@ -178,6 +179,45 @@ public static class MusicHomeSnapshotTests
         finally
         {
             if (Directory.Exists(root)) Directory.Delete(TestWorkspace.ValidatePath(TestWorkspace.DataRoot, root), true);
+        }
+    }
+    private static async Task ActionParameters()
+    {
+        var actions = JsonNode.Parse("""
+            [
+              {"type":"similar","sourceIds":["9007199254740993","42"],"sourceType":"song"},
+              {"type":"fm","provider":"rule","ruleId":"rule-1","tabTagId":"tag-2","sourceName":"Rule FM"},
+              {"type":"fm","mode":"scene","submode":"work"},
+              {"type":"heartbeat","entry":"favorites","songId":"9007199254740993"}
+            ]
+            """)!.AsArray();
+        var page = Page("wy", "actions");
+        page["sections"]![0]!["items"] = new JsonArray(actions.Select((action, index) =>
+        {
+            var saved = action!.DeepClone();
+            saved["credentials"] = new JsonObject { ["cookie"] = "synthetic" };
+            saved["scope"] = "synthetic-account";
+            return (JsonNode?)new JsonObject
+            {
+                ["id"] = index.ToString(), ["kind"] = action["type"]!.GetValue<string>(),
+                ["title"] = "Recommendation", ["action"] = saved
+            };
+        }).ToArray());
+        await using var backing = new MusicOfficialAudioTests.MemoryStore();
+        await using (var store = new CacheDocumentStore(backing))
+        {
+            await new MusicHomeSnapshotStore(store).SaveAsync(Snapshot("wy", page));
+            await store.DrainAsync();
+        }
+        await using var reopened = new CacheDocumentStore(backing);
+        var snapshot = (await new MusicHomeSnapshotStore(reopened).ReadAsync(_ =>
+            throw new InvalidOperationException("An action seed is not a repository song reference")))!;
+        var cards = MusicCatalogDto.Read(snapshot.Pages.Single(), "wy", "home", "").Single().Items;
+        Check(cards.Count == actions.Count);
+        for (int index = 0; index < actions.Count; index++)
+        {
+            Check(cards[index].CanOpen && cards[index].Action is not null);
+            Check(JsonNode.DeepEquals(JsonNode.Parse(cards[index].Action!.Value.GetRawText()), actions[index]));
         }
     }
     private static async Task Damaged()

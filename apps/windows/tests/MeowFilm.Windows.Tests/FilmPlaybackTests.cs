@@ -458,8 +458,8 @@ public static class FilmPlaybackTests
 
     private static async Task PosterCards()
     {
-        const string poster = "pack://application:,,,/MeowFilm.Capabilities;component/Film/Presentation/Assets/poster-long-season.jpg";
-        const string still = "pack://application:,,,/MeowFilm.Capabilities;component/Film/Presentation/Assets/episode-01.jpg";
+        const string poster = "ms-appx:///MeowFilm.Capabilities/Film/Presentation/Assets/poster-long-season.jpg";
+        const string still = "ms-appx:///MeowFilm.Capabilities/Film/Presentation/Assets/episode-01.jpg";
         await CheckPosterCard(poster, 400, 300, 2d / 3);
         await CheckPosterCard(poster, 150, 300, 2d / 3);
         await CheckPosterCard(still, 400, 300, 16d / 9);

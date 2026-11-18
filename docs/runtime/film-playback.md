@@ -22,6 +22,8 @@ fsync 与 rename 原子替换文档路径；文件链接的其他目录项保留
 见[存储](../ios/storage.md#影视设置)，Windows 接线见[原生设置](../windows/native-settings.md)。
 HTTP `settings.set` 及规则写入
 在注入模式返回 `PERMISSION_DENIED`，不形成第二个配置写 owner。
+普通资料库读取保留偏好原值与扩展字段，不执行整块编辑校验。会话按实际消费字段读取偏好；
+排序可只包含部分维度，未知维度不参与排序，网盘顺序不自动补齐。显式设置编辑仍检查所写字段的类型和取值。
 
 双端 aggregate entry 显式装配九个模块（顺序见[音乐平台运行器](music-platform.md)）；通用 `createRuntime` 未显式启用
 pan／metadata／film 时保持原默认三个模块。`connectFilmPlayback` 在 provider
