@@ -32,21 +32,55 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     bool RequiresAccount = false, bool Display = true, string Placement = "",
     bool DirectPlay = true, JsonElement? PlaybackSource = null, string RankText = "", string SalesText = "",
     bool IsCloudFavorites = false, bool IsManagedPlaylist = false, int? Count = null,
-    string Label = "", MusicCatalogCoverReference? CoverRef = null, bool UsesSongDisplay = true, string ChannelKind = "") : INotifyPropertyChanged
+    string Label = "", MusicCatalogCoverReference? CoverRef = null, bool UsesSongDisplay = true, string ChannelKind = "",
+    string ContextText = "", long? PlayCount = null, string CoverLabel = "") : INotifyPropertyChanged
 {
     public event PropertyChangedEventHandler? PropertyChanged;
     private string title = Title, subtitle = Subtitle, cover = Cover;
+    private string contextText = ContextText;
+    private long? playCount = PlayCount;
     public string Title { get => UsesSongDisplay ? Song?.Title ?? title : title; init => title = value; }
     public string Subtitle { get => UsesSongDisplay ? Song?.Artist ?? subtitle : subtitle; init => subtitle = value; }
     public string Cover { get => UsesSongDisplay ? Song?.Cover ?? cover : cover; init => cover = value; }
     public bool HasLabel => Label.Length > 0;
-    public string Caption => HasLabel ? Subtitle : Title;
+    public long? PlayCount { get => playCount; init => playCount = value; }
+    public string ContextText { get => contextText; init => contextText = value; }
+    public bool HasPlayCount => PlayCount.HasValue;
+    public bool HasCoverLabel => CoverLabel.Length > 0;
+    public string PlayCountText => PlayCount is not { } count ? "" : count >= 100_000_000 ?
+        (count / 100_000_000d).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + "亿" : count >= 10_000 ?
+        (count / 10_000d).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + "万" :
+        count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    public string Caption => !HasLabel ? Title : ContextText.Length == 0 ? Subtitle :
+        Kind == "fm" ? $"从「{ContextText}」开启无限漫游" : ContextText;
     internal void FillCover(string value)
     {
         if (Cover.Length > 0 || value.Length == 0) return;
         cover = value;
         foreach (var name in new[] { nameof(Cover), nameof(FirstPreviewCover) })
             PropertyChanged?.Invoke(this, new(name));
+    }
+    internal void FillCollectionMetadata(string name, string artwork, long? plays)
+    {
+        FillCover(artwork);
+        if (!HasLabel && (IsPreviewEntry || Title.Length == 0) && name.Length > 0 && title != name)
+        {
+            title = name;
+            foreach (var property in new[] { nameof(Title), nameof(Caption) })
+                PropertyChanged?.Invoke(this, new(property));
+        }
+        if (HasLabel && contextText.Length == 0 && name.Length > 0 && name != Label)
+        {
+            contextText = name;
+            PropertyChanged?.Invoke(this, new(nameof(ContextText)));
+            PropertyChanged?.Invoke(this, new(nameof(Caption)));
+        }
+        if (plays.HasValue && plays != playCount)
+        {
+            playCount = plays;
+            foreach (var property in new[] { nameof(PlayCount), nameof(HasPlayCount), nameof(PlayCountText) })
+                PropertyChanged?.Invoke(this, new(property));
+        }
     }
     internal void RefreshSong(JsonElement? value)
     {
@@ -192,6 +226,8 @@ public static class MusicCatalogDto
         value.ValueKind == JsonValueKind.Array ? value.EnumerateArray() : [];
     internal static int? Number(JsonElement value, string key) =>
         Field(value, key) is { ValueKind: JsonValueKind.Number } number && number.TryGetInt32(out int result) ? result : null;
+    internal static long? LongNumber(JsonElement value, string key) =>
+        Field(value, key) is { ValueKind: JsonValueKind.Number } number && number.TryGetInt64(out long result) ? result : null;
     internal static bool Boolean(JsonElement value, string key, bool fallback) => Field(value, key).ValueKind switch
     { JsonValueKind.True => true, JsonValueKind.False => false, _ => fallback };
     private static JsonElement? Object(JsonElement value) => value.ValueKind == JsonValueKind.Object ? value.Clone() : null;
@@ -270,7 +306,8 @@ public static class MusicCatalogDto
             IsManagedPlaylist: Text(item, "relationship") == "owned",
             Label: Text(item, "label"), ChannelKind: Text(Field(action, "channel"), "channelKind"),
             CoverRef: Text(reference, "kind") == "playlist" && Text(reference, "id").Length > 0
-                ? new("playlist", Text(reference, "id")) : null, UsesSongDisplay: false);
+                ? new("playlist", Text(reference, "id")) : null, UsesSongDisplay: false,
+            ContextText: Text(item, "contextText"), PlayCount: LongNumber(item, "playCount"), CoverLabel: Text(item, "coverLabel"));
     }
     private static MusicCatalogCard SongCard(JsonElement item, string platform) =>
         new(Text(item, "songId"), Text(item, "title"), Text(item, "artist"), Text(item, "cover_url"), "song", platform,
@@ -280,7 +317,7 @@ public static class MusicCatalogDto
             ActionId: Text(item, "id"), Locator: Object(Field(item, "locator")),
             RequiresAccount: Boolean(item, "requiresAccount", false), Display: Boolean(item, "display", true),
             IsCloudFavorites: platform == "wy" && Text(item, "kind") == "favorites" && Text(item, "relationship") == "owned",
-            IsManagedPlaylist: Text(item, "relationship") == "owned", Count: Number(item, "count"));
+            IsManagedPlaylist: Text(item, "relationship") == "owned", Count: Number(item, "count"), PlayCount: LongNumber(item, "playCount"));
     private static MusicCatalogCard Descriptor(JsonElement item, string platform) =>
         new(Text(item, "id"), Text(item, "name"), "", Text(item, "cover"), "channel", platform,
             ActionId: Text(item, "id"), PageCode: Text(item, "pageCode"), Placement: Text(item, "placement"),

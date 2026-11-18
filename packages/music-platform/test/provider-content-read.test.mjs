@@ -116,7 +116,8 @@ test('WY home and Cube preserve display materials, banner image semantics and FM
   assert.equal(cards[3].title, ''); assert.equal(cards[3].cover, 'https://images.invalid/image-only.jpg');
   assert.equal(cards[4].title, 'Display only'); assert.equal(cards[4].action, null);
   assert.equal(cards[4].cover, 'https://images.invalid/fallback.jpg');
-  assert.equal(cards[5].label, 'Header label'); assert.equal(cards[5].title, 'Business title');
+  assert.equal(cards[5].label, 'Business title'); assert.equal(cards[5].title, 'Business title');
+  assert.equal(cards[5].contextText, 'Header label');
   assert.equal(cards[5].subtitle, 'Current subtitle');
   const songCard = home.sections.find(row => row.layout === 'song-columns').items[0];
   assert.equal(songCard.title, 'Card title'); assert.equal(songCard.cover, 'https://images.invalid/card.jpg');
@@ -134,6 +135,52 @@ test('WY home and Cube preserve display materials, banner image semantics and FM
   assert.equal(cube.sections[1].layout, 'feature-rail');
   assert.ok(cube.sections[1].items.every(row => row.label === ''));
   assert.equal(f.requests.length, 2); await f.close();
+});
+
+test('WY home keeps category labels, dynamic context and fixed mobile copy in separate roles', async t => {
+  const f = fixture(request => {
+    assert.ok(new URL(request.url).pathname.endsWith('/link/page/rcmd/resource/show'));
+    return response({ code: 200, data: { blocks: [{ positionCode: 'home-entries', dslData: {
+      blockResource: { resources: [
+        { resourceType: 'dailySongs', title: '每日推荐 | 从「合成歌曲」听起', subTitle: '11-18', dayOfMonth: 18,
+          singleLineTitle: '符合你口味的新鲜好歌' },
+        { resourceType: 'fm', title: '合成歌曲', subTitle: '私人漫游', singleLineTitle: '多种听歌模式随心播放' },
+        { resourceType: 'similarSong', title: '曲目甲、曲目乙', subTitle: '相似歌曲', singleLineTitle: '从你喜欢的歌听起' },
+        { resourceType: 'similarArtist', title: '艺人甲、艺人乙', subTitle: '相似艺人', singleLineTitle: '从你喜欢的艺人听起' },
+        { resourceType: 'playList', resourceId: '1', title: '私人雷达', subTitle: '私人雷达', singleLineTitle: '你爱的歌值得反复聆听' },
+        { resourceType: 'playList', resourceId: '2', title: '动态歌单名', subTitle: '心情氛围歌单', singleLineTitle: '懂你情绪的歌单' },
+      ] },
+    } }] } });
+  });
+  t.after(() => f.close());
+  const cards = (await f.request('wy', 'home')).sections[0].items;
+  assert.deepEqual(cards.map(row => row.label), ['每日推荐', '私人漫游', '相似歌曲', '相似艺人', '私人雷达', '心情氛围歌单']);
+  assert.deepEqual(cards.map(row => row.title), cards.map(row => row.label));
+  assert.deepEqual(cards.map(row => row.contextText), ['每日推荐 | 从「合成歌曲」听起', '合成歌曲', '曲目甲、曲目乙',
+    '艺人甲、艺人乙', '', '动态歌单名']);
+  assert.equal(cards[0].subtitle, '符合你口味的新鲜好歌');
+  assert.equal(cards[1].subtitle, '多种听歌模式随心播放');
+  assert.equal(f.requests.length, 1);
+});
+
+test('WY home reads music display resources without rendering greeting and promotion registration tables', async t => {
+  const greeting = { resourceType: 'nonstandard', resourceId: 'greeting' };
+  const registrations = { dataGroupResourceList: [greeting], commonResourceList: [greeting,
+    { resourceType: 'VIP', title: 'VIP享超21项特权' }] };
+  const f = fixture(() => response({ code: 200, data: { blocks: [
+    { positionCode: 'greeting', dslData: { greetingTemplate: registrations } },
+    { positionCode: 'music', dslData: { playlistTemplate: { ...registrations, blockResource: {
+      title: '推荐歌单', ...registrations, resources: [{ resourceType: 'playlist', resourceId: '1' },
+        { resourceType: 'playlist', title: '无动作歌单', playCount: 0 }, { resourceType: 'future-music', title: '新展示内容' }],
+    } } } },
+  ] } }));
+  t.after(() => f.close());
+  const page = await f.request('wy', 'home');
+  assert.equal(page.sections.length, 1);
+  assert.equal(page.sections[0].title, '推荐歌单');
+  assert.deepEqual(page.sections[0].items.map(row => row.title), ['', '无动作歌单', '新展示内容']);
+  assert.equal(page.sections[0].items[1].playCount, 0);
+  assert.equal(f.requests.length, 1);
 });
 
 test('WY FM actions publish the same five canonical modes from carousel and recommendation containers', async t => {

@@ -12,7 +12,7 @@ enum MusicNativePlatformResult {
         return .init(platform: source, nativeID: value[music: "id"].musicText, kind: kind,
             title: value[music: "name"].musicText, creator: value[music: "creator"].musicText,
             artwork: MusicArtworkURL.normalized(value[music: "cover"].musicText),
-            count: MusicPlatformDTO.optionalCount(rawCount))
+            count: MusicPlatformDTO.optionalCount(rawCount), playCount: MusicPlatformDTO.optionalCount(value[music: "playCount"]))
     }
     static func collections(_ value: RuntimeValue, platform: MusicPublicBrowsePlatform) throws -> [MusicPublicBrowseCollection] {
         try value.musicArray.map { try collection($0, platform: platform) }
@@ -66,7 +66,8 @@ enum MusicNativePlatformResult {
                 kind: kind == .album ? .album : .playlist, title: value[music: "title"].musicText,
                 creator: value[music: "creator"].musicText,
                 artwork: MusicArtworkURL.normalized(value[music: "cover"].musicText),
-                count: MusicPlatformDTO.optionalCount(value[music: "count"])))
+                count: MusicPlatformDTO.optionalCount(value[music: "count"]),
+                playCount: MusicPlatformDTO.optionalCount(value[music: "playCount"])))
         case .channel:
             content = descriptor[music: "type"].musicText != "channel" || descriptor[music: "channel"] == .null ? .unavailable :
                 .channel(try channel(descriptor[music: "channel"], platform: platform))
@@ -106,7 +107,9 @@ enum MusicNativePlatformResult {
                 } : value[music: "previewSongs"].musicArray).map { try MusicPlatformDTO.nativeTrack($0) },
             recommendationReason: value[music: "recommendationReason"].musicText,
             coverLabel: value[music: "coverLabel"].musicText, requiresAccount: value[music: "requiresAccount"].musicBool,
-            kind: kind, label: value[music: "label"].musicText, presentation: value[music: "presentation"].musicText, coverRef: coverRef)
+            kind: kind, label: value[music: "label"].musicText, contextText: value[music: "contextText"].musicText,
+            playCount: MusicPlatformDTO.optionalCount(value[music: "playCount"]),
+            presentation: value[music: "presentation"].musicText, coverRef: coverRef)
     }
     private static func visibleItems(_ value: RuntimeValue, platform: MusicPublicBrowsePlatform,
                                      key: String) throws -> [MusicNativePublicBrowseItem] {

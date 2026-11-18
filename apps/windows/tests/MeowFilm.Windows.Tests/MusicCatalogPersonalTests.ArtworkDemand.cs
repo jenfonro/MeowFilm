@@ -12,6 +12,9 @@ public static partial class MusicCatalogPersonalTests
         yield return Case("hidden artwork stops dispatch and retains admitted settlement for redisplay", ArtworkDemandHidden);
         yield return Case("missing and failed artwork are distinct finite outcomes across pagination", ArtworkDemandTerminal);
         yield return Case("preview and detail reuse collection root artwork without borrowing song covers", ArtworkDemandCollectionRoot);
+        yield return Case("visible playlist metadata reuses preview names and play counts even with supplied artwork", CollectionMetadataPreview);
+        yield return Case("playlist summaries fill channel titles and keep home category labels", CollectionMetadataSummary);
+        yield return Case("failed playlist members still allow one visible metadata summary", CollectionMetadataAfterPreviewFailure);
         yield return Case("visible FM artwork shares explicit configurations without playlist previews or playback", FMArtworkCoalescing);
         yield return Case("hidden FM artwork retains admitted settlement without dispatching new reads", FMArtworkHidden);
         yield return Case("missing and failed FM artwork stay finite across pagination", FMArtworkTerminal);
@@ -120,6 +123,7 @@ public static partial class MusicCatalogPersonalTests
             f.App.TransformNext("music.catalog.playlist", reply => Edit(reply, row =>
             {
                 row["cover"] = rootCover ? "https://art.example.test/root" : "";
+                row["playCount"] = 0;
                 row["items"]![0]!["cover_url"] = "https://art.example.test/song";
             }));
             await f.Module.NavigateAsync("catalog-home", default);
@@ -144,6 +148,67 @@ public static partial class MusicCatalogPersonalTests
         await DemandArtwork(detail);
         Equal(detail.Platform.SampleCover, card.Cover);
         Equal(0, Calls(detail, "music.catalog.playlists"));
+    }
+    private static async Task CollectionMetadataPreview()
+    {
+        await using var f = await Fixture.Create();
+        f.Platform.ChannelEntries = [MissingArtworkCard("500", "first", "preview", "https://art.example.test/supplied"),
+            MissingArtworkCard("500", "copy", "preview", "https://art.example.test/supplied"),
+            new { id = "500", key = "link", kind = "playlist", title = "活动标题", cover = "", action = new { type = "playlist", id = "500" } }];
+        f.App.TransformNext("music.catalog.playlist", reply => Edit(reply, row =>
+        {
+            row["name"] = "欧美红心宝藏 | 高收藏率英文歌推荐";
+            row["cover"] = "https://art.example.test/root"; row["playCount"] = 3031000;
+        }));
+        await f.Module.NavigateAsync("catalog-channel/wy/rock", default);
+        var cards = VisibleCards(f);
+        await DemandArtwork(f);
+        Check(cards.Take(2).All(card => card.Title == "欧美红心宝藏 | 高收藏率英文歌推荐" &&
+            card.Caption == card.Title && card.PlayCount == 3031000 && card.PlayCountText == "303.1万" && card.HasPreview));
+        Check(cards.Take(2).All(card => card.Cover == "https://art.example.test/supplied"));
+        Check(cards[2] is { Title: "活动标题", Cover: "", HasPreview: false, PlayCount: null },
+            "a link to the same playlist never acquires the destination's display materials");
+        Equal(1, Calls(f, "music.catalog.playlist")); Equal(0, Calls(f, "music.catalog.playlists"));
+        var request = f.Platform.Requests.OfType<MusicPlaylistRequest>().Single();
+        Equal(1, request.Page); Equal(3, request.Limit);
+        f.Module.UpdateCatalogVisibleCards([]); await DemandArtwork(f);
+        Equal(1, Calls(f, "music.catalog.playlist")); Equal(0, f.Output.Opens);
+    }
+    private static async Task CollectionMetadataSummary()
+    {
+        await using var f = await Fixture.Create();
+        f.Platform.HomeEntries = [new { id = "500", key = "home", kind = "playlist", title = "私人雷达", label = "私人雷达",
+            subtitle = "你爱的歌值得反复聆听", cover = "https://art.example.test/supplied", presentation = "preview",
+            coverRef = new { kind = "playlist", id = "500" }, action = new { type = "playlist", id = "500" } }];
+        f.App.TransformNext("music.catalog.playlist", reply => Edit(reply, row =>
+        {
+            row["name"] = ""; row["cover"] = "";
+        }));
+        f.App.TransformNext("music.catalog.playlists", reply => Edit(reply, row =>
+        {
+            row["items"]![0]!["name"] = "今日动态歌单"; row["items"]![0]!["playCount"] = 0;
+        }));
+        await f.Module.NavigateAsync("catalog-home", default); await DemandArtwork(f);
+        var home = VisibleCards(f).Single();
+        Equal("私人雷达", home.Label); Equal("私人雷达", home.Title); Equal("今日动态歌单", home.Caption);
+        Check(home.HasPlayCount && home.PlayCountText == "0");
+        Equal(1, Calls(f, "music.catalog.playlists"));
+        f.Platform.ChannelEntries = [new { id = "501", key = "channel", kind = "playlist", title = "", cover = "https://art.example.test/supplied",
+            coverRef = new { kind = "playlist", id = "501" }, action = new { type = "playlist", id = "501" } }];
+        await f.Module.NavigateAsync("catalog-channel/wy/rock", default); await DemandArtwork(f);
+        Equal("歌单", VisibleCards(f).Single().Title);
+    }
+    private static async Task CollectionMetadataAfterPreviewFailure()
+    {
+        await using var f = await Fixture.Create();
+        f.Platform.ChannelEntries = [MissingArtworkCard("500", "entry", "preview")];
+        f.Platform.SampleCover = "https://art.example.test/summary";
+        f.App.FailNext("music.catalog.playlist", "NETWORK_ERROR");
+        await f.Module.NavigateAsync("catalog-channel/wy/rock", default); await DemandArtwork(f);
+        var card = VisibleCards(f).Single();
+        Check(card.Title == "歌单" && card.Cover == f.Platform.SampleCover && !card.HasPreview && !card.HasPlayCount);
+        f.Module.UpdateCatalogVisibleCards([]); await DemandArtwork(f);
+        Equal(1, Calls(f, "music.catalog.playlist")); Equal(1, Calls(f, "music.catalog.playlists"));
     }
     private static async Task FMArtworkCoalescing()
     {

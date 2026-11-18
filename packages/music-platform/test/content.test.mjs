@@ -34,6 +34,7 @@ test('home labels are presentation roles, not a second kind of card parsing', ()
   assert.equal(home.sections[0].layout, 'feature-rail');
   assert.equal(home.sections[0].items[0].label, '私人雷达');
   assert.equal(home.sections[0].items[0].subtitle, '今天的歌单内容');
+  assert.equal(home.sections[0].items[0].contextText, '今日动态歌单');
   const channel = projectContent('wy', 'channel', inputs.home);
   assert.equal(channel.sections[0].items[0].label, '');
   assert.equal(channel.sections[0].items[0].title, '私人雷达');
@@ -77,4 +78,14 @@ test('image extraction tries usable candidates and preserves rendition identity'
   assert.equal(images('data:image/png;base64,AA', 'https://images.invalid/cover/{size}.jpg?crop=1'),
     'https://images.invalid/cover/480.jpg?crop=1');
   assert.equal(images('https://user:secret@images.invalid/a.jpg'), '');
+});
+
+test('collection summaries and browse cards preserve play count separately from song count', () => {
+  const summary = collection('wy', { id: 1, name: '歌单', songCount: 200, playCount: 3031000 });
+  assert.equal(summary.count, 200); assert.equal(summary.playCount, 3031000);
+  const cards = projectContent('wy', 'channel', { sections: [{ type: 'entries', items: [
+    { ...summary, kind: 'playlist' }, { kind: 'playlist', playCount: 0 }, { kind: 'playlist', playCount: {} },
+  ] }] }).sections[0].items;
+  assert.deepEqual(cards.map(row => row.playCount), [3031000, 0, null]);
+  assert.equal(cards[0].count, 200);
 });

@@ -145,7 +145,7 @@ public static partial class MusicUiTests
             var fixture = MusicNativeCatalogTests.ContentFixture(home ? "home-page" : "browse-page");
             var sections = MusicCatalogDto.Read(fixture, "wy", home ? "home" : "channel", "");
             var model = sections.First(section => section.IsEntrySection).Items[0] with { Cover = "", Decoration = "" };
-            var card = new EntryCard { DataContext = model, Width = 152 };
+            var card = new EntryCard { DataContext = model, Width = 152, VerticalAlignment = VerticalAlignment.Top };
             using var host = new DesktopTestUi.Host(card, 320, 400);
             await TestUiHost.LoadedAsync(card); await Drain(); card.UpdateLayout();
             var header = (Grid)card.FindName("TitleHeader");
@@ -154,8 +154,11 @@ public static partial class MusicUiTests
             var shade = (Border)card.FindName("BottomShade");
             True(header.Visibility == (home ? Visibility.Visible : Visibility.Collapsed),
                 "only home labels occupy the upper title slot");
-            True(caption.Text == (home ? model.Subtitle : model.Title), "the lower caption uses the fixed role");
+            True(caption.Text == (home ? model.ContextText : model.Title), "the lower caption uses the fixed role");
             if (home) True(Visuals(header).OfType<TextBlock>().Any(text => text.Text == model.Label), "home label is rendered");
+            if (!home) True(((TextBlock)card.FindName("PlayCount")).Text == "0" &&
+                ((Grid)card.FindName("CoverInfo")).Visibility == Visibility.Visible &&
+                ((Border)card.FindName("TitleShade")).Visibility == Visibility.Visible, "zero plays has a protected cover label");
             True(Visuals(card).OfType<TextBlock>().All(text => text.FontWeight == Microsoft.UI.Text.FontWeights.Normal),
                 "ordinary card typography remains regular");
             var gradient = (LinearGradientBrush)shade.Background;
@@ -165,7 +168,26 @@ public static partial class MusicUiTests
             True(gradient.GradientStops.Select(stop => stop.Offset).SequenceEqual([.62, .82, 1d]) &&
                 gradient.GradientStops.Select(stop => stop.Color.A).SequenceEqual(new byte[] { 0, 112, 255 }),
                 "the resting alpha stops are not an animated hover effect");
+            if (home)
+            {
+                model.InitializePreview([new("Broken Ankle", "", "", 1, null), new("Maggie", "", "", 2, null), new("HONEYMOON", "", "", 3, null)]);
+                CardMotion.SetPointerActive(surface, true);
+                await Until(() => !CardMotion.HasActiveAnimation(surface)); await Drain(); card.UpdateLayout();
+                var lines = Visuals((Border)card.FindName("PreviewBlock")).OfType<TextBlock>().ToArray();
+                var button = (Button)card.FindName("PlayButton");
+                True(lines.Length == 3 && lines[0].ActualWidth > lines[^1].ActualWidth &&
+                    DesktopTestUi.Bounds(lines[0], surface).Bottom <= DesktopTestUi.Bounds(button, surface).Top &&
+                    DesktopTestUi.Bounds(lines[^1], surface).Right <= DesktopTestUi.Bounds(button, surface).Left,
+                    "preview rows use the unobstructed width above the play button");
+            }
         }
+        var fm = new MusicCatalogCard("fm", "24h不间断欧美频道 一键播放", "", "", "fm", "wy", CoverLabel: "欧美漫游");
+        var fmCard = new EntryCard { DataContext = fm, Width = 152 };
+        using var fmScene = new DesktopTestUi.Host(fmCard, 320, 400);
+        await TestUiHost.LoadedAsync(fmCard); await Drain(); fmCard.UpdateLayout();
+        True(((TextBlock)fmCard.FindName("FMLabel")).Text == "欧美漫游" &&
+            ((TextBlock)fmCard.FindName("Caption")).Text == fm.Title && !fm.HasLabel,
+            "the FM cover marker is independent of the home category and lower caption");
     }
 
     private static async Task CatalogArtworkVisibility()

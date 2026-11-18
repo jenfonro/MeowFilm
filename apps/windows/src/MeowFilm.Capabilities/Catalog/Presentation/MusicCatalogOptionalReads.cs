@@ -12,12 +12,13 @@ public sealed partial class MusicCapability
         public long Observation;
         public bool Retired;
         public readonly CancellationTokenSource Cancellation = new();
-        public readonly Dictionary<string, CatalogOptionalRead> Previews = [], Covers = [];
+        public readonly Dictionary<string, CatalogOptionalRead> Previews = [], Collections = [];
     }
     private sealed class CatalogOptionalRead
     {
         public Task Work = Task.CompletedTask;
-        public string Cover = "", Error = "", CollectionId = "";
+        public string Name = "", Cover = "", Error = "", CollectionId = "";
+        public long? PlayCount;
         public IReadOnlyList<MusicRankPreview> Songs = [];
         public bool Admitted;
     }
@@ -53,7 +54,7 @@ public sealed partial class MusicCapability
             _ = DisposeWhenSettled();
             async Task DisposeWhenSettled()
             {
-                await Task.WhenAll(scope.Previews.Values.Concat(scope.Covers.Values).Select(read => read.Work));
+                await Task.WhenAll(scope.Previews.Values.Concat(scope.Collections.Values).Select(read => read.Work));
                 scope.Cancellation.Dispose();
             }
         }
@@ -84,8 +85,16 @@ public sealed partial class MusicCapability
     private bool HasOptionalDemand(CatalogOptionalReads scope, Func<MusicCatalogCard, bool> predicate) =>
         ReferenceEquals(activeCatalogReads, scope) && IsCatalogPage && visibleCatalogCards.Any(predicate);
     private string PreviewReadKey(MusicCatalogCard card) => card.Kind + ":" + JsonSerializer.Serialize(CardReadParameters(card));
-    private static string CoverReadKey(MusicCatalogCard card) => card.CoverRef is { Kind: "playlist" } reference
+    private static string CollectionReadKey(MusicCatalogCard card) => card.CoverRef is { Kind: "playlist" } reference
         ? reference.Id : "";
+
+    private static bool NeedsCollectionMetadata(MusicCatalogCard card, CatalogOptionalRead? root)
+    {
+        bool needsName = card.Title.Length == 0 || card.IsPreviewEntry && (!card.HasLabel || card.ContextText.Length == 0);
+        return card.Cover.Length == 0 && string.IsNullOrEmpty(root?.Cover) ||
+            needsName && string.IsNullOrEmpty(root?.Name) ||
+            card.IsPreviewEntry && !card.HasLabel && card.PlayCount is null && root?.PlayCount is null;
+    }
 
     // Called with clipped, visible slots by MusicCatalogView. No Loaded/hover-driven API reads.
     internal void UpdateCatalogVisibleCards(IEnumerable<MusicCatalogCard> cards)
@@ -104,12 +113,17 @@ public sealed partial class MusicCapability
             read.Work = ReadCatalogPreview(scope, key, card, read);
             TrackCatalogOptionalRead(read.Work);
         }
-        var missing = current.Where(card => card.Cover.Length == 0 && CoverReadKey(card).Length > 0)
-            .Select(CoverReadKey).Distinct(StringComparer.Ordinal).Where(id => !scope.Covers.ContainsKey(id)).ToArray();
-        if (missing.Length == 0) return;
-        var reads = missing.ToDictionary(id => id, _ => new CatalogOptionalRead(), StringComparer.Ordinal);
-        foreach (var pair in reads) scope.Covers.Add(pair.Key, pair.Value);
-        var work = ReadCatalogCovers(scope, reads);
+        var reads = new Dictionary<string, CatalogOptionalRead>(StringComparer.Ordinal);
+        foreach (var card in current)
+        {
+            string id = CollectionReadKey(card);
+            if (id.Length == 0) continue;
+            scope.Collections.TryGetValue(id, out var root);
+            if (root is { Admitted: true } or { Work.IsCompleted: false } || !NeedsCollectionMetadata(card, root)) continue;
+            reads[id] = scope.Collections[id] = root ?? new();
+        }
+        if (reads.Count == 0) return;
+        var work = ReadCatalogCollections(scope, reads);
         foreach (var read in reads.Values) read.Work = work;
         TrackCatalogOptionalRead(work);
     }
@@ -141,7 +155,8 @@ public sealed partial class MusicCapability
             if (card.Kind != "fm")
                 read.Songs = MusicCatalogDto.Read(reply, card.Platform, card.Kind, "").SelectMany(section => section.Items)
                     .Take(3).Select((item, index) => new MusicRankPreview(item.Title, item.Subtitle, item.Cover, index + 1, null, item.Song)).ToArray();
-            if (card.Kind == "playlist") RememberCatalogCollectionCover(scope.Platform, card.ActionId, read.Cover);
+            if (card.Kind == "playlist") RememberCatalogCollectionMetadata(scope.Platform, card.ActionId,
+                MusicCatalogDto.Text(reply, "name"), read.Cover, MusicCatalogDto.LongNumber(reply, "playCount"));
         }
         catch (Exception error) { read.Error = OptionalReadError(error); }
         finally
@@ -150,29 +165,24 @@ public sealed partial class MusicCapability
             PublishOptionalResults(scope, completing: read);
         }
     }
-    private async Task ReadCatalogCovers(CatalogOptionalReads scope, Dictionary<string, CatalogOptionalRead> reads)
+    private async Task ReadCatalogCollections(CatalogOptionalReads scope, Dictionary<string, CatalogOptionalRead> reads)
     {
         await Task.Yield();
         bool entered = false;
         var admitted = new Dictionary<string, CatalogOptionalRead>(StringComparer.Ordinal);
         try
         {
-            // An already requested preview owns its collection root cover.
+            // Reuse the admitted preview root before considering a separate summary.
             foreach (var pair in reads)
             {
                 var preview = scope.Previews.Values.FirstOrDefault(read => read.CollectionId == pair.Key);
-                if (preview is null) continue;
-                await preview.Work;
-                if (preview.Admitted && pair.Value.Cover.Length == 0)
-                { pair.Value.Cover = preview.Cover; pair.Value.Error = preview.Error; }
+                if (preview is not null) await preview.Work;
             }
             await catalogPreviewSlots.WaitAsync(scope.Cancellation.Token); entered = true;
             foreach (var pair in reads)
             {
-                if (pair.Value.Cover.Length > 0 || pair.Value.Error.Length > 0) continue;
-                if (!OptionalReadsCurrent(scope) ||
-                    !HasOptionalDemand(scope, card => card.Cover.Length == 0 && CoverReadKey(card) == pair.Key))
-                { scope.Covers.Remove(pair.Key); continue; }
+                if (!OptionalReadsCurrent(scope) || !HasOptionalDemand(scope,
+                    card => CollectionReadKey(card) == pair.Key && NeedsCollectionMetadata(card, pair.Value))) continue;
                 admitted.Add(pair.Key, pair.Value);
                 pair.Value.Admitted = true;
             }
@@ -185,17 +195,21 @@ public sealed partial class MusicCapability
             request.Token.ThrowIfCancellationRequested();
             if (!OptionalReadsCurrent(scope)) return;
             foreach (var item in MusicCatalogDto.Rows(MusicCatalogDto.Field(reply, "items")))
-                if (admitted.TryGetValue(MusicCatalogDto.Text(item, "id"), out var read) && read.Cover.Length == 0)
-                    read.Cover = MusicCatalogDto.Text(item, "cover");
+                if (admitted.TryGetValue(MusicCatalogDto.Text(item, "id"), out var read))
+                {
+                    if (read.Name.Length == 0) read.Name = MusicCatalogDto.Text(item, "name");
+                    if (read.Cover.Length == 0) read.Cover = MusicCatalogDto.Text(item, "cover");
+                    read.PlayCount ??= MusicCatalogDto.LongNumber(item, "playCount");
+                }
         }
         catch (Exception error)
         {
-            foreach (var read in reads.Values.Where(read => read.Cover.Length == 0)) read.Error = OptionalReadError(error);
+            foreach (var read in admitted.Values) read.Error = OptionalReadError(error);
         }
         finally
         {
             if (entered) catalogPreviewSlots.Release();
-            foreach (var read in reads.Values) PublishOptionalResults(scope, completing: read);
+            PublishOptionalResults(scope);
         }
     }
     private static string OptionalReadError(Exception error) => error switch
@@ -209,31 +223,32 @@ public sealed partial class MusicCapability
         if (!OptionalReadsCurrent(scope) || !ReferenceEquals(activeCatalogReads, scope)) return;
         foreach (var card in visibleCatalogCards.ToArray())
         {
-            if (scope.Previews.TryGetValue(PreviewReadKey(card), out var preview) &&
+            if ((card.IsPreviewEntry || card.CanRequestFMArtwork) && scope.Previews.TryGetValue(PreviewReadKey(card), out var preview) &&
                 (preview.Work.IsCompleted || ReferenceEquals(preview, completing)) && preview.Error.Length == 0)
             {
                 if (card.Kind == "fm") card.FillCover(preview.Cover);
                 else card.InitializePreview(preview.Songs);
             }
-            if (scope.Covers.TryGetValue(CoverReadKey(card), out var cover) &&
-                (cover.Work.IsCompleted || ReferenceEquals(cover, completing)) && cover.Error.Length == 0)
-                card.FillCover(cover.Cover);
+            if (scope.Collections.TryGetValue(CollectionReadKey(card), out var root))
+                card.FillCollectionMetadata(root.Name, root.Cover, root.PlayCount);
         }
     }
-    private void RememberCatalogCollectionCover(string platform, string id, string cover)
+    private void RememberCatalogCollectionMetadata(string platform, string id, string name, string cover, long? playCount)
     {
-        if (id.Length == 0 || cover.Length == 0) return;
+        if (id.Length == 0 || name.Length == 0 && cover.Length == 0 && playCount is null) return;
         foreach (var scope in catalogOptionalSnapshots.Values.Where(scope =>
             scope.Platform == platform && OptionalReadsCurrent(scope)).ToArray())
         {
-            if (!scope.Covers.TryGetValue(id, out var read))
-                scope.Covers.Add(id, read = new());
-            if (read.Cover.Length == 0) { read.Cover = cover; read.Error = ""; }
+            if (!scope.Collections.TryGetValue(id, out var read))
+                scope.Collections.Add(id, read = new());
+            if (name.Length > 0) read.Name = name;
+            if (read.Cover.Length == 0) read.Cover = cover;
+            read.PlayCount ??= playCount;
             PublishOptionalResults(scope);
         }
     }
     internal string CatalogCoverReadOutcome(string id) => activeCatalogReads is { } scope &&
-        scope.Covers.TryGetValue(id, out var read) ? read.Error.Length > 0 ? read.Error :
+        scope.Collections.TryGetValue(id, out var read) ? read.Error.Length > 0 ? read.Error :
             !read.Work.IsCompleted ? "pending" : read.Cover.Length > 0 ? "cover" : "empty" : "unrequested";
     internal string CatalogFMArtworkOutcome(MusicCatalogCard card) => activeCatalogReads is { } scope &&
         scope.Previews.TryGetValue(PreviewReadKey(card), out var read) ? read.Error.Length > 0 ? read.Error :

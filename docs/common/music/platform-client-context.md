@@ -30,7 +30,7 @@
 - 分页使用真实 cursor、nextpage、结束标记及 consumed 位置；短页不自动证明结束。同组多版本、顺序和重复 occurrence 不因展示数量裁剪。
 - 分页只解析当前成员和可关联详情，不提前消费后页元数据；canonical 返回保留真实身份，不能给未确认的别名关联补造成员位置。身份缺失的歌曲仍可保留展示，但不制造永久歌曲或可执行定位；仓库采用结果不反向删除父卡或其他展示材料。
 - 普通全集读取只取得所需内容，不前后双读确认快照；实际规范 ID、条数和正常内容变化不与本地预估二次比较。真实远端写事务单独保留其提交保障。
-- 运行器在首页／频道转换中不因缺标题、图片或歌手自行追加摘要／详情请求。原生业务 owner 按可见缺图需求显式请求已有摘要配方；只有用户明确请求成员时才执行所需的多步成员读取。已有 URL 不联网证明，缺图不改变队列 revision、顺序、当前 occurrence 或播放位置，详见[共享图片与展示资源](presentation-resources.md#缺少图片引用的按需读取)。
+- 运行器在首页／频道转换中不因缺标题、图片或歌手自行追加摘要／详情请求。原生业务 owner 按可见展示需求复用已读集合根资料，必要时显式请求已有摘要配方；只有明确请求成员时才执行所需的多步成员读取。已有 URL 不联网证明，资料回填不改变队列 revision、顺序、当前 occurrence 或播放位置，详见[共享图片与展示资源](presentation-resources.md#缺少图片引用的按需读取)。
 - 官方音频按真实 URL、品质、完整版／试听事实消费；游客可使用配方确实支持的能力。网络或解析失败不推断需要登录、无资源或错源。专有歌词解密和 chorus 字段转换由 Node 完成。
 - 歌词主轨与翻译／罗马音分别消费；附属轨失败保留主轨、健康兄弟及有限错误码，取消、超时、会话失效和资源超限继续终止。Base64 接受等价空白与省略 padding，仍拒绝非法字符、坏密文、压缩流和时钟材料。签名始终使用上游原文，不先作数值规范化。
 - 播放反馈按平台和 start／end 取实际编码字段。QQ 使用已取得的曲目时长；网易不消费调用者 duration／position；酷狗 start 只消费时长，end 保留真实录音时长与播放位置关联，不消费 media。附加回执成员不改变真实成功／拒绝及一次结算。
@@ -43,14 +43,15 @@
 | --- | --- |
 | BrowsePage | `home/channel/artistActivity/charts` 返回 `platform/id/title/sections/tags/selectedTag/continuation`；不再同时返回另一套顶层 `entries`／`feed` 展示树 |
 | Section | `id/title/layout/items/action/tabs/selectedTab/tags/selectedTag/errorCode/avatars/requiresAccount`；`layout` 是最终组件分类，不按 `type`、成员形状或平台二次分类 |
-| Card | `key/id/kind/label/title/subtitle/cover/coverRef/action/song`，以及 `presentation/preview/previewSongs/decoration/count/dayOfMonth/display/available/requiresAccount/canPlay` 等独立展示材料 |
+| Card | `key/id/kind/label/title/subtitle/contextText/cover/coverRef/action/song`，以及 `presentation/preview/previewSongs/decoration/count/playCount/coverLabel/dayOfMonth/display/available/requiresAccount/canPlay` 等独立展示材料 |
 | ChannelDirectory | `{platform,items:[descriptor]}`；descriptor 使用 `id/name/channelKind/pageCode/cover/placement/available/display`，不从 id 前缀猜频道类型 |
 | Song | `title/artist/album/duration/cover_url/sources`；独立歌曲列表不嵌套第二层 `song`，排行可附加 `rank`。`sources` 保存真实来源，不伪造永久 songId |
-| Collection | `id/name/cover/count/creator/source/engine`；详情另保留其现有根资料、歌曲 `items` 与分页材料 |
+| Collection | `id/name/cover/count/playCount/creator/source/engine`；详情另保留其现有根资料、歌曲 `items` 与分页材料 |
 
 - `layout` 为 `feature-rail/banner/playlist-rail/playlist-grid/song-columns/song-list/artist-grid/channel-grid/ranking/ranking-small/ranked-songs/artist-updates/vip-songs/vip-ranked-songs/album-ranking`。`TOP_3/ONLY_COVER/rail/list` 等上游／适配中间值不进入端侧分派。
 - `kind` 为 `song/playlist/album/artist/channel/chart/daily/fm/similar/heartbeat/song-collection/unsupported`，表达内容与动作类别，不能由 `sources`、`available` 或动作形状重算。未知／缺动作保留展示，仅不执行操作。
-- `title` 是卡片业务标题。`label` 只表达首页入口上方栏目标签；频道为空。Windows 首页上方显示 `label`、底栏显示 `subtitle`，频道底栏显示 `title`；iOS 保留自己的既有标题／副标题位置。
+- `title` 是卡片业务标题。`label` 只表达首页入口上方栏目标签；频道为空。`contextText` 独立保留动态业务文字材料，未提供时为空。Windows 首页上方显示 `label`、底栏优先采用 `contextText`（FM 按该歌曲材料组合漫游文案），缺失时使用 `subtitle`；频道底栏显示 `title`。iOS 保留自己的既有标题／副标题位置。
+- `count` 是歌曲数量，`playCount` 是可选数值播放量，缺失为 null，真实 0 保留；两者不混用。`coverLabel` 为封面独立标识，例如频道 FM 的“欧美漫游”，不占首页 `label` 的语义。
 - `cover` 是该卡片展示图，不因 `song.cover_url`、动作目标或仓库采用而被覆盖。`coverRef` 为同一展示图的显式元数据定位；目前网易普通歌单为 `{kind:"playlist",id}`，其余为 null，banner 始终为 null。
 - 显式 `playlists` 操作接收 `{ids:[...]}`，返回 `{platform,items:[Collection]}`。客户端不为集合图读取完整成员、不取第一首歌图冒充集合图。
 - 结构诊断仅包含固定提取路径、阶段、JSON 类型及数量，不含账号、ID、URL、原始响应或其他业务值；诊断附于 `diagnostics`，不参与放行或客户端分类。正常缺项、真实网络失败和程序错误分别处理。

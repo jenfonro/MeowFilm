@@ -192,7 +192,7 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 | `music.platform.audio-locators.v1` | 账号作用域下的官方音频定位缓存 |
 | `meowfilm.music.audio-resources.v1` | 实际播放后的完整音频缓存 |
 | `music.presentation-resources.v2` | 共享图片／歌词原始字节叶子，首用文件 metadata 仅保留在内存 |
-| `music.home.display.v1`、`music.source-checks.v1` | 首页展示快照和来源发现观察 |
+| `music.home.display.v2`、`music.source-checks.v1` | 首页展示快照和来源发现观察 |
 | `music.ui.appearance.v1`、`music.ui.songColors.v1`、`music.ui.lastChannel` | 音乐外观偏好、歌曲取色缓存和频道恢复 |
 | `playback.volume`、播放所有者 `music`／`film` | 共享播放音量与当前播放业务所有者 |
 | `meowfilm.film.library.v1` | 影视收藏身份，保留原来源／影片字段及可选 Node `businessID/playbackTarget`，见[影视收藏](film.md#详情和收藏) |

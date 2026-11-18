@@ -1090,12 +1090,12 @@ private extension MusicPublicBrowseItem {
         if case .collection(let value) = content, value.platform == ref.platform,
            value.kind == ref.kind, value.nativeID == ref.id, value.artwork == nil {
             next = .collection(.init(platform: value.platform, nativeID: value.nativeID, kind: value.kind,
-                title: value.title, creator: value.creator, artwork: cover, count: value.count))
+                title: value.title, creator: value.creator, artwork: cover, count: value.count, playCount: value.playCount))
         } else { next = content }
         return .init(id: id, title: title, subtitle: subtitle, artwork: cover, content: next,
             ranking: ranking, previewSongs: previewSongs, recommendationReason: recommendationReason,
             coverLabel: coverLabel, requiresAccount: requiresAccount, kind: kind, label: label,
-            presentation: presentation, coverRef: coverRef)
+            presentation: presentation, coverRef: coverRef, contextText: contextText, playCount: playCount)
     }
 }
 

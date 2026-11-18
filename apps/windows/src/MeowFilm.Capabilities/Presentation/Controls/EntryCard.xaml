@@ -13,8 +13,8 @@
   </Grid>
   <Border x:Name="BottomShade" IsHitTestVisible="False"/>
   <Border x:Name="CoverShade" Background="#40000000" IsHitTestVisible="False" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Surface}"/>
-  <Border x:Name="ExpansionShade" Grid.RowSpan="2" IsHitTestVisible="False" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Surface}"/>
-  <Border x:Name="TitleShade" Visibility="{Binding HasLabel,Converter={StaticResource Visible}}" Height="64" VerticalAlignment="Top" IsHitTestVisible="False"/>
+  <Border x:Name="ExpansionShade" Grid.RowSpan="2" IsHitTestVisible="False" Opacity="0"/>
+  <Border x:Name="TitleShade" Height="64" VerticalAlignment="Top" IsHitTestVisible="False"/>
   <Grid x:Name="TitleHeader" Visibility="{Binding HasLabel,Converter={StaticResource Visible}}" Canvas.ZIndex="1" Margin="10,10,10,0" VerticalAlignment="Top" IsHitTestVisible="False"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
    <Grid Width="17" Height="18" Margin="0,2,6,0" VerticalAlignment="Top" Visibility="{Binding HasCalendarDay,Converter={StaticResource Visible}}">
     <Border BorderBrush="{Binding Foreground,ElementName=Entry}" BorderThickness="1" CornerRadius="2" Margin="0,3,0,0"/><Path Data="M 0,7 L 17,7 M 4,0 L 4,5 M 13,0 L 13,5" Stroke="{Binding Foreground,ElementName=Entry}" StrokeThickness="1"/>
@@ -22,12 +22,22 @@
    </Grid>
    <TextBlock Grid.Column="1" Text="{Binding Label}" FontSize="17" LineHeight="24" LineStackingStrategy="BlockLineHeight" TextTrimming="CharacterEllipsis"/>
   </Grid>
+  <Grid x:Name="CoverInfo" Visibility="{Binding HasLabel,Converter={StaticResource Visible},ConverterParameter=Not}" Margin="10,10,10,0" VerticalAlignment="Top" IsHitTestVisible="False">
+   <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/></Grid.ColumnDefinitions>
+   <StackPanel Orientation="Horizontal" Visibility="{Binding HasPlayCount,Converter={StaticResource Visible}}">
+    <Path Width="11" Height="12" Margin="0,1,4,0" Stretch="Uniform" Stroke="{Binding Foreground,ElementName=Entry}" StrokeThickness="1.4"
+      Data="M 1,9 L 1,6 C 1,0 11,0 11,6 L 11,9 M 1,6 L 3,6 L 3,11 L 1,11 Z M 9,6 L 11,6 L 11,11 L 9,11 Z"/>
+    <TextBlock x:Name="PlayCount" Text="{Binding PlayCountText}" Foreground="{Binding Foreground,ElementName=Entry}" FontSize="11"/>
+   </StackPanel>
+   <TextBlock x:Name="FMLabel" Grid.Column="1" Text="{Binding CoverLabel}" Foreground="{Binding Foreground,ElementName=Entry}" FontSize="12"
+     Visibility="{Binding HasCoverLabel,Converter={StaticResource Visible}}" TextTrimming="CharacterEllipsis"/>
+  </Grid>
   <Canvas x:Name="CaptionHost" Grid.Row="1" Margin="10,6" IsHitTestVisible="False">
    <StackPanel x:Name="ContentBlock" Width="{Binding ActualWidth,ElementName=CaptionHost}">
     <StackPanel.RenderTransform><TranslateTransform x:Name="ContentTranslation"/></StackPanel.RenderTransform>
     <Grid x:Name="CaptionSlot" Height="36"><TextBlock x:Name="Caption" Text="{Binding Caption}" FontSize="12" LineHeight="18" LineStackingStrategy="BlockLineHeight" VerticalAlignment="Bottom" MaxHeight="36" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/></Grid>
-    <Border x:Name="PreviewBlock" Padding="0,8,40,0" MinHeight="44" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Surface}">
-     <ItemsControl ItemsSource="{Binding PreviewTitles}" VerticalAlignment="Bottom"><ItemsControl.ItemTemplate><DataTemplate><TextBlock Text="{Binding}" FontSize="13" Height="25" TextTrimming="CharacterEllipsis" Foreground="{Binding Foreground,ElementName=Entry}"/></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
+    <Border x:Name="PreviewBlock" Padding="0,8,0,0" MinHeight="44" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Surface}">
+     <StackPanel x:Name="PreviewRows" VerticalAlignment="Bottom"/>
     </Border>
    </StackPanel>
   </Canvas>

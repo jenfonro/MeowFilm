@@ -566,6 +566,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
               lhs.recommendationReason == rhs.recommendationReason, lhs.coverLabel == rhs.coverLabel,
               lhs.requiresAccount == rhs.requiresAccount, lhs.kind == rhs.kind, lhs.label == rhs.label,
               lhs.presentation == rhs.presentation, lhs.coverRef == rhs.coverRef,
+              lhs.contextText == rhs.contextText, lhs.playCount == rhs.playCount,
               sameRanking(lhs.ranking, rhs.ranking) else { return false }
         switch (lhs.content, rhs.content) {
         case (.collection(let lhs), .collection(let rhs)): return lhs == rhs

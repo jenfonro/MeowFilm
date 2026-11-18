@@ -93,12 +93,14 @@ function resource(r, { banner = false } = {}) {
   if (/video|podcast|voice|djradio|djprogram|mv/.test(kind)) return null;
   const declared = action(first(r.action, r.url, r.orpheus, r.clickAction)) ?? action(play?.detailUrl);
   const id = scalar(first(r.rankId, r.resourceId, r.id, r.resource));
-  const result = { id, label: title(r), name: title(r), cover: cover(r, banner), subtitle: text(first(r.subTitle, r.subtitle)),
+  const result = { id, name: title(r), cover: cover(r, banner), subtitle: text(first(r.subTitle, r.subtitle)),
     badge: text(array(r.tags)[0]), source: 'wy', engine: 'Netease' };
   const finish = (type, action) => ({ ...result, kind: type, action });
   if (text(r.singleLineTitle)) {
+    const context = result.name;
     result.name = kind === 'dailysongs' && r.dayOfMonth != null ? result.name.split(/\s*\|\s*/)[0] :
       result.subtitle || result.name;
+    result.contextText = context === result.name ? '' : context;
     result.subtitle = r.singleLineTitle;
   }
   if (kind === 'similarsong' || kind === 'similarartist' || declared?.type === 'similar')
@@ -139,6 +141,7 @@ function resource(r, { banner = false } = {}) {
       submode: text(first(r.subMode, r.submode)) || declared?.submode || '' });
   }
   if (['playlist', 'play_list', 'song_list', 'list', 'scroll_playlist', 'toplist'].includes(kind) || declared?.type === 'playlist') {
+    result.playCount = optionalNumber(r.playCount);
     const pid = declared?.id ?? id;
     if (!pid) {
       const ids = first(play?.playAction?.songIds, r.songIds);
@@ -191,7 +194,8 @@ function* leaves(node) {
   if (node.resourceType != null || node.songInfo || node.songData || node.resourceExtInfo?.songData ||
       node.targetType != null || node.action && node.resourceId != null) { yield node; return; }
   for (const [key, value] of Object.entries(node))
-    if (!['playBtn', 'playBtnData', 'playAll', 'playAction', 'clickAction', 'log', 'track', 'crossPlatformConfig'].includes(key)) yield* leaves(value);
+    if (!['playBtn', 'playBtnData', 'playAll', 'playAction', 'clickAction', 'log', 'track', 'crossPlatformConfig',
+      'dataGroupResourceList', 'commonResourceList'].includes(key)) yield* leaves(value);
 }
 function roots(value) {
   const data = nested(value);
@@ -200,7 +204,7 @@ function roots(value) {
   if (data.content?.items || data.resources || data.items) return [data];
   const candidates = Object.values(data).filter(value => value && typeof value === 'object' && !Array.isArray(value));
   const selected = candidates.filter(value => value.blockResource || value.header || value.block || value.resources || value.items || value.content?.items);
-  return (selected.length ? selected : candidates).map(value => value.blockResource ?? value);
+  return selected.map(value => value.blockResource ?? value);
 }
 function contentPage(raw, target, c, cursor = '') {
   const data = record(raw?.data ?? raw), blocks = array(data.blocks).map(record), result = emptyPage(target), occurrences = new Map();

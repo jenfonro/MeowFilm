@@ -17,8 +17,7 @@ public sealed class SkipButton : Button
     private readonly Rectangle edge = new() { Width = 3, Height = 16 };
     private readonly Microsoft.UI.Xaml.Shapes.Path first = new(), second = new();
     private readonly TranslateTransform translation = new();
-    private readonly ScaleTransform direction = new() { CenterX = 8, CenterY = 8 };
-    private readonly ScaleTransform pressed = new() { CenterX = 8, CenterY = 8 };
+    private readonly ScaleTransform scale = new() { CenterX = 8, CenterY = 8 };
     private Storyboard? motion;
     public SkipButton()
     {
@@ -27,16 +26,21 @@ public sealed class SkipButton : Button
         first.Data = MusicVisuals.Geometry("M0,0 L12,8 L0,16 Z"); second.Data = MusicVisuals.Geometry("M0,0 L12,8 L0,16 Z");
         Canvas.SetLeft(second, -16); moving.Children.Add(first); moving.Children.Add(second); arrows.Children.Add(moving);
         Canvas.SetLeft(edge, 13); glyph.Children.Add(arrows); glyph.Children.Add(edge);
-        glyph.RenderTransform = new TransformGroup { Children = { direction, pressed } }; Content = glyph;
+        glyph.RenderTransform = scale; Content = glyph;
         RegisterPropertyChangedCallback(ForegroundProperty, (_, _) => Refresh());
-        RegisterPropertyChangedCallback(IsPressedProperty, (_, _) => pressed.ScaleX = pressed.ScaleY = IsPressed ? .9 : 1);
+        RegisterPropertyChangedCallback(IsPressedProperty, (_, _) => Refresh());
         RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => { if (!IsEnabled) Reset(); });
         PointerEntered += (_, _) => SetPointerWithin(true); PointerExited += (_, _) => SetPointerWithin(false); Click += (_, _) => Animate();
         Unloaded += (_, _) => Reset(); Refresh();
     }
     internal void SetPointerWithin(bool within) { if (within) Animate(); else Reset(); }
     internal bool HasActiveAnimation => motion?.GetCurrentState() == ClockState.Active;
-    private void Refresh() { direction.ScaleX = Next ? 1 : -1; first.Fill = second.Fill = edge.Fill = Foreground; }
+    private void Refresh()
+    {
+        scale.ScaleY = IsPressed ? .9 : 1;
+        scale.ScaleX = Next ? scale.ScaleY : -scale.ScaleY;
+        first.Fill = second.Fill = edge.Fill = Foreground;
+    }
     private void Reset() { motion?.Stop(); motion = null; translation.X = 0; }
     private void Animate()
     {
