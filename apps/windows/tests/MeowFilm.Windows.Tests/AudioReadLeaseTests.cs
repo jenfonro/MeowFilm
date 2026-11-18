@@ -125,7 +125,7 @@ public static class AudioReadLeaseTests
 
     private static Task BoundedBytes()
     {
-        var lease = new Lease(seconds: 600);
+        var lease = new Lease([], (1L << 40) + 17);
         using (var input = new AudioDecoderInput(lease, default))
         {
             input.Open();
@@ -417,7 +417,7 @@ public static class AudioReadLeaseTests
         public CancellationToken Revoked => revoked.Token;
         internal Lease(double seconds = 60) : this(WaveHeader(seconds), (long)(48000 * seconds) * 2 + 44) { }
         internal Lease(byte[] bytes) : this(bytes, bytes.Length) { }
-        private Lease(byte[] prefix, long length)
+        internal Lease(byte[] prefix, long length)
         { DeclaredLength = length; Stream = new(prefix, length, () => revoked.IsCancellationRequested); }
         internal void Revoke() => revoked.Cancel();
         public ValueTask DisposeAsync()

@@ -108,12 +108,11 @@ export const kwProvider = {
   },
   async lyrics(c, { id, musicInfo = {} }) {
     const bytes = await read(c, 'https://mlyric.kuwo.cn/mobi.s',
-      { f: 'web', type: 'lyric', lrcx: '1', rid: input(first(id, musicInfo.songmid)), encode: 'utf8' }, 512 * 1024);
+      { f: 'web', type: 'lyric', lrcx: '1', rid: input(first(id, musicInfo.songmid)), encode: 'utf8' });
     return kuwoLyrics(bytes);
   },
 };
 const headers = () => ({ 'User-Agent': agent, Referer: 'https://www.kuwo.cn/' });
-async function read(c, url, query = {}, maximumBytes) {
-  return c.read({ url: url + (Object.keys(query).length ? '?' + form(query) : ''), headers: headers(), json: false,
-    ...(maximumBytes === undefined ? {} : { maximumBytes }) });
+async function read(c, url, query = {}) {
+  return c.read({ url: url + (Object.keys(query).length ? '?' + form(query) : ''), headers: headers(), json: false });
 }

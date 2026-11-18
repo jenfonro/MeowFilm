@@ -163,7 +163,7 @@ final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
             XCTAssertThrowsError(try enqueue(queue, .end, instance: instance), change)
         }
     }
-    func testExpiryAndCapacityAreResourceLimitsAndEvictWholeUnconfirmedPairs() throws {
+    func testPendingPairsSurviveFormerCapacityAndStillExpire() throws {
         let store = try store(), queue = try ready(store)
         var first: UUID?
         for _ in 0..<130 {
@@ -172,8 +172,8 @@ final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
             _ = try enqueue(queue, .end, instance: instance)
         }
         let rows = try rows(store)
-        XCTAssertEqual(rows.count, 256)
-        XCTAssertFalse(rows.contains { $0["instance"] as? String == first?.uuidString })
+        XCTAssertEqual(rows.count, 260)
+        XCTAssertTrue(rows.contains { $0["instance"] as? String == first?.uuidString })
         let grouped = Dictionary(grouping: rows) { $0["instance"] as? String }
         XCTAssertTrue(grouped.values.allSatisfy { $0.count == 2 })
         XCTAssertTrue(try queue.candidates(at: now + 7 * 86_400).isEmpty)

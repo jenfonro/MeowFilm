@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createCipheriv, publicEncrypt, generateKeyPairSync, constants } from 'node:crypto';
-import { createScriptHost, SCRIPT_LIMITS, ScriptHostError } from '../src/index.js';
+import { createScriptHost, ScriptHostError } from '../src/index.js';
 import { lxScript, target, deferred, turn, memoryStorage } from './fixtures.js';
 
 async function waitFor(predicate, message, timeoutMs = 3000) {
@@ -163,25 +163,19 @@ test('generation-bound observation reads the actual old owner while update await
 
 test('host applies shared script limits and protocol-specific timeout defaults', async t => {
   const host = hostFor(t);
-  assert.equal(host.limits.maxSourceBytes, 16 * 1024 * 1024);
   assert.equal(host.limits.maxStackBytes, 256 * 1024);
   assert.equal(host.limits.initTimeoutMs, 5000);
   assert.equal(host.limits.requestTimeoutMs, 60000);
   assert.equal(host.limits.cleanupTimeoutMs, 100);
 });
 
-test('install and update reject sources over the shared 16 MiB UTF-8 boundary', async t => {
+test('install and update preserve sources above the former 16 MiB UTF-8 boundary', async t => {
   const host = hostFor(t);
-  const exact = 'x'.repeat(SCRIPT_LIMITS.maxSourceBytes);
-  const installed = await host.install({ installationId: 'boundary', source: exact });
-  assert.equal(installed.contentHash, createHash('sha256').update(exact).digest('hex'));
-  assert.throws(() => host.install({ installationId: 'too-large',
-    source: 'x'.repeat(SCRIPT_LIMITS.maxSourceBytes + 1) }), { code: 'RESOURCE_LIMIT' });
-  assert.throws(() => host.get('too-large'), { code: 'NOT_FOUND' });
-  await assert.rejects(host.update('boundary', {
-    source: 'x'.repeat(SCRIPT_LIMITS.maxSourceBytes + 1),
-  }), { code: 'RESOURCE_LIMIT' });
-  assert.equal(host.get('boundary').contentHash, installed.contentHash);
+  const source = '// ' + '猫'.repeat(6 * 1024 * 1024);
+  const installed = await host.install({ installationId: 'large', source });
+  assert.equal(installed.contentHash, createHash('sha256').update(source).digest('hex'));
+  const updated = await host.update('large', { source: source + '😀' });
+  assert.equal(updated.contentHash, createHash('sha256').update(source + '😀').digest('hex'));
 });
 
 test('import is inert; enable is explicit; SDK payload and metadata stay exact', async t => {
@@ -593,12 +587,19 @@ test('closing during pending initialization aborts startup and cannot publish a 
 
 test('raw LX header metadata is read without evaluating on import', async t => {
   const host = hostFor(t);
-  const source = `/*\n * @name Synthetic raw source\n * @version 3.1.0\n * @author Fixture\n */\n` +
-    lxScript({ handler: 'async () => ({name:lx.currentScriptInfo.name,version:lx.currentScriptInfo.version,author:lx.currentScriptInfo.author})' });
-  const installed = await host.install({ installationId: 'a', source });
+  const metadata = { name: '猫'.repeat(1025), version: 'v'.repeat(129), author: 'a'.repeat(1025),
+    description: 'd'.repeat(1025), homepage: 'https://fixture.invalid/' + 'h'.repeat(1025) };
+  const alert = { log: '更新'.repeat(1025), updateUrl: 'https://fixture.invalid/' + 'u'.repeat(1025) };
+  const source = `/*\n * ${'padding'.repeat(1200)}\n` +
+    Object.entries(metadata).map(([key, value]) => ` * @${key} ${value}\n`).join('') + ' */\n' +
+    lxScript({ setup: `lx.send('updateAlert', ${JSON.stringify(alert)});`,
+      handler: 'async () => { const {rawScript, ...metadata} = lx.currentScriptInfo; return metadata; }' });
+  const installed = await host.install({ installationId: 'a', source, version: metadata.version });
   assert.equal(installed.generation, 0);
+  assert.equal(installed.version, metadata.version);
   await host.enable('a');
-  assert.deepEqual(await host.invoke(target()), { name: 'Synthetic raw source', version: '3.1.0', author: 'Fixture' });
+  assert.deepEqual(await host.invoke(target()), metadata);
+  assert.deepEqual(host.get('a').updateAlert, alert);
 });
 
 test('uncooperative adapter tasks stay visible after bounded close, then retire when settled', async t => {
@@ -658,12 +659,14 @@ test('simultaneous storage calls keep their original site after awaits', async t
   }, get(input) { return input.siteId; } } });
   await host.install({ installationId: 'a', enabled: true, permissions: { storage: ['read', 'write'] },
     source: lxScript({ handler: `async (_request, {storage}) => {
-      await storage.set('key','value'); return await storage.get('key');
+      const key = 'long-key-'.repeat(65);
+      await storage.set(key,'value'); return await storage.get(key);
     }` }) });
   const a = host.invoke(target('a', 'kw'));
   const b = host.invoke(target('a', 'tx'));
   await bothEntered.promise;
   assert.deepEqual(seen.map(v => v.siteId), ['kw', 'tx']);
+  assert.ok(seen.every(v => v.key === 'long-key-'.repeat(65)));
   assert.notEqual(seen[0].requestId, seen[1].requestId);
   release.resolve();
   assert.deepEqual(await Promise.all([a, b]), ['kw', 'tx']);

@@ -85,10 +85,10 @@ public static partial class MusicUiTests
             True(ViewportTopIndex(f) <= anchor && anchor < ViewportTopIndex(f) + columns,
                 "a width change keeps the previous first film in the first visible row");
             anchor = ViewportTopIndex(f);
-            double expectedWidth = Math.Min(176, (f.Panel.ViewportWidth + 24) / columns - 24);
+            double expectedWidth = (f.Panel.ViewportWidth + 36) / columns - 36;
             foreach (var container in ViewportContainers(f))
                 True(Math.Abs(container.RenderSize.Width - expectedWidth) < 1,
-                    "search preserves the original responsive 144-176 DIP card-width calculation");
+                    "search fills the frontend grid with a 180 DIP minimum and 36 DIP gaps");
             var positions = ViewportContainers(f).Select(container =>
                 (Index: f.Items.ItemContainerGenerator.IndexFromContainer(container),
                  Bounds: container.TransformToAncestor(f.Panel).TransformBounds(new Rect(container.RenderSize)))).ToArray();
@@ -97,14 +97,14 @@ public static partial class MusicUiTests
                 var nextColumn = positions.Where(other => other.Index == item.Index + 1 && other.Index / columns == item.Index / columns).ToArray();
                 if (nextColumn.Length == 1)
                 {
-                    double pitch = (f.Panel.ViewportWidth + 24) / columns;
+                    double pitch = (f.Panel.ViewportWidth + 36) / columns;
                     True(Math.Abs(nextColumn[0].Bounds.Left - item.Bounds.Left - pitch) < 1,
                         "column pitch retains the existing trailing-gap layout");
                 }
                 var nextRow = positions.Where(other => other.Index == item.Index + columns).ToArray();
                 if (nextRow.Length == 1)
-                    True(Math.Abs(nextRow[0].Bounds.Top - item.Bounds.Bottom - 24) < 1,
-                        "row gap remains 24 DIP");
+                    True(Math.Abs(nextRow[0].Bounds.Top - item.Bounds.Bottom - 36) < 1,
+                        "row gap follows the frontend's 36 DIP spacing");
             }
             CheckViewportMapping(f);
             CheckViewportRange(f);
@@ -156,8 +156,13 @@ public static partial class MusicUiTests
         var currentContainer = ViewportContainers(f).First(container =>
         {
             var bounds = container.TransformToAncestor(f.Panel).TransformBounds(new Rect(container.RenderSize));
-            return bounds.Top >= 0 && bounds.Bottom <= f.Panel.ViewportHeight;
+            return bounds.Bottom > 0 && bounds.Top < f.Panel.ViewportHeight;
         });
+        f.Panel.MakeVisible(currentContainer, new Rect(currentContainer.RenderSize));
+        await f.Layout();
+        var currentBounds = currentContainer.TransformToAncestor(f.Panel).TransformBounds(new Rect(currentContainer.RenderSize));
+        True(currentBounds.Top >= -.5 && currentBounds.Bottom <= f.Panel.ViewportHeight + .5,
+            "the current card is fully visible before activation regardless of row height");
         var current = f.Scene.Page.Cards[f.Items.ItemContainerGenerator.IndexFromContainer(currentContainer)];
         Visuals(currentContainer).OfType<Button>().Single(button => button.Name == "HitButton")
             .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
@@ -252,12 +257,12 @@ public static partial class MusicUiTests
             .Where(container => f.Items.ItemContainerGenerator.IndexFromContainer(container) >= 0);
 
     private static int ViewportColumns(ViewportScene f) =>
-        Math.Max(1, (int)Math.Floor((f.Panel.ViewportWidth + 24) / (144 + 24)));
+        Math.Max(1, (int)Math.Floor((f.Panel.ViewportWidth + 36) / (180 + 36)));
 
     private static int ViewportTopIndex(ViewportScene f)
     {
         double height = ViewportContainers(f).First().RenderSize.Height;
-        return (int)Math.Floor(f.Scroll.VerticalOffset / (height + 24)) * ViewportColumns(f);
+        return (int)Math.Floor(f.Scroll.VerticalOffset / (height + 36)) * ViewportColumns(f);
     }
 
     private static void CheckViewportRange(ViewportScene f)
@@ -265,12 +270,12 @@ public static partial class MusicUiTests
         int columns = ViewportColumns(f);
         var containers = ViewportContainers(f).ToArray();
         double height = containers.First().RenderSize.Height;
-        int bound = columns * ((int)Math.Ceiling(f.Panel.ViewportHeight / (height + 24)) + 3);
+        int bound = columns * ((int)Math.Ceiling(f.Panel.ViewportHeight / (height + 36)) + 3);
         True(containers.Length <= bound, "realized card count is bounded by the viewport plus adjacent cache rows");
         foreach (var container in containers)
         {
             var bounds = container.TransformToAncestor(f.Panel).TransformBounds(new Rect(container.RenderSize));
-            True(bounds.Bottom >= -height - 48 && bounds.Top <= f.Panel.ViewportHeight + height + 48,
+            True(bounds.Bottom >= -height - 72 && bounds.Top <= f.Panel.ViewportHeight + height + 72,
                 "realized containers stay near the viewport rather than accumulating at old positions");
         }
     }
@@ -302,7 +307,7 @@ public static partial class MusicUiTests
         private ViewportScene(UnifiedScene scene, IArtworkLoader? loader)
         {
             Scene = scene;
-            Hwnd = SearchRenderSource(scene.Shell, out Root);
+            Hwnd = SearchRenderSource(scene.Shell, out Root, Width, 760);
             ArtworkScope.SetLoader(Root, loader);
             var view = (SearchResultsView)scene.Page.View;
             Items = (ItemsControl)view.FindName("FilmItems");

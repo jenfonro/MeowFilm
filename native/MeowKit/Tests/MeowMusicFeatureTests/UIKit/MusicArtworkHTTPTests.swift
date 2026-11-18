@@ -169,108 +169,57 @@ final class MusicArtworkHTTPTests: XCTestCase {
         }
     }
     func testRejectedResponseStopsItsBodyStream() async throws {
-        // Sources without a bounded-rendition fallback surface the limit.
-        let qq = URL(string: "https://y.gtimg.cn/music/synthetic-\(UUID().uuidString).jpg")!
-        let processed = URL(string: "https://p1.music.126.net/synthetic-\(UUID().uuidString).jpg?param=200y200")!
-        for (mode, source) in [("status", nil), ("length", qq), ("length", processed)] as [(String, URL?)] {
-            let stopped = expectation(description: "\(mode) response stream stopped")
-            let fixture = MusicArtworkHTTPFixture(url: source, status: mode == "status" ? 503 : 200, body: Data(),
-                length: mode == "length" ? MusicArtworkHTTP.maximumBytes + 1 : nil, held: true,
-                stopped: { stopped.fulfill() })
-            let http = MusicArtworkHTTP(configuration: configuration())
-            do { _ = try await http.read(fixture.url); XCTFail("Rejected response accepted") }
-            catch {
-                XCTAssertEqual((error as? URLError)?.code, mode == "status" ? .badServerResponse : .dataLengthExceedsMaximum)
-            }
-            await fulfillment(of: [stopped], timeout: 3)
-            fixture.close()
-        }
-    }
-    func testUnknownLengthStillCannotExceedArtworkByteLimit() async throws {
-        let fixture = MusicArtworkHTTPFixture(url: URL(string: "https://y.gtimg.cn/music/synthetic-\(UUID().uuidString).jpg")!,
-            body: Data(repeating: 1, count: MusicArtworkHTTP.maximumBytes + 1))
+        let stopped = expectation(description: "rejected response stream stopped")
+        let fixture = MusicArtworkHTTPFixture(status: 503, body: Data(), held: true,
+            stopped: { stopped.fulfill() })
         defer { fixture.close() }
         let http = MusicArtworkHTTP(configuration: configuration())
-        do { _ = try await http.read(fixture.url); XCTFail("Oversized stream accepted") }
-        catch { XCTAssertEqual((error as? URLError)?.code, .dataLengthExceedsMaximum) }
+        do { _ = try await http.read(fixture.url); XCTFail("Rejected response accepted") }
+        catch { XCTAssertEqual((error as? URLError)?.code, .badServerResponse) }
+        await fulfillment(of: [stopped], timeout: 3)
     }
-    func testPhysicalReadSurfacesOriginalBudgetFailureWithoutReadingAnotherResource() async throws {
-        let original = URL(string: "https://p4.music.126.net/synthetic-\(UUID().uuidString)==/109951.png")!
-        let bounded = URL(string: original.absoluteString + "?imageView&thumbnail=1024x1024")!
-        let first = MusicArtworkHTTPFixture(url: original, body: Data(), length: MusicArtworkHTTP.maximumBytes + 1, held: true)
-        let second = MusicArtworkHTTPFixture(url: bounded)
-        defer { first.close(); second.close() }
-        do {
-            _ = try await MusicArtworkHTTP(configuration: configuration()).read(original)
-            XCTFail("Oversized physical resource accepted")
-        } catch { XCTAssertEqual((error as? URLError)?.code, .dataLengthExceedsMaximum) }
-        XCTAssertEqual(first.requests.map(\.url), [original])
-        XCTAssertTrue(second.requests.isEmpty, "Rendition selection belongs to the shared image consumer")
+    func testLargeArtworkReturnsCompleteOriginalWithAndWithoutLength() async throws {
+        let body = Data(repeating: 1, count: 4 * 1_024 * 1_024 + 1)
+        for length in [nil, Optional(body.count)] {
+            let original = URL(string: "https://p4.music.126.net/synthetic-\(UUID().uuidString)==/109951.png")!
+            let rendition = URL(string: original.absoluteString + "?imageView&thumbnail=1024x1024")!
+            let first = MusicArtworkHTTPFixture(url: original, body: body, length: length)
+            let second = MusicArtworkHTTPFixture(url: rendition)
+            defer { first.close(); second.close() }
+            let actual = try await MusicArtworkHTTP(configuration: configuration()).read(original)
+            XCTAssertEqual(actual, body)
+            XCTAssertEqual(first.requests.map(\.url), [original])
+            XCTAssertTrue(second.requests.isEmpty)
+        }
     }
 #if os(iOS)
     @MainActor
-    func testSharedImagesFallsBackOnceAndCachesOnlyTheActualBoundedResource() async throws {
-        for stillOversized in [false, true] {
-            let original = URL(string: "https://p4.music.126.net/synthetic-\(UUID().uuidString)==/109951.png")!
-            let bounded = URL(string: original.absoluteString + "?imageView&thumbnail=1024x1024")!
-            let png = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData {
-                UIColor.red.setFill(); $0.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
-            }
-            let first = MusicArtworkHTTPFixture(url: original, body: Data(), length: MusicArtworkHTTP.maximumBytes + 1, held: true)
-            let second = stillOversized
-                ? MusicArtworkHTTPFixture(url: bounded, body: Data(), length: MusicArtworkHTTP.maximumBytes + 1, held: true)
-                : MusicArtworkHTTPFixture(url: bounded, body: png)
-            defer { first.close(); second.close() }
-            let images = MusicArtworkImages(http: MusicArtworkHTTP(configuration: configuration()))
-            do {
-                let (image, data, resource) = try await images.read(original)
-                XCTAssertFalse(stillOversized); XCTAssertEqual(data, png); XCTAssertEqual(resource, bounded)
-                XCTAssertNil(images.cached(original), "A rendition must never be stored under its oversized original URL")
-                XCTAssertTrue(images.cached(bounded) === image)
-                let (cached, _, cachedResource) = try await images.read(bounded)
-                XCTAssertTrue(cached === image); XCTAssertEqual(cachedResource, bounded)
-
-                let loaded = expectation(description: "list consumer reuses the actual rendition")
-                let view = MusicArtworkView(size: 48, images: images)
-                view.onImage = { value, _ in XCTAssertTrue(value === image); loaded.fulfill() }
-                view.load(bounded)
-                await fulfillment(of: [loaded], timeout: 3)
-            } catch {
-                XCTAssertTrue(stillOversized); XCTAssertEqual((error as? URLError)?.code, .dataLengthExceedsMaximum)
-                XCTAssertNil(images.cached(original)); XCTAssertNil(images.cached(bounded))
-            }
-            XCTAssertEqual(first.requests.map(\.url), [original])
-            XCTAssertEqual(second.requests.map(\.url), [bounded])
-            XCTAssertEqual(second.requests.first?.httpShouldHandleCookies, false)
-            await images.close()
-        }
-    }
-
-    @MainActor
-    func testMusicArtworkViewUsesTheSharedRenditionFallbackWithoutRepeatingItOnRebind() async {
+    func testSharedImagesAndViewKeepTheRequestedResource() async throws {
         let original = URL(string: "https://p4.music.126.net/synthetic-\(UUID().uuidString).png")!
-        let bounded = URL(string: original.absoluteString + "?imageView&thumbnail=1024x1024")!
+        let rendition = URL(string: original.absoluteString + "?imageView&thumbnail=1024x1024")!
         let png = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData {
             UIColor.blue.setFill(); $0.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
         }
-        let first = MusicArtworkHTTPFixture(url: original, body: Data(), length: MusicArtworkHTTP.maximumBytes + 1, held: true)
-        let second = MusicArtworkHTTPFixture(url: bounded, body: png)
+        let first = MusicArtworkHTTPFixture(url: original, body: png)
+        let second = MusicArtworkHTTPFixture(url: rendition)
         defer { first.close(); second.close() }
         let images = MusicArtworkImages(http: MusicArtworkHTTP(configuration: configuration()))
+        let (image, data, resource) = try await images.read(original)
+        XCTAssertEqual(data, png); XCTAssertEqual(resource, original)
+        XCTAssertTrue(images.cached(original) === image)
+        XCTAssertNil(images.cached(rendition))
         let view = MusicArtworkView(size: 96, images: images)
-        let loaded = expectation(description: "actual song view loaded a bounded resource")
-        view.onImage = { _, bytes in XCTAssertEqual(bytes, png); loaded.fulfill() }
+        let loaded = expectation(description: "song view reused the requested resource")
+        view.onImage = { value, _ in XCTAssertTrue(value === image); loaded.fulfill() }
         let song = MusicRemoteTrack(ref: .init(kind: .library, id: "artwork-song"), songId: "artwork-song",
                                     title: "歌曲", artist: "歌手", artwork: original)
         view.load(song)
         await fulfillment(of: [loaded], timeout: 3)
-        let displayed = view.image
-        XCTAssertNotNil(displayed); XCTAssertNil(images.cached(original))
-        XCTAssertTrue(images.cached(bounded) === displayed)
+        XCTAssertTrue(view.image === image)
         view.load(song)
-        XCTAssertTrue(view.image === displayed)
+        XCTAssertTrue(view.image === image)
         XCTAssertEqual(first.requests.map(\.url), [original])
-        XCTAssertEqual(second.requests.map(\.url), [bounded])
+        XCTAssertTrue(second.requests.isEmpty)
         await images.close()
     }
 #endif

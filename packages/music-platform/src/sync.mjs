@@ -81,9 +81,8 @@ async function kgCloud(c, path, body, callbacks) {
     Object.assign(query, { last_area: 'gztx', last_time: time, uuid: '-', userid: c.account.userId, token: cookies.token });
     query.signature = md5(kgSalt + Object.keys(query).sort().map(key => key + '=' + scalar(query[key])).join('') + content + kgSalt);
   }
-  if (Buffer.byteLength(content) > 256 * 1024) fail('LIMIT');
   const response = await c.response({ url: 'https://gateway.kugou.com' + path + '?' + form(query), method: 'POST', json: false,
-    body: content, maximumBytes: 2 * 1024 * 1024, headers: { 'Content-Type': contentType, 'x-router': 'cloudlist.service.kugou.com',
+    body: content, headers: { 'Content-Type': contentType, 'x-router': 'cloudlist.service.kugou.com',
       mid: query.mid, dfid: query.dfid, clienttime: time, 'kg-rc': '1', 'kg-thash': '5d816a0',
       'kg-rec': '1', 'kg-rf': 'B9EDA08A64250DEFFBCADDEE00F8F25F' } }, callbacks);
   if (response.headers.get('ssa-code')) { callbacks.rejected(); fail('VERIFICATION_REQUIRED'); }

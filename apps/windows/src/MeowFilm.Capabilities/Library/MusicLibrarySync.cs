@@ -71,12 +71,12 @@ public sealed partial class MusicLibraryOwner
                 else
                 {
                     LJ.Fields(w, "platform accountId collectionId remoteId operation before desired ids name directory", "platform accountId collectionId remoteId operation before desired ids name directory");
-                    LJ.Require(LJ.Id(LJ.S(w["collectionId"])) && LJ.Id(LJ.S(w["name"]), 200));
+                    LJ.Require(LJ.Id(LJ.S(w["collectionId"])) && LJ.Id(LJ.S(w["name"]), null));
                     LJ.Require(operation is "create" or "delete" or "add" or "remove" or "order");
                     foreach (string field in new[] { "before", "desired", "ids", "directory" })
                     {
                         var values = LJ.Array(w[field]);
-                        LJ.Require((field != "directory" || values.Count <= 10000) && values.All(value =>
+                        LJ.Require(values.All(value =>
                             value is JsonValue scalar && scalar.TryGetValue<string>(out string? id) && id is { Length: > 0 }));
                     }
                     string remoteId = LJ.S(w["remoteId"]);
@@ -90,7 +90,7 @@ public sealed partial class MusicLibraryOwner
                     LJ.Fields(v, "token code count", "token code count");
                     LJ.Require(LJ.S(v["token"]).Length == 64 && LJ.S(v["token"]).All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f') &&
                         ConfirmationCodes.Contains(LJ.S(v["code"])));
-                    _ = LJ.I(v["count"], 0, 100000);
+                    _ = LJ.I(v["count"]);
                 }
                 else LJ.Require(s[field] is null);
             LJ.Require(s["confirmation"] is null || s["approved"] is null);
@@ -100,7 +100,6 @@ public sealed partial class MusicLibraryOwner
                 code.Length <= 80);
             _ = LJ.I(status["at"]);
             var issues = LJ.Array(status["issues"]);
-            LJ.Require(issues.Count <= 256);
             foreach (var issue in issues.OfType<JsonObject>())
             {
                 LJ.Fields(issue, "platform collectionId code", "platform collectionId code");

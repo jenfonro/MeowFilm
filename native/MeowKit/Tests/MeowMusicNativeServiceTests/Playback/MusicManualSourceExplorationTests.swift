@@ -77,7 +77,7 @@ private struct ManualExplorationFileCache: MusicAudioFileCaching {
 
 @MainActor final class MusicManualSourceExplorationTests: XCTestCase {
     private func song(types: [String] = ManualExplorationScripts.qualities) throws -> MJ {
-        var raw = try MJ.parse(MusicNativeCandidateDiscoveryFixture.track(id: "101").data, maximum: 16 * 1024)
+        var raw = try MJ.parse(MusicNativeCandidateDiscoveryFixture.track(id: "101").data)
         raw["types"] = .array(types.map { .obj([("type", .string($0))]) })
         return try NativeMusicFixture.storedSong(.init(platform: "tx", data: raw.bytes))
     }

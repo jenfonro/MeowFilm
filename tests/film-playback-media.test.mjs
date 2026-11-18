@@ -1093,7 +1093,7 @@ test('E42/E48: redirect loops and non-HTTP redirect targets fail with a closed e
   assert.equal(upstream.requests.length, 2);
 });
 
-test('E41: oversized control documents fail as a resource boundary, with no media-size limit', async t => {
+test('E41: control documents above the former 8 MiB boundary retain their complete content', async t => {
   const upstream = await source(t, (_request, response) => {
     response.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
     response.write('#EXTM3U\n#');
@@ -1111,8 +1111,8 @@ test('E41: oversized control documents fail as a resource boundary, with no medi
   });
   const media = service(t), prepared = await media.prepare({ url: `${upstream.url}/list.m3u8`, headers: credentials });
   const result = await read(prepared.url);
-  assert.equal(result.status, 502);
-  assert.equal(result.text, 'MEDIA_MANIFEST_LIMIT');
+  assert.equal(result.status, 200);
+  assert.equal(result.text, '#EXTM3U\n#' + 'a'.repeat(9 * 1024 * 1024));
   await media.release(prepared.id);
 });
 

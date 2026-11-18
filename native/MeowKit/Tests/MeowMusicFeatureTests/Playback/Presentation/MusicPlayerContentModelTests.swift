@@ -9,19 +9,17 @@ import MeowPlayback
 
 @MainActor
 final class MusicPlayerContentModelTests: XCTestCase {
-    func testPreviewRenditionIsDisplayedBeforeSelectionSettlesAndSurvivesRepositoryProjection() async throws {
+    func testPreviewArtworkIsDisplayedBeforeSelectionSettlesAndSurvivesRepositoryProjection() async throws {
         let entered = expectation(description: "Preview success registration is held")
         let gate = MusicCollectionGate { entered.fulfill() }
         let current = ContentArtworkResponse(data: png(.red))
-        let original = ContentArtworkResponse(length: MusicArtworkHTTP.maximumBytes + 1, held: true)
-        let boundedURL = try XCTUnwrap(URL(string: original.url.absoluteString + "?imageView&thumbnail=1024x1024"))
-        let boundedData = png(.blue)
-        let bounded = ContentArtworkResponse(url: boundedURL, data: boundedData)
+        let originalData = png(.blue)
+        let original = ContentArtworkResponse(data: originalData)
         let fixture = ContentArtworkFixture(current: current.url, previous: original.url,
                                             next: original.url, selectionGate: gate)
         addTeardownBlock { @MainActor in
             await gate.release()
-            current.close(); original.close(); bounded.close()
+            current.close(); original.close()
             await fixture.close()
         }
         let state = fixture.model.state, fence = fixture.content.fence
@@ -29,14 +27,13 @@ final class MusicPlayerContentModelTests: XCTestCase {
         await fulfillment(of: [entered], timeout: 3)
         await wait("Current cover is ready while preview registration is held") { fixture.content.artwork != nil }
         let currentImage = try XCTUnwrap(fixture.content.artwork)
-        let previewImage = try XCTUnwrap(fixture.images.cached(boundedURL))
+        let previewImage = try XCTUnwrap(fixture.images.cached(original.url))
         let previous = try XCTUnwrap(fixture.model.recordPreview(.previous))
         let next = try XCTUnwrap(fixture.model.recordPreview(.next))
         XCTAssertEqual(previous.track.artwork, original.url)
         XCTAssertEqual(next.track.artwork, original.url)
         XCTAssertTrue(fixture.content.artwork(for: previous) === previewImage)
         XCTAssertTrue(fixture.content.artwork(for: next) === previewImage)
-        XCTAssertNil(fixture.images.cached(original.url), "A rendition cannot masquerade as its original resource")
 
         fixture.model.metadataState.lyricState = "none"
         await updates()
@@ -47,13 +44,13 @@ final class MusicPlayerContentModelTests: XCTestCase {
         await gate.release()
         await fixture.content.flushArtwork()
         await wait("Both preview references project the committed real resource") {
-            fixture.model.recordPreview(.previous)?.track.artwork == boundedURL &&
-                fixture.model.recordPreview(.next)?.track.artwork == boundedURL
+            fixture.model.recordPreview(.previous)?.track.artwork == original.url &&
+                fixture.model.recordPreview(.next)?.track.artwork == original.url
         }
         let successes = await fixture.service.successCalls()
         XCTAssertEqual(successes.count, 2)
         XCTAssertEqual(Set(successes.map(\.songID)), Set([previous.track.songId, next.track.songId]))
-        XCTAssertTrue(successes.allSatisfy { $0.url == boundedURL && $0.requested == original.url })
+        XCTAssertTrue(successes.allSatisfy { $0.url == original.url && $0.requested == original.url })
         XCTAssertTrue(fixture.content.artwork(for: fixture.model.recordPreview(.previous)) === previewImage)
         XCTAssertTrue(fixture.content.artwork(for: fixture.model.recordPreview(.next)) === previewImage)
 
@@ -65,11 +62,8 @@ final class MusicPlayerContentModelTests: XCTestCase {
         XCTAssertTrue(fixture.content.artwork(for: fixture.model.recordPreview(.previous)) === previewImage)
         XCTAssertTrue(fixture.content.artwork(for: fixture.model.recordPreview(.next)) === previewImage)
         let originalBytes = await fixture.cache.read(original.url)
-        let boundedBytes = await fixture.cache.read(boundedURL)
-        XCTAssertNil(originalBytes)
-        XCTAssertEqual(boundedBytes?.data, boundedData)
+        XCTAssertEqual(originalBytes?.data, originalData)
         XCTAssertEqual(original.requests.map(\.url), [original.url])
-        XCTAssertEqual(bounded.requests.map(\.url), [boundedURL])
         XCTAssertEqual(current.requests.map(\.url), [current.url])
         XCTAssertEqual(fixture.model.state, state)
         XCTAssertEqual(fixture.content.fence, fence)
@@ -78,18 +72,16 @@ final class MusicPlayerContentModelTests: XCTestCase {
         XCTAssertTrue(fixture.content.artwork === currentImage)
     }
 
-    func testSameSongRenditionWaitsForReadinessAndFailureOrClearKeepsThePreviousImage() async throws {
+    func testSameSongArtworkWaitsForReadinessAndFailureOrClearKeepsThePreviousImage() async throws {
         for outcome in [ContentArtworkOutcome.ready, .failed, .cleared] {
-            let entered = expectation(description: "Replacement rendition requested: \(outcome)")
+            let entered = expectation(description: "Replacement image requested: \(outcome)")
             let current = ContentArtworkResponse(data: png(.red))
-            let original = ContentArtworkResponse(length: MusicArtworkHTTP.maximumBytes + 1, held: true)
-            let boundedURL = try XCTUnwrap(URL(string: original.url.absoluteString + "?imageView&thumbnail=1024x1024"))
-            let bounded = ContentArtworkResponse(url: boundedURL,
+            let original = ContentArtworkResponse(
                 data: outcome == .failed ? Data([1, 2, 3]) : png(.blue),
                 held: true, started: { entered.fulfill() })
             let fixture = ContentArtworkFixture(current: current.url)
             addTeardownBlock { @MainActor in
-                current.close(); original.close(); bounded.close()
+                current.close(); original.close()
                 await fixture.close()
             }
             await wait("Initial current cover is ready") { fixture.content.artwork != nil }
@@ -111,7 +103,7 @@ final class MusicPlayerContentModelTests: XCTestCase {
             XCTAssertTrue(fixture.content.artwork === previousImage, "A held same-song replacement cannot flash empty")
             XCTAssertTrue(displayed.allSatisfy { $0 === previousImage })
             if outcome == .cleared { await fixture.cache.clearImages() }
-            bounded.finish()
+            original.finish()
             await fixture.content.flushArtwork()
             await fixture.model.playbackMetadata.flush()
             await updates()
@@ -120,31 +112,29 @@ final class MusicPlayerContentModelTests: XCTestCase {
             await fixture.content.flushArtwork()
             let successes = await fixture.service.successCalls()
             let failures = await fixture.service.failureCount()
-            let stored = await fixture.cache.read(boundedURL)
+            let stored = await fixture.cache.read(original.url)
             if outcome == .ready {
                 await wait("Only the ready real resource replaces the old cover") {
-                    fixture.model.displayTrack?.artwork == boundedURL &&
-                        fixture.content.artwork === fixture.images.cached(boundedURL)
+                    fixture.model.displayTrack?.artwork == original.url &&
+                        fixture.content.artwork === fixture.images.cached(original.url)
                 }
-                let ready = try XCTUnwrap(fixture.images.cached(boundedURL))
+                let ready = try XCTUnwrap(fixture.images.cached(original.url))
                 XCTAssertFalse(ready === previousImage)
                 XCTAssertTrue(displayed.allSatisfy { $0 === previousImage || $0 === ready })
-                XCTAssertEqual(successes, [.init(songID: songID, url: boundedURL, requested: original.url)])
+                XCTAssertEqual(successes, [.init(songID: songID, url: original.url, requested: original.url)])
                 XCTAssertEqual(failures, 0)
-                XCTAssertEqual(stored?.data, bounded.data)
+                XCTAssertEqual(stored?.data, original.data)
             } else {
                 XCTAssertTrue(fixture.content.artwork === previousImage)
                 XCTAssertTrue(displayed.allSatisfy { $0 === previousImage })
-                XCTAssertTrue(successes.isEmpty, "Unfinished or failed rendition must not be registered")
+                XCTAssertTrue(successes.isEmpty, "Unfinished or failed image must not be registered")
                 XCTAssertEqual(failures, outcome == .cleared ? 0 : 1,
                                "Cache cancellation is not a real candidate failure")
                 XCTAssertNil(stored)
-                XCTAssertNil(fixture.images.cached(boundedURL))
+                XCTAssertNil(fixture.images.cached(original.url))
             }
-            XCTAssertNil(fixture.images.cached(original.url))
             XCTAssertEqual(current.requests.map(\.url), [current.url])
             XCTAssertEqual(original.requests.map(\.url), [original.url])
-            XCTAssertEqual(bounded.requests.map(\.url), [boundedURL])
             XCTAssertEqual(fixture.model.state, state)
             XCTAssertEqual(fixture.content.fence, fence)
             XCTAssertEqual(fixture.model.queue.map(\.track.ref), references)
@@ -162,7 +152,6 @@ final class MusicPlayerContentModelTests: XCTestCase {
                 XCTAssertEqual(failuresAfterReopening, 1)
                 XCTAssertEqual(original.requests.map(\.url), [original.url],
                                "Presentation changes cannot hot-retry a real failure")
-                XCTAssertEqual(bounded.requests.map(\.url), [boundedURL])
                 XCTAssertTrue(fixture.content.artwork === previousImage)
             }
 
@@ -173,16 +162,14 @@ final class MusicPlayerContentModelTests: XCTestCase {
         }
     }
 
-    func testClearedPreviewRenditionDoesNotPublishRegisterOrRefillAndKeepsTheCurrentImage() async throws {
-        let entered = expectation(description: "Preview rendition is held")
+    func testClearedPreviewArtworkDoesNotPublishRegisterOrRefillAndKeepsTheCurrentImage() async throws {
+        let entered = expectation(description: "Preview image is held")
         let current = ContentArtworkResponse(data: png(.red))
-        let original = ContentArtworkResponse(length: MusicArtworkHTTP.maximumBytes + 1, held: true)
-        let boundedURL = try XCTUnwrap(URL(string: original.url.absoluteString + "?imageView&thumbnail=1024x1024"))
-        let bounded = ContentArtworkResponse(url: boundedURL, data: png(.blue),
+        let original = ContentArtworkResponse(data: png(.blue),
             held: true, started: { entered.fulfill() })
         let fixture = ContentArtworkFixture(current: current.url, previous: original.url, next: original.url)
         addTeardownBlock { @MainActor in
-            current.close(); original.close(); bounded.close()
+            current.close(); original.close()
             await fixture.close()
         }
         let state = fixture.model.state, fence = fixture.content.fence
@@ -190,7 +177,7 @@ final class MusicPlayerContentModelTests: XCTestCase {
         await wait("Current image is ready beside the held preview") { fixture.content.artwork != nil }
         let currentImage = try XCTUnwrap(fixture.content.artwork)
         await fixture.cache.clearImages()
-        bounded.finish()
+        original.finish()
         await fixture.content.flushArtwork()
         fixture.model.metadataState.lyricState = "none"
         await updates()
@@ -198,16 +185,14 @@ final class MusicPlayerContentModelTests: XCTestCase {
         let successes = await fixture.service.successCalls()
         let failures = await fixture.service.failureCount()
         let originalBytes = await fixture.cache.read(original.url)
-        let boundedBytes = await fixture.cache.read(boundedURL)
         XCTAssertNil(fixture.content.artwork(for: fixture.model.recordPreview(.previous)))
         XCTAssertNil(fixture.content.artwork(for: fixture.model.recordPreview(.next)))
         XCTAssertTrue(fixture.content.artwork === currentImage)
         XCTAssertTrue(successes.isEmpty)
         XCTAssertEqual(failures, 0)
-        XCTAssertNil(originalBytes); XCTAssertNil(boundedBytes)
-        XCTAssertNil(fixture.images.cached(original.url)); XCTAssertNil(fixture.images.cached(boundedURL))
+        XCTAssertNil(originalBytes)
+        XCTAssertNil(fixture.images.cached(original.url))
         XCTAssertEqual(original.requests.map(\.url), [original.url])
-        XCTAssertEqual(bounded.requests.map(\.url), [boundedURL])
         XCTAssertEqual(current.requests.map(\.url), [current.url])
         XCTAssertEqual(fixture.model.state, state)
         XCTAssertEqual(fixture.content.fence, fence)

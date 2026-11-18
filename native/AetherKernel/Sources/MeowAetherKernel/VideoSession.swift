@@ -53,10 +53,10 @@ public final class AetherVideoSession {
         !cancelled && failure == nil && engine.canSeek
     }
     public var chapters: [AetherVideoChapter] {
-        engine.mediaChapters.prefix(256).compactMap {
+        engine.mediaChapters.compactMap {
             let end = $0.startSeconds + $0.durationSeconds
             guard $0.startSeconds.isFinite, $0.startSeconds >= 0, end.isFinite, end > $0.startSeconds else { return nil }
-            return AetherVideoChapter(title: String($0.name.prefix(256)), start: $0.startSeconds, end: end)
+            return AetherVideoChapter(title: $0.name, start: $0.startSeconds, end: end)
         }
     }
     public var volume: Float {

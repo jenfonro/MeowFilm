@@ -280,7 +280,7 @@ test('Cat media preserves HEAD, If-Range, 206, 416, caller cookies and hop-heade
     assert.equal(requests.length, 3);
   });
 
-test('Cat media enforces the 8MiB raw playlist budget before success headers, not a video length limit',
+test('Cat media preserves playlists above the former 8MiB boundary with declared and streamed lengths',
   { timeout: 15000 }, async t => {
     const signature = Buffer.from('#EXTM3U\n');
     const exact = Buffer.concat([signature, Buffer.alloc(budget - signature.length, 0x23)]);
@@ -290,8 +290,7 @@ test('Cat media enforces the 8MiB raw playlist budget before success headers, no
       response.setHeader('content-type', 'application/vnd.apple.mpegurl');
       if (request.url === '/declared.m3u8') {
         response.writeHead(200, { 'content-length': budget + 1 });
-        response.flushHeaders();
-        return;
+        return response.end(utf8);
       }
       if (request.url === '/exact.m3u8') return response.end(exact);
       if (request.url === '/binary') {
@@ -313,9 +312,9 @@ test('Cat media enforces the 8MiB raw playlist budget before success headers, no
     assert.equal(accepted.bytes.length, budget);
     assert.equal(digest(accepted.bytes), digest(exact));
     for (const path of ['/oversize.m3u8', '/oversize-ascii.m3u8', '/declared.m3u8']) {
-      const rejected = await read(fixture.url(path));
-      assert.equal(rejected.status, 413, path);
-      assert.deepEqual(JSON.parse(rejected.text), { error: { code: 'RESOURCE_LIMIT' } });
+      const accepted = await read(fixture.url(path));
+      assert.equal(accepted.status, 200, path);
+      assert.deepEqual(accepted.bytes, path === '/oversize-ascii.m3u8' ? Buffer.concat([exact, Buffer.from('#')]) : utf8);
     }
     const binary = await read(fixture.url('/binary'));
     assert.equal(binary.status, 200);
@@ -660,7 +659,25 @@ test('DASH template destination labels survive URL hostname normalization withou
   assert.equal(resolve('r0/7-7-42'), 'http://7.synthetic.invalid/seg-7.m4s?time=42');
 });
 
-test('Cat media compressed binary prefixes replay exact wire bytes while compressed control input remains bounded',
+test('DASH retains wide XML and more than 1024 BaseURL alternatives while preserving the depth bound', () => {
+  const bases = Array.from({ length: 1025 }, (_, index) => `<BaseURL>v${index}/</BaseURL>`).join('');
+  const labels = '<Label>complete</Label>'.repeat(100001), registered = [];
+  const rewritten = rewriteDASH(`<MPD>${bases}<Period><AdaptationSet>${labels}` +
+    '<Representation id="video"><SegmentTemplate media="$Number$.m4s"/></Representation></AdaptationSet></Period></MPD>',
+  'https://fixture.invalid/media/', specification => {
+    registered.push(specification);
+    return `http://127.0.0.1:1234/route/${registered.length}/`;
+  });
+  assert.equal(registered.length, 1025);
+  assert.equal(registered.at(-1).resources[0].url, 'https://fixture.invalid/media/v1024/');
+  assert.equal((rewritten.match(/<Label>complete<\/Label>/g) ?? []).length, 100001);
+  assert.ok(rewritten.includes('http://127.0.0.1:1234/route/1025/'));
+  assert.throws(() => rewriteDASH('<MPD>' + '<Period>'.repeat(64) + '</Period>'.repeat(64) + '</MPD>',
+    'https://fixture.invalid/', () => assert.fail('invalid depth cannot register resources')),
+  { code: 'MEDIA_MANIFEST_LIMIT' });
+});
+
+test('Cat media compressed binary prefixes replay exact wire bytes while compressed control input is retained beyond the former quota',
   { timeout: 15000 }, async t => {
     const payload = randomBytes(budget + 1024), encoded = gzipSync(payload);
     const encoders = { gzip: gzipSync, deflate: deflateSync, br: brotliCompressSync };
@@ -681,9 +698,9 @@ test('Cat media compressed binary prefixes replay exact wire bytes while compres
     assert.equal(binary.headers.etag, '"binary-original"');
     assert.equal(digest(binary.bytes), digest(encoded));
     for (const encoding of Object.keys(encoders)) {
-      const limited = await read(fixture.url('/' + encoding));
-      assert.equal(limited.status, 413, encoding);
-      assert.deepEqual(JSON.parse(limited.text), { error: { code: 'RESOURCE_LIMIT' } });
+      const result = await read(fixture.url('/' + encoding));
+      assert.equal(result.status, 200, encoding);
+      assert.equal(result.text, '#EXTM3U\n#' + 'x'.repeat(budget));
     }
   });
 

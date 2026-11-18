@@ -29,7 +29,7 @@ internal sealed class NovelRuleRuntimeFixture : IRuntimeClient, IAsyncDisposable
     {
         string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
             ?? throw new InvalidOperationException("A real eight-module Windows runtime bundle is required.");
-        var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), AppIdentity.RuntimeId, AppIdentity.ScriptModules);
+        var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), AppIdentity.RuntimeId);
         return await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, AppIdentity.ScriptModules,
             Path.Combine(TestWorkspace.DataPath("novel-rule-rpc", Guid.NewGuid().ToString("N")), "script-runtime")).ConfigureAwait(false);
     }

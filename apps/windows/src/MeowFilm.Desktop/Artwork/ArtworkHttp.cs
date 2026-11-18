@@ -26,7 +26,7 @@ internal sealed class ArtworkHttp : IDisposable
     {
         UseCookies = false, UseProxy = false, AllowAutoRedirect = false,
         AutomaticDecompression = DecompressionMethods.None,
-        ConnectTimeout = TimeSpan.FromSeconds(10), MaxResponseHeadersLength = 32,
+        ConnectTimeout = TimeSpan.FromSeconds(10),
         PooledConnectionLifetime = TimeSpan.FromMinutes(2)
     };
 
@@ -68,7 +68,6 @@ internal sealed class ArtworkHttp : IDisposable
             if (!response.IsSuccessStatusCode) throw new ArtworkException(status is 401 or 403 ? "ARTWORK_DENIED" : "ARTWORK_NETWORK");
             if (response.Content.Headers.ContentEncoding.Count != 0) throw new ArtworkException("ARTWORK_FORMAT");
             long? expected = response.Content.Headers.ContentLength;
-            if (expected is > ArtworkService.MaximumBytes or 0) throw new ArtworkException("ARTWORK_LIMIT");
             await using var source = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
             using var bytes = new MemoryStream();
             byte[] buffer = new byte[32768];
@@ -78,7 +77,6 @@ internal sealed class ArtworkHttp : IDisposable
                 {
                     int count = await source.ReadAsync(buffer, token).ConfigureAwait(false);
                     if (count == 0) break;
-                    if (bytes.Length + count > ArtworkService.MaximumBytes) throw new ArtworkException("ARTWORK_LIMIT");
                     bytes.Write(buffer, 0, count);
                 }
                 token.ThrowIfCancellationRequested();

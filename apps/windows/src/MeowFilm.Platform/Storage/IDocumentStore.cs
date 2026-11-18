@@ -13,8 +13,7 @@ public sealed record DocumentFingerprint(bool Exists, int Length, string? Sha256
     public static DocumentFingerprint FromBytes(ReadOnlySpan<byte> bytes) =>
         new(true, bytes.Length, Convert.ToHexStringLower(SHA256.HashData(bytes)));
 
-    internal bool IsValid => IsValidFor(DocumentRules.MaximumDocumentBytes);
-    internal bool IsValidFor(int maximumBytes) => Length >= 0 && Length <= maximumBytes &&
+    internal bool IsValid => Length >= 0 &&
         (Exists ? DocumentRules.ValidHash(Sha256) : Length == 0 && Sha256 is null);
 }
 
@@ -49,8 +48,6 @@ public interface IDocumentStore : IAsyncDisposable
 
 internal static class DocumentRules
 {
-    internal const int MaximumDocumentBytes = 8 * 1024 * 1024;
-    internal const int MaximumSourceBytes = 16 * 1024 * 1024;
     internal static bool ValidNamespace(string? value)
     {
         if (value is null || value.Length is < 1 or > 128 || !AlphaNumeric(value[0]) ||
@@ -73,7 +70,7 @@ internal static class DocumentRules
         if (values is null) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         var result = new HashSet<string>(StringComparer.Ordinal);
         foreach (string value in values)
-            if (!ValidNamespace(value) || !result.Add(value) || result.Count > 64)
+            if (!ValidNamespace(value) || !result.Add(value))
                 throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         return result;
     }

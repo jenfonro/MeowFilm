@@ -51,6 +51,14 @@ final class NovelUIKitTests: XCTestCase {
     }
     private func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
     private func button(_ id: String, in view: UIView) throws -> UIButton { try XCTUnwrap(descendants(view).first { $0.accessibilityIdentifier == id } as? UIButton) }
+    private func novelShell(_ home: NovelHomeViewController, theme: any PageThemeProviding) -> MeowfilmPrimaryShellViewController {
+        let factories: [@MainActor () -> UIViewController] = MeowfilmPrimaryPage.allCases.map { page in
+            { page == .novel ? home : UIViewController() }
+        }
+        let shell = MeowfilmPrimaryShellViewController(pageFactories: factories, themeProvider: theme, openMenu: {}, openSearch: {})
+        shell.loadViewIfNeeded(); shell.select(.novel)
+        return shell
+    }
     private func assertLabelFits(_ label: UILabel, in container: UIView, file: StaticString = #filePath, line: UInt = #line) {
         let size = label.sizeThatFits(CGSize(width: label.bounds.width, height: .greatestFiniteMagnitude))
         let frame = label.convert(label.bounds, to: container)
@@ -512,31 +520,228 @@ final class NovelUIKitTests: XCTestCase {
         XCTAssertEqual(try NovelRulesViewController.readRuleQr(data), text)
         XCTAssertThrowsError(try NovelRulesViewController.readRuleQr(Data("not an image".utf8)))
     }
-    func testEmptyAndPopulatedShelfKeepNativeSelectorsAndReturnToSameBook() async throws {
-        let (feature, _) = try await fixture(), theme = NovelTestPageTheme()
+    func testDiscoveryEmptyAndLoadedListReturnsFromDetailsWithoutReloading() async throws {
+        let (feature, runtime) = try await fixture(), theme = NovelTestPageTheme()
         let page = NovelHomeViewController(feature: feature, themeProvider: theme)
-        let navigation = PageNavigationController(themeProvider: theme); navigation.setViewControllers([page], animated: false)
-        let window = try mount(navigation); page.showShelf()
-        await wait { page.isPageVisible }
+        let navigation = PageNavigationController(themeProvider: theme); navigation.setViewControllers([novelShell(page, theme: theme)], animated: false)
+        let window = try mount(navigation)
+        await wait { page.isPageVisible && !page.discovery.loading }
         let table = try XCTUnwrap(descendants(page.view).first { $0.accessibilityIdentifier == "novel.books" } as? UITableView)
         XCTAssertEqual(table.numberOfRows(inSection: 0), 0)
-        let segments = try XCTUnwrap(descendants(page.view).first { $0.accessibilityIdentifier == "novel.sections" } as? UISegmentedControl)
-        XCTAssertFalse(segments.isHidden)
-        XCTAssertGreaterThan(segments.bounds.width, 0)
-        XCTAssertNotNil(descendants(page.view).first { $0.accessibilityIdentifier == "novel.books.empty" })
-        attach(window, "novel-shelf-empty")
-        let book = NovelBook(installationId: "fixture", bookUrl: "https://fixture.invalid/book", name: "雨夜来信", author: "林舟", intro: "一封迟来的信，抵达雨中的旧城。")
-        try await feature.setShelf(book, present: true)
-        await wait { table.numberOfRows(inSection: 0) == 1 }
-        XCTAssertEqual(table.cellForRow(at: .init(row: 0, section: 0))?.textLabel?.text, book.name)
-        attach(window, "novel-shelf-book")
+        XCTAssertEqual((table.backgroundView as? UILabel)?.text, "没有可发现书源")
+        attach(window, "novel-home-empty")
+        await runtime.configureExplore(block: false)
+        try await feature.refreshSources()
+        await wait { !page.discovery.loading && table.numberOfRows(inSection: 0) == 1 }
+        table.layoutIfNeeded()
+        let book = try XCTUnwrap(page.discovery.books.first)
+        XCTAssertEqual(book.name, "雨夜来信")
+        let cell = try XCTUnwrap(table.cellForRow(at: .init(row: 0, section: 0)) as? NovelBookCell)
+        XCTAssertEqual((descendants(cell).first { $0.accessibilityIdentifier == "novel.book.title" } as? UILabel)?.text, book.name)
+        attach(window, "novel-home-book")
+        let calls = await runtime.exploreCalls
         page.onSelect = { book in navigation.pushViewController(NovelDetailViewController(book: book, feature: feature, themeProvider: theme), animated: false) }
         page.tableView(table, didSelectRowAt: .init(row: 0, section: 0))
         XCTAssertTrue(navigation.topViewController is NovelDetailViewController)
         XCTAssertTrue(feature.local.books(history: true).isEmpty)
         navigation.popViewController(animated: false)
-        XCTAssertTrue(navigation.topViewController === page)
+        await wait { page.isPageVisible }
+        XCTAssertEqual(page.discovery.books, [book])
         XCTAssertEqual(table.numberOfRows(inSection: 0), 1)
+        let returnedCalls = await runtime.exploreCalls
+        XCTAssertEqual(returnedCalls, calls)
+    }
+    func testDismissedDiscoveryFailureCanReopenRetryAndKeepTheFailedPage() async throws {
+        let (feature, runtime) = try await fixture(), theme = NovelTestPageTheme()
+        await runtime.configureExplore(block: false)
+        try await feature.refreshSources()
+        let page = NovelHomeViewController(feature: feature, themeProvider: theme)
+        let shell = novelShell(page, theme: theme)
+        let navigation = PageNavigationController(themeProvider: theme)
+        navigation.setViewControllers([shell], animated: false)
+        _ = try mount(navigation)
+        await wait { page.isPageVisible && !page.discovery.loading && page.discovery.canLoadMore }
+        let books = page.discovery.books
+        await runtime.failNextExplore()
+        try button("novel.explore.more", in: page.view).sendActions(for: .touchUpInside)
+        await wait { page.presentedViewController is UIAlertController && !page.discovery.loading }
+        let alert = try XCTUnwrap(page.presentedViewController as? UIAlertController)
+        await wait { !alert.isBeingPresented }
+        page.dismissPageModal(alert)
+        await wait { page.presentedViewController == nil && page.canPresentPageAlert }
+        navigation.pushViewController(PageViewController(themeProvider: theme), animated: false)
+        navigation.popViewController(animated: false)
+        await wait { page.canPresentPageAlert }
+        let more = try button("novel.explore.more", in: page.view)
+        XCTAssertTrue(more.isEnabled); XCTAssertEqual(more.title(for: .normal), "重试")
+        XCTAssertEqual(page.discovery.books, books)
+        more.sendActions(for: .touchUpInside)
+        await wait { page.presentedViewController is UIAlertController }
+        let retry = try XCTUnwrap(page.presentedViewController as? UIAlertController)
+        XCTAssertEqual(retry.actions.map(\.title), ["确定", "重试"])
+        await wait { !retry.isBeingPresented }
+        page.dismissPageModal(retry) { page.discovery.retry() }
+        await wait { page.canPresentPageAlert && !page.discovery.loading && page.discovery.error == nil }
+        let pages = await runtime.explorePages
+        XCTAssertEqual(pages, [1, 2, 2])
+        XCTAssertEqual(page.discovery.books, books)
+    }
+    func testDiscoveryChannelAndCurrentKindsExpandOverBooksAndCloseOnSelectionOrOutside() async throws {
+        let (feature, runtime) = try await fixture(), theme = NovelTestPageTheme()
+        await runtime.configureExplore(block: false); await runtime.configureGroupedExplore()
+        try await feature.refreshSources()
+        let page = NovelHomeViewController(feature: feature, themeProvider: theme)
+        let navigation = PageNavigationController(themeProvider: theme); navigation.setViewControllers([novelShell(page, theme: theme)], animated: false)
+        let window = try mount(navigation)
+        await wait { !page.discovery.loading && page.discovery.channels.count == 9 }
+        window.layoutIfNeeded(); page.view.layoutIfNeeded()
+        let table = try XCTUnwrap(descendants(page.view).first { $0.accessibilityIdentifier == "novel.books" } as? UITableView)
+        let channels = try XCTUnwrap(descendants(page.view).first { $0.accessibilityIdentifier == "novel.channel.tags" } as? FilterTagsView)
+        let kinds = try XCTUnwrap(descendants(page.view).first { $0.accessibilityIdentifier == "novel.kind.tags" } as? FilterTagsView)
+        let originalTop = table.frame.minY
+        XCTAssertTrue(channels.hasOverflow); XCTAssertTrue(kinds.hasOverflow)
+        XCTAssertEqual(page.discovery.selectedChannel?.title, "榜单")
+        XCTAssertEqual(descendants(kinds).compactMap { ($0 as? UIButton)?.title(for: .normal) },
+                       ["月票榜", "畅销榜", "新书榜", "推荐榜", "完结榜", "收藏榜", "热搜榜", "更新榜"])
+        try button("novel.channel.tags.toggle", in: page.view).sendActions(for: .touchUpInside)
+        page.view.layoutIfNeeded()
+        XCTAssertTrue(channels.isExpanded); XCTAssertFalse(kinds.isExpanded)
+        XCTAssertTrue(table.accessibilityElementsHidden); XCTAssertTrue(kinds.accessibilityElementsHidden)
+        XCTAssertEqual(table.frame.minY, originalTop, accuracy: 0.5)
+        attach(window, "novel-home-channels-expanded")
+        try button("novel.tags.dismiss", in: page.view).sendActions(for: .touchUpInside)
+        page.view.layoutIfNeeded()
+        XCTAssertFalse(channels.isExpanded); XCTAssertFalse(table.accessibilityElementsHidden)
+        try button("novel.kind.tags.toggle", in: page.view).sendActions(for: .touchUpInside)
+        page.view.layoutIfNeeded()
+        XCTAssertTrue(kinds.isExpanded); XCTAssertTrue(channels.accessibilityElementsHidden)
+        XCTAssertEqual(table.frame.minY, originalTop, accuracy: 0.5)
+        attach(window, "novel-home-kinds-expanded")
+        let selectedKind = try XCTUnwrap(page.discovery.selectedChannel?.items.last)
+        try button("novel.kind.tag." + selectedKind.id, in: page.view).sendActions(for: .touchUpInside)
+        await wait { !page.discovery.loading && page.discovery.selectedKindID == selectedKind.id }
+        XCTAssertFalse(kinds.isExpanded); XCTAssertFalse(table.accessibilityElementsHidden)
+        let category = page.discovery.channels[1]
+        try button("novel.channel.tags.toggle", in: page.view).sendActions(for: .touchUpInside)
+        try button("novel.channel.tag." + category.id, in: page.view).sendActions(for: .touchUpInside)
+        await wait { !page.discovery.loading && page.discovery.selectedChannelID == category.id }
+        page.view.layoutIfNeeded()
+        XCTAssertFalse(channels.isExpanded)
+        XCTAssertEqual(descendants(kinds).compactMap { ($0 as? UIButton)?.title(for: .normal) }, ["东方玄幻", "异世大陆"])
+        attach(window, "novel-home-current-category")
+    }
+    func testHomeAndSearchUseSharedMetadataCellsAcrossThemesWidthAndDynamicType() async throws {
+        let (feature, runtime) = try await fixture(), theme = NovelTestPageTheme()
+        await runtime.configureExplore(block: false); await runtime.configureGroupedExplore()
+        await runtime.configureBookPresentation()
+        let coverFormat = UIGraphicsImageRendererFormat(); coverFormat.scale = 1
+        let coverBytes = UIGraphicsImageRenderer(size: CGSize(width: 148, height: 208), format: coverFormat).pngData { context in
+            UIColor(red: 0.19, green: 0.25, blue: 0.35, alpha: 1).setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 148, height: 208))
+            ("雨夜\n来信" as NSString).draw(in: CGRect(x: 24, y: 48, width: 100, height: 120),
+                withAttributes: [.font: UIFont.systemFont(ofSize: 29), .foregroundColor: UIColor.white])
+        }
+        await runtime.configureImage(coverBytes, entered: {}); await runtime.acceptImage()
+        try await feature.refreshSources()
+        let page = NovelHomeViewController(feature: feature, themeProvider: theme)
+        let navigation = PageNavigationController(themeProvider: theme); navigation.setViewControllers([novelShell(page, theme: theme)], animated: false)
+        let host = UIViewController()
+        host.addChild(navigation); host.view.addSubview(navigation.view); navigation.didMove(toParent: host)
+        navigation.view.translatesAutoresizingMaskIntoConstraints = false
+        let width = navigation.view.widthAnchor.constraint(equalToConstant: 320)
+        NSLayoutConstraint.activate([width, navigation.view.centerXAnchor.constraint(equalTo: host.view.centerXAnchor),
+            navigation.view.topAnchor.constraint(equalTo: host.view.topAnchor), navigation.view.bottomAnchor.constraint(equalTo: host.view.bottomAnchor)])
+        let window = try mount(host)
+        await wait { !page.discovery.loading && page.discovery.books.count == 4 }
+        let table = try XCTUnwrap(descendants(page.view).first { $0.accessibilityIdentifier == "novel.books" } as? UITableView)
+        var ordinaryHeight: CGFloat = 0
+        for (name, size, style, category) in [
+            ("compact-light", CGFloat(320), UIUserInterfaceStyle.light, UIContentSizeCategory.large),
+            ("wide-dark", window.bounds.width, .dark, .large),
+            ("compact-large-type", CGFloat(320), .light, .accessibilityExtraExtraExtraLarge),
+        ] {
+            width.constant = size; window.overrideUserInterfaceStyle = style
+            navigation.traitOverrides.preferredContentSizeCategory = category
+            window.layoutIfNeeded(); table.reloadData(); table.layoutIfNeeded()
+            await wait { page.traitCollection.userInterfaceStyle == style }
+            let cell = try XCTUnwrap(table.cellForRow(at: .init(row: 0, section: 0)) as? NovelBookCell)
+            cell.layoutIfNeeded()
+            let texts = Dictionary(uniqueKeysWithValues: descendants(cell).compactMap { view -> (String, UILabel)? in
+                guard let label = view as? UILabel, let id = label.accessibilityIdentifier else { return nil }
+                return (id, label)
+            })
+            XCTAssertEqual(texts["novel.book.title"]?.text, "雨夜来信")
+            XCTAssertEqual(texts["novel.book.author"]?.text, "作者：林舟")
+            XCTAssertEqual(texts["novel.book.intro"]?.numberOfLines, 1)
+            XCTAssertEqual(texts["novel.book.wordCount"]?.text, "128.6万字")
+            XCTAssertEqual(texts["novel.book.source"]?.text, "合成书源")
+            XCTAssertEqual(texts["novel.book.chapter"]?.text, "第一章 雨声")
+            for label in texts.values {
+                XCTAssertFalse(label.font.fontDescriptor.symbolicTraits.contains(.traitBold))
+                XCTAssertFalse(label.font.fontDescriptor.symbolicTraits.contains(.traitItalic))
+                assertLabelFits(label, in: cell)
+            }
+            let cover = try XCTUnwrap(descendants(cell).first { $0.accessibilityIdentifier == "novel.book.cover" })
+            XCTAssertEqual(cover.bounds.size, CGSize(width: 74, height: 104))
+            XCTAssertEqual(cell.bounds.width, size, accuracy: 1)
+            if category == .large { ordinaryHeight = cell.bounds.height }
+            else { XCTAssertGreaterThan(cell.bounds.height, ordinaryHeight) }
+            attach(window, "novel-home-" + name)
+        }
+        width.constant = window.bounds.width; window.overrideUserInterfaceStyle = .light
+        navigation.traitOverrides.preferredContentSizeCategory = .large
+        let search = NovelSearchResultsContent(feature: feature, theme: page.theme)
+        let searchPage = SearchPageViewController(themeProvider: theme, query: "雨夜")
+        searchPage.searchTargets = [.init(id: "novel", title: "小说", placeholder: "搜索小说")]
+        searchPage.searchTargetID = "novel"
+        searchPage.addChild(search); searchPage.view.addSubview(search.view); search.didMove(toParent: searchPage)
+        search.view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            search.view.topAnchor.constraint(equalTo: searchPage.contentTopAnchor),
+            search.view.leadingAnchor.constraint(equalTo: searchPage.view.safeAreaLayoutGuide.leadingAnchor),
+            search.view.trailingAnchor.constraint(equalTo: searchPage.view.safeAreaLayoutGuide.trailingAnchor),
+            search.view.bottomAnchor.constraint(equalTo: searchPage.view.safeAreaLayoutGuide.bottomAnchor),
+        ])
+        searchPage.onSubmit = { search.submit($0) }
+        navigation.pushViewController(searchPage, animated: false)
+        searchPage.searchField.sendActions(for: .editingDidEndOnExit)
+        await wait { !search.session.loading && search.session.books.count == 4 }
+        let results = try XCTUnwrap(descendants(search.view).first { $0.accessibilityIdentifier == "novel.search.books" } as? UITableView)
+        window.layoutIfNeeded(); results.layoutIfNeeded()
+        let cell = try XCTUnwrap(results.cellForRow(at: .init(row: 0, section: 0)) as? NovelBookCell)
+        XCTAssertEqual((descendants(cell).first { $0.accessibilityIdentifier == "novel.book.wordCount" } as? UILabel)?.text, "128.6万字")
+        XCTAssertEqual((descendants(cell).first { $0.accessibilityIdentifier == "novel.book.source" } as? UILabel)?.text, "合成书源")
+        attach(window, "novel-search-shared-book-list")
+        search.close()
+    }
+    func testSharedBookCellRejectsLateCoverAndReleasesEveryTrustedReference() async throws {
+        let (feature, runtime) = try await fixture(), provider = NovelTestPageTheme()
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        let bytes = UIGraphicsImageRenderer(size: CGSize(width: 148, height: 208), format: format).pngData { context in
+            UIColor.systemIndigo.setFill(); context.fill(CGRect(x: 0, y: 0, width: 148, height: 208))
+        }
+        let requested = expectation(description: "book cell requested a trusted cover")
+        await runtime.configureImage(bytes, entered: { requested.fulfill() })
+        let page = PageViewController(themeProvider: provider)
+        let cell = NovelBookCell(style: .default, reuseIdentifier: NovelBookCell.reuseIdentifier)
+        page.view.addSubview(cell)
+        cell.frame = CGRect(x: 0, y: 0, width: 320, height: 128)
+        _ = try mount(page)
+        let book = NovelBook(installationId: "fixture", bookUrl: "https://fixture.invalid/book",
+            name: "雨夜来信", coverUrl: "https://fixture.invalid/cover")
+        cell.configure(book, feature: feature, theme: page.theme, loadCover: true)
+        await fulfillment(of: [requested], timeout: 5)
+        cell.cancelImage(); await runtime.acceptImage()
+        let cover = try XCTUnwrap(descendants(cell).first { $0.accessibilityIdentifier == "novel.book.cover" } as? UIImageView)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while await runtime.imageReleases < 1, ContinuousClock.now < deadline { await Task.yield() }
+        let released = await runtime.imageReleases
+        XCTAssertEqual(released, 1); XCTAssertNil(cover.image)
+        cell.configure(book, feature: feature, theme: page.theme, loadCover: true)
+        await wait { cover.image != nil }
+        let allReleased = await runtime.imageReleases
+        XCTAssertEqual(allReleased, 2)
+        cell.prepareForReuse(); XCTAssertNil(cover.image)
     }
     func testReaderFourModesNativeLayoutProgressPurchaseAndBackgroundPause() async throws {
         let (feature, runtime) = try await fixture(), theme = NovelTestPageTheme()
@@ -782,7 +987,7 @@ final class NovelUIKitTests: XCTestCase {
         let purchases = await runtime.purchases, bodies = await runtime.contentCalls
         XCTAssertEqual(purchases, 0); XCTAssertEqual(bodies, 1)
     }
-    func testHomeShelfAndHiddenRefreshCancelDiscoveryAndOnlyUseTheCurrentRevision() async throws {
+    func testHiddenDiscoveryCancelsAndResumesOnlyTheCurrentRevision() async throws {
         let (feature, runtime) = try await fixture()
         let entered = expectation(description: "discovery entered"), cancelled = expectation(description: "discovery physically cancelled")
         await runtime.configureExplore(block: true, entered: { entered.fulfill() }, cancelled: { cancelled.fulfill() })
@@ -791,18 +996,19 @@ final class NovelUIKitTests: XCTestCase {
         let navigation = PageNavigationController(themeProvider: NovelTestPageTheme()); navigation.setViewControllers([home], animated: false)
         _ = try mount(navigation)
         await fulfillment(of: [entered], timeout: 5)
-        home.showShelf()
+        navigation.pushViewController(PageViewController(themeProvider: NovelTestPageTheme()), animated: false)
+        await wait { !home.isPageVisible }
         await fulfillment(of: [cancelled], timeout: 5)
         let before = await runtime.exploreCalls
         let table = try XCTUnwrap(descendants(home.view).first { $0.accessibilityIdentifier == "novel.books" } as? UITableView)
         table.refreshControl?.beginRefreshing(); table.refreshControl?.sendActions(for: .valueChanged)
         await wait { table.refreshControl?.isRefreshing == false }
-        let whileShelf = await runtime.exploreCalls; XCTAssertEqual(whileShelf, before)
+        let whileHidden = await runtime.exploreCalls; XCTAssertEqual(whileHidden, before)
         await runtime.configureExplore(block: false, revision: 2)
         try await feature.refreshSources()
         await Task.yield()
         let afterSourceChange = await runtime.exploreCalls; XCTAssertEqual(afterSourceChange, before)
-        home.showHome()
+        navigation.popViewController(animated: false)
         await wait { table.numberOfRows(inSection: 0) == 1 }
         let refreshed = await runtime.exploreCalls; XCTAssertTrue(refreshed.contains("explore:2"))
         navigation.pushViewController(PageViewController(themeProvider: NovelTestPageTheme()), animated: false)
@@ -832,14 +1038,21 @@ private actor NovelUIKitRuntime: NovelRuntimeServing {
     private var imageContinuation: CheckedContinuation<Data, Never>?
     private var imageAccepted = false
     private var exploreEnabled = false, blockExplore = false
+    private var failingExplore = false
+    private var groupedExplore = false
+    private var presentationBooks = false
     private var revision = 1
     private var exploreEntered: (@Sendable () -> Void)?, exploreCancelled: (@Sendable () -> Void)?
     var exploreCalls: [String] = []
+    var explorePages: [Int] = []
     func configureImage(_ bytes: Data, entered: @escaping @Sendable () -> Void) { imageBytes = bytes; imageEntered = entered }
     func acceptImage() { imageAccepted = true; imageContinuation?.resume(returning: imageBytes ?? Data()); imageContinuation = nil }
     func configureExplore(block: Bool, revision: Int = 1, entered: (@Sendable () -> Void)? = nil, cancelled: (@Sendable () -> Void)? = nil) {
         exploreEnabled = true; blockExplore = block; self.revision = revision; exploreEntered = entered; exploreCancelled = cancelled
     }
+    func configureGroupedExplore() { groupedExplore = true }
+    func failNextExplore() { failingExplore = true }
+    func configureBookPresentation() { presentationBooks = true }
     func hasActiveCalls() -> Bool { false }
     func setActivityHandler(_ handler: (@Sendable (Bool) -> Void)?) {}
     func close() {}
@@ -869,18 +1082,51 @@ private actor NovelUIKitRuntime: NovelRuntimeServing {
             return .object(["title": .string("第一章 雨声"), "chapter": payload["chapter"], "blocks": .array(blocks)])
         case "exploreKinds":
             exploreCalls.append("kinds:\(revision)")
+            if groupedExplore {
+                var kinds: [RuntimeValue] = [.object(["title": .string("榜单")])]
+                for title in ["月票榜", "畅销榜", "新书榜", "推荐榜", "完结榜", "收藏榜", "热搜榜", "更新榜"] {
+                    kinds.append(.object(["title": .string(title), "url": .string("https://fixture.invalid/" + title)]))
+                }
+                for title in ["玄幻", "奇幻", "武侠", "仙侠", "都市", "历史", "科幻", "悬疑"] {
+                    kinds.append(.object(["title": .string(title)]))
+                    for item in title == "玄幻" ? ["东方玄幻", "异世大陆"] : ["热门", "最新"] {
+                        kinds.append(.object(["title": .string(item), "url": .string("https://fixture.invalid/" + title + "/" + item)]))
+                    }
+                }
+                return .object(["kinds": .array(kinds)])
+            }
             return .object(["kinds": .array([.object(["title": .string("全部"), "url": .string("https://fixture.invalid/explore")])])])
         case "explore":
             exploreCalls.append("explore:\(revision)")
+            explorePages.append(Int(payload["page"].number ?? 0))
+            if failingExplore { failingExplore = false; throw NovelError.invalidResponse }
             let entered = exploreEntered; exploreEntered = nil; entered?()
             if blockExplore {
                 do { try await Task.sleep(nanoseconds: 60_000_000_000) }
                 catch { let cancelled = exploreCancelled; exploreCancelled = nil; cancelled?(); throw error }
             }
-            return .object(["books": .array([.object(["bookUrl": .string("https://fixture.invalid/book"), "name": .string("雨夜来信"), "author": .string("林舟")]), .null, .object(["name": .string("缺少地址")])])])
+            return .object(["books": .array(books + [.null, .object(["name": .string("缺少地址")])])])
+        case "search": return .object(["books": .array(books)])
         case "payAction": purchases += 1; return .bool(true)
         default: throw NovelError.invalidResponse
         }
+    }
+    private var book: RuntimeValue {
+        .object(["bookUrl": .string("https://fixture.invalid/book"), "name": .string("雨夜来信"), "author": .string("林舟"),
+                 "intro": .string("一封迟来的信，抵达雨中的旧城。她推开旧书店的门，信笺仍放在窗前。"),
+                 "coverUrl": .string(presentationBooks ? "https://fixture.invalid/cover" : ""),
+                 "wordCount": .string("128.6万字"), "latestChapterTitle": .string("第一章 雨声")])
+    }
+    private var books: [RuntimeValue] {
+        guard presentationBooks else { return [book] }
+        return [book,
+            .object(["bookUrl": .string("https://fixture.invalid/long-title"),
+                "name": .string("沿着星光走到世界尽头：一位旅人的漫长归途"), "author": .string("远山与海"),
+                "intro": .string("星图上的最后一条航线，通向无人知晓的故乡。"),
+                "wordCount": .string("76.8万字"), "latestChapterTitle": .string("第六百二十一章 归途")]),
+            .object(["bookUrl": .string("https://fixture.invalid/missing"), "name": .string("无声的港湾")]),
+            .object(["bookUrl": .string("https://fixture.invalid/city"), "name": .string("旧城拾光"),
+                "author": .string("青石"), "intro": .string("旧书店里的故事，从一张泛黄的照片开始。"), "wordCount": .string("32.5万字")])]
     }
 }
 #endif

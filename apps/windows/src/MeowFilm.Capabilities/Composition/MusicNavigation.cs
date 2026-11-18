@@ -91,7 +91,7 @@ public sealed partial class MusicCapability
         if (route.StartsWith("search-local/", StringComparison.Ordinal))
         {
             string query = Uri.UnescapeDataString(route[13..]);
-            if (query.Length is < 1 or > 200 || query.Any(char.IsControl))
+            if (query.Length < 1 || query.Any(char.IsControl))
                 throw new ArgumentException("Invalid search route", nameof(route));
             var target = new Location("search", query);
             return LoadAsync(locations.GetValueOrDefault(target.Key) ?? target, cancellationToken, publishStatus: false);
@@ -118,7 +118,7 @@ public sealed partial class MusicCapability
         if (!local && !online) { await NavigateAsync(navigationLocation, token); return; }
         string encoded = navigationLocation[(local ? 13 : 15)..];
         string query = Uri.UnescapeDataString(encoded);
-        if (query.Length is < 1 or > 200 || query.Any(char.IsControl))
+        if (query.Length < 1 || query.Any(char.IsControl))
             throw new ArgumentException("Invalid search location", nameof(navigationLocation));
         if (local) { await NavigateAsync("search-local/" + Uri.EscapeDataString(query), token); return; }
         RetireOperationStatus();
@@ -149,7 +149,7 @@ public sealed partial class MusicCapability
             if (IsCatalogPage) await NavigateAsync("catalog-discovery", cancellationToken);
             return;
         }
-        if (query.Length > 200 || query.Any(char.IsControl)) throw new ArgumentException("Invalid query", nameof(query));
+        if (query.Any(char.IsControl)) throw new ArgumentException("Invalid query", nameof(query));
         bool online = IsCatalogPage;
         long pageGeneration = loadGeneration;
         long navigation = navigationSubmission;
@@ -167,7 +167,7 @@ public sealed partial class MusicCapability
     {
         if (stopping) return;
         query = query.Trim();
-        if (query.Length is < 1 or > 200 || query.Any(char.IsControl))
+        if (query.Length < 1 || query.Any(char.IsControl))
             throw new ArgumentException("Invalid query", nameof(query));
         RetireOperationStatus();
         InvalidateCatalogAction();
@@ -248,13 +248,13 @@ public sealed partial class MusicCapability
                 case "history":
                 {
                     title = "最近播放";
-                    var reply = await Call("music.history.get", new { kind = "days", offset = 0, limit = 100 }, token);
-                    dates = MusicDto.Page(reply, "items", 0).Select(item => MusicDto.Text(item, "id")).ToArray();
-                    MusicDto.Require(dates.Length <= 7 && dates.Distinct().Count() == dates.Length);
+                    var history = await ReadHistoryAsync("days", token);
+                    dates = history.Select(item => MusicDto.Text(item, "id")).ToArray();
+                    MusicDto.Require(dates.Distinct().Count() == dates.Length);
                     target = target with { Date = dates.Contains(target.Date) ? target.Date : dates.FirstOrDefault() };
                     if (target.Date is not null)
                     {
-                        reply = await Call("music.history.get", new { kind = "days", id = target.Date, offset = target.Offset, limit = 100 }, token);
+                        var reply = await Call("music.history.get", new { kind = "days", id = target.Date, offset = target.Offset, limit = 100 }, token);
                         rows = MusicDto.Page(reply, "items", target.Offset).Select(item => SongRow.Read(item.GetProperty("song"))).ToArray();
                         count = MusicDto.Count(reply, "total");
                     }
@@ -263,10 +263,9 @@ public sealed partial class MusicCapability
                 case "archives":
                 {
                     title = "已播队列";
-                    var reply = await Call("music.history.get", new { kind = "playlists", offset = 0, limit = 100 }, token);
-                    archives = MusicDto.Page(reply, "items", 0).Select(item => new ArchivedPlaylist(
+                    var history = await ReadHistoryAsync("playlists", token);
+                    archives = history.Select(item => new ArchivedPlaylist(
                         MusicDto.Text(item, "id"), MusicDto.Text(item, "title"), MusicDto.Count(item, "count"))).ToArray();
-                    MusicDto.Require(archives.Length <= 5);
                     break;
                 }
                 default:
@@ -320,6 +319,19 @@ public sealed partial class MusicCapability
         {
             if (ReferenceEquals(loadCancellation, request))
             { loadCancellation = null; if (!disposed) RefreshBindings(); }
+        }
+    }
+    private async Task<JsonElement[]> ReadHistoryAsync(string kind, CancellationToken token)
+    {
+        var rows = new List<JsonElement>();
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        while (true)
+        {
+            var reply = await Call("music.history.get", new { kind, offset = rows.Count, limit = 100 }, token);
+            var page = MusicDto.Page(reply, "items", rows.Count);
+            MusicDto.Require(page.All(row => ids.Add(MusicDto.Text(row, "id"))));
+            rows.AddRange(page);
+            if (rows.Count >= MusicDto.Count(reply, "total")) return rows.ToArray();
         }
     }
     private async Task<(PlaylistRow[] Rows, long Revision)> FetchPlaylists(CancellationToken token)

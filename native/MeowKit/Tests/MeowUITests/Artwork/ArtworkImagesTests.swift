@@ -137,13 +137,47 @@ final class ArtworkImagesTests: XCTestCase {
         }
     }
 
-    func testNetworkDecodeAndResponseBudgetFailuresAreNotCachedAsSuccess() async {
+    func testImageAboveCacheBudgetDecodesWithoutEnteringEitherCache() async throws {
+        let side = 1536
+        var pixels = Data(count: side * side * 4)
+        pixels.withUnsafeMutableBytes { (buffer: UnsafeMutableRawBufferPointer) in
+            var seed: UInt32 = 1
+            for offset in stride(from: 0, to: buffer.count, by: 4) {
+                seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5
+                buffer[offset] = UInt8(truncatingIfNeeded: seed >> 16)
+                buffer[offset + 1] = UInt8(truncatingIfNeeded: seed >> 8)
+                buffer[offset + 2] = UInt8(truncatingIfNeeded: seed)
+                buffer[offset + 3] = 255
+            }
+        }
+        let provider = try XCTUnwrap(CGDataProvider(data: pixels as CFData))
+        let bitmap = try XCTUnwrap(CGImage(width: side, height: side, bitsPerComponent: 8, bitsPerPixel: 32,
+            bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent))
+        let data = try XCTUnwrap(UIImage(cgImage: bitmap).pngData())
+        XCTAssertGreaterThan(data.count, 4 * 1_024 * 1_024)
+        let bytes = ArtworkTestBytes(), network = ArtworkTestNetwork(), images = loader(bytes, network)
+        await network.set(url, data: data)
+        let (image, actual) = try await images.read(url)
+        let thumbnail = try XCTUnwrap(image.cgImage)
+        XCTAssertLessThanOrEqual(thumbnail.width, 1_024); XCTAssertLessThanOrEqual(thumbnail.height, 1_024)
+        XCTAssertEqual(actual, data)
+        XCTAssertNil(images.cached(url)); XCTAssertTrue(bytes.statistics().writes.isEmpty)
+        let (_, supplied) = try await images.read(url, cachedData: data)
+        XCTAssertEqual(supplied, data)
+        let requests = await network.log(); XCTAssertEqual(requests, [url])
+        XCTAssertNil(images.cached(url)); XCTAssertTrue(bytes.statistics().writes.isEmpty)
+        await images.close()
+    }
+
+    func testNetworkAndDecodeFailuresAreNotCachedAsSuccess() async {
         let data = png()
         let cases: [(Data, URLError.Code?, URLError.Code)] = [
             (data, .notConnectedToInternet, .notConnectedToInternet),
             (Data("not an image".utf8), nil, .cannotDecodeContentData),
             (Data(data.dropLast(12)), nil, .cannotDecodeContentData),
-            (Data(repeating: 0, count: 4 * 1_024 * 1_024 + 1), nil, .dataLengthExceedsMaximum)
+            (Data(repeating: 0, count: 4 * 1_024 * 1_024 + 1), nil, .cannotDecodeContentData)
         ]
         for (data, failure, expected) in cases {
             let bytes = ArtworkTestBytes(), network = ArtworkTestNetwork(), images = loader(bytes, network)

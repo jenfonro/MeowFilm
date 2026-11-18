@@ -7,7 +7,6 @@ namespace MeowFilm.Media;
 // no filename derived from a lease is ever given to FFmpeg or opened a second time.
 internal sealed class AudioDecoderInput : IDisposable
 {
-    private const long MaximumLength = 1L << 40;
     private readonly INativeMediaReadLease? _lease;
     private readonly FFmpegHttpTransport? _http;
     private readonly CancellationTokenSource _lifetime;
@@ -77,7 +76,7 @@ internal sealed class AudioDecoderInput : IDisposable
             _stream = _lease.Content;
             Length = _lease.Length;
             if (_stream is null || !_stream.CanRead || !_stream.CanSeek || _stream.CanWrite ||
-                Length < 0 || Length > MaximumLength || _stream.Length != Length)
+                Length < 0 || _stream.Length != Length)
                 throw new PlaybackException(PlaybackError.InvalidReadLease);
             CanSeek = true;
             Seek(0, 0);

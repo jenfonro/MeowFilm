@@ -151,7 +151,7 @@ async function streamResponse(reply, response, { signal, requestId, contract, co
   }
 }
 
-function readBody(stream, { maximumBytes, limitCode, signal } = {}) {
+function readBody(stream, { signal } = {}) {
   return new Promise((resolve, reject) => {
     let chunks = [], length = 0, settled = false;
     function finish(error) {
@@ -167,9 +167,7 @@ function readBody(stream, { maximumBytes, limitCode, signal } = {}) {
     }
     const data = bytes => {
       length += bytes.length;
-      if (maximumBytes !== undefined && length > maximumBytes) {
-        finish(Object.assign(new Error(), { sourceLimit: true, code: limitCode }));
-      } else chunks.push(bytes);
+      chunks.push(bytes);
     };
     const end = () => finish();
     const aborted = () => finish(new BridgeError('CANCELLED'));
@@ -199,8 +197,7 @@ export function createHttpServer({ sessionId = randomUUID(), resolve: resolveRou
       if (controller.signal.aborted || response.destroyed) return;
       if (response.headersSent) { response.destroy(); return; }
       response.writeHead(status, { 'content-type': 'application/json',
-        ...(uuid.test(requestId ?? '') ? { 'x-meow-request-id': requestId } : {}),
-        ...(status === 413 ? { connection: 'close' } : {}) });
+        ...(uuid.test(requestId ?? '') ? { 'x-meow-request-id': requestId } : {}) });
       response.end(Buffer.from(stringifyJSONValue(value, -1)));
     };
     request.on('aborted', abort);
@@ -239,8 +236,7 @@ export function createHttpServer({ sessionId = randomUUID(), resolve: resolveRou
         owner.promise = (async () => {
           let admitted = false;
           try {
-            const bytes = await readBody(request, { maximumBytes: route.maximumBytes,
-              limitCode: route.limitCode, signal: controller.signal });
+            const bytes = await readBody(request, { signal: controller.signal });
             if (controller.signal.aborted) return;
             let input;
             if (!route.contentType) { if (bytes.length) invalid(); input = null; }
@@ -261,8 +257,7 @@ export function createHttpServer({ sessionId = randomUUID(), resolve: resolveRou
             send(route.status?.(result) ?? 200, result);
           } catch (error) {
             if (controller.signal.aborted) return;
-            if (error?.sourceLimit) send(413, { ok: false, contract: route.contract, code: route.limitCode });
-            else send(!admitted && error?.code === 'INVALID_REQUEST' ? 400 : route.responseType === 'stream' ? 502 : 200,
+            send(!admitted && error?.code === 'INVALID_REQUEST' ? 400 : route.responseType === 'stream' ? 502 : 200,
               failed(admitted && error?.code === 'INVALID_REQUEST' ? 'INVALID_RESPONSE'
                 : error instanceof BridgeError ? error.code : 'INVALID_RESPONSE'));
           } finally {

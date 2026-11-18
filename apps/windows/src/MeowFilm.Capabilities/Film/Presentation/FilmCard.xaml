@@ -4,7 +4,7 @@
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  xmlns:art="clr-namespace:MeowFilm.Desktop.Artwork;assembly=MeowFilm.Desktop"
- MaxWidth="176" HorizontalAlignment="Left" VerticalAlignment="Top" Background="Transparent"
+ HorizontalAlignment="Left" VerticalAlignment="Top" Background="Transparent"
  UseLayoutRounding="True" SnapsToDevicePixels="True">
  <UserControl.Resources>
   <ResourceDictionary>
@@ -35,6 +35,7 @@
          AutomationProperties.Name="{Binding Title}">
   <StackPanel>
    <local:AspectRatioDecorator AspectRatio="176,264">
+   <Grid>
    <Grid x:Name="PosterFrame" local:CardClip.Radius="14"
          RenderTransformOrigin=".5,0">
     <Grid.RenderTransform><ScaleTransform
@@ -53,27 +54,6 @@
     <local:FilmHoverShade x:Name="HoverShade"
                           Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton}"/>
     <local:FilmPlayMark Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton}"/>
-    <Border x:Name="TextBadge" HorizontalAlignment="Right" VerticalAlignment="Top"
-            MaxWidth="{Binding ActualWidth,ElementName=PosterFrame,Converter={StaticResource Film.BadgeWidth}}"
-            Margin="8" Padding="8,2" CornerRadius="8">
-     <Border.Style><Style TargetType="Border">
-      <Setter Property="Visibility" Value="{Binding HasTextBadge,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
-      <Setter Property="Background" Value="#F97316"/>
-      <Setter Property="TextElement.Foreground" Value="White"/>
-      <Setter Property="Effect"><Setter.Value><DropShadowEffect BlurRadius="16" ShadowDepth="8" Opacity=".18" Color="Black"/></Setter.Value></Setter>
-      <Style.Triggers>
-       <DataTrigger Binding="{Binding HasScore}" Value="True"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
-       <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
-        <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
-        <Setter Property="TextElement.Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
-        <Setter Property="Effect" Value="{x:Null}"/>
-       </Trigger>
-      </Style.Triggers>
-     </Style></Border.Style>
-     <TextBlock Text="{Binding TextBadge}" Foreground="{Binding Path=(TextElement.Foreground),ElementName=TextBadge}"
-                FontSize="10" LineHeight="15" LineStackingStrategy="BlockLineHeight"
-                TextTrimming="CharacterEllipsis"/>
-    </Border>
     <Border x:Name="ScoreBadge" Width="32" Height="32" CornerRadius="16" Margin="0,8,8,0"
             HorizontalAlignment="Right" VerticalAlignment="Top"
             Visibility="{Binding HasScore,Converter={StaticResource MeowFilm.BoolToVisibility}}"
@@ -94,13 +74,33 @@
                 HorizontalAlignment="Center" VerticalAlignment="Center"/>
     </Border>
    </Grid>
+    <Border x:Name="TextBadge" HorizontalAlignment="Right" VerticalAlignment="Top"
+            MaxWidth="{Binding ActualWidth,ElementName=PosterFrame,Converter={StaticResource Film.BadgeWidth}}"
+            Margin="8" Padding="8,2" CornerRadius="8">
+     <Border.Style><Style TargetType="Border">
+      <Setter Property="Visibility" Value="{Binding HasTextBadge,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
+      <Setter Property="Background" Value="#F97316"/>
+      <Setter Property="TextElement.Foreground" Value="White"/>
+      <Style.Triggers>
+       <DataTrigger Binding="{Binding HasScore}" Value="True"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
+       <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+        <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+        <Setter Property="TextElement.Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+       </Trigger>
+      </Style.Triggers>
+     </Style></Border.Style>
+     <TextBlock Text="{Binding TextBadge}" Foreground="{Binding Path=(TextElement.Foreground),ElementName=TextBadge}"
+                FontSize="12" LineHeight="18" LineStackingStrategy="BlockLineHeight"
+                TextTrimming="CharacterEllipsis"/>
+    </Border>
+   </Grid>
    </local:AspectRatioDecorator>
    <TextBlock Text="{Binding Title}" Margin="0,9,0,0" Height="21"
               Foreground="{DynamicResource MeowFilm.Brush.Text}"
               FontSize="15" TextAlignment="Center"
               TextTrimming="CharacterEllipsis"/>
    <Border x:Name="SiteLabel" Margin="0,3,0,0" Padding="8,2" CornerRadius="8"
-           BorderThickness="1" HorizontalAlignment="Center" MaxWidth="176"
+           BorderThickness="1" HorizontalAlignment="Center" MaxWidth="{Binding ActualWidth,ElementName=Card}"
            Visibility="{Binding HasSubtitle,Converter={StaticResource MeowFilm.BoolToVisibility}}">
     <Border.Style><Style TargetType="Border">
      <Setter Property="Background" Value="#F8FAFC"/>

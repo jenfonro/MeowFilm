@@ -1,6 +1,6 @@
 # 本地存储
 
-`MeowStorage` 提供两种同步 Data API 文档存储，按数据敏感性选用。产品装配提供专用目录和命名空间；调用方负责业务 JSON 编解码与有效性。
+`MeowStorage` 提供普通／加密两种同步 Data 文档 API，以及独立原始字节文件 API。产品装配提供专用目录和命名空间；调用方负责业务 JSON 编解码与有效性，资源 owner 负责缓存预算与生命周期。
 
 | 数据 | 存储 | 位置 |
 | --- | --- | --- |
@@ -12,7 +12,8 @@
 | 猫源来源意图、网盘凭据、TMDB／豆瓣配置 | 加密文档 | `meowfilm/documents/protected-settings` 下按 namespace/key 散列存放，排除备份 |
 | 视频映射／选项／删除记录 | 普通文档 | `meowfilm/documents/film.video-sources.v1`，参与备份 |
 | 音乐脚本安装、源码与私有数据 | Node 私有文档 | Application Support 下 `meowfilm/script-runtime/music`，参与备份 |
-| 共享图片／歌词（`music.presentation-resources.v1`）、来源观察（`music.source-checks.v1`）、首页展示（`music.home.display.v1`）、官方音频定位（`music.platform.audio-locators.v1`） | 普通文档 | Caches 下 `meowfilm/documents` |
+| 共享图片／歌词（`music.presentation-resources.v2`） | 原始字节文件 | Caches 下 `meowfilm/documents/music.presentation-resources.v2` |
+| 来源观察（`music.source-checks.v1`）、首页展示（`music.home.display.v1`）、官方音频定位（`music.platform.audio-locators.v1`） | 普通文档 | Caches 下 `meowfilm/documents` |
 | 平台匿名协议状态 | Node 私有文档 | Application Support 下 `meowfilm/script-runtime/music-platform`，不保存原生账号凭据 |
 | 账号凭据（`<bundle>.music.platform.accounts.v1`） | `MeowAccounts` Keychain 凭据 | `afterFirstUnlockThisDeviceOnly`，不同步；bundle 使用稳定产品身份 |
 | 实际播放后的音频 | 音频文件缓存 | Caches 下 `meowfilm.music.audio-resources.v1`，Data Protection class C |
@@ -31,7 +32,7 @@ Application Support 的受信系统基目录先经 POSIX `realpath` 解析，再
 
 - `DocumentStore` 原样保存调用方字节，路径为 `<目录>/<namespace>/<key>.json`，可在 App 外直接查看和编辑；不加密，不加完整性信封，不要求内容可解析。
 - namespace 和 key 为 1～128 个小写 ASCII 字母、数字、`.`、`_`、`-`，首字符为字母或数字，不含 `..`。只用小写，避免不区分大小写的卷把两个标识映射到同一文件。
-- 单文档上限默认 8 MiB，属于资源边界，装配可按消费者调整；写入、比较替换和读取都先按上限检查。命名空间不限制文档数量和总字节。
+- 普通文档默认不设单文档、文档数量和总字节配额。缓存装配可显式传入 `maximumDocumentBytes`；仅显式有界的消费者在写入、比较替换和读取时检查该预算。
 - 写入在同目录生成唯一 stage，写完 fsync 后 rename 替换目标。`compareAndSwap` 在同一锁内比较当前文件内容，相同才替换；比较的是内容，不是单调版本。外部编辑后的内容就是下次比较的当前内容，不视为损坏。
 - 目标必须是单一硬链接的普通文件。文档、命名空间目录或基目录为符号链接、目录或多硬链接时按 unsafePath 拒绝读取，不跟随也不修改链接目标；替换和删除只作用于本 store 的目录项。
 - 命名空间中的未知文件和中断遗留的 stage 不阻塞读写，也不会被自动删除。
@@ -43,6 +44,13 @@ Application Support 的受信系统基目录先经 POSIX `realpath` 解析，再
 - 音乐数据库 `areas` 表的 `catalogSource` 行保存数据源偏好。
 - 记录字段封闭：`{"schema":1,"revision":0,"platform":"wy"}`；platform 只允许 `wy`／`kg`，revision 必须为非负 JSON 安全整数。记录缺失时默认网易云、revision 0，读取不写盘；未知字段、非法类型、版本或平台明确返回 `corruptDocument`，保留原文件。
 - 保存使用数据库事务，并核对该记录独立的 revision；成功切换加一，同值保存不写盘，过期 revision 返回 `staleRevision`。与 playback 的 `settingsRevision` 无关，不重写 library、queue、playback 或 history。
+
+## 原始资源文件
+
+- `ResourceFileStore` 原样保存 `<目录>/<namespace>/<key>.bytes`，不加文档信封或持久索引。`inventory` 只枚举文件 metadata，包含可识别的本格式 stage；资源 owner 在首用成功后复用内存 metadata，正常读写不重新枚举目录。
+- `OrdinaryFileDirectory` 从既有普通文档实现抽取目录打开、限制读取和同目录 fsync／rename；基目录及 namespace 的最终组件不跟随符号链接，读取及 touch 只接受单硬链接普通文件。`DocumentStore` 的上限、内容 CAS、未知邻居和 stage 行为保持原契约。
+- 资源写入设置 mtime，再由调用方的同步 commit 回调准入原子 rename；`touch` 只更新目标文件的 mtime，同值或更早时间不触发修改。失败写入尝试删除自己的 stage；未成功删除的 stage 向 owner 回报实际已写字节，持续计入原预算，不冒充可读资源。
+- iOS 音乐的 v2 namespace、逐 URL／songID 叶子、30 天期限、定向清理和共享预算见[音乐缓存](music.md#缓存)。仅新格式生效，不读取、迁移或自动删除旧图片／歌词文件；资源字节和 metadata 不进入歌曲数据库。
 
 ## 加密文档
 
@@ -68,7 +76,7 @@ Application Support 的受信系统基目录先经 POSIX `realpath` 解析，再
 - 覆盖或删除前先认证原文档。缺 key、错误 key、篡改、未知版本、锁定和 IO 失败使用封闭错误，不暴露路径、密钥或明文。
 - `compareAndSwap(key:expected:replacement:)` 在同一 store 锁内认证并解密当前内容，与 expected 明文字节精确比较后才加密原子替换。缺失／存在、内容不符返回 `revisionConflict`；不因冲突生成新密钥或修改原文档。
 - 命名空间已有任何文件但缺少 key 时，不创建新 key。
-- 默认上限：单文档明文 8 MiB、命名空间密文 32 MiB、文件 128 个；可配置硬上限分别为 64 MiB、256 MiB、1024 个。
+- 加密业务文档不设单文档、命名空间总字节或文件数量配额；目录枚举仍验证文件类型，并防止非空命名空间在缺失密钥时重新创建密钥。
 - 同一命名空间只能有一个存储实例。跨进程事务、恶意同进程代码和回滚攻击不在契约范围内。
 - 原子 rename 后没有可失败步骤。当前原生账号提交的保存失败、冲突或未知结果按其真实安全存储回执处理，不由普通缓存写入推断；账号发布边界见[音乐平台客户端上下文](../common/music/platform-client-context.md)。
 
@@ -119,7 +127,7 @@ Cat 安装事实、源码与私有卷继续使用 `meowfilm/script-runtime/cat`�
 | `.rules`／`film.rules` | `film.rules.v1` | 普通 |
 | `.preferences`／`film.preferences` | `film.preferences.v1` | 普通 |
 
-每块 key 均为 `settings`。规则和偏好分别使用 `{version:1,rules}`、`{version:1,preferences}`；元数据为 `{version:1,settings}`，网盘为 `{version:1,accounts}`。猫源结构见[Cat 原生意图](../runtime/cat-script-runtime.md#原生来源意图注入)。文档包装层负责对象 JSON、8 MiB 明文字节边界及内容 CAS，领域消费者负责各自字段、默认值和有效性；本地 `update(_:)` 只在真实变更提交后调用通知。
+每块 key 均为 `settings`。规则和偏好分别使用 `{version:1,rules}`、`{version:1,preferences}`；元数据为 `{version:1,settings}`，网盘为 `{version:1,accounts}`。猫源结构见[Cat 原生意图](../runtime/cat-script-runtime.md#原生来源意图注入)。文档包装层负责对象 JSON 及内容 CAS，领域消费者负责各自字段、默认值和有效性；本地 `update(_:)` 只在真实变更提交后调用通知。
 
 敏感块在上述 `protected-settings` 根下使用 AES-GCM；Keychain service 为 `dev.meowfilm.aggregate.film.settings.keys.v1`，每 namespace 一把 32 字节 key，沿用本页保护与失败规则。`snapshot()` 提供内容 fingerprint，受信 `compareAndSwap(expected:document:)` 只由 App 装配授予 pan 在线凭据回写，不反向通知同一运行器；私密帧见[运行底座](runtime-preflight.md#原生设置私密通道)。
 

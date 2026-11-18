@@ -46,8 +46,8 @@ public final class FilmPlaybackChapterModel: ObservableObject {
         invalidate()
         guard !attemptID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !resourceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              chapters.count <= 256, chapters.allSatisfy({
-                  $0.title.utf16.count <= 256 && $0.start.isFinite && $0.start >= 0 &&
+              chapters.allSatisfy({
+                  $0.start.isFinite && $0.start >= 0 &&
                       $0.end.isFinite && $0.end > $0.start
               }) else {
             error = .init(code: "INVALID_REQUEST"); return

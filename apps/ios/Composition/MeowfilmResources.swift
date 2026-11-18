@@ -46,9 +46,11 @@ struct MeowfilmResources: Sendable {
         let cacheRoot = caches?.appendingPathComponent("meowfilm", isDirectory: true)
             .appendingPathComponent("documents", isDirectory: true)
         musicLibrary = MusicNativeLibraryDatabase(url: libraryRoot.appendingPathComponent("music-library-v1", isDirectory: true).appendingPathComponent(MusicNativeLibraryDatabase.filename))
-        musicPresentationCache = MusicNativePresentationCache(storeFactory: Self.documentFactory(
-            base: cacheRoot, namespace: MusicNativePresentationCache.namespace,
-            maximumDocumentBytes: 16 * 1024 * 1024))
+        musicPresentationCache = MusicNativePresentationCache(storeFactory: {
+            guard let cacheRoot else { throw DocumentStoreError.storageFailure }
+            try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
+            return try ResourceFileStore(baseURL: cacheRoot, namespace: MusicNativePresentationCache.namespace)
+        })
         if let caches {
             musicAudioCache = NativeMusicAudioFileCache(rootURL: caches.resolvingSymlinksInPath()
                 .appendingPathComponent("meowfilm.music.audio-resources.v1", isDirectory: true), presentationCache: musicPresentationCache)
@@ -57,7 +59,7 @@ struct MeowfilmResources: Sendable {
             base: cacheRoot, namespace: MusicNativePersistentSourceDiscoveryCache.namespace,
             maximumDocumentBytes: 4 * 1024 * 1024))
         musicHomeSnapshot = MusicNativeHomeSnapshotDocument(storeFactory: Self.documentFactory(
-            base: cacheRoot, namespace: MusicNativeHomeSnapshotDocument.namespace))
+            base: cacheRoot, namespace: MusicNativeHomeSnapshotDocument.namespace, maximumDocumentBytes: 8 * 1024 * 1024))
         let filmSettings = try MeowfilmNativeSettings(documentsRoot: libraryRoot)
         self.filmSettings = filmSettings
         let scriptSession = RuntimeSession(launcher: MeowfilmScriptRuntime.launcher(settings: filmSettings.access))
@@ -82,7 +84,7 @@ struct MeowfilmResources: Sendable {
             observeConnection: { await scriptSession.connectionIfStarted() })
         musicAccountGate = try? MusicAccountAccessGate(
             bundleIdentifier: MeowfilmIdentity.bundleIdentifier,
-            urlCacheStore: try? Self.documentFactory(base: cacheRoot, namespace: "music.platform.audio-locators.v1")(),
+            urlCacheStore: try? Self.documentFactory(base: cacheRoot, namespace: "music.platform.audio-locators.v1", maximumDocumentBytes: 8 * 1024 * 1024)(),
             feedbackOutboxStoreFactory: Self.documentFactory(
                 base: libraryRoot, namespace: "music.platform.feedback-events.v1"),
             audioCache: musicAudioCache,
@@ -94,7 +96,7 @@ struct MeowfilmResources: Sendable {
     /// Ordinary document namespace. A missing Caches directory is a store failure,
     /// which each cache consumer treats as a miss.
     private static func documentFactory(base: URL?, namespace: String,
-                                        maximumDocumentBytes: Int = 8 * 1024 * 1024)
+                                        maximumDocumentBytes: Int? = nil)
         -> @Sendable () throws -> DocumentStore {
         return {
             guard let base else { throw DocumentStoreError.storageFailure }

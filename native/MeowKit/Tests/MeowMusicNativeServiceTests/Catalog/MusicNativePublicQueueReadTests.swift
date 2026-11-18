@@ -21,7 +21,7 @@ final class MusicNativePublicQueueReadTests: XCTestCase {
     private func rows(_ count: Int) -> [MusicQueueTrackReference] {
         (0..<count).map {
             .init(songID: "song-\($0)", occurrenceID: "occurrence-\($0)", platform: "wy",
-                  sourceKey: "wy/\($0)", byteCount: String($0).utf8.count)
+                  sourceKey: "wy/\($0)")
         }
     }
     func testConcurrentReadersShareSnapshotAndPaginationNeverReloads() async throws {
@@ -46,7 +46,7 @@ final class MusicNativePublicQueueReadTests: XCTestCase {
                 count += 1
                 if count == 1 { throw MusicServiceError.networkOffline }
                 return [.init(songID: "song-1", occurrenceID: "occurrence-1", platform: "wy",
-                              sourceKey: "wy/1", byteCount: 1)]
+                              sourceKey: "wy/1")]
             }
         }
         let loads = Loads()
@@ -81,7 +81,7 @@ final class MusicNativePublicQueueReadTests: XCTestCase {
     func testCloseReleasesUnloadedSnapshotCapture() async {
         final class Snapshot: @unchecked Sendable {
             let rows: [MusicQueueTrackReference] = [.init(songID: "song-1", occurrenceID: "occurrence-1",
-                platform: "wy", sourceKey: "wy/1", byteCount: 1)]
+                platform: "wy", sourceKey: "wy/1")]
         }
         weak var retained: Snapshot?
         let reader: MusicNativePublicBrowseQueueRead
@@ -93,14 +93,18 @@ final class MusicNativePublicQueueReadTests: XCTestCase {
         await reader.close()
         XCTAssertNil(retained)
     }
-    func testByteOversizedSnapshotIsRejectedBeforeAnyPageIsIssued() async {
-        let oversized = (0..<((MusicRemoteQueueSource.maximumBytes / (64 * 1024)) + 1)).map {
+    func testLargeSnapshotReturnsCompletePages() async throws {
+        let oversized = (0..<101).map {
             MusicQueueTrackReference(songID: "song-\($0)", occurrenceID: "occurrence-\($0)", platform: "wy",
-                                     sourceKey: "wy/\($0)", byteCount: 64 * 1024)
+                                     sourceKey: "wy/\($0)/" + String(repeating: "x", count: 64 * 1024))
         }
         let reader = MusicNativePublicBrowseQueueRead { _ in oversized }
-        do { _ = try await reader.page(nil, intent: .init()); XCTFail("Oversized snapshot admitted") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .limit) }
+        let first = try await reader.page(nil, intent: .init())
+        let last = try await reader.page("90", intent: .init())
+        XCTAssertEqual(first.items.count, 30)
+        XCTAssertEqual(last.items.count, 11)
+        XCTAssertEqual(last.items.last?.songID, oversized.last?.songID)
+        XCTAssertNil(last.cursor)
         await reader.close()
     }
     func testSnapshotBeyondFormerTwoThousandRowsIsAccepted() async throws {
@@ -113,11 +117,11 @@ final class MusicNativePublicQueueReadTests: XCTestCase {
         XCTAssertEqual(last.items.last?.occurrenceID, values.last?.occurrenceID)
         await reader.close()
     }
-    func testSnapshotWithinByteBudgetKeepsAllRowsWithoutEarlyTruncation() async throws {
+    func testSnapshotKeepsAllRowsWithoutEarlyTruncation() async throws {
         let rowBytes = 64 * 1024
-        let values = (0..<(MusicRemoteQueueSource.maximumBytes / rowBytes)).map {
+        let values = (0..<97).map {
             MusicQueueTrackReference(songID: "song-\($0)", occurrenceID: "occurrence-\($0)", platform: "wy",
-                                     sourceKey: "wy/\($0)", byteCount: rowBytes)
+                                     sourceKey: "wy/\($0)/" + String(repeating: "x", count: rowBytes))
         }
         let reader = MusicNativePublicBrowseQueueRead { _ in values }
         let page = try await reader.page(nil, intent: .init())

@@ -25,7 +25,7 @@
 
 native owner 拒绝 `library.import/save/update/remove`，返回 `PERMISSION_DENIED`；配置写入不走这些运行器方法。`library.list/get/export` 只投影本次已接收的内存配置；启动不会仅凭私有状态恢复书源。
 
-`SourceConfiguration` 只消费 `installationId,revision,name,sourceUrl,group,order,enabled,enabledExplore,protocol,definition`，附加成员不参与配置，也不授予 actions、Cookie、变量或 generation 的写入权限。`sources` 是含启用和禁用源的完整集合，可以为空；相对上次快照缺失的源视为移除，不按增量 patch 合并。快照 revision 与每源 revision 均为正安全整数；重复身份／URL、必需配置成员缺失或错误类型、未知协议与源码大小错误在撤销任何旧实例前拒绝。定义解析、协议与定义匹配及初始化仅在该源实际执行时检查，失败不阻断健康兄弟；禁用源不预检未执行定义。全局旧 revision 返回 `STALE_SOURCE`，同 revision 不同内容返回 `SOURCE_INTEGRITY`；每源租约也不得倒退或在同 revision 改写内容。
+`SourceConfiguration` 只消费 `installationId,revision,name,sourceUrl,group,order,enabled,enabledExplore,protocol,definition`，附加成员不参与配置，也不授予 actions、Cookie、变量或 generation 的写入权限。`sources` 是含启用和禁用源的完整集合，可以为空；相对上次快照缺失的源视为移除，不按增量 patch 合并。快照 revision 与每源 revision 均为正安全整数；重复身份／URL、必需配置成员缺失或错误类型、未知协议与源码字段错误在撤销任何旧实例前拒绝。定义解析、协议与定义匹配及初始化仅在该源实际执行时检查，失败不阻断健康兄弟；禁用源不预检未执行定义。全局旧 revision 返回 `STALE_SOURCE`，同 revision 不同内容返回 `SOURCE_INTEGRITY`；每源租约也不得倒退或在同 revision 改写内容。
 
 `library.apply` 只处理真实变化、失败重试和移除项；相同快照幂等，成功源不重复初始化，禁用源不执行。替换或移除会撤销旧调用、Web 与图片并等待实际清理。初始化失败在当前已保存 revision 上返回该源 `errorCode`，关闭执行准入，不回写配置或恢复旧定义；清理失败仍为 `SOURCE_CLEANUP`。精确快照可重试失败项，后继快照使旧应用结果失效。运行器恢复后须重新接收最新原生快照才能执行。
 
@@ -33,7 +33,7 @@ native owner 的私有文档为 `{schema:1,sources:[{installationId,private:{coo
 
 `SourceRecord` 为 `installationId,revision,name,sourceUrl,group,order,enabled,enabledExplore,protocol,actions:[string]`，另投影用于管理排序／操作的 `weight,lastUpdateTime,respondTime,hasExplore`；恢复或应用失败时带 `errorCode`。generation 不属于公开记录。revision 为正整数，每次接受的定义或管理修改递增，旧 revision 返回 `STALE_SOURCE`。名称可为空，order 是用于排序的有限数值，不要求整数；`library.list` 按 order、名称、installationId 排序。无源返回空列表。
 
-以下导入、试运行与保存流程属于 runtime owner。导入接受当前 Legado JSON 对象或数组、`sources/bookSources/data` 数组容器、逐行 JSON，以及轻悦时光 HTML／HTML 对象。每个文件或 URL 由客户端各调用一次，定义数组由运行器逐项解析与试运行；结果的 index 从 0 起，失败不抹掉已成功项。同 `bookSourceUrl` 更新原 installationId；无此字段的独立 HTML 使用导入 URL 或文件名建立稳定来源身份。URL 导入使用运行器 HTTP，按最终响应文本解析，不把文件来源视为脚本权限。源码继续遵循现有 16 MiB 格式边界。管理字段使用 `enabled`、`customOrder` 和 `enabledExplore/exploreUrl`；其他普通键不回填这些字段。
+以下导入、试运行与保存流程属于 runtime owner。导入接受当前 Legado JSON 对象或数组、`sources/bookSources/data` 数组容器、逐行 JSON，以及轻悦时光 HTML／HTML 对象。每个文件或 URL 由客户端各调用一次，定义数组由运行器逐项解析与试运行；结果的 index 从 0 起，失败不抹掉已成功项。同 `bookSourceUrl` 更新原 installationId；无此字段的独立 HTML 使用导入 URL 或文件名建立稳定来源身份。URL 导入使用运行器 HTTP，按最终响应文本解析，不把文件来源视为脚本权限。源码不设人为字节上限，仍验证编码和实际消费的格式。管理字段使用 `enabled`、`customOrder` 和 `enabledExplore/exploreUrl`；其他普通键不回填这些字段。
 
 `library.previewImport` 仅下载、解析和识别定义，不安装、不执行候选、不修改永久库或创建私有源数据。URL 只下载一次；返回的定义包含来源身份和当前管理元数据，客户端确认所选条目后将这些定义一次性传给 `library.import`，不再下载。预览也受取消／关闭排空约束，失败条目不隐藏有效项。
 

@@ -13,7 +13,6 @@ public sealed record GrantedFile(string Id, string Path, string Title);
 /// <summary>Paths explicitly chosen in native file UI. Never expose this namespace to script RPC.</summary>
 public sealed class GrantedMediaFiles
 {
-    private const int MaximumDocumentBytes = 8 * 1024 * 1024, MaximumItems = 100_000;
     private readonly IDocumentStore store;
     private readonly string documentNamespace;
     private readonly HashSet<string> extensions;
@@ -33,7 +32,7 @@ public sealed class GrantedMediaFiles
     public async Task<IReadOnlyList<GrantedFile>> GrantAsync(IEnumerable<string> selectedPaths, CancellationToken cancellationToken = default)
     {
         var selected = selectedPaths?.ToArray() ?? throw new InvalidDataException("FILE_LIMIT");
-        if (selected.Length is 0 or > 1000) throw new InvalidDataException("FILE_LIMIT");
+        if (selected.Length == 0) throw new InvalidDataException("FILE_LIMIT");
         var files = selected.Select(Grant).DistinctBy(file => file.Id).ToArray();
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -41,7 +40,6 @@ public sealed class GrantedMediaFiles
             var (current, fingerprint) = await ReadLockedAsync(cancellationToken).ConfigureAwait(false);
             var known = current.ToDictionary(file => file.Id, StringComparer.Ordinal);
             foreach (var file in files) known[file.Id] = file;
-            if (known.Count > MaximumItems) throw new InvalidDataException("FILE_LIMIT");
             await WriteLockedAsync(known.Values, fingerprint, cancellationToken).ConfigureAwait(false);
         }
         finally { gate.Release(); }
@@ -95,7 +93,7 @@ public sealed class GrantedMediaFiles
             if (document.Fingerprint != DocumentFingerprint.Missing) throw Corrupt();
             return [];
         }
-        if (document.Data.Length == 0 || document.Data.Length > MaximumDocumentBytes) throw Corrupt();
+        if (document.Data.Length == 0) throw Corrupt();
         try
         {
             using var json = JsonDocument.Parse(document.Data, new JsonDocumentOptions { MaxDepth = 4 });
@@ -104,7 +102,7 @@ public sealed class GrantedMediaFiles
             var schema = json.RootElement.GetProperty("Schema");
             if (schema.ValueKind != JsonValueKind.Number || schema.GetRawText() != "1") throw Corrupt();
             var rawItems = json.RootElement.GetProperty("Items");
-            if (rawItems.ValueKind != JsonValueKind.Array || rawItems.GetArrayLength() > MaximumItems) throw Corrupt();
+            if (rawItems.ValueKind != JsonValueKind.Array) throw Corrupt();
             var ids = new HashSet<string>(StringComparer.Ordinal);
             var result = new List<GrantedFile>(rawItems.GetArrayLength());
             foreach (var raw in rawItems.EnumerateArray())
@@ -125,7 +123,6 @@ public sealed class GrantedMediaFiles
     private async Task WriteLockedAsync(IEnumerable<GrantedFile> values, DocumentFingerprint before, CancellationToken token)
     {
         var items = values.ToArray();
-        if (items.Length > MaximumItems) throw new InvalidDataException("FILE_LIMIT");
         var ids = new HashSet<string>(StringComparer.Ordinal);
         var array = new JsonArray();
         foreach (var item in items)
@@ -135,7 +132,6 @@ public sealed class GrantedMediaFiles
             array.Add(new JsonObject { ["Id"] = item.Id, ["Path"] = item.Path, ["Title"] = item.Title });
         }
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(new JsonObject { ["Schema"] = 1, ["Items"] = array });
-        if (bytes.Length > MaximumDocumentBytes) throw new InvalidDataException("FILE_LIMIT");
         var expected = DocumentFingerprint.FromBytes(bytes);
         var written = await store.WriteAsync(documentNamespace, bytes, before, token).ConfigureAwait(false);
         if (written != expected) throw new InvalidDataException("COMMIT_UNKNOWN");

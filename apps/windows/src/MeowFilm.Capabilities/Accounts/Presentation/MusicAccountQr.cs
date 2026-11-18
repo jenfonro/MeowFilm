@@ -13,7 +13,6 @@ public static class MusicAccountQrImage
     {
         try
         {
-            if (base64.Length is < 1 or > 699052) throw new MusicOperationException("LIMIT");
             byte[] bytes = Convert.FromBase64String(base64);
             AccountQrPng.Validate(bytes);
             using var stream = new MemoryStream(bytes, writable: false);

@@ -55,10 +55,10 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
     private JsonObject Collection(string id) => Collections.Single(c => S(c["id"]) == id);
     private JsonObject Binding(string cid, string key) => Bindings(Collection(cid)).Single(b => BindingKey(b) == key);
     private void Status(string phase, string code = "") => state["status"] = O(("phase", phase), ("code", code),
-        ("at", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), ("issues", LJ.Arr(issues.Take(256))));
+        ("at", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), ("issues", LJ.Arr(issues)));
     private void Issue(string platform, string cid, string code)
     {
-        if (issues.Count < 256 && issueKeys.Add(platform + "\n" + cid + "\n" + code))
+        if (issueKeys.Add(platform + "\n" + cid + "\n" + code))
             issues.Add(O(("platform", platform), ("collectionId", cid), ("code", code)));
     }
     internal static string Error(Exception error) => error switch

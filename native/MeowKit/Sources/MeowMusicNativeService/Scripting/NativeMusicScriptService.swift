@@ -367,7 +367,7 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
 
     /// LX media is a direct URL. HTTP links are upgraded instead of adding an ATS exception.
     static func mediaURL(_ text: String) throws -> URL {
-        guard text.utf8.count <= 8192, !text.unicodeScalars.contains(where: { $0.value <= 32 || $0.value == 127 }),
+        guard !text.unicodeScalars.contains(where: { $0.value <= 32 || $0.value == 127 }),
               var components = URLComponents(string: text),
               let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
               components.host?.isEmpty == false, components.user == nil, components.password == nil else {

@@ -16,7 +16,7 @@ public static partial class NovelTests
     {
         string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT") ?? throw new InvalidOperationException("Runtime bundles required");
         RuntimeModule[] modules = RuntimeHttpClientTests.Modules;
-        var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules);
+        var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate");
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
         await using var runtime = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules,
             TestWorkspace.DataPath("novel-web-cookie-scope"), deadline.Token);

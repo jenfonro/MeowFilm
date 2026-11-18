@@ -13,6 +13,7 @@ namespace MeowFilm.Platform.Storage;
 /// </summary>
 public sealed class CacheDocumentStore : IDocumentStore
 {
+    public const int MaximumDocumentBytes = 8 * 1024 * 1024;
     private readonly object gate = new();
     private readonly Dictionary<string, DocumentSnapshot> snapshots = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Task> reads = new(StringComparer.Ordinal);
@@ -47,7 +48,7 @@ public sealed class CacheDocumentStore : IDocumentStore
     /// <summary>A complete cache snapshot never needs to read old disk content before publication.</summary>
     public void Save(string documentNamespace, ReadOnlyMemory<byte> data)
     {
-        if (data.Length > LocalDocumentStore.MaximumDocumentBytes)
+        if (data.Length > MaximumDocumentBytes)
             throw new DocumentStoreException(DocumentStoreError.Limit);
         byte[] bytes = data.ToArray();
         lock (gate)
@@ -76,7 +77,7 @@ public sealed class CacheDocumentStore : IDocumentStore
         DocumentFingerprint expected, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (data.Length > LocalDocumentStore.MaximumDocumentBytes)
+        if (data.Length > MaximumDocumentBytes)
             throw new DocumentStoreException(DocumentStoreError.Limit);
         byte[] bytes = data.ToArray();
         var fingerprint = DocumentFingerprint.FromBytes(bytes);

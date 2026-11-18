@@ -58,7 +58,7 @@ final class MusicAccountTransferState: ObservableObject {
         task = Task { [weak self] in
             guard let self else { return }
             do {
-                let bytes = try await ImportedFileReader.read(url, maximumBytes: MusicAccountFilePayload.maximumBytes)
+                let bytes = try await ImportedFileReader.read(url)
                 guard current(id) else { return }
                 let next = try await service.prepareAccountImport(MusicAccountFilePayload(fileData: bytes))
                 guard current(id) else { next.cancel(); await service.discardAccountImport(next); return }

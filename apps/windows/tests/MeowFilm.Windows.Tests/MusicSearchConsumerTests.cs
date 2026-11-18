@@ -152,11 +152,11 @@ public static partial class MusicUiTests
                 finally { window.Content = null; window.Close(); }
             }
         });
-        yield return Case("restored search locations reject empty oversized and control queries", async () =>
+        yield return Case("restored search locations reject empty and control queries", async () =>
         {
             await using var f = await SearchScene.Create();
             foreach (string prefix in new[] { "search-local/", "catalog-search/" })
-            foreach (string query in new[] { "", new string('x', 201), "a\nb" })
+            foreach (string query in new[] { "", "a\nb" })
             {
                 bool rejected = false;
                 try { await f.Module.RestoreNavigationAsync(prefix + Uri.EscapeDataString(query), default); }

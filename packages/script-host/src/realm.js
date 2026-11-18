@@ -304,8 +304,8 @@ export const realmSource = String.raw`
               data={...data,sources:capabilities(data)};
               initialized=true;
             } else if (event==='updateAlert') {
-              requireValue(!alertSent && data && typeof data.log==='string' && data.log.length<=1024 &&
-                (data.updateUrl===undefined || typeof data.updateUrl==='string' && data.updateUrl.length<=1024),
+              requireValue(!alertSent && data && typeof data.log==='string' &&
+                (data.updateUrl===undefined || typeof data.updateUrl==='string'),
                 'SCRIPT_PROTOCOL_ERROR');
               alertSent=true;
             } else throw error('SCRIPT_PROTOCOL_ERROR');

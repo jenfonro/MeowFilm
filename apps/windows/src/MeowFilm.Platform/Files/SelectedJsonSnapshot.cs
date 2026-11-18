@@ -30,11 +30,9 @@ public sealed class SelectedJsonSnapshotException : Exception
 /// </summary>
 public static class SelectedJsonSnapshot
 {
-    public const int MaximumBytes = 8 * 1024 * 1024;
-
     /// <summary>
     /// Exact bytes, including empty/invalid JSON; parsing belongs to the caller.
-    /// Bounds: 8 MiB inclusive, 4096 UTF-16 path characters, 128 components, 255 per component.
+    /// Path bounds: 4096 UTF-16 characters, 128 components, 255 per component.
     /// Work runs off the UI context; cancellation is checked between bounded synchronous OS
     /// calls, not an OS-call deadline. All pins/handles are released before the task settles.
     /// </summary>
@@ -43,7 +41,7 @@ public static class SelectedJsonSnapshot
     {
         try
         {
-            var data = await SelectedFileSnapshot.ReadAsync(selectedPath, ".json", MaximumBytes, cancellationToken)
+            var data = await SelectedFileSnapshot.ReadAsync(selectedPath, ".json", cancellationToken)
                 .ConfigureAwait(false);
             try
             {

@@ -179,12 +179,9 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
 
     func readHeader(_ client: HLSClient) {
         guard !invalidated, !client.closed else { return }
-        let remaining = HLSClientRequest.maximumHeaderBytes - client.header.count
-        guard remaining > 0 else { reject(client, status: 431); return }
-        client.connection.receive(minimumIncompleteLength: 1, maximumLength: remaining) { [self, client] data, _, complete, error in
+        client.connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { [self, client] data, _, complete, error in
             guard !invalidated, !client.closed else { return }
             if let data {
-                guard data.count <= remaining else { reject(client, status: 431); return }
                 client.header.append(data)
             }
             if let end = client.header.range(of: Data("\r\n\r\n".utf8)) {

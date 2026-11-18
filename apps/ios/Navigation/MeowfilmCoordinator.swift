@@ -405,11 +405,11 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 guard let self, let main = self.main else { return }
                 let content: MeowfilmSidebarContent
                 switch main.selectedPage {
-                case .film: content = .film(home: filmHome, settings: self.assembly.filmSettings)
+                case .film: content = .film(settings: self.assembly.filmSettings)
                 case .novel:
-                    guard let novel = self.assembly.novel else { return }
-                    content = .novel(feature: novel, home: { [weak self] in self?.novelHome?.showHome() })
-                default: content = .music(source: MusicHomeSourceSettingsModel(model: model), selectedPage: main.selectedPage)
+                    guard let home = self.novelHome else { return }
+                    content = .novel(discovery: home.discovery, home: { [weak self] in self?.main?.select(.novel) })
+                default: content = .music(selectedPage: main.selectedPage)
                 }
                 self.root.showSidebar(content: content)
             },

@@ -340,10 +340,10 @@ public static class MusicHomeSnapshotTests
         var page = Page("wy", "boundary"); page.Remove("ok");
         page["sections"]![0]!["items"]![0]!["subtitle"] = "";
         int overhead = JsonSerializer.SerializeToUtf8Bytes(new { platform = "wy", pages = new[] { page } }).Length;
-        page["sections"]![0]!["items"]![0]!["subtitle"] = new string('x', LocalDocumentStore.MaximumDocumentBytes - overhead);
+        page["sections"]![0]!["items"]![0]!["subtitle"] = new string('x', CacheDocumentStore.MaximumDocumentBytes - overhead);
         await owner.SaveAsync(Snapshot("wy", page));
-        Check(store.ReadMemory(MusicHomeSnapshotStore.Namespace).Data!.Length == LocalDocumentStore.MaximumDocumentBytes);
-        page["sections"]![0]!["items"]![0]!["subtitle"] = new string('y', LocalDocumentStore.MaximumDocumentBytes - overhead + 1);
+        Check(store.ReadMemory(MusicHomeSnapshotStore.Namespace).Data!.Length == CacheDocumentStore.MaximumDocumentBytes);
+        page["sections"]![0]!["items"]![0]!["subtitle"] = new string('y', CacheDocumentStore.MaximumDocumentBytes - overhead + 1);
         await owner.SaveAsync(Snapshot("wy", page));
         var restored = (await owner.ReadAsync(_ => null))!.Pages.Single();
         Check(restored.GetProperty("sections")[0].GetProperty("items")[0].GetProperty("subtitle").GetString()![0] == 'x');

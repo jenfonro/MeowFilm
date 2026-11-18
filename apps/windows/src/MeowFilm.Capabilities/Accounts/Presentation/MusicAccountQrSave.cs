@@ -53,9 +53,8 @@ public sealed partial class MusicCapability
             var encoder = new PngBitmapEncoder();
             encoder.Frames.Add(BitmapFrame.Create(image!));
             encoder.Save(bytes);
-            if (bytes.Length > 524288) throw new IOException();
             if (!Current()) return Task.CompletedTask;
-            // Encoding is complete before any I/O. Bounded synchronous publication cannot pump
+            // Encoding is complete before any I/O. Synchronous publication cannot pump
             // a modal UI callback between its final epoch check and CreateNew/write.
             using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 16384,
                 FileOptions.WriteThrough))

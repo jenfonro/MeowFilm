@@ -71,7 +71,7 @@ extension MusicViewModel {
         guard let membership = try requireService() as? any MusicCollectionMembershipServing else { throw MusicServiceError.unsupported }
         let refs = try await membership.collectionReferences(in: collection)
         try check(epoch); try binding.check(self)
-        guard refs.count == collection.count, refs.count <= 20_000, Set(refs).count == refs.count,
+        guard refs.count == collection.count, Set(refs).count == refs.count,
               refs.allSatisfy({ $0.kind == .library && $0.occurrence == nil }) else { throw MusicServiceError.invalidResponse }
         return refs
     }

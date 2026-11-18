@@ -581,6 +581,12 @@ public static partial class MusicRecommendationTests
         Check(f.Catalog.Calls.Last().Similar is { SourceType: "artist" } && f.Selections.Count == 2);
         var back = await f.Rec.ExecuteAsync("music.recommendations.return", new { id = S(artist, "id") });
         Check(S(back, "code") == "CHECKPOINT_NOT_FOUND");
+        string[] largeSourceIds = Enumerable.Range(1, 1200).Select(index => $"seed-song-{index:D4}").ToArray();
+        f.Catalog.Reply("similar", "30", "31");
+        var largeSimilar = await f.Rec.ExecuteAsync("music.recommendations.start",
+            new { kind = "similar", platform = "wy", sourceIds = largeSourceIds, sourceType = "song" });
+        Check(largeSimilar.GetProperty("ok").GetBoolean() &&
+            f.Catalog.Calls.Last().Similar!.SourceIds.SequenceEqual(largeSourceIds));
     }
     private static async Task SimilarContinuation()
     {

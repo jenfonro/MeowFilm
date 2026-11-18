@@ -40,7 +40,6 @@ class ProductConfigurationTests(unittest.TestCase):
         project = self.project("Meowfilm")
         for library in ("MeowUI", "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicNativeService", "MeowFilmFeature", "MeowNovelFeature"):
             self.assertIn(f"productName = {library};", project)
-        self.assertEqual(project.count('path = "Navigation/MeowfilmCoordinator.swift";'), 1)
         self.assertEqual({p.name for p in (self.root / "apps/ios").glob("*.xcodeproj")}, {"Meowfilm.xcodeproj"})
 
     def test_all_app_and_hosted_test_configurations_require_ios_18(self):

@@ -69,7 +69,7 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 | `native/AudioKernel` | 锁定 FFmpeg 9.0.1 音频闭包、隐藏上游符号的动态框架与最小 C ABI | 无业务或视频依赖 |
 | `packages/film-rules`／`packages/film-search` | Node 加载的共享规则／搜索程序，不再作为 SwiftPM 依赖 | 共享 script-host 原生载体 |
 
-共享模块不依赖音乐模块。业务差异通过显式参数、契约或注入实现表达；模块边界由 `scripts/check-source-scope.py` 检查。
+共享模块不依赖音乐模块。业务差异通过显式参数、契约或注入实现表达；模块边界由 `scripts/check-source-scope.py` 检查。源码按 target 的实际输入和工程成员核对，未使用的 App 职责目录不必存在或非空，整个 target 仍须有有效源码。系统模块按 SwiftPM 声明类型、接口成员和实际 import 核对依赖；`CSQLite` 保留 SDK sqlite3 头及链接要求，不限制系统模块名称、消费者或接口文件的完整文本形状。
 
 音乐依赖闭包不包含视频目标；应用装配共享一个 `FilmPlayerPreferencesStore` 给设置、播放模型与媒体桥接，候选工厂通过 `makePlaybackVideoDecoder(engine:)` 读取首选内核。出厂默认 KSPlayer，设置变更只对下一媒体候选生效，当前实例不热切；播放页消费事件里的实际内核，不用首选值代替运行事实。选择、能力过滤及控制生效时机见[播放器设置](film-settings.md#播放器设置)，候选回退见[影视](film.md#内核选择与候选回退)。音乐 PCM／输出与取消排空边界见[独立音乐核心](music-audio-core.md)，系统会话仍由[系统媒体控制](system-media.md)说明。
 
@@ -79,7 +79,7 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 
 原生源码检查仅覆盖 `apps/ios` 和 `native/MeowKit`，不遍历 Windows 专属源码。Node 根测试可用 `node scripts/test-root.mjs --platform ios` 选择 iOS 与共享契约测试；共享 packager 用例不读取 Windows 入口源码，iOS 入口及生成载荷由本端 wrapper 用例验证。
 
-平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器使用 `MeowRuntime.RuntimeValue`／`RuntimeObject`／`RuntimeJSON`：对象键按原始 UTF-8 区分，保留 Unicode 规范等价但标量不同的成员；语法解析复用 `JSONObject.decodeValue`／`Fields`，同一 UTF-8 键重复时采用末值。`Fields` 按首次插入顺序迭代，同键更新不重排，删除后重插追加到末尾；`JSONObject.encode` 仍按键排序输出。无法无损表示的数字由 `JSONNumber`／`RuntimeValue.exactNumber` 保留原文，不因未消费数字拒绝整棵树。普通数字、身份与资源由实际消费者检查；解码深度 64 和私密帧字节预算保留。HTTP 只解析一次 envelope，核对 request-id、contract、ok 与 value/code，不再次全树校验。共同语义见[公共 HTTP 契约](../runtime/runtime-bridge.md)。`JSONObject.decode` 是供既有 DTO 使用的 Foundation 字典投影，不用于原始文档保留；持久原文使用 `decodeValue` 或 `RuntimeJSON`。该边界不增加普通 JSON 总字节配额。
+平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器使用 `MeowRuntime.RuntimeValue`／`RuntimeObject`／`RuntimeJSON`：对象键按原始 UTF-8 区分，保留 Unicode 规范等价但标量不同的成员；语法解析复用 `JSONObject.decodeValue`／`Fields`，同一 UTF-8 键重复时采用末值。`Fields` 按首次插入顺序迭代，同键更新不重排，删除后重插追加到末尾；`JSONObject.encode` 仍按键排序输出。无法无损表示的数字由 `JSONNumber`／`RuntimeValue.exactNumber` 保留原文，不因未消费数字拒绝整棵树。普通数字、身份与资源由实际消费者检查；解码深度 64 保留，私密帧不设业务字节配额。HTTP 只解析一次 envelope，核对 request-id、contract、ok 与 value/code，不再次全树校验。共同语义见[公共 HTTP 契约](../runtime/runtime-bridge.md)。`JSONObject.decode` 是供既有 DTO 使用的 Foundation 字典投影，不用于原始文档保留；持久原文使用 `decodeValue` 或 `RuntimeJSON`。该边界不增加普通 JSON 总字节配额。
 
 ## UI 技术选型
 
@@ -118,8 +118,8 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 - 推荐、频道、影视、我的由主页面外壳保留，首次切换到时创建并加载。
 - 推荐／频道／影视／我的是四个独立页面；切换时各页连同自己的页头按页面顺序左右滑动，页头不在页面间移动或共用，底部栏选中态在切换开始时同步；减少动态效果时直接切换。底部入口为「首页／影视／我的」，「首页」进入推荐页；频道页也高亮「首页」，但仍保持真实频道页面身份和不透明 dock 背景。
 - 推荐页头依次为菜单、搜索胶囊与原功能按钮；频道页头依次为菜单、频道滚动条、频道选择及圆形搜索按钮，不再提供「推荐／频道」页面切换控件。频道切换条在频道数据到达后显示，搜索进入既有搜索页。频道通过现有内容入口或侧边栏「频道」进入；底部「首页」、音乐侧边栏「首页」及屏幕左边缘右滑均返回推荐。边缘返回沿用统一距离／速度规则，短滑或取消保留当前频道；频道内容区横滑切换频道，分页、栏目、轮播和列表滚动都等待边缘手势失败后才接管触摸。
-- 影视页头为菜单与占据其余标题区域的搜索胶囊；菜单打开影视侧边栏，胶囊暂时进入既有音乐搜索页，返回保留原影视页面与滚动位置。影视侧边栏「首页」返回影视首页，数据源选择位于侧边栏。播放器与底部栏固定在屏幕底部，不随键盘升起，键盘只增加内容的底部避让。进入／返回非主页面时底部栏只做上下收放，按钮行保持固定高度与横向位置，不随页面左右滑动；这是既定效果。
-- 音乐、影视与小说共用侧边栏框架：保留原窗口底色和顶部居中 App 图标，菜单按内容高度排列，图标槽与文字列统一对齐，选中项使用圆角底色与主题强调色；普通文字保持系统 Regular。菜单区域可独立滚动，带图标、左对齐文字和尾部箭头的“设置”固定在底部安全区上方，不随列表滚动。音乐主菜单为首页／频道，快捷音乐数据源另组保留；“我的”沿用音乐内容。影视主菜单为首页／视频源，快捷影视数据源另组保留。小说主菜单为首页／分类／已添加书源。视频源、书源与小说分类当前仅展示，不接入首页切源或分类导航；二级页仍使用返回入口。
+- 影视页头为菜单与占据其余标题区域的搜索胶囊；菜单打开影视侧边栏，胶囊暂时进入既有音乐搜索页，返回保留原影视页面与滚动位置。影视侧边栏「首页」返回影视首页。播放器与底部栏固定在屏幕底部，不随键盘升起，键盘只增加内容的底部避让。进入／返回非主页面时底部栏只做上下收放，按钮行保持固定高度与横向位置，不随页面左右滑动；这是既定效果。
+- 音乐、影视与小说共用侧边栏框架：保留原窗口底色和顶部居中 App 图标，菜单按内容高度排列，图标槽与文字列统一对齐，选中项使用圆角底色与主题强调色；普通文字保持系统 Regular。菜单区域可独立滚动，带图标、左对齐文字和尾部箭头的“设置”固定在底部安全区上方，不随列表滚动。音乐主菜单为首页／频道；“我的”沿用音乐内容。影视主菜单为首页／视频源。音乐与影视侧边栏均不提供数据源快捷切换。小说主菜单为首页／分类／已添加书源。视频源、书源与小说分类当前仅展示，不接入首页切源或分类导航；二级页仍使用返回入口。
 - 页面跳转由路由显式调用，不通过业务状态标志触发。
 - 上层呈现通过视图层级阻挡下层触摸。
 - 资源活跃、页面可见及浮层呈现时机分别管理；待处理的错误在页面稳定出现或导航／呈现转场完成后处理，不因此重新加载业务。
@@ -185,13 +185,14 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 | --- | --- |
 | `dev.meowfilm.aggregate` | 固定产品身份；安装宿主改写安装标识时，内部存储身份不变 |
 | Application Support 下 `meowfilm/documents` | 原生业务数据根目录 |
-| Caches 下 `meowfilm/documents` | 普通缓存文档根目录 |
+| Caches 下 `meowfilm/documents` | 普通缓存文档和逐资源原始字节文件根目录 |
 | Application Support 下 `meowfilm/script-runtime/music-platform` | Node 唯一维护的匿名协议状态 |
 | `music-library-v1/music-library-v1.sqlite3` | 系统 SQLite 永久歌曲仓库、来源索引、引用队列、历史和播放记录 |
 | `dev.meowfilm.aggregate.music.platform.accounts.v1` | 三平台 Keychain 账号凭据与固定账号槽 |
 | `music.platform.audio-locators.v1` | 账号作用域下的官方音频定位缓存 |
 | `meowfilm.music.audio-resources.v1` | 实际播放后的完整音频缓存 |
-| `music.presentation-resources.v1`、`music.home.display.v1`、`music.source-checks.v1` | 共享图片／歌词资源、首页展示快照和来源发现观察 |
+| `music.presentation-resources.v2` | 共享图片／歌词原始字节叶子，首用文件 metadata 仅保留在内存 |
+| `music.home.display.v1`、`music.source-checks.v1` | 首页展示快照和来源发现观察 |
 | `music.ui.appearance.v1`、`music.ui.songColors.v1`、`music.ui.lastChannel` | 音乐外观偏好、歌曲取色缓存和频道恢复 |
 | `playback.volume`、播放所有者 `music`／`film` | 共享播放音量与当前播放业务所有者 |
 | `meowfilm.film.library.v1` | 影视收藏身份，保留原来源／影片字段及可选 Node `businessID/playbackTarget`，见[影视收藏](film.md#详情和收藏) |

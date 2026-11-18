@@ -50,7 +50,8 @@ internal static class Program
                 });
                 musicLibraryStore = new(Path.Combine(AppDataPaths.Current.Documents, "music-library"));
                 capabilities.Add(new MusicCapability(runtime, storage, musicLibraryStore, musicPlayback,
-                    Path.Combine(cacheRoot, "music-audio"), cacheStore));
+                    Path.Combine(cacheRoot, "music-audio"), cacheStore,
+                    Path.Combine(cacheRoot, "music-presentation-v2")));
                 pendingRules = new FilmRuleService(runtime, storage);
                 pendingSources = new FilmSourceService(runtime, storage);
                 pendingMetadata = new FilmMetadataService(runtime, storage);

@@ -15,7 +15,6 @@ enum MusicAccountFeedbackNotSent: Error {
 final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
     static let key = "music.platform-playback-pending"
     static let retention: TimeInterval = 7 * 86_400
-    static let capacity = 256
 
     struct Entry: Codable, Sendable {
         enum Phase: String, Codable { case start, end }
@@ -62,7 +61,7 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
         var entries: [Entry] = []
     }
     private struct Admission {
-        let scope: String, occurredAt: TimeInterval
+        let scope: String
         var confirmed = false
     }
     private let lock = NSLock()
@@ -108,7 +107,7 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
         do {
             if let data = try resolvedStore()?.read(key: Self.key) {
                 let document = try JSONDecoder().decode(Document.self, from: data)
-                guard document.version == 1, document.entries.count <= Self.capacity,
+                guard document.version == 1,
                       Set(document.entries.map(\.id)).count == document.entries.count,
                       document.entries.allSatisfy({
                           !$0.scope.isEmpty && $0.generation >= 0 &&
@@ -127,10 +126,6 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
         var safe = draft.filter { $0.occurredAt <= now && $0.occurredAt + Self.retention > now }
         let starts = Set(safe.filter { $0.phase == .start }.map(\.instance))
         safe.removeAll { $0.phase == .end && !$0.startConfirmed && !starts.contains($0.instance) }
-        while safe.count > Self.capacity {
-            let instance = safe[0].instance
-            safe.removeAll { $0.instance == instance }
-        }
         return safe
     }
     func configure(_ next: MusicPlaybackFeedbackSetting, at now: TimeInterval) throws {
@@ -178,15 +173,12 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
             guard draft.contains(where: { $0.id == entry.id }) else { return .unconfirmed }
             try save(draft)
             if value.event == .start {
-                admissions[value.instanceID] = .init(scope: expected, occurredAt: value.occurredAt)
-                if admissions.count > Self.capacity, let first = admissions.min(by: { $0.value.occurredAt < $1.value.occurredAt })?.key {
-                    admissions.removeValue(forKey: first)
-                }
+                admissions[value.instanceID] = .init(scope: expected)
             } else { admissions.removeValue(forKey: value.instanceID) }
             return .registered
         }
     }
-    /// A bounded snapshot per real trigger, not a repeating retry loop.
+    /// A snapshot per real trigger, not a repeating retry loop.
     func candidates(at now: TimeInterval) throws -> [UUID] {
         try locked {
             guard armed, !frozen, !dispatchStopped, setting.enabled, authorization.isActive else { return [] }

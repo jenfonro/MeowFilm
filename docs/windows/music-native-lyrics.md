@@ -6,7 +6,7 @@
 
 `NativeMusicLyrics` 经同一个 `MusicPlatformClient` 发 `lyrics` 业务操作。WY／QQ／KG／KW／MG 的专有请求、QRC／KRC／Kuwo／MRC 转换和上游字段消费在 Node；Windows 保留通用时间轴解析、平台偏好、本地歌词、取消及 WPF 呈现。原生不再拥有平台专有歌词解密器或客户端设备 owner。
 
-`MusicLyricApplication` 连接当前歌曲、平台策略、账号／脚本失效和共享在途读取；`MusicLibraryOwner` 保存永久 songId 关联的本地歌词，`MusicPresentationCache` 保存可恢复展示歌词。实际字节、时间轴、文件输入和资源预算仍沿现有职责处理。
+`MusicLyricApplication` 连接当前歌曲、平台策略、账号／脚本失效和共享在途读取；`MusicLibraryOwner` 保存永久 songId 关联的本地歌词，`MusicPresentationCache` 保存可恢复展示歌词。用户本地歌词与解析输入不设容量门槛，时间轴和文件格式校验保留；展示缓存继续按其独立配额处理。
 
 ## 应用编排
 

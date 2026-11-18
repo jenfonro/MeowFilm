@@ -147,9 +147,8 @@ const clone = node => structuredClone(node);
 export function parseXML(text) {
   if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(text)) throw failure();
   const document = { children: [], namespaces: { xml: 'http://www.w3.org/XML/1998/namespace' } }, stack = [document];
-  let position = 0, nodes = 0;
+  let position = 0;
   function append(child) {
-    if (++nodes > 100000) throw failure('MEDIA_MANIFEST_LIMIT');
     stack.at(-1).children.push(child);
   }
   while (position < text.length) {
@@ -361,7 +360,6 @@ export function rewriteDASH(text, base, register, serialize = serializeXML) {
       for (const parent of bases) for (const child of ownBases) {
         const childBase = child.attrs['xml:base'] ? address(child.attrs['xml:base'], parent.url) : parent.url;
         next.push({ url: address(content(child), childBase), attrs: { ...parent.attrs, ...child.attrs } });
-        if (next.length > 1024) throw failure('MEDIA_MANIFEST_LIMIT');
       }
       bases = next;
     }

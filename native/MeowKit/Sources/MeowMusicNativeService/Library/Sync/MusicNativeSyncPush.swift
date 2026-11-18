@@ -57,7 +57,6 @@ extension NativeMusicService {
     func syncDispatch(_ mutation: MusicLibrarySyncMutation, local: MJ, session: MusicLibrarySyncSession,
                       selection: MusicLibrarySyncSelection, round: inout MusicNativeSyncRound) async throws -> Bool {
         try await syncCurrent(round)
-        try musicRequire(round.ledger.fences.count < 512, .limit)
         var fence = MusicNativeSyncFence(platform: session.platform, accountID: session.accountID, scope: session.scope,
             localID: local["id"].string, localRevision: local["revision"].int, mutation: .init(mutation))
         round.ledger.fences.append(fence)

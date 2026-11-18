@@ -27,13 +27,15 @@ final class CredentialStoreTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode(AccountIdentity.self, from: invalid))
     }
 
-    func testOpaqueCredentialRejectsEmptyAndOversizeValues() throws {
+    func testOpaqueCredentialRejectsEmptyAndRoundTripsLargeValues() throws {
         XCTAssertThrowsError(try AccountCredential(data: Data())) {
             XCTAssertEqual($0 as? CredentialStoreError, .invalidCredential)
         }
-        XCTAssertThrowsError(try AccountCredential(data: Data(repeating: 1, count: AccountCredential.maximumByteCount + 1)))
-        let maximum = try AccountCredential(data: Data(repeating: 1, count: AccountCredential.maximumByteCount))
-        XCTAssertEqual(maximum.dataRepresentation().count, AccountCredential.maximumByteCount)
+        let bytes = Data(repeating: 1, count: 256 * 1024 + 1)
+        let credential = try AccountCredential(data: bytes)
+        let record = CredentialRecord(credential: credential)
+        XCTAssertEqual(credential.dataRepresentation(), bytes)
+        XCTAssertEqual(try CredentialRecordCodec.decode(CredentialRecordCodec.encode(record)), record)
     }
 
     func testCredentialAndRecordDescriptionsAndReflectionAreRedacted() throws {

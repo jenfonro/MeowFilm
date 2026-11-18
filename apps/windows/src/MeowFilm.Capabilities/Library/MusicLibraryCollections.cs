@@ -44,7 +44,7 @@ public sealed partial class MusicLibraryOwner
         }
         if (method == "music.library.search")
         {
-            LJ.Fields(p, "query offset limit", "query"); string query = LJ.Text(p["query"], 200).ToLowerInvariant();
+            LJ.Fields(p, "query offset limit", "query"); string query = LJ.Text(p["query"], null).ToLowerInvariant();
             var matches = collections.OfType<JsonObject>().Where(c => !LJ.B(c["deleted"])).SelectMany(Order).Distinct()
                 .Select(DetailSong)
                 .Where(s => new[] { "title", "artist", "album" }.Any(f => LJ.S(s[f]).Contains(query, StringComparison.OrdinalIgnoreCase))).Select(NativeMusicSong.Normalize);
@@ -54,7 +54,7 @@ public sealed partial class MusicLibraryOwner
         JsonObject result;
         if (method == "music.library.create")
         {
-            LJ.Fields(p, "name songs", "name"); string name = LJ.Text(p["name"], 200); var songs = Songs(p, true);
+            LJ.Fields(p, "name songs", "name"); string name = LJ.Text(p["name"], null); var songs = Songs(p, true);
             long next = LJ.I(library["nextId"], 1); LJ.Require(next < LJ.MaxInteger, "LIMIT");
             LJ.Require(!collections.OfType<JsonObject>().Any(c => LJ.S(c["id"]) == "playlist:" + next), "CORRUPT_LIBRARY");
             var c = FreshCollection("playlist:" + next, name, "playlist"); library["nextId"] = next + 1;
@@ -107,7 +107,7 @@ public sealed partial class MusicLibraryOwner
                 var order = LJ.Array(p["order"]).Select(n => LJ.Text(n)).ToArray();
                 LJ.Require(order.Length == next.Length && order.Distinct().Count() == next.Length && order.All(next.Contains), "INVALID_ORDER"); next = order;
             }
-            if (method == "music.library.edit" && p["name"] is not null) { LJ.Require(LJ.S(c["kind"]) != "favorites", "INVALID_NAME"); c["name"] = LJ.Text(p["name"], 200); }
+            if (method == "music.library.edit" && p["name"] is not null) { LJ.Require(LJ.S(c["kind"]) != "favorites", "INVALID_NAME"); c["name"] = LJ.Text(p["name"], null); }
             foreach (string id in before.Concat(next).Distinct())
                 if (before.Contains(id) != next.Contains(id))
                 {

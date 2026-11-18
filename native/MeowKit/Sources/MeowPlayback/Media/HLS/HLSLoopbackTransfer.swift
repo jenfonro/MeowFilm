@@ -124,13 +124,14 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
               !transfer.client.closed, !data.isEmpty else { return }
         do {
             guard let response = transfer.response, !response.discardBody else { throw PlaybackNetworkError.invalidResponse }
-            let maximum: Int64 = transfer.resource.kind == .playlist ? Int64(HLSPlaylist.maximumInputBytes) :
-                transfer.resource.kind == .media ? 512 * 1024 * 1024 : 64 * 1024
-            guard Int64(data.count) <= maximum - transfer.received,
-                  response.length == nil || Int64(data.count) <= response.length! - transfer.received else {
+            let (received, overflow) = transfer.received.addingReportingOverflow(Int64(data.count))
+            guard !overflow, response.length == nil || received <= response.length! else {
+                throw PlaybackNetworkError.invalidResponse
+            }
+            if transfer.resource.kind == .playlist, received > HLSPlaylist.maximumInputBytes {
                 throw PlaybackNetworkError.resourceBudgetExceeded
             }
-            transfer.received += Int64(data.count)
+            transfer.received = received
             if transfer.resource.kind == .playlist {
                 transfer.playlist.append(data)
             } else {

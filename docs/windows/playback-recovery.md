@@ -79,4 +79,4 @@ Continuation 不进入持久化数据，也不改变 App 数据身份。来源�
 
 [共同播放缓存契约](../common/music/playback-sessions.md#顺序播放缓存)由 `MusicAudioFileCache.PreparedFile` 实现：单个 HTTP producer 顺序写，原生 read lease 从该文件读取，未取得字节异步等待；seek 和单次 read 取消不改变 producer。未知长度先接收到 EOF 再提供真实长度，不虚造长度。`PlaybackCacheFraction` 从连续写入及最终提交事实发布。暂停保留 producer，换曲／关闭撤销并排空，清缓存保留当前已打开读取但禁止旧发布。影视和 HLS 继续使用原有媒体协议，不接音乐下载。
 
-共享图片和展示歌词使用 `music.presentation-resources.v1`：图片按完整 URL、歌词按永久 songId 保存，二者合计沿原 8 MiB 文档预算、30 天淘汰及实际播放续期，不按歌曲数量固定截断。单音频淘汰不删除共享图或健康歌词；定向清图片不清歌词和音频，既有全部音乐缓存入口仍保持原覆盖种类。资源归属与清理规则见[共同展示资源契约](../common/music/presentation-resources.md)。
+共享图片和展示歌词使用 `music-presentation-v2` 逐文件缓存：图片按完整 URL、歌词按永久 songId 保存，二者合计沿原 8 MiB 资源字节预算、30 天淘汰及实际播放续期，不按歌曲数量固定截断。读写只处理本资源，不复制或重写整个缓存。单音频淘汰不删除共享图或健康歌词；定向清图片不清歌词和音频，既有全部音乐缓存入口仍保持原覆盖种类。资源归属与清理规则见[共同展示资源契约](../common/music/presentation-resources.md)。

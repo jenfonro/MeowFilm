@@ -349,7 +349,7 @@ public static class AppRuntimeClientTests
             await using var port = new AppRuntimeClient(_ => Task.FromResult<IRuntimeSession>(session));
             port.Start();
             using var caller = new CancellationTokenSource();
-            var image = port.ReadImageAsync("/v1/tmdb/images/w500/a.jpg", 4 * 1024 * 1024, caller.Token);
+            var image = port.ReadImageAsync("/v1/tmdb/images/w500/a.jpg", caller.Token);
             caller.Cancel();
             BridgeTests.Equal(true, session.ImageCancellation.IsCancellationRequested);
             BridgeTests.Equal(false, image.IsCompleted);
@@ -365,7 +365,7 @@ public static class AppRuntimeClientTests
             var session = new Session { ImageResponse = response.Task };
             var port = new AppRuntimeClient(_ => Task.FromResult<IRuntimeSession>(session));
             port.Start();
-            var image = port.ReadImageAsync("/v1/tmdb/images/w500/a.jpg", 4 * 1024 * 1024);
+            var image = port.ReadImageAsync("/v1/tmdb/images/w500/a.jpg");
             await port.DisposeAsync();
             BridgeTests.Equal(true, session.ImageCancellation.IsCancellationRequested);
             BridgeTests.Equal(false, image.IsCompleted);
@@ -383,7 +383,6 @@ public static class AppRuntimeClientTests
             BridgeTests.Equal(true, ReferenceEquals(bytes, await port.ReadImageAsync(reference)));
             BridgeTests.Equal(reference, session.ImageReference);
             BridgeTests.Equal(1, session.UnboundedImages);
-            BridgeTests.Equal(0, session.BoundedImages);
         });
         yield return new("app-runtime: cancelled full-size image waits for physical settlement and clears late bytes", async () =>
         {
@@ -400,7 +399,6 @@ public static class AppRuntimeClientTests
             try { await image; throw new InvalidOperationException("Expected image cancellation"); }
             catch (OperationCanceledException) { }
             BridgeTests.Equal(1, session.UnboundedImages);
-            BridgeTests.Equal(0, session.BoundedImages);
             BridgeTests.Equal(true, bytes.All(value => value == 0));
         });
         yield return new("app-runtime: shutdown fences a late full-size image and clears its returned bytes", async () =>
@@ -416,7 +414,6 @@ public static class AppRuntimeClientTests
             byte[] bytes = [1, 2, 3]; response.SetResult(bytes);
             await BridgeTests.Expect("CLOSED", () => image);
             BridgeTests.Equal(1, session.UnboundedImages);
-            BridgeTests.Equal(0, session.BoundedImages);
             BridgeTests.Equal(true, bytes.All(value => value == 0));
         });
         yield return new("app-runtime: shutdown cancels and fences a late successful upload", async () =>
@@ -437,13 +434,11 @@ public static class AppRuntimeClientTests
 
     private sealed class Session : IRuntimeSession
     {
-        public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
-        { BoundedImages++; ImageReference = reference; ImageCancellation = cancellationToken; return ImageResponse ?? Task.FromResult(new byte[] { 1 }); }
         public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default)
         { UnboundedImages++; ImageReference = reference; ImageCancellation = cancellationToken; return ImageResponse ?? Task.FromResult(new byte[] { 1 }); }
 
         public int Calls, Uploads, Disposals;
-        public int BoundedImages, UnboundedImages;
+        public int UnboundedImages;
         public string? ImageReference;
         public Task<JsonElement>? Response;
         public Task<JsonElement>? UploadResponse;

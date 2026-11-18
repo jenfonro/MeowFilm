@@ -102,7 +102,6 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
                 nextDocument["version"] = 1; nextDocument["revision"] = next.Revision;
                 nextDocument["enabled"] = JsonSerializer.SerializeToNode(targets);
                 data = JsonSerializer.SerializeToUtf8Bytes(nextDocument);
-                if (data.Length > 1024) throw Error("LIMIT");
                 preservesWyConsent = current.Enabled.Contains("wy") && targets.Contains("wy");
                 // Fence all reporting BEFORE admitting a settings mutation. A lost
                 // acknowledgment must not leave the old enabled policy operational.
@@ -141,8 +140,6 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
         }
         try
         {
-            if (saved.Data.Length > 1024)
-                throw Error("CORRUPT_STORAGE");
             using var doc = JsonDocument.Parse(saved.Data, new() { MaxDepth = 4 });
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object) throw Error("CORRUPT_STORAGE");

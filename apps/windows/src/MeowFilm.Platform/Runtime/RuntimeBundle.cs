@@ -17,7 +17,11 @@ public sealed partial class RuntimeBundle
     [GeneratedRegex(@"\A[0-9a-f]{64}\z", RegexOptions.CultureInvariant)]
     private static partial Regex HashPattern();
 
-    public static RuntimeBundle Verify(string directory, string expectedProduct, IReadOnlyList<RuntimeModule> expectedModules)
+    [GeneratedRegex(@"\.(?:[cm]?js|json|node|dll|dylib|so(?:\.[0-9]+)*|exe|a|o|wasm|framework|xcframework)\z",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ExecutionFormatPattern();
+
+    public static RuntimeBundle Verify(string directory, string expectedProduct)
     {
         try
         {
@@ -26,7 +30,7 @@ public sealed partial class RuntimeBundle
             var manifestPath = Path.Combine(root, "runtime-manifest.json");
             EnsureOrdinaryAncestors(manifestPath);
             var info = new FileInfo(manifestPath);
-            if (!info.Exists || info.Length is 0 or > 4 * 1024 * 1024) Invalid();
+            if (!info.Exists || info.Length == 0) Invalid();
             using var document = JsonDocument.Parse(File.ReadAllBytes(manifestPath), new JsonDocumentOptions { MaxDepth = 32 });
             var manifest = document.RootElement;
             if (manifest.GetProperty("schemaVersion").GetInt32() != 1
@@ -35,17 +39,18 @@ public sealed partial class RuntimeBundle
                 || manifest.GetProperty("transport").GetString() != "windows-http-v1"
                 || manifest.GetProperty("assemblyProfile").GetString() != "common-native"
                 || manifest.GetProperty("platform").GetString() != "win32") Invalid();
-            var modules = manifest.GetProperty("modules").EnumerateArray().Select(item => item.GetString()).ToArray();
-            if (modules.Length != expectedModules.Count || modules.Distinct(StringComparer.Ordinal).Count() != modules.Length
-                || !modules.SequenceEqual(expectedModules.Select(item => item.Id), StringComparer.Ordinal)) Invalid();
             var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var file in manifest.GetProperty("files").EnumerateArray())
             {
                 var name = file.GetProperty("path").GetString()!;
+                if (!names.Add(name.Normalize())) Invalid();
+                var path = SafePath(root, name);
+                if (file.TryGetProperty("role", out var role) && role.ValueKind == JsonValueKind.String
+                    && role.ValueEquals("documentation")
+                    && !ExecutionFormatPattern().IsMatch(name)) continue;
                 var hash = file.GetProperty("sha256").GetString()!;
                 var length = file.GetProperty("bytes").GetInt64();
-                if (!names.Add(name.Normalize()) || !HashPattern().IsMatch(hash) || length < 0) Invalid();
-                var path = SafePath(root, name);
+                if (!HashPattern().IsMatch(hash) || length < 0) Invalid();
                 EnsureOrdinaryAncestors(path);
                 var actual = new FileInfo(path);
                 if (!actual.Exists || actual.Length != length) Invalid();
@@ -71,7 +76,8 @@ public sealed partial class RuntimeBundle
             else
             {
                 var relative = Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
-                if (relative != "runtime-manifest.json" && !names.Contains(relative.Normalize())) Invalid();
+                if (relative != "runtime-manifest.json" && !names.Contains(relative.Normalize())
+                    && Path.GetExtension(relative).ToLowerInvariant() is not (".md" or ".txt")) Invalid();
             }
         }
     }

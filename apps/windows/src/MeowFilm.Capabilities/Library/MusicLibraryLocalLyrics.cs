@@ -19,7 +19,6 @@ public sealed partial class MusicLibraryOwner
         LJ.Fields(state, "schema items", "schema items");
         LJ.Require(LJ.I(state["schema"]) == 1);
         var rows = LJ.Array(state["items"]);
-        LJ.Require(rows.Count <= 64 && LJ.Bytes(state).Length <= 2 * 1024 * 1024, "LIMIT");
         var identities = new HashSet<string>(StringComparer.Ordinal);
         foreach (var item in rows)
         {
@@ -28,7 +27,6 @@ public sealed partial class MusicLibraryOwner
             LJ.Require(Guid.TryParseExact(LJ.S(row["songId"]), "D", out _) && identities.Add(LJ.S(row["songId"])) &&
                 LJ.S(row["contentHash"]).Length == 64, "CORRUPT_STORAGE");
             ValidateDisplayLines(LJ.Array(row["lines"]));
-            LJ.Require(LJ.Bytes(row).Length <= 256 * 1024, "LIMIT");
         }
     }
 
@@ -61,7 +59,7 @@ public sealed partial class MusicLibraryOwner
         RequireCurrentLyricSong(doc, key);
         LJ.Require(p["text"] is JsonValue value && value.TryGetValue<string>(out _), "INVALID_LYRIC_RESPONSE");
         string text = LJ.S(p["text"]);
-        LJ.Require(text.Length is > 0 and <= 65536 && !text.Any(c => c < 32 && c is not ('\r' or '\n' or '\t')),
+        LJ.Require(text.Length > 0 && !text.Any(c => c < 32 && c is not ('\r' or '\n' or '\t')),
             "INVALID_LYRIC_RESPONSE");
         var lines = JsonNode.Parse(MusicLyricTiming.Parse(text, duration: LJ.N(song["duration"])).GetRawText())!.AsArray();
         LJ.Require(lines.Count > 0, "INVALID_LYRIC_RESPONSE");

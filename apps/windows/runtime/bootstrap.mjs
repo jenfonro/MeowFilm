@@ -7,8 +7,6 @@ const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const sessionPattern = new RegExp(`^${uuid}$(?![\\s\\S])`);
 const pipePattern = new RegExp(`^meowfilm-${uuid}$(?![\\s\\S])`);
 
-const bootstrapBytes = 64 * 1024;
-
 /** Same fixed identity as native AppDataPaths, delivered only through the private pipe. */
 export function windowsScriptDataRoot(input) {
   if (typeof input !== 'string' || !isAbsolute(input) || /^[/\\]{2}/.test(input) ||
@@ -150,8 +148,6 @@ export async function startWindowsRuntimeOnPipe(stream, {
       return;
     }
     length += bytes.length;
-    // The resource bound includes the line terminator, never business bodies.
-    if (length > bootstrapBytes) { stop('INVALID_REQUEST'); return; }
     const newline = bytes.indexOf(10);
     if (newline !== -1 && newline !== bytes.length - 1) { stop('INVALID_REQUEST'); return; }
     chunks.push(bytes);
@@ -161,7 +157,7 @@ export async function startWindowsRuntimeOnPipe(stream, {
       const value = decodeJSONValue(Buffer.concat(chunks, length).subarray(0, -1));
       chunks = [];
       if (value === null || typeof value !== 'object' || Array.isArray(value) ||
-          Object.keys(value).length !== (value.nativeSettings === true ? 3 : 2) || value.sessionId !== sessionId ||
+          value.sessionId !== sessionId ||
           !Object.hasOwn(value, 'dataRoot')) {
         throw new BridgeError('INVALID_REQUEST');
       }

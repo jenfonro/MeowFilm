@@ -25,8 +25,7 @@ public actor MusicRemoteQueueSource {
     private var contentRevision = UUID()
     private var closed = false
     private var closing: Task<Void, Never>?
-    private var byteCount = 0
-    public static let maximumBytes = 6 * 1024 * 1024
+    private static let maximumReadbackCacheBytes = 6 * 1024 * 1024
 
     public init(context: MusicRemoteQueueContext,
                 authorization: MusicQueueAuthorization = MusicQueueAuthorization(),
@@ -91,20 +90,18 @@ public actor MusicRemoteQueueSource {
         loading = true; defer { loading = false }
         let reading = MusicQueueAuthorization(parent: intent)
         let value = try await withTaskCancellationHandler {
-            try await readPage(cursor, remainingBytes: Self.maximumBytes - byteCount, intent: reading, caching: true)
+            try await readPage(cursor, intent: reading, caching: true)
         } onCancel: { reading.revoke() }
-        let bytes = value.items.reduce(0) { $0 + $1.byteCount }
-        try reading.perform { pages[key] = value; byteCount += bytes }
+        try reading.perform { pages[key] = value }
         return value
     }
-    private func readPage(_ cursor: String?, remainingBytes: Int, intent: MusicQueueAuthorization,
+    private func readPage(_ cursor: String?, intent: MusicQueueAuthorization,
                           caching: Bool) async throws -> MusicQueueReferencePage {
         switch load {
         case .fresh(let load):
             let value = try await load(cursor)
             try await validate(); try intent.check()
-            try checkPage(cursor: cursor, next: value.cursor,
-                          bytes: value.items.reduce(0) { $0 + $1.data.count }, remainingBytes: remainingBytes, caching: caching)
+            try checkPage(cursor: cursor, next: value.cursor, caching: caching)
             guard let adopt else { throw MusicServiceError.unavailable }
             let items = try await adopt(value.items, intent)
             try await validate(); try intent.check()
@@ -112,15 +109,13 @@ public actor MusicRemoteQueueSource {
         case .references(let load):
             let value = try await load(cursor, intent)
             try await validate(); try intent.check()
-            try checkPage(cursor: cursor, next: value.cursor,
-                          bytes: value.items.reduce(0) { $0 + $1.byteCount }, remainingBytes: remainingBytes, caching: caching)
+            try checkPage(cursor: cursor, next: value.cursor, caching: caching)
             return value
         }
     }
-    private func checkPage(cursor: String?, next: String?, bytes: Int, remainingBytes: Int, caching: Bool) throws {
+    private func checkPage(cursor: String?, next: String?, caching: Bool) throws {
         guard next != cursor || cursor == nil,
               !caching || next == nil || pages[next!] == nil else { throw MusicServiceError.invalidResponse }
-        guard bytes <= remainingBytes else { throw MusicServiceError.limit }
     }
     private func projectTracks(_ items: [MusicQueueTrackReference]) async throws -> [MusicNativeTrackData] {
         guard let project else { throw MusicServiceError.unavailable }
@@ -161,19 +156,18 @@ public actor MusicRemoteQueueSource {
         // The write may succeed remotely even if its acknowledgement or the
         // subsequent read fails. Never expose pre-write pages under a new style
         // revision, and never POST again merely to reconcile that uncertainty.
-        pages.removeAll(); byteCount = 0
+        pages.removeAll()
         defer { savingStyle = false }
         let result = try await dailyStyle.save(selection)
         // Preserve the actual dispatched write receipt even after the page
         // closes. Only current resources may cache the following read.
         let bytes = result.page.items.reduce(0) { $0 + $1.data.count }
-        if !closed, authorization.isActive, bytes <= Self.maximumBytes, let adopt {
+        if !closed, authorization.isActive, bytes <= Self.maximumReadbackCacheBytes, let adopt {
             // Adoption is optional readback work, not the dispatched write.
             // Its failure must never replace or replay the original receipt.
             if let items = try? await adopt(result.page.items, authorization), !closed, authorization.isActive {
                 pages = ["": .init(items: items, total: result.page.total, nextPage: result.page.nextPage,
                     cursor: result.page.cursor, dailyStyle: result.page.dailyStyle)]
-                byteCount = bytes
             }
         }
         return result
@@ -191,13 +185,13 @@ public actor MusicRemoteQueueSource {
         try await validate(); try intent.check()
         guard !loading else { throw MusicServiceError.busy }
         loading = true; defer { loading = false }
-        var rows: [MusicQueueTrackReference] = [], cursor: String?, bytes = 0, visited = Set<String>()
+        var rows: [MusicQueueTrackReference] = [], cursor: String?, visited = Set<String>()
         repeat {
             try intent.check(); try await validate()
             guard visited.insert(cursor ?? "").inserted else { throw MusicServiceError.invalidResponse }
-            let value = try await readPage(cursor, remainingBytes: Self.maximumBytes - bytes, intent: intent, caching: false)
+            let value = try await readPage(cursor, intent: intent, caching: false)
             try intent.check(); try await validate()
-            bytes += value.items.reduce(0) { $0 + $1.byteCount }; rows += value.items; cursor = value.cursor
+            rows += value.items; cursor = value.cursor
         } while cursor != nil
         return rows
     }
@@ -205,7 +199,7 @@ public actor MusicRemoteQueueSource {
     public func close() async {
         revoke()
         if let closing { await closing.value; return }
-        closed = true; pages.removeAll(); byteCount = 0
+        closed = true; pages.removeAll()
         let release = self.release
         let closing = Task { await release() }
         self.closing = closing

@@ -81,14 +81,6 @@ public sealed partial class MusicCapability
 
     private void RememberRecording(MusicRecordingRow row)
     {
-        if (!recordingPlatforms.ContainsKey(row.SongId) && recordingPlatforms.Count >= 256)
-        {
-            string oldest = recordingPlatforms.Keys.First();
-            recordingPlatforms.Remove(oldest);
-            explicitRecordings.Remove(oldest);
-            foreach (var key in recordingChoices.Keys.Where(key => key.StartsWith(oldest + "\0", StringComparison.Ordinal)).ToArray())
-                recordingChoices.Remove(key);
-        }
         recordingPlatforms[row.SongId] = row.Platform;
         recordingChoices[row.SongId + "\0" + row.Platform] = row.SourceKey;
     }

@@ -1810,7 +1810,6 @@ test('Cat source file failures affect only the enabled instance',
       ['encoding', Buffer.from([0xc3, 0x28]), 'SCRIPT_PROTOCOL_ERROR'],
       ['bom', Buffer.from('\uFEFFmodule.exports = {};'), 'SCRIPT_PROTOCOL_ERROR'],
       ['syntax', Buffer.from('module.exports = { home( };'), 'SCRIPT_EXCEPTION'],
-      ['oversized', Buffer.alloc(SCRIPT_LIMITS.maxSourceBytes + 1, 0x20), 'RESOURCE_LIMIT'],
     ]) {
       await t.test(kind, async t => {
         const root = rootFor(t);
@@ -8435,7 +8434,7 @@ test('Cat rejects malformed settings and a non-file source without replacing the
   assert.equal(fs.statSync(path).isDirectory(), true);
 });
 
-test('Cat applies JSON config material and rejects oversized versions before installation',
+test('Cat applies JSON config material and preserves long versions across cold reopen',
   { timeout: 30000 }, async t => {
     const root = rootFor(t);
     const runtime = createCatRuntime({ dataRoot: root });
@@ -8460,12 +8459,19 @@ test('Cat applies JSON config material and rejects oversized versions before ins
     });
     const settings = JSON.parse(readFileSync((await runtime.status()).settingsPath, 'utf8'));
     assert.deepEqual(settings.scripts[0].config.jsonValue, result.configValue);
-    await assert.rejects(runtime.install({
-      installationId: 'oversized-version', source, config: {},
-      version: 'x'.repeat(129), enabled: false,
-    }), { code: 'INVALID_ARGUMENT' });
-    assert.equal((await runtime.status()).instances.some(item =>
-      item.installationId === 'oversized-version'), false);
+    const version = 'x'.repeat(129);
+    await runtime.install({
+      installationId: 'long-version', source, config: {},
+      version, enabled: false,
+    });
+    assert.equal((await runtime.status()).instances.find(item =>
+      item.installationId === 'long-version').version, version);
+    await runtime.close();
+    const reopened = createCatRuntime({ dataRoot: root });
+    t.after(() => reopened.close());
+    await reopened.start();
+    assert.equal((await reopened.status()).instances.find(item =>
+      item.installationId === 'long-version').version, version);
   });
 
 test('Cat runtime cannot be restarted or queried after close', async t => {

@@ -126,7 +126,7 @@ public final class FilmSettingsDocument: @unchecked Sendable {
     }
 
     private func encode(_ value: RuntimeValue) throws -> Data {
-        guard case .object = value, let bytes = try? RuntimeJSON.encode(value), bytes.count <= 8 * 1024 * 1024 else {
+        guard case .object = value, let bytes = try? RuntimeJSON.encode(value) else {
             throw FilmSettingsStorageError.invalidDocument
         }
         return bytes

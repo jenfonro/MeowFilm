@@ -85,7 +85,6 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
         {
             cancellationToken.ThrowIfCancellationRequested();
             var p = Json(parameters ?? new { });
-            Require(System.Text.Encoding.UTF8.GetByteCount(p.GetRawText()) <= 8192, "LIMIT");
             if (method == "music.recommendations.start")
                 return await StartAsync(Parse(p), cancellationToken).ConfigureAwait(false);
             if (method == "music.recommendations.get")
@@ -238,7 +237,6 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
         try
         {
             token.ThrowIfCancellationRequested();
-            Require(System.Text.Encoding.UTF8.GetByteCount(input.GetRawText()) <= 8192, "LIMIT");
             var config = Parse(input);
             lock (gate)
             {

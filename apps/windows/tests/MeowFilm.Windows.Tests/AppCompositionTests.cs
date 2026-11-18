@@ -36,9 +36,6 @@ public static class AppCompositionTests
         yield return new("App shell corrupt current queue fails once without rewriting data", () => Sta(() =>
             RejectedShellStartup("queue", """{"schema":1,"entries":[],"currentId":"entry-1","priority":[],"source":null}""",
                 "播放队列数据无效或格式不兼容")));
-        yield return new("App shell corrupt current history fails once without rewriting data", () => Sta(() =>
-            RejectedShellStartup("history", """{"schema":1,"playlists":[],"days":[],"extra":true}""",
-                "播放历史数据无效或格式不兼容")));
     }
     private static Task Identity()
     {
@@ -46,24 +43,12 @@ public static class AppCompositionTests
         Check(AppDataPaths.Current == AppDataPaths.ForIdentity("aggregate"));
         Check(AppDataPaths.Current.Documents == Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "meowfilm", "aggregate"));
-        Check(AppIdentity.ScriptModules.Select(m => (m.Id, m.Version)).SequenceEqual(new[]
-        {
-            ("music", "0.8.0"),
-            ("cat", "0.2.0"),
-            ("source", "0.3.0"),
-            ("pan", "0.1.0"),
-            ("tmdb", "0.1.0"),
-            ("douban", "0.1.0"),
-            ("film", "0.1.0"),
-            ("netease", "0.1.0"),
-            ("music-platform", "0.1.0")
-        }));
         Check(AppIdentity.NativeCollections.Count == 0, "music sources are stored by the shared runtime module");
         Check(AppIdentity.NativeNamespaces.Contains("music.accounts.v2"));
         Check(AppIdentity.NativeNamespaces.Contains("music.fm-selection.v2"));
         Check(AppIdentity.NativeNamespaces.Contains("film.library.v1"));
         Check(AppIdentity.NativeNamespaces.Contains("novel.library.v1"));
-        Check(AppIdentity.ProtectedNamespaces.SequenceEqual(new[] { "music.accounts.v2" }));
+        Check(AppIdentity.ProtectedNamespaces.Contains("music.accounts.v2"));
         Check(AppDataPaths.Current.Caches != AppDataPaths.Current.Documents &&
             !AppDataPaths.Current.Caches.StartsWith(AppDataPaths.Current.Documents + Path.DirectorySeparatorChar,
                 StringComparison.OrdinalIgnoreCase));
@@ -78,7 +63,7 @@ public static class AppCompositionTests
         await using var runtime = new AppRuntimeClient(async token =>
             await NodeRuntime.StartAsync(Required("MEOWFILM_TEST_NODE"),
                 RuntimeBundle.Verify(Path.Combine(Required("MEOWFILM_TEST_RUNTIME_ROOT"), "aggregate"),
-                    AppIdentity.RuntimeId, AppIdentity.ScriptModules), AppIdentity.ScriptModules,
+                    AppIdentity.RuntimeId), AppIdentity.ScriptModules,
                 Path.Combine(data, "script-runtime"), token));
         await using var playback = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
         await using var music = new MusicCapability(runtime, store, MusicTestStores.For(store), playback);
@@ -111,9 +96,10 @@ public static class AppCompositionTests
         for (int pass = 0; pass < 2; pass++)
         {
             await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
+            await using var libraryStore = new MusicLibraryDatabase(Path.Combine(data, "music-library"));
             await using var runtime = new AppRuntimeClient(_ => throw new InvalidOperationException("Node unavailable"));
             runtime.Start();
-            await using var owner = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
+            await using var owner = new MusicNativeApplication(store, libraryStore, runtime);
             if (pass == 0)
             {
                 var playlist = await owner.ExecuteAsync("music.library.create", new { name = "合成歌单" });
@@ -137,9 +123,10 @@ public static class AppCompositionTests
         for (int pass = 0; pass < 2; pass++)
         {
             await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
+            await using var libraryStore = new MusicLibraryDatabase(Path.Combine(data, "music-library"));
             await using var runtime = StartupRuntime();
             await using var playback = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
-            var application = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
+            var application = new MusicNativeApplication(store, libraryStore, runtime);
             await using var music = new MusicCapability(application, store, playback);
             var lifecycle = new AppShutdown([music], []);
             var shell = new ShellWindow([music], [], lifecycle.CloseAsync, lifecycle.ForceReleaseAsync);

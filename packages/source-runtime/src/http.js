@@ -18,15 +18,14 @@ function jsonObject(value) {
 
 export function normalizeHeaders(value) {
   const input = jsonObject(value);
-  sourceRequire(Object.keys(input).length <= 128);
   const output = {};
   for (const [key, raw] of Object.entries(input)) {
-    sourceRequire(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,128}$/.test(key));
+    sourceRequire(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(key));
     const values = Array.isArray(raw) ? raw : [raw];
-    sourceRequire(values.length > 0 && values.length <= 32);
+    sourceRequire(values.length > 0);
     output[key] = values.map(item => {
       const value = String(item);
-      sourceRequire(value.length <= 16384 && !/[\r\n]/.test(value));
+      sourceRequire(!/[\r\n]/.test(value));
       return value;
     });
   }

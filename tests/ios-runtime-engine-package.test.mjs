@@ -3,20 +3,25 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fixture, hash, paths, readJSON, repository, target } from './ios-native-package-support.mjs';
+import { rejectRestoredPlatformSource } from './runtime-source-change-support.mjs';
 
 async function rejects(f, code) {
   await assert.rejects(f.pack(), { code });
   assert.equal(readJSON(join(f.output, 'runtime-manifest.json')).status, 'failed');
 }
 
-test('iOS wrapper packages the nine-module App closure and separate pre-sign framework identity', async t => {
+test('iOS packaging binds emitted platform bytes to the resolved inputs even after source restoration', async t => {
+  const f = fixture(t);
+  await rejectRestoredPlatformSource(f.pack, join(f.root, 'apps/ios/runtime/bootstrap.mjs'), f.output);
+});
+
+test('iOS wrapper packages the App closure and separate pre-sign framework identity', async t => {
   const f = fixture(t), manifest = await f.pack();
   assert.equal(manifest.status, 'complete');
   assert.equal(manifest.entry, 'app/ios/entries/aggregate.mjs');
   assert.equal(manifest.platform, 'ios');
   assert.equal(manifest.transport, 'runtime.http.v1');
   assert.equal(manifest.assemblyProfile, 'common-native');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
   assert.deepEqual(manifest.target, target);
   assert.deepEqual(manifest.fileHashExcludes, ['runtime-manifest.json']);
   assert.equal(manifest.trustedNative.length, 1);
@@ -38,9 +43,6 @@ test('iOS wrapper packages the nine-module App closure and separate pre-sign fra
   assert.equal(manifest.dependencies.some(dependency => dependency.name === 'undici'), false);
   assert.equal(manifest.files.some(file => /(?:^|\/)node_modules\/undici\//.test(file.path)), false);
   assert.equal(manifest.files.some(file => /\.(?:node|wasm|dylib|so|dll)$/i.test(file.path)), false);
-  const entry = readFileSync(join(f.output, manifest.entry), 'utf8');
-  for (const name of ['music-script', 'cat-script', 'source-runtime', 'pan-runtime', 'metadata-data', 'netease-token'])
-    assert.ok(entry.includes(`../../modules/${name}.mjs`));
   const imports = manifest.relocations.find(file => file.path === manifest.entry).imports;
   assert.ok(imports.some(({ from, to }) => from === '../../../runtime/entry.mjs' && to === '../../entry.mjs'));
   assert.ok(manifest.dependencies.some(dependency => dependency.name === '@meowfilm/film-playback'));
@@ -66,14 +68,12 @@ test('iOS wrapper packages the nine-module App closure and separate pre-sign fra
   }
 });
 
-test('iOS wrapper relocates only the fixed internal descriptor helper onto the packaged native loader', async t => {
+test('iOS wrapper relocates the private descriptor capability onto the packaged native loader', async t => {
   const f = fixture(t), source = '../../../packages/script-host/src/native-engine.js';
-  const bootstrap = readFileSync(join(repository, 'apps/ios/runtime/bootstrap.mjs'), 'utf8');
-  assert.ok(bootstrap.includes(`import { duplicateBootstrapDescriptor } from '${source}';`));
   const manifest = await f.pack(), path = 'app/ios/bootstrap.mjs';
   const relocated = '../../node_modules/@meowfilm/script-host/src/native-engine.js';
-  assert.ok(readFileSync(join(f.output, path), 'utf8')
-    .includes(`from '${relocated}'`));
+  assert.match(readFileSync(join(f.output, path), 'utf8'),
+    /from ['"]\.\.\/\.\.\/node_modules\/@meowfilm\/script-host\/src\/native-engine\.js['"]/);
   assert.deepEqual(manifest.relocations.find(file => file.path === path).imports.find(value => value.from === source),
     { from: source, to: relocated });
   assert.deepEqual(manifest.relocations.find(file => file.path === path).imports.find(value =>
@@ -82,19 +82,61 @@ test('iOS wrapper relocates only the fixed internal descriptor helper onto the p
   assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/script-host/src/native-engine.js'));
 });
 
+test('iOS packaging follows platform helpers, public exports and literal dynamic imports', async t => {
+  const f = fixture(t), bootstrap = 'apps/ios/runtime/bootstrap.mjs';
+  f.write(bootstrap, `${readFileSync(join(f.root, bootstrap), 'utf8')}
+import './helpers/extra.mjs';
+import './helpers/extra.mjs';
+await import('./helpers/extra.mjs');
+`);
+  f.write('apps/ios/runtime/helpers/extra.mjs', `
+import 'node:child_process';
+import 'path';
+import '@meowfilm/runtime-bridge/json';
+export { value } from './nested/leaf.mjs';
+await import('node:fs');
+await import('../../../runtime/contracts.mjs');
+`);
+  f.write('apps/ios/runtime/helpers/nested/leaf.mjs', 'export const value = 1;\n');
+  const manifest = await f.pack();
+  assert.equal(manifest.status, 'complete');
+  for (const path of ['app/ios/helpers/extra.mjs', 'app/ios/helpers/nested/leaf.mjs',
+    'node_modules/@meowfilm/runtime-bridge/src/json-value.js'])
+    assert.ok(manifest.files.some(file => file.path === path), path);
+  assert.match(readFileSync(join(f.output, 'app/ios/helpers/extra.mjs'), 'utf8'),
+    /import\(['"]\.\.\/\.\.\/contracts\.mjs['"]\)/);
+});
+
+test('iOS packaging ignores unreferenced ordinary platform files', async t => {
+  const f = fixture(t);
+  f.write('apps/ios/runtime/entries/other.mjs', "import 'uninstalled-package';\n");
+  f.write('apps/ios/runtime/notes.txt', 'ordinary build notes\n');
+  const manifest = await f.pack();
+  assert.equal(manifest.status, 'complete');
+  assert.equal(manifest.files.some(file => file.path === 'app/ios/entries/other.mjs'), false);
+});
+
 for (const [name, change, code] of [
-  ['an extra platform source', f => f.write('apps/ios/runtime/entries/other.mjs', 'export {};'), 'IOS_CLOSURE'],
-  ['a missing platform entry', f => f.remove('apps/ios/runtime/entries/aggregate.mjs'), 'IOS_CLOSURE'],
-  ['a missing private settings capability', f => f.remove('apps/runtime/native-settings.mjs'), 'IOS_CLOSURE'],
+  ['a missing platform entry', f => f.remove('apps/ios/runtime/entries/aggregate.mjs'), 'MISSING_SOURCE'],
+  ['a missing private settings capability', f => f.remove('apps/runtime/native-settings.mjs'), 'MISSING_SOURCE'],
   ['a missing music module', f => f.remove('apps/runtime/modules/music-platform.mjs'), 'MISSING_SOURCE'],
   ['a missing music license', f => f.remove('LICENSES/KuGouMusicApi-MIT.txt'), 'MISSING_SOURCE'],
-  ['an unexpected entry import', f => f.write('apps/ios/runtime/entries/aggregate.mjs',
-    "import { fork } from 'node:child_process';\n" + readFileSync(join(repository, 'apps/ios/runtime/entries/aggregate.mjs'))), 'IOS_IMPORT'],
-  ['a dynamic platform import', f => f.write('apps/ios/runtime/bootstrap.mjs',
-    readFileSync(join(repository, 'apps/ios/runtime/bootstrap.mjs')) + "\nawait import('node:fs');\n"), 'IOS_IMPORT'],
+  ['a missing imported helper', f => f.write('apps/ios/runtime/bootstrap.mjs',
+    readFileSync(join(repository, 'apps/ios/runtime/bootstrap.mjs')) + "\nawait import('./missing.mjs');\n"), 'MISSING_SOURCE'],
+  ['an unresolved platform import', f => f.write('apps/ios/runtime/bootstrap.mjs',
+    readFileSync(join(repository, 'apps/ios/runtime/bootstrap.mjs')) + "\nawait import(moduleName);\n"), 'PLATFORM_IMPORT'],
+  ['an unknown Node builtin', f => f.write('apps/ios/runtime/bootstrap.mjs',
+    readFileSync(join(repository, 'apps/ios/runtime/bootstrap.mjs')) + "\nimport 'node:not-a-real-builtin';\n"), 'PLATFORM_IMPORT'],
+  ['a cross-platform private import', f => f.write('apps/ios/runtime/bootstrap.mjs',
+    readFileSync(join(repository, 'apps/ios/runtime/bootstrap.mjs')) + "\nimport '../../windows/runtime/bootstrap.mjs';\n"), 'PLATFORM_IMPORT'],
+  ['a relative import outside the runtime', f => f.write('apps/ios/runtime/bootstrap.mjs',
+    readFileSync(join(repository, 'apps/ios/runtime/bootstrap.mjs')) + "\nimport '../../../outside.mjs';\n"), 'PLATFORM_IMPORT'],
   ['another internal package path', f => f.write('apps/ios/runtime/bootstrap.mjs',
     "import { createScriptHost } from '../../../packages/script-host/src/index.js';\n" +
-    readFileSync(join(repository, 'apps/ios/runtime/bootstrap.mjs'))), 'IOS_IMPORT'],
+    readFileSync(join(repository, 'apps/ios/runtime/bootstrap.mjs'))), 'PLATFORM_IMPORT'],
+  ['an unexported package path', f => f.write('apps/ios/runtime/bootstrap.mjs',
+    readFileSync(join(repository, 'apps/ios/runtime/bootstrap.mjs')) + "\nimport '@meowfilm/runtime-bridge/src/index.js';\n"), 'PLATFORM_IMPORT'],
+  ['a missing public export target', f => f.remove('packages/runtime-bridge/src/json-value.js'), 'MISSING_PUBLIC_FILE'],
   ['an extra native dependency', f => f.write('packages/script-host/src/extra.node', 'unreviewed'), 'NATIVE_PAYLOAD'],
   // Package content and the injected native receipt reserve the same output directory.
   // Separate input locations make this a real collision on case-insensitive hosts too.

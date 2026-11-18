@@ -7,7 +7,7 @@ public sealed partial class MusicLibraryOwner
 {
     // Native, owner-local capabilities. They are never serialized into the library
     // document or restored as a live recommendation/account session.
-    private sealed record RecommendationCheckpoint(JsonObject Queue, string[] History, string[] Failed, int Bytes);
+    private sealed record RecommendationCheckpoint(JsonObject Queue, string[] History, string[] Failed);
     private sealed record RecommendationReceipt(string Nonce, string Hash, JsonObject Result);
     private sealed record RecommendationCommit(string Nonce, string Hash, string Checkpoint,
         RecommendationCheckpoint? Capture, bool Consume, JsonObject Result,
@@ -16,7 +16,6 @@ public sealed partial class MusicLibraryOwner
     private RecommendationReceipt? recommendationReceipt;
     private RecommendationCommit? recommendationStage;
     private Pending? recommendationUnknown;
-    private const int RecommendationMemoryLimit = 8 * 1024 * 1024;
 
     private static string RecommendationNonce(JsonObject p)
     {
@@ -41,9 +40,7 @@ public sealed partial class MusicLibraryOwner
     private RecommendationCheckpoint CaptureRecommendation(MusicLibraryData doc)
     {
         var q = (JsonObject)Queue(doc).DeepClone();
-        int bytes = LJ.Bytes(q).Length;
-        LJ.Require(recommendationCheckpoints.Values.Sum(c => c.Bytes) + bytes <= RecommendationMemoryLimit, "LIMIT");
-        return new(q, shuffleHistory.ToArray(), failedEntries.ToArray(), bytes);
+        return new(q, shuffleHistory.ToArray(), failedEntries.ToArray());
     }
     private static JsonObject RecommendationResult(JsonObject result, string nonce, bool applied = true) =>
         LJ.Merge(result, LJ.Obj(("nonce", nonce), ("applied", applied)));

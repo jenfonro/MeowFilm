@@ -123,7 +123,7 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
         bool entered = false;
         try
         {
-            var p = LJ.Parameters(parameters, 8192);
+            var p = LJ.Parameters(parameters);
             lock (gate) LJ.Require(!closed && !stopping, "CLOSED");
             if (method == "music.librarySync.get") { LJ.Fields(p, ""); return MusicLibrarySyncEngine.View(await library.ReadLibrarySyncAsync(cancellationToken)); }
             if (method == "music.librarySync.run") { LJ.Fields(p, ""); return await RunOnce(cancellationToken).ConfigureAwait(false); }

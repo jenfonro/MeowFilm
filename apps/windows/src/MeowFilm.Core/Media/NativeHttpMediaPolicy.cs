@@ -9,15 +9,14 @@ internal static class NativeHttpMediaPolicy
     {
         NativeHttpMediaOptions.ValidateSyntax(uri);
         if (!allowAdaptive) RejectAdaptivePath(uri);
-        if (headers is null || headers.Count > 32) throw new PlaybackException(PlaybackError.InvalidHeaders);
+        if (headers is null) throw new PlaybackException(PlaybackError.InvalidHeaders);
         var copy = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        int size = 0;
         foreach (var (name, value) in headers)
         {
-            if (string.IsNullOrEmpty(name) || name.Length > 128 || value is null || value.Length > 8192 ||
+            if (string.IsNullOrEmpty(name) || value is null ||
                 name.Any(c => !char.IsAsciiLetterOrDigit(c) && !"!#$%&'*+-.^_`|~".Contains(c)) ||
                 value.Any(c => c < 0x20 || c > 0x7e) ||
-                !copy.TryAdd(name, value) || (size += name.Length + value.Length) > 16384)
+                !copy.TryAdd(name, value))
                 throw new PlaybackException(PlaybackError.InvalidHeaders);
             if (name.Equals("Host", StringComparison.OrdinalIgnoreCase) ||
                 name.Equals("Range", StringComparison.OrdinalIgnoreCase) ||

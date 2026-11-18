@@ -93,8 +93,8 @@ current／pending attempt、resource 与媒体租约；其他会话、已替换�
 返回 `STALE_SESSION`，不存在／已释放的会话沿用 `NOT_FOUND`。没有章节返回空数组。
 不创建媒体租约、不写历史、不发布 snapshot，也不触发播放、跳转或 `media.ended`。
 
-章节来自内核读取的真实容器元数据，时间为同一播放时间轴的秒数。最多 256 条，
-每条标题最多 256 个 UTF-16 code units，`start/end` 必须是有限数，
+章节来自内核读取的真实容器元数据，时间为同一播放时间轴的秒数。章节数量与标题长度不设配额，
+标题必须是字符串，`start/end` 必须是有限数，
 `start>=0`、`end>start`；不符合时整体返回 `INVALID_REQUEST`。
 Node 影视 owner 只匹配完整标准标签：片头／片头曲／片尾／片尾曲、
 Opening／Opening Credits／Ending／Ending Credits／Intro／Outro／OP／ED（英文忽略大小写）。
@@ -532,9 +532,8 @@ Range／206／416／HEAD、背压与清单子引用由媒体 owner 管；不经�
 不整片下载或转码，不迁远端 GoProxy／relay。ClearKey 交内核处理；
 携带许可 URL 不会自动发请求，也不代表具备对应 DRM/CDM 能力。
 
-媒体控制文档、路由表及预取有独立资源预算：registry 16 MiB，控制输入 8 MiB、
-重写输出 32 MiB／累计 64 MiB，预取每 lease 32 MiB／pool 64 MiB；普通二进制尾流
-不因这些预算截断。实际预取无法完成时明确报错，不以 URL 或清单成功冒充媒体命中。
+媒体控制文档、重写输出与路由表不设人为字节/条目配额；DASH 保留 XML 深度和格式校验。
+预取缓存仍为每 lease 32 MiB／pool 64 MiB；普通二进制尾流不因缓存预算截断。实际预取无法完成时明确报错，不以 URL 或清单成功冒充媒体命中。
 前台只复用已完成的缓存，不等待同资源的在途预取；缺失字节直接按前台请求读取。
 媒体传输合计最多 64 个活动请求，预取准入为前台保留最后一个额度；额度不足时
 预取报 `MEDIA_BUSY`，不排队阻塞前台，也不增加总资源上限。

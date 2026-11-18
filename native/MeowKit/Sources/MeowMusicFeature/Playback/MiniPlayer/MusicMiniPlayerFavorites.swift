@@ -208,7 +208,7 @@ import Combine
         let epoch = try model.enter(), catalogueID = model.collectionCatalogueID
         let values = try await model.requireService().collections()
         try model.check(epoch); try own.check(model)
-        guard values.count <= 2000, Set(values.map { Data($0.id.utf8) }).count == values.count else {
+        guard Set(values.map { Data($0.id.utf8) }).count == values.count else {
             throw MusicServiceError.invalidResponse
         }
         guard let collection = values.first(where: { $0.id == id && $0.kind == "favorites" }) else {

@@ -296,19 +296,18 @@ test('Cat network import follows redirects, stores the supplied URL and updates 
     assert.equal((await runtime.status()).instances.length, 1);
   });
 
-test('Cat downloads report bounded bytes, invalid encoding, disconnect and timeout without replacing the old source',
+test('Cat downloads report encoding, disconnect and timeout failures',
   { timeout: 30000 }, async t => {
     let mode = 'valid';
     const { url } = await serverFor(t, (request, response) => {
       if (mode === 'valid') response.end(source('valid'));
-      else if (mode === 'large') response.end('x'.repeat(2048));
       else if (mode === 'invalid') response.end(Buffer.from([0xff]));
       else if (mode === 'disconnect') request.socket.destroy();
       // Timeout mode deliberately leaves the response open.
     });
-    const runtime = runtimeFor(t, { limits: { maxSourceBytes: 1024, requestTimeoutMs: 150 } });
+    const runtime = runtimeFor(t, { limits: { requestTimeoutMs: 150 } });
     const original = await runtime.import({ installationId: 'download', name: 'download', sourceUrl: url });
-    for (const [nextMode, code] of [['large', 'RESOURCE_LIMIT'], ['invalid', 'SCRIPT_PROTOCOL_ERROR'],
+    for (const [nextMode, code] of [['invalid', 'SCRIPT_PROTOCOL_ERROR'],
       ['disconnect', 'NETWORK_ERROR'], ['timeout', 'TIMEOUT']]) {
       mode = nextMode;
       await assert.rejects(runtime.update({ installationId: 'download' }), { code });
@@ -323,6 +322,24 @@ test('Cat downloads report bounded bytes, invalid encoding, disconnect and timeo
     assert.equal((await runtime.update({ installationId: 'download' })).updateState, 'unchanged');
     assert.equal(runtime.instance('download').updateError, null);
     assert.deepEqual(await runtime.invoke(target('download')), { value: 'valid' });
+  });
+
+test('Cat downloads, updates and cold reads preserve sources above 16 MiB',
+  { timeout: 30000 }, async t => {
+    let content = source('original');
+    const { url } = await serverFor(t, (_request, response) => response.end(content));
+    const dataRoot = rootFor(t), runtime = runtimeFor(t, { dataRoot });
+    await runtime.import({ installationId: 'download', name: 'download', sourceUrl: url });
+    content = source('large') + ' '.repeat(16 * 1024 * 1024);
+    const updated = await runtime.update({ installationId: 'download' });
+    assert.equal(updated.updateState, 'updated');
+    assert.equal(updated.sourceHash, digest(content));
+    assert.deepEqual(await runtime.invoke(target('download')), { value: 'large' });
+    await runtime.close();
+    const reopened = runtimeFor(t, { dataRoot });
+    await reopened.start();
+    await ready(reopened, 'download');
+    assert.deepEqual(await reopened.invoke(target('download')), { value: 'large' });
   });
 
 test('Cat cancellation releases a downloading connection and persists failure while the old instance keeps running',

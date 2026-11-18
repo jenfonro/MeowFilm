@@ -42,6 +42,24 @@ final class MusicSourceDeclarationFailureTests: XCTestCase {
         .permissionDenied, .invalidResponse, .invalidRequest, .storageFailed, .corruptDocument,
         .storageConflict, .targetChanged, .staleRevision, .staleAccess, .accessUnavailable, .closed, .cancelled]
 
+    func testLongVersionAndLargeDeclaredQualityListPreserveMetadataWithoutDroppingDuplicateValidation() async throws {
+        let service = try await NativeMusicFixture.service()
+        let version = String(repeating: "v", count: 129)
+        let qualities = ["128k"] + (1...33).map { "quality-\($0)" }
+        func source(_ qualities: [String]) -> MusicScriptSource {
+            .init(installationID: "source", generation: 1, enabled: true, state: .ready, version: version,
+                contentHash: declarationIdentity.contentHash, revisionHash: declarationIdentity.revisionHash,
+                capabilities: [.init(siteID: "tx", title: "source", actions: ["musicUrl"], qualities: qualities)])
+        }
+        let capability = try await service.validate(source(qualities), site: "tx", quality: "128k")
+        XCTAssertEqual(capability.qualities, qualities)
+        do {
+            _ = try await service.validate(source(qualities + ["128k"]), site: "tx", quality: "128k")
+            XCTFail("Duplicate qualities accepted")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .invalidResponse) }
+        await service.close()
+    }
+
     func testCachedDeclarationLocalFailuresKeepAutomaticAndQualityAtSameTier() async throws {
         for failure in local {
             for automatic in [false, true] {
