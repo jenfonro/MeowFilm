@@ -334,7 +334,8 @@ public static class MusicHomeSnapshotTests
         var owner = new MusicHomeSnapshotStore(store);
         var page = Page("wy", "boundary"); page.Remove("ok");
         page["sections"]![0]!["items"]![0]!["subtitle"] = "";
-        int overhead = JsonSerializer.SerializeToUtf8Bytes(new { platform = "wy", pages = new[] { page } }).Length;
+        await owner.SaveAsync(Snapshot("wy", page));
+        int overhead = store.ReadMemory(MusicHomeSnapshotStore.Namespace).Data!.Length;
         page["sections"]![0]!["items"]![0]!["subtitle"] = new string('x', CacheDocumentStore.MaximumDocumentBytes - overhead);
         await owner.SaveAsync(Snapshot("wy", page));
         Check(store.ReadMemory(MusicHomeSnapshotStore.Namespace).Data!.Length == CacheDocumentStore.MaximumDocumentBytes);
