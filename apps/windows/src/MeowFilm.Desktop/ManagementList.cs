@@ -3,7 +3,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
-using Microsoft.UI.Xaml.Markup;
 using Microsoft.UI.Xaml.Media;
 
 namespace MeowFilm.Desktop;
@@ -90,7 +89,6 @@ public sealed class ManagementList : UserControl
         var content = new Grid(); content.RowDefinitions.Add(new() { Height = GridLength.Auto }); content.RowDefinitions.Add(new());
         content.Children.Add(header); Grid.SetRow(list, 1); Grid.SetRow(empty, 1); content.Children.Add(list); content.Children.Add(empty); card.Child = content; Grid.SetRow(card, 1); layout.Children.Add(card);
         list.UseResource(StyleProperty, "MeowFilm.ManagementList");
-        list.ItemTemplate = (DataTemplate)XamlReader.Load("<DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:local='using:MeowFilm.Desktop'><local:ManagementRowView/></DataTemplate>");
         list.UseResource(ItemsControl.ItemContainerStyleProperty, "MeowFilm.ManagementListItem");
         ScrollViewer.SetHorizontalScrollBarVisibility(list, ScrollBarVisibility.Disabled);
         ScrollViewer.SetVerticalScrollBarVisibility(list, ScrollBarVisibility.Auto);

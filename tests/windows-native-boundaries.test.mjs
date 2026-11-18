@@ -119,3 +119,27 @@ test('published assemblies follow custom evaluated identities rather than produc
   assert.throws(() => verifyPublishedGraph('aggregate', deps, files.filter(name => name !== 'FoundationKit.dll'), policy),
     /assemblies/);
 });
+
+test('SDK publish assets and WinUI resources absent from deps remain required', t => {
+  const policy = fixture(t).verify(), names = policy.application.assemblies;
+  const target = 'net10.0/win-x64';
+  const deps = { libraries: Object.fromEntries(names.map(name => [name + '/1.0.0', { type: 'project' }])),
+    runtimeTarget: { name: target }, targets: { [target]: {} } };
+  const files = [...names.map(name => name + '.dll'), 'meowfilm.exe', 'Microsoft.ui.xaml.dll',
+    'nested/Scoped.dll', 'meowfilm.pri', 'App.xbf', 'MeowFilm.Desktop/Theme.xbf'];
+  const publishItems = [
+    { RelativePath: 'Microsoft.ui.xaml.dll' },
+    { RelativePath: 'nested\\Scoped.dll' },
+    { RelativePath: 'meowfilm.pri' },
+    { RelativePath: 'App.xbf' },
+    { RelativePath: 'MeowFilm.Desktop\\Theme.xbf' },
+  ];
+  assert.deepEqual(verifyPublishedGraph('aggregate', deps, files, policy, publishItems).projects, names);
+  for (const item of publishItems) {
+    const missing = item.RelativePath.replaceAll('\\', '/');
+    assert.throws(() => verifyPublishedGraph('aggregate', deps, files.filter(name => name !== missing), policy, publishItems),
+      /missing resolved publish asset/);
+  }
+  for (const extra of ['RetiredLibrary.dll', 'Scoped.dll'])
+    assert.throws(() => verifyPublishedGraph('aggregate', deps, [...files, extra], policy, publishItems), /assemblies/);
+});

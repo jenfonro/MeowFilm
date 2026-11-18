@@ -51,8 +51,10 @@ try {
     # Use MSBuild's resolved publish closure, not a recursive copy of a reused
     # bin directory that can retain assemblies from a previously enabled module.
     # Only a complete checked staging tree replaces the fixed local installation.
+    $PublishItems = Join-Path $WindowsTmpRoot 'publish-items.json'
     & $WindowsDotnet publish $Project --no-restore @PublishProperties `
-        --output $Output --nologo -nodeReuse:false
+        --output $Output --nologo -nodeReuse:false `
+        -getItem:ResolvedFileToPublish "-getResultOutputFile:$PublishItems"
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $Runtime = Join-Path $Output 'runtime'
     & $WindowsNode (Join-Path $PSScriptRoot 'package-runtime.mjs') --product $DataIdentity --output $Runtime
@@ -76,7 +78,7 @@ try {
     })
     $Manifest | Add-Member -NotePropertyName node -NotePropertyValue $NodeRuntime
     [System.IO.File]::WriteAllText($ManifestPath, ($Manifest | ConvertTo-Json -Depth 50) + "`n", [System.Text.UTF8Encoding]::new($false))
-    & $WindowsNode (Join-Path $PSScriptRoot 'verify-projects.mjs') --build $Output --identity $DataIdentity @PublishProperties
+    & $WindowsNode (Join-Path $PSScriptRoot 'verify-projects.mjs') --build $Output --identity $DataIdentity --publish-items $PublishItems @PublishProperties
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if (-not $FrameworkDependent -and
         (-not (Test-Path -LiteralPath (Join-Path $Output 'coreclr.dll')) -or

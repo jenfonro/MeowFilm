@@ -25,4 +25,20 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="[1.8.260921001]" />
     <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
   </ItemGroup>
+  <Target Name="IncludeWinUIResourcesInPublish" AfterTargets="ComputeResolvedFilesToPublishList"
+          DependsOnTargets="GetCopyToOutputDirectoryItems">
+    <ItemGroup>
+      <!-- PRI expansion and project content can name the same built resource. -->
+      <_WinUIPublishFiles Include="@(AllItemsFullPathWithTargetPath->'$(TargetDir)%(TargetPath)')">
+        <RelativePath>%(TargetPath)</RelativePath>
+      </_WinUIPublishFiles>
+      <_WinUIPublishFiles Include="$(ProjectPriFullPath)" Condition="'$(IncludeProjectPriFile)' == 'true'">
+        <RelativePath>$(ProjectPriFileName)</RelativePath>
+      </_WinUIPublishFiles>
+      <_WinUIPublishFiles Remove="@(ResolvedFileToPublish)" MatchOnMetadata="RelativePath" MatchOnMetadataOptions="PathLike" />
+      <ResolvedFileToPublish Include="@(_WinUIPublishFiles->Distinct())">
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
 </Project>
