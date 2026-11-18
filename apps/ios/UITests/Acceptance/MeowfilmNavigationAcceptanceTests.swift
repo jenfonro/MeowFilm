@@ -844,6 +844,41 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         XCTAssertTrue(app.buttons["search.open"].waitForExistence(timeout: 5))
     }
 
+    func testPlaybackMenusOpenFromActualSettingsWithoutChoicePagesOrChangingValues() throws {
+        openSidebar()
+        app.buttons["app.sidebar.settings"].tap()
+        XCTAssertTrue(app.cells["settings.category.film"].waitForExistence(timeout: 5))
+        app.cells["settings.category.film"].tap()
+        let player = app.cells["film.settings.player"]
+        XCTAssertTrue(player.waitForExistence(timeout: 5))
+        if !player.isHittable { app.tables.firstMatch.swipeUp() }
+        player.tap()
+        for (id, title) in [("engine", "播放器设置"), ("defaultRate", "播放控制")] {
+            let menu = app.buttons["film.player." + id + ".menu"]
+            XCTAssertTrue(menu.waitForExistence(timeout: 5) && menu.isHittable)
+            XCTAssertTrue(app.staticTexts[title].exists)
+            let current = try XCTUnwrap(menu.value as? String)
+            XCTAssertFalse(current.isEmpty)
+            XCTAssertEqual(menu.label, id == "engine" ? "播放核心" : "默认倍速")
+            assertInsideHeader(app.buttons["page.header.back"])
+            menu.tap()
+            let selection = app.buttons[current]
+            XCTAssertTrue(selection.waitForExistence(timeout: 5) && selection.isHittable)
+            attach("film-player-app-native-menu-" + id)
+            selection.tap()
+            XCTAssertTrue(menu.waitForExistence(timeout: 5))
+            XCTAssertEqual(menu.value as? String, current)
+            XCTAssertTrue(app.staticTexts[title].exists)
+            XCTAssertEqual(app.otherElements.matching(identifier: "page.header").count, 1)
+            assertInsideHeader(app.buttons["page.header.back"])
+            if id == "engine" { app.cells["film.player.controls"].tap() }
+        }
+        app.buttons["page.header.back"].tap()
+        XCTAssertTrue(app.buttons["film.player.engine.menu"].waitForExistence(timeout: 5))
+        app.buttons["page.header.back"].tap()
+        XCTAssertTrue(player.waitForExistence(timeout: 5))
+    }
+
     func testLocalCollectionSearchAndEditorStayBelowTheHeader() {
         XCTAssertTrue(app.buttons["app.primary.library"].waitForExistence(timeout: 30))
         app.buttons["app.primary.library"].tap()

@@ -10,6 +10,7 @@ public enum SettingsVisualMetrics {
     public static let rowVerticalPadding: CGFloat = 12
     public static let separatorHeight: CGFloat = 0.5
     public static let sectionSpacing: CGFloat = 20
+    public static let contentTopSpacing: CGFloat = 20
 }
 
 #if os(iOS)
@@ -64,7 +65,7 @@ public final class SettingsRowBackgroundView: UIView {
         applyTheme(theme)
     }
 
-    private func applyTheme(_ theme: PageTheme) {
+    public func applyTheme(_ theme: PageTheme) {
         let settings = theme.settings
         let surface = usesSettingsColors
             ? (selected ? settings.selected : settings.surface) : theme.surface

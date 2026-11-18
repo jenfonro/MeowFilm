@@ -41,11 +41,20 @@ final class MusicSourceManagementPresentationTests: XCTestCase {
             XCTAssertEqual(name.text, "网络音源")
             XCTAssertEqual(address.text, "https://sources.invalid/original.js")
             dialog.overrideUserInterfaceStyle = .dark
-            let labels = dialog.body.arrangedSubviews.compactMap { $0 as? UILabel }
+            let sections = dialog.body.arrangedSubviews.compactMap { $0 as? SettingsInputSection }
+            let labels = sections.map(\.titleLabel)
             XCTAssertEqual(labels.map(\.text), ["名称", "网络地址"])
             let settings = PageTheme(colors: page.appearance.pagePalette, dark: true).settings
             for label in labels {
-                XCTAssertEqual(label.textColor.resolvedColor(with: dialog.traitCollection), UIColor(settings.ink))
+                XCTAssertEqual(label.textColor.resolvedColor(with: dialog.traitCollection), UIColor(settings.muted))
+            }
+            for section in sections {
+                let input = try XCTUnwrap(section.input as? SettingsTextField)
+                section.layoutIfNeeded()
+                XCTAssertLessThanOrEqual(section.titleLabel.frame.maxY, input.frame.minY)
+                XCTAssertEqual(input.inputAppearance, .underline)
+                XCTAssertEqual(input.backgroundColor, .clear)
+                XCTAssertEqual(input.layer.borderWidth, 0)
             }
             name.text = "更新名称"; address.text = "https://sources.invalid/edited.js"
             try self.button("management.dialog.confirm", in: dialog.view).sendActions(for: .touchUpInside)

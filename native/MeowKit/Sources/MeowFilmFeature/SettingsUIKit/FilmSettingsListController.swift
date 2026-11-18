@@ -60,18 +60,54 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
             if usesSettingsColors {
                 view.tintColor = UIColor(theme.settings.accent)
             }
-            table.reloadData()
+            for cell in table.visibleCells {
+                guard let path = table.indexPath(for: cell) else { continue }
+                let row = sections[path.section].rows[path.row]
+                cell.tintColor = UIColor(usesSettingsColors ? theme.settings.accent : theme.accent)
+                (cell.backgroundView as? SettingsRowBackgroundView)?.applyTheme(theme)
+                (cell.selectedBackgroundView as? SettingsRowBackgroundView)?.applyTheme(theme)
+                if var content = cell.contentConfiguration as? UIListContentConfiguration {
+                    applyTextColors(to: &content, row: row)
+                    cell.contentConfiguration = content
+                }
+                if usesSettingsColors, row.stylesContent, let content = row.content {
+                    applyControlColors(in: content)
+                }
+            }
+            if usesSettingsColors {
+                for section in sections.indices {
+                    if let header = table.headerView(forSection: section) {
+                        applyHeaderColors(in: header)
+                    }
+                }
+            }
         }
+    }
+
+    override func responds(to selector: Selector!) -> Bool {
+        // The non-settings directory keeps UIKit's native grouped-header policy.
+        if !usesSettingsColors && (
+            selector == #selector(UITableViewDelegate.tableView(_:heightForHeaderInSection:)) ||
+            selector == #selector(UITableViewDelegate.tableView(_:viewForHeaderInSection:))
+        ) { return false }
+        return super.responds(to: selector)
     }
 
     func render() { if isViewLoaded { table.reloadData() } }
     func numberOfSections(in tableView: UITableView) -> Int { sections.count }
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { sections[section].rows.count }
     func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        sections[section].title.isEmpty ? nil : sections[section].title
+        if usesSettingsColors && section == 0 { return nil }
+        return sections[section].title.isEmpty ? nil : sections[section].title
+    }
+    func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
+        usesSettingsColors ? table.heightForHeader(in: section, title: sections[section].title) : UITableView.automaticDimension
+    }
+    func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+        usesSettingsColors ? table.viewForHeader(in: section, title: sections[section].title, theme: theme) : nil
     }
     func tableView(_ tableView: UITableView, willDisplayHeaderView view: UIView, forSection section: Int) {
-        if usesSettingsColors {
+        if usesSettingsColors, section != 0 {
             let label = (view as? UITableViewHeaderFooterView)?.textLabel
             label?.font = .preferredFont(forTextStyle: .subheadline)
             label?.adjustsFontForContentSizeCategory = true
@@ -113,15 +149,7 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
             cell.selectionStyle = .none
             return cell
         }
-        if usesSettingsColors {
-            content.textProperties.color = UIColor(!row.enabled ? theme.settings.muted :
-                (row.destructive ? theme.settings.danger :
-                    (row.action != nil && !row.disclosure ? theme.settings.accent : theme.settings.ink)))
-            content.secondaryTextProperties.color = UIColor(theme.settings.muted)
-        } else {
-            content.textProperties.color = UIColor(row.enabled ? theme.ink : theme.muted)
-            content.secondaryTextProperties.color = UIColor(theme.muted)
-        }
+        applyTextColors(to: &content, row: row)
         content.textProperties.numberOfLines = 0; content.secondaryTextProperties.numberOfLines = 0
         cell.contentConfiguration = content
         cell.isAccessibilityElement = true
@@ -135,9 +163,25 @@ class FilmSettingsListController: PageViewController, UITableViewDataSource, UIT
         if row.selected { cell.accessibilityTraits.insert(.selected) }
         return cell
     }
+    private func applyTextColors(to content: inout UIListContentConfiguration, row: FilmSettingsRow) {
+        if usesSettingsColors {
+            content.textProperties.color = UIColor(!row.enabled ? theme.settings.muted :
+                (row.destructive ? theme.settings.danger :
+                    (row.action != nil && !row.disclosure ? theme.settings.accent : theme.settings.ink)))
+            content.secondaryTextProperties.color = UIColor(theme.settings.muted)
+        } else {
+            content.textProperties.color = UIColor(row.enabled ? theme.ink : theme.muted)
+            content.secondaryTextProperties.color = UIColor(theme.muted)
+        }
+    }
+    private func applyHeaderColors(in view: UIView) {
+        if let label = view as? UILabel { label.textColor = UIColor(theme.settings.muted) }
+        for child in view.subviews { applyHeaderColors(in: child) }
+    }
     private func applyControlColors(in view: UIView) {
         let colors = theme.settings
-        if let field = view as? UITextField { colors.apply(to: field) }
+        if let section = view as? SettingsInputSection { section.applyTheme(theme) }
+        else if let field = view as? UITextField { colors.apply(to: field) }
         else if let field = view as? UITextView { colors.apply(to: field) }
         else if let toggle = view as? UISwitch { toggle.onTintColor = UIColor(colors.accent) }
         else if let button = view as? PageHeaderTextButton {
@@ -251,8 +295,17 @@ func filmSwitchRow(_ title: String, id: String, isOn: Bool, enabled: Bool,
     label.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).ink) }
     label.font = .preferredFont(forTextStyle: .body)
     label.adjustsFontForContentSizeCategory = true; label.numberOfLines = 0
-    let stack = UIStackView(arrangedSubviews: [label, switchView])
+    let stack = FilmSwitchRowStack(arrangedSubviews: [label, switchView])
     stack.alignment = .center; stack.spacing = 12
     return .init(title: title, id: id, enabled: enabled, action: { change(!isOn) }, content: stack)
+}
+
+@MainActor
+private final class FilmSwitchRowStack: UIStackView {
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        super.point(inside: point, with: event) || arrangedSubviews.contains {
+            $0.point(inside: $0.convert(point, from: self), with: event)
+        }
+    }
 }
 #endif

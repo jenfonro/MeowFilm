@@ -1678,6 +1678,12 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         window.frame = CGRect(x: 0, y: 0, width: 320, height: 480)
         window.layoutIfNeeded(); page.view.layoutIfNeeded()
         let name = try XCTUnwrap(view("film.manual.name", page.view) as? UITextField)
+        let panel = try XCTUnwrap(page.form.superview)
+        XCTAssertEqual(panel.convert(panel.bounds, to: page.view).minY -
+            page.pageHeader.convert(page.pageHeader.bounds, to: page.view).maxY,
+            SettingsVisualMetrics.contentTopSpacing, accuracy: 0.5)
+        XCTAssertEqual((name as? SettingsTextField)?.inputAppearance, .plain)
+        XCTAssertEqual(name.backgroundColor, .clear); XCTAssertEqual(name.layer.borderWidth, 0)
         XCTAssertTrue(name.becomeFirstResponder())
         name.text = "草稿名称"; name.sendActions(for: .editingChanged)
         page.applyTheme()
@@ -1808,7 +1814,26 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             input.tap()
         }
         let keywords = try XCTUnwrap(view("film.preferences.keywords", page.view) as? UITextField)
+        let keywordSection = try XCTUnwrap(keywords.superview as? SettingsInputSection)
+        XCTAssertEqual(keywordSection.titleLabel.text, "关键字匹配规则")
+        XCTAssertLessThanOrEqual(keywordSection.titleLabel.frame.maxY, keywords.frame.minY)
+        XCTAssertEqual((keywords as? SettingsTextField)?.inputAppearance, .underline)
+        XCTAssertEqual(keywords.backgroundColor, .clear); XCTAssertEqual(keywords.layer.borderWidth, 0)
         try await waitFor { keywords.isFirstResponder }
+        await layoutKeywordConsumer(page, window)
+        let scroll = try XCTUnwrap(sequence(first: keywordSection as UIView, next: { $0.superview })
+            .compactMap { $0 as? UIScrollView }.first)
+        let inputTarget = keywords.convert(keywords.bounds, to: scroll).insetBy(dx: 0, dy: -2)
+        XCTAssertTrue(scroll.bounds.inset(by: scroll.adjustedContentInset).insetBy(dx: -1, dy: -1).contains(inputTarget),
+            "Focusing the native field must reveal its full hit region when the keyboard resizes the list")
+        attachWindow(window, name: "film-preferences-keywords-focused-above-keyboard")
+        let hitPoint = keywords.convert(CGPoint(x: keywords.bounds.midX, y: keywords.bounds.maxY + 2), to: page.view)
+        let hit = page.view.hitTest(hitPoint, with: nil)
+        XCTAssertTrue(hit === keywords || hit?.isDescendant(of: keywords) == true,
+            "The SwiftUI keyword row must preserve the compact field's lower hit region: " +
+                "input=\(keywords.frame), section=\(keywordSection.frame), target=\(inputTarget), " +
+                "viewport=\(scroll.bounds), keyboard=\(page.view.keyboardLayoutGuide.layoutFrame), " +
+                "point=\(hitPoint), hit=\(String(describing: hit))")
         keywords.text = " H.265,，DDP, "
         keywords.sendActions(for: .editingChanged)
         await settle()
@@ -1847,8 +1872,18 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await visible(page)
         try await waitFor { owner.draft != nil && !owner.busy && !owner.preferencesBusy }
         await settle()
-        _ = try await visibleCell("film.preferences.keywords.row", page)
+        XCTAssertNil(page.table.superview)
+        try await waitFor { self.view("film.preferences.keywords", page.view)?.window === window }
         let keywords = try XCTUnwrap(view("film.preferences.keywords", page.view) as? UITextField)
+        let keywordSection = try XCTUnwrap(keywords.superview as? SettingsInputSection)
+        XCTAssertEqual(keywordSection.titleLabel.text, "关键字匹配规则")
+        XCTAssertLessThanOrEqual(keywordSection.titleLabel.frame.maxY, keywords.frame.minY)
+        XCTAssertEqual((keywords as? SettingsTextField)?.inputAppearance, .underline)
+        XCTAssertEqual(keywords.backgroundColor, .clear); XCTAssertEqual(keywords.layer.borderWidth, 0)
+        let hitPoint = keywords.convert(CGPoint(x: keywords.bounds.midX, y: keywords.bounds.maxY + 2), to: page.view)
+        let hit = page.view.hitTest(hitPoint, with: nil)
+        XCTAssertTrue(hit === keywords || hit?.isDescendant(of: keywords) == true,
+            "The shared keyword row must preserve the compact field's lower hit region")
         XCTAssertTrue(keywords.becomeFirstResponder())
         keywords.text = " 广告,，预告, "
         keywords.sendActions(for: .editingChanged)
@@ -1868,7 +1903,11 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await waitFor("The saved notice was acknowledged through its UI action") {
             page.presentedViewController == nil && page.canPresentPageAlert
         }
-        try select("film.preferences.restore.siteClean", page)
+        try await runnerAction { app in
+            let restore = app.buttons["film.preferences.restore.siteClean"]
+            XCTAssertTrue(restore.isHittable)
+            restore.tap()
+        }
         await settle()
         XCTAssertEqual(owner.draft?.siteCleanKeywords, FilmPlaybackPreferences.defaults.siteCleanKeywords)
         XCTAssertEqual(owner.draft?.ruleOrder, draft.ruleOrder)
@@ -1880,6 +1919,230 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(restoredChanges, savedChanges)
         let calls = await store.calls()
         XCTAssertTrue(calls.isEmpty, "Site-clean draft restoration must not call the runtime or persist")
+    }
+
+    func testKeywordConsumersKeepCompleteRowsAndEditingStateAt320PointsAcrossAccessibilitySizeAndThemes() async throws {
+        for area in [FilmPlaybackPreferencesController.Area.preferences, .siteClean] {
+            let consumer = area == .preferences ? "preferences" : "site-clean"
+            let store = try FilmUIKitPlaybackSettingsStore(self)
+            let owner = FilmPlaybackSettingsModel(transport: store.transport, settingsDocument: store.document)
+            let page = FilmPlaybackPreferencesController(owner: owner, area: area,
+                                                         themeProvider: FilmPlaybackUIKitTheme())
+            page.traitOverrides.preferredContentSizeCategory = .large
+            page.traitOverrides.userInterfaceStyle = .light
+            let container = UIViewController()
+            let window = try mount(container)
+            defer { unmount(container, window) }
+            container.addChild(page); container.view.addSubview(page.view)
+            page.view.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                page.view.topAnchor.constraint(equalTo: container.view.topAnchor),
+                page.view.leadingAnchor.constraint(equalTo: container.view.leadingAnchor),
+                page.view.bottomAnchor.constraint(equalTo: container.view.bottomAnchor),
+                page.view.widthAnchor.constraint(equalToConstant: 320),
+            ])
+            page.didMove(toParent: container)
+            await layoutKeywordConsumer(page, window)
+            try await visible(page)
+            try await waitFor { owner.draft != nil && !owner.busy && !owner.preferencesBusy }
+            await settle()
+            XCTAssertNil(page.table.superview)
+            let list = try XCTUnwrap(descendants(page.view).compactMap { $0 as? UICollectionView }.first)
+            await layoutKeywordConsumer(page, window, scroll: list)
+            if area == .preferences {
+                try await runnerAction { app in
+                    XCTAssertTrue(app.staticTexts["film.preferences.dimension.quality"].waitForExistence(timeout: 4),
+                        "The loaded preference rows must be published before scrolling to the keyword input")
+                    app.swipeUp()
+                }
+            }
+            let keywords = try XCTUnwrap(view("film.preferences.keywords", page.view) as? SettingsTextField)
+            let section = try XCTUnwrap(keywords.superview as? SettingsInputSection)
+            let title = section.titleLabel
+            let scroll = try XCTUnwrap(sequence(first: section as UIView, next: { $0.superview })
+                .compactMap { $0 as? UIScrollView }.first)
+            let initialRow = try XCTUnwrap(sequence(first: section as UIView, next: { $0.superview }).first {
+                $0 is UITableViewCell || $0 is UICollectionViewCell
+            })
+            let initialPath = try XCTUnwrap(list.indexPath(for: try XCTUnwrap(initialRow as? UICollectionViewCell)))
+            list.scrollToItem(at: initialPath, at: .centeredVertically, animated: false)
+            await layoutKeywordConsumer(page, window, scroll: list)
+            try await runnerAction { app in
+                XCTAssertTrue(app.textFields["film.preferences.keywords"].isHittable)
+            }
+            var phase = "begin editing"
+            var editingEndPhases: [String] = []
+            keywords.addAction(UIAction { _ in
+                editingEndPhases.append(phase)
+            }, for: .editingDidEnd)
+            func layoutDescription() -> String {
+                let row = sequence(first: section as UIView, next: { $0.superview }).first {
+                    $0 is UITableViewCell || $0 is UICollectionViewCell
+                }
+                return "\(consumer), \(phase), category=\(keywords.traitCollection.preferredContentSizeCategory.rawValue), " +
+                    "title=\(title.frame), input=\(keywords.frame), section=\(section.frame), " +
+                    "row=\(String(describing: row.map(ObjectIdentifier.init))), original=\(ObjectIdentifier(initialRow)), " +
+                    "viewport=\(scroll.bounds), content=\(scroll.contentSize), focused=\(keywords.isFirstResponder), " +
+                    "window=\(keywords.convert(keywords.bounds, to: window)), keyboard=\(page.view.keyboardLayoutGuide.layoutFrame), " +
+                    "editingEnded=\(editingEndPhases)"
+            }
+            let normalTitleSize = title.font.pointSize
+            let normalInputSize = try XCTUnwrap(keywords.font).pointSize
+            XCTAssertTrue(keywords.becomeFirstResponder())
+            let text = " 自订,，保留, "
+            keywords.text = text; keywords.sendActions(for: .editingChanged)
+            await settle()
+            XCTAssertTrue(keywords.isFirstResponder)
+            let selectionStart = try XCTUnwrap(keywords.position(from: keywords.beginningOfDocument, offset: 1))
+            let selectionEnd = try XCTUnwrap(keywords.position(from: selectionStart, offset: 2))
+            keywords.selectedTextRange = keywords.textRange(from: selectionStart, to: selectionEnd)
+            let draft = try XCTUnwrap(owner.draft)
+            XCTAssertEqual(area == .preferences ? draft.keywords : draft.siteCleanKeywords, ["自订", "保留"])
+            attachWindow(window, name: "film-\(consumer)-keywords-320-regular-focused")
+            for style in [UIUserInterfaceStyle.light, .dark] {
+                phase = "accessibilityExtraExtraExtraLarge, \(style), trait layout"
+                await layoutKeywordConsumer(page, window, scroll: scroll) {
+                    page.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+                    page.traitOverrides.userInterfaceStyle = style
+                }
+                let row = try XCTUnwrap(sequence(first: section as UIView, next: { $0.superview }).first {
+                    $0 is UITableViewCell || $0 is UICollectionViewCell
+                }, layoutDescription())
+                XCTAssertTrue(row is UICollectionViewCell, layoutDescription())
+                XCTAssertTrue(row === initialRow, layoutDescription())
+                phase = "accessibilityExtraExtraExtraLarge, \(style), scroll"
+                let cell = try XCTUnwrap(row as? UICollectionViewCell, layoutDescription())
+                let path = try XCTUnwrap(list.indexPath(for: cell), layoutDescription())
+                list.scrollToItem(at: path, at: .centeredVertically, animated: false)
+                await layoutKeywordConsumer(page, window, scroll: scroll)
+                let context = layoutDescription()
+                XCTAssertEqual(page.view.bounds.width, 320, accuracy: 0.5, context)
+                XCTAssertTrue(view("film.preferences.keywords", page.view) === keywords, context)
+                XCTAssertTrue(keywords.superview === section, context)
+                XCTAssertTrue(section.input === keywords, context)
+                XCTAssertTrue(keywords.isFirstResponder, context)
+                XCTAssertTrue(editingEndPhases.isEmpty, context)
+                XCTAssertEqual(keywords.text, text, context)
+                let selection = try XCTUnwrap(keywords.selectedTextRange, context)
+                XCTAssertEqual(keywords.offset(from: keywords.beginningOfDocument, to: selection.start), 1, context)
+                XCTAssertEqual(keywords.offset(from: keywords.beginningOfDocument, to: selection.end), 3, context)
+                XCTAssertEqual(owner.draft, draft, context)
+                XCTAssertEqual(owner.preferences, .defaults, context)
+                XCTAssertEqual(title.text, "关键字匹配规则", context)
+                XCTAssertEqual(title.numberOfLines, 0, context)
+                XCTAssertTrue(title.adjustsFontForContentSizeCategory, context)
+                XCTAssertTrue(keywords.adjustsFontForContentSizeCategory, context)
+                for content in [title as UIView, keywords] {
+                    XCTAssertEqual(content.traitCollection.preferredContentSizeCategory,
+                        .accessibilityExtraExtraExtraLarge, context)
+                    XCTAssertEqual(content.traitCollection.userInterfaceStyle, style, context)
+                    XCTAssertFalse(content.hasAmbiguousLayout, context)
+                    XCTAssertFalse(content.isHidden, context)
+                    XCTAssertGreaterThan(content.alpha, 0, context)
+                    XCTAssertGreaterThan(content.bounds.width, 0, context)
+                }
+                let font = try XCTUnwrap(keywords.font)
+                XCTAssertGreaterThan(title.font.pointSize, normalTitleSize, context)
+                XCTAssertGreaterThan(font.pointSize, normalInputSize, context)
+                XCTAssertEqual(title.font.pointSize,
+                    UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: title.traitCollection).pointSize,
+                    accuracy: 0.5, context)
+                XCTAssertEqual(font.pointSize,
+                    UIFont.preferredFont(forTextStyle: .body, compatibleWith: keywords.traitCollection).pointSize,
+                    accuracy: 0.5, context)
+                let fittedTitle = title.sizeThatFits(.init(width: title.bounds.width, height: .greatestFiniteMagnitude))
+                XCTAssertGreaterThan(fittedTitle.height, title.font.lineHeight, context)
+                XCTAssertLessThanOrEqual(fittedTitle.height, title.bounds.height + 0.5, context)
+                XCTAssertLessThanOrEqual(title.frame.maxY, keywords.frame.minY, context)
+                XCTAssertGreaterThanOrEqual(keywords.bounds.height + 0.5, keywords.intrinsicContentSize.height, context)
+                XCTAssertGreaterThanOrEqual(keywords.editingRect(forBounds: keywords.bounds).height + 0.5,
+                    font.lineHeight, context)
+                let fittedSection = section.systemLayoutSizeFitting(
+                    CGSize(width: section.bounds.width, height: UIView.layoutFittingCompressedSize.height),
+                    withHorizontalFittingPriority: .required, verticalFittingPriority: .fittingSizeLevel)
+                XCTAssertLessThanOrEqual(fittedSection.height, section.bounds.height + 0.5, context)
+                let containment: [(UIView, UIView)] = [(title, section), (keywords, section), (section, row), (row, scroll)]
+                for (content, container) in containment {
+                    let frame = content.convert(content.bounds, to: container)
+                    let bounds = container === scroll ? scroll.bounds.inset(by: scroll.adjustedContentInset) : container.bounds
+                    XCTAssertGreaterThanOrEqual(frame.minX, bounds.minX - 0.5, context)
+                    XCTAssertLessThanOrEqual(frame.maxX, bounds.maxX + 0.5, context)
+                    XCTAssertGreaterThanOrEqual(frame.minY, bounds.minY - 0.5, context)
+                    XCTAssertLessThanOrEqual(frame.maxY, bounds.maxY + 0.5, context)
+                }
+                for ancestor in sequence(first: keywords as UIView, next: { $0.superview }) {
+                    XCTAssertFalse(ancestor.isHidden, context)
+                    XCTAssertGreaterThan(ancestor.alpha, 0, context)
+                }
+                XCTAssertTrue(keywords.window === window, context)
+                XCTAssertTrue(keywords.isEnabled, context)
+                XCTAssertEqual(keywords.inputAppearance, .underline, context)
+                XCTAssertEqual(keywords.backgroundColor, .clear, context)
+                XCTAssertEqual(keywords.layer.borderWidth, 0, context)
+                XCTAssertEqual(keywords.layer.cornerRadius, 0, context)
+                XCTAssertEqual(title.textColor, UIColor(page.theme.settings.muted), context)
+                XCTAssertEqual(keywords.textColor, UIColor(page.theme.settings.ink), context)
+                let lines = (keywords.layer.sublayers ?? []).filter {
+                    !$0.isHidden && $0.backgroundColor == UIColor(page.theme.settings.separator).cgColor &&
+                        $0.bounds.height == SettingsVisualMetrics.separatorHeight
+                }
+                XCTAssertEqual(lines.count, 1, context)
+                let line = try XCTUnwrap(lines.first, context)
+                XCTAssertGreaterThan(line.opacity, 0, context)
+                XCTAssertGreaterThan(try XCTUnwrap(line.backgroundColor).alpha, 0, context)
+                XCTAssertEqual(line.frame.minX, keywords.bounds.minX, accuracy: 0.5, context)
+                XCTAssertEqual(line.frame.maxY, keywords.bounds.maxY, accuracy: 0.5, context)
+                XCTAssertEqual(line.bounds.width, keywords.bounds.width, accuracy: 0.5, context)
+                try await runnerAction { app in
+                    XCTAssertTrue(app.textFields["film.preferences.keywords"].isHittable, context)
+                }
+                attachWindow(window, name: "film-\(consumer)-keywords-320-accessibility-\(style == .dark ? "dark" : "light")")
+            }
+            phase = "restore large"
+            await layoutKeywordConsumer(page, window, scroll: scroll) {
+                page.traitOverrides.preferredContentSizeCategory = .large
+            }
+            XCTAssertTrue(view("film.preferences.keywords", page.view) === keywords, consumer)
+            XCTAssertTrue(keywords.isFirstResponder, consumer)
+            XCTAssertTrue(editingEndPhases.isEmpty, layoutDescription())
+            XCTAssertEqual(keywords.text, text, consumer)
+            let selection = try XCTUnwrap(keywords.selectedTextRange, consumer)
+            XCTAssertEqual(keywords.offset(from: keywords.beginningOfDocument, to: selection.start), 1, consumer)
+            XCTAssertEqual(keywords.offset(from: keywords.beginningOfDocument, to: selection.end), 3, consumer)
+            XCTAssertEqual(owner.draft, draft, consumer)
+            XCTAssertEqual(owner.preferences, .defaults, consumer)
+            XCTAssertEqual(title.font.pointSize, normalTitleSize, accuracy: 0.5, consumer)
+            XCTAssertEqual(try XCTUnwrap(keywords.font).pointSize, normalInputSize, accuracy: 0.5, consumer)
+            XCTAssertFalse(title.hasAmbiguousLayout, consumer)
+            XCTAssertFalse(keywords.hasAmbiguousLayout, consumer)
+            let fittedSection = section.systemLayoutSizeFitting(
+                CGSize(width: section.bounds.width, height: UIView.layoutFittingCompressedSize.height),
+                withHorizontalFittingPriority: .required, verticalFittingPriority: .fittingSizeLevel)
+            XCTAssertEqual(fittedSection.height, section.bounds.height, accuracy: 0.5, consumer)
+            attachWindow(window, name: "film-\(consumer)-keywords-320-regular-restored-dark")
+            phase = "user scroll, stable layout"
+            scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x,
+                y: max(-scroll.adjustedContentInset.top, scroll.contentOffset.y - 12)), animated: false)
+            let userOffset = scroll.contentOffset
+            page.view.setNeedsLayout()
+            await layoutKeywordConsumer(page, window, scroll: scroll)
+            XCTAssertEqual(scroll.contentOffset.y, userOffset.y, accuracy: 0.5, layoutDescription())
+            XCTAssertTrue(keywords.isFirstResponder, layoutDescription())
+            XCTAssertEqual(keywords.text, text, consumer)
+            XCTAssertEqual(owner.draft, draft, consumer)
+            phase = "unmount"
+        }
+    }
+
+    private func layoutKeywordConsumer(_ page: UIViewController, _ window: UIWindow,
+                                       scroll: UIScrollView? = nil, update: () -> Void = {}) async {
+        let committed = expectation(description: "Keyword layout transaction completed")
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { committed.fulfill() }
+        update()
+        window.layoutIfNeeded(); page.view.layoutIfNeeded(); scroll?.layoutIfNeeded()
+        CATransaction.commit()
+        await fulfillment(of: [committed], timeout: 4)
     }
 
     func testBlocksRequireConfirmationAndUseExactOrBulkReceiptsWithoutChangingHistory() async throws {

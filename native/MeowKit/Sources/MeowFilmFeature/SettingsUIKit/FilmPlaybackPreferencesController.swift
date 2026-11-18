@@ -10,10 +10,23 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
     private let area: Area
     private var loading: Task<Void, Never>?
     private var saving: Task<Void, Never>?
-    private let keywords = filmTextField("关键字匹配规则", id: "film.preferences.keywords")
+    private let keywords: SettingsTextField = {
+        let field = filmTextField("关键字匹配规则", id: "film.preferences.keywords") as! SettingsTextField
+        field.inputAppearance = .underline
+        return field
+    }()
+    private lazy var keywordSection: SettingsInputSection = {
+        let section = SettingsInputSection(title: "关键字匹配规则", input: keywords)
+        section.titleLabel.setContentHuggingPriority(.defaultHigh, for: .vertical)
+        section.isLayoutMarginsRelativeArrangement = true
+        section.layoutMargins = .zero
+        return section
+    }()
     private var preferencesContent: UIHostingController<FilmPreferencesContent>?
+    private var keywordSize = CGSize.zero, keywordViewportSize = CGSize.zero
+    private var needsKeywordReveal = false
     override var avoidsKeyboard: Bool { true }
-    override var usesSettingsTable: Bool { area != .preferences }
+    override var usesSettingsTable: Bool { area == .autoPrepare }
 
     init(owner: FilmPlaybackSettingsModel, area: Area, themeProvider: any PageThemeProviding) {
         self.owner = owner; self.area = area
@@ -38,8 +51,12 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
             owner.edit { if self.area == .siteClean { $0.siteCleanKeywords = values } else { $0.keywords = values } }
         }, for: .editingChanged)
         keywords.addAction(UIAction { [weak self] _ in self?.update() }, for: .editingDidEnd)
-        if area == .preferences {
-            let content = UIHostingController(rootView: FilmPreferencesContent(owner: owner, keywords: keywords, theme: theme))
+        keywords.addAction(UIAction { [weak self] _ in
+            self?.needsKeywordReveal = true; self?.view.setNeedsLayout()
+        }, for: .editingDidBegin)
+        if area != .autoPrepare {
+            let content = UIHostingController(rootView: FilmPreferencesContent(owner: owner, keywordSection: keywordSection,
+                siteClean: area == .siteClean, theme: theme, contentSizeCategory: traitCollection.preferredContentSizeCategory))
             preferencesContent = content
             addChild(content); view.addSubview(content.view)
             content.view.backgroundColor = .clear
@@ -51,6 +68,9 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
                 content.view.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
             ])
             content.didMove(toParent: self)
+            registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) {
+                (page: FilmPlaybackPreferencesController, _: UITraitCollection) in page.applyTheme()
+            }
         }
         observe(owner) { [weak self] in if self?.keywords.isFirstResponder != true { self?.update() } }
         load()
@@ -65,8 +85,10 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
     }
 
     private func update() {
-        if area == .preferences {
-            if !keywords.isFirstResponder { keywords.text = owner.draft?.keywords.joined(separator: ",") }
+        if area != .autoPrepare {
+            if !keywords.isFirstResponder {
+                keywords.text = (area == .siteClean ? owner.draft?.siteCleanKeywords : owner.draft?.keywords)?.joined(separator: ",")
+            }
             return
         }
         guard let draft = owner.draft else {
@@ -75,10 +97,8 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
             render(); return
         }
         switch area {
-        case .preferences:
+        case .preferences, .siteClean:
             return
-        case .siteClean:
-            sections = [.init(title: "关键字匹配规则", rows: keywordRows(draft.siteCleanKeywords, group: .siteClean))]
         case .autoPrepare:
             sections = [.init(title: "", rows: [
                 filmSwitchRow("进入播放页自动准备", id: "film.preferences.auto-prepare",
@@ -99,16 +119,26 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
               })
     }
 
-    private func keywordRows(_ values: [String], group: FilmPlaybackSettingsModel.Group) -> [FilmSettingsRow] {
-        keywords.text = values.joined(separator: ",")
-        keywords.isEnabled = !owner.preferencesBusy; keywords.textColor = UIColor(theme.settings.ink)
-        return [.init(title: "关键字匹配规则", id: "film.preferences.keywords.row", content: keywords),
-                restoreRow("恢复默认关键词", group: group)]
-    }
-
     override func applyTheme() {
         super.applyTheme()
-        preferencesContent?.rootView = FilmPreferencesContent(owner: owner, keywords: keywords, theme: theme)
+        keywordSection.applyTheme(theme)
+        preferencesContent?.rootView = FilmPreferencesContent(owner: owner, keywordSection: keywordSection,
+            siteClean: area == .siteClean, theme: theme, contentSizeCategory: traitCollection.preferredContentSizeCategory)
+        needsKeywordReveal = true; viewIfLoaded?.setNeedsLayout()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        preferencesContent?.view.layoutIfNeeded()
+        guard let scroll = sequence(first: keywordSection as UIView, next: { $0.superview })
+            .compactMap({ $0 as? UIScrollView }).first else { return }
+        let changed = keywordSize != keywordSection.bounds.size || keywordViewportSize != scroll.bounds.size
+        keywordSize = keywordSection.bounds.size; keywordViewportSize = scroll.bounds.size
+        guard needsKeywordReveal || changed else { return }
+        needsKeywordReveal = false
+        if keywords.isFirstResponder {
+            scroll.scrollRectToVisible(keywords.convert(keywords.bounds, to: scroll).insetBy(dx: 0, dy: -8), animated: false)
+        }
     }
 
     private func save() {
@@ -126,39 +156,48 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
 @MainActor
 private struct FilmPreferencesContent: View {
     @ObservedObject var owner: FilmPlaybackSettingsModel
-    let keywords: UITextField
+    let keywordSection: SettingsInputSection
+    let siteClean: Bool
     let theme: PageTheme
-    @ScaledMetric(relativeTo: .body) private var inputHeight = UIFont.preferredFont(
-        forTextStyle: .body, compatibleWith: UITraitCollection(preferredContentSizeCategory: .large)
-    ).lineHeight + 16
+    let contentSizeCategory: UIContentSizeCategory
     private struct Item: Identifiable { let id, title: String }
 
     var body: some View {
         List {
             if let draft = owner.draft {
-                SettingsOrderingSection(title: "优先片源规则",
-                    items: draft.ruleOrder.map { Item(id: $0.rawValue, title: $0.title) },
-                    theme: theme, enabled: !owner.preferencesBusy) { item in
-                    Text(item.title).accessibilityIdentifier("film.preferences.dimension.\(item.id)")
-                } move: { offsets, destination in
-                    var order = draft.ruleOrder
-                    order.move(fromOffsets: offsets, toOffset: destination)
-                    owner.edit { $0.ruleOrder = order }
-                }
-                SettingsOrderingSection(title: "网盘匹配规则",
-                    items: draft.panOrder.map { Item(id: $0.rawValue, title: $0.title) },
-                    theme: theme, enabled: !owner.preferencesBusy) { item in
-                    Text(item.title).accessibilityIdentifier("film.preferences.pan.\(item.id)")
-                } move: { offsets, destination in
-                    var order = draft.panOrder
-                    order.move(fromOffsets: offsets, toOffset: destination)
-                    owner.edit { $0.panOrder = order }
+                if !siteClean {
+                    SettingsOrderingSection(title: "优先片源规则",
+                        items: draft.ruleOrder.map { Item(id: $0.rawValue, title: $0.title) },
+                        theme: theme, enabled: !owner.preferencesBusy) { item in
+                        Text(item.title).accessibilityIdentifier("film.preferences.dimension.\(item.id)")
+                    } move: { offsets, destination in
+                        var order = draft.ruleOrder
+                        order.move(fromOffsets: offsets, toOffset: destination)
+                        owner.edit { $0.ruleOrder = order }
+                    }
+                    SettingsOrderingSection(title: "网盘匹配规则",
+                        items: draft.panOrder.map { Item(id: $0.rawValue, title: $0.title) },
+                        theme: theme, enabled: !owner.preferencesBusy) { item in
+                        Text(item.title).accessibilityIdentifier("film.preferences.pan.\(item.id)")
+                    } move: { offsets, destination in
+                        var order = draft.panOrder
+                        order.move(fromOffsets: offsets, toOffset: destination)
+                        owner.edit { $0.panOrder = order }
+                    }
                 }
                 Section {
-                    KeywordsInput(field: keywords, value: draft.keywords.joined(separator: ","),
-                                  enabled: !owner.preferencesBusy, theme: theme)
-                        .frame(height: max(36, inputHeight))
-                        .modifier(SettingsListRowStyle(theme: theme, first: true, last: true))
+                    KeywordsInput(section: keywordSection, value: (siteClean ? draft.siteCleanKeywords : draft.keywords).joined(separator: ","),
+                                  enabled: !owner.preferencesBusy, theme: theme, contentSizeCategory: contentSizeCategory)
+                        .modifier(SettingsListRowStyle(theme: theme, first: true, last: !siteClean))
+                    if siteClean {
+                        Button("恢复默认关键词") {
+                            keywordSection.endEditing(true)
+                            owner.restoreDraft(.siteClean)
+                        }
+                        .disabled(owner.preferencesBusy)
+                        .accessibilityIdentifier("film.preferences.restore.siteClean")
+                        .modifier(SettingsListRowStyle(theme: theme, first: false, last: true))
+                    }
                 } header: {
                     SettingsListSectionHeader(title: "关键字匹配规则", theme: theme)
                 }
@@ -172,14 +211,37 @@ private struct FilmPreferencesContent: View {
     }
 
     private struct KeywordsInput: UIViewRepresentable {
-        let field: UITextField
+        let section: SettingsInputSection
         let value: String
         let enabled: Bool
         let theme: PageTheme
-        func makeUIView(context: Context) -> UITextField { field }
-        func updateUIView(_ view: UITextField, context: Context) {
-            if !view.isFirstResponder { view.text = value }
-            view.isEnabled = enabled; theme.settings.apply(to: view)
+        let contentSizeCategory: UIContentSizeCategory
+        func makeUIView(context: Context) -> SettingsInputSection { section }
+        func updateUIView(_ view: SettingsInputSection, context: Context) {
+            let field = view.input as! UITextField
+            if !field.isFirstResponder { field.text = value }
+            field.isEnabled = enabled; view.applyTheme(theme)
+            applyFonts(to: view)
+        }
+        func sizeThatFits(_ proposal: ProposedViewSize, uiView: SettingsInputSection, context: Context) -> CGSize? {
+            guard let width = proposal.width, width.isFinite else { return nil }
+            applyFonts(to: uiView)
+            let title = uiView.titleLabel
+            let titleSize = title.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
+            return CGSize(width: width,
+                height: titleSize.height + uiView.spacing + uiView.input.intrinsicContentSize.height + uiView.layoutMargins.bottom)
+        }
+        private func applyFonts(to view: SettingsInputSection) {
+            let traits = UITraitCollection(preferredContentSizeCategory: contentSizeCategory)
+            let titleFont = UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: traits)
+            if view.titleLabel.font != titleFont { view.titleLabel.font = titleFont }
+            let field = view.input as! UITextField
+            let inputFont = UIFont.preferredFont(forTextStyle: .body, compatibleWith: traits)
+            if field.font != inputFont { field.font = inputFont }
+            let hitInset = max(0, (44 - field.intrinsicContentSize.height) / 2)
+            if view.layoutMargins.bottom != hitInset {
+                view.layoutMargins = .init(top: 0, left: 0, bottom: hitInset, right: 0)
+            }
         }
     }
 }

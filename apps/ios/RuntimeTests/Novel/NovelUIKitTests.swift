@@ -135,8 +135,14 @@ final class NovelUIKitTests: XCTestCase {
                     XCTAssertTrue(table.clipsToBounds)
                     XCTAssertEqual(manager.manager.search.searchTextField.backgroundColor, UIColor(settings.input))
                     XCTAssertEqual(manager.manager.search.searchTextField.textColor, UIColor(settings.ink))
+                    XCTAssertEqual(manager.manager.search.searchTextField.convert(manager.manager.search.searchTextField.bounds, to: page.view).minY -
+                        page.pageHeader.convert(page.pageHeader.bounds, to: page.view).maxY,
+                        SettingsVisualMetrics.contentTopSpacing, accuracy: 0.5)
                     XCTAssertFalse(manager.manager.tools.isHidden)
                     XCTAssertEqual(manager.manager.tools.arrangedSubviews.count, page is NovelSourcesViewController ? 3 : 2)
+                    XCTAssertEqual(manager.manager.tools.convert(manager.manager.tools.bounds, to: page.view).minY,
+                        manager.manager.search.searchTextField.convert(manager.manager.search.searchTextField.bounds, to: page.view).minY,
+                        accuracy: 0.5)
                     let remove = try button("management.delete", in: manager.manager)
                     XCTAssertEqual(remove.backgroundColor, UIColor(settings.input))
                     XCTAssertEqual(remove.titleColor(for: .normal), UIColor(settings.danger))
@@ -147,24 +153,47 @@ final class NovelUIKitTests: XCTestCase {
                     for input in descendants(form) {
                         if let field = input as? UITextField {
                             XCTAssertEqual(field.textColor, UIColor(settings.ink))
-                            XCTAssertEqual(field.backgroundColor, UIColor(settings.input))
-                            XCTAssertEqual(field.layer.borderColor, UIColor(settings.inputBorder).cgColor)
-                            XCTAssertEqual(field.layer.cornerRadius, min(field.bounds.width, field.bounds.height) / 2, accuracy: 0.5)
+                            XCTAssertEqual(field.backgroundColor, .clear)
+                            XCTAssertEqual(field.layer.borderWidth, 0)
+                            XCTAssertEqual(field.layer.cornerRadius, 0)
+                            XCTAssertEqual((field as? SettingsTextField)?.inputAppearance, .plain)
                         } else if let field = input as? UITextView {
                             XCTAssertEqual(field.textColor, UIColor(settings.ink))
-                            XCTAssertEqual(field.backgroundColor, UIColor(settings.input))
-                            XCTAssertEqual(field.layer.borderColor, UIColor(settings.inputBorder).cgColor)
-                            XCTAssertEqual(field.layer.cornerRadius, min(field.bounds.width, field.bounds.height) / 2, accuracy: 0.5)
+                            XCTAssertEqual(field.backgroundColor, .clear)
+                            XCTAssertEqual(field.layer.borderWidth, 0)
+                            XCTAssertEqual(field.layer.cornerRadius, 0)
+                            XCTAssertEqual((field as? SettingsTextView)?.inputAppearance, .plain)
                         }
+                    }
+                    let dividers = form.fields.arrangedSubviews.filter { $0.subviews.isEmpty }
+                    XCTAssertFalse(dividers.isEmpty)
+                    for divider in dividers {
+                        XCTAssertFalse(divider.isHidden)
+                        XCTAssertGreaterThan(divider.bounds.height, 0)
+                        XCTAssertEqual(divider.bounds.height, SettingsVisualMetrics.separatorHeight,
+                            accuracy: 0.5 / form.traitCollection.displayScale + 0.001,
+                            "The separator may round to either adjacent physical pixel height")
+                        XCTAssertEqual(divider.backgroundColor?.resolvedColor(with: form.traitCollection), UIColor(settings.separator))
+                        XCTAssertEqual(divider.bounds.width, form.fields.bounds.width - (form.boxedInputs ? 32 : 0),
+                            accuracy: 0.5)
+                    }
+                    if page is NovelRuleEditor {
+                        XCTAssertEqual(form.fields.convert(form.fields.bounds, to: page.view).minY -
+                            page.pageHeader.convert(page.pageHeader.bounds, to: page.view).maxY,
+                            SettingsVisualMetrics.contentTopSpacing, accuracy: 0.5)
                     }
                 }
                 if page is NovelSourceEditor {
                     let panel = try XCTUnwrap(descendants(page.view).first { $0.accessibilityIdentifier == "novel.source.panel" })
                     XCTAssertEqual(panel.backgroundColor, UIColor(settings.surface))
+                    XCTAssertEqual(panel.convert(panel.bounds, to: page.view).minY -
+                        page.pageHeader.convert(page.pageHeader.bounds, to: page.view).maxY,
+                        SettingsVisualMetrics.contentTopSpacing, accuracy: 0.5)
                     let type = try XCTUnwrap(descendants(panel).compactMap { $0 as? UIButton }.first { $0.accessibilityLabel == "内容类型" })
                     XCTAssertEqual(type.configuration?.baseForegroundColor, UIColor(settings.ink))
                     XCTAssertEqual(type.configuration?.background.backgroundColor, UIColor(settings.input))
                 }
+                attach(window, "settings-novel-\(index)-\(style == .dark ? "dark" : "light")")
             }
         }
     }
@@ -276,8 +305,10 @@ final class NovelUIKitTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(scrim.backgroundColor).cgColor.alpha, 0)
         XCTAssertLessThan(try XCTUnwrap(scrim.backgroundColor).cgColor.alpha, 1)
         let settings = page.theme.settings
-        XCTAssertEqual(input.backgroundColor, UIColor(settings.input)); XCTAssertEqual(input.textColor, UIColor(settings.ink))
-        XCTAssertEqual(input.layer.borderColor, UIColor(settings.inputBorder).cgColor)
+        XCTAssertEqual(input.backgroundColor, .clear); XCTAssertEqual(input.textColor, UIColor(settings.ink))
+        XCTAssertEqual(input.layer.borderWidth, 0)
+        XCTAssertEqual((input as? SettingsTextField)?.inputAppearance, .underline)
+        XCTAssertEqual((input.superview as? SettingsInputSection)?.titleLabel.text, "书源地址")
         input.text = "https://source.invalid/book-sources.json"
         try button("management.dialog.confirm", in: dialog.view).sendActions(for: .touchUpInside); await fulfillment(of: [entered], timeout: 5)
         try button("management.dialog.cancel", in: dialog.view).sendActions(for: .touchUpInside); await fulfillment(of: [cancelled], timeout: 5)
@@ -295,11 +326,12 @@ final class NovelUIKitTests: XCTestCase {
         let message = String(repeating: "无法导入，请检查网络地址和书源内容后重新提交。", count: 8)
         let dialog = ManagementDialog(title: heading, action: "确定导入", themeProvider: NovelTestPageTheme())
         dialog.traitOverrides.preferredContentSizeCategory = .large
-        let label = UILabel(); label.text = String(repeating: "书源网络地址", count: 4); label.font = .systemFont(ofSize: 14)
+        let fieldTitle = String(repeating: "书源网络地址", count: 4)
         let input = ManagementDialog.input(placeholder: "网络地址")
         let address = "https://source.invalid/" + String(repeating: "long-path/", count: 20)
         input.keyboardType = .URL; input.text = address
-        dialog.body.addArrangedSubview(label); dialog.body.addArrangedSubview(input)
+        dialog.addInput(input, title: fieldTitle)
+        let label = try XCTUnwrap(dialog.body.arrangedSubviews.first as? SettingsInputSection).titleLabel
         var submissions: [String] = [], accepted = 0
         dialog.submit = {
             submissions.append(input.text ?? "")
@@ -318,11 +350,12 @@ final class NovelUIKitTests: XCTestCase {
         XCTAssertEqual(headingLabel.font.pointSize, 17, accuracy: 0.1)
         XCTAssertEqual(error.font.pointSize, 13, accuracy: 0.1)
         XCTAssertEqual(input.font?.pointSize ?? 0, 14, accuracy: 0.1)
+        XCTAssertEqual(label.font.pointSize, 15, accuracy: 0.1)
         XCTAssertEqual(confirm.titleLabel?.font.pointSize ?? 0, 14, accuracy: 0.1)
         dialog.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
         await wait {
             headingLabel.font.pointSize > 17 && error.font.pointSize > 13 &&
-                (input.font?.pointSize ?? 0) > 14 && (confirm.titleLabel?.font.pointSize ?? 0) > 14 && label.font.pointSize > 14
+                (input.font?.pointSize ?? 0) > 14 && (confirm.titleLabel?.font.pointSize ?? 0) > 14 && label.font.pointSize > 15
         }
         dialog.view.setNeedsLayout(); dialog.view.layoutIfNeeded()
         confirm.sendActions(for: .touchUpInside)
@@ -343,6 +376,9 @@ final class NovelUIKitTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(input.bounds.height, 44)
         XCTAssertGreaterThanOrEqual(input.bounds.height, input.intrinsicContentSize.height)
         XCTAssertEqual(input.keyboardType, .URL); XCTAssertEqual(input.text, address)
+        XCTAssertEqual((input as? SettingsTextField)?.inputAppearance, .underline)
+        XCTAssertEqual(input.backgroundColor, .clear)
+        XCTAssertEqual(input.layer.borderWidth, 0)
         assertReachableEdges(input, in: scroll)
         for action in [cancel, confirm] {
             XCTAssertGreaterThanOrEqual(action.bounds.width, 44); XCTAssertGreaterThanOrEqual(action.bounds.height, 44)
@@ -446,8 +482,10 @@ final class NovelUIKitTests: XCTestCase {
         } as? UITextField)
         await wait { dialog.view.window === window && !dialog.isBeingPresented }
         let settings = SettingsTheme(dark: input.traitCollection.userInterfaceStyle == .dark)
-        XCTAssertEqual(input.backgroundColor, UIColor(settings.input))
-        XCTAssertEqual(input.layer.borderColor, UIColor(settings.inputBorder).cgColor)
+        XCTAssertEqual(input.backgroundColor, .clear)
+        XCTAssertEqual(input.layer.borderWidth, 0)
+        XCTAssertEqual((input as? SettingsTextField)?.inputAppearance, .underline)
+        XCTAssertEqual((input.superview as? SettingsInputSection)?.titleLabel.text, input.accessibilityLabel)
         input.text = "-1"
         try button("management.dialog.confirm", in: dialog.view).sendActions(for: .touchUpInside)
         await wait {
