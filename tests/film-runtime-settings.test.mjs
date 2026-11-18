@@ -19,7 +19,7 @@ async function until(read) {
   assert.fail('The runtime did not reach the expected state');
 }
 
-async function fixture(t) {
+async function fixture(t, initialPreferences = {}) {
   mkdirSync(area, { recursive: true });
   const root = mkdtempSync(new URL('case-', area));
   const calls = [];
@@ -30,7 +30,7 @@ async function fixture(t) {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const address = `http://127.0.0.1:${server.address().port}/synthetic-video`;
-  let preferences = defaultPreferences();
+  let preferences = { ...defaultPreferences(), ...initialPreferences };
   const accounts = new Map(['quark', 'uc'].map(provider => [provider, { provider, revision: 1, configured: true }]));
   const instances = new Map(['a', 'b'].map(key => [key, {
     installationId: `install-${key}`, generation: 1, state: 'ready',
@@ -127,6 +127,19 @@ async function readable(receipt) {
   await response.arrayBuffer();
   return response.status;
 }
+
+test('native saved preference extensions and unused bad fields do not block library reads or playback', async t => {
+  const preferences = { ruleOrder: ['extension', 'quality'], panOrder: null, keywords: [null, 'Film'],
+    siteCleanKeywords: [], extra: { unconsumed: true } };
+  const f = await fixture(t, preferences);
+  const library = await f.rpc('library.get');
+  assert.deepEqual(library.preferences, { ...defaultPreferences(), ...preferences });
+  const a = await f.open('a');
+  assert.equal(await readable(a.receipt), 200);
+  await f.film.settingsChanged('film.preferences');
+  assert.deepEqual((await f.snapshot(a.id)).attempt, a.attempt);
+  assert.equal(await readable(a.receipt), 200);
+});
 
 test('native same-value settings preserve directories, pending/current receipts and controlled resources', async t => {
   const f = await fixture(t), a = await f.open('a'), b = await f.open('b');

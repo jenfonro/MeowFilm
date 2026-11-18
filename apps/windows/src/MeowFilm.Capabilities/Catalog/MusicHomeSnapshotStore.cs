@@ -114,7 +114,7 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
             "section" => "id title layout available errorCode requiresAccount display selectedTab selectedTag",
             "tab" => "id name",
             "tag" => "id name group selected",
-            "action" => "type id branch pageCode",
+            "action" => "type id branch pageCode provider mode submode ruleId tabTagId sourceType sourceName entry songId",
             "channel" => "id name pageCode channelKind placement",
             "coverRef" => "kind id",
             "locator" => "kind id playlistId dirId listId version totalVersion creatorId creatorListId",
@@ -130,6 +130,11 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
                 result[field] = JsonNode.Parse(scalar.GetRawText());
             }
         if (kind == "song") return result;
+        if (kind == "action")
+            foreach (string field in new[] { "sourceIds", "ids" })
+                if (value.TryGetProperty(field, out var ids) && ids.ValueKind == JsonValueKind.Array)
+                    result[field] = new JsonArray(ids.EnumerateArray().Where(id => id.ValueKind == JsonValueKind.String)
+                        .Select(id => (JsonNode?)JsonValue.Create(id.GetString())).ToArray());
         if (kind is "card" or "preview" && value.TryGetProperty("song", out var song))
             result["song"] = Project(song, "song", token);
         foreach (string field in kind switch
@@ -151,10 +156,10 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
             result["preview"] = new JsonArray(preview.EnumerateArray().Take(3).Select(item => Project(item, "preview", token)).ToArray());
         return result;
     }
-    private static JsonNode? Restore(JsonNode? value, Func<string, JsonElement?> song, CancellationToken token)
+    private static JsonNode? Restore(JsonNode? value, Func<string, JsonElement?> song, CancellationToken token, bool songReference = false)
     {
         token.ThrowIfCancellationRequested();
-        if (value is JsonObject reference && reference["songId"] is JsonValue id)
+        if (songReference && value is JsonObject reference && reference["songId"] is JsonValue id)
         {
             var current = song(id.GetValue<string>());
             if (current is null) return null;
@@ -164,7 +169,7 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
             return restored;
         }
         if (value is JsonObject obj)
-            return new JsonObject(obj.Select(pair => KeyValuePair.Create(pair.Key, Restore(pair.Value, song, token))));
+            return new JsonObject(obj.Select(pair => KeyValuePair.Create(pair.Key, Restore(pair.Value, song, token, pair.Key == "song"))));
         if (value is JsonArray array) return new JsonArray(array.Select(item => Restore(item, song, token)).ToArray());
         return value?.DeepClone();
     }

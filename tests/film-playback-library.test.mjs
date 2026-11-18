@@ -44,13 +44,17 @@ const empty = () => ({
 
 test('native preferences stay in their sole settings owner while repeated business writes and reopen preserve library facts', t => {
   const dataRoot = area(t), path = join(dataRoot, 'film-playback', 'library.json');
-  let preferences = { ...defaultPreferences(), keywords: ['native-first'], metadataViewProvider: 'douban' };
+  let preferences = { ...defaultPreferences(), ruleOrder: ['extension'], panOrder: [], keywords: ['native-first'],
+    metadataViewProvider: 'douban', extra: parseJSONText('{"id":9007199254740993}') };
   const owner = createPlaybackLibrary({ dataRoot, nativePreferences: () => preferences });
   t.after(() => owner.close());
   owner.update(draft => { draft.history.push(history()); });
   owner.update(draft => { draft.manual.push(manual()); });
   assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(path, 'utf8')), 'preferences'), false);
   assert.deepEqual(owner.read().preferences.keywords, ['native-first']);
+  assert.equal(stringifyJSONValue(owner.read().preferences), stringifyJSONValue(preferences));
+  assert.equal(Object.isFrozen(preferences), false);
+  assert.equal(Object.isFrozen(preferences.extra), false);
   preferences = { ...preferences, keywords: ['native-latest'] };
   assert.deepEqual(owner.read().preferences.keywords, ['native-latest']);
   owner.close();
@@ -60,6 +64,7 @@ test('native preferences stay in their sole settings owner while repeated busine
   assert.deepEqual(restarted.read().manual, [manual()]);
   assert.deepEqual(restarted.read().preferences.keywords, ['native-latest']);
   assert.equal(restarted.read().preferences.metadataViewProvider, 'douban');
+  assert.equal(stringifyJSONValue(restarted.read().preferences), stringifyJSONValue(preferences));
 });
 
 test('E31/E36: initial document takes defaults only from policy and exposes an immutable snapshot', t => {

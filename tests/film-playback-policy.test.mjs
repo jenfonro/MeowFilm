@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  compareCandidates, defaultPreferences, isCandidateAllowed, isSmartSiteAllowed, normalizePreferences,
+  compareCandidates, defaultPreferences, isCandidateAllowed, isSmartSiteAllowed, normalizePreferences, readPreferences,
 } from '../packages/film-playback/src/policy.js';
 
 const source = { key: 'cat:install:site', engine: 'cat', installationId: 'install', siteId: 'site',
@@ -24,13 +24,12 @@ test('E36 default preferences contain only supported pan families and are indepe
   assert.deepEqual(defaultPreferences(), expected);
 });
 
-test('E36 normalized preferences keep empty keyword groups and complete a partial pan order', () => {
+test('E36 edited preferences preserve partial orders and empty keyword groups', () => {
   const value = { ruleOrder: ['keyword', 'pan', 'quality'], panOrder: ['baidu', 'quark'],
     keywords: ['  DDP ', 'H.265'], siteCleanKeywords: [], iosAutoPrepare: false };
   const before = structuredClone(value);
   const result = normalizePreferences(value);
-  assert.deepEqual(result, { ...value, keywords: ['DDP', 'H.265'],
-    panOrder: ['baidu', 'quark', 'yidong', 'tianyi', 'uc'], metadataViewProvider: 'tmdb' });
+  assert.deepEqual(result, { ...value, keywords: ['DDP', 'H.265'], metadataViewProvider: 'tmdb' });
   assert.deepEqual(value, before);
   assert.deepEqual(normalizePreferences({ keywords: [], siteCleanKeywords: [] }).keywords, []);
   assert.deepEqual(normalizePreferences(), defaultPreferences());
@@ -38,14 +37,30 @@ test('E36 normalized preferences keep empty keyword groups and complete a partia
 });
 
 test('E36 malformed preferences fail with a closed code and without echoing input', () => {
-  for (const value of [null, [], 'secret', { ruleOrder: ['quality'] },
-    { ruleOrder: ['quality', 'pan', 'pan'] }, { panOrder: ['115'] }, { panOrder: ['139'] },
+  for (const value of [null, [], 'secret',
+    { ruleOrder: ['quality', 'pan', 'pan'] },
     { panOrder: ['quark', 'quark'] }, { keywords: ['DDP', 'ddp'] }, { keywords: [''] },
     { keywords: [1] }, { iosAutoPrepare: 1 }, { metadataViewProvider: null },
     { metadataViewProvider: 'source' }, { metadataViewProvider: 'TMDB' }]) {
     assert.throws(() => normalizePreferences(value), error =>
       error.code === 'INVALID_PREFERENCES' && error.message === 'Invalid film playback preferences');
   }
+});
+
+test('saved partial and extended orders use only the dimensions actually selected', () => {
+  const items = [candidate({ id: 'first', quality: '720P', provider: 'uc' }),
+    candidate({ id: 'word', quality: '1080P', provider: 'quark', name: 'DDP' })];
+  for (const project of [normalizePreferences, readPreferences]) {
+    assert.deepEqual(sorted(items, { preferences: project({ ruleOrder: ['extension'], keywords: ['DDP'] }) }), ['first', 'word']);
+    assert.deepEqual(sorted(items, { preferences: project({ ruleOrder: [] }) }), ['first', 'word']);
+    const preferences = project({ ruleOrder: ['extension', 'pan'], panOrder: ['unknown', 'quark'] });
+    assert.deepEqual(preferences.panOrder, ['unknown', 'quark']);
+    assert.deepEqual(sorted(items, { preferences }), ['word', 'first']);
+  }
+  const preferences = readPreferences({ ruleOrder: ['quality'], panOrder: null, keywords: [null, 'DDP'],
+    siteCleanKeywords: 'unused', iosAutoPrepare: 'unused', metadataViewProvider: 'unused' });
+  assert.deepEqual(sorted(items, { preferences }), ['word', 'first']);
+  assert.equal(isSmartSiteAllowed(source, preferences), true);
 });
 
 test('E35 smart site cleaning respects enabled/searchable and can be cleared without disabling sources', () => {
