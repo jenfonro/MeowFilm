@@ -19,7 +19,6 @@ enum MusicNativeLyricsParser {
     static func timed(_ text: String) -> Bool { !matches(#"\[(?:\d{1,3}:\d{2}(?:\.\d{1,3})?|\d+,\d+)\]"#, text).isEmpty }
     static func clock(_ minute: String, _ second: String) -> Double { (Double(minute) ?? 0) * 60 + (Double(second) ?? 0) }
     static func parse(_ raw: MusicNativeLyrics, duration: Double = 0) throws -> [MusicLyricLine] {
-        try musicRequire(raw.text.utf8.count <= 512 * 1024 && raw.translation.utf8.count <= 512 * 1024, .limit)
         return try lines(raw.text, translation: raw.translation, duration: duration)
     }
     struct Word { var time: Double; var duration: Double?; let text: String }

@@ -10,6 +10,8 @@ public final class SettingsSwitch: UIView {
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
         addSubview(control)
         control.addAction(UIAction { [weak self] _ in
             guard let self else { return }

@@ -46,6 +46,117 @@ final class MeowUIPlatformTests: XCTestCase {
         XCTAssertFalse(host.view.hitTest(CGPoint(x: 120, y: 37), with: nil) === field)
     }
 
+    func testInputSectionPreservesCompactFieldExpandedHitRegion() throws {
+        let host = UIViewController(), window = try display(host)
+        let field = SettingsTextField(); field.inputAppearance = .underline
+        field.font = .preferredFont(forTextStyle: .body)
+        field.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        let section = SettingsInputSection(title: "关键字匹配规则", input: field)
+        let size = section.systemLayoutSizeFitting(CGSize(width: 200, height: 0),
+            withHorizontalFittingPriority: .required, verticalFittingPriority: .fittingSizeLevel)
+        section.frame = CGRect(origin: CGPoint(x: 20, y: 40), size: size)
+        host.view.addSubview(section)
+        window.layoutIfNeeded(); section.layoutIfNeeded()
+        XCTAssertEqual(field.bounds.height, 36)
+        XCTAssertEqual(field.layer.borderWidth, 0)
+        XCTAssertEqual(field.frame.maxY, section.bounds.maxY, accuracy: 0.5)
+        for y in [-3.0, field.bounds.midY, field.bounds.maxY + 3] {
+            let point = field.convert(CGPoint(x: field.bounds.midX, y: y), to: host.view)
+            let hit = host.view.hitTest(point, with: nil)
+            XCTAssertTrue(hit === field || hit?.isDescendant(of: field) == true)
+        }
+        let outside = field.convert(CGPoint(x: field.bounds.midX, y: field.bounds.maxY + 5), to: host.view)
+        XCTAssertFalse(host.view.hitTest(outside, with: nil) === field)
+    }
+
+    func testSettingsInputsKeepExplicitAppearanceAndEditingStateAcrossThemeAndSizeChanges() async throws {
+        let host = UIViewController(), window = try display(host)
+        let field = SettingsTextField(), text = SettingsTextView()
+        field.text = "字段原值"; field.font = .preferredFont(forTextStyle: .body)
+        text.text = String(repeating: "第一行\n第二行\n", count: 20)
+        text.font = .preferredFont(forTextStyle: .body)
+        text.selectedRange = NSRange(location: 2, length: 3)
+        host.view.addSubview(field); host.view.addSubview(text)
+        for appearance in [SettingsInputAppearance.plain, .underline, .outlined, .plain] {
+            field.inputAppearance = appearance; text.inputAppearance = appearance
+            for dark in [false, true] {
+                let theme = PageTheme(dark: dark), settings = theme.settings
+                window.overrideUserInterfaceStyle = dark ? .dark : .light
+                for width: CGFloat in [200, 358] {
+                    field.frame = CGRect(x: 20, y: 40, width: width, height: 36)
+                    text.frame = CGRect(x: 20, y: 100, width: width, height: 140)
+                    settings.apply(to: field); settings.apply(to: text)
+                    field.layoutIfNeeded(); text.layoutIfNeeded()
+                    let outlined = appearance == .outlined
+                    for input in [field as UIView, text] {
+                        XCTAssertEqual(input.backgroundColor, outlined ? UIColor(settings.input) : .clear)
+                        XCTAssertEqual(input.layer.borderWidth, outlined ? 1 : 0)
+                        let lines = (input.layer.sublayers ?? []).filter {
+                            !$0.isHidden && $0.backgroundColor == UIColor(settings.separator).cgColor &&
+                                $0.bounds.height == SettingsVisualMetrics.separatorHeight
+                        }
+                        XCTAssertEqual(lines.count, appearance == .underline ? 1 : 0)
+                        if let line = lines.first {
+                            XCTAssertEqual(line.frame.minX, input.bounds.minX, accuracy: 0.5)
+                            XCTAssertEqual(line.frame.maxY, input.bounds.maxY, accuracy: 0.5)
+                            XCTAssertEqual(line.bounds.width, input.bounds.width, accuracy: 0.5)
+                        }
+                    }
+                    XCTAssertEqual(field.layer.cornerRadius, outlined ? 18 : 0)
+                    XCTAssertEqual(text.layer.cornerRadius, 0, "Multiline outlined input is rectangular")
+                    XCTAssertEqual(field.textRect(forBounds: field.bounds).minX, outlined ? 12 : 0, accuracy: 0.5)
+                    XCTAssertEqual(text.textContainerInset.left, outlined ? 12 : 0)
+                    XCTAssertEqual(text.textContainerInset.right, outlined ? 12 : 0)
+                    XCTAssertEqual(text.textContainer.lineFragmentPadding, 0)
+                    XCTAssertEqual(field.text, "字段原值")
+                    XCTAssertEqual(text.selectedRange, NSRange(location: 2, length: 3))
+                    XCTAssertEqual(text.text, String(repeating: "第一行\n第二行\n", count: 20))
+                }
+            }
+        }
+        text.inputAppearance = .underline
+        text.setContentOffset(CGPoint(x: 0, y: 50), animated: false)
+        text.layoutIfNeeded()
+        let line = try XCTUnwrap(text.layer.sublayers?.first {
+            !$0.isHidden && $0.bounds.height == SettingsVisualMetrics.separatorHeight
+        })
+        XCTAssertEqual(line.frame.maxY, text.bounds.maxY, accuracy: 0.5,
+            "The underline stays at the input edge while multiline text scrolls")
+        await Task.yield()
+    }
+
+    func testSettingsSwitchProtectsTrailingWidthInFillRowsAtDifferentTitleLengths() async throws {
+        let host = UIViewController(), window = try display(host)
+        let stack = UIStackView(); stack.axis = .vertical; stack.spacing = 12
+        host.view.addSubview(stack); stack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: host.view.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: host.view.trailingAnchor, constant: -20),
+            stack.topAnchor.constraint(equalTo: host.view.safeAreaLayoutGuide.topAnchor, constant: 20),
+        ])
+        var toggles: [SettingsSwitch] = []
+        for title in ["自动准备", "退出保留音频", "较长的播放设置标题仍保留右侧开关"] {
+            let label = UILabel(); label.text = title; label.font = .preferredFont(forTextStyle: .body)
+            label.adjustsFontForContentSizeCategory = true; label.numberOfLines = 0
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            let toggle = SettingsSwitch()
+            let row = UIStackView(arrangedSubviews: [label, toggle]); row.spacing = 12; row.alignment = .center
+            stack.addArrangedSubview(row); toggles.append(toggle)
+        }
+        for category in [UIContentSizeCategory.large, .accessibilityExtraExtraExtraLarge] {
+            host.traitOverrides.preferredContentSizeCategory = category
+            await Task.yield(); window.layoutIfNeeded(); stack.layoutIfNeeded()
+            let edges = toggles.map { $0.convert($0.bounds, to: stack).maxX }
+            for toggle in toggles {
+                XCTAssertEqual(toggle.bounds.width, 44, accuracy: 0.5)
+                XCTAssertEqual(toggle.contentHuggingPriority(for: .horizontal), .required)
+                XCTAssertEqual(toggle.contentCompressionResistancePriority(for: .horizontal), .required)
+                XCTAssertFalse(toggle.hasAmbiguousLayout)
+            }
+            XCTAssertEqual(edges.min(), edges.max())
+        }
+    }
+
     func testSettingsCardsRoundOnlyOuterCornersAndKeepDividersInsideTheGroup() throws {
         for dark in [false, true] {
             let theme = PageTheme(palette: .coral, dark: dark)
@@ -136,7 +247,7 @@ final class MeowUIPlatformTests: XCTestCase {
                   edit: {}, toggle: { _ in }, menu: UIMenu(children: [UIAction(title: "检测") { _ in }])),
         ]
         let table = try XCTUnwrap(descendants(manager).compactMap { $0 as? UITableView }.first)
-        for category in [UIContentSizeCategory.large, .accessibilityExtraExtraExtraLarge] {
+        for (stage, category) in [UIContentSizeCategory.large, .accessibilityExtraExtraExtraLarge, .large].enumerated() {
             host.traitOverrides.preferredContentSizeCategory = category
             await Task.yield()
             for dark in [false, true] {
@@ -193,11 +304,24 @@ final class MeowUIPlatformTests: XCTestCase {
                     }
                 }
                 XCTAssertEqual(manager.search.searchTextField.textColor, UIColor(theme.settings.ink))
+                XCTAssertEqual(manager.search.searchTextField.convert(manager.search.searchTextField.bounds, to: manager).minY,
+                    SettingsVisualMetrics.contentTopSpacing, accuracy: 0.5)
                 XCTAssertEqual(manager.search.searchTextField.backgroundColor, UIColor(theme.settings.input))
                 XCTAssertEqual(manager.search.searchTextField.layer.cornerRadius,
                     min(manager.search.searchTextField.bounds.width, manager.search.searchTextField.bounds.height) / 2,
                     accuracy: 0.5)
                 XCTAssertTrue(manager.search.searchTextField.adjustsFontForContentSizeCategory)
+                manager.search.setNeedsLayout(); manager.search.layoutIfNeeded()
+                XCTAssertEqual(manager.search.searchTextField.convert(manager.search.searchTextField.bounds, to: manager).minY,
+                    SettingsVisualMetrics.contentTopSpacing, accuracy: 0.5,
+                    "A native search-bar layout must preserve the visible field's top spacing")
+                let input = manager.search.searchTextField
+                for y in [input.bounds.minY + 1, input.bounds.maxY - 1] {
+                    let point = input.convert(CGPoint(x: input.bounds.midX, y: y), to: manager)
+                    let hit = manager.hitTest(point, with: nil)
+                    XCTAssertTrue(hit === input || hit?.isDescendant(of: input) == true,
+                        "The aligned search field must remain reachable at both vertical edges: category=\(category.rawValue), dark=\(dark), field=\(input.convert(input.bounds, to: manager)), bar=\(manager.search.convert(manager.search.bounds, to: manager)), point=\(point), hit=\(String(describing: hit))")
+                }
                 for button in descendants(manager).compactMap({ $0 as? UIButton }).filter({
                     ["management.selectAll", "management.invert", "management.delete"].contains($0.accessibilityIdentifier ?? "")
                 }) {
@@ -209,6 +333,9 @@ final class MeowUIPlatformTests: XCTestCase {
                     XCTAssertGreaterThanOrEqual(frame.minY, -0.5)
                     XCTAssertLessThanOrEqual(frame.maxY, parent.bounds.height + 0.5)
                 }
+                let attachment = XCTAttachment(image: renderSettingsCard(manager))
+                attachment.name = "management-search-320-\(stage)-\(dark)"
+                attachment.lifetime = .keepAlways; add(attachment)
             }
         }
         let cell = try XCTUnwrap(table.cellForRow(at: IndexPath(row: 0, section: 0)))
@@ -266,6 +393,9 @@ final class MeowUIPlatformTests: XCTestCase {
             let cell = try XCTUnwrap(table.cellForRow(at: last))
             XCTAssertLessThanOrEqual(cell.convert(cell.bounds, to: manager).maxY, footer.frame.minY)
         }
+        manager.configureToolbar(showsSearch: false, buttons: [])
+        manager.setNeedsLayout(); manager.layoutIfNeeded()
+        XCTAssertEqual(table.frame.minY, SettingsVisualMetrics.contentTopSpacing, accuracy: 0.5)
     }
 
     func testManagementFormsKeepFieldsAndChecksReadableAt320PointsAcrossDynamicTypeAndThemes() async throws {
@@ -366,19 +496,25 @@ final class MeowUIPlatformTests: XCTestCase {
                         XCTAssertEqual(button.titleColor(for: .normal), UIColor(settings.ink))
                     }
                     for input in [name as UIView, pattern, result] {
-                        XCTAssertEqual(input.backgroundColor, UIColor(settings.input))
-                        XCTAssertEqual(input.layer.borderColor, UIColor(settings.inputBorder).cgColor)
-                        XCTAssertEqual(input.layer.cornerRadius, min(input.bounds.width, input.bounds.height) / 2,
-                            accuracy: 0.5)
+                        XCTAssertEqual(input.backgroundColor, .clear)
+                        XCTAssertEqual(input.layer.borderWidth, 0)
+                        XCTAssertEqual(input.layer.cornerRadius, 0)
                     }
-                    if !boxed {
-                        let separators = form.fields.arrangedSubviews.filter { !($0 is UIStackView) && !($0 is UIButton) }
-                        XCTAssertFalse(separators.isEmpty)
-                        for separator in separators {
-                            XCTAssertEqual(separator.backgroundColor?.resolvedColor(with: form.traitCollection), UIColor(settings.separator))
-                            XCTAssertGreaterThan(separator.bounds.height, 0)
-                            XCTAssertEqual(separator.bounds.width, form.fields.bounds.width, accuracy: 0.5)
-                        }
+                    XCTAssertEqual((name as? SettingsTextField)?.inputAppearance, .plain)
+                    XCTAssertEqual((pattern as? SettingsTextView)?.inputAppearance, .plain)
+                    XCTAssertEqual(name.textRect(forBounds: name.bounds).minX, name.bounds.minX, accuracy: 0.5)
+                    XCTAssertEqual(pattern.textContainerInset.left, 0)
+                    let separators = form.fields.arrangedSubviews.filter { !($0 is UIStackView) && !($0 is UIButton) }
+                    XCTAssertFalse(separators.isEmpty)
+                    for separator in separators {
+                        XCTAssertEqual(separator.backgroundColor?.resolvedColor(with: form.traitCollection), UIColor(settings.separator))
+                        XCTAssertFalse(separator.isHidden)
+                        XCTAssertGreaterThan(separator.bounds.height, 0)
+                        XCTAssertEqual(separator.bounds.height, SettingsVisualMetrics.separatorHeight,
+                            accuracy: 0.5 / form.traitCollection.displayScale + 0.001,
+                            "The separator may round to either adjacent physical pixel height")
+                        XCTAssertEqual(separator.bounds.width,
+                            form.fields.bounds.width - (boxed ? 32 : 0), accuracy: 0.5)
                     }
                     form.scrollRectToVisible(tail.convert(tail.bounds, to: form), animated: false)
                     form.layoutIfNeeded()

@@ -69,7 +69,7 @@
         "COPYING.LGPLv3": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
         "LICENSE.md": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af"
       },
-      "preparedTreeSHA256": "e8f3b3c1be233adccbbb6866657c5b799afc418d00ef57c81da73263e0773ce5"
+      "preparedTreeSHA256": "06a280eed85120d1e6b4f4e9007672a71c7c7948343ff51b41d2d46e7474c77c"
     },
     "freetype": {
       "version": "2.14.1",
@@ -198,7 +198,7 @@
     }
   },
   "inputs": {
-    "apps/windows/native/FilmKernel/ffmpeg-film-avio.patch": "ebc1bbad9bdeaff7e4666a85ddcabaa8176f864360d40d73d5477ecd596ab4fb",
+    "apps/windows/native/FilmKernel/ffmpeg-film-avio.patch": "58b293eb10ebf3a49119ffd33a4d1a36a09ce7bad09be3855d1057959d6f8a7e",
     "scripts/windows/build-film-kernel-placebo.patch": "6064d6b7a0767157497b950fb215884784061633e392669aff64684a2b5cc873",
     "apps/windows/native/FilmKernel/ffmpeg-private.h": "39fd1f47e3982b5fab505becdaee6eab35719611ccbb6308aa35eac9ee9255af",
     "scripts/windows/build-film-kernel-glslang.wrap": "0fab3a524b58661d4e10597680fb28484504f8591f852d5eb0043904e8507e2c",
@@ -217,7 +217,7 @@
         },
         "libavformat/dashdec.c": {
           "upstream": "50f4368e09137d961ba7965ac4e664b48bc3358efcfc1a44df19cb897832ea86",
-          "patched": "4c94bb5d7c17c0513fd257f1aa05402fa87c9732e41bd0336706c8873488ea3d"
+          "patched": "e5769f9571be7d4321d9c2814853405dc1a8e85f776965e598d235b25ee78091"
         },
         "libavformat/mov.c": {
           "upstream": "7ed52b0e5932026058a55483e72880eb592cdef048b0cec15e9ea7e922ad0347",

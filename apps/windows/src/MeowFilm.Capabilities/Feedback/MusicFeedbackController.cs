@@ -68,7 +68,7 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
 
     public void Select(MusicFeedbackSelection value)
     {
-        if (string.IsNullOrEmpty(value.EntryId) || value.EntryId.Length > 200) return;
+        if (string.IsNullOrEmpty(value.EntryId)) return;
         lock (sync)
         {
             if (closed || preparing) return;

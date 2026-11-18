@@ -23,6 +23,7 @@ public static class MusicQqAccountUiTests
     {
         yield return Case("native-owner-png-profile-save-readback-logout", Login);
         yield return Case("png-native-decode-bounds-pixels-only", Image);
+        yield return Case("large-png-decode-and-explicit-save-no-byte-quota", LargeImageSave);
         yield return Case("visible-user-challenge-only-poll-hide-cancel-no-background", Visibility);
         yield return Case("pending-generation-hidden-before-png-never-publishes", PendingHidden);
         yield return Case("manual-and-visible-query-single-flight", SingleFlight);
@@ -87,6 +88,26 @@ public static class MusicQqAccountUiTests
             catch (Exception e) when (e.Message is "INVALID_RESPONSE" or "LIMIT") { }
         }
         return Task.CompletedTask;
+    }
+    private static async Task LargeImageSave()
+    {
+        byte[] png = MusicAccountRuntimeFixture.QrPng(width: 1024, height: 1024, noise: true, chunkBytes: 2048);
+        string encoded = Convert.ToBase64String(png);
+        Check(png.Length > 524288 && encoded.Length > 699052);
+        var image = MusicAccountQrImage.DecodePng(encoded);
+        Check(image.IsFrozen && image.PixelWidth == 1024 && image.PixelHeight == 1024);
+        await using var f = await Fixture.Create();
+        f.Transport.Image = png;
+        await f.Module.BeginAccountQrAsync();
+        Check(f.Module.CanSaveAccountQr);
+        await f.Module.SaveAccountQrAsync();
+        Check(f.Module.AccountStatus == "二维码已保存" && new FileInfo(f.Dialogs.Path).Length > 524288);
+        using var stream = File.OpenRead(f.Dialogs.Path);
+        var saved = new PngBitmapDecoder(stream, BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+        byte[] expected = new byte[1024 * 1024 * 4], actual = new byte[expected.Length];
+        image.CopyPixels(expected, 4096, 0);
+        new FormatConvertedBitmap(saved.Frames[0], PixelFormats.Bgra32, null, 0).CopyPixels(actual, 4096, 0);
+        Check(actual.AsSpan().SequenceEqual(expected));
     }
     private static async Task Visibility()
     {
@@ -307,6 +328,7 @@ public static class MusicQqAccountUiTests
     private sealed class QrScenario
     {
         internal int Calls, Polls, Status;
+        internal byte[]? Image;
         internal long ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeMilliseconds();
         internal string? HoldAt;
         internal readonly TaskCompletionSource Arrived = MusicAccountRuntimeFixture.Signal(), Release = MusicAccountRuntimeFixture.Signal();
@@ -319,7 +341,7 @@ public static class MusicQqAccountUiTests
                 challengeId = call.Parameters.GetProperty("challengeId").GetString(),
                 expiresAt = ExpiresAt,
                 url = "",
-                imageBase64 = Convert.ToBase64String(Png()) });
+                imageBase64 = Convert.ToBase64String(Image ?? Png()) });
             if (call.Operation == "qr.poll")
             {
                 Polls++;
@@ -339,6 +361,7 @@ public static class MusicQqAccountUiTests
         internal MusicNativeApplication Application;
         internal MusicAccountFixtureApplication Calls;
         internal MusicCapability Module;
+        internal Dialogs Dialogs;
         private Fixture()
         {
             string root = TestWorkspace.DataPath("qq-account-ui", Guid.NewGuid().ToString("N"));
@@ -347,7 +370,8 @@ public static class MusicQqAccountUiTests
             Runtime.Platform.OnRequest = Transport.Read;
             Application = new(Store, MusicTestStores.For(Store), Runtime);
             Calls = new(Application);
-            Module = new(Calls, Store, new Output(), new Dialogs());
+            Dialogs = new(System.IO.Path.Combine(root, "explicit-qr.png"));
+            Module = new(Calls, Store, new Output(), Dialogs);
         }
         internal static async Task<Fixture> Create()
         {
@@ -368,10 +392,12 @@ public static class MusicQqAccountUiTests
             finally { await Runtime.DisposeAsync(); await Store.DisposeAsync(); }
         }
     }
-    private sealed class Dialogs : IMusicDialogs
+    private sealed class Dialogs(string path) : IMusicDialogs, IMusicAccountQrSaveDialog
     {
+        internal string Path { get; } = path;
         public bool Confirm(string message, string title) => true;
         public string[]? SelectAudioFiles() => null;
+        public string? SelectQrPngPath() => Path;
     }
     private sealed class Output : IMusicPlayback
     {

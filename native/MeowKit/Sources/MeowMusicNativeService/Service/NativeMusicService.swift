@@ -192,7 +192,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var publicCollectionRefreshes = 0
     private var accessTransitions = 0
     var publicQueueSources: [UUID: (collectionID: String, authorization: MusicQueueAuthorization,
-                                   reader: MusicNativePublicBrowseQueueRead, bytes: Int)] = [:]
+                                   reader: MusicNativePublicBrowseQueueRead)] = [:]
     var spent = Set<String>()
     var operations: [UUID: @Sendable () -> Void] = [:]
     var operationTasks: [UUID: Task<Void, Never>] = [:]

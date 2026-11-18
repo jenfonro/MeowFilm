@@ -38,7 +38,7 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
     private static MusicHomeSnapshot? Decode(DocumentSnapshot saved, Func<string, JsonElement?> song, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        if (saved.Data is null || saved.Data.Length > LocalDocumentStore.MaximumDocumentBytes) return null;
+        if (saved.Data is null || saved.Data.Length > CacheDocumentStore.MaximumDocumentBytes) return null;
         try
         {
             using var document = JsonDocument.Parse(saved.Data);
@@ -79,13 +79,13 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
                 {
                     JsonSerializer.Serialize(writer, ProjectPage(page, snapshot.Platform, token));
                     writer.Flush();
-                    if (output.Length > LocalDocumentStore.MaximumDocumentBytes)
+                    if (output.Length > CacheDocumentStore.MaximumDocumentBytes)
                         throw new DocumentStoreException(DocumentStoreError.Limit);
                 }
                 writer.WriteEndArray();
                 writer.WriteEndObject();
             }
-            if (output.Length > LocalDocumentStore.MaximumDocumentBytes)
+            if (output.Length > CacheDocumentStore.MaximumDocumentBytes)
                 throw new DocumentStoreException(DocumentStoreError.Limit);
             token.ThrowIfCancellationRequested();
             return output.ToArray();

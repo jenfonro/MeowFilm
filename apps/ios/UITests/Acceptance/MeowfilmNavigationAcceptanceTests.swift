@@ -102,7 +102,7 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         XCTAssertTrue(app.otherElements["novel.home"].waitForExistence(timeout: 5))
         assertPageOwnsHeader("novel", controls: ["app.menu", "search.open"])
         assertPrimaryNavigation(selected: "novel")
-        XCTAssertTrue(app.segmentedControls["novel.sections"].exists)
+        XCTAssertTrue(app.tables["novel.books"].waitForExistence(timeout: 5))
         attach("03-novel")
 
         app.buttons["app.primary.recommend"].tap()
@@ -444,7 +444,7 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
     func testSidebarsShareStructureAndHomeFollowsPageBusiness() {
         openSidebar()
         let frames = assertSidebarStructure(controls: [
-            "app.sidebar.home", "app.sidebar.channels", "app.sidebar.musicSource",
+            "app.sidebar.home", "app.sidebar.channels",
         ])
         attach("20-sidebar-music")
         app.buttons["app.sidebar.home"].tap()
@@ -456,17 +456,10 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
             XCTAssertTrue(app.otherElements["app.page." + page].waitForExistence(timeout: 5))
             openSidebar()
             let controls = page == "film"
-                ? ["app.sidebar.home", "app.sidebar.filmSource"]
-                : ["app.sidebar.home", "app.sidebar.channels", "app.sidebar.musicSource"]
+                ? ["app.sidebar.home"]
+                : ["app.sidebar.home", "app.sidebar.channels"]
             assertSidebarStructure(controls: controls, matching: frames)
             attach("20-sidebar-" + page)
-            if page == "film" {
-                app.buttons["app.sidebar.filmSource"].tap()
-                let douban = app.buttons["豆瓣"]
-                XCTAssertTrue(douban.waitForExistence(timeout: 5))
-                douban.tap()
-                XCTAssertTrue(app.otherElements["app.sidebar"].exists)
-            }
             revealSidebarElement(app.buttons["app.sidebar.home"])
             app.buttons["app.sidebar.home"].tap()
             XCTAssertTrue(app.otherElements["app.sidebar"].waitForNonExistence(timeout: 5))
@@ -494,7 +487,7 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         openChannels()
         openSidebar()
         assertSidebarStructure(controls: [
-            "app.sidebar.home", "app.sidebar.channels", "app.sidebar.musicSource",
+            "app.sidebar.home", "app.sidebar.channels",
         ], matching: frames)
         attach("20-sidebar-channels")
         app.buttons["app.sidebar.home"].tap()
@@ -504,7 +497,7 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         assertPrimaryNavigation(selected: "recommend")
     }
 
-    func testMusicSourceSelectionStaysConsistentBetweenSidebarAndSettings() throws {
+    func testMusicSettingsSourceSelectionPersistsAfterReopeningAndRestoresOriginal() throws {
         let sources = ["网易云音乐", "酷狗音乐"]
         func displayedSource(_ element: XCUIElement) -> String? {
             let text = [element.label, element.value as? String ?? ""]
@@ -528,60 +521,57 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
             waitForSource(source, on: element)
         }
 
-        openSidebar()
-        let shortcut = app.buttons["app.sidebar.musicSource"]
-        XCTAssertTrue(shortcut.waitForExistence(timeout: 5))
-        revealSidebarElement(shortcut)
+        func openMusicSettings() -> XCUIElement {
+            openSidebar()
+            let settings = app.buttons["app.sidebar.settings"]
+            revealSidebarElement(settings)
+            settings.tap()
+            XCTAssertTrue(app.otherElements["app.sidebar"].waitForNonExistence(timeout: 5))
+            let music = app.cells["settings.category.music"]
+            let reached = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                music.exists || self.app.alerts["错误"].exists
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [reached], timeout: 5), .completed)
+            acknowledgeMusicContentFailureIfPresent()
+            // Do not tap Settings again: the original navigation must have completed.
+            XCTAssertTrue(music.waitForExistence(timeout: 5))
+            music.tap()
+            XCTAssertTrue(app.buttons["settings.search"].waitForExistence(timeout: 5))
+            let picker = app.buttons["music.settings.catalogSource"]
+            XCTAssertTrue(picker.waitForExistence(timeout: 5))
+            if !picker.isHittable { app.swipeUp() }
+            XCTAssertTrue(picker.isHittable)
+            return picker
+        }
+        func leaveSettings() {
+            app.buttons["page.header.back"].tap()
+            XCTAssertTrue(app.cells["settings.category.music"].waitForExistence(timeout: 5))
+            app.buttons["page.header.back"].tap()
+            XCTAssertTrue(app.otherElements["app.page.recommend"].waitForExistence(timeout: 5))
+            acknowledgeMusicContentFailureIfPresent()
+        }
+
+        let picker = openMusicSettings()
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            shortcut.isEnabled && displayedSource(shortcut) != nil
+            picker.isEnabled && displayedSource(picker) != nil
         }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 5), .completed)
-        let original = try XCTUnwrap(displayedSource(shortcut))
-        // Exercise the same write in each entry regardless of a previous run's selection.
-        selectSource("网易云音乐", on: shortcut)
-        selectSource("酷狗音乐", on: shortcut)
-        attach("music-source-sidebar-selected")
-
-        let settings = app.buttons["app.sidebar.settings"]
-        revealSidebarElement(settings)
-        settings.tap()
-        XCTAssertTrue(app.otherElements["app.sidebar"].waitForNonExistence(timeout: 5))
-        let music = app.cells["settings.category.music"]
-        let reached = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            music.exists || self.app.alerts["错误"].exists
-        }, object: nil)
-        XCTAssertEqual(XCTWaiter.wait(for: [reached], timeout: 5), .completed)
-        acknowledgeMusicContentFailureIfPresent()
-        // Do not tap Settings again: the original navigation must have completed.
-        XCTAssertTrue(music.waitForExistence(timeout: 5))
-        music.tap()
-        XCTAssertTrue(app.buttons["settings.search"].waitForExistence(timeout: 5))
-        let picker = app.buttons["music.settings.catalogSource"]
-        if !picker.isHittable { app.swipeUp() }
-        XCTAssertTrue(picker.waitForExistence(timeout: 5))
-        XCTAssertTrue(picker.isHittable)
-        waitForSource("酷狗音乐", on: picker)
+        let original = try XCTUnwrap(displayedSource(picker))
+        let changed = original == sources[0] ? sources[1] : sources[0]
+        selectSource(changed, on: picker)
         attach("music-source-settings-selected")
+        leaveSettings()
 
-        selectSource("网易云音乐", on: picker)
-        app.buttons["page.header.back"].tap()
-        XCTAssertTrue(music.waitForExistence(timeout: 5))
-        app.buttons["page.header.back"].tap()
-        XCTAssertTrue(app.otherElements["app.page.recommend"].waitForExistence(timeout: 5))
+        let reopened = openMusicSettings()
+        waitForSource(changed, on: reopened)
+        attach("music-source-settings-reopened")
+        selectSource(original, on: reopened)
+        leaveSettings()
 
-        acknowledgeMusicContentFailureIfPresent()
-        openSidebar()
-        XCTAssertTrue(shortcut.waitForExistence(timeout: 5))
-        revealSidebarElement(shortcut)
-        waitForSource("网易云音乐", on: shortcut)
-        selectSource(original, on: shortcut)
-        waitForSource(original, on: shortcut)
-        attach("music-source-sidebar-restored")
-        let home = app.buttons["app.sidebar.home"]
-        revealSidebarElement(home)
-        home.tap()
-        XCTAssertTrue(app.otherElements["app.sidebar"].waitForNonExistence(timeout: 5))
-        XCTAssertTrue(app.otherElements["app.page.recommend"].waitForExistence(timeout: 5))
+        let restored = openMusicSettings()
+        waitForSource(original, on: restored)
+        attach("music-source-settings-restored")
+        leaveSettings()
     }
 
     func testSettingsPagesUseAppOwnedHeaders() throws {
@@ -844,6 +834,41 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         XCTAssertTrue(app.buttons["search.open"].waitForExistence(timeout: 5))
     }
 
+    func testPlaybackMenusOpenFromActualSettingsWithoutChoicePagesOrChangingValues() throws {
+        openSidebar()
+        app.buttons["app.sidebar.settings"].tap()
+        XCTAssertTrue(app.cells["settings.category.film"].waitForExistence(timeout: 5))
+        app.cells["settings.category.film"].tap()
+        let player = app.cells["film.settings.player"]
+        XCTAssertTrue(player.waitForExistence(timeout: 5))
+        if !player.isHittable { app.tables.firstMatch.swipeUp() }
+        player.tap()
+        for (id, title) in [("engine", "播放器设置"), ("defaultRate", "播放控制")] {
+            let menu = app.buttons["film.player." + id + ".menu"]
+            XCTAssertTrue(menu.waitForExistence(timeout: 5) && menu.isHittable)
+            XCTAssertTrue(app.staticTexts[title].exists)
+            let current = try XCTUnwrap(menu.value as? String)
+            XCTAssertFalse(current.isEmpty)
+            XCTAssertEqual(menu.label, id == "engine" ? "播放核心" : "默认倍速")
+            assertInsideHeader(app.buttons["page.header.back"])
+            menu.tap()
+            let selection = app.buttons[current]
+            XCTAssertTrue(selection.waitForExistence(timeout: 5) && selection.isHittable)
+            attach("film-player-app-native-menu-" + id)
+            selection.tap()
+            XCTAssertTrue(menu.waitForExistence(timeout: 5))
+            XCTAssertEqual(menu.value as? String, current)
+            XCTAssertTrue(app.staticTexts[title].exists)
+            XCTAssertEqual(app.otherElements.matching(identifier: "page.header").count, 1)
+            assertInsideHeader(app.buttons["page.header.back"])
+            if id == "engine" { app.cells["film.player.controls"].tap() }
+        }
+        app.buttons["page.header.back"].tap()
+        XCTAssertTrue(app.buttons["film.player.engine.menu"].waitForExistence(timeout: 5))
+        app.buttons["page.header.back"].tap()
+        XCTAssertTrue(player.waitForExistence(timeout: 5))
+    }
+
     func testLocalCollectionSearchAndEditorStayBelowTheHeader() {
         XCTAssertTrue(app.buttons["app.primary.library"].waitForExistence(timeout: 30))
         app.buttons["app.primary.library"].tap()
@@ -1077,6 +1102,8 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         XCTAssertTrue(scroll.descendants(matching: .any)["app.sidebar.icon"].exists, file: file, line: line)
         XCTAssertTrue(scroll.otherElements["app.sidebar.card"].exists, file: file, line: line)
         XCTAssertFalse(scroll.buttons["app.sidebar.settings"].exists, file: file, line: line)
+        XCTAssertFalse(sidebar.buttons["app.sidebar.musicSource"].exists, file: file, line: line)
+        XCTAssertFalse(sidebar.buttons["app.sidebar.filmSource"].exists, file: file, line: line)
         XCTAssertEqual(card.frame.minX, settings.frame.minX, accuracy: 1, file: file, line: line)
         XCTAssertEqual(card.frame.maxX, settings.frame.maxX, accuracy: 1, file: file, line: line)
         XCTAssertEqual(card.descendants(matching: .button).allElementsBoundByIndex.map(\.identifier).sorted(),

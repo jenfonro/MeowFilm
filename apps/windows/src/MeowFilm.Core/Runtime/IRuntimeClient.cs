@@ -51,16 +51,12 @@ public interface IRuntimeConnectionSource
     Task<RuntimeConnection> CaptureConnectionAsync(CancellationToken cancellationToken = default);
 }
 
-public sealed record RuntimeModule(string Id, string Version)
-{
-    public IReadOnlyList<string> RequiredMethods { get; init; } = [];
-}
+public sealed record RuntimeModule(string Id, string Version);
 
 /// <summary>Image bytes from a validated runtime-relative reference, without HTTP access credentials.
 /// Completion includes physical response disposal, including cancellation.</summary>
 public interface IRuntimeImageClient
 {
-    Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default);
-    /// <summary>Reads the complete image without a caller's thumbnail/card byte quota.</summary>
+    /// <summary>Reads the complete image; cache admission belongs to the consumer.</summary>
     Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default);
 }

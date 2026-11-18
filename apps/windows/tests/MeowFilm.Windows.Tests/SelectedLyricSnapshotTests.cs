@@ -44,13 +44,15 @@ public static class SelectedLyricSnapshotTests
                 await Reject(path, SelectedLyricSnapshotError.InvalidEncoding);
             }
         });
-        yield return new("Selected lyric snapshot byte and decoded character budgets reject complete input not a prefix", async () =>
+        yield return new("Selected lyric snapshot large text is complete with matching hash", async () =>
         {
             string path = Path.Combine(NewRoot(), "large.lrc");
-            await File.WriteAllBytesAsync(path, new byte[SelectedLyricSnapshot.MaximumBytes + 1]);
-            await Reject(path, SelectedLyricSnapshotError.TooLarge);
-            await File.WriteAllTextAsync(path, new string('a', SelectedLyricSnapshot.MaximumCharacters + 1));
-            await Reject(path, SelectedLyricSnapshotError.TooLarge);
+            string text = "[00:01]" + new string('歌', 100_000);
+            byte[] bytes = Encoding.UTF8.GetBytes(text);
+            await File.WriteAllBytesAsync(path, bytes);
+            var result = await SelectedLyricSnapshot.ReadAsync(path);
+            Equal(text, result.Text);
+            Equal(Convert.ToHexStringLower(SHA256.HashData(bytes)), result.Sha256);
         });
         yield return new("Selected lyric snapshot invalid path or extension never causes a directory search", async () =>
         {

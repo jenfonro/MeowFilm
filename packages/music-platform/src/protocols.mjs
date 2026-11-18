@@ -84,11 +84,11 @@ export function wyRequest(path, params, client, account, clock, weapi = false, t
   return { url: origin + (weapi ? '/weapi/' : '/eapi/') + path.slice(5), method: 'POST', body,
     headers: { ...headers, Referer: 'https://music.163.com/', 'Content-Type': 'application/x-www-form-urlencoded' } };
 }
-export function encryptedWyResponse(bytes, maximumBytes = 4 * 1024 * 1024) {
+export function encryptedWyResponse(bytes) {
   try {
     let plain = decrypt(bytes, 'e82ckenh8dichen8');
     if (plain[0] === 0x1f && plain[1] === 0x8b) {
-      const inflated = gunzipSync(plain, { maxOutputLength: maximumBytes, info: true });
+      const inflated = gunzipSync(plain, { info: true });
       if (inflated.engine.bytesWritten !== plain.length) fail('INVALID_RESPONSE');
       plain = inflated.buffer;
     }

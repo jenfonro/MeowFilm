@@ -13,6 +13,7 @@ public final class NovelFeature: ObservableObject {
     @Published public var error: String?
     public private(set) var closed = false
     private var startup: Task<Void, Never>?
+    private var sourceRefresh = UUID()
     private var sessions: [UUID: NovelReadingSession] = [:]
     private var closing: Task<Void, Never>?
     public init(library: NovelLibrary, rules: NovelRuleProcessor, runtime: any NovelRuntimeServing) {
@@ -34,8 +35,10 @@ public final class NovelFeature: ObservableObject {
         guard !closed, !Task.isCancelled else { return }; local = value
     }
     public func refreshSources() async throws {
+        let token = UUID(); sourceRefresh = token
         let value = try await sourcesClient.list()
         try Task.checkCancellation(); guard !closed else { throw NovelError.closed }
+        guard sourceRefresh == token else { return }
         sources = value.sorted { $0.order == $1.order ? $0.id < $1.id : $0.order < $1.order }
         for session in sessions.values { session.sourcesChanged() }
     }

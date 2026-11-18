@@ -81,12 +81,15 @@ public static class NativeHttpMediaTransferTests
             new Dictionary<string, string> { ["X-Fixture\r\nHost"] = "canary" },
             new Dictionary<string, string> { ["Cookie"] = "canary\r\nInjected: secret" },
             new Dictionary<string, string> { ["Cookie"] = "canary\0secret" },
-            new Dictionary<string, string> { ["X-Fixture"] = new string('a', 8193) },
             new Dictionary<string, string> { ["cookie"] = "one", ["Cookie"] = "two" }
         })
             await ExpectCode(() => Copy(server.Uri("/a"), headers), PlaybackError.InvalidHeaders);
         await ExpectCode(() => Copy(server.Uri("/a"), null!), PlaybackError.InvalidHeaders);
         Check(server.Requests.IsEmpty);
+        var large = Enumerable.Range(0, 33).ToDictionary(index => "X-Fixture-" + index, _ => "value");
+        large["X-" + new string('a', 129)] = new string('b', 17000);
+        Check((await Copy(server.Uri("/a"), large)).SequenceEqual(wave));
+        Check(server.Requests.All(request => large.All(pair => request.Headers[pair.Key] == pair.Value)));
     }
 
     private static async Task HttpPolicy()

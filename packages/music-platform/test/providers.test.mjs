@@ -461,7 +461,7 @@ test('KW SSR keeps sparse display material while unresolved aliases and executab
   }
 });
 
-test('mandatory material, JSON, transport, upstream denial and byte limits keep distinct real errors', async () => {
+test('mandatory material, JSON, transport, upstream denial and large malformed input keep distinct real errors', async () => {
   const missing = fixture(() => { assert.fail('missing keyword must not dispatch'); });
   await assert.rejects(missing.request('wy', 'search'), { code: 'INVALID_REQUEST' });
   await assert.rejects(missing.request('wy', 'search', { keyword: 'x', page: { toString: null } }), { code: 'INVALID_REQUEST' });
@@ -472,7 +472,7 @@ test('mandatory material, JSON, transport, upstream denial and byte limits keep 
     ['{"code":200,"unused":"\\1e400}', {}, 'INVALID_RESPONSE'],
     [{ code: 500 }, {}, 'UPSTREAM_ERROR'],
     ['denied', { status: 503 }, 'UPSTREAM_HTTP'],
-    ['x'.repeat(4 * 1024 * 1024 + 1), {}, 'LIMIT'],
+    ['x'.repeat(4 * 1024 * 1024 + 1), {}, 'INVALID_RESPONSE'],
   ]) {
     const f = fixture(() => response(body, options));
     await assert.rejects(f.request('wy', 'search', { keyword: 'x' }), { code }); await f.close();

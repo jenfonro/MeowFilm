@@ -26,7 +26,7 @@ public struct SearchHistoryEntry: Codable, Equatable, Sendable, Identifiable {
             entries = []; return
         }
         var seen = Set<String>()
-        entries = Array(saved.filter { !$0.text.isEmpty && seen.insert($0.id).inserted }.prefix(60))
+        entries = saved.filter { !$0.text.isEmpty && seen.insert($0.id).inserted }
     }
     public func record(_ keyword: String) {
         let keyword = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -35,7 +35,6 @@ public struct SearchHistoryEntry: Codable, Equatable, Sendable, Identifiable {
         let entry = SearchHistoryEntry(text: keyword)
         entries.removeAll { $0.id == entry.id }
         entries.insert(entry, at: 0)
-        entries = Array(entries.prefix(60))
         save()
     }
     public func clear() { entries = []; save() }

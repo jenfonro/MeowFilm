@@ -20,7 +20,7 @@ public static class MusicLyricTiming
     private static double Clock(string minutes, string seconds) => Number(minutes) * 60 + Number(seconds);
     public static JsonElement Parse(string text, string translation = "", double duration = 0)
     {
-        LJ.Require(text is not null && translation is not null && text.Length <= 65536 && translation.Length <= 65536 &&
+        LJ.Require(text is not null && translation is not null &&
             double.IsFinite(duration) && duration >= 0, "INVALID_LYRIC_RESPONSE");
         var original = ParseLines(text!, duration);
         var translations = new Dictionary<long, List<string>>();
@@ -104,7 +104,7 @@ public static class MusicLyricTiming
                 if (text.Length > 0) lines.Add(new(time + offset, markerEnd, text, words));
             }
         }
-        LJ.Require(lines.Count <= 10000, "LIMIT"); lines = lines.OrderBy(l => l.Time).ToList();
+        lines = lines.OrderBy(l => l.Time).ToList();
         for (int i = 0; i < lines.Count; i++)
         {
             var line = lines[i]; double? next = lines.Skip(i + 1).FirstOrDefault(l => l.Time > line.Time)?.Time;

@@ -42,8 +42,8 @@ internal static class LJ
     }
     internal static bool B(JsonNode? n) => n is JsonValue v && v.TryGetValue<bool>(out var b) && b;
     internal static bool IsBool(JsonNode? n) => n is JsonValue v && v.TryGetValue<bool>(out _);
-    internal static bool Id(string s, int max = 2048) => s.Length > 0 && s.Length <= max && s.Trim() == s && !s.Any(c => c < 32 || c == 127);
-    internal static string Text(JsonNode? n, int max = 2048)
+    internal static bool Id(string s, int? max = 2048) => s.Length > 0 && (max is null || s.Length <= max) && s.Trim() == s && !s.Any(c => c < 32 || c == 127);
+    internal static string Text(JsonNode? n, int? max = 2048)
     { string s = S(n); Require(Id(s, max)); return s; }
     // Callers project the fields they use; extra members do not grant behavior.
     internal static void Fields(JsonObject o, string allowed, string required = "") =>
@@ -130,25 +130,21 @@ internal static class LJ
         _ => node?.DeepClone()
     };
     internal static JsonElement Element(JsonNode node) => JsonSerializer.SerializeToElement(node, Json);
-    internal static JsonNode Parse(ReadOnlyMemory<byte> bytes, int maximum = 8 * 1024 * 1024) =>
-        ParseValue(bytes, maximum) ?? throw new MusicLibraryException("CORRUPT_STORAGE");
-    internal static JsonNode? ParseValue(ReadOnlyMemory<byte> bytes, int maximum)
+    internal static JsonNode Parse(ReadOnlyMemory<byte> bytes) =>
+        ParseValue(bytes) ?? throw new MusicLibraryException("CORRUPT_STORAGE");
+    internal static JsonNode? ParseValue(ReadOnlyMemory<byte> bytes)
     {
-        Require(bytes.Length > 0 && bytes.Length <= maximum, "LIMIT");
         try
         {
             using var doc = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 24 });
-            int budget = 250000;
             void Check(JsonElement e)
             {
-                Require(--budget >= 0, "LIMIT");
                 if (e.ValueKind == JsonValueKind.Object)
                 {
                     var seen = new HashSet<string>(StringComparer.Ordinal);
-                    foreach (var p in e.EnumerateObject()) { Require(p.Name.Length <= 8192 && seen.Add(p.Name), "CORRUPT_STORAGE"); Check(p.Value); }
+                    foreach (var p in e.EnumerateObject()) { Require(seen.Add(p.Name), "CORRUPT_STORAGE"); Check(p.Value); }
                 }
                 else if (e.ValueKind == JsonValueKind.Array) foreach (var child in e.EnumerateArray()) Check(child);
-                else if (e.ValueKind == JsonValueKind.String) Require(e.GetString()!.Length <= 512 * 1024, "LIMIT");
             }
             Check(doc.RootElement);
             return JsonNode.Parse(doc.RootElement.GetRawText());
@@ -161,10 +157,10 @@ internal static class LJ
         var document = Object(Parse(bytes), "CORRUPT_STORAGE");
         return document;
     }
-    internal static JsonObject Parameters(object? value, int max = 512 * 1024)
+    internal static JsonObject Parameters(object? value)
     {
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(value ?? new { }, Json);
-        return Object(Parse(bytes, max));
+        return Object(Parse(bytes));
     }
     internal static JsonObject Page(IEnumerable<JsonNode?> values, JsonObject p, string field = "items")
     {

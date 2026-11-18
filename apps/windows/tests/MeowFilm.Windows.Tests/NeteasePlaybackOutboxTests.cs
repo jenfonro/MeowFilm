@@ -86,13 +86,14 @@ public static class NeteasePlaybackOutboxTests
             Check(saved.Account.UserId == "124" && saved.Start is { Inflight: false } &&
                 saved.End is { Time: 3, Realtime: 3 });
         });
-        yield return Case("oversized UTF8 event is rejected before writing the outbox", async () =>
+        yield return Case("UTF8 event beyond thirty two KiB persists complete unsent facts", async () =>
         {
             await using var f = await Fixture.Create(); f.Remote.Offline = true;
             var input = f.NewStart() with { Algorithm = new string('界', 12000) };
-            await Error(() => f.Protocol.StartAsync(f.Accounts.Value!, input), "LIMIT");
+            await using var session = await f.Protocol.StartAsync(f.Accounts.Value!, input);
             await f.Protocol.DrainAsync();
-            Check(f.Store.OutboxWrites == 0 && f.Remote.Uploads.Count == 0 && f.Saved().Length == 0);
+            Check(f.Store.OutboxWrites > 0 && f.Remote.Uploads.Count == 0 &&
+                f.Saved().Single().Algorithm == input.Algorithm && f.Saved().Single().Start is { Inflight: false });
         });
         yield return Case("local admission is not remote ACK and safe unsent start-end recover in order", async () =>
         {
@@ -385,7 +386,7 @@ public static class NeteasePlaybackOutboxTests
                 await next.Protocol.InitializeAsync(); await next.Protocol.DrainAsync();
                 Check(next.Remote.Uploads.Count == 0 && next.Saved().Length == 0);
             });
-        yield return Case("retention and capacity evict complete pairs not listening thresholds", async () =>
+        yield return Case("outbox retains more than two hundred fifty six events until time retention expires", async () =>
         {
             await using var f = await Fixture.Create();
             f.Remote.Offline = true;
@@ -396,7 +397,8 @@ public static class NeteasePlaybackOutboxTests
                 await f.Protocol.DrainAsync();
             }
             var saved = f.Saved();
-            Check(saved.Sum(e => e.Count) == 256 && saved.All(e => e.Start is not null && e.End is not null));
+            Check(saved.Length == 130 && saved.Sum(e => e.Count) == 260 &&
+                saved.All(e => e.Start is not null && e.End is not null));
             f.Clock.Advance(8 * 24 * 60 * 60); f.Remote.Offline = false;
             await f.Protocol.InitializeAsync(); await f.Protocol.DrainAsync();
             Check(f.Saved().Length == 0 && f.Remote.Uploads.Count == 0);

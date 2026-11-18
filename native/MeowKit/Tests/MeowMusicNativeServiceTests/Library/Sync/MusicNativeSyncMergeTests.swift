@@ -381,7 +381,7 @@ import MeowMusicTestSupport
     }
 
     private func validTrack(_ track: Data) throws {
-        let raw = try MJ.parse(track, maximum: 16 * 1024)
+        let raw = try MJ.parse(track)
         XCTAssertTrue(raw.isObject)
         _ = try MusicModel.normalize(.init(platform: "wy", data: track))
     }
@@ -512,7 +512,7 @@ import MeowMusicTestSupport
         XCTAssertEqual(saved["automatic"]["revision"].int, 1)
     }
 
-    func testFenceMembersAndBeforeBeyondRealBudgetStillFail() throws {
+    func testFenceMembersAndBeforeBeyondFormerBudgetRoundTrip() throws {
         let padding = String(repeating: "o", count: 8192)
         let members = (0..<350).map {
             MusicLibrarySyncMember(nativeID: "101", occurrenceID: "o-\($0)-" + padding,
@@ -521,9 +521,21 @@ import MeowMusicTestSupport
         var ledger = MusicNativeSyncLedger()
         ledger.scopes["wy"] = "synthetic-install:local-account"
         ledger.fences = [validFence(members: members)]
-        XCTAssertThrowsError(try ledger.json()) {
-            XCTAssertEqual($0 as? MusicServiceError, .limit)
-        }
+        let encoded = try ledger.json()
+        XCTAssertGreaterThan(encoded.bytes.count, 5 * 1024 * 1024)
+        let loaded = try MusicNativeSyncLedger.load(try libraryWrapper(ledger: ledger))
+        XCTAssertEqual(loaded.fences.first?.mutation.members.count, members.count)
+        XCTAssertEqual(loaded.fences.first?.mutation.members.last?.occurrenceID, members.last?.occurrenceID)
+    }
+
+    func testLedgerPreservesAllPendingFencesAndIssues() throws {
+        var ledger = MusicNativeSyncLedger()
+        ledger.scopes["wy"] = "synthetic-install:local-account"
+        ledger.fences = (0..<513).map { _ in validFence(members: [NativeSyncFixture.member("101")]) }
+        ledger.issues = (0..<129).map { .init(collectionID: "collection-\($0)", code: "unconfirmed") }
+        let loaded = try MusicNativeSyncLedger.load(try libraryWrapper(ledger: ledger))
+        XCTAssertEqual(loaded.fences.count, 513)
+        XCTAssertEqual(loaded.issues, ledger.issues)
     }
 
     func testFenceDuplicateOccurrencesAndMissingWriteIdentityStillFail() throws {

@@ -178,9 +178,6 @@ final class MeowfilmRootContainerViewController: PageViewController {
         sidebar.onSelectPage = { [weak self] page in
             self?.dismissSidebar { [weak self] in self?.onSelectPage?(page) }
         }
-        sidebar.onError = { [weak self] message in
-            (self?.navigation.topViewController as? PageViewController)?.showError(message)
-        }
         sidebar.onClosed = { [weak self, weak sidebar] in
             guard let self, self.sidebar === sidebar else { return }
             sidebar?.removeFromSuperview()

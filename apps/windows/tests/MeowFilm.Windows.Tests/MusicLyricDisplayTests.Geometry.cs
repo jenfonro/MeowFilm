@@ -11,7 +11,6 @@ using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.PlaybackCache;
 using MeowFilm.Desktop;
-using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -380,36 +379,37 @@ public static partial class MusicLyricDisplayTests
 
     private static async Task VerifyMultiplePresentations()
     {
-        await using var disk = new MusicOfficialAudioTests.MemoryStore();
-        await using var documents = new CacheDocumentStore(disk);
-        var cache = new MusicPresentationCache(documents);
+        string directory = NewPresentationRoot();
         string[] songs = [Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D")];
         const string image = "https://images.example.test/shared.png?size=original";
         byte[] original = [1, 2, 3, 4]; // Cache stores opaque original bytes; loader tests cover successful decoding.
-        foreach (string song in songs)
+        await using (var cache = new MusicPresentationCache(directory))
         {
-            var raw = LJ.Obj(("songId", song), ("duration", 100));
-            string key = MusicPresentationCache.SongKey(raw);
-            await cache.SaveLyricsAsync(key, "source:" + song, new JsonArray(LJ.Obj(("text", song))), cache.LyricEpoch, default);
-            await cache.WriteAsync(image, original, cache.Epoch, default);
-            raw["sources"] = new JsonArray(LJ.Obj(("sourceKey", "supplemented-recording")));
-            Equal(key, MusicPresentationCache.SongKey(raw));
+            foreach (string song in songs)
+            {
+                var raw = LJ.Obj(("songId", song), ("duration", 100));
+                string key = MusicPresentationCache.SongKey(raw);
+                await cache.SaveLyricsAsync(key, "source:" + song, new JsonArray(LJ.Obj(("time", 0), ("text", song))), cache.LyricEpoch, default);
+                await cache.WriteAsync(image, original, cache.Epoch, default);
+                raw["sources"] = new JsonArray(LJ.Obj(("sourceKey", "supplemented-recording")));
+                Equal(key, MusicPresentationCache.SongKey(raw));
+            }
+            await cache.DrainAsync();
         }
-        await documents.DrainAsync();
-        await using var restarted = new CacheDocumentStore(disk);
-        var cold = new MusicPresentationCache(restarted);
-        await cold.LoadAsync(default);
+        await using var cold = new MusicPresentationCache(directory);
         foreach (string song in songs.Reverse())
         {
-            var saved = cold.ReadLyricsMemory(song);
+            var saved = await cold.ReadLyricsAsync(song, default);
             Equal(song, saved!["lines"]![0]!["text"]!.GetValue<string>());
+            Equal("source:" + song, saved["sourceKey"]!.GetValue<string>());
         }
         Check((await cold.ReadAsync(image, default))!.Content.SequenceEqual(original));
-        var entries = JsonNode.Parse(restarted.ReadMemory(MusicPresentationCache.Namespace).Data!)!["entries"]!.AsObject();
-        Equal(3, entries.Count); // Two song-referenced lyrics and one shared image, not per-song images.
+        Check(File.ReadAllBytes(PresentationResourceFile(directory, "image", image)).SequenceEqual(original));
+        Equal(3, Directory.EnumerateFiles(directory, "*.resource").Count()); // Two song-referenced lyrics and one shared image, not per-song images.
         await cold.ClearImagesAsync(default);
-        Check(await cold.ReadAsync(image, default) is null && songs.All(song => cold.ReadLyricsMemory(song) is not null));
+        Check(await cold.ReadAsync(image, default) is null);
+        foreach (string song in songs) Check(await cold.ReadLyricsAsync(song, default) is not null);
         await cold.ClearAllAsync(default);
-        Check(songs.All(song => cold.ReadLyricsMemory(song) is null));
+        foreach (string song in songs) Check(await cold.ReadLyricsAsync(song, default) is null);
     }
 }

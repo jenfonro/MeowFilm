@@ -181,8 +181,7 @@ public static class AppLauncher
                     // Native pages and business owners never wait for this start:
                     // a failed runtime only makes script sources unavailable.
                     var root = Path.Combine(AppContext.BaseDirectory, "runtime");
-                    var bundle = await Task.Run(() => RuntimeBundle.Verify(root, definition.Id,
-                        definition.RuntimeModules), token).ConfigureAwait(false);
+                    var bundle = await Task.Run(() => RuntimeBundle.Verify(root, definition.Id), token).ConfigureAwait(false);
                     token.ThrowIfCancellationRequested();
                     return await NodeRuntime.StartAsync(Path.Combine(root, "node.exe"), bundle,
                         definition.RuntimeModules, paths.ScriptRuntime, token, ownerRevoked: token,
@@ -208,9 +207,9 @@ public static class AppLauncher
                     lifecycle.CloseAsync, lifecycle.ForceReleaseAsync, lifecycle.CancelShutdownPreparationAsync,
                     appearance, closePreferences, mediaControls: mediaControls,
                     resetUserData: reset.ResetAsync) { Title = "meowfilm" };
-                artwork = new ArtworkService(readTrusted: async (reference, maximumBytes, token) =>
+                artwork = new ArtworkService(readTrusted: async (reference, token) =>
                 {
-                    try { return await runtime.ReadImageAsync(reference, maximumBytes, token).ConfigureAwait(false); }
+                    try { return await runtime.ReadImageAsync(reference, token).ConfigureAwait(false); }
                     catch (BridgeException error)
                     {
                         throw new ArtworkException(error.Code switch
@@ -224,7 +223,7 @@ public static class AppLauncher
                             _ => "ARTWORK_NETWORK"
                         });
                     }
-                }, cacheDirectory: Path.Combine(paths.Caches, "artwork"));
+                }, cacheDirectory: Path.Combine(paths.Caches, "artwork-v2"));
                 ArtworkScope.SetLoader(shell, artwork);
                 windowAttachment = attachWindow?.Invoke(shell, modules);
                 cancellationToken.ThrowIfCancellationRequested();

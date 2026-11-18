@@ -294,6 +294,19 @@ function realCat(t) {
   return { rpc, runtime: () => runtime, install, invoke };
 }
 
+test('real HTTP Cat install forwards a long version without truncation', async t => {
+  const { rpc, invoke } = realCat(t);
+  const version = 'v'.repeat(129);
+  okay(await rpc.upload('long-version', 1, Buffer.from(catFixture('long'))));
+  const installed = okay(await rpc('install', {
+    installationId: 'long-version', sourceRevision: 1, version, enabled: true,
+  }));
+  assert.equal(installed.version, version);
+  assert.equal(okay(await rpc('status')).instances.find(item =>
+    item.installationId === 'long-version').version, version);
+  assert.deepEqual(okay(await invoke('long-version', installed.generation)), { marker: 'long', count: 1 });
+});
+
 for (const operation of ['enable', 'uninstall', 'install']) {
   test(`real HTTP Cat ${operation} reaches a pending initialization before the installation transaction`,
     { timeout: 30000 }, async t => {

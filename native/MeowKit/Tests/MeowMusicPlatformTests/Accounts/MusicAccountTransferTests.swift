@@ -243,7 +243,9 @@ final class MusicAccountTransferTests: XCTestCase {
             do { _ = try await fixture.owner.prepareAccountImport(.init(fileData: data)); XCTFail("must reject") }
             catch { XCTAssertEqual(error as? MusicAccountTransferError, .invalidFile) }
         }
-        XCTAssertThrowsError(try MusicAccountFilePayload(fileData: Data(repeating: 32, count: MusicAccountFilePayload.maximumBytes + 1)))
+        let large = Data(repeating: 32, count: 1024 * 1024 + 1) + valid
+        let decoded = try MusicAccountTransferCodec.decode(.init(fileData: large))
+        XCTAssertEqual(decoded.count, rows.count)
         XCTAssertTrue(fixture.store.calls().isEmpty)
         for provider in fixture.providers.values { let count = await provider.count(); XCTAssertEqual(count, 0) }
     }

@@ -64,19 +64,7 @@ public static class RuntimeHttpClientTests
                 BridgeTests.Equal(false, exchange.Headers.ContainsKey("Content-Type"));
                 await exchange.ReplyAsync(Success(Description(), RuntimeHttpProtocol.Name));
             }
-            var declared = RuntimeHttpProtocol.ValidateDescription((await describe).GetProperty("value"), "aggregate", Modules);
-            BridgeTests.Equal(103, declared.Count);
-            BridgeTests.Equal(true, declared.Contains("music.platform.request"));
-            BridgeTests.Equal(true, declared.Contains("music.platform.session.update"));
-            BridgeTests.Equal(true, declared.Contains("music.platform.cache.clear"));
-            BridgeTests.Equal(true, declared.Contains("music.platform.describe"));
-            BridgeTests.Equal(true, declared.Contains("netease.token.get"));
-            BridgeTests.Equal(true, declared.Contains("film.data.target"));
-            BridgeTests.Equal(true, declared.Contains("film.rules.group.set"));
-            BridgeTests.Equal(true, declared.Contains("film.rules.group.defaults"));
-            BridgeTests.Equal(true, declared.Contains("film.rules.group.preview"));
-            BridgeTests.Equal(true, declared.Contains("source.runtime.rules.process"));
-            BridgeTests.Equal(true, declared.Contains("source.runtime.library.apply"));
+            RuntimeHttpProtocol.ValidateDescription((await describe).GetProperty("value"), "aggregate", Modules);
             var close = client.ShutdownAsync();
             await using (var exchange = await server.AcceptAsync())
             {
@@ -86,6 +74,45 @@ public static class RuntimeHttpClientTests
                 await exchange.ReplyAsync(Success(new { closed = true, cleanupComplete = true, future = true }, RuntimeHttpProtocol.Name));
             }
             await close;
+        });
+        yield return new("runtime-http: same-owner unregistered methods reach HTTP without changing route ownership", async () =>
+        {
+            await using var server = new Server();
+            await using var client = new RuntimeHttpClient(server.BaseUrl);
+            foreach (var (method, path) in new[]
+            {
+                ("source.runtime.rules.unknown", "/v1/source/rules.unknown"),
+                ("film.session.media.release.extra", "/v1/film/session.media.release.extra"),
+                ("netease.token.close", "/v1/netease/close"),
+                ("music.script.netease.token.get", "/v1/music/netease.token.get")
+            })
+            {
+                var call = client.CallAsync(method);
+                await using (var exchange = await server.AcceptAsync())
+                {
+                    CheckCorrelation(exchange, server);
+                    BridgeTests.Equal("POST", exchange.Method);
+                    BridgeTests.Equal(path, exchange.Path);
+                    await exchange.ReplyAsync(Failure("METHOD_NOT_FOUND", RuntimeHttpProtocol.Name), status: 404);
+                }
+                var reply = await call;
+                BridgeTests.Equal(false, reply.GetProperty("ok").GetBoolean());
+                BridgeTests.Equal(RuntimeHttpProtocol.Name, reply.GetProperty("contract").GetString());
+                BridgeTests.Equal("METHOD_NOT_FOUND", reply.GetProperty("code").GetString());
+            }
+            var added = client.CallAsync("music.script.fixture.newHandler", new { number = 3 });
+            await using (var exchange = await server.AcceptAsync())
+            {
+                BridgeTests.Equal("/v1/music/fixture.newHandler", exchange.Path);
+                await exchange.ReplyAsync(Success(new { number = 3 }));
+            }
+            BridgeTests.Equal(3, (await added).GetProperty("value").GetProperty("number").GetInt32());
+            foreach (string operation in new[] { "", "Library.releaseImage", "library.ReleaseImage", "library..releaseImage",
+                "library/releaseImage", "../library.releaseImage", "library.releaseImage?x=1",
+                "library.releaseImage#fragment", "library.releaseImage\n" })
+                BridgeTests.Throws("METHOD_UNAVAILABLE", () => client.CallAsync("source.runtime." + operation));
+            BridgeTests.Throws("METHOD_UNAVAILABLE", () => client.CallAsync("foreign.runtime.fixture.newHandler"));
+            BridgeTests.Equal(false, server.HasConnection);
         });
         yield return new("runtime-http: source library routes binary images and fixed source errors retain their contract", async () =>
         {
@@ -102,7 +129,7 @@ public static class RuntimeHttpClientTests
             BridgeTests.Equal(0, (await list).GetProperty("value").GetProperty("sources").GetArrayLength());
             const string reference = "/v1/source/images/opaque-reference";
             byte[] pixels = [137, 80, 78, 71, 13, 10, 26, 10];
-            var image = client.ReadImageAsync(reference, 1024);
+            var image = client.ReadImageAsync(reference);
             await using (var exchange = await server.AcceptAsync())
             {
                 CheckCorrelation(exchange, server);
@@ -122,13 +149,13 @@ public static class RuntimeHttpClientTests
             BridgeTests.Equal(true, (await release).GetProperty("value").GetProperty("released").GetBoolean());
             foreach (string contract in new[] { "source.runtime.v2", "tmdb.data.v1", "douban.data.v1" })
             {
-                var missing = client.ReadImageAsync(reference, 1024);
+                var missing = client.ReadImageAsync(reference);
                 await using (var exchange = await server.AcceptAsync())
                     await exchange.ReplyAsync(Failure("SOURCE_NOT_FOUND", contract), status: 502);
                 await BridgeTests.Expect(contract == "source.runtime.v2" ? "SOURCE_NOT_FOUND" : "INVALID_RESPONSE", () => missing);
             }
             foreach (string invalid in new[] { "/v1/source/images/../private", reference + "?cookie=fixture", reference + "#fragment" })
-                await BridgeTests.Expect("INVALID_REQUEST", () => client.ReadImageAsync(invalid, 1024));
+                await BridgeTests.Expect("INVALID_REQUEST", () => client.ReadImageAsync(invalid));
             foreach (string code in new[] { "SOURCE_INTEGRITY", "SOURCE_ENCODING", "STALE_SOURCE", "SOURCE_NOT_FOUND", "SOURCE_DISABLED",
                 "UNSUPPORTED_PROTOCOL", "UNSUPPORTED_ACTION", "UNSUPPORTED_RULE", "UNSUPPORTED_DEPENDENCY",
                 "CAPABILITY_UNAVAILABLE", "SOURCE_CLEANUP", "SOURCE_FAILURE", "HTTP_ERROR", "VIRTUAL_ROUTE_NOT_FOUND" })
@@ -169,7 +196,6 @@ public static class RuntimeHttpClientTests
             await client.DisposeAsync();
             await BridgeTests.Expect("CLOSED", () => closing);
             await unfinished.AssertDisconnectedAsync();
-            BridgeTests.Throws("METHOD_UNAVAILABLE", () => client.CallAsync("source.runtime.rules.unknown", input));
         });
         yield return new("runtime-http: full-size source images exceed card budgets with declared and chunked bodies", async () =>
         {
@@ -194,17 +220,6 @@ public static class RuntimeHttpClientTests
                 }
                 var received = await full;
                 BridgeTests.Equal(true, pixels.SequenceEqual(received));
-                var capped = client.ReadImageAsync(reference, cardBudget);
-                await using (var exchange = await server.AcceptAsync())
-                {
-                    if (!chunked) await exchange.BeginImageAsync(pixels.Length);
-                    else
-                    {
-                        try { await exchange.ReplyChunkedAsync(pixels); }
-                        catch (IOException) { } // The bounded reader may reset an oversized stream.
-                    }
-                }
-                await BridgeTests.Expect("RESOURCE_LIMIT", () => capped);
             }
         });
         yield return new("runtime-http: unbounded images retain trusted paths response identity MIME and source failures", async () =>
@@ -297,23 +312,12 @@ public static class RuntimeHttpClientTests
                 return Task.CompletedTask;
             });
         foreach (var expected in Modules)
-            yield return new("runtime-http: description requires app module identity and consumed methods " + expected.Id, () =>
+            yield return new("runtime-http: description requires app module identity " + expected.Id, () =>
             {
                 Reject((modules, module) => modules.Remove(module));
                 Reject((modules, module) => modules.Add(module.DeepClone()));
                 Reject((_, module) => module["version"] = "other");
                 Reject((_, module) => module["contract"] = "other");
-                if (expected.RequiredMethods.Count != 0)
-                {
-                    Reject((_, module) => module.AsObject().Remove("methods"));
-                    Reject((_, module) => module["methods"] = new JsonObject { ["unused"] = true });
-                    foreach (var method in expected.RequiredMethods)
-                        Reject((_, module) =>
-                        {
-                            var methods = module["methods"]!.AsArray();
-                            methods.Remove(methods.Single(value => value!.GetValue<string>() == method));
-                        });
-                }
                 return Task.CompletedTask;
 
                 void Reject(Action<JsonArray, JsonNode> mutate)
@@ -325,7 +329,7 @@ public static class RuntimeHttpClientTests
                         RuntimeHttpProtocol.ValidateDescription(BridgeCodec.Value(description), "aggregate", Modules));
                 }
             });
-        yield return new("runtime-http: description accepts required subsets reordered with unused modules methods and members", () =>
+        yield return new("runtime-http: description accepts required identities reordered with unused methods metadata", () =>
         {
             var description = JsonSerializer.SerializeToNode(Description())!.AsObject();
             description["future"] = true;
@@ -333,29 +337,25 @@ public static class RuntimeHttpClientTests
             var required = modules.Reverse().Select(module => module!.DeepClone()).ToArray();
             modules.Clear();
             modules.Add(new JsonObject { ["id"] = "future", ["unused"] = true });
-            foreach (var module in required)
+            for (int index = 0; index < required.Length; index++)
             {
-                var expected = Modules.Single(item => item.Id == module["id"]!.GetValue<string>());
+                var module = required[index];
                 module["future"] = 1;
-                if (expected.RequiredMethods.Count == 0) module.AsObject().Remove("methods");
-                else
+                module["methods"] = index switch
                 {
-                    var methods = new JsonArray();
-                    foreach (var method in expected.RequiredMethods.Reverse()) methods.Add(method);
-                    methods.Add(expected.RequiredMethods[0]);
-                    methods.Add("future.method");
-                    methods.Add(new JsonObject { ["unused"] = true });
-                    module["methods"] = methods;
-                }
+                    0 => null,
+                    1 => JsonValue.Create("unused"),
+                    2 => new JsonObject { ["unused"] = true },
+                    3 => new JsonArray(),
+                    _ => new JsonArray("future.method", "future.method", new JsonObject { ["unused"] = true })
+                };
                 modules.Add(module);
             }
-            var declared = RuntimeHttpProtocol.ValidateDescription(BridgeCodec.Value(description), "aggregate", Modules);
-            BridgeTests.Equal(true, declared.SetEquals(Modules.SelectMany(module => module.RequiredMethods)));
+            RuntimeHttpProtocol.ValidateDescription(BridgeCodec.Value(description), "aggregate", Modules);
             // A known but unrequested module does not impose its version or method contract.
             modules.Single(module => module!["id"]!.GetValue<string>() == "cat")!["version"] = "future";
             var music = Modules.Single(module => module.Id == "music");
-            BridgeTests.Equal(true, RuntimeHttpProtocol.ValidateDescription(BridgeCodec.Value(description),
-                "aggregate", [music]).SetEquals(music.RequiredMethods));
+            RuntimeHttpProtocol.ValidateDescription(BridgeCodec.Value(description), "aggregate", [music]);
             modules.Clear();
             BridgeTests.Throws("INVALID_RESPONSE", () =>
                 RuntimeHttpProtocol.ValidateDescription(BridgeCodec.Value(description), "aggregate", Modules));
@@ -462,7 +462,6 @@ public static class RuntimeHttpClientTests
                 await using (var exchange = await server.AcceptAsync()) await exchange.ReplyAsync(Failure(foreignCode, contract));
                 await BridgeTests.Expect("INVALID_RESPONSE", () => outgoing);
             }
-            await BridgeTests.Expect("METHOD_UNAVAILABLE", () => client.CallAsync("film.session.media.release.extra"));
         });
         yield return new("runtime-http: business value depth is independent of the response envelope", async () =>
         {
@@ -573,8 +572,6 @@ public static class RuntimeHttpClientTests
             try { await call; throw new InvalidOperationException("Expected cancellation"); }
             catch (OperationCanceledException) { }
             await exchange.AssertDisconnectedAsync();
-            BridgeTests.Throws("METHOD_UNAVAILABLE", () => client.CallAsync("netease.token.close"));
-            BridgeTests.Throws("METHOD_UNAVAILABLE", () => client.CallAsync("music.script.netease.token.get"));
             BridgeTests.Equal(false, server.HasConnection);
         });
         yield return new("runtime-http: NetEase returns only its declared sanitized error codes", async () =>
@@ -683,62 +680,10 @@ public static class RuntimeHttpClientTests
     internal static RuntimeModule[] Modules => AppIdentity.ScriptModules.ToArray();
     internal static object Description() => new
     {
-        protocol = "runtime.http.v1", product = "aggregate", modules = new[]
+        protocol = "runtime.http.v1", product = "aggregate", modules = Modules.Select(module => new
         {
-            new { id = "music", version = "0.8.0", contract = "music.script.v3", methods = new[]
-            {
-                "music.script.sources.list", "music.script.sources.detail", "music.script.sources.add", "music.script.sources.download",
-                "music.script.sources.edit", "music.script.sources.update", "music.script.sources.rollback", "music.script.sources.enable",
-                "music.script.sources.disable", "music.script.sources.remove", "music.script.sources.check",
-                "music.script.resolve", "music.script.invoke", "music.script.close"
-            } },
-            new { id = "cat", version = "0.2.0", contract = "cat.script.v2", methods = new[]
-            {
-                "cat.script.start", "cat.script.status", "cat.script.refresh", "cat.script.install", "cat.script.import",
-                "cat.script.edit", "cat.script.update", "cat.script.restart", "cat.script.enable", "cat.script.uninstall",
-                "cat.script.invoke", "cat.script.management.describe", "cat.script.management.sync"
-            } },
-            new { id = "source", version = "0.3.0", contract = "source.runtime.v2", methods = new[]
-            {
-                "source.runtime.load", "source.runtime.unload", "source.runtime.invoke", "source.runtime.status", "source.runtime.close",
-                "source.runtime.library.list", "source.runtime.library.get", "source.runtime.library.apply", "source.runtime.library.previewImport", "source.runtime.library.import", "source.runtime.library.save",
-                "source.runtime.library.update", "source.runtime.library.remove", "source.runtime.library.export", "source.runtime.library.invoke",
-                "source.runtime.library.image", "source.runtime.library.releaseImage", "source.runtime.web.pending", "source.runtime.web.respond",
-                "source.runtime.rules.process"
-            } },
-            new { id = "pan", version = "0.1.0", contract = "pan.runtime.v1", methods = new[]
-            {
-                "pan.providers", "pan.settings.get", "pan.settings.set", "pan.settings.clear", "pan.login.start",
-                "pan.login.poll", "pan.login.cancel", "pan.list", "pan.prepare", "pan.play", "pan.refresh"
-            } },
-            new { id = "tmdb", version = "0.1.0", contract = "tmdb.data.v1", methods = new[]
-            {
-                "tmdb.data.settings.get", "tmdb.data.settings.update", "tmdb.data.request"
-            } },
-            new { id = "douban", version = "0.1.0", contract = "douban.data.v1", methods = new[]
-            {
-                "douban.data.settings.get", "douban.data.settings.update", "douban.data.request", "douban.data.search"
-            } },
-            new { id = "film", version = "0.1.0", contract = "film.playback.v1", methods = new[]
-            {
-                "film.session.open", "film.session.command", "film.session.snapshot", "film.session.release",
-                "film.session.attempt", "film.session.media.release", "film.settings.get", "film.settings.set",
-                "film.library.get", "film.library.remove", "film.manual.update",
-                "film.data.target", "film.data.catalog", "film.data.search", "film.data.detail", "film.data.metadata",
-                "film.data.metadata.entry", "film.data.cache.entry", "film.data.invalidate",
-                "film.rules.get", "film.rules.set", "film.rules.group.set", "film.rules.group.defaults", "film.rules.group.preview",
-                "film.rules.restore", "film.rules.preview", "film.rules.normalize", "film.rules.clear",
-                "film.search.open", "film.search.snapshot", "film.search.command", "film.search.release", "film.search.handoff"
-            } },
-            new { id = "netease", version = "0.1.0", contract = "netease.token.v1", methods = new[]
-            {
-                "netease.token.get"
-            } },
-            new { id = "music-platform", version = "0.1.0", contract = "music.platform.v1", methods = new[]
-            {
-                "music.platform.request", "music.platform.session.update", "music.platform.cache.clear", "music.platform.describe"
-            } }
-        }
+            id = module.Id, version = module.Version, contract = RuntimeHttpProtocol.Modules[module.Id].Name
+        }).ToArray()
     };
 
     private static void CheckCorrelation(Exchange exchange, Server server)

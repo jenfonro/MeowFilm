@@ -14,9 +14,9 @@ struct FilmScriptFileSnapshot: Sendable {
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
         guard values.isRegularFile == true, values.isSymbolicLink != true else { throw FileError.scriptRequired }
-        // Share the same file-provider coordination, actual-byte resource bound,
+        // Share the same file-provider coordination, chunked reads,
         // cancellation and change detection as the service's fileURL entry.
-        var data = try await ImportedFileReader.read(url, maximumBytes: CatLocalSourceInput.maximumBytes)
+        var data = try await ImportedFileReader.read(url)
         defer { data.resetBytes(in: 0..<data.count) }
         guard let source = String(data: data, encoding: .utf8) else { throw FileError.invalidUTF8 }
         return Self(fileName: url.lastPathComponent, source: source)

@@ -149,7 +149,15 @@ public struct NovelSourceClient: Sendable {
     public func kinds(_ source: NovelSource) async throws -> [NovelExploreKind] {
         let value = try await invoke(source, action: "exploreKinds")
         guard let items = value["kinds"].array else { throw NovelError.invalidResponse }
-        return items.map { .init(title: $0["title"].string ?? "", url: $0["url"].string ?? "") }
+        let kinds: [NovelExploreKind] = items.compactMap {
+            guard case .object = $0 else { return nil }
+            let title = $0["title"].string ?? "", url = $0["url"].string ?? ""
+            guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return .init(title: title, url: url)
+        }
+        guard items.isEmpty || !kinds.isEmpty else { throw NovelError.invalidResponse }
+        return kinds
     }
     public func explore(_ source: NovelSource, url: String, page: Int) async throws -> [NovelBook] {
         let value = try await invoke(source, action: "explore", payload: .object(["url": .string(url), "page": .number(Double(page))]))

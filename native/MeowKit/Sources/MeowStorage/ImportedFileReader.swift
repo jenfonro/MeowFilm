@@ -5,32 +5,27 @@ import Darwin
 
 /// Closed diagnostics: file-provider errors may contain a private path or URL.
 public enum ImportedFileError: Error, Equatable, Sendable, LocalizedError {
-    case invalidFile, unavailable, tooLarge, changed, cancelled
+    case invalidFile, unavailable, changed, cancelled
 
     public var errorDescription: String? {
         switch self {
         case .invalidFile: return "文件无效"
         case .unavailable: return "文件不可读取"
-        case .tooLarge: return "文件超过大小限制"
         case .changed: return "文件已更改，请重新选择"
         case .cancelled: return "已取消"
         }
     }
 }
 
-/// Read-only, bounded document-picker import. No bookmark, upload, persistent
+/// Read-only document-picker import. No bookmark, upload, persistent
 /// copy, or source deletion is performed here. Parsing belongs to the caller.
 ///
-/// The limit applies to bytes actually read, not just a possibly stale URL
-/// resource-size hint. File-provider coordination and disk I/O run off main.
+/// File-provider coordination and disk I/O run off main.
 /// Cancellation is cooperative; this does not claim to preempt a stalled
 /// external file provider or provide a snapshot against hostile local writers.
 public enum ImportedFileReader {
-    public static let maximumSupportedBytes = 32 * 1024 * 1024
-
-    public static func read(_ url: URL, maximumBytes: Int) async throws -> Data {
-        guard maximumBytes > 0, maximumBytes <= maximumSupportedBytes,
-              url.isFileURL, url.user == nil, url.password == nil,
+    public static func read(_ url: URL) async throws -> Data {
+        guard url.isFileURL, url.user == nil, url.password == nil,
               url.host == nil || url.host == "" || url.host == "localhost" else {
             throw ImportedFileError.invalidFile
         }
@@ -45,7 +40,7 @@ public enum ImportedFileReader {
             var result: Result<Data, Error>?
             coordinator.coordinate(readingItemAt: url, options: .withoutChanges,
                                    error: &coordinationError) { coordinatedURL in
-                result = Result { try readCoordinated(coordinatedURL, maximumBytes: maximumBytes) }
+                result = Result { try readCoordinated(coordinatedURL) }
             }
             try checkCancellation()
             guard coordinationError == nil, let result else { throw ImportedFileError.unavailable }
@@ -53,7 +48,7 @@ public enum ImportedFileReader {
             catch let error as ImportedFileError { throw error }
             catch { throw ImportedFileError.unavailable }
             #else
-            return try readCoordinated(url, maximumBytes: maximumBytes)
+            return try readCoordinated(url)
             #endif
         }
         return try await withTaskCancellationHandler {
@@ -69,7 +64,7 @@ public enum ImportedFileReader {
         if Task.isCancelled { throw ImportedFileError.cancelled }
     }
 
-    private static func readCoordinated(_ url: URL, maximumBytes: Int) throws -> Data {
+    private static func readCoordinated(_ url: URL) throws -> Data {
         try checkCancellation()
         do {
             let handle = try FileHandle(forReadingFrom: url)
@@ -80,14 +75,12 @@ public enum ImportedFileReader {
                   (before.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else {
                 throw ImportedFileError.invalidFile
             }
-            guard before.st_size >= 0, before.st_size <= Int64(maximumBytes) else {
-                throw ImportedFileError.tooLarge
-            }
+            guard before.st_size >= 0 else { throw ImportedFileError.invalidFile }
             #else
             let values = try url.resourceValues(forKeys: [.isRegularFileKey])
             guard values.isRegularFile == true else { throw ImportedFileError.invalidFile }
             #endif
-            let bytes = try readBounded(maximumBytes: maximumBytes) { count in
+            let bytes = try readChunks { count in
                 try checkCancellation()
                 return try handle.read(upToCount: count)
             }
@@ -107,20 +100,14 @@ public enum ImportedFileReader {
         catch { throw ImportedFileError.unavailable }
     }
 
-    /// Internal deterministic test seam for short reads, growth and EOF. Read
-    /// requests never exceed remaining budget + one overflow-detection byte.
-    static func readBounded(maximumBytes: Int, read: (Int) throws -> Data?) throws -> Data {
-        guard maximumBytes > 0, maximumBytes <= maximumSupportedBytes else {
-            throw ImportedFileError.invalidFile
-        }
+    /// Internal deterministic test seam for short reads and EOF.
+    static func readChunks(read: (Int) throws -> Data?) throws -> Data {
         var output = Data()
         while true {
             try checkCancellation()
-            let requested = min(64 * 1024, maximumBytes - output.count + 1)
+            let requested = 64 * 1024
             guard let chunk = try read(requested), !chunk.isEmpty else { return output }
-            guard chunk.count <= requested, chunk.count <= maximumBytes - output.count else {
-                throw ImportedFileError.tooLarge
-            }
+            guard chunk.count <= requested else { throw ImportedFileError.invalidFile }
             output.append(chunk)
         }
     }

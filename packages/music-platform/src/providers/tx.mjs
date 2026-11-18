@@ -135,7 +135,7 @@ export const txProvider = {
   async lyrics(c, { id, musicInfo = {} }) {
     const data = await c.tx('music.musichallSong.PlayLyricInfo', 'GetPlayLyricInfo', {
       songMid: input(first(id, musicInfo.songmid)), type: 1, crypt: 1, lrc_t: 0, qrc: 1, qrc_t: 0,
-      trans: 1, trans_t: 0, roma: 1, roma_t: 0, needSingingAnnotations: false }, false, { maximumBytes: 512 * 1024 });
+      trans: 1, trans_t: 0, roma: 1, roma_t: 0, needSingingAnnotations: false }, false);
     return lyricTracks(await qrcLyrics(text(data?.lyric), c.signal), {
       translation: () => qrcLyrics(text(data?.trans), c.signal),
       romanization: () => qrcLyrics(text(data?.roma), c.signal),

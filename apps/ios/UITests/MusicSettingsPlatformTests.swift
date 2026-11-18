@@ -5,35 +5,73 @@ import SwiftUI
 import Combine
 import MeowContracts
 import MeowPlayback
+import MeowStorage
+@testable import MeowFilmFeature
 @testable import MeowMusicFeature
 @testable import MeowUI
 
 @MainActor
 final class MusicSettingsPlatformTests: XCTestCase {
-    func testSettingsRowsShareUIKitTypeGeometryAndMatchHomeTableHeaderInset() throws {
+    func testSettingsRowsShareUIKitTypeGeometryAndMatchSearchPurificationTopSpacing() throws {
         let domain = "MusicSettingsRowGeometry." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
         defer { defaults.removePersistentDomain(forName: domain) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(domain, isDirectory: true)
+        let rules = FilmRuleService(settingsDocument: FilmSettingsDocument(
+            block: .rules, storage: .plain { try DocumentStore(baseURL: directory, namespace: FilmSettingsBlock.rules.namespace) }
+        ), request: { _, _ in
+            XCTFail("Measuring settings geometry must not execute rules")
+            throw FilmRuleServiceError.closed
+        })
+        let owner = FilmRulesDraft(service: rules)
+        let loaded = expectation(description: "native reference rules loaded")
+        Task {
+            do { try await owner.load() }
+            catch { XCTFail("Loading synthetic reference rules failed: \(error)") }
+            loaded.fulfill()
+        }
+        wait(for: [loaded], timeout: 3)
+        defer {
+            let closed = expectation(description: "reference rules closed")
+            Task { await rules.close(); closed.fulfill() }
+            wait(for: [closed], timeout: 3)
+            try? FileManager.default.removeItem(at: directory)
+        }
         let appearance = MusicAppearancePreferencesStore(defaults: defaults)
         let page = HostingPageViewController(themeProvider: appearance,
             content: MusicSettingsContent(theme: PageTheme(palette: .sky)))
         page.pageTitle = "音乐设置"
         try withSettingsComponent(page) {
             let window = try XCTUnwrap(page.view.window)
-            let reference = SettingsTableView()
-            let referenceData = MusicSettingsTableGeometryFixture()
-            reference.dataSource = referenceData
-            reference.rowHeight = UITableView.automaticDimension
-            reference.estimatedRowHeight = 56
-            reference.alpha = 0
-            reference.translatesAutoresizingMaskIntoConstraints = false
-            page.view.insertSubview(reference, at: 0)
+            // Keep the system's horizontal List margins as an independent reference.
+            let nativeReference = UIHostingController(rootView: List { Text("平台账号") }.listStyle(.insetGrouped))
+            let container = try XCTUnwrap(page.parent)
+            container.addChild(nativeReference)
+            container.view.insertSubview(nativeReference.view, at: 0)
+            nativeReference.view.alpha = 0
+            nativeReference.view.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
-                reference.topAnchor.constraint(equalTo: page.contentTopAnchor),
-                reference.leadingAnchor.constraint(equalTo: page.view.safeAreaLayoutGuide.leadingAnchor),
-                reference.trailingAnchor.constraint(equalTo: page.view.safeAreaLayoutGuide.trailingAnchor),
-                reference.bottomAnchor.constraint(equalTo: page.view.bottomAnchor)
+                nativeReference.view.topAnchor.constraint(equalTo: page.contentTopAnchor),
+                nativeReference.view.leadingAnchor.constraint(equalTo: page.view.leadingAnchor),
+                nativeReference.view.trailingAnchor.constraint(equalTo: page.view.trailingAnchor),
+                nativeReference.view.bottomAnchor.constraint(equalTo: page.view.bottomAnchor)
             ])
+            nativeReference.didMove(toParent: container)
+            @MainActor func nativeList() -> UICollectionView? {
+                settingsDescendants(nativeReference.view).compactMap { $0 as? UICollectionView }.first
+            }
+            let reference = FilmRulePageViewController(owner: owner, group: .search, themeProvider: appearance)
+            page.addChild(reference)
+            page.view.insertSubview(reference.view, at: 0)
+            reference.view.alpha = 0
+            reference.view.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                reference.view.topAnchor.constraint(equalTo: page.contentTopAnchor),
+                reference.view.leadingAnchor.constraint(equalTo: page.view.safeAreaLayoutGuide.leadingAnchor),
+                reference.view.trailingAnchor.constraint(equalTo: page.view.safeAreaLayoutGuide.trailingAnchor),
+                reference.view.bottomAnchor.constraint(equalTo: page.view.bottomAnchor)
+            ])
+            reference.didMove(toParent: page)
             let width = try XCTUnwrap(page.view.constraints.first {
                 $0.firstAttribute == .width && $0.secondItem == nil
             })
@@ -43,30 +81,55 @@ final class MusicSettingsPlatformTests: XCTestCase {
                     .compactMap { $0 as? SettingsRowBackgroundView }
                     .filter { $0.bounds.width > 0 }
             }
-            for category in [UIContentSizeCategory.large, .accessibilityExtraExtraExtraLarge] {
+            let environments: [(CGFloat, UIContentSizeCategory)] = [CGFloat(320), 390, 430].flatMap { viewport in
+                [UIContentSizeCategory.large, .accessibilityExtraExtraExtraLarge].map { (viewport, $0) }
+            }
+            for (viewport, category) in environments {
                 page.traitOverrides.preferredContentSizeCategory = category
-                width.constant = category == .large ? 390 : 320
+                nativeReference.traitOverrides.preferredContentSizeCategory = category
+                width.constant = viewport
                 for dark in [false, true] {
                     page.traitOverrides.userInterfaceStyle = dark ? .dark : .light
+                    nativeReference.traitOverrides.userInterfaceStyle = dark ? .dark : .light
                     page.setContent(MusicSettingsContent(theme: PageTheme(palette: .sky, dark: dark)))
-                    reference.reloadData()
+                    reference.applyTheme()
                     waitForSettingsComponent("settings rows laid out for current type and theme") {
-                        window.layoutIfNeeded(); page.view.layoutIfNeeded()
+                        window.layoutIfNeeded(); page.view.layoutIfNeeded(); nativeReference.view.layoutIfNeeded()
                         return !visibleRows().isEmpty &&
+                            nativeList()?.layoutAttributesForItem(at: IndexPath(item: 0, section: 0)) != nil &&
                             page.traitCollection.preferredContentSizeCategory == category
                     }
                     let rows = visibleRows()
                         .sorted { $0.convert($0.bounds, to: page.view).minY < $1.convert($1.bounds, to: page.view).minY }
                     let first = try XCTUnwrap(rows.first)
                     let frame = first.convert(first.bounds, to: page.view)
-                    XCTAssertEqual(frame.minX, SettingsVisualMetrics.cardHorizontalInset, accuracy: 0.5)
-                    XCTAssertEqual(frame.maxX, page.view.bounds.maxX - SettingsVisualMetrics.cardHorizontalInset, accuracy: 0.5)
+                    let systemList = try XCTUnwrap(nativeList())
+                    let systemRow = try XCTUnwrap(systemList.layoutAttributesForItem(at: IndexPath(item: 0, section: 0)))
+                    let systemFrame = systemList.convert(systemRow.frame, to: page.view)
+                    XCTAssertEqual(frame.minX, systemFrame.minX, accuracy: 0.5)
+                    XCTAssertEqual(frame.maxX, systemFrame.maxX, accuracy: 0.5)
                     let headerBottom = page.pageHeader.convert(page.pageHeader.bounds, to: page.view).maxY
                     XCTAssertGreaterThanOrEqual(frame.minY, headerBottom)
-                    let referenceFrame = reference.convert(reference.rectForRow(at: IndexPath(row: 0, section: 0)),
-                                                           to: page.view)
+                    let referenceCard = try XCTUnwrap(reference.editors.first)
+                    let referenceFrame = referenceCard.convert(referenceCard.bounds, to: page.view)
+                    XCTAssertEqual(SettingsVisualMetrics.contentTopSpacing, 20)
+                    XCTAssertEqual(referenceFrame.minY - headerBottom, SettingsVisualMetrics.contentTopSpacing, accuracy: 1,
+                        "Measure the search-purification card's outer boundary, not its inner title padding")
                     XCTAssertEqual(frame.minY - headerBottom, referenceFrame.minY - headerBottom, accuracy: 1,
-                        "The SwiftUI list must use the settings home table's first-section gap")
+                        "The SwiftUI list must use the actual search-purification first-card gap")
+                    XCTAssertEqual(reference.scrollView.contentInset.top, 0, accuracy: 0.5)
+                    XCTAssertEqual(reference.scrollView.adjustedContentInset.top, 0, accuracy: 0.5)
+                    XCTAssertEqual(reference.scrollView.contentOffset.y, 0, accuracy: 0.5)
+                    let list = try XCTUnwrap(settingsDescendants(page.view).compactMap { $0 as? UICollectionView }.first)
+                    XCTAssertEqual(list.contentOffset.y, -list.adjustedContentInset.top, accuracy: 1)
+                    let metrics = XCTAttachment(string: """
+                        width=\(viewport) category=\(category.rawValue) dark=\(dark)
+                        headerBottom=\(headerBottom) cardTop=\(frame.minY) referenceCardTop=\(referenceFrame.minY)
+                        card=\(frame) nativeGroupedRow=\(systemFrame)
+                        listOffset=\(list.contentOffset) inset=\(list.contentInset) adjustedInset=\(list.adjustedContentInset)
+                        """)
+                    metrics.name = "settings-top-metrics-\(Int(viewport))-\(category.rawValue)-\(dark)"
+                    metrics.lifetime = .keepAlways; add(metrics)
                     let title = UILabel()
                     title.font = .preferredFont(forTextStyle: .body, compatibleWith: page.traitCollection)
                     title.numberOfLines = 0; title.text = "平台账号"
@@ -82,7 +145,76 @@ final class MusicSettingsPlatformTests: XCTestCase {
                     let screenshot = XCTAttachment(image: UIGraphicsImageRenderer(bounds: page.view.bounds).image { _ in
                         XCTAssertTrue(page.view.drawHierarchy(in: page.view.bounds, afterScreenUpdates: true))
                     })
-                    screenshot.name = "settings-shared-type-\(category.rawValue)-\(dark ? "dark" : "light")"
+                    screenshot.name = "settings-shared-type-\(Int(viewport))-\(category.rawValue)-\(dark ? "dark" : "light")"
+                    screenshot.lifetime = .keepAlways; add(screenshot)
+                }
+            }
+        }
+    }
+
+    func testSettingsListFirstSectionTitleUsesSharedTopMargin() throws {
+        let appearance = MusicAppearancePreferencesStore()
+        let page = HostingPageViewController(themeProvider: appearance,
+            content: SettingsTitledListGeometryFixture(theme: PageTheme(palette: .sky)))
+        page.pageTitle = "歌词／封面设置"
+        try withSettingsComponent(page) {
+            let window = try XCTUnwrap(page.view.window)
+            let width = try XCTUnwrap(page.view.constraints.first {
+                $0.firstAttribute == .width && $0.secondItem == nil
+            })
+            let environments: [(CGFloat, UIContentSizeCategory)] = [CGFloat(320), 390, 430].flatMap { viewport in
+                [UIContentSizeCategory.large, .accessibilityExtraExtraExtraLarge].map { (viewport, $0) }
+            }
+            for (viewport, category) in environments {
+                width.constant = viewport
+                page.traitOverrides.preferredContentSizeCategory = category
+                for dark in [false, true] {
+                    page.traitOverrides.userInterfaceStyle = dark ? .dark : .light
+                    page.setContent(SettingsTitledListGeometryFixture(theme: PageTheme(palette: .sky, dark: dark)))
+                    waitForSettingsComponent("titled list laid out") {
+                        window.layoutIfNeeded(); page.view.layoutIfNeeded()
+                        return self.settingsDescendants(page.view).compactMap { $0 as? UICollectionView }
+                            .contains { $0.numberOfSections == 2 && $0.numberOfItems(inSection: 0) == 1 } &&
+                            self.settingsDescendants(page.view).contains {
+                                $0.accessibilityIdentifier == "settings.geometry.titleBounds" && !$0.bounds.isEmpty
+                            }
+                    }
+                    let list = try XCTUnwrap(settingsDescendants(page.view).compactMap { $0 as? UICollectionView }.first)
+                    let title = try XCTUnwrap(settingsDescendants(page.view).first {
+                        $0.accessibilityIdentifier == "settings.geometry.titleBounds"
+                    })
+                    // Measure the title itself in the same UIKit space as the rows and page header.
+                    let titleFrame = title.convert(title.bounds, to: page.view)
+                    let sectionHeader = try XCTUnwrap(list.layoutAttributesForSupplementaryElement(
+                        ofKind: UICollectionView.elementKindSectionHeader, at: IndexPath(item: 0, section: 0)))
+                    let sectionHeaderFrame = list.convert(sectionHeader.frame, to: page.view)
+                    let headerBottom = page.pageHeader.convert(page.pageHeader.bounds, to: page.view).maxY
+                    XCTAssertEqual(SettingsVisualMetrics.contentTopSpacing, 20)
+                    XCTAssertEqual(titleFrame.minY - headerBottom, SettingsVisualMetrics.contentTopSpacing, accuracy: 1,
+                        "The actual first section title, not the scroll container, starts at the shared margin")
+                    XCTAssertEqual(titleFrame.minY, sectionHeaderFrame.minY, accuracy: 1,
+                        "The section header must not add another inset above the visible title")
+                    XCTAssertGreaterThan(titleFrame.height, 0)
+                    XCTAssertGreaterThanOrEqual(titleFrame.minX, sectionHeaderFrame.minX)
+                    XCTAssertLessThanOrEqual(titleFrame.maxX, sectionHeaderFrame.maxX + 0.5)
+                    let first = try XCTUnwrap(list.layoutAttributesForItem(at: IndexPath(item: 0, section: 0)))
+                    let second = try XCTUnwrap(list.layoutAttributesForItem(at: IndexPath(item: 0, section: 1)))
+                    let rowFrame = list.convert(first.frame, to: page.view)
+                    XCTAssertGreaterThanOrEqual(rowFrame.minY, titleFrame.maxY)
+                    XCTAssertGreaterThan(second.frame.minY, first.frame.maxY)
+                    XCTAssertEqual(list.contentOffset.y, -list.adjustedContentInset.top, accuracy: 1)
+                    let metrics = XCTAttachment(string: """
+                        width=\(viewport) category=\(category.rawValue) dark=\(dark)
+                        headerBottom=\(headerBottom) title=\(titleFrame) firstRow=\(rowFrame)
+                        firstHeader=\(sectionHeaderFrame) titleBounds=\(title.bounds)
+                        offset=\(list.contentOffset) inset=\(list.contentInset) adjustedInset=\(list.adjustedContentInset)
+                        """)
+                    metrics.name = "settings-titled-top-\(Int(viewport))-\(category.rawValue)-\(dark)"
+                    metrics.lifetime = .keepAlways; add(metrics)
+                    let screenshot = XCTAttachment(image: UIGraphicsImageRenderer(bounds: page.view.bounds).image { _ in
+                        XCTAssertTrue(page.view.drawHierarchy(in: page.view.bounds, afterScreenUpdates: true))
+                    })
+                    screenshot.name = metrics.name
                     screenshot.lifetime = .keepAlways; add(screenshot)
                 }
             }
@@ -1317,6 +1449,40 @@ final class MusicSettingsPlatformTests: XCTestCase {
 }
 
 @MainActor
+private struct SettingsTitledListGeometryFixture: View {
+    let theme: PageTheme
+    var body: some View {
+        List {
+            Section {
+                Text("QQ 音乐").modifier(SettingsListRowStyle(theme: theme, first: true, last: true))
+            } header: {
+                SettingsListSectionHeader(title: "歌词", theme: theme)
+                    .accessibilityIdentifier("settings.geometry.firstHeader")
+                    .background(SettingsTitleFrameProbe())
+            }
+            Section {
+                Text("网易云音乐").modifier(SettingsListRowStyle(theme: theme, first: true, last: true))
+            } header: {
+                SettingsListSectionHeader(title: "封面", theme: theme)
+            }
+        }
+        .modifier(SettingsListStyle(theme: theme))
+    }
+}
+
+@MainActor
+private struct SettingsTitleFrameProbe: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.accessibilityIdentifier = "settings.geometry.titleBounds"
+        view.isUserInteractionEnabled = false
+        view.accessibilityElementsHidden = true
+        return view
+    }
+    func updateUIView(_ uiView: UIView, context: Context) {}
+}
+
+@MainActor
 private struct CompactToggleFixture: View {
     let enabled: Bool
     let changed: (Bool) -> Void
@@ -1493,14 +1659,6 @@ private actor MusicSettingsQRCheckGate {
         if !released { await withCheckedContinuation { waiter = $0 } }
     }
     func release() { released = true; waiter?.resume(); waiter = nil }
-}
-
-@MainActor
-private final class MusicSettingsTableGeometryFixture: NSObject, UITableViewDataSource {
-    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { 1 }
-    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        SettingsTableCell(title: "平台账号", theme: PageTheme(palette: .sky), first: true, last: true)
-    }
 }
 
 @MainActor

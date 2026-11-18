@@ -6,6 +6,35 @@ import MeowMusicFeature
 /// Local native document/queue tests. All songs/accounts are synthetic, with
 /// no JS resolver, live account, remote transport or media playback.
 final class MusicNativeLocalCollectionQueueTests: XCTestCase {
+    func testPreviousKeepsEverySelectionBeyondOneHundredAndStorageReread() async throws {
+        let (store, service, collection, _) = try await setup()
+        var state = try await service.changeQueue(.collection(id: collection.id, revision: collection.revision, index: 0),
+                                                  expectedRevision: 0)
+        let entries = try await service.queue().entries
+        _ = try await service.updateSettings(.init(ifRevision: state.settingsRevision, mode: .shuffle))
+        var history: [String] = []
+        for index in 1...105 {
+            history.append(try XCTUnwrap(state.currentId))
+            state = try await service.changeQueue(.select(entries[index % entries.count].id), expectedRevision: state.revision)
+        }
+        let saved = try await service.read()
+        XCTAssertEqual(saved.queue["history"].strings, history)
+        let persisted = try MusicDocument(try XCTUnwrap(store.snapshot().0), runID: saved.queue["runId"].string)
+        XCTAssertEqual(persisted.queue["history"].strings, history)
+        for id in history.reversed() {
+            let result = try await service.advance(.previous, reason: .manual, expectedRevision: state.revision)
+            XCTAssertEqual(result.selectedId, id)
+            state = result.state
+        }
+        let exhausted = try await service.read()
+        XCTAssertTrue(exhausted.queue["history"].strings.isEmpty)
+        await service.close()
+        let reopened = try await NativeMusicFixture.service(store)
+        let restored = try await reopened.read()
+        XCTAssertTrue(restored.queue["history"].strings.isEmpty)
+        await reopened.close()
+    }
+
     private func setup(accounts: (any MusicNativeAccountProviding)? = nil) async throws ->
         (NativeMusicTestLibrary, NativeMusicService, MusicCollection, [MusicRemoteTrack]) {
         let store = NativeMusicTestLibrary()
@@ -264,7 +293,7 @@ final class MusicNativeLocalCollectionQueueTests: XCTestCase {
         await service.close()
     }
 
-    func testFavoritesSubsetUsesItsActualIdentityAndTheSameBoundedArchivePolicy() async throws {
+    func testFavoritesSubsetKeepsEveryArchiveWithItsActualIdentity() async throws {
         let (_, service, _, tracks) = try await setup()
         let collections = try await service.collections()
         let favorites = try XCTUnwrap(collections.first { $0.kind == "favorites" })
@@ -278,7 +307,7 @@ final class MusicNativeLocalCollectionQueueTests: XCTestCase {
         XCTAssertEqual(document.queue["source"]["id"].string, favorites.id)
         XCTAssertEqual(document.queue["source"]["title"].string, favorites.title)
         XCTAssertEqual(document.queue["serial"].int, 14)
-        XCTAssertEqual(history.count, 5)
+        XCTAssertEqual(history.count, 6)
         XCTAssertTrue(history.allSatisfy { $0.title == favorites.title && $0.count == 2 })
         await service.close()
     }

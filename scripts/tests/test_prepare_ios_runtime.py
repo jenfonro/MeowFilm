@@ -194,7 +194,7 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
                 self.assertEqual(json.loads((target / "runtime-manifest.json").read_text()), {"status": "complete"})
                 self.assertEqual([p.name for p in target.parent.iterdir()], ["Runtime"])
 
-    def test_complete_nine_module_payload_is_published_at_the_existing_target_path(self):
+    def test_complete_payload_without_module_metadata_is_published_at_the_existing_target_path(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             selected = prepare.target("iphonesimulator", "x86_64")
@@ -205,7 +205,6 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
             manifest = {
                 "status": "complete", "platform": "ios", "assemblyProfile": "common-native",
                 "target": selected, "transport": "runtime.http.v1",
-                "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease", "music-platform"],
                 "trustedNative": [{}],
             }
 
@@ -216,32 +215,22 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
                 staging = Path(command[command.index("--output") + 1])
                 staging.mkdir()
                 (staging / "runtime-manifest.json").write_text(json.dumps(manifest))
-                (staging / "sentinel").write_bytes(b"nine-module-payload")
+                (staging / "sentinel").write_bytes(b"current-payload")
                 return SimpleNamespace(returncode=0)
 
             with patch.dict(prepare.payload.__globals__, ROOT=root), patch.object(prepare.subprocess, "run", run):
                 self.assertEqual(prepare.payload("node", selected), target)
             self.assertEqual(json.loads((target / "runtime-manifest.json").read_text()), manifest)
-            self.assertEqual((target / "sentinel").read_bytes(), b"nine-module-payload")
+            self.assertEqual((target / "sentinel").read_bytes(), b"current-payload")
             self.assertEqual([path.name for path in target.parent.iterdir()], ["Runtime"])
 
-    def test_payload_requires_the_exact_nine_module_app_before_replacing_previous_payload(self):
-        expected_modules = ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease", "music-platform"]
-        for modules in [
-            ["music", "cat", "source", "tmdb"],
-            ["music", "cat", "source", "tmdb", "netease"],
-            ["music", "cat", "source", "pan", "tmdb", "douban", "film"],
-            expected_modules, ["music", "cat", "source"], ["music", "cat", "source", "douban"],
-            ["music", "cat", "source", "pan"], ["music", "cat", "source", "unknown"],
-            expected_modules + ["douban"], expected_modules + ["pan"], expected_modules + ["tmdb"],
-            ["tmdb", "music", "cat", "source"],
-            ["music", "cat", "source", "pan", "tmdb", "douban"],
-            ["music", "cat", "source", "pan", "tmdb", "douban", "film", "unknown"],
-            ["music", "cat", "source", "pan", "tmdb", "douban", "douban"],
-            ["music", "cat", "source", "tmdb", "pan", "douban", "film"],
-            ["music", "cat", "source", "pan", "tmdb", "douban", "netease", "film"],
+    def test_payload_rejects_invalid_build_identity_before_replacing_previous_payload(self):
+        for field, value in [
+            ("status", "failed"), ("status", "platform-pending"), ("platform", "windows"),
+            ("assemblyProfile", "windows-native"), ("transport", "other"),
+            ("target", prepare.target("iphoneos", "arm64")), ("trustedNative", []),
         ]:
-            with self.subTest(modules=modules), tempfile.TemporaryDirectory() as temporary:
+            with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 selected = prepare.target("iphonesimulator", "x86_64")
                 target = root / ".cache/ios-runtime/iphonesimulator-x86_64/Runtime"
@@ -251,8 +240,9 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
                 (target / "sentinel").write_bytes(b"previous-payload")
                 (root / "node_modules/@meowfilm/script-host").mkdir(parents=True)
                 manifest = {"status": "complete", "platform": "ios", "assemblyProfile": "common-native",
-                            "target": selected, "transport": "runtime.http.v1", "modules": modules,
+                            "target": selected, "transport": "runtime.http.v1",
                             "trustedNative": [{"platform": "ios"}]}
+                manifest[field] = value
                 commands = []
                 def run(command, **kwargs):
                     commands.append(command)
@@ -263,14 +253,10 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
                     (staging / "runtime-manifest.json").write_text(json.dumps(manifest))
                     return prepare.subprocess.CompletedProcess(command, 0)
                 with patch.dict(prepare.payload.__globals__, ROOT=root), patch.object(prepare.subprocess, "run", run):
-                    if modules == expected_modules:
-                        self.assertEqual(prepare.payload("node", selected), target)
-                        self.assertEqual(json.loads((target / "runtime-manifest.json").read_text()), manifest)
-                    else:
-                        with self.assertRaisesRegex(ValueError, "payload is not complete"):
-                            prepare.payload("node", selected)
-                        self.assertEqual(json.loads((target / "runtime-manifest.json").read_text()), previous)
-                        self.assertEqual((target / "sentinel").read_bytes(), b"previous-payload")
+                    with self.assertRaisesRegex(ValueError, "payload is not complete"):
+                        prepare.payload("node", selected)
+                    self.assertEqual(json.loads((target / "runtime-manifest.json").read_text()), previous)
+                    self.assertEqual((target / "sentinel").read_bytes(), b"previous-payload")
                 self.assertEqual(commands[1][1:],
                                  [str(root / "scripts/ios/package-runtime.mjs"), "--product", "aggregate",
                                   "--sdk", "iphonesimulator", "--arch", "x64",

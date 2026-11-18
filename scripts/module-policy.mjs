@@ -1,12 +1,7 @@
 import { lstatSync } from 'node:fs';
+import { isBuiltin } from 'node:module';
 import { join, resolve } from 'node:path';
 import { parse } from 'acorn';
-
-// These are capability boundaries, not package allowlists. Workspace package
-// imports are admitted only when their package exports the requested entry.
-export const SHARED_RUNTIME_BUILTINS = new Set([
-  'node:buffer', 'node:crypto', 'node:http', 'node:https', 'node:stream',
-]);
 
 const IMPORT_DECLARATIONS = new Set([
   'ImportDeclaration', 'ExportNamedDeclaration', 'ExportAllDeclaration', 'ImportExpression',
@@ -75,7 +70,7 @@ export function sourceReferences(text) {
 }
 
 export function packageNameFromSpecifier(specifier) {
-  if (specifier.startsWith('.') || specifier.startsWith('node:') || specifier.startsWith('file:'))
+  if (specifier.startsWith('.') || isBuiltin(specifier) || specifier.startsWith('node:') || specifier.startsWith('file:'))
     return null;
   return specifier.split('/').slice(0, specifier.startsWith('@') ? 2 : 1).join('/');
 }

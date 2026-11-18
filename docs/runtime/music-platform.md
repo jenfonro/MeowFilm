@@ -42,3 +42,5 @@ request 将 HTTP `context.signal` 交给 owner。普通目录读取退订与物�
 公共打包器从实际静态导入和根 workspace lock 解析 `@meowfilm/music-platform`，复制 `src` 和薄模块；两端 wrapper 仅加入自己的启动文件。中央音乐许可和原始 notices 随公共载荷保存，实际文件及哈希进入 manifest；iOS 另携带现有 Node 兼容许可，Windows App 中央许可清单保持原安全复制门禁。来源路径见 `LICENSES/NOTICE.md` 和[许可说明](../licenses.md)。
 
 直接覆盖入口包括 `runtime-assembly`、`runtime-package`、`runtime-engine-package`、两端 runtime／runtime-engine-package 及 iOS prepare fixture。新增九模块、共享 owner 失败关闭和许可闭包断言仍须在指定机器执行，不能以本说明作为通过证据。
+
+普通 HTTP 响应、歌词解压、歌单同步和播放反馈上传不设人为字节配额；API 缓存的容量与淘汰策略保持不变。网易 NCBL 播放日志按 Zstandard 128 KiB raw block 和 NCBL 32 KiB frame 分块，保留 UInt16/UInt32 字段的真实可表达范围，不以旧单条/总日志字节门槛截断业务内容。

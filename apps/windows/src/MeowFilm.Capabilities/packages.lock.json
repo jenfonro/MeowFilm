@@ -23,6 +23,7 @@
         "type": "Project",
         "dependencies": {
           "MeowFilm.Core": "[1.0.0, )",
+          "MeowFilm.Platform": "[1.0.0, )",
           "SkiaSharp": "[4.155.0, 4.155.0]",
           "SkiaSharp.NativeAssets.Win32": "[4.155.0, 4.155.0]"
         }

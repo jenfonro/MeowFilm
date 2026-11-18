@@ -103,10 +103,9 @@ export function createMusicPlatform({ documents, transport = createMusicTranspor
         const recipe = wyRequest(path, data, client, c.account, clock, weapi, options.token, options.vip);
         assertCurrent();
         const reply = await transport({ ...recipe,
-          signal, dispatched: options.dispatched, json: !options.vip,
-          ...(options.maximumBytes == null ? {} : { maximumBytes: options.maximumBytes }) });
+          signal, dispatched: options.dispatched, json: !options.vip });
         assertCurrent();
-        if (options.vip) reply.value = encryptedWyResponse(reply.value, options.maximumBytes);
+        if (options.vip) reply.value = encryptedWyResponse(reply.value);
         if (!options.raw) try { wySuccess(reply.value); }
         catch (error) { if (error.code !== 'INVALID_RESPONSE') options.rejected?.(); throw error; }
         if (!entry.committed) clients.acceptWy(reply.cookies, c.account, new URL(recipe.url).hostname);
@@ -117,8 +116,7 @@ export function createMusicPlatform({ documents, transport = createMusicTranspor
         const client = prepare ? await clients.prepare('tx') : clients.get('tx');
         assertCurrent();
         const recipe = txRequest(module, method, data, client, c.account, clock, options);
-        const reply = await transport({ ...recipe, signal, dispatched: options.dispatched,
-          ...(options.maximumBytes == null ? {} : { maximumBytes: options.maximumBytes }) });
+        const reply = await transport({ ...recipe, signal, dispatched: options.dispatched });
         assertCurrent();
         try { return txSuccess(reply.value); }
         catch (error) { if (error.code !== 'INVALID_RESPONSE') options.rejected?.(); throw error; }
@@ -127,8 +125,7 @@ export function createMusicPlatform({ documents, transport = createMusicTranspor
         assertCurrent();
         const request = kgRequest(path, data, clients.get('kg'), c.account, clock, router, body, origin, salt);
         if (options.headers) Object.assign(request.headers, options.headers);
-        const reply = await transport({ ...request, signal, dispatched: options.dispatched,
-          ...(options.maximumBytes == null ? {} : { maximumBytes: options.maximumBytes }) });
+        const reply = await transport({ ...request, signal, dispatched: options.dispatched });
         assertCurrent();
         if (reply.headers.get('ssa-code')) { options.rejected?.(); fail('VERIFICATION_REQUIRED'); }
         try { return kgSuccess(reply.value); }
@@ -154,7 +151,7 @@ export function createMusicPlatform({ documents, transport = createMusicTranspor
               'x-router': 'kmr.service.kugou.com', 'Cache-Control': 'no-store',
               mid: cookies.KUGOU_API_MID ?? client.mid, dfid: cookies.dfid ?? client.dfid ?? '-', clienttime: String(time),
               'User-Agent': 'Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi',
-              'kg-rc': '1', 'kg-thash': '5d816a0', 'kg-rec': '1', 'kg-rf': 'B9EDA08A64250DEFFBCADDEE00F8F25F' }, maximumBytes: 2 * 1024 * 1024,
+              'kg-rc': '1', 'kg-thash': '5d816a0', 'kg-rec': '1', 'kg-rf': 'B9EDA08A64250DEFFBCADDEE00F8F25F' },
             body: JSON.stringify({ appid: 1005, clienttime: time, clientver: 20489, data: [{ hash: hash.toLowerCase() }],
               dfid: cookies.dfid ?? client.dfid ?? '-', key: md5('1005' + kgSalt + '20489' + time),
               mid: cookies.KUGOU_API_MID ?? client.mid, show_privilege: 0, show_author_alias: 0,
@@ -167,7 +164,7 @@ export function createMusicPlatform({ documents, transport = createMusicTranspor
         }
         const raw = await c.kg('/kmr/v2/audio', {}, 'openapi.kugou.com',
           { data: [{ entity_id: protocolInteger(mix) }], fields: 'base,audio_info,album_info,authors.base' },
-          undefined, undefined, { maximumBytes: 2 * 1024 * 1024, headers: { 'KG-TID': '238', 'Cache-Control': 'no-store' } });
+          undefined, undefined, { headers: { 'KG-TID': '238', 'Cache-Control': 'no-store' } });
         const values = rows(raw.data), row = values[0], audio = row?.audio_info;
         if (values.length !== 1 || Number(row?.__status) !== 1 || scalar(row.base?.album_audio_id) !== mix ||
             !['hash', 'hash_320', 'hash_flac', 'hash_high'].some(key => scalar(audio?.[key]).toUpperCase() === hash) ||

@@ -1,15 +1,14 @@
 import UIKit
 import Combine
 import MeowUI
-import MeowMusicFeature
 import MeowFilmFeature
 import MeowNovelFeature
 
 @MainActor
 enum MeowfilmSidebarContent {
-    case music(source: MusicHomeSourceSettingsModel, selectedPage: MeowfilmPrimaryPage)
-    case novel(feature: NovelFeature, home: () -> Void)
-    case film(home: FilmHomeModel, settings: FilmSettingsModel?)
+    case music(selectedPage: MeowfilmPrimaryPage)
+    case novel(discovery: NovelDiscoverySession, home: () -> Void)
+    case film(settings: FilmSettingsModel?)
 }
 
 /// One layout for all domains. Business choices stay in their existing owners.
@@ -19,21 +18,18 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
     var onSettings: (() -> Void)?
     var onClosed: (() -> Void)?
     var onSelectPage: ((MeowfilmPrimaryPage) -> Void)?
-    var onError: ((String) -> Void)?
     private let content: MeowfilmSidebarContent
     private let shade = UIButton(type: .custom)
     private let panel: WindowGradientView
     private let scroll = UIScrollView()
     private let card = UIView()
     private let upper = UIStackView()
-    private let lower = UIStackView()
     private let videos = UIStackView()
     private let books = UIStackView()
     private let settings = UIButton(type: .system)
-    private var sourceButton: UIButton?
     private var buttons: [UIButton] = []
     private var videoRows: [FilmSourceKey: UIStackView] = [:]
-    private var bookRows: [String: UIStackView] = [:]
+    private var bookRows: [String: UIButton] = [:]
     private var observations: Set<AnyCancellable> = []
     private var observing = false
     private var animator: UIViewPropertyAnimator?
@@ -128,17 +124,13 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         icon.accessibilityLabel = "meowfilm"
         icon.accessibilityIdentifier = "app.sidebar.icon"
         card.accessibilityIdentifier = "app.sidebar.card"
-        for stack in [upper, lower, videos, books] {
+        for stack in [upper, videos, books] {
             stack.axis = .vertical
             stack.spacing = 4
         }
         upper.accessibilityIdentifier = "app.sidebar.upper"
-        lower.accessibilityIdentifier = "app.sidebar.lower"
-        let groups = UIStackView(arrangedSubviews: [upper, lower])
-        groups.axis = .vertical
-        groups.spacing = 20
-        card.addSubview(groups)
-        groups.pinEdges(to: card)
+        card.addSubview(upper)
+        upper.pinEdges(to: card)
         for item in [icon, card] {
             column.addSubview(item)
             item.translatesAutoresizingMaskIntoConstraints = false
@@ -157,39 +149,22 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
 
     private func configureContent() {
         switch content {
-        case .music(_, let selected):
+        case .music(let selected):
             upper.addArrangedSubview(navigationButton(title: "首页", symbol: "house", page: .recommend,
                                                        selected: selected == .recommend))
             upper.addArrangedSubview(navigationButton(title: "频道", symbol: "square.grid.2x2", page: .channels,
                                                        selected: selected == .channels))
-            let button = UIButton(type: .system)
-            configureButton(button, title: "音乐数据源", symbol: "music.note.house")
-            button.accessibilityIdentifier = "app.sidebar.musicSource"
-            button.showsMenuAsPrimaryAction = true
-            sourceButton = button
-            lower.addArrangedSubview(button)
-            renderMusicSource()
-        case .novel(let feature, let home):
+        case .novel(_, let home):
             let button = UIButton(type: .system)
             configureButton(button, title: "首页", symbol: "house")
             button.accessibilityIdentifier = "app.sidebar.home"
             button.addAction(UIAction { [weak self] _ in home(); self?.onDismiss?() }, for: .touchUpInside)
             upper.addArrangedSubview(button)
-            upper.addArrangedSubview(displayRow(title: "分类", symbol: "square.grid.2x2",
-                                               identifier: "app.sidebar.category"))
             upper.addArrangedSubview(books)
-            renderBooks(feature.sources)
-            lower.isHidden = true
-        case .film(let home, let model):
-            let button = UIButton(type: .system)
-            configureButton(button, title: "影视数据源", symbol: "film")
-            button.accessibilityIdentifier = "app.sidebar.filmSource"
-            button.showsMenuAsPrimaryAction = true
-            sourceButton = button
-            lower.addArrangedSubview(button)
+            renderBooks()
+        case .film(let model):
             upper.addArrangedSubview(navigationButton(title: "首页", symbol: "house", page: .film, selected: true))
             upper.addArrangedSubview(videos)
-            renderFilmSource(home)
             renderVideos(model?.snapshot?.homeVideos ?? [])
         }
     }
@@ -199,7 +174,6 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         configuration.title = title
         configuration.titleAlignment = .leading
         configuration.titleLineBreakMode = .byWordWrapping
-        configuration.subtitleLineBreakMode = .byWordWrapping
         configuration.background = .clear()
         configuration.background.cornerRadius = 28
         configuration.cornerStyle = .fixed
@@ -207,11 +181,6 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { [weak button] attributes in
             var value = attributes
             value.font = UIFont.preferredFont(forTextStyle: .body, compatibleWith: button?.traitCollection)
-            return value
-        }
-        configuration.subtitleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { [weak button] attributes in
-            var value = attributes
-            value.font = UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: button?.traitCollection)
             return value
         }
         button.configuration = configuration
@@ -285,19 +254,14 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         panel.themeProvider.pageThemeChanges.receive(on: RunLoop.main)
             .sink { [weak self] in self?.applyTheme() }.store(in: &observations)
         switch content {
-        case .music(let source, _):
-            source.onError = { [weak self] in self?.onError?($0) }
-            source.objectWillChange.receive(on: RunLoop.main)
-                .sink { [weak self] in self?.renderMusicSource() }.store(in: &observations)
-            source.activate()
-        case .novel(let feature, _):
-            feature.$sources.receive(on: RunLoop.main)
-                .sink { [weak self] in self?.renderBooks($0) }.store(in: &observations)
-        case .film(let home, let settings):
-            home.$selectedSourceID.receive(on: RunLoop.main)
-                .sink { [weak self, weak home] _ in
-                    if let home { self?.renderFilmSource(home) }
-                }.store(in: &observations)
+        case .music:
+            break
+        case .novel(let discovery, _):
+            discovery.feature.$sources.receive(on: RunLoop.main)
+                .sink { [weak self] _ in self?.renderBooks() }.store(in: &observations)
+            discovery.$selectedSource.receive(on: RunLoop.main)
+                .sink { [weak self] _ in self?.renderBooks() }.store(in: &observations)
+        case .film(let settings):
             settings?.$snapshot.receive(on: RunLoop.main).sink { [weak self] snapshot in
                 self?.renderVideos(snapshot?.homeVideos ?? [])
             }.store(in: &observations)
@@ -307,32 +271,6 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
     private func stopObserving() {
         observing = false
         observations.removeAll()
-        if case .music(let source, _) = content {
-            source.onError = nil
-            source.deactivate()
-        }
-    }
-
-    private func renderMusicSource() {
-        guard case .music(let source, _) = content, let button = sourceButton else { return }
-        button.configuration?.subtitle = source.selection?.selected.title
-        button.isEnabled = source.selection?.available.isEmpty == false && !source.isSaving
-        button.menu = source.selection.map { selection in
-            UIMenu(title: "音乐数据源", children: selection.available.map { platform in
-                UIAction(title: platform.title, state: selection.selected == platform ? .on : .off) { [weak source] _ in
-                    source?.select(platform)
-                }
-            })
-        }
-    }
-
-    private func renderFilmSource(_ home: FilmHomeModel) {
-        sourceButton?.configuration?.subtitle = home.sources.first { $0.id == home.selectedSourceID }?.title
-        sourceButton?.menu = UIMenu(title: "影视数据源", children: home.sources.map { source in
-            UIAction(title: source.title, state: source.id == home.selectedSourceID ? .on : .off) { [weak home] _ in
-                home?.selectSource(id: source.id)
-            }
-        })
     }
 
     private func renderVideos(_ sources: [FilmVideoSource]) {
@@ -360,19 +298,40 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         applyTheme()
     }
 
-    private func renderBooks(_ sources: [NovelSource]) {
+    private func renderBooks() {
+        guard case .novel(let discovery, _) = content else { return }
+        let sources = discovery.feature.sources
+        let available = Set(discovery.availableSources.map(\.id))
         books.isHidden = sources.isEmpty
         let keys = Set(sources.map(\.id))
         for (key, row) in bookRows where !keys.contains(key) {
             row.removeFromSuperview()
+            buttons.removeAll { $0 === row }
             bookRows[key] = nil
         }
         for (index, source) in sources.enumerated() {
-            let row = bookRows[source.id] ?? displayRow(title: source.name, symbol: "book.closed",
-                identifier: "app.sidebar.book.\(Data(source.id.utf8).base64EncodedString())")
-            bookRows[source.id] = row
-            (row.arrangedSubviews.last as? UILabel)?.text = source.name
+            let row: UIButton
+            if let existing = bookRows[source.id] { row = existing }
+            else {
+                row = UIButton(type: .system)
+                configureButton(row, title: source.name, symbol: "book.closed")
+                row.accessibilityIdentifier = "app.sidebar.book.\(Data(source.id.utf8).base64EncodedString())"
+                row.addAction(UIAction { [weak self, weak discovery] _ in
+                    guard let discovery, discovery.availableSources.contains(where: { $0.id == source.id }) else { return }
+                    discovery.selectSource(id: source.id)
+                    self?.onDismiss?()
+                }, for: .touchUpInside)
+                bookRows[source.id] = row
+            }
+            row.configuration?.title = source.name
             row.accessibilityLabel = source.name
+            row.isEnabled = available.contains(source.id)
+            row.isSelected = discovery.selectedSource?.id == source.id
+            row.isAccessibilityElement = true
+            row.accessibilityTraits = [.button]
+            if !row.isEnabled { row.accessibilityTraits.insert(.notEnabled) }
+            if row.isSelected { row.accessibilityTraits.insert(.selected) }
+            row.accessibilityValue = row.isSelected ? "已选择" : nil
             if books.arrangedSubviews.count <= index || books.arrangedSubviews[index] !== row {
                 books.insertArrangedSubview(row, at: index)
             }

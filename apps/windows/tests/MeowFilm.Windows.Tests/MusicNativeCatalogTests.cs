@@ -57,7 +57,7 @@ public static partial class MusicNativeCatalogTests
         yield return new("Native catalog close drains ignored read cancellation and borrows dependencies", CloseRead);
         yield return new("Native catalog close drains admitted CAS without pretending cancellation rollback", CloseCommit);
         yield return new("Native catalog bounded close fails until actual drain rather than disposing dependencies", CloseTimeout);
-        yield return new("Native catalog field and storage capacity checks never admit partial persistence", Budgets);
+        yield return new("Native catalog large fields and stages preserve complete input and storage results", Budgets);
     }
 
     private static void Check(bool value, string message = "Assertion failed")
@@ -919,8 +919,13 @@ public static partial class MusicNativeCatalogTests
         var huge = O(Song("wy", 0)); huge["title"] = new string('x', 32 * 1024 * 1024);
         var large = J(huge);
         f.Platform.Pages = p => Page(p, 1, _ => large);
-        Error(await f.Run("playlist.prepare", new { platform = "wy", id = "42" }), "LIMIT");
-        Check(f.Store.Writes == writes);
+        var stage = await f.Prepare();
+        Check(N(stage, "count") == 1 && f.Store.Writes == writes + 1 && N(await f.Queue(), "total") == 0);
+        Ok(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }));
+        var queue = await f.Queue();
+        Check(N(queue, "total") == 1 && S(queue.GetProperty("current").GetProperty("song"), "title") == S(large, "title"));
+        Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 1 }),
+            "CATALOG_TOKEN_EXPIRED");
         f.Platform.Pages = p => Page(p, 1); await f.Prepare(); await f.Prepare();
     }
 }

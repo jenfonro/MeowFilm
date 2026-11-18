@@ -1179,8 +1179,6 @@ public static class FilmSettingsUiTests
             Task.FromResult(new RuntimeConnection(this, new Uri("http://127.0.0.1:1/"), CancellationToken.None));
         public Task<JsonElement> CallAsync(string method, object? parameters, TimeSpan timeout, CancellationToken cancellationToken = default) =>
             CallAsync(method, parameters, cancellationToken);
-        public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default) =>
-            throw new InvalidOperationException("Source settings do not read images.");
         public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("Source settings do not read images.");
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

@@ -145,6 +145,20 @@ final class RuntimeMetadataImageTests: XCTestCase {
         }
     }
 
+    func testRealHTTPLargeMetadataImagesReturnCompleteBodies() async throws {
+        let bytes = Data(repeating: 0x45, count: 4 * 1_024 * 1_024 + 1)
+        let peer = try MetadataImageHTTPPeer { _ in .init(status: 200, body: bytes) }
+        defer { peer.stop() }
+        await fulfillment(of: [peer.ready], timeout: 3)
+        let client = try RuntimeHTTPClient(baseURL: peer.endpoint())
+        for path in ["/v1/tmdb/images/w500/large.jpg", "/v1/douban/images/large.jpg"] {
+            let actual = try await client.readMetadataImage(try XCTUnwrap(RuntimeHTTPClient.metadataImageURL(path)))
+            XCTAssertEqual(actual, bytes)
+        }
+        await client.close()
+        XCTAssertEqual(peer.requests.count, 2)
+    }
+
     func testRealHTTPRejectsMalformedDoubanReferencesWithoutSendingAnyRequest() async throws {
         let valid = "/v1/douban/images/view/photo/public/poster.jpg"
         let peer = try MetadataImageHTTPPeer { request in

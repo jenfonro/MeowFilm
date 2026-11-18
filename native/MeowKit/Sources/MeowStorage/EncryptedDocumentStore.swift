@@ -7,10 +7,7 @@ public enum EncryptedDocumentStoreError: Error, Equatable, Sendable {
     case invalidNamespace
     case invalidKey
     case invalidBaseURL
-    case invalidLimits
     case unsafePath
-    case documentTooLarge
-    case namespaceFull
     case invalidEnvelope
     case unsupportedVersion
     case missingKey
@@ -37,59 +34,31 @@ public enum EncryptedDocumentStoreError: Error, Equatable, Sendable {
 /// Key material is local to each operation, never retained on this object. Swift Data
 /// copies are not promised to be securely erased; callers own returned plaintext.
 public final class EncryptedDocumentStore: @unchecked Sendable {
-    public struct Limits: Equatable, Sendable {
-        public let maximumDocumentBytes: Int
-        /// Committed/enumerated encrypted bytes, including abandoned staging files.
-        /// One in-flight replacement additionally needs at most maximumDocumentBytes + 37.
-        public let maximumNamespaceBytes: Int
-        public let maximumDocuments: Int
-
-        public init(maximumDocumentBytes: Int = 8 * 1_024 * 1_024,
-                    maximumNamespaceBytes: Int = 32 * 1_024 * 1_024,
-                    maximumDocuments: Int = 128) {
-            self.maximumDocumentBytes = maximumDocumentBytes
-            self.maximumNamespaceBytes = maximumNamespaceBytes
-            self.maximumDocuments = maximumDocuments
-        }
-
-        fileprivate func validate() throws {
-            guard (1...64 * 1_024 * 1_024).contains(maximumDocumentBytes),
-                  maximumNamespaceBytes >= maximumDocumentBytes + EncryptedDocumentFormat.overhead,
-                  maximumNamespaceBytes <= 256 * 1_024 * 1_024,
-                  (1...1_024).contains(maximumDocuments) else {
-                throw EncryptedDocumentStoreError.invalidLimits
-            }
-        }
-    }
-
     private let base: URL
     private let root: URL
     private let baseIdentity: FileIdentity
     private var rootIdentity: FileIdentity?
     private let namespace: String
-    private let limits: Limits
     private let keyProvider: any EncryptedDocumentKeyProvider
     private let committer: any EncryptedDocumentCommitter
     private let lock = NSLock()
 
     /// Passive: validates directories/configuration, never creates a directory or key.
     public convenience init(baseURL: URL, namespace: String,
-                            keyProvider: any EncryptedDocumentKeyProvider,
-                            limits: Limits = Limits()) throws {
+                            keyProvider: any EncryptedDocumentKeyProvider) throws {
         try self.init(baseURL: baseURL, namespace: namespace, keyProvider: keyProvider,
-                      limits: limits, committer: RenameEncryptedDocumentCommitter())
+                      committer: RenameEncryptedDocumentCommitter())
     }
 
     init(baseURL: URL, namespace: String, keyProvider: any EncryptedDocumentKeyProvider,
-         limits: Limits = Limits(), committer: any EncryptedDocumentCommitter) throws {
+         committer: any EncryptedDocumentCommitter) throws {
         guard EncryptedDocumentFormat.validIdentifier(namespace) else {
             throw EncryptedDocumentStoreError.invalidNamespace
         }
-        try limits.validate()
         guard baseURL.isFileURL, baseURL.host == nil || baseURL.host == "" || baseURL.host == "localhost",
               baseURL.query == nil, baseURL.fragment == nil, baseURL.user == nil, baseURL.port == nil,
               baseURL.password == nil, baseURL.path.hasPrefix("/"),
-              !baseURL.path.utf8.contains(0), baseURL.path.utf8.count <= 768 else {
+              !baseURL.path.utf8.contains(0) else {
             throw EncryptedDocumentStoreError.invalidBaseURL
         }
         // Resolve trusted system ancestors such as /var -> /private/var once. Reject a
@@ -98,7 +67,7 @@ public final class EncryptedDocumentStore: @unchecked Sendable {
             throw EncryptedDocumentStoreError.unsafePath
         }
         let canonical = baseURL.resolvingSymlinksInPath().standardizedFileURL
-        guard canonical.path != "/", canonical.path.utf8.count <= 768,
+        guard canonical.path != "/",
               let info = try Self.metadata(canonical), Self.isDirectory(info) else {
             throw EncryptedDocumentStoreError.invalidBaseURL
         }
@@ -108,7 +77,6 @@ public final class EncryptedDocumentStore: @unchecked Sendable {
                                                      isDirectory: true)
         self.namespace = namespace
         self.keyProvider = keyProvider
-        self.limits = limits
         self.committer = committer
         self.rootIdentity = nil
         _ = try checkDirectories()
@@ -180,28 +148,19 @@ public final class EncryptedDocumentStore: @unchecked Sendable {
 
     private func writeUnlocked(_ data: Data, key: String) throws {
         let destination = try location(key)
-        guard data.count <= limits.maximumDocumentBytes else {
-            throw EncryptedDocumentStoreError.documentTooLarge
-        }
         let exists = try checkDirectories()
         let previous: Data?
         if exists { previous = try envelope(at: destination) }
         else { previous = nil }
         if let previous { try EncryptedDocumentFormat.validate(previous) }
-        let inventory = try namespaceInventory(exists: exists)
-        let nextBytes = data.count + EncryptedDocumentFormat.overhead
-        let retainedBytes = inventory.bytes - (previous?.count ?? 0)
-        guard retainedBytes + nextBytes <= limits.maximumNamespaceBytes,
-              inventory.count + (previous == nil ? 1 : 0) <= limits.maximumDocuments else {
-            throw EncryptedDocumentStoreError.namespaceFull
-        }
+        let isEmpty = try namespaceIsEmpty(exists: exists)
 
         let material: Data
         if let existing = try providerRead() {
             material = existing
         } else {
             // ANY file, including unknown/staged files, forbids automatic reprovisioning.
-            guard inventory.count == 0, previous == nil else {
+            guard isEmpty, previous == nil else {
                 throw EncryptedDocumentStoreError.missingKey
             }
             material = try providerCreate()
@@ -353,12 +312,10 @@ public final class EncryptedDocumentStore: @unchecked Sendable {
         guard Self.isPrivateFile(info), FileIdentity(info) == FileIdentity(pathInfo) else {
             throw EncryptedDocumentStoreError.unsafePath
         }
-        guard info.st_size >= 0,
-              info.st_size <= off_t(limits.maximumDocumentBytes + EncryptedDocumentFormat.overhead) else {
-            throw EncryptedDocumentStoreError.documentTooLarge
+        guard let count = Int(exactly: info.st_size), count >= 0 else {
+            throw EncryptedDocumentStoreError.storageFailure
         }
-        // No mmap: bound allocation before reading, reject short reads or growth.
-        let count = Int(info.st_size)
+        // No mmap: allocate the actual file size, reject short reads or growth.
         var bytes = Data(count: count)
         var offset = 0
         while offset < count {
@@ -376,31 +333,24 @@ public final class EncryptedDocumentStore: @unchecked Sendable {
         return bytes
     }
 
-    private func namespaceInventory(exists: Bool) throws -> (count: Int, bytes: Int) {
-        guard exists else { return (0, 0) }
-        // Enumerate lazily and stop at the budget, rather than allocating an unbounded
-        // list of filenames. Hidden/abandoned files count; directory errors never skip.
+    private func namespaceIsEmpty(exists: Bool) throws -> Bool {
+        guard exists else { return true }
+        // Hidden/abandoned files prevent key reprovisioning; directory errors never skip.
         var enumerationFailed = false
         guard let entries = FileManager.default.enumerator(
             at: root, includingPropertiesForKeys: nil, options: [.skipsSubdirectoryDescendants],
             errorHandler: { _, _ in enumerationFailed = true; return false }
         ) else { throw EncryptedDocumentStoreError.storageFailure }
-        var total = 0, count = 0
+        var isEmpty = true
         while let next = entries.nextObject() {
             guard let entry = next as? URL else { throw EncryptedDocumentStoreError.storageFailure }
-            count += 1
-            guard count <= limits.maximumDocuments else { throw EncryptedDocumentStoreError.namespaceFull }
+            isEmpty = false
             guard let info = try Self.metadata(entry), Self.isPrivateFile(info) else {
                 throw EncryptedDocumentStoreError.unsafePath
             }
-            guard info.st_size >= 0, info.st_size <= off_t(limits.maximumNamespaceBytes) else {
-                throw EncryptedDocumentStoreError.namespaceFull
-            }
-            total += Int(info.st_size)
-            guard total <= limits.maximumNamespaceBytes else { throw EncryptedDocumentStoreError.namespaceFull }
         }
         guard !enumerationFailed else { throw EncryptedDocumentStoreError.storageFailure }
-        return (count, total)
+        return isEmpty
     }
 
     private func prepareDirectory() throws {

@@ -87,7 +87,7 @@ struct ProgressiveMediaResponse {
         let validator = (etag?.hasPrefix("\"") == true && etag?.hasSuffix("\"") == true)
             ? etag : response.value(forHTTPHeaderField: "Last-Modified")
         if let validator {
-            guard validator.utf8.count <= 512, !validator.utf8.contains(where: { $0 < 32 || $0 == 127 }) else {
+            guard !validator.utf8.contains(where: { $0 < 32 || $0 == 127 }) else {
                 throw PlaybackNetworkError.invalidResponse
             }
         }
@@ -102,7 +102,7 @@ struct ProgressiveMediaResponse {
     }
 
     static func parseContentRange(_ raw: String) -> (start: Int64, end: Int64, total: Int64)? {
-        guard raw.utf8.count <= 96, raw.hasPrefix("bytes ") else { return nil }
+        guard raw.hasPrefix("bytes ") else { return nil }
         let pieces = raw.dropFirst(6).split(separator: "/", omittingEmptySubsequences: false)
         guard pieces.count == 2 else { return nil }
         let ends = pieces[0].split(separator: "-", omittingEmptySubsequences: false)
@@ -112,7 +112,7 @@ struct ProgressiveMediaResponse {
     }
 
     private static func unsigned(_ value: String) -> Int64? {
-        guard !value.isEmpty, value.utf8.count <= 19, value.utf8.allSatisfy({ (48...57).contains($0) }) else { return nil }
+        guard !value.isEmpty, value.utf8.allSatisfy({ (48...57).contains($0) }) else { return nil }
         return Int64(value)
     }
 

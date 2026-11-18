@@ -6,7 +6,7 @@
 
 App 部署目标及 MeowKit／AetherKernel 最低 iOS18；macOS15 仅为原生 XCTest 执行目标，不是 Mac 产品。仓库参考 Xcode26.1.1；Aether 7.68.0 上游以 Xcode27 为正式支持、26.3 为 best effort，工具链兼容须以实际编译结果确认，不由最低部署版本或准备通过推定。
 
-构建机需要使用 `scripts/script-host-native.json` 中 `build.node` 锁定的 Node 版本及根锁依赖 `npm ci --ignore-scripts`；客户端不需要用户安装 Node。`prepare-ios-runtime.py` 校验 `scripts/ios-node-mobile.json` 锁定的 Node Mobile 18.20.4 archive／许可，复用 `.cache/nodejs-mobile/ios/NodeMobile.xcframework`，并按 iOS SDK／架构准备 `MeowScriptHost.framework` 和公共载荷。`scripts/ios/package-runtime.mjs` 包装公共 `common-native` 打包器，包含 `complete`／`runtime.http.v1` manifest、iOS entry、按序 music／cat／source／pan／tmdb／douban／film／netease／music-platform 九模块、影视和音乐平台业务依赖、规则 SDK 与 token 的锁定 jsdom 依赖和许可，不包含 Windows 入口或 WASM／asm.js 引擎。
+构建机需要使用 `scripts/script-host-native.json` 中 `build.node` 锁定的 Node 版本及根锁依赖 `npm ci --ignore-scripts`；客户端不需要用户安装 Node。`prepare-ios-runtime.py` 校验 `scripts/ios-node-mobile.json` 锁定的 Node Mobile 18.20.4 archive／许可，复用 `.cache/nodejs-mobile/ios/NodeMobile.xcframework`，并按 iOS SDK／架构准备 `MeowScriptHost.framework` 和公共载荷。`scripts/ios/package-runtime.mjs` 包装公共 `common-native` 打包器，包含 `complete`／`runtime.http.v1` manifest、iOS entry 及其业务模块、规则 SDK、根锁依赖和适用许可，不包含 Windows 入口或 WASM／asm.js 引擎。模块装配由实际 entry 和 provider 接线决定，准备工具不重复冻结完整模块数组；失败仍保留原完整载荷，不用旧载荷继续构建。
 
 `build-ios.sh`、`test-native.sh compile|all` 自动准备这些输入；直接运行 Xcode 前先准备相同目标的载体与载荷。可用 `MEOWFILM_BUILD_NODE` 指定构建工具 Node 路径；它不改变 App 内嵌版本。工程嵌入并签名 NodeMobile 和 MeowScriptHost，载荷及适用许可随 App 分发。影视规则／搜索程序由 Node 加载，共用 `scripts/script-host-native.json` 锁定的 QuickJS-NG 0.18.0 原生载体、派生补丁与 Unicode 表，不再通过 SwiftPM 静态链接另一套客户端规则核心；中央引擎 MIT 与 `Unicode-3.0.txt` 由 Xcode 随 App 打包。CI 两个工作流均恢复锁定依赖，不使用系统已装 Node 的隐式状态。
 

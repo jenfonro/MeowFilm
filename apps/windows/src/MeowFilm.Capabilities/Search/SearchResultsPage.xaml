@@ -82,7 +82,7 @@
      </ScrollViewer>
     </ControlTemplate></ItemsControl.Template>
     <ItemsControl.ItemsPanel><ItemsPanelTemplate>
-     <local:FilmSearchVirtualizingPanel CardGap="24" RowGap="24">
+     <local:FilmSearchVirtualizingPanel>
       <local:FilmSearchVirtualizingPanel.FooterTemplate><DataTemplate>
        <StackPanel>
         <TextBlock Text="{Binding Status}" Margin="0,16" HorizontalAlignment="Center" Style="{StaticResource Capability.Muted}"

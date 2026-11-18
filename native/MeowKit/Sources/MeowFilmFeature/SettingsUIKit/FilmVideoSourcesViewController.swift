@@ -205,7 +205,7 @@ final class FilmVideoDetailController: FilmSourcePageController {
         input.text = String(video.order)
         input.keyboardType = .numbersAndPunctuation
         input.accessibilityIdentifier = "film.video.order.input"
-        dialog.body.addArrangedSubview(input)
+        dialog.addInput(input, title: "排序")
         dialog.submit = { [weak self] in
             guard let self else { return false }
             guard let order = Int(input.text ?? "") else {

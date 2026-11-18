@@ -7,11 +7,10 @@ import { decodeJSON, utf8 } from './model.mjs';
 import { entities } from './literal.mjs';
 import { decryptQRC } from './qrc.mjs';
 
-const maximumBytes = 512 * 1024;
 const timed = value => /\[(?:\d+:\d+(?:\.\d+)?|\d+,\d+)\]/.test(value);
 function inflate(bytes, padding = false) {
   try {
-    const result = inflateSync(bytes, { maxOutputLength: maximumBytes, info: true });
+    const result = inflateSync(bytes, { info: true });
     const tail = bytes.subarray(result.engine.bytesWritten);
     // QRC encrypts complete eight-byte blocks with up to seven zero bytes.
     // KRC/Kuwo have no block padding and consume exactly one zlib document.
@@ -19,10 +18,6 @@ function inflate(bytes, padding = false) {
     return result.buffer;
   }
   catch (error) { fail(error.code === 'ERR_BUFFER_TOO_LARGE' ? 'LIMIT' : 'INVALID_RESPONSE'); }
-}
-function output(value) {
-  if (Buffer.byteLength(value) > maximumBytes) fail('LIMIT');
-  return value;
 }
 export async function lyricTracks(main, optional, signal) {
   const result = { text: main, translation: '', romanization: '' }, errors = {};
@@ -56,11 +51,10 @@ export function lyricXML(value) {
 }
 export async function qrcLyrics(encoded, signal) {
   if (!encoded) return '';
-  if (timed(encoded) || encoded.trimStart().startsWith('<')) return output(lyricXML(encoded));
+  if (timed(encoded) || encoded.trimStart().startsWith('<')) return lyricXML(encoded);
   encoded = encoded.replace(/\s/g, '');
   if (encoded.length % 2 || !/^[\da-f]+$/i.test(encoded)) fail('INVALID_RESPONSE');
-  if (encoded.length / 2 > maximumBytes) fail('LIMIT');
-  return output(lyricXML(utf8(inflate(await decryptQRC(Buffer.from(encoded, 'hex'), signal), true))));
+  return lyricXML(utf8(inflate(await decryptQRC(Buffer.from(encoded, 'hex'), signal), true)));
 }
 export function krcLyrics(encoded) {
   const bytes = base64(encoded);
@@ -104,10 +98,10 @@ export function krcLyrics(encoded) {
       for (const line of lines) counts.set(clock(line), (counts.get(clock(line)) ?? 0) + 1);
       const translated = lines.flatMap((line, index) => line.plain.trim() && content[index][0].trim() && counts.get(clock(line)) === 1
         ? [stamp(line.start) + content[index][0]] : []);
-      if (translated.length) translation = output(prefix + translated.join('\n'));
+      if (translated.length) translation = prefix + translated.join('\n');
     }
   }
-  return { text: output(prefix + lines.map(line => line.value).join('\n')), translation, romanization: '' };
+  return { text: prefix + lines.map(line => line.value).join('\n'), translation, romanization: '' };
 }
 function stamp(ms) {
   const minutes = Math.floor(ms / 60000), seconds = (ms % 60000 / 1000).toFixed(3).padStart(6, '0');
@@ -175,9 +169,9 @@ export function kuwoLyrics(bytes) {
     return `[${line.at},${duration}]` + words.map(word => `(${line.at + word.start},${word.duration},0)${word.text}`).join('');
   });
   if (!lines.length) fail('INVALID_RESPONSE');
-  return { text: output(offset + converted.join('\n')),
-    translation: output(translations.length ? offset + translations.map(line =>
-      stamp(line.at) + literal(entities(line.text.replace(/<(-?\d+),(-?\d+)(?:,-?\d+)?>/g, '')))).join('\n') : ''), romanization: '' };
+  return { text: offset + converted.join('\n'),
+    translation: translations.length ? offset + translations.map(line =>
+      stamp(line.at) + literal(entities(line.text.replace(/<(-?\d+),(-?\d+)(?:,-?\d+)?>/g, '')))).join('\n') : '', romanization: '' };
 }
 export async function miguLyrics(bytes, signal) {
   const encoded = utf8(bytes).trim();
@@ -222,5 +216,5 @@ export async function miguLyrics(bytes, signal) {
     }).join('');
   }).filter(Boolean);
   if (!lines.length) fail('INVALID_RESPONSE');
-  return output(lines.join('\n'));
+  return lines.join('\n');
 }

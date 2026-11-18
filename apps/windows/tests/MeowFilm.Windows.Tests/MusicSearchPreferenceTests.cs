@@ -76,7 +76,7 @@ public static class MusicSearchPreferenceTests
                 await Code(owner, "music.search.settings.save", invalid, "INVALID_REQUEST");
                 Check(store.Writes == 0);
             });
-        yield return Case("history-deduplicates-trims-and-retains-sixty-on-cold-reopen", async () =>
+        yield return Case("history-deduplicates-trims-and-retains-all-on-cold-reopen", async () =>
         {
             var store = new Store();
             await using (var owner = new MusicLibraryOwner(MusicTestStores.For(store)))
@@ -88,9 +88,9 @@ public static class MusicSearchPreferenceTests
             await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
             var history = (await Call(reopened, "music.search.history.get")).GetProperty("history");
             var items = history.GetProperty("items").EnumerateArray().ToArray();
-            Check(items.Length == 60 && items[0].GetProperty("text").GetString() == "词20" &&
+            Check(items.Length == 65 && items[0].GetProperty("text").GetString() == "词20" &&
                 items[0].GetProperty("kind").GetString() == "playlists");
-            Check(items.All(i => i.GetProperty("text").GetString() != "词0") &&
+            Check(items.Any(i => i.GetProperty("text").GetString() == "词0") &&
                 items.Count(i => i.GetProperty("text").GetString() == "词20") == 1);
         });
         yield return Case("history-clear-requires-current-revision-and-explicit-confirmation", async () =>
@@ -112,7 +112,16 @@ public static class MusicSearchPreferenceTests
             var items = (await Call(owner, "music.search.history.get")).GetProperty("history").GetProperty("items");
             Check(items.GetArrayLength() == 2 && items[0].GetProperty("text").GetString() == "B");
         });
-        foreach (string text in new[] { "", " ", "bad\nvalue", "bad\u0085value", new string('x', 201) })
+        yield return Case("history-keeps-query-beyond-two-hundred-characters", async () =>
+        {
+            var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+            string text = new('x', 4097);
+            await Call(owner, "music.search.history.record", new { text, kind = "songs" });
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+            var rows = (await Call(reopened, "music.search.history.get")).GetProperty("history").GetProperty("items");
+            Check(rows.GetArrayLength() == 1 && rows[0].GetProperty("text").GetString() == text);
+        });
+        foreach (string text in new[] { "", " ", "bad\nvalue", "bad\u0085value" })
             yield return Case("invalid-history-text-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
                 System.Text.Encoding.UTF8.GetBytes(text)))[..8], async () =>
             {

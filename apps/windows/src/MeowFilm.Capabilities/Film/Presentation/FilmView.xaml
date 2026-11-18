@@ -11,6 +11,27 @@
     <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
     <ResourceDictionary Source="/MeowFilm.Desktop;component/FilterChrome.xaml"/>
    </ResourceDictionary.MergedDictionaries>
+   <Style x:Key="Film.ShelfTitleButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
+    <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.SectionHeading}"/>
+    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="Padding" Value="0,0,8,0"/>
+    <Setter Property="Margin" Value="0"/>
+    <Setter Property="HorizontalAlignment" Value="Left"/>
+    <Setter Property="Cursor" Value="Hand"/>
+   </Style>
+   <Style x:Key="Film.ShelfRefreshButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.IconButton}">
+    <Setter Property="Content" Value="&#xE72C;"/>
+    <Setter Property="FontSize" Value="16"/>
+    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="Margin" Value="0"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="ToolTip" Value="{Binding Title,StringFormat=刷新 {0}}"/>
+    <Style.Triggers>
+     <DataTrigger Binding="{Binding CanRefresh}" Value="False">
+      <Setter Property="AutomationProperties.ItemStatus" Value="加载中"/>
+     </DataTrigger>
+    </Style.Triggers>
+   </Style>
    <Style x:Key="Film.MoreButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
     <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
     <Setter Property="Padding" Value="13,5,11,5"/>
@@ -89,16 +110,17 @@
       <StackPanel Margin="0,0,0,28">
        <Grid Margin="0,0,0,16">
         <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <TextBlock Text="{Binding Title}" Style="{StaticResource MeowFilm.SectionHeading}"
-                   Margin="0" VerticalAlignment="Center"/>
-        <StackPanel Grid.Column="1" Orientation="Horizontal">
-        <Button Content="刷新" Click="HomeRefresh_Click" Style="{StaticResource Film.MoreButton}"
-                IsEnabled="{Binding CanRefresh}" Margin="0,0,12,0"
+        <Button Tag="{Binding}" Click="More_Click" Style="{StaticResource Film.ShelfTitleButton}"
+                AutomationProperties.Name="{Binding Title,StringFormat=查看更多 {0}}">
+         <StackPanel Orientation="Horizontal">
+          <TextBlock Text="{Binding Title}" Style="{x:Null}" VerticalAlignment="Center"/>
+          <TextBlock Text="&#xE76C;" Style="{x:Null}" FontFamily="{DynamicResource MeowFilm.Font.Icons}"
+                     FontSize="12" Margin="8,0,0,0" VerticalAlignment="Center"/>
+         </StackPanel>
+        </Button>
+        <Button Grid.Column="1" Click="HomeRefresh_Click" Style="{StaticResource Film.ShelfRefreshButton}"
+                IsEnabled="{Binding CanRefresh}"
                 AutomationProperties.Name="{Binding Title,StringFormat=刷新 {0}}"/>
-        <Button Content="查看更多" Tag="{Binding}"
-                Click="More_Click" Style="{StaticResource Film.MoreButton}"
-                AutomationProperties.Name="{Binding Title,StringFormat=查看更多 {0}}"/>
-        </StackPanel>
        </Grid>
        <local:FilmShelf ItemActivated="Shelf_ItemActivated"
                         RetryRequested="Shelf_RetryRequested"/>

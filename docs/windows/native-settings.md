@@ -31,7 +31,7 @@ PID 验证的 CurrentUserOnly 启动／存活管道在 Windows App 装配中提�
 - `settings.write` 请求为 `{kind,id,block,document,expected}`，仅允许 `pan.accounts`，用于运行器取得新凭据后的真实原子回写。
 - 回执为 `{kind:"settings.result",id,ok,document,fingerprint}`；存储失败回执为封闭错误码，不包含配置。
 - 请求只消费对应动作所需的唯一 kind／id／block 及写入 document／expected；普通扩展不拒绝，准确关联、块权限及 CAS 指纹仍核对。
-- 每帧最多 8 MiB，按换行分帧；未知请求、越权块、损坏帧或管道断开关闭该运行代次。
+- 按换行分帧，不设置业务帧字节配额；未知请求、越权块、损坏帧或管道断开关闭该运行代次。
 - Node 在对外就绪前读取全部设置块。HTTP `POST /v1/settings/changed` 只接收 `{block}`，使用 `runtime.http.v1` 信封；`RuntimeHttpClient` 的本地方法名为 `runtime.settings.changed`。通知中没有文档或凭据。
 
 运行器重读被通知块并更新真正的消费者。猫源撤销旧输入工作、解析当前来源并调度替换；网盘撤销旧账号代次的请求／登录会话；元数据失效旧配置和相关业务缓存；影视规则更新新任务使用的快照，偏好重核准备候选与发现范围，不强停已开始的媒体。旧任务不得覆盖新配置或发布迟到凭据。现有播放、业务历史和无关设置块不因保存被删除。HTTP 成功值 `{notified:true}` 只确认通知处理；猫源实际替换由模块生命周期继续执行，不能据此宣布装载成功。

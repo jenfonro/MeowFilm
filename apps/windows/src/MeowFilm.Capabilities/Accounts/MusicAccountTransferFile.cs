@@ -11,7 +11,6 @@ namespace MeowFilm.Capabilities.Accounts;
 [DebuggerDisplay("MusicAccountTransferFile (redacted)")]
 public sealed class MusicAccountTransferFile : IDisposable
 {
-    public const int MaximumBytes = 1024 * 1024;
     [DebuggerBrowsable(DebuggerBrowsableState.Never)] private byte[]? bytes;
     internal MusicAccountTransferFile(byte[] bytes) { this.bytes = bytes; }
     public static async Task<MusicAccountTransferFile> ReadAsync(Stream source, CancellationToken token = default)
@@ -22,11 +21,9 @@ public sealed class MusicAccountTransferFile : IDisposable
         {
             while (true)
             {
-                int count = await source.ReadAsync(chunk.AsMemory(0, Math.Min(chunk.Length,
-                    MaximumBytes + 1 - (int)buffer.Length)), token).ConfigureAwait(false);
+                int count = await source.ReadAsync(chunk, token).ConfigureAwait(false);
                 if (count == 0) break;
                 buffer.Write(chunk, 0, count);
-                AccountRules.Require(buffer.Length <= MaximumBytes, "LIMIT");
             }
             return new(buffer.ToArray());
         }
@@ -53,7 +50,6 @@ public sealed class MusicAccountTransferFile : IDisposable
     internal List<TransferEntry> Decode()
     {
         ObjectDisposedException.ThrowIf(bytes is null, this);
-        AccountRules.Require(bytes.Length <= MaximumBytes, "LIMIT");
         try
         {
             // UTF-8 BOM is a file encoding marker, not part of the JSON root.
@@ -108,7 +104,6 @@ public sealed class MusicAccountTransferFile : IDisposable
                 }
                 writer.WriteEndArray(); writer.WriteEndObject();
             }
-            AccountRules.Require(buffer.Length <= MaximumBytes, "LIMIT");
             return new(buffer.ToArray());
         }
         finally { CryptographicOperations.ZeroMemory(buffer.GetBuffer().AsSpan(0, (int)buffer.Length)); }

@@ -6,8 +6,6 @@ import { fault, requireValue } from './errors.js';
 import { compileDASHTemplate, createHLSVariables, decodeManifest, hlsAttributes, hlsAttributeLine, manifestFormat, rewriteDASH,
   serializeXMLChunks } from './media-manifest.js';
 
-// Control documents are bounded; the binary media body is not buffered here.
-const playlistBytes = 8 * 1024 * 1024;
 const decompressors = { gzip: createGunzip, deflate: createInflate, br: createBrotliDecompress };
 
 async function proxyChunk(stream, maximum) {
@@ -74,7 +72,7 @@ export async function proxyPlaylistInput(upstream, target, resources) {
     return { stream: decoder, format };
   }
   const wire = [], decoded = [];
-  let wireBytes = 0, decodedBytes = 0, settled = false, resolve, reject;
+  let decodedBytes = 0, settled = false, resolve, reject;
   const decision = new Promise((yes, no) => { resolve = yes; reject = no; });
   decision.catch(() => {});
   const data = chunk => {
@@ -94,9 +92,7 @@ export async function proxyPlaylistInput(upstream, target, resources) {
     while (!settled) {
       const chunk = await proxyChunk(upstream, 512);
       if (!chunk) { decoder.end(); await decision; break; }
-      wire.push(chunk); wireBytes += chunk.length;
-      // The same control-input budget bounds retained encoded probe metadata.
-      requireValue(wireBytes <= playlistBytes, 'RESOURCE_LIMIT');
+      wire.push(chunk);
       await Promise.race([new Promise((yes, no) => decoder.write(chunk, error => error ? no(error) : yes())), decision]);
     }
   } finally {
@@ -110,14 +106,11 @@ export async function proxyPlaylistInput(upstream, target, resources) {
   return { stream: replayProxy(decoded, decoder, resources), format };
 }
 
-export async function readProxyPlaylist(upstream, headers = upstream.headers) {
-  const declared = headers['content-length'];
-  requireValue(declared === undefined || Number(declared) <= playlistBytes, 'RESOURCE_LIMIT');
+export async function readProxyPlaylist(upstream) {
   const chunks = [];
   let bytes = 0;
   for await (const chunk of upstream) {
     bytes += chunk.byteLength;
-    requireValue(bytes <= playlistBytes, 'RESOURCE_LIMIT');
     chunks.push(chunk);
   }
   try { return decodeManifest(Buffer.concat(chunks, bytes)); }

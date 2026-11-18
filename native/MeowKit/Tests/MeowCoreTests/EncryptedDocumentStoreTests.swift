@@ -21,12 +21,12 @@ final class EncryptedDocumentStoreTests: XCTestCase {
         return root
     }
 
-    private func fixture(limits: EncryptedDocumentStore.Limits = .init()) throws
+    private func fixture() throws
         -> (URL, MemoryDocumentKeys, EncryptedDocumentStore) {
         let base = try temporaryRoot()
         let keys = MemoryDocumentKeys()
         return (base, keys, try EncryptedDocumentStore(baseURL: base, namespace: namespace,
-                                                       keyProvider: keys, limits: limits))
+                                                       keyProvider: keys))
     }
 
     // Independently encode the documented file/AAD format, rather than reusing the
@@ -456,8 +456,7 @@ final class EncryptedDocumentStoreTests: XCTestCase {
             URL(string: "file://server.invalid/store")!,
             URL(string: base.absoluteString + "?query")!,
             URL(string: base.absoluteString + "#fragment")!,
-            URL(fileURLWithPath: "/"),
-            URL(fileURLWithPath: "/" + String(repeating: "x", count: 800))
+            URL(fileURLWithPath: "/")
         ]
         for url in invalid {
             expectStorageError(.invalidBaseURL) {
@@ -510,59 +509,20 @@ final class EncryptedDocumentStoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: alias), bytes)
     }
 
-    func testInvalidBudgetsAreRejectedPassively() throws {
-        let (base, keys, _) = try fixture()
-        let invalid: [EncryptedDocumentStore.Limits] = [
-            .init(maximumDocumentBytes: 0), .init(maximumDocumentBytes: -1),
-            .init(maximumDocumentBytes: Int.max), .init(maximumNamespaceBytes: Int.max),
-            .init(maximumDocumentBytes: 10, maximumNamespaceBytes: 46),
-            .init(maximumDocuments: 0), .init(maximumDocuments: 1_025)
-        ]
-        for limits in invalid {
-            expectStorageError(.invalidLimits) {
-                try EncryptedDocumentStore(baseURL: base, namespace: namespace, keyProvider: keys, limits: limits)
-            }
-        }
-        XCTAssertEqual(keys.readCount, 0)
-        XCTAssertEqual(keys.createCount, 0)
-    }
-
-    func testDocumentBudgetBoundsInputReadAndUpdateBeforeKeyCreationOrReplacement() throws {
-        let (base, keys, store) = try fixture(limits: .init(maximumDocumentBytes: 32, maximumNamespaceBytes: 256))
-        expectStorageError(.documentTooLarge) { try store.write(Data(repeating: 1, count: 33), key: document) }
-        XCTAssertEqual(keys.createCount, 0)
-        try store.write(Data(repeating: 1, count: 32), key: document)
-        let old = try Data(contentsOf: location(base))
-        expectStorageError(.documentTooLarge) {
-            try store.update(key: document, defaultValue: Data()) { $0.append(1) }
-        }
-        XCTAssertEqual(try Data(contentsOf: location(base)), old)
-        let oversize = Data(repeating: 0, count: 32 + 37 + 1)
-        try oversize.write(to: location(base))
-        let reads = keys.readCount
-        assertProtectedFailure(.documentTooLarge, store: store, path: location(base), expected: oversize)
-        XCTAssertEqual(keys.readCount, reads)
-    }
-
-    func testNamespaceCountAndByteBudgetsPreserveExistingDocuments() throws {
-        let limits = EncryptedDocumentStore.Limits(maximumDocumentBytes: 32, maximumNamespaceBytes: 100,
-                                                   maximumDocuments: 2)
-        let (base, _, store) = try fixture(limits: limits)
-        try store.write(Data(repeating: 1, count: 20), key: document) // 57 encrypted bytes
-        let old = try Data(contentsOf: location(base))
-        expectStorageError(.namespaceFull) { try store.write(Data(repeating: 2, count: 20), key: "second") }
-        XCTAssertEqual(try Data(contentsOf: location(base)), old)
-        try store.write(Data(), key: "second") // total 94 bytes
-        expectStorageError(.namespaceFull) { try store.write(Data(), key: "third") }
-        // Replacement charges the retained snapshot, not both committed versions.
-        try store.write(Data(repeating: 3, count: 20), key: document)
-        XCTAssertEqual(try files(base).count, 2)
-        let one = try EncryptedDocumentStore(baseURL: base, namespace: "one", keyProvider: MemoryDocumentKeys(),
-                                             limits: .init(maximumDocumentBytes: 32,
-                                                           maximumNamespaceBytes: 256, maximumDocuments: 1))
-        try one.write(Data(), key: "first")
-        expectStorageError(.namespaceFull) { try one.write(Data(), key: "second") }
-        try one.write(Data([1]), key: "first")
+    func testLargeDocumentsUpdateAndReopenBeyondFormerNamespaceBudgets() throws {
+        let (base, keys, store) = try fixture()
+        let bytes = Data(repeating: 1, count: 8 * 1024 * 1024 + 1)
+        for index in 0..<4 { try store.write(bytes, key: "large-\(index)") }
+        for index in 0..<129 { try store.write(Data([2]), key: "small-\(index)") }
+        let reopened = try EncryptedDocumentStore(baseURL: base, namespace: namespace, keyProvider: keys)
+        XCTAssertEqual(try reopened.read(key: "large-0"), bytes)
+        XCTAssertEqual(try reopened.read(key: "small-128"), Data([2]))
+        try reopened.update(key: "large-0", defaultValue: Data()) { $0.append(3) }
+        var replacement = bytes; replacement.append(3)
+        XCTAssertEqual(try reopened.read(key: "large-0"), replacement)
+        try reopened.compareAndSwap(key: "large-0", expected: replacement, replacement: bytes)
+        XCTAssertEqual(try reopened.read(key: "large-0"), bytes)
+        XCTAssertEqual(try files(base).count, 133)
     }
 
     func testEveryCommittedFileIsCiphertextAndCarriesRequestedMetadata() throws {

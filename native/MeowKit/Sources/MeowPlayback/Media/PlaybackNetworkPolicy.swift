@@ -120,7 +120,6 @@ struct PlaybackNetworkPlan {
     }
 
     static func validate(_ input: [String: String]) throws -> [String: String] {
-        guard input.count <= 64 else { throw PlaybackNetworkError.invalidHeaders }
         let token = Set("!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyz".utf8)
         let reserved: Set<String> = [
             "host", "connection", "content-length", "transfer-encoding", "accept-encoding",
@@ -128,13 +127,11 @@ struct PlaybackNetworkPlan {
             "if-match", "if-none-match", "if-modified-since", "if-unmodified-since"
         ]
         var result: [String: String] = [:]
-        var bytes = 0
         for (name, value) in input {
             let key = name.lowercased()
-            bytes += name.utf8.count + value.utf8.count
             guard !key.isEmpty, key.utf8.allSatisfy({ token.contains($0) }),
                   !value.utf8.contains(where: { $0 < 32 || $0 == 127 }),
-                  bytes <= 16 * 1024, result[key] == nil,
+                  result[key] == nil,
                   !reserved.contains(key), !key.hasPrefix("proxy-") else {
                 throw PlaybackNetworkError.invalidHeaders
             }

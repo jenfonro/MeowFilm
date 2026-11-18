@@ -9,8 +9,6 @@ public static class RuntimeRecoveryTests
     private static void Check(bool value) { if (!value) throw new InvalidOperationException("Runtime recovery assertion"); }
     private sealed class Session : IRuntimeSession
     {
-        public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
-            => throw new InvalidOperationException("Image requests are not part of this fixture.");
         public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default)
             => throw new InvalidOperationException("Image requests are not part of this fixture.");
 
@@ -61,6 +59,7 @@ public static class RuntimeRecoveryTests
             Check(runtime.State == RuntimeConnectionState.Dormant && runtime.Generation == 0);
             await BridgeTests.Expect("INVALID_MESSAGE", () => runtime.RetryAsync());
             var scope = new Scope(); runtime.RegisterRecoveryScope(scope);
+            for (int index = 0; index < 40; index++) runtime.RegisterRecoveryScope(new Scope());
             BridgeTests.Throws("INVALID_MESSAGE", () => runtime.RegisterRecoveryScope(scope));
             runtime.Start();
             await runtime.CallAsync("music.script.sources.list");

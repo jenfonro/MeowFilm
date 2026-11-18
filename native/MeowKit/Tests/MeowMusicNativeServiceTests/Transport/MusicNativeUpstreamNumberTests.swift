@@ -84,7 +84,8 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
         let nested = String(repeating: "[", count: 80) + "0" + String(repeating: "]", count: 80)
         XCTAssertEqual(try MJ.parse(Data(nested.utf8)).json, nested)
         for bad in ["01", "+1", "1.", "1e", "NaN", "Infinity", "[1,]", "1 2"] { XCTAssertThrowsError(try MJ.parse(Data(bad.utf8))) }
-        XCTAssertThrowsError(try MJ.parse(value.bytes, maximum: value.bytes.count - 1))
+        let large = MJ.obj([("text", .string(String(repeating: "x", count: 8 * 1024 * 1024 + 1)))])
+        XCTAssertEqual(try MJ.parse(large.bytes), large)
     }
 
     func testNativeJSONRetainsUnconsumedNumericLexemesAndExactIntegerConversions() throws {

@@ -6,21 +6,20 @@ using System.Text;
 
 namespace MeowFilm.Capabilities.Accounts;
 
-/// <summary>Bound encoded data, chunks, dimensions and inflation BEFORE native image decoding.</summary>
+/// <summary>Validate PNG structure and bound dimensions and inflation BEFORE native image decoding.</summary>
 internal static class AccountQrPng
 {
-    internal const int MaxBytes = 524288;
     internal static void Validate(byte[] bytes, CancellationToken token = default)
     {
-        AccountRules.Require(bytes.Length is >= 57 and <= MaxBytes, "LIMIT");
+        AccountRules.Require(bytes.Length >= 57, "INVALID_RESPONSE");
         AccountRules.Require(bytes.AsSpan(0, 8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }), "INVALID_RESPONSE");
         using var compressed = new MemoryStream();
-        int at = 8, chunks = 0, maxInflated = 0;
+        int at = 8, maxInflated = 0;
         bool image = false, ended = false, dataEnded = false;
         while (at < bytes.Length)
         {
             token.ThrowIfCancellationRequested();
-            AccountRules.Require(++chunks <= 256 && bytes.Length - at >= 12, "LIMIT");
+            AccountRules.Require(bytes.Length - at >= 12, "INVALID_RESPONSE");
             uint length = BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(at, 4));
             AccountRules.Require(length <= bytes.Length - at - 12, "INVALID_RESPONSE");
             int n = (int)length;
@@ -34,7 +33,7 @@ internal static class AccountQrPng
             AccountRules.Require(~crc == BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(at + n + 8, 4)), "INVALID_RESPONSE");
             string kind = Encoding.ASCII.GetString(bytes, at + 4, 4);
             AccountRules.Require(kind.All(char.IsAsciiLetter), "INVALID_RESPONSE");
-            if (chunks == 1)
+            if (at == 8)
             {
                 AccountRules.Require(kind == "IHDR" && n == 13, "INVALID_RESPONSE");
                 uint w = BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(at + 8, 4));

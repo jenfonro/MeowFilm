@@ -23,7 +23,7 @@ function responseStatus(status, allowRedirect) {
   error.status = status;
   throw error;
 }
-async function nodeExchange({ url, method, headers, body, maximumBytes, json, signal, allowRedirect, dispatched }) {
+async function nodeExchange({ url, method, headers, body, json, signal, allowRedirect, dispatched }) {
   // Use the existing managed Node network's per-exchange ownership pattern.
   // No shared agent survives the operation; completion includes physical close.
   const resources = [], closing = [];
@@ -60,12 +60,11 @@ async function nodeExchange({ url, method, headers, body, maximumBytes, json, si
     streams.push(own(new Writable({
       write(chunk, _encoding, callback) {
         length += chunk.length;
-        if (length > maximumBytes) { callback(new MusicPlatformError('LIMIT')); return; }
         chunks.push(chunk);
         callback();
       },
     })));
-    // Compressed input stays streaming; the existing limit owns decoded bytes.
+    // Compressed input stays streaming until the complete decoded response is available.
     await pipeline(streams, { signal });
     signal?.throwIfAborted();
     const bytes = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, length);
@@ -84,9 +83,9 @@ async function nodeExchange({ url, method, headers, body, maximumBytes, json, si
   }
 }
 
-/** Fixed recipes use this byte-bounded transport; it never validates business objects. */
+/** Fixed recipes use this transport; it never validates business objects. */
 export function createMusicTransport({ fetch: fetcher } = {}) {
-  return async ({ url, method = 'GET', headers = {}, body, maximumBytes = 4 * 1024 * 1024,
+  return async ({ url, method = 'GET', headers = {}, body,
     json = true, signal, allowRedirect = false, dispatched }) => {
     signal?.throwIfAborted();
     try {
@@ -94,7 +93,7 @@ export function createMusicTransport({ fetch: fetcher } = {}) {
         validateHeaderName(name); validateHeaderValue(name, value);
       }
     } catch { fail('INVALID_REQUEST'); }
-    if (!fetcher) return nodeExchange({ url, method, headers, body, maximumBytes, json, signal, allowRedirect, dispatched });
+    if (!fetcher) return nodeExchange({ url, method, headers, body, json, signal, allowRedirect, dispatched });
     let response;
     dispatched?.();
     try { response = await fetcher(url, { method, headers, body, signal, redirect: 'manual' }); }
@@ -112,7 +111,6 @@ export function createMusicTransport({ fetch: fetcher } = {}) {
         if (done) break;
         signal?.throwIfAborted();
         length += chunk.byteLength;
-        if (length > maximumBytes) { await reader.cancel().catch(() => {}); fail('LIMIT'); }
         chunks.push(chunk);
       }
     } catch (error) {

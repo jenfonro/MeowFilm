@@ -19,7 +19,7 @@ public static partial class AppUserDataResetTests
     {
         string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
             ?? throw new InvalidOperationException("A real aggregate Windows runtime bundle is required.");
-        var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), AppIdentity.RuntimeId, AppIdentity.ScriptModules);
+        var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), AppIdentity.RuntimeId);
         string parent = TestWorkspace.DataPath("reset-native-owners-" + Guid.NewGuid().ToString("N"));
         var paths = new AppDataPaths(Path.Combine(parent, "aggregate"));
         using var data = new UserDataDirectory(paths.Documents, paths.Caches);

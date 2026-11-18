@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
@@ -13,7 +12,6 @@ namespace MeowFilm.Capabilities;
 /// </summary>
 public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStylePreferences
 {
-    private const long MaximumStageBytes = 32 * 1024 * 1024;
     private readonly IMusicPlatformCatalog catalog;
     private readonly MusicLibraryOwner library;
     private readonly TimeProvider clock;
@@ -22,13 +20,13 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
     private readonly CancellationTokenSource lifetime = new();
     private CancellationTokenSource session = new();
     private TaskCompletionSource drained = Completed();
-    private long epoch, reservedBytes;
+    private long epoch;
     private int pending;
     private bool closed;
     private Task? disposal;
     internal Func<MusicSearchRequest, CancellationToken, Task<JsonElement>>? SearchSongs { get; set; }
     private sealed record Stage(string Platform, string Id, string Name,
-        JsonElement[] Songs, long Bytes, DateTimeOffset Expires, long Epoch, string HeartbeatAccount);
+        JsonElement[] Songs, DateTimeOffset Expires, long Epoch, string HeartbeatAccount);
 
     public MusicNativeCatalogOwner(IMusicPlatformCatalog catalog, MusicLibraryOwner library, TimeProvider? clock = null)
         => (this.catalog, this.library, this.clock) = (catalog ?? throw new ArgumentNullException(nameof(catalog)),
@@ -278,12 +276,9 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
         var result = await catalog.CompletePlaylistAsync(new(platform, id,
             Refresh: Flag(input, "refresh"), Personal: Optional(input, "personal")), signal).ConfigureAwait(false);
         Guard(signal, captured);
-        Check(result.GetProperty("items").EnumerateArray().Sum(song =>
-            (long)Encoding.UTF8.GetByteCount(song.GetRawText()) + 1) + 2 <= MaximumStageBytes, "LIMIT");
         result = await library.AdoptPlatformResultAsync(result, signal, observation: observation).ConfigureAwait(false);
         Guard(signal, captured);
         var songs = result.GetProperty("items").EnumerateArray().Select(song => song.Clone()).ToArray();
-        long bytes = 2 + songs.Sum(song => (long)Encoding.UTF8.GetByteCount(song.GetRawText()) + 1);
         var name = OptionalText(result, "name", allowEmpty: true) ?? "";
         var actualId = Text(result, "id");
         var heartbeatAccount = OptionalText(result, "heartbeatAccountId") ?? "";
@@ -291,9 +286,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
         lock (gate)
         {
             Check(!closed && captured == epoch, "STALE_SESSION"); Prune();
-            Check(bytes <= MaximumStageBytes && reservedBytes + bytes <= MaximumStageBytes * 2, "LIMIT");
-            reservedBytes += bytes;
-            stages.Add(token, new(platform, actualId, name, songs, bytes,
+            stages.Add(token, new(platform, actualId, name, songs,
                 clock.GetUtcNow().AddMinutes(1), captured, heartbeatAccount));
         }
         return JsonSerializer.SerializeToElement(new { token, platform, id = actualId, name, count = songs.Length });
@@ -338,34 +331,29 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
                     "NOT_FOUND");
             }
             stages.Remove(token);
-            // Keep bytes reserved throughout an admitted storage transaction.
         }
-        try
+        var context = JsonSerializer.SerializeToNode(new { sourceTitle = item.Name,
+            sourcePlatform = item.Platform, sourceType = "playlist", sourceId = item.Id,
+            queueSource = new { id = item.Id, title = item.Name, kind = "playlist", platform = item.Platform } })!.AsObject();
+        if (item.HeartbeatAccount.Length > 0)
         {
-            var context = JsonSerializer.SerializeToNode(new { sourceTitle = item.Name,
-                sourcePlatform = item.Platform, sourceType = "playlist", sourceId = item.Id,
-                queueSource = new { id = item.Id, title = item.Name, kind = "playlist", platform = item.Platform } })!.AsObject();
-            if (item.HeartbeatAccount.Length > 0)
-            {
-                context["heartbeatPlaylistId"] = item.Id;
-                context["heartbeatAccountId"] = item.HeartbeatAccount;
-            }
-            var sourceContext = JsonSerializer.SerializeToElement(context);
-            var result = action == "next"
-                ? await library.AppendQueueAsync(item.Songs, sourceContext, version, signal).ConfigureAwait(false)
-                : await library.ReplaceQueueAsync(item.Songs, index, sourceContext, version, signal).ConfigureAwait(false);
-            Check(result.ValueKind == JsonValueKind.Object && result.TryGetProperty("ok", out _), "INVALID_RESPONSE");
-            if (result.GetProperty("ok").ValueKind != JsonValueKind.True)
-            {
-                var code = Text(result, "code");
-                // Library reports CANCELLED only before durable CAS admission.
-                if (code == "CANCELLED" && signal.IsCancellationRequested) signal.ThrowIfCancellationRequested();
-                throw new CatalogFailure(code);
-            }
-            return JsonSerializer.SerializeToElement(new { currentId = result.GetProperty("currentId"),
-                version = result.GetProperty("version"), mode = result.GetProperty("mode") });
+            context["heartbeatPlaylistId"] = item.Id;
+            context["heartbeatAccountId"] = item.HeartbeatAccount;
         }
-        finally { lock (gate) reservedBytes -= item.Bytes; }
+        var sourceContext = JsonSerializer.SerializeToElement(context);
+        var result = action == "next"
+            ? await library.AppendQueueAsync(item.Songs, sourceContext, version, signal).ConfigureAwait(false)
+            : await library.ReplaceQueueAsync(item.Songs, index, sourceContext, version, signal).ConfigureAwait(false);
+        Check(result.ValueKind == JsonValueKind.Object && result.TryGetProperty("ok", out _), "INVALID_RESPONSE");
+        if (result.GetProperty("ok").ValueKind != JsonValueKind.True)
+        {
+            var code = Text(result, "code");
+            // Library reports CANCELLED only before durable CAS admission.
+            if (code == "CANCELLED" && signal.IsCancellationRequested) signal.ThrowIfCancellationRequested();
+            throw new CatalogFailure(code);
+        }
+        return JsonSerializer.SerializeToElement(new { currentId = result.GetProperty("currentId"),
+            version = result.GetProperty("version"), mode = result.GetProperty("mode") });
     }
 
     public void Invalidate(string? platform = null)
@@ -421,11 +409,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
         var now = clock.GetUtcNow();
         foreach (var entry in stages.Where(pair => pair.Value.Expires <= now).Select(pair => pair.Key).ToArray()) Remove(entry);
     }
-    private bool Remove(string token)
-    {
-        if (!stages.Remove(token, out var item)) return false;
-        reservedBytes -= item.Bytes; return true;
-    }
+    private bool Remove(string token) => stages.Remove(token);
     private static TaskCompletionSource Completed() { var task = new TaskCompletionSource(); task.SetResult(); return task; }
     private static JsonElement Failed(string code) => JsonSerializer.SerializeToElement(new
     {

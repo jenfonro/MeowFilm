@@ -67,7 +67,7 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
         string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
             ?? throw new InvalidOperationException("Run the selected group through scripts/windows/test.ps1.");
         var modules = RuntimeHttpClientTests.Modules;
-        var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules);
+        var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate");
         string root = TestWorkspace.DataPath("film-playback-native", Guid.NewGuid().ToString("N"));
         byte[] bytes;
         if (longVideo) bytes = FFmpegVideoFixtures.Progressive();
@@ -268,7 +268,7 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
         byte[] before = File.ReadAllBytes(path);
         string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")!;
         var modules = RuntimeHttpClientTests.Modules;
-        var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules);
+        var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate");
         await using var next = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules, DataRoot);
         using var child = Process.GetProcessById(next.ProcessId);
         _ = child.SafeHandle;

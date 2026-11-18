@@ -410,8 +410,8 @@ test('lyrics retain real decryption and decompression failures and preserve an i
   await assert.rejects(damaged.request('tx', 'lyrics', { id: 'mid' }), { code: 'INVALID_RESPONSE' }); await damaged.close();
   const bomb = fixture(request => response(new URL(request.url).pathname === '/v1/search' ?
     { status: 200, candidates: [{ id: 1, accesskey: 'synthetic' }] } :
-    { status: 200, error_code: 0, content: krc('x'.repeat(512 * 1024 + 1)) }));
-  await assert.rejects(bomb.request('kg', 'lyrics', { id: kgHash }), { code: 'LIMIT' }); await bomb.close();
+    { status: 200, error_code: 0, content: krc('[1000,300]' + 'x'.repeat(512 * 1024 + 1)) }));
+  assert.equal((await bomb.request('kg', 'lyrics', { id: kgHash })).text, '[1000,300]' + 'x'.repeat(512 * 1024 + 1)); await bomb.close();
 });
 
 test('chorus consumes actual timing only; absent and unrelated fields do not block', async t => {

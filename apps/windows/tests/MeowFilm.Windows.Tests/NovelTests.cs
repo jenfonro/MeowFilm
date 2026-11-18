@@ -434,8 +434,6 @@ public static partial class NovelTests
             _ => Json(new { })
         };
         private JsonElement Pay() { Paid = true; return Json(new { paid = true }); }
-        public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken token = default) =>
-            throw new InvalidOperationException("Novel images must not use the card byte quota.");
         public async Task<byte[]> ReadImageAsync(string reference, CancellationToken token = default)
         {
             Check(ImageReferences.Contains(reference)); ImageReads++; ImageReadStarted?.TrySetResult();

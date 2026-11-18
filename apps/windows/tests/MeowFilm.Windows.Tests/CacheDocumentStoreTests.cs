@@ -105,9 +105,10 @@ public static class CacheDocumentStoreTests
             var original = await strict.WriteAsync(CacheNamespace, Bytes("seed"), DocumentFingerprint.Missing).WaitAsync(Deadline);
             string path = Directory.GetFiles(fixture.CacheRoot, "document.json", SearchOption.AllDirectories).Single();
             using (var file = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None))
-                file.SetLength(LocalDocumentStore.MaximumDocumentBytes + 1L);
-            await StoreError(() => strict.ReadAsync(CacheNamespace), DocumentStoreError.Limit);
-            await StoreError(() => strict.WriteAsync(CacheNamespace, replacement, original), DocumentStoreError.Limit);
+                file.SetLength(CacheDocumentStore.MaximumDocumentBytes + 1L);
+            Check((await strict.ReadAsync(CacheNamespace)).Data!.Length == CacheDocumentStore.MaximumDocumentBytes + 1,
+                "ordinary disk documents have no cache quota");
+            await StoreError(() => strict.WriteAsync(CacheNamespace, replacement, original), DocumentStoreError.Conflict);
         }
         await using (var cache = new CacheDocumentStore(() => fixture.CacheStore()))
         {

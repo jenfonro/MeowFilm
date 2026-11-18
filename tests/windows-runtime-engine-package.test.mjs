@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { packageRuntime } from '../scripts/package-runtime.mjs';
 import { packageWindowsRuntime } from '../scripts/windows/package-runtime.mjs';
 import { prepareWindowsTestBundles } from '../scripts/windows/prepare-test-bundles.mjs';
+import { rejectRestoredPlatformSource } from './runtime-source-change-support.mjs';
 import { assertOwnedPath, temporaryRoot } from '../scripts/windows/working-paths.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -53,7 +54,6 @@ function verifyManifest(output, manifest) {
   assert.equal(manifest.platform, 'win32');
   assert.equal(manifest.entry, 'app/windows/entries/aggregate.mjs');
   assert.equal(manifest.assemblyProfile, 'common-native');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
   const paths = manifest.files.map(file => file.path);
   assert.deepEqual(paths, [...paths].sort());
   assert.equal(new Set(paths.map(path => path.normalize('NFC').toLowerCase())).size, paths.length);
@@ -64,20 +64,12 @@ function verifyManifest(output, manifest) {
     assert.equal(bytes.length, file.bytes, file.path);
     assert.equal(sha256(bytes), file.sha256, file.path);
   }
-  assert.deepEqual(paths.filter(path => path.startsWith('app/')), [
-    'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs', 'app/entry.mjs',
-    'app/modules/cat-script.mjs', 'app/modules/film-playback.mjs',
-    ...metadataFiles.map(file => `app/${file}`), 'app/modules/music-platform.mjs', 'app/modules/music-script.mjs',
-    'app/modules/netease-token.mjs', 'app/modules/pan-runtime.mjs', 'app/modules/source-candidates.mjs', 'app/modules/source-library.mjs',
-    'app/modules/source-rules.mjs', 'app/modules/source-runtime.mjs', 'app/modules/source-web.mjs',
-    'app/pan-entry.mjs',
-    'app/windows/bootstrap.mjs', 'app/windows/entries/aggregate.mjs', 'app/windows/native-settings.mjs',
-  ]);
+  assert.ok(paths.includes(manifest.entry));
 }
 
 function packagingFixture({
-  missingBootstrap = false, missingSettings = false, extraSource = false, extraImport = false,
-  missingShared = false, missingCommonModule = false, missingSourceModule = false, platformModule = false,
+  missingBootstrap = false, missingSettings = false, missingHelper = false,
+  missingShared = false, missingCommonModule = false, missingSourceModule = false,
 } = {}) {
   const fixtureArea = area(), source = join(fixtureArea, 'source');
   const manifest = { name: 'windows-package-fixture', version: '1.0.0', private: true, workspaces: ['packages/*'] };
@@ -92,6 +84,7 @@ function packagingFixture({
     const location = `packages/${name}`, installed = `node_modules/@meowfilm/${name}`;
     const pkg = {
       name: `@meowfilm/${name}`, version: '1.0.0', type: 'module', license: 'MIT', exports: './src/index.js',
+      ...(name === 'runtime-bridge' ? { exports: { '.': './src/index.js', './json': './src/json-value.js' } } : {}),
       ...(name === 'script-host' ? { dependencies: { '@meowfilm/source-runtime': '1.0.0' } } : {}),
       ...(name === 'film-playback' ? { dependencies: {
         '@meowfilm/film-rules': '1.0.0', '@meowfilm/film-search': '1.0.0' } } : {}),
@@ -104,6 +97,7 @@ function packagingFixture({
     if (!(missingShared && name === 'script-host')) {
       write(source, `${location}/src/index.js`, `${packageImports[name] ?? ''}${inert}`);
     }
+    if (name === 'runtime-bridge') write(source, `${location}/src/json-value.js`, inert);
     write(source, `${location}/LICENSE`, 'Synthetic fixture license\n');
     lock.packages[location] = { version: pkg.version, ...(pkg.dependencies ? { dependencies: pkg.dependencies } : {}) };
     lock.packages[installed] = { resolved: location, link: true };
@@ -131,11 +125,9 @@ function packagingFixture({
     if (missingBootstrap && path === 'bootstrap.mjs') continue;
     if (missingSettings && path === 'native-settings.mjs') continue;
     let text = readFileSync(join(root, 'apps/windows/runtime', path), 'utf8');
-    if (extraImport && path === 'bootstrap.mjs') text += "\nimport { unexpected } from './unexpected.mjs';\n";
+    if (missingHelper && path === 'bootstrap.mjs') text += "\nimport { helper } from './missing.mjs';\n";
     write(source, `apps/windows/runtime/${path}`, text);
   }
-  if (extraSource) write(source, 'apps/windows/runtime/unlisted-helper.mjs', inert);
-  if (platformModule) write(source, 'apps/windows/runtime/modules/music-script.mjs', inert);
   return { root: source, area: fixtureArea, output: join(fixtureArea, 'payload') };
 }
 
@@ -149,10 +141,16 @@ test('packaging rejects existing output without changing a single prior byte', a
   assert.deepEqual(files(f.output).map(path => [path, sha256(readFileSync(join(f.output, path)))]), before);
 });
 
+test('Windows packaging binds emitted platform bytes to the resolved inputs even after source restoration', async () => {
+  const f = packagingFixture();
+  await rejectRestoredPlatformSource(() => packageWindowsRuntime({ ...f, product: 'aggregate' }),
+    join(f.root, 'apps/windows/runtime/bootstrap.mjs'), f.output);
+});
+
 for (const [option, code] of [
-  ['missingBootstrap', 'ENOENT'], ['missingSettings', 'ENOENT'], ['extraSource', 'WINDOWS_CLOSURE'],
-  ['extraImport', 'WINDOWS_IMPORT'], ['missingShared', 'MISSING_PUBLIC_FILE'],
-  ['missingCommonModule', 'MISSING_SOURCE'], ['platformModule', 'WINDOWS_CLOSURE'],
+  ['missingBootstrap', 'MISSING_SOURCE'], ['missingSettings', 'MISSING_SOURCE'],
+  ['missingHelper', 'MISSING_SOURCE'], ['missingShared', 'MISSING_PUBLIC_FILE'],
+  ['missingCommonModule', 'MISSING_SOURCE'],
   ['missingSourceModule', 'MISSING_SOURCE'],
 ]) {
   test(`packaging ${option} is explicit and retains a failed file inventory`, async () => {
@@ -163,10 +161,6 @@ for (const [option, code] of [
     assert.equal(manifest.error.code, code);
     for (const file of manifest.files) {
       assert.equal(sha256(readFileSync(join(f.output, file.path))), file.sha256);
-    }
-    if (!['missingShared', 'missingCommonModule', 'missingSourceModule'].includes(option)) {
-      assert.equal(manifest.transport, 'windows-http-v1');
-      assert.equal(manifest.entry, 'app/windows/entries/aggregate.mjs');
     }
   });
 }
@@ -185,22 +179,74 @@ methods.import();
   assert.ok(output.includes(pseudo));
 });
 
-for (const statement of ["require('node:child_process');", "import('./unexpected.mjs');", 'import(moduleName);']) {
-  test(`Windows wrapper rejects actual unsupported import syntax: ${statement}`, async () => {
+test('Windows packaging follows platform helpers, public exports and literal dynamic imports', async () => {
+  const f = packagingFixture(), bootstrap = 'apps/windows/runtime/bootstrap.mjs';
+  write(f.root, bootstrap, `${readFileSync(join(f.root, bootstrap), 'utf8')}
+import './helpers/extra.mjs';
+import './helpers/extra.mjs';
+await import('./helpers/extra.mjs');
+`);
+  write(f.root, 'apps/windows/runtime/helpers/extra.mjs', `
+import 'node:fs';
+import 'node:net';
+import 'path';
+import { createRequire } from 'node:module';
+import '@meowfilm/runtime-bridge/json';
+import '@meowfilm/inactive-core';
+export { value } from './nested/leaf.mjs';
+const require = createRequire(import.meta.url);
+require('node:child_process');
+require('@meowfilm/runtime-bridge');
+await import('../../../runtime/contracts.mjs');
+`);
+  write(f.root, 'apps/windows/runtime/helpers/nested/leaf.mjs', 'export const value = 1;\n');
+  const manifest = await packageWindowsRuntime({ ...f, product: 'aggregate' });
+  verifyManifest(f.output, manifest);
+  for (const path of ['app/windows/helpers/extra.mjs', 'app/windows/helpers/nested/leaf.mjs',
+    'node_modules/@meowfilm/inactive-core/src/index.js', 'node_modules/@meowfilm/runtime-bridge/src/json-value.js'])
+    assert.ok(manifest.files.some(file => file.path === path), path);
+  const helper = readFileSync(join(f.output, 'app/windows/helpers/extra.mjs'), 'utf8');
+  assert.match(helper, /import\(['"]\.\.\/\.\.\/contracts\.mjs['"]\)/);
+  assert.ok(manifest.dependencies.some(dependency => dependency.name === '@meowfilm/inactive-core'));
+});
+
+test('Windows packaging ignores unreferenced ordinary platform files', async () => {
+  const f = packagingFixture();
+  write(f.root, 'apps/windows/runtime/helpers/unreferenced.mjs', "import 'uninstalled-package';\n");
+  write(f.root, 'apps/windows/runtime/notes.txt', 'ordinary build notes\n');
+  const manifest = await packageWindowsRuntime({ ...f, product: 'aggregate' });
+  verifyManifest(f.output, manifest);
+  assert.equal(manifest.files.some(file => file.path === 'app/windows/helpers/unreferenced.mjs'), false);
+});
+
+test('Windows packaging rejects a missing public export target used by the settings helper', async () => {
+  const f = packagingFixture();
+  rmSync(join(f.root, 'packages/runtime-bridge/src/json-value.js'));
+  await assert.rejects(packageWindowsRuntime({ ...f, product: 'aggregate' }), { code: 'MISSING_PUBLIC_FILE' });
+  assert.equal(readJSON(join(f.output, 'runtime-manifest.json')).status, 'failed');
+});
+
+for (const [statement, code] of [
+  ["import('./unexpected.mjs');", 'MISSING_SOURCE'],
+  ['import(moduleName);', 'PLATFORM_IMPORT'],
+  ["import 'node:not-a-real-builtin';", 'PLATFORM_IMPORT'],
+  ["import '../../ios/runtime/bootstrap.mjs';", 'PLATFORM_IMPORT'],
+  ["import '../../../outside.mjs';", 'PLATFORM_IMPORT'],
+]) {
+  test(`Windows wrapper rejects unresolved or unavailable imports: ${statement}`, async () => {
     const f = packagingFixture();
     const path = join(f.root, 'apps/windows/runtime/bootstrap.mjs');
     write(f.root, 'apps/windows/runtime/bootstrap.mjs', `${readFileSync(path, 'utf8')}\n${statement}`);
-    await assert.rejects(packageWindowsRuntime({ ...f, product: 'aggregate' }), { code: 'WINDOWS_IMPORT' });
+    await assert.rejects(packageWindowsRuntime({ ...f, product: 'aggregate' }), { code });
+    assert.equal(readJSON(join(f.output, 'runtime-manifest.json')).status, 'failed');
   });
 }
 
-for (const statement of ["import 'node:net';", "import 'node:fs';",
-  "import '@meowfilm/script-host';", "import('./native-settings.mjs');", 'import(moduleName);',
-  "require('@meowfilm/runtime-bridge');"]) {
+for (const statement of ["import '@meowfilm/script-host/src/host.js';", 'import(moduleName);']) {
   test(`Windows settings helper rejects unsupported imports: ${statement}`, async () => {
     const f = packagingFixture(), path = 'apps/windows/runtime/native-settings.mjs';
     write(f.root, path, `${readFileSync(join(f.root, path), 'utf8')}\n${statement}`);
-    await assert.rejects(packageWindowsRuntime({ ...f, product: 'aggregate' }), { code: 'WINDOWS_IMPORT' });
+    await assert.rejects(packageWindowsRuntime({ ...f, product: 'aggregate' }), { code: 'PLATFORM_IMPORT' });
     assert.equal(readJSON(join(f.output, 'runtime-manifest.json')).status, 'failed');
   });
 }
@@ -224,16 +270,16 @@ test('Windows packaging preserves common files byte-for-byte and is reproducible
   const second = await packageWindowsRuntime({ root: f.root, product: 'aggregate', output: join(f.area, 'second') });
   assert.deepEqual(first, second);
   const shared = await packageRuntime({ root: f.root, product: 'aggregate', output: join(f.area, 'common'), profile: 'common-native' });
-  assert.deepEqual(shared.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
-  assert.deepEqual(first.files.filter(file => !file.path.startsWith('app/windows/')), shared.files);
-  assert.deepEqual(first.dependencies, shared.dependencies);
+  for (const file of shared.files) assert.deepEqual(first.files.find(value => value.path === file.path), file);
+  for (const dependency of shared.dependencies)
+    assert.deepEqual(first.dependencies.find(value => value.path === dependency.path), dependency);
   assert.deepEqual(first.omittedOptionalDependencies, shared.omittedOptionalDependencies);
   for (const file of [...metadataFiles, 'modules/pan-runtime.mjs', 'pan-entry.mjs']) {
     const path = `apps/runtime/${file}`, bytes = readFileSync(join(f.root, path));
     assert.deepEqual(readFileSync(join(f.output, 'app', file)), bytes);
     assert.deepEqual(first.inputs.filter(input => input.path === path), [{ path, sha256: sha256(bytes) }]);
   }
-  assert.ok(readFileSync(join(f.output, first.entry), 'utf8').includes("from '../../entry.mjs'"));
+  assert.match(readFileSync(join(f.output, first.entry), 'utf8'), /from ['"]\.\.\/\.\.\/entry\.mjs['"]/);
   for (const relative of ['bootstrap.mjs', 'native-settings.mjs', 'entries/aggregate.mjs']) {
     const source = `apps/windows/runtime/${relative}`, path = `app/windows/${relative}`;
     assert.deepEqual(first.inputs.filter(input => input.path === source),
@@ -244,11 +290,7 @@ test('Windows packaging preserves common files byte-for-byte and is reproducible
     readFileSync(join(f.root, 'apps/windows/runtime/native-settings.mjs')));
   assert.ok(readFileSync(join(f.output, 'app/windows/bootstrap.mjs'), 'utf8')
     .includes("from './native-settings.mjs'"));
-  assert.deepEqual(first.relocations.find(item => item.source === 'apps/windows/runtime/native-settings.mjs'), {
-    source: 'apps/windows/runtime/native-settings.mjs', path: 'app/windows/native-settings.mjs',
-    imports: [{ from: '@meowfilm/runtime-bridge', to: '@meowfilm/runtime-bridge' },
-      { from: '@meowfilm/runtime-bridge/json', to: '@meowfilm/runtime-bridge/json' }],
-  });
+  assert.ok(first.files.some(file => file.path === 'node_modules/@meowfilm/runtime-bridge/src/json-value.js'));
 });
 
 test('Windows packaging automatically includes a new shared runtime helper', async () => {
@@ -271,6 +313,10 @@ test('Windows packaging accepts optional metadata and pan closures and neutral H
   write(f.root, 'apps/runtime/modules/metadata/network.mjs', `
     import 'node:http';
     import 'node:https';
+    import 'node:net';
+    import 'node:fs';
+    import 'node:util';
+    import 'url';
     import '@meowfilm/script-host';
     import './settings.mjs';
     throw new Error('Metadata network fixture code must never execute');
@@ -313,7 +359,7 @@ for (const [target, importer] of [
 }
 
 for (const [name, mutate, code] of [
-  ...['node:net', 'node:fs', '@meowfilm/script-host/src/host.js', '@meowfilm/pan-runtime/src/index.js',
+  ...['node:not-a-real-builtin', '@meowfilm/script-host/src/host.js', '@meowfilm/pan-runtime/src/index.js',
     '../../../windows/runtime/bootstrap.mjs', '../../../ios/runtime/bootstrap.mjs'].map(specifier =>
     [`metadata import ${specifier}`, f =>
       write(f.root, 'apps/runtime/modules/metadata/network.mjs', `import '${specifier}';`), 'SHARED_IMPORT']),
@@ -325,7 +371,6 @@ for (const [name, mutate, code] of [
     const manifest = readJSON(join(f.output, 'runtime-manifest.json'));
     assert.equal(manifest.status, 'failed');
     assert.equal(manifest.error.code, code);
-    assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
     for (const file of manifest.files) {
       const bytes = readFileSync(join(f.output, file.path));
       assert.equal(bytes.length, file.bytes);

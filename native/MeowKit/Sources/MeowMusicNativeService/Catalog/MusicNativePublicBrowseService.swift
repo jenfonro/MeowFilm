@@ -97,7 +97,6 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
         let port = publicPlatforms, own = epoch, revision = publicCollectionRevision
         let result = try await work(label: "publicBrowseQueue") { try await port.browseComplete(request.collection) }
         try check(own); try musicRequire(revision == publicCollectionRevision, .staleResult)
-        try musicRequire(result.tracks.reduce(0, { $0 + $1.data.count }) <= MusicRemoteQueueSource.maximumBytes, .limit)
         let authorization = MusicQueueAuthorization()
         let references = try adoptQueueTracks(result.tracks, epoch: own, authorization: authorization, intent: authorization)
         try check(own)

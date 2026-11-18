@@ -176,7 +176,7 @@ public static class AppRuntimeConnectionTests
             Check(host.ShutdownCompletion?.IsCompletedSuccessfully == true && session.DisposeCalls == 1,
                 "a startup failure with successful cleanup still permits a successful final shutdown");
         });
-        yield return Test("image forwarding preserves the reference budget and bytes without starting a dormant host", async () =>
+        yield return Test("image forwarding preserves the reference and bytes without starting a dormant host", async () =>
         {
             int launches = 0;
             byte[] bytes = [1, 2, 3];
@@ -186,30 +186,28 @@ public static class AppRuntimeConnectionTests
                 launches++;
                 session = new(owner, 41002)
                 {
-                    ImageReader = (reference, budget, token) =>
+                    ImageReader = (reference, token) =>
                     {
-                        Check(reference == ImageReference && budget == bytes.Length && token.CanBeCanceled,
-                            "the image session receives the exact validated reference budget and linked token");
+                        Check(reference == ImageReference && token.CanBeCanceled,
+                            "the image session receives the exact validated reference and linked token");
                         return Task.FromResult(bytes);
                     }
                 };
                 return Task.FromResult<IRuntimeSession>(session);
             });
             IRuntimeImageClient images = host;
-            await Error("CLOSED", () => images.ReadImageAsync(ImageReference, bytes.Length));
-            await Error("INVALID_REQUEST", () => images.ReadImageAsync("https://example.invalid/poster.jpg", bytes.Length));
-            await Error("INVALID_REQUEST", () => images.ReadImageAsync(ImageReference, 0));
+            await Error("CLOSED", () => images.ReadImageAsync(ImageReference));
+            await Error("INVALID_REQUEST", () => images.ReadImageAsync("https://example.invalid/poster.jpg"));
             Check(launches == 0, "image reads and input validation never implicitly start an App runtime");
             host.Start();
             var captured = await host.CaptureConnectionAsync();
-            await Error("INVALID_REQUEST", () => images.ReadImageAsync("/v1/tmdb/images/w500/../poster.jpg", bytes.Length));
-            await Error("INVALID_REQUEST", () => images.ReadImageAsync(ImageReference, -1));
+            await Error("INVALID_REQUEST", () => images.ReadImageAsync("/v1/tmdb/images/w500/../poster.jpg"));
             using var cancelled = new CancellationTokenSource();
             cancelled.Cancel();
-            try { await images.ReadImageAsync(ImageReference, bytes.Length, cancelled.Token); throw new InvalidOperationException("Expected caller cancellation"); }
+            try { await images.ReadImageAsync(ImageReference, cancelled.Token); throw new InvalidOperationException("Expected caller cancellation"); }
             catch (OperationCanceledException) { }
             Check(session!.ImageReads == 0, "invalid and pre-cancelled image reads never reach the session");
-            Check(ReferenceEquals(await images.ReadImageAsync(ImageReference, bytes.Length), bytes),
+            Check(ReferenceEquals(await images.ReadImageAsync(ImageReference), bytes),
                 "successful image bytes are returned from the actual App runtime without substitution");
             var retained = await host.CaptureConnectionAsync();
             Check(launches == 1 && session.ImageReads == 1 && ReferenceEquals(retained.Client, captured.Client) &&
@@ -226,13 +224,13 @@ public static class AppRuntimeConnectionTests
                 session = new(owner, 41002)
                 {
                     Drain = response.Task,
-                    ImageReader = (_, _, token) => { entered.TrySetResult(token); return response.Task; }
+                    ImageReader = (_, token) => { entered.TrySetResult(token); return response.Task; }
                 }));
             host.Start();
             var captured = await host.CaptureConnectionAsync();
             using var caller = new CancellationTokenSource();
             IRuntimeImageClient images = host;
-            var read = images.ReadImageAsync(ImageReference, late.Length, caller.Token);
+            var read = images.ReadImageAsync(ImageReference, caller.Token);
             try
             {
                 var readerToken = await entered.Task;
@@ -264,7 +262,7 @@ public static class AppRuntimeConnectionTests
                 launches++;
                 session = new(owner, 41002)
                 {
-                    CompleteImageReader = (path, token) =>
+                    ImageReader = (path, token) =>
                     {
                         Check(path == reference && token.CanBeCanceled,
                             "the complete reader receives the exact source reference and linked token without a thumbnail quota");
@@ -285,7 +283,7 @@ public static class AppRuntimeConnectionTests
             cancelled.Cancel();
             try { await images.ReadImageAsync(reference, cancelled.Token); throw new InvalidOperationException("Expected caller cancellation"); }
             catch (OperationCanceledException) { }
-            Check(session!.ImageReads == 0, "invalid and pre-cancelled reads never reach either reader");
+            Check(session!.ImageReads == 0, "invalid and pre-cancelled reads never reach the reader");
             Check(ReferenceEquals(await images.ReadImageAsync(reference), bytes),
                 "the App host forwards the complete image overload without substituting its bytes");
             using var caller = new CancellationTokenSource();
@@ -302,7 +300,7 @@ public static class AppRuntimeConnectionTests
                 { Check(error.CancellationToken == caller.Token, "the complete reader reports the original caller cancellation"); }
                 Check(late.All(value => value == 0) && session.ImageReads == 2 && session.Disposals == 0 &&
                     host.State == RuntimeConnectionState.Ready && !captured.Revoked.IsCancellationRequested,
-                    "late full-size bytes are cleared without disposing the shared epoch or calling the bounded reader");
+                    "late full-size bytes are cleared without disposing the shared epoch");
             }
             finally { response.TrySetResult(late); }
         });
@@ -320,19 +318,19 @@ public static class AppRuntimeConnectionTests
                 {
                     first = session;
                     session.Drain = response.Task;
-                    session.ImageReader = (_, _, token) => { entered.TrySetResult(token); return response.Task; };
+                    session.ImageReader = (_, token) => { entered.TrySetResult(token); return response.Task; };
                 }
                 else
                 {
                     next = session;
-                    session.ImageReader = (_, _, _) => Task.FromResult(fresh);
+                    session.ImageReader = (_, _) => Task.FromResult(fresh);
                 }
                 return Task.FromResult<IRuntimeSession>(session);
             });
             host.Start();
             var captured = await host.CaptureConnectionAsync();
             IRuntimeImageClient images = host;
-            var read = images.ReadImageAsync(ImageReference, late.Length);
+            var read = images.ReadImageAsync(ImageReference);
             try
             {
                 var readerToken = await entered.Task;
@@ -343,7 +341,7 @@ public static class AppRuntimeConnectionTests
                 await cancellation.Task;
                 Check(captured.Revoked.IsCancellationRequested && !read.IsCompleted && !recovery.IsCompleted && launches == 1,
                     "recovery revokes the old capability but cannot publish a new epoch before image drain");
-                await Error("CLOSED", () => images.ReadImageAsync(ImageReference, fresh.Length));
+                await Error("CLOSED", () => images.ReadImageAsync(ImageReference));
                 response.TrySetResult(late);
                 await Error("CLOSED", () => read);
                 await recovery;
@@ -352,7 +350,7 @@ public static class AppRuntimeConnectionTests
                     !ReferenceEquals(current.Client, captured.Client) && current.BusinessOrigin.Port == 41003 &&
                     captured.BusinessOrigin.Port == 41002 && !current.Revoked.IsCancellationRequested,
                     "the retired image result is cleared and cannot inherit the replacement origin or capability");
-                Check(ReferenceEquals(await images.ReadImageAsync(ImageReference, fresh.Length), fresh) &&
+                Check(ReferenceEquals(await images.ReadImageAsync(ImageReference), fresh) &&
                     first.ImageReads == 1 && next!.ImageReads == 1,
                     "only a new explicit image read may use the replacement epoch");
             }
@@ -721,8 +719,7 @@ public static class AppRuntimeConnectionTests
         internal bool Unrevocable;
         internal Task Drain = Task.CompletedTask;
         internal TaskCompletionSource? DisposalStarted;
-        internal Func<string, int, CancellationToken, Task<byte[]>>? ImageReader;
-        internal Func<string, CancellationToken, Task<byte[]>>? CompleteImageReader;
+        internal Func<string, CancellationToken, Task<byte[]>>? ImageReader;
         internal readonly Channel<TimedCall> TimedCalls = Channel.CreateUnbounded<TimedCall>();
         internal Func<string, object?, TimeSpan, CancellationToken, Task<JsonElement>>? TimedCaller;
         private Task? disposal;
@@ -757,19 +754,12 @@ public static class AppRuntimeConnectionTests
         public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
             ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default) =>
             CallAsync("fixture.upload", cancellationToken: cancellationToken);
-        public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (!IsConnected) throw new BridgeException("CLOSED");
-            ImageReads++;
-            return ImageReader?.Invoke(reference, maximumBytes, cancellationToken) ?? throw new BridgeException("METHOD_UNAVAILABLE");
-        }
         public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!IsConnected) throw new BridgeException("CLOSED");
             ImageReads++;
-            return CompleteImageReader?.Invoke(reference, cancellationToken) ?? throw new BridgeException("METHOD_UNAVAILABLE");
+            return ImageReader?.Invoke(reference, cancellationToken) ?? throw new BridgeException("METHOD_UNAVAILABLE");
         }
         public ValueTask DisposeAsync() { DisposeCalls++; return new(disposal ??= CloseAsync()); }
         private async Task CloseAsync()

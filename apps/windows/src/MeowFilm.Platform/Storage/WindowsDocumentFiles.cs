@@ -282,8 +282,6 @@ internal static class WindowsDocumentFiles
 
 internal static class CurrentUserDpapi
 {
-    internal const int MaximumCiphertextBytes = DocumentRules.MaximumDocumentBytes + 64 * 1024;
-
     internal static byte[] Transform(byte[] input, byte[] entropy, bool protect)
     {
         var inputPin = GCHandle.Alloc(input, GCHandleType.Pinned);
@@ -298,7 +296,7 @@ internal static class CurrentUserDpapi
                 ? CryptProtectData(ref source, null, ref optional, IntPtr.Zero, IntPtr.Zero, 1, out output)
                 : CryptUnprotectData(ref source, IntPtr.Zero, ref optional, IntPtr.Zero, IntPtr.Zero, 1, out output);
             if (!success) WindowsDocumentFiles.Fail(DocumentStoreError.Protection);
-            if (output.Size <= 0 || output.Size > MaximumCiphertextBytes || output.Data == IntPtr.Zero)
+            if (output.Size <= 0 || output.Data == IntPtr.Zero)
                 WindowsDocumentFiles.Fail(DocumentStoreError.Corrupt);
             var result = new byte[output.Size];
             Marshal.Copy(output.Data, result, 0, result.Length);
@@ -309,11 +307,15 @@ internal static class CurrentUserDpapi
             if (output.Data != IntPtr.Zero)
             {
                 // Best effort for this native allocation; not a claim about DPAPI/GC/caller copies.
-                if (output.Size is > 0 and <= MaximumCiphertextBytes)
+                if (output.Size > 0)
                 {
                     var zeros = new byte[Math.Min(output.Size, 8192)];
-                    for (int offset = 0; offset < output.Size; offset += zeros.Length)
-                        Marshal.Copy(zeros, 0, IntPtr.Add(output.Data, offset), Math.Min(zeros.Length, output.Size - offset));
+                    for (int offset = 0; offset < output.Size;)
+                    {
+                        int count = Math.Min(zeros.Length, output.Size - offset);
+                        Marshal.Copy(zeros, 0, IntPtr.Add(output.Data, offset), count);
+                        offset += count;
+                    }
                 }
                 _ = LocalFree(output.Data);
             }

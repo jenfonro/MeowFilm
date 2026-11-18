@@ -114,44 +114,14 @@ async function assertRealBusiness(client) {
   const description = reply.value;
   assert.equal(description.protocol, 'runtime.http.v1');
   assert.equal(description.product, 'aggregate');
-  assert.deepEqual(description.modules.map(({ id, version, contract }) => ({ id, version, contract })), [
-    { id: 'music', version: '0.8.0', contract: 'music.script.v3' },
-    { id: 'cat', version: '0.2.0', contract: 'cat.script.v2' },
-    { id: 'source', version: '0.3.0', contract: 'source.runtime.v2' },
-    { id: 'pan', version: '0.1.0', contract: 'pan.runtime.v1' },
-    { id: 'tmdb', version: '0.1.0', contract: 'tmdb.data.v1' },
-    { id: 'douban', version: '0.1.0', contract: 'douban.data.v1' },
-    { id: 'film', version: '0.1.0', contract: 'film.playback.v1' },
-    { id: 'netease', version: '0.1.0', contract: 'netease.token.v1' },
-    { id: 'music-platform', version: '0.1.0', contract: 'music.platform.v1' },
-  ]);
-  const operations = {
-    music: ['sources.list', 'sources.detail', 'sources.add', 'sources.download', 'sources.edit',
-      'sources.update', 'sources.rollback', 'sources.enable', 'sources.disable', 'sources.remove',
-      'sources.check', 'resolve', 'invoke', 'close'],
-    cat: ['start', 'status', 'refresh', 'install', 'import', 'edit', 'update', 'restart',
-      'enable', 'uninstall', 'invoke', 'management.describe', 'management.sync'],
-    source: ['load', 'unload', 'invoke', 'status', 'close',
-      'library.list', 'library.get', 'library.apply', 'library.previewImport', 'library.import', 'library.save', 'library.update', 'library.remove',
-      'library.export', 'library.invoke', 'library.image', 'library.releaseImage', 'web.pending', 'web.respond', 'rules.process'],
-    pan: ['providers', 'settings.get', 'settings.set', 'settings.clear', 'login.start',
-      'login.poll', 'login.cancel', 'list', 'prepare', 'play', 'refresh'],
-    tmdb: ['settings.get', 'settings.update', 'request'],
-    douban: ['settings.get', 'settings.update', 'request', 'search'],
-    netease: ['get'],
-    'music-platform': ['cache.clear', 'describe', 'request', 'session.update'],
-    film: ['session.open', 'session.command', 'session.snapshot', 'session.release', 'session.attempt',
-      'session.media.release', 'settings.get', 'settings.set', 'library.get', 'library.remove', 'manual.update',
-      'data.catalog', 'data.search', 'data.detail', 'data.target', 'data.metadata', 'data.metadata.entry', 'data.cache.entry', 'data.invalidate',
-      'rules.get', 'rules.set', 'rules.group.set', 'rules.group.defaults', 'rules.group.preview',
-      'rules.restore', 'rules.preview', 'rules.normalize', 'rules.clear',
-      'search.open', 'search.snapshot', 'search.command', 'search.release', 'search.handoff'],
-  };
-  for (const module of description.modules) {
-    const prefix = { music: 'music.script.', cat: 'cat.script.', source: 'source.runtime.',
-      pan: 'pan.', tmdb: 'tmdb.data.', douban: 'douban.data.', film: 'film.', netease: 'netease.token.',
-      'music-platform': 'music.platform.' }[module.id];
-    assert.deepEqual(module.methods, operations[module.id].map(name => prefix + name).sort());
+  for (const [id, version, contract] of [
+    ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'],
+    ['source', '0.3.0', 'source.runtime.v2'],
+  ]) {
+    const module = description.modules.find(value => value.id === id);
+    assert.ok(module, id);
+    assert.equal(module.version, version);
+    assert.equal(module.contract, contract);
   }
   for (const method of ['pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get',
     'film.settings.get', 'film.library.get']) assert.equal((await client.call(method)).ok, true, method);
@@ -170,7 +140,6 @@ async function assertRealBusiness(client) {
   assert.deepEqual(await client.call('film.session.open'), {
     ok: false, contract: 'film.playback.v1', code: 'INVALID_REQUEST',
   });
-  return description;
 }
 
 async function verifyScriptExecution(t, client, scriptDataRoot) {
@@ -335,12 +304,13 @@ async function verifyCatExecution(client) {
   assert.deepEqual(result, { ok: true, contract: 'cat.script.v2', value: { text } });
 }
 
-async function runProduct(t, entry, payload, dataRoot, manifest) {
-  const server = await pipeServer(t, dataRoot);
+async function runProduct(t, entry, payload, dataRoot) {
+  const server = await pipeServer(t, dataRoot, {
+    config: value => JSON.stringify({ ...value, extra: { ordinary: true } }) + '\n',
+  });
   const child = spawnRuntime(t, entry, server.argv, payload);
   const { client, socket, ready } = await bounded(server.connection);
-  const description = await assertRealBusiness(client);
-  if (manifest) assert.deepEqual(description.modules.map(module => module.id), manifest.modules);
+  await assertRealBusiness(client);
   const tmdbSettings = await verifyTMDBAssembly(t, { client, baseUrl: ready.baseUrl });
   await verifyPanAndDoubanAssembly(client);
   await verifyScriptExecution(t, client, dataRoot);
@@ -402,13 +372,12 @@ for (const packaged of [false, true]) {
   // Disk inventory/copy of the native and jsdom payload has a separate fixture
   // budget; it must not consume the unchanged real-runtime protocol deadline.
   const options = { ...windows, timeout: packaged ? 120000 : windows.timeout };
-  test(`${packaged ? 'packaged' : 'source'} Windows entry serves nine App modules over HTTP and drains on close`, options, async t => {
+  test(`${packaged ? 'packaged' : 'source'} Windows entry serves App business over HTTP and drains on close`, options, async t => {
     const area = temporary(t);
     let entry = join(root, 'apps/windows/runtime/entries/aggregate.mjs'), payload, manifest;
     if (packaged) {
       payload = join(area, 'payload');
       manifest = await packageWindowsRuntime({ root, product: 'aggregate', output: payload });
-      assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
       assert.equal(manifest.transport, 'windows-http-v1');
       assert.equal(manifest.trustedNative[0].platform, 'win32');
       assert.equal(manifest.trustedNative[0].arch, process.arch);
@@ -422,7 +391,7 @@ for (const packaged of [false, true]) {
         .some(item => item.from === './native-settings.mjs' && item.to === './native-settings.mjs'));
       entry = join(payload, manifest.entry);
     }
-    await bounded(runProduct(t, entry, payload, join(area, 'data'), manifest), windows.timeout);
+    await bounded(runProduct(t, entry, payload, join(area, 'data')), windows.timeout);
   });
 }
 

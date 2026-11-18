@@ -29,11 +29,8 @@ internal sealed record NeteasePlaybackPending(Guid PlaybackId, NeteasePlaybackAc
 internal static class NeteasePlaybackOutboxDocument
 {
     internal const string Namespace = "music.playback-outbox.v2";
-    // Retention/capacity/byte bounds are local resource and privacy boundaries,
-    // not minimum listening time, counting thresholds or a retry allowance.
-    internal const int MaximumEvents = 256;
-    internal const int MaximumBytes = 4 * 1024 * 1024;
-    internal const int MaximumEventBytes = 32 * 1024;
+    // Retention is a privacy boundary, not minimum listening time,
+    // a counting threshold or a retry allowance.
     internal static readonly TimeSpan Retention = TimeSpan.FromDays(7);
     private sealed record Document(int Version, NeteasePlaybackPending[] Playbacks);
     private static readonly JsonSerializerOptions Json = new()
@@ -56,16 +53,13 @@ internal static class NeteasePlaybackOutboxDocument
         }
         try
         {
-            FeedbackProtocolRules.Require(snapshot.Data.Length <= MaximumBytes &&
-                snapshot.Fingerprint == DocumentFingerprint.FromBytes(snapshot.Data), "CORRUPT_STORAGE");
+            FeedbackProtocolRules.Require(snapshot.Fingerprint == DocumentFingerprint.FromBytes(snapshot.Data), "CORRUPT_STORAGE");
             using var syntax = JsonDocument.Parse(snapshot.Data, new() { MaxDepth = 8 });
             UniqueProperties(syntax.RootElement);
             var document = JsonSerializer.Deserialize<Document>(snapshot.Data, Json);
             FeedbackProtocolRules.Require(document is { Version: 1, Playbacks: not null }, "CORRUPT_STORAGE");
             var entries = document.Playbacks;
-            FeedbackProtocolRules.Require(entries.Length <= MaximumEvents &&
-                entries.Sum(e => e.Count) <= MaximumEvents &&
-                entries.Select(e => e.PlaybackId).Distinct().Count() == entries.Length, "CORRUPT_STORAGE");
+            FeedbackProtocolRules.Require(entries.Select(e => e.PlaybackId).Distinct().Count() == entries.Length, "CORRUPT_STORAGE");
             foreach (var entry in entries) Validate(entry);
             var eventIds = entries.SelectMany(e => new[] { e.Start?.Id, e.End?.Id })
                 .OfType<Guid>().ToArray();
@@ -93,8 +87,6 @@ internal static class NeteasePlaybackOutboxDocument
         if (entry.End is { } end)
             FeedbackProtocolRules.Require(Valid(end) && end.Reason is "playend" or "ui" or "interrupt" or "exception",
                 "CORRUPT_STORAGE");
-        FeedbackProtocolRules.Require(JsonSerializer.SerializeToUtf8Bytes(entry, Json).Length <= MaximumEventBytes,
-            "CORRUPT_STORAGE");
     }
 
     private static bool Valid(NeteasePlaybackEvent value) => value.Id != Guid.Empty &&

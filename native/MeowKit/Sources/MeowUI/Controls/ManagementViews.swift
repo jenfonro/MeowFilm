@@ -74,6 +74,7 @@ public final class ManagementListView: UIView, UITableViewDataSource, UITableVie
         }
     }
     public let search = UISearchBar()
+    private lazy var searchContainer = ManagementSearchContainer(search: search)
     public let tools = UIStackView()
     public let footerMore = UIButton(type: .system)
     public let deleteButton = UIButton(type: .system)
@@ -88,6 +89,7 @@ public final class ManagementListView: UIView, UITableViewDataSource, UITableVie
     private let toolbar = UIStackView()
     private let toolbarSpacer = UIView()
     private lazy var toolbarHeight = toolbar.heightAnchor.constraint(equalToConstant: 50)
+    private lazy var listTop = table.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 10)
     private let footer = UIStackView(), count = UIButton(type: .custom), inverse = UIButton(type: .system)
     private let batchActions = UIStackView()
     private lazy var footerHeight = footer.heightAnchor.constraint(equalToConstant: 52)
@@ -96,12 +98,12 @@ public final class ManagementListView: UIView, UITableViewDataSource, UITableVie
     private var currentTheme = PageTheme()
     public override init(frame: CGRect) {
         super.init(frame: frame)
-        for child in [search, toolbarSpacer, tools] { toolbar.addArrangedSubview(child) }
+        for child in [searchContainer, toolbarSpacer, tools] { toolbar.addArrangedSubview(child) }
         toolbarSpacer.isHidden = true
-        toolbar.alignment = .center; toolbar.spacing = 8
+        toolbar.alignment = .top; toolbar.spacing = 8
         search.searchBarStyle = .minimal; search.delegate = self; search.placeholder = "搜索"
         search.searchTextField.font = .systemFont(ofSize: 14); search.searchTextField.clipsToBounds = true
-        search.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        searchContainer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         tools.axis = .horizontal; tools.spacing = 8; tools.isHidden = true
         table.register(ManagementRowCell.self, forCellReuseIdentifier: "management.row"); table.dataSource = self; table.delegate = self; table.separatorStyle = .singleLine; table.layer.cornerRadius = 22
         table.clipsToBounds = true; table.rowHeight = UITableView.automaticDimension; table.estimatedRowHeight = 64
@@ -143,8 +145,8 @@ public final class ManagementListView: UIView, UITableViewDataSource, UITableVie
         let listBottom = table.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -4)
         listBottom.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            toolbar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16), toolbar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24), toolbar.topAnchor.constraint(equalTo: topAnchor, constant: 4), toolbarHeight,
-            table.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 10), table.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24), table.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24), listBottom,
+            toolbar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16), toolbar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24), toolbar.topAnchor.constraint(equalTo: topAnchor, constant: SettingsVisualMetrics.contentTopSpacing), toolbarHeight,
+            listTop, table.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24), table.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24), listBottom,
             table.bottomAnchor.constraint(lessThanOrEqualTo: keyboardLayoutGuide.topAnchor, constant: -4),
             footer.leadingAnchor.constraint(equalTo: table.leadingAnchor, constant: 12), footer.trailingAnchor.constraint(equalTo: table.trailingAnchor, constant: -12),
             footer.bottomAnchor.constraint(equalTo: table.bottomAnchor, constant: -4), footerHeight])
@@ -155,10 +157,25 @@ public final class ManagementListView: UIView, UITableViewDataSource, UITableVie
     public override func didMoveToWindow() { super.didMoveToWindow(); applyFonts() }
     public override func layoutSubviews() {
         super.layoutSubviews()
-        toolbar.layoutIfNeeded(); search.layoutIfNeeded()
-        search.searchTextField.layer.cornerRadius = min(search.searchTextField.bounds.width, search.searchTextField.bounds.height) / 2
+        toolbar.layoutIfNeeded(); searchContainer.layoutIfNeeded()
+        let searchHeight = searchContainer.isHidden ? 0 : searchContainer.intrinsicContentSize.height
+        let toolsHeight = tools.isHidden ? 0 : tools.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).height
+        let requiredToolbarHeight = toolbar.isHidden ? 0 :
+            max(UIFontMetrics.default.scaledValue(for: 50, compatibleWith: traitCollection), max(searchHeight, toolsHeight))
+        var needsSecondPass = !searchContainer.isHidden && searchContainer.bounds.height + 0.01 < searchHeight
+        if abs(toolbarHeight.constant - requiredToolbarHeight) > 0.01 {
+            toolbarHeight.constant = requiredToolbarHeight
+            toolbar.setNeedsLayout()
+            needsSecondPass = true
+        }
         let width = footer.bounds.width - footer.layoutMargins.left - footer.layoutMargins.right
-        guard width > 0 else { return }
+        guard width > 0 else {
+            if needsSecondPass {
+                super.layoutSubviews()
+                toolbar.layoutIfNeeded(); searchContainer.layoutIfNeeded()
+            }
+            return
+        }
         let actions = batchActions.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
         let vertical = count.intrinsicContentSize.width + actions.width + 10 > width
         footer.axis = vertical ? .vertical : .horizontal
@@ -168,8 +185,13 @@ public final class ManagementListView: UIView, UITableViewDataSource, UITableVie
                                                              height: .greatestFiniteMagnitude)).height ?? 0
         let countHeight = max(44, ceil(titleHeight))
         let height = vertical ? countHeight + actions.height + 10 : max(52, max(countHeight, actions.height))
-        if footerHeight.constant != height {
+        if abs(footerHeight.constant - height) > 0.01 {
             footerHeight.constant = height
+            needsSecondPass = true
+        }
+        if needsSecondPass {
+            super.layoutSubviews()
+            toolbar.layoutIfNeeded(); searchContainer.layoutIfNeeded()
         }
         let bottomInset = table.frame.maxY - footer.frame.minY + 12
         if table.contentInset.bottom != bottomInset {
@@ -180,6 +202,10 @@ public final class ManagementListView: UIView, UITableViewDataSource, UITableVie
     private func applyFonts() {
         search.searchTextField.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 14), compatibleWith: traitCollection)
         search.searchTextField.adjustsFontForContentSizeCategory = true
+        search.searchTextField.invalidateIntrinsicContentSize()
+        search.invalidateIntrinsicContentSize()
+        search.setNeedsLayout()
+        searchContainer.invalidateIntrinsicContentSize(); searchContainer.setNeedsLayout()
         empty.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 14), compatibleWith: traitCollection)
         empty.adjustsFontForContentSizeCategory = true
         for button in [count, inverse, deleteButton] {
@@ -191,6 +217,7 @@ public final class ManagementListView: UIView, UITableViewDataSource, UITableVie
     }
     public func configureToolbar(showsSearch: Bool, buttons: [UIButton], accessories: [UIView] = []) {
         search.isHidden = !showsSearch
+        searchContainer.isHidden = !showsSearch
         tools.arrangedSubviews.forEach { $0.removeFromSuperview() }
         buttons.forEach { tools.addArrangedSubview($0) }
         accessories.forEach { tools.addArrangedSubview($0) }
@@ -199,6 +226,7 @@ public final class ManagementListView: UIView, UITableViewDataSource, UITableVie
         toolbarSpacer.isHidden = showsSearch || !hasTools
         toolbar.isHidden = !showsSearch && !hasTools
         toolbarHeight.constant = toolbar.isHidden ? 0 : UIFontMetrics.default.scaledValue(for: 50, compatibleWith: traitCollection)
+        listTop.constant = toolbar.isHidden ? 0 : 10
     }
     public func setSelection(_ selected: Set<String>) {
         guard self.selected != selected else { return }
@@ -264,6 +292,33 @@ public final class ManagementListView: UIView, UITableViewDataSource, UITableVie
         button.widthAnchor.constraint(equalToConstant: 38).isActive = true; button.heightAnchor.constraint(equalToConstant: 38).isActive = true
         button.layer.cornerRadius = 19; button.backgroundColor = ManagementAppearance.surface
         if let action { button.addAction(UIAction { _ in action() }, for: .touchUpInside) }; return button
+    }
+}
+
+@MainActor
+private final class ManagementSearchContainer: UIView {
+    private let search: UISearchBar
+    init(search: UISearchBar) {
+        self.search = search
+        super.init(frame: .zero)
+        addSubview(search)
+    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+    override var intrinsicContentSize: CGSize {
+        let size = search.intrinsicContentSize
+        return CGSize(width: size.width, height: ceil(max(36, search.searchTextField.bounds.height)))
+    }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let previousHeight = intrinsicContentSize.height
+        search.frame = CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width,
+            height: max(bounds.height, search.sizeThatFits(CGSize(width: bounds.width, height: 0)).height))
+        search.layoutIfNeeded()
+        let field = search.searchTextField
+        // UIKit owns the nested field's geometry; align the whole bar after its native layout.
+        search.frame.origin.y = bounds.minY - field.convert(field.bounds, to: search).minY
+        field.layer.cornerRadius = min(field.bounds.width, field.bounds.height) / 2
+        if intrinsicContentSize.height != previousHeight { invalidateIntrinsicContentSize() }
     }
 }
 
@@ -338,57 +393,68 @@ private final class ManagementRowCell: UITableViewCell {
 @MainActor
 public final class ManagementFormView: UIScrollView {
     public let fields = UIStackView()
+    private lazy var fieldsTop = fields.topAnchor.constraint(equalTo: contentLayoutGuide.topAnchor, constant: 12)
     public var boxedInputs = false {
         didSet { fields.spacing = boxedInputs ? 14 : 0; fields.isLayoutMarginsRelativeArrangement = boxedInputs; fields.layoutMargins = boxedInputs ? .init(top: 16, left: 16, bottom: 16, right: 16) : .zero; fields.layer.cornerRadius = boxedInputs ? 22 : 18 }
     }
     public override init(frame: CGRect) {
         super.init(frame: frame); keyboardDismissMode = .interactive; alwaysBounceVertical = true
+        contentInsetAdjustmentBehavior = .never
         fields.axis = .vertical; fields.layer.cornerRadius = 18; fields.clipsToBounds = true
         addSubview(fields); fields.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([fields.topAnchor.constraint(equalTo: contentLayoutGuide.topAnchor, constant: 12), fields.bottomAnchor.constraint(equalTo: contentLayoutGuide.bottomAnchor, constant: -12), fields.leadingAnchor.constraint(equalTo: contentLayoutGuide.leadingAnchor, constant: 12), fields.trailingAnchor.constraint(equalTo: contentLayoutGuide.trailingAnchor, constant: -12), fields.widthAnchor.constraint(equalTo: frameLayoutGuide.widthAnchor, constant: -24)])
+        NSLayoutConstraint.activate([fieldsTop, fields.bottomAnchor.constraint(equalTo: contentLayoutGuide.bottomAnchor, constant: -12), fields.leadingAnchor.constraint(equalTo: contentLayoutGuide.leadingAnchor, constant: 12), fields.trailingAnchor.constraint(equalTo: contentLayoutGuide.trailingAnchor, constant: -12), fields.widthAnchor.constraint(equalTo: frameLayoutGuide.widthAnchor, constant: -24)])
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (form: ManagementFormView, _: UITraitCollection) in form.updateCheckRows() }
+    }
+    public convenience init(contentTopSpacing: CGFloat) {
+        self.init(frame: .zero)
+        fieldsTop.constant = contentTopSpacing
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
     public override func didMoveToWindow() { super.didMoveToWindow(); updateCheckRows() }
     public func clear() { fields.arrangedSubviews.forEach { $0.removeFromSuperview() } }
     @discardableResult
     public func text(_ label: String, value: String, rows: Int = 1, id: String,
-                     theme: PageTheme? = nil, in container: UIStackView? = nil,
+                     theme: PageTheme? = nil, appearance: SettingsInputAppearance = .plain,
+                     in container: UIStackView? = nil,
                      changed: @escaping (String) -> Void) -> UIView {
-        let section = UIStackView(); section.axis = .vertical; section.spacing = boxedInputs ? 8 : 5
-        section.isLayoutMarginsRelativeArrangement = true; section.layoutMargins = boxedInputs ? .zero : .init(top: 11, left: 14, bottom: 10, right: 14)
-        let title = UILabel(); title.text = label; title.numberOfLines = 0
-        title.textColor = theme.map { UIColor($0.settings.muted) } ?? ManagementAppearance.muted
-        title.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: boxedInputs ? 13 : 12), compatibleWith: traitCollection); title.adjustsFontForContentSizeCategory = true
-        title.setContentCompressionResistancePriority(.required, for: .vertical); section.addArrangedSubview(title)
         let input: UIView
         if rows > 1 {
             let text = ManagementTextView(minimumHeight: boxedInputs ? max(92, CGFloat(rows) * 19.5 + 18) : max(72, CGFloat(rows) * 23 + 24), rows: rows); text.text = value; text.changed = changed; text.delegate = text
+            text.inputAppearance = appearance
             text.autocorrectionType = .no; text.autocapitalizationType = .none; text.smartQuotesType = .no; text.smartDashesType = .no
             text.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: boxedInputs ? 13 : 17), compatibleWith: traitCollection); text.adjustsFontForContentSizeCategory = true; text.backgroundColor = .clear
             text.textContainer.lineFragmentPadding = 0
             input = text
         } else {
             let text = SettingsTextField(); text.text = value; text.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: boxedInputs ? 13 : 17), compatibleWith: traitCollection); text.adjustsFontForContentSizeCategory = true
+            text.inputAppearance = appearance
             text.autocorrectionType = .no; text.autocapitalizationType = .none; text.smartQuotesType = .no; text.smartDashesType = .no
             text.heightAnchor.constraint(greaterThanOrEqualToConstant: 36).isActive = true
             text.setContentCompressionResistancePriority(.required, for: .vertical); text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             text.addAction(UIAction { [weak text] _ in changed(text?.text ?? "") }, for: .editingChanged); input = text
         }
-        if let theme {
-            if let field = input as? UITextField { field.textColor = UIColor(theme.settings.ink) }
-            if let field = input as? UITextView { field.textColor = UIColor(theme.settings.ink) }
-        }
+        let section = SettingsInputSection(title: label, input: input)
+        section.spacing = boxedInputs ? 8 : 5
+        section.isLayoutMarginsRelativeArrangement = true
+        section.layoutMargins = boxedInputs ? .zero : .init(top: 11, left: 14, bottom: 10, right: 14)
+        section.titleLabel.textColor = theme.map { UIColor($0.settings.muted) } ?? ManagementAppearance.muted
+        section.titleLabel.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: boxedInputs ? 13 : 12), compatibleWith: traitCollection)
         if let text = input as? UITextField { (theme?.settings ?? SettingsTheme(dark: traitCollection.userInterfaceStyle == .dark)).apply(to: text) }
         if let text = input as? UITextView { (theme?.settings ?? SettingsTheme(dark: traitCollection.userInterfaceStyle == .dark)).apply(to: text) }
-        input.accessibilityIdentifier = id; input.accessibilityLabel = label; section.addArrangedSubview(input)
+        input.accessibilityIdentifier = id; input.accessibilityLabel = label
         if let container { addSection(section, to: container, theme: theme) }
         else { addSection(section) }
         return input
     }
     public func addSection(_ section: UIView) {
         fields.addArrangedSubview(section)
-        if !boxedInputs { let separator = UIView(); separator.backgroundColor = ManagementAppearance.line; separator.heightAnchor.constraint(equalToConstant: 0.5).isActive = true; fields.addArrangedSubview(separator) }
+        let separator = UIView(); separator.backgroundColor = ManagementAppearance.line
+        separator.heightAnchor.constraint(equalToConstant: SettingsVisualMetrics.separatorHeight).isActive = true
+        fields.addArrangedSubview(separator)
+        if boxedInputs {
+            fields.setCustomSpacing(fields.spacing / 2, after: section)
+            fields.setCustomSpacing(fields.spacing / 2, after: separator)
+        }
         updateCheckRows()
     }
     private func addSection(_ section: UIView, to container: UIStackView, theme: PageTheme?) {
@@ -421,6 +487,7 @@ public final class ManagementFormView: UIScrollView {
         let settings = theme.settings
         fields.backgroundColor = UIColor(settings.surface); tintColor = UIColor(settings.accent)
         for section in fields.arrangedSubviews {
+            if section.subviews.isEmpty { section.backgroundColor = UIColor(settings.separator) }
             for input in (section as? UIStackView)?.arrangedSubviews ?? [] {
                 (input as? UILabel)?.textColor = UIColor(settings.muted)
                 if let text = input as? UITextField {
