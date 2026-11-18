@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { isDeepStrictEqual } from 'node:util';
 import { stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
-import { compareCandidates, defaultPreferences, isCandidateAllowed, isSmartSiteAllowed, normalizePreferences } from './policy.js';
+import { compareCandidates, isCandidateAllowed, isSmartSiteAllowed, normalizePreferences, readPreferences } from './policy.js';
 import { contentResults, matchesResult, mediaVariants, normalizeDetail, recognizeCandidates, recognizeVariantCandidates } from './recognition.js';
 import { buildEpisodeMap, matchEpisodeMaps, resolveEpisode, sameSeasonPartition } from './episodes.js';
 import { providerFamily, qualityKey } from './rules.js';
@@ -66,7 +66,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
   const episodeMaps = new WeakMap(), browsingProjections = new WeakMap();
   let closed = false, closing;
   requireValue(rules && typeof rules.snapshot === 'function');
-  const preferences = () => normalizePreferences(library.read().preferences ?? defaultPreferences());
+  const preferences = () => readPreferences(library.read().preferences);
   let observedPreferences = preferences();
   function get(id) {
     requireValue(!closed, 'CLOSED');

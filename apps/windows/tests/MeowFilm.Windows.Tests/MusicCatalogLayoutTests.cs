@@ -165,8 +165,10 @@ public static partial class MusicUiTests
             True(CardMotion.GetProgress(surface) == 0 && shade.Visibility == Visibility.Visible &&
                 !shade.IsHitTestVisible && ((SolidColorBrush)surface.Background).Color == gradient.GradientStops[^1].Color,
                 "the resting gradient is present without hover and shares the footer color");
-            True(gradient.GradientStops.Select(stop => stop.Offset).SequenceEqual([.62, .82, 1d]) &&
-                gradient.GradientStops.Select(stop => stop.Color.A).SequenceEqual(new byte[] { 0, 112, 255 }),
+            var offsets = gradient.GradientStops.Select(stop => stop.Offset).ToArray();
+            // WinUI stores gradient stop offsets at single precision.
+            True(offsets.SequenceEqual([(double).62f, (double).82f, 1d]), $"resting gradient stop offsets: {string.Join(", ", offsets)}");
+            True(gradient.GradientStops.Select(stop => stop.Color.A).SequenceEqual(new byte[] { 0, 112, 255 }),
                 "the resting alpha stops are not an animated hover effect");
             if (home)
             {

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { isUtf8 } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
-import { defaultPreferences, normalizePreferences } from './policy.js';
+import { defaultPreferences } from './policy.js';
 import { cloneJSONValue, parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 
 const codes = new Set([
@@ -128,7 +128,7 @@ export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
 
   function read() {
     open();
-    return nativePreferences ? freeze({ ...committed, preferences: normalizePreferences(nativePreferences()) }) : committed;
+    return nativePreferences ? freeze({ ...committed, preferences: cloneJSONValue(nativePreferences()) }) : committed;
   }
 
   function update(mutator) {

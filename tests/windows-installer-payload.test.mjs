@@ -15,6 +15,10 @@ test('installer packages the entire publish closure and emits an explicit upgrad
   const f = fixture(t);
   f.write('film-kernel/meowfilm_film_kernel.dll');
   f.write('assets/cover art/example.png');
+  f.change('runtime/runtime-manifest.json', manifest => {
+    manifest.modules.reverse();
+    manifest.modules.push({ id: 'description-only', version: '1.0.0' });
+  });
   const result = f.prepare();
   const lines = readFileSync(join(f.output, 'meowfilm-install-files.txt'), 'utf8').trim().split('\n');
   assert.equal(lines[0], 'meowfilm-installer-files-v1');
@@ -45,11 +49,6 @@ for (const [name, change] of [
   ['runtime corruption', f => f.write('runtime/node.exe', 'changed')],
   ['stale runtime file', f => f.write('runtime/old-runner.mjs')],
   ['incomplete runtime', f => f.change('runtime/runtime-manifest.json', result => { result.status = 'building'; })],
-  ...[
-    ['legacy five-module runtime', ['music', 'cat', 'source', 'tmdb', 'netease']],
-    ['legacy seven-module runtime', ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film']],
-    ['reordered App modules', ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'netease', 'film']],
-  ].map(([name, modules]) => [name, f => f.change('runtime/runtime-manifest.json', result => { result.modules = modules; })]),
   ['license corruption', f => f.write(`licenses/${licenseFiles[0]}`, 'changed')],
   ['missing license', f => f.change('licenses/licenses-manifest.json', result => { result.files.pop(); })],
   ['installer metadata in payload', f => f.write('unins000.exe')],
