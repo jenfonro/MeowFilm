@@ -304,7 +304,10 @@ function constrainedFixture(known) {
   } }, shares: { share: [file('share-other', '720p', 'uc')] }, pages: { a: [[result('searched')]] } });
 }
 async function seedConstrainedStages(f) {
-  f.library.update(document => { document.history.unshift(history('history')); });
+  f.library.update(document => {
+    const row = history('history');
+    document.history = [row, ...document.history.filter(item => item.targetId !== row.targetId)];
+  });
   (await f.service.updateManual({ action: 'save', item: manualSite('manual') }));
   (await f.service.updateManual({ action: 'save', item: manualShare('share', 'uc') }));
 }
@@ -534,7 +537,9 @@ test('F11 a missing season has no selectable coordinates or invented global offs
   const { sessionId, current } = await playSeries(f, { season: 1, episode: 2, globalEpisode: 2 });
   const beforeInvalidSelection = requests(f);
   await assert.rejects(f.command(sessionId, 'select.target', { target: { ...f.snapshot(sessionId).metadataSources[0].playbackTarget, season: 2, episode: 1 } }), { code: 'NOT_FOUND' });
-  await assert.rejects(f.command(sessionId, 'browse.season', { season: 2 }), { code: 'NOT_FOUND' });
+  await f.command(sessionId, 'browse.season', { season: 2 });
+  await until(() => f.snapshot(sessionId).browsing.error === 'NOT_FOUND');
+  assert.equal(f.snapshot(sessionId).browsing.loading, false);
   assert.deepEqual(requests(f).slice(beforeInvalidSelection.length).map(call => call.type), ['season', 'metadata']);
   assert.equal(f.snapshot(sessionId).current.attemptId, current.id);
   await f.command(sessionId, 'media.ended', { attemptId: current.id });

@@ -9,10 +9,14 @@ using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.PlaybackCache;
 using MeowFilm.Platform.Storage;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
@@ -131,19 +135,19 @@ public static partial class MusicOfficialPlaybackScopeTests
             try
             {
                 await http.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                await DesktopTestUi.DrainAsync();
                 originalRelease.TrySetResult();
                 await Until(() => http.Addresses.Contains(fallback));
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                await DesktopTestUi.DrainAsync();
                 fallbackRelease.TrySetResult();
-                await Until(() => players.Covers.All(cover => cover.Children.OfType<Button>().Single().IsVisible));
+                await Until(() => players.Covers.All(cover => DesktopVisual.IsVisible(cover.Children.OfType<Button>().Single())));
                 Check(http.Addresses.SequenceEqual([original, fallback]) && f.Module.CurrentArtwork == fallback,
                     "exhausted candidates keep the failed image's retry action without looping");
                 http.Failures.Clear(); http.Gates[fallback] = retryRelease;
                 foreach (var cover in players.Covers)
-                    cover.Children.OfType<Button>().Single().RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    DesktopTestUi.Invoke(cover.Children.OfType<Button>().Single());
                 await Until(() => http.Addresses.Count == 3);
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                await DesktopTestUi.DrainAsync();
                 retryRelease.TrySetResult();
                 await players.Loaded(fallback);
                 await f.SetQuality("320k");
@@ -172,7 +176,7 @@ public static partial class MusicOfficialPlaybackScopeTests
                     Check(http.Cancelled, "all old-song subscribers detach from their shared physical request");
                     var current = players.Covers.Select(cover => cover.Source).ToArray();
                     http.Release.TrySetResult();
-                    await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                    await DesktopTestUi.DrainAsync();
                     Check(f.Module.CurrentArtwork == next && players.Covers.Select(cover => cover.Source).SequenceEqual(current),
                         "old results cannot replace or fail the next song's cover");
                     http.Failures.Clear(); http.Hold = false;
@@ -306,15 +310,14 @@ public static partial class MusicOfficialPlaybackScopeTests
             layout.RowDefinitions.Add(new() { Height = new GridLength(100) });
             layout.RowDefinitions.Add(new());
             layout.Children.Add(mini); layout.Children.Add(detail); Grid.SetRow(detail, 1);
-            window = new Window { Content = layout, Width = 1100, Height = 900, Left = -10000, Top = -10000,
-                ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None };
-            ArtworkScope.SetLoader(window, images);
+            window = DesktopTestUi.CreateWindow(layout, 1100, 900);
+            ArtworkScope.SetLoader(DesktopTestUi.WindowRoot(window), images);
             var miniRecord = (MusicRecordView)((Button)mini.FindName("ArtworkButton")).Content;
             var detailRecord = (MusicRecordView)detail.FindName("DetailRecord");
             ArtworkScope.SetLoader(miniRecord, images);
             ArtworkScope.SetLoader(detailRecord, images);
             Covers = [(ArtworkImage)miniRecord.FindName("Cover"), (ArtworkImage)detailRecord.FindName("Cover")];
-            window.Show(); window.UpdateLayout();
+            window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout();
         }
         internal Task Loaded(string address) =>
             Until(() => Covers.All(cover => cover.Address == address && cover.Source is not null));
@@ -335,16 +338,16 @@ public static partial class MusicOfficialPlaybackScopeTests
     }
     private sealed class ArtworkTestLease : IArtworkLease
     {
-        public BitmapSource Image { get; } = ArtworkPixels();
+        public MeowFilm.Desktop.Artwork.ArtworkPixels Image { get; } = new(1, 1, new byte[] { 60, 120, 180, 255 });
         internal bool Disposed;
         public void Dispose() => Disposed = true;
     }
-    private static BitmapSource ArtworkPixels(int size = 1)
+    private static System.Windows.Media.Imaging.BitmapSource ArtworkPixels(int size = 1)
     {
         var pixels = new byte[size * size * 4];
         for (int i = 0; i < pixels.Length; i += 4)
         { pixels[i] = 60; pixels[i + 1] = 120; pixels[i + 2] = 180; pixels[i + 3] = 255; }
-        var image = BitmapSource.Create(size, size, 96, 96, PixelFormats.Bgra32, null, pixels, size * 4);
+        var image = System.Windows.Media.Imaging.BitmapSource.Create(size, size, 96, 96, System.Windows.Media.PixelFormats.Bgra32, null, pixels, size * 4);
         image.Freeze(); return image;
     }
     private sealed class ArtworkHttpProbe(int size = 1) : HttpMessageHandler
@@ -359,7 +362,7 @@ public static partial class MusicOfficialPlaybackScopeTests
         private readonly byte[] bytes = Encode(size);
         internal static byte[] Encode(int size = 1)
         {
-            var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(ArtworkPixels(size)));
+            var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder(); encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(ArtworkPixels(size)));
             using var stream = new MemoryStream(); encoder.Save(stream); return stream.ToArray();
         }
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -507,7 +510,7 @@ public static partial class MusicOfficialPlaybackScopeTests
                 }
                 successor = loader.AcquireAsync(address);
                 anotherPage = loader.AcquireAsync(address);
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                await DesktopTestUi.DrainAsync();
                 Check(http.Addresses.Count == 1 && !successor.IsCompleted && !anotherPage.IsCompleted,
                     "new same-key demand cannot overlap retired non-cooperative HTTP");
                 http.Hold = false;
@@ -569,12 +572,11 @@ public static partial class MusicOfficialPlaybackScopeTests
     {
         using var controlled = new ControlledArtwork();
         var image = new ArtworkImage { Address = "https://images.example.test/first.png", DisplayIdentity = "song-a" };
-        var window = new Window { Content = image, Width = 200, Height = 200, ShowActivated = false,
-            ShowInTaskbar = false, Left = -10000, Top = -10000 };
-        ArtworkScope.SetLoader(window, controlled);
+        var window = DesktopTestUi.CreateWindow(image, 200, 200);
+        ArtworkScope.SetLoader(DesktopTestUi.WindowRoot(window), controlled);
         try
         {
-            window.Show(); window.UpdateLayout();
+            window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout();
             await Until(() => controlled.Calls.Count == 1);
             var initial = new ArtworkTestLease(); controlled.Calls[0].Completion.TrySetResult(initial);
             await Until(() => image.Source is not null);
@@ -583,7 +585,7 @@ public static partial class MusicOfficialPlaybackScopeTests
             await Until(() => controlled.Calls.Count == 2);
             Check(ReferenceEquals(image.Source, pixels) && !initial.Disposed, "same-song loading cannot flash a placeholder");
             controlled.Calls[1].Completion.TrySetException(new ArtworkException("ARTWORK_NETWORK"));
-            await Until(() => image.ToolTip is not null);
+            await Until(() => ToolTipService.GetToolTip(image) is not null);
             Check(ReferenceEquals(image.Source, pixels), "failed same-song replacement retains the last successful pixels");
             image.Address = "https://images.example.test/third.png";
             await Until(() => controlled.Calls.Count == 3);
@@ -632,7 +634,7 @@ public static partial class MusicOfficialPlaybackScopeTests
         await f.Module.NavigateAsync("catalog-channel/wy/cache-b", default);
         var current = await f.Ok("music.catalog.song", new { platform = "wy", id = "cached", refresh = true });
         Check(current.GetProperty("song").GetProperty("songId").GetString() == id);
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await DesktopTestUi.DrainAsync();
         int requests = f.Runtime.Requests.Count, writes = f.Store.Writes;
         await f.Module.NavigateAsync("catalog-channel/wy/cache-a", default);
         var restored = f.Module.CatalogSections.SelectMany(section => section.Items).Single(item => item.Song is not null);
@@ -665,15 +667,14 @@ public static partial class MusicOfficialPlaybackScopeTests
         await f.Module.NavigateAsync("catalog-channel/wy/template", default);
         var card = f.Module.CatalogSections.Single().Items.Single();
         var view = new MusicCatalogView();
-        var content = (FrameworkElement)((DataTemplate)view.FindResource("Catalog.SongRow")).LoadContent();
+        var content = (FrameworkElement)((DataTemplate)DesktopVisual.Resource(view, "Catalog.SongRow")).LoadContent();
         content.DataContext = card; view.Content = content;
         using var controlled = new ControlledArtwork();
         ArtworkScope.SetLoader(view, controlled);
-        var window = new Window { Content = view, Width = 430, Height = 130, Left = -10000, Top = -10000,
-            ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None };
+        var window = DesktopTestUi.CreateWindow(view, 430, 130);
         try
         {
-            window.Show(); window.UpdateLayout();
+            window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout();
             await Until(() => controlled.Calls.Count == 1);
             var image = ArtworkDescendants<ArtworkImage>(view).Single();
             Check(image.DisplayIdentity == card.Song!.Id);
@@ -684,7 +685,7 @@ public static partial class MusicOfficialPlaybackScopeTests
             await Until(() => controlled.Calls.Count == 2);
             Check(ReferenceEquals(image.Source, initial.Image) && !initial.Disposed);
             controlled.Calls[1].Completion.TrySetException(new ArtworkException("ARTWORK_NETWORK"));
-            await Until(() => image.ToolTip is not null);
+            await Until(() => ToolTipService.GetToolTip(image) is not null);
             Check(ReferenceEquals(image.Source, initial.Image), "real template keeps success on replacement failure");
             source = ArtworkSong("wy", "template", "https://images.example.test/template-3.png");
             await f.Ok("music.catalog.song", new { platform = "wy", id = "template", refresh = true });
@@ -717,47 +718,45 @@ public static partial class MusicOfficialPlaybackScopeTests
         var page = (MusicView)f.Module.View;
         var subjects = new List<(FrameworkElement View, object Data, string Name)>();
         foreach (string name in new[] { "Catalog.SongRow", "Catalog.PlaylistCard", "Catalog.Banner", "Catalog.Entry" })
-            subjects.Add(((FrameworkElement)((DataTemplate)catalog.FindResource(name)).LoadContent(), card, name));
+            subjects.Add(((FrameworkElement)((DataTemplate)DesktopVisual.Resource(catalog, name)).LoadContent(), card, name));
         foreach (string name in new[] { "SongsGrid", "SearchSongsGrid" })
-            subjects.Add(((FrameworkElement)((DataGridTemplateColumn)((DataGrid)page.FindName(name)).Columns[0])
-                .CellTemplate.LoadContent(), row, name));
-        subjects.Add(((FrameworkElement)((ListBox)queue.FindName("QueueList")).ItemTemplate.LoadContent(),
+            subjects.Add(((FrameworkElement)((ListView)page.FindName(name)).ItemTemplate.LoadContent(), row, name));
+        subjects.Add(((FrameworkElement)((ListView)queue.FindName("QueueList")).ItemTemplate.LoadContent(),
             new MusicQueueSurfaceRow(row, false), "QueueList"));
-        subjects.Add(((FrameworkElement)((ListBox)queue.FindName("RecommendationList")).ItemTemplate.LoadContent(),
+        subjects.Add(((FrameworkElement)((ListView)queue.FindName("RecommendationList")).ItemTemplate.LoadContent(),
             new MusicRecommendationCandidate("session", "candidate", row), "RecommendationList"));
         using var controlled = new ControlledArtwork();
         var host = new ContentControl();
         ArtworkScope.SetLoader(host, controlled);
-        var window = new Window { Content = host, Width = 500, Height = 380, Left = -10000, Top = -10000,
-            ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None };
+        var window = DesktopTestUi.CreateWindow(host, 500, 380);
         try
         {
             window.Show();
             foreach (var (view, data, name) in subjects)
             {
-                view.DataContext = data; host.Content = view; window.UpdateLayout();
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                view.DataContext = data; host.Content = view; DesktopTestUi.WindowRoot(window).UpdateLayout();
+                await DesktopTestUi.DrainAsync();
                 var image = ArtworkDescendants<ArtworkImage>(view).Single(value => value.Address == row.Cover);
                 Check(image.DisplayIdentity == row.Id, name + " must use the permanent song, not occurrence or platform ID");
             }
             var rank = new MusicCatalogCard("rank", "Rank", "", "https://images.example.test/collection.png",
                 "playlist", "wy", Preview:
                 [new("", "", "", 1, null, row), new("", "", "", 2, null, row), new("", "", "", 3, null, row)]);
-            var ranking = (FrameworkElement)((DataTemplate)catalog.FindResource("Catalog.Ranking")).LoadContent();
-            ranking.DataContext = rank; host.Content = ranking; window.UpdateLayout();
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            var ranking = (FrameworkElement)((DataTemplate)DesktopVisual.Resource(catalog, "Catalog.Ranking")).LoadContent();
+            ranking.DataContext = rank; host.Content = ranking; DesktopTestUi.WindowRoot(window).UpdateLayout();
+            await DesktopTestUi.DrainAsync();
             Check(ArtworkDescendants<ArtworkImage>(ranking).Count(image => image.DisplayIdentity == row.Id) == 3);
             var withoutCover = SongRow.Read(Element(await MusicSongFixture.AdoptAsync(f.App,
                 ArtworkSong("wy", "bindings-without-cover", ""))));
             ranking.DataContext = rank with { Preview = [new("", "", "", 1, null, withoutCover)] };
-            window.UpdateLayout();
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            DesktopTestUi.WindowRoot(window).UpdateLayout();
+            await DesktopTestUi.DrainAsync();
             Check(ArtworkDescendants<ArtworkImage>(ranking).Single(image => image.Address == rank.Cover).DisplayIdentity == "",
                 "a collection fallback is not the preview song's image");
             var collection = card with { Song = null, Cover = "https://images.example.test/collection.png" };
             var entry = subjects.Single(subject => subject.Name == "Catalog.Entry").View;
-            entry.DataContext = collection; host.Content = entry; window.UpdateLayout();
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            entry.DataContext = collection; host.Content = entry; DesktopTestUi.WindowRoot(window).UpdateLayout();
+            await DesktopTestUi.DrainAsync();
             Check(ArtworkDescendants<ArtworkImage>(entry).Single(image => image.Address == collection.Cover).DisplayIdentity == "",
                 "collection cover cannot borrow a song's identity after recycling");
             Check(new MusicCatalogCard("rank", "Rank", "", collection.Cover, "playlist", "wy").FirstPreviewIdentity == "");

@@ -1,5 +1,6 @@
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using Windows.UI;
+using Microsoft.UI;
+using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.Capabilities;
 
 namespace MeowFilm.Windows.Tests;
@@ -10,36 +11,28 @@ public static class MusicEntryPaletteTests
     {
         yield return Case("entry palette uses shared sRGB mean and explicit preview or standard role", () =>
         {
-            var image = Image((x, y) => Color.FromRgb(200, 160, 120));
+            var image = Image((x, y) => Color.FromArgb(255, 200, 160, 120));
             var preview = MusicEntryPalette.Sample(image, preview: true);
             var standard = MusicEntryPalette.Sample(image);
-            Check(preview.IsFrozen && preview.Color == Color.FromRgb(200, 160, 120),
+            Check(preview.Color == Color.FromArgb(255, 200, 160, 120),
                 "preview below the luminance ceiling retains its mean RGB");
-            Check(standard.Color == Color.FromRgb(118, 92, 74),
+            Check(standard.Color == Color.FromArgb(255, 118, 92, 74),
                 "standard mixes 65 percent RGB 75/56/50 before luminance limiting");
             var white = Image((x, y) => Colors.White);
-            Check(MusicEntryPalette.Sample(white, preview: true).Color == Color.FromRgb(170, 170, 170),
+            Check(MusicEntryPalette.Sample(white, preview: true).Color == Color.FromArgb(255, 170, 170, 170),
                 "preview caps sRGB luminance at 170");
-            Check(MusicEntryPalette.Sample(white).Color == Color.FromRgb(104, 94, 91),
+            Check(MusicEntryPalette.Sample(white).Color == Color.FromArgb(255, 104, 94, 91),
                 "standard caps the mixed color at luminance 96");
         });
         yield return Case("partial alpha contributes proportionally to the shared RGB mean", () =>
         {
-            var bytes = new byte[48 * 48 * 4];
-            for (int i = 0; i < 48 * 48; i++)
-            {
-                bool red = i % 48 < 24;
-                bytes[i * 4] = red ? (byte)0 : (byte)255;
-                bytes[i * 4 + 2] = red ? (byte)255 : (byte)0;
-                bytes[i * 4 + 3] = red ? (byte)255 : (byte)85;
-            }
-            var image = BitmapSource.Create(48, 48, 96, 96, PixelFormats.Bgra32, null, bytes, 192);
-            Check(MusicEntryPalette.Sample(image, preview: true).Color == Color.FromRgb(191, 0, 64),
+            var image = Image((x, y) => x < 24 ? Colors.Red : Color.FromArgb(85, 0, 0, 255), 48);
+            Check(MusicEntryPalette.Sample(image, preview: true).Color == Color.FromArgb(255, 191, 0, 64),
                 "straight alpha gives opaque red three times the weight of translucent blue");
         });
         yield return Case("transparent padding and tiny accent pixels cannot replace the cover color", () =>
         {
-            var blue = Color.FromRgb(130, 172, 209);
+            var blue = Color.FromArgb(255, 130, 172, 209);
             var opaque = MusicEntryPalette.Sample(Image((x, y) => blue)).Color;
             var transparent = MusicEntryPalette.Sample(Image((x, y) =>
                 x < 8 ? blue : Color.FromArgb(0, 255, 0, 0))).Color;
@@ -51,8 +44,8 @@ public static class MusicEntryPaletteTests
         });
         yield return Case("equal artwork is deterministic without order dependent palette selection", () =>
         {
-            var forward = Image((x, y) => x < 24 ? Color.FromRgb(180, 80, 70) : Color.FromRgb(75, 125, 190), 48);
-            var reverse = Image((x, y) => x < 24 ? Color.FromRgb(75, 125, 190) : Color.FromRgb(180, 80, 70), 48);
+            var forward = Image((x, y) => x < 24 ? Color.FromArgb(255, 180, 80, 70) : Color.FromArgb(255, 75, 125, 190), 48);
+            var reverse = Image((x, y) => x < 24 ? Color.FromArgb(255, 75, 125, 190) : Color.FromArgb(255, 180, 80, 70), 48);
             Check(MusicEntryPalette.Sample(forward).Color == MusicEntryPalette.Sample(reverse).Color,
                 "reversing color regions does not change the chosen surface");
         });
@@ -62,20 +55,9 @@ public static class MusicEntryPaletteTests
         new("music-entry-palette: " + name, () => MusicQualityConsumerTests.Sta(() =>
         { action(); return Task.CompletedTask; }));
     internal static BitmapSource CoolArtwork() => Image((x, y) =>
-        x < 19 ? Color.FromRgb(165, 195, 224) :
-        y < 16 ? Color.FromRgb(248, 249, 251) : Color.FromRgb(49, 55, 63));
-    internal static BitmapSource Image(Func<int, int, Color> pixel, int size = 32)
-    {
-        var bytes = new byte[size * size * 4];
-        for (int y = 0; y < size; y++)
-        for (int x = 0; x < size; x++)
-        {
-            var c = pixel(x, y); int i = (y * size + x) * 4;
-            bytes[i] = c.B; bytes[i + 1] = c.G; bytes[i + 2] = c.R; bytes[i + 3] = c.A;
-        }
-        var image = BitmapSource.Create(size, size, 96, 96, PixelFormats.Bgra32, null, bytes, size * 4);
-        image.Freeze(); return image;
-    }
+        x < 19 ? Color.FromArgb(255, 165, 195, 224) :
+        y < 16 ? Color.FromArgb(255, 248, 249, 251) : Color.FromArgb(255, 49, 55, 63));
+    internal static BitmapSource Image(Func<int, int, Color> pixel, int size = 32) => MusicTestUi.Bitmap(size, size, pixel);
     private static int Distance(Color a, Color b) =>
         Math.Abs(a.R - b.R) + Math.Abs(a.G - b.G) + Math.Abs(a.B - b.B);
     private static void Check(bool condition, string message)

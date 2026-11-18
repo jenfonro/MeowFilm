@@ -1,11 +1,14 @@
+using MeowFilm.Desktop;
+using System;
 using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.Web.WebView2.Core;
-using Microsoft.Web.WebView2.Wpf;
 
 namespace MeowFilm.Capabilities;
 
@@ -104,14 +107,14 @@ internal static class NovelWebInteraction
                     if (input.SourceRegex.Length > 0 || input.OverrideRegex.Length > 0)
                         value = await selectedUrl.Task.WaitAsync(ct);
                     else if (scripted is { } scalar) value = scalar;
-                    else value = JsonSerializer.Deserialize<string>(await web.CoreWebView2.ExecuteScriptAsync("document.documentElement.outerHTML").WaitAsync(ct)) ?? "";
+                    else value = JsonSerializer.Deserialize<string>(await web.CoreWebView2.ExecuteScriptAsync("document.documentElement.outerHTML").AsTask(ct)) ?? "";
                     // Legado's browser helper builds StrResponse from this response value.
                     // QYSG scalar modes keep their existing result and positional arguments.
                     if (input.Mode is "request" or "browser")
                         value = new { url = web.Source?.AbsoluteUri ?? input.Url, statusCode, data = value };
                 }
                 string finalUrl = web.Source?.AbsoluteUri ?? input.Url;
-                var final = (await web.CoreWebView2.CookieManager.GetCookiesAsync(null).WaitAsync(ct)).Select(BrowserCookie.From).ToArray();
+                var final = (await web.CoreWebView2.CookieManager.GetCookiesAsync(null).AsTask(ct)).Select(BrowserCookie.From).ToArray();
                 ct.ThrowIfCancellationRequested();
                 output = NovelWebRequest.Result(value, finalUrl, CookieChanges(baseline, final)); return true;
             }, token, autoSubmit: input.Automatic);
@@ -132,7 +135,7 @@ internal static class NovelWebInteraction
                 {
                     bool waitForBrowser;
                     try { waitForBrowser = browserCreated || environment is not null && environment.GetProcessInfos().Count > 0; }
-                    finally { web.Dispose(); }
+                    finally { web.Close(); }
                     // The SDK event acknowledges the whole process group and release
                     // of the user data folder, not merely the main browser PID.
                     if (waitForBrowser) await browserExited.Task;
@@ -147,7 +150,7 @@ internal static class NovelWebInteraction
         void BrowserExited(object? sender, CoreWebView2BrowserProcessExitedEventArgs e) => browserExited.TrySetResult();
         async Task Initialize()
         {
-            environment = await CoreWebView2Environment.CreateAsync(userDataFolder: profile);
+            environment = await CoreWebView2Environment.CreateWithOptionsAsync("", profile, new CoreWebView2EnvironmentOptions());
             environment.BrowserProcessExited += BrowserExited;
             await web.EnsureCoreWebView2Async(environment);
             browserCreated = true; var core = web.CoreWebView2;
@@ -178,12 +181,12 @@ internal static class NovelWebInteraction
                         if (input.OverrideRegex.Length > 0 && e.ResourceContext == CoreWebView2WebResourceContext.Document && await Match(input.OverrideRegex, e.Request.Uri))
                         {
                             selectedUrl.TrySetResult(e.Request.Uri);
-                            e.Response = core.Environment.CreateWebResourceResponse(new MemoryStream(), 200, "OK", "Content-Type: text/html"); return;
+                            e.Response = core.Environment.CreateWebResourceResponse(new MemoryStream().AsRandomAccessStream(), 200, "OK", "Content-Type: text/html"); return;
                         }
                         if (input.SourceRegex.Length > 0 && await Match(input.SourceRegex, e.Request.Uri)) selectedUrl.TrySetResult(e.Request.Uri);
                         if (!supplied && input.Html.Length > 0 && e.Request.Uri == input.Url)
                         {
-                            supplied = true; e.Response = core.Environment.CreateWebResourceResponse(new MemoryStream(Encoding.UTF8.GetBytes(input.Html)), 200, "OK", "Content-Type: text/html; charset=utf-8");
+                            supplied = true; e.Response = core.Environment.CreateWebResourceResponse(new MemoryStream(Encoding.UTF8.GetBytes(input.Html)).AsRandomAccessStream(), 200, "OK", "Content-Type: text/html; charset=utf-8");
                         }
                     }
                     catch (OperationCanceledException) { }
@@ -199,13 +202,13 @@ internal static class NovelWebInteraction
                     (seed.HostOnly ? "" : ".") + seed.Domain, seed.Path);
                 cookie.IsSecure = seed.Secure; cookie.IsHttpOnly = seed.HttpOnly;
                 if (seed.SameSite is { } sameSite) cookie.SameSite = Enum.Parse<CoreWebView2CookieSameSiteKind>(sameSite);
-                if (seed.Expires is { } expiry) cookie.Expires = DateTimeOffset.FromUnixTimeMilliseconds((long)expiry).UtcDateTime;
+                if (seed.Expires is { } expiry) cookie.Expires = expiry / 1000d;
                 core.CookieManager.AddOrUpdateCookie(cookie);
             }
             baseline = (await core.CookieManager.GetCookiesAsync(null)).Select(BrowserCookie.From).ToArray();
             retired.Token.ThrowIfCancellationRequested();
             string headers = string.Join("\r\n", input.Headers.Select(h => h.Key + ": " + h.Value));
-            var content = input.Body.Length == 0 ? null : new MemoryStream(Encoding.UTF8.GetBytes(input.Body));
+            var content = input.Body.Length == 0 ? null : new MemoryStream(Encoding.UTF8.GetBytes(input.Body)).AsRandomAccessStream();
             core.NavigateWithWebResourceRequest(core.Environment.CreateWebResourceRequest(input.Url, input.Method, content, headers));
         }
         async Task<bool> Match(string pattern, string url)
@@ -233,7 +236,7 @@ internal static class NovelWebInteraction
                     window.chrome.webview.postMessage({id:{{JsonSerializer.Serialize(id)}},ok:false});
                   }
                 })();
-                """).WaitAsync(token);
+                """).AsTask(token);
             return await completion.Task.WaitAsync(token);
         }
         finally { core.WebMessageReceived -= Message; }
@@ -257,7 +260,7 @@ internal static class NovelWebInteraction
         internal (string, string, string) Identity => (Name, Domain, Path);
         internal static BrowserCookie From(CoreWebView2Cookie cookie) => new(cookie.Name, cookie.Value,
             cookie.Domain, cookie.Path, cookie.IsSecure, cookie.IsHttpOnly, cookie.SameSite,
-            cookie.IsSession ? null : cookie.Expires.ToUniversalTime());
+            cookie.IsSession ? null : DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(cookie.Expires * 1000d)).UtcDateTime);
         internal NovelWebCookieChange Change(bool deleted = false)
         {
             bool domainCookie = Domain.StartsWith('.') && !Name.StartsWith("__Host-", StringComparison.Ordinal);

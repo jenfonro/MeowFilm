@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Windows;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
 using MeowFilm.Desktop;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
@@ -34,8 +36,8 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         Sources.InteractAsync = (request, token) =>
         {
             view.PauseReading();
-            FrameworkElement owner = settings.IsVisible ? settings : view.IsVisible ? view :
-                SearchWebOwner is { IsVisible: true } searchOwner ? searchOwner : throw new OperationCanceledException(token);
+            FrameworkElement owner = DesktopVisual.IsVisible(settings) ? settings : DesktopVisual.IsVisible(view) ? view :
+                SearchWebOwner is { } searchOwner && DesktopVisual.IsVisible(searchOwner) ? searchOwner : throw new OperationCanceledException(token);
             return NovelWebInteraction.ShowAsync(owner, Rules, request, token);
         };
     }
@@ -66,7 +68,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     }
     internal void RefreshReaderSettings()
     {
-        if (!stopping && !disposed && !applyingReaderSettings && view.IsVisible && route == ReaderRoute &&
+        if (!stopping && !disposed && !applyingReaderSettings && DesktopVisual.IsVisible(view) && route == ReaderRoute &&
             Session is { NeedsReprocessing: true, Loading: false })
             _ = ApplyReaderSettingsAsync();
     }
@@ -77,7 +79,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         {
             await work.Run(async ct =>
             {
-                while (view.IsVisible && route == ReaderRoute && Session is { NeedsReprocessing: true, Loading: false })
+                while (DesktopVisual.IsVisible(view) && route == ReaderRoute && Session is { NeedsReprocessing: true, Loading: false })
                     await ReprocessCurrentAsync(ct);
                 return true;
             });
@@ -89,8 +91,8 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     private void SourceApplyFailed(object? sender, string text)
     {
         if (stopping || disposed) return;
-        if (view.Dispatcher.CheckAccess()) Notify(text);
-        else _ = view.Dispatcher.InvokeAsync(() => { if (!stopping && !disposed) Notify(text); });
+        if (view.DispatcherQueue.HasThreadAccess) Notify(text);
+        else _ = view.DispatcherQueue.TryEnqueue(() => { if (!stopping && !disposed) Notify(text); });
     }
     private void SourcesChanged(object? sender, EventArgs e)
     {
@@ -216,7 +218,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     public void Notify(string text)
     {
         Notice = text;
-        if (settings.IsVisible) settings.PostNotice(text); else view.PostNotice(text);
+        if (DesktopVisual.IsVisible(settings)) settings.PostNotice(text); else view.PostNotice(text);
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Notice)));
     }
     private void Publish()

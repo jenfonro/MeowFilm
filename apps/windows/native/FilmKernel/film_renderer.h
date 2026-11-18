@@ -19,11 +19,13 @@ class FilmRenderer {
 public:
     FilmRenderer();
     ~FilmRenderer();
-    int open(void *hwnd);
+    int open(void *display_window);
     void set_stream(const AVStream *stream);
     AVBufferRef *hardware_device() const; // Borrowed; decoder takes av_buffer_ref.
-    // Null releases only the swapchain for a fenced owner handoff.
-    int attach(void *hwnd);
+    // Null releases only the swapchain for a fenced owner handoff. The returned
+    // IDXGISwapChain1 reference belongs to the caller, not to this renderer.
+    int attach(const mfk_surface *surface, void **swapchain);
+    int surface_update(const mfk_surface &surface);
     int inspect(const AVFrame *base, const AVFrame *enhancement);
     int present(const AVFrame *base, const AVFrame *enhancement, double aspect,
                 double position);

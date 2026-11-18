@@ -16,7 +16,7 @@ public static class FilmPlaybackRecoveryTests
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(5);
 
     private static TestCase Test(string name, Func<Task> run) =>
-        new("film-recovery: " + name, () => MusicQualityConsumerTests.Sta(run));
+        new("film-recovery: " + name, () => TestUiHost.InvokeAsync(run));
     private static string Key(string installation) => $"cat:{installation}:video";
     private static JsonElement Source(string installation, long generation = 1) => FilmJson.Encode(new
     {
@@ -76,7 +76,11 @@ public static class FilmPlaybackRecoveryTests
                 await rig.Session.CommandAsync("select.target", new { target = (request.Target with { Season = 2, Episode = 4, GlobalEpisode = 16 }).Wire() });
                 await Until(() => rig.Page.ActiveTarget.Season == 2 && rig.Page.ActiveTarget.Episode == 4);
                 var currentMetadata = FilmJson.Encode(new { title = "当前第二季资料", seasons = new[] { new { businessId = request.Target.Id + ":season:2", playbackTarget = (request.Target with { Season = 2 }).Wire(), season_number = 2, name = "第二季" } } });
-                first.Film.Change(root => root["metadata"] = Node(currentMetadata));
+                first.Film.Change(root =>
+                {
+                    root["metadata"] = Node(currentMetadata);
+                    root["workInfo"] = Node(WorkInfo(rig.Page.ActiveTarget with { Title = "当前第二季资料" }, currentMetadata));
+                });
                 await Until(() => rig.Page.Title == "当前第二季资料");
                 first.Crash();
                 await Until(() => rig.Page.ConnectionFailed && rig.Host.CanRetry && !rig.Session.HasSession);

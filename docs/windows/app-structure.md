@@ -1,6 +1,6 @@
 # 一个 Windows App，按能力组织
 
-共同规则分别见[页面数据请求](../common/pages/data-requests.md)和[音乐平台客户端上下文](../common/music/platform-client-context.md)。本文件说明 WPF／.NET 的具体装配；模块化接入不等于把所有上下文初始化集中在 Accounts 或页面。
+共同规则分别见[页面数据请求](../common/pages/data-requests.md)和[音乐平台客户端上下文](../common/music/platform-client-context.md)。本文件说明 WinUI 3／.NET 的具体装配；模块化接入不等于把所有上下文初始化集中在 Accounts 或页面。
 
 ## 装配与依赖方向
 
@@ -16,7 +16,7 @@ Audio / Media / Platform / Desktop → Core
 
 Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口、一套导航与设置、一个原生播放协调、一个系统媒体会话。原生媒体基础设施由既有音频链和影视媒体共同使用；当前不装配下载能力。`SystemMedia` 只消费本模块的中性 `ISystemPlayback`／`ISystemMediaBackend`，项目不引用具体播放工程；音乐／电影 typed 投影由 App 装配。
 
-`scripts/windows/verify-app-structure.mjs` 检查 Windows 源码、公共 `apps/runtime`／`packages`、Windows／共享引擎工具和 `scripts/` 根层的共享 Node `.mjs` 工具，不按文件名登记，也不递归扫描整个 `scripts`。iOS 专属工具放在 `scripts/ios/`，专属模板只在其生成运行时中解析；Windows 源码或工具不能反向导入这些工具或模板。相对导入、链接安全、实际运行时入口与依赖和 WPF 资源检查保持；EmbeddedResource 的实际路径、逻辑身份及清单也由此检查。公共与 Windows Node 运行器使用 `node:module` 的 `isBuiltin()` 识别内置模块，workspace 导入按包声明的公开 `exports` 和实际目标文件解析，新增公开子路径或被引用的 helper 无需逐文件登记。portable source-runtime 的无 Node／宿主全局边界仍由公共依赖检查负责，第三方脚本权限不因此改变。结构检查不解析 C#／JS 源码中的完整操作表；协议与方法行为由实际消费者回归验证。Windows 构建输入指纹采用相同源码／工具范围及生成目录排除规则，并包含本端配置、测试、共享引擎输入和随包许可；独立 iOS 代码、工具目录及测试不影响该指纹，共享引擎工具仍按整个职责目录计入。
+`scripts/windows/verify-app-structure.mjs` 检查 Windows 源码、公共 `apps/runtime`／`packages`、Windows／共享引擎工具和 `scripts/` 根层的共享 Node `.mjs` 工具，不按文件名登记，也不递归扫描整个 `scripts`。iOS 专属工具放在 `scripts/ios/`，专属模板只在其生成运行时中解析；Windows 源码或工具不能反向导入这些工具或模板。相对导入、链接安全、实际运行时入口与依赖和 WinUI 资源检查保持；EmbeddedResource 的实际路径、逻辑身份及清单也由此检查。公共与 Windows Node 运行器使用 `node:module` 的 `isBuiltin()` 识别内置模块，workspace 导入按包声明的公开 `exports` 和实际目标文件解析，新增公开子路径或被引用的 helper 无需逐文件登记。portable source-runtime 的无 Node／宿主全局边界仍由公共依赖检查负责，第三方脚本权限不因此改变。结构检查不解析 C#／JS 源码中的完整操作表；协议与方法行为由实际消费者回归验证。Windows 构建输入指纹采用相同源码／工具范围及生成目录排除规则，并包含本端配置、测试、共享引擎输入和随包许可；独立 iOS 代码、工具目录及测试不影响该指纹，共享引擎工具仍按整个职责目录计入。
 
 ## 能力源码
 
@@ -36,7 +36,9 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 | Presentation | 共同视图、主题及中性命名的控件 |
 | Film | 影视首页、来源取数、原生搜索会话、播放交接、模块生命周期和影片专属展示 |
 
-具体歌曲、歌词、音乐平台协议保留 `Music` 语义。跨多个职责的既有 partial 类型保持原公开 namespace，不为凑目录重新设计业务模型或复制 owner。中性控件包括 `CardMotion`、`EntryCard`、`Shelf`、`OverlayScrollChrome`、`SeekBar`、`SkipButton`；主题键为 `Capability.*`。WPF 共享资源使用显式程序集 pack URI，不靠移动后目录的相对搜索回退。
+具体歌曲、歌词、音乐平台协议保留 `Music` 语义。跨多个职责的既有 partial 类型保持原公开 namespace，不为凑目录重新设计业务模型或复制 owner。中性控件包括 `CardMotion`、`EntryCard`、`Shelf`、`OverlayScrollChrome`、`SeekBar`、`SkipButton`；主题键为 `Capability.*`。WinUI 共享资源使用带库身份的 `ms-appx:///` URI，不靠移动后目录的相对搜索回退。
+
+Windows 呈现依赖精确锁定的 Windows App SDK，Shell、页面、播放器画面与覆盖内容处于同一 WinUI 合成树。保留的 WPF FrameworkReference 仅供非可视的调度与文字排版消费者，不承载另一个可视岛。播放器输出及绑定／解绑边界见[原生媒体实现](media-playback.md)；编译、控件测试和真实桌面呈现分别验收。
 
 ## 当前身份与唯一数据格式
 
@@ -51,11 +53,11 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 - 当前提供可淘汰的播放缓存，未提供用户下载管理。
 - 不兼容数据明确失败并保留原始内容。
 
-可执行文件名、程序集名、源文件位置、测试分组和 WPF 资源键的变化都不等于持久化键变化。
+可执行文件名、程序集名、源文件位置、测试分组和界面资源键的变化都不等于持久化键变化。
 
 ## 主窗口启动门槛
 
-`AppLauncher` 在创建首个启动窗口前安装 Desktop 的唯一排版默认，再完成模块装配、外观和窗口关闭偏好读取，依次等待实现 `IDesktopStartupParticipant` 的模块完成 `PrepareStartupAsync`，随后才构造 `ShellWindow` 并调用 `Show()`。现有启动窗口承载等待、失败和重试；模块完整的 `InitializeAsync` 仍由桌面壳的选中模块生命周期负责。外观与关闭偏好作为 App 共享参与者加入两阶段关闭；主窗口拥有原生托盘，隐藏到托盘不进入 App 关闭流程，具体行为见[桌面壳](desktop-shell.md#系统托盘与关闭选择)。
+`AppLauncher` 通过 WinUI `Application.Start` 建立唯一 UI 线程及其同步上下文，在创建首个启动窗口前安装 Desktop 的唯一排版默认，再完成模块装配、外观和窗口关闭偏好读取，依次等待实现 `IDesktopStartupParticipant` 的模块完成 `PrepareStartupAsync`，随后才构造 `ShellWindow` 并调用 `Activate()`。现有启动窗口承载等待、失败和重试；模块完整的 `InitializeAsync` 仍由桌面壳的选中模块生命周期负责。外观与关闭偏好作为 App 共享参与者加入两阶段关闭；主窗口拥有原生托盘，隐藏到托盘不进入 App 关闭流程，具体行为见[桌面壳](desktop-shell.md#系统托盘与关闭选择)。
 
 音乐参与者只完成最小本地准备：通过 `music.accounts.list` 恢复账号状态，读取 `music.catalogSource.settings.get` 和 `music.home.v2`。账号与来源恢复失败不能冒充游客或默认来源；不等待网络登录验证、账号资料或首页 HTTP。快照缺失、不可读取或不能解码为可用展示时均视为未命中，允许正常首载；不把缓存错误变成启动门槛，也不把真实首页请求失败改写为成功空结果。
 
@@ -82,4 +84,4 @@ App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能�
 
 强制释放先确认共享运行器真实退役；原生消费者通过[运行器关闭回执](app-runtime.md#所有权与关闭)完成本地排空，不向退役宿主再次请求会话重置或图片释放，真实关闭失败仍阻断删除与替代代次。清除失败后的托盘退出与浮层退出复用同一单飞 abort 路径；尚未确认、清除中或退出中不接纳竞争动作，也不改走普通保存关闭。
 
-两根全部清除后才移除 pending，关闭旧 Shell，但不关闭 WPF dispatcher；复用启动/失败重试窗口创建新的 `AppStartup`、store、cache owner、runtime、业务模块、偏好、播放和窗口附件。小说原生写入、规则 RPC 与 Web 交互随旧 owner 取消并排空，搜索页及导航委托一并释放并重新装配，不借用旧 `NovelCapability`。入口装配闭包在资源成功释放后清空，旧 Shell 的 Closed 不会终止替代代次。程序 PID 不变，无需手动重启。中断后的进程启动先继续同一请求，部分删除失败仍不准入业务；完成请求的重试不再删除新代业务或缓存。范围及文件排他边界见[本机数据清除](protected-storage.md#clear-all-local-user-data)。
+两根全部清除后才移除 pending，关闭旧 Shell，但不退出 WinUI Application 及其 UI 线程；复用启动/失败重试窗口创建新的 `AppStartup`、store、cache owner、runtime、业务模块、偏好、播放和窗口附件。小说原生写入、规则 RPC 与 Web 交互随旧 owner 取消并排空，搜索页及导航委托一并释放并重新装配，不借用旧 `NovelCapability`。入口装配闭包在资源成功释放后清空，旧 Shell 的 Closed 不会终止替代代次。程序 PID 不变，无需手动重启。中断后的进程启动先继续同一请求，部分删除失败仍不准入业务；完成请求的重试不再删除新代业务或缓存。范围及文件排他边界见[本机数据清除](protected-storage.md#clear-all-local-user-data)。

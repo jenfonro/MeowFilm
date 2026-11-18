@@ -1163,7 +1163,7 @@ test('E03 independent Douban seasons use explicit real season markers/counts wit
 });
 
 for (const counts of [[2, 2, 2, 2], [3, 2, 2, 2]]) {
-  test(`Douban selector compares every season count with TMDB: ${counts.join('/')}`, async t => {
+  test(`reliable Douban metadata remains available independently of TMDB season counts: ${counts.join('/')}`, async t => {
     const f = fixture(t);
     f.handlers.tmdb.request = () => success(tvValue(43, {
       seasons: [1, 2, 3, 4].map(season_number => ({ season_number, episode_count: 2 })),
@@ -1175,14 +1175,11 @@ for (const counts of [[2, 2, 2, 2], [3, 2, 2, 2]]) {
       ({ target_id: target.id, target_type: 'tv', target })) } });
     f.handlers.douban.request = ({ path }) => success(subjects.find(row => path.endsWith(`/${row.id}`)));
     const rows = await f.data.metadataSources(tvTarget);
-    if (counts[0] === 2) {
-      assert.deepEqual(rows.map(row => row.provider), ['tmdb'], 'identical season/count structure is redundant');
-    } else {
-      assert.deepEqual(rows.map(row => row.provider), ['tmdb', 'douban']);
-      assert.equal(rows[1].metadataId, '101', 'the season-one subject anchors the single selector');
-      assert.deepEqual(rows[1].seasons.map(row => [row.season, row.episodeCount, row.metadataId]),
-        counts.map((count, index) => [index + 1, count, String(101 + index)]));
-    }
+    assert.deepEqual(rows.map(row => row.provider), ['tmdb', 'douban']);
+    assert.equal(rows[1].metadataId, '101', 'the season-one subject anchors the single selector');
+    assert.deepEqual(rows[1].seasons.map(row => [row.season, row.episodeCount, row.metadataId]),
+      counts.map((count, index) => [index + 1, count, String(101 + index)]));
+    assert.deepEqual(rows[1].association, { kind: 'title-season', targetProvider: 'tmdb', targetMetadataId: 43 });
     assert.equal(f.calls('douban', 'request').length, 4);
     assert.equal(f.calls('tmdb', 'request').some(row => row.params.path.includes('/season/')), false);
   });

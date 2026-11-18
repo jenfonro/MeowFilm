@@ -4,6 +4,44 @@ import MeowRuntime
 
 @MainActor
 final class FilmPlaybackBlockAdmissionTests: XCTestCase {
+    func testExactSelectionValidationPreservesPendingUntilAcceptedOrRejected() async throws {
+        for accepted in [false, true] {
+            let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
+                attempt: FilmPlaybackFixture.attempt("pending")))
+            let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
+            let preparing = FilmPlaybackGate(), prepared = FilmPlaybackGate()
+            let requested = FilmPlaybackGate(), decision = FilmPlaybackGate()
+            media.preparationEntered = preparing; media.preparationGate = prepared
+            await server.beforeAction { action in
+                if action == "select.target" { await requested.release(); await decision.wait() }
+            }
+            if accepted {
+                await server.reply(to: "select.target", with: FilmPlaybackFixture.snapshot(100, stage: "pending",
+                    attempt: FilmPlaybackFixture.attempt("selected")))
+            } else { await server.fail("select.target", with: .remote("INVALID_REQUEST")) }
+            addTeardownBlock { await prepared.release(); await decision.release(); await model.close() }
+            await model.open()?.value; await preparing.wait()
+            let cancellations = media.pendingCancellations
+            model.selectTarget(try FilmPlaybackTarget(FilmPlaybackFixture.sourceTarget(candidateID: "selected")))
+            await requested.wait()
+            XCTAssertEqual(media.pendingCancellations, cancellations)
+            let waiting = expectation(description: "Prepared candidate waits for selection validation")
+            media.onAwaitingCommit = { waiting.fulfill() }
+            await prepared.release(); await fulfillment(of: [waiting], timeout: 2)
+            media.onAwaitingCommit = nil
+            XCTAssertTrue(media.committed.isEmpty); XCTAssertTrue(media.nativeReleases.isEmpty)
+            await decision.release(); await model.waitForPendingWork()
+            XCTAssertEqual(media.committed, [accepted ? "selected" : "pending"])
+            XCTAssertEqual(media.cancelled, accepted ? ["pending"] : [])
+            XCTAssertEqual(model.actionError?.code, accepted ? nil : "INVALID_REQUEST")
+            let calls = await server.calls()
+            XCTAssertEqual(calls.filter { $0.0 == "session.attempt" &&
+                $0.1.filmObject?["attemptId"] == .string("pending") }.count, 1)
+            XCTAssertFalse(calls.contains { $0.1.filmObject?["action"] == .string("media.failed") })
+            await model.close()
+        }
+    }
+
     func testDurableBlockDecisionRetainsTheSameCandidateUntilAcceptedOrRejected() async throws {
         for outcome in ["STALE_SESSION", "STORAGE_ERROR", "accepted"] {
             let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",

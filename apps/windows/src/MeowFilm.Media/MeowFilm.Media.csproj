@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
-    <UseWPF>true</UseWPF>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWinUI>true</UseWinUI>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <FilmKernelRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..\..\.cache\windows-film-kernel'))</FilmKernelRoot>
   </PropertyGroup>
@@ -24,4 +24,15 @@
   <Target Name="BuildFilmKernel" BeforeTargets="BeforeBuild">
     <Exec Command="powershell -NoProfile -File &quot;$(MSBuildThisFileDirectory)..\..\..\..\scripts\windows\build-film-kernel.ps1&quot; -Configuration $(Configuration)" />
   </Target>
+  <PropertyGroup>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSdkUndockedRegFreeWinRTInitialize>false</WindowsAppSdkUndockedRegFreeWinRTInitialize>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="[1.8.260921001]" />
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
+  </ItemGroup>
 </Project>

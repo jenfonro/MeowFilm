@@ -62,6 +62,16 @@ public struct FilmPlayerPreferences: Codable, Equatable, Sendable {
         defaultRate = min(defaultRate, engine.maximumRate)
         holdRate = min(holdRate, engine.maximumRate)
     }
+
+    func hasSameGestureSettings(as other: Self) -> Bool {
+        holdRate == other.holdRate && seekStep == other.seekStep &&
+            singleTapCenter == other.singleTapCenter && singleTapSides == other.singleTapSides &&
+            doubleTapCenter == other.doubleTapCenter && doubleTapSides == other.doubleTapSides &&
+            swipeVolume == other.swipeVolume && swipeBrightness == other.swipeBrightness &&
+            swipeSeek == other.swipeSeek && swipeEpisodes == other.swipeEpisodes &&
+            hapticHold == other.hapticHold && hapticBrightness == other.hapticBrightness &&
+            hapticVolume == other.hapticVolume && hapticSeek == other.hapticSeek
+    }
 }
 
 private enum FilmPlayerPreferencesError: LocalizedError {
@@ -85,7 +95,7 @@ public final class FilmPlayerPreferencesStore: ObservableObject {
     public func reload() {
         persistenceError = nil
         guard let raw = defaults.object(forKey: Self.preferencesKey) else {
-            preferences = .init()
+            if preferences != .init() { preferences = .init() }
             return
         }
         guard let data = raw as? Data,
@@ -100,7 +110,7 @@ public final class FilmPlayerPreferencesStore: ObservableObject {
             return
         }
         if next != saved { _ = save(next) }
-        else { preferences = next }
+        else if preferences != next { preferences = next }
     }
 
     @discardableResult
@@ -123,7 +133,7 @@ public final class FilmPlayerPreferencesStore: ObservableObject {
         do {
             let data = try JSONEncoder().encode(next)
             defaults.set(data, forKey: Self.preferencesKey)
-            preferences = next
+            if preferences != next { preferences = next }
             persistenceError = nil
             return true
         } catch {

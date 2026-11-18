@@ -1,6 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
+using MeowFilm.Desktop;
 using MeowFilm.Capabilities;
 using MeowFilm.Media;
 using static MeowFilm.Windows.Tests.FilmPlaybackFixture;
@@ -10,7 +10,7 @@ namespace MeowFilm.Windows.Tests;
 public static class FilmPlaybackSessionTests
 {
     private static TestCase Test(string name, Func<Task> action) =>
-        new("film-session: " + name, () => MusicQualityConsumerTests.Sta(action));
+        new("film-session: " + name, () => TestUiHost.InvokeAsync(action));
     private static TaskCompletionSource Gate() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static async Task ReleaseFailure(Func<Task> action)
     {
@@ -32,6 +32,90 @@ public static class FilmPlaybackSessionTests
 
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Test("browse snapshots do not republish unchanged native state while real updates and revocation still publish", async () =>
+        {
+            await using var rig = new FilmPlaybackRig();
+            await rig.OpenAsync(); await Play(rig);
+            int publications = 0;
+            var changes = new List<string?>();
+            rig.Session.MediaStateChanged += (_, _) => publications++;
+            rig.Page.PropertyChanged += (_, args) => changes.Add(args.PropertyName);
+            rig.Runtime.Change(root => root["browsing"]!["sourceId"] = "another-directory");
+            await Until(() => rig.Page.SourceId == "another-directory");
+            Check(publications == 0 && !changes.Any(name => name is nameof(FilmPlaybackPage.MediaView) or
+                nameof(FilmPlaybackPage.HasOutput) or nameof(FilmPlaybackPage.Position) or
+                nameof(FilmPlaybackPage.PlayerStatusText) or nameof(FilmPlaybackPage.PlayerPanOptions)),
+                "a directory snapshot does not touch media consumers");
+            await rig.Session.SeekAsync(42);
+            Check(publications > 0 && changes.Contains(nameof(FilmPlaybackPage.Position)) &&
+                !changes.Contains(nameof(FilmPlaybackPage.MediaView)), "real progress publishes without reattaching the same view");
+            publications = 0; changes.Clear();
+            rig.Native.Pulse("PositionSeconds");
+            Check(publications == 0 && changes.Count == 0, "a same-value native pulse is not a media update");
+            await Play(rig, "replacement");
+            Check(changes.Contains(nameof(FilmPlaybackPage.MediaIdentity)) &&
+                !changes.Contains(nameof(FilmPlaybackPage.MediaView)),
+                "a new occurrence cancels stale controls without remounting the same surface");
+            publications = 0; changes.Clear();
+            rig.Runtime.Change(root => { root["current"] = null; root["stage"] = "stopped"; });
+            await Until(() => !rig.Session.HasOutput && rig.Native.Stops == 1);
+            Check(publications > 0 && changes.Contains(nameof(FilmPlaybackPage.HasOutput)) &&
+                rig.Native.Commits == 2, "authoritative revocation still retires output even in a shared snapshot");
+        });
+        foreach (bool accepted in new[] { false, true })
+            yield return Test("post-commit error survives browse until explicit recovery accepted=" + accepted, async () =>
+            {
+                await using var rig = new FilmPlaybackRig();
+                await rig.OpenAsync();
+                rig.Runtime.Intercept = (method, input, _) =>
+                {
+                    if (method == "film.session.command" && FilmJson.Text(input, "action") == "media.started")
+                    {
+                        if (accepted) rig.Runtime.Handle(method, input);
+                        return Task.FromResult(FilmRuntimeProbe.Failure("STORAGE_ERROR"));
+                    }
+                    return Task.FromResult(rig.Runtime.Handle(method, input));
+                };
+                rig.Runtime.Attempt("committed", Candidate("committed"));
+                await Until(() => rig.Page.ExecutionFailed);
+                Check(rig.Session.HasOutput && !rig.Page.ConnectionFailed && rig.Page.NeedsRecovery &&
+                    !rig.Page.CanSelectDirectory && !rig.Page.CanPlay,
+                    "unknown report results are execution errors, not connection or candidate failures");
+                await rig.Page.CommandAsync("browse", new { sourceId = (string?)null });
+                Check(rig.Page.ExecutionFailed && rig.Page.NeedsRecovery && rig.Native.Commits == 1,
+                    "a successful browse cannot prove that an earlier media report completed");
+                await Error("STORAGE_ERROR", () => rig.Page.SelectEpisodeAsync(rig.Page.Episodes[0]));
+                rig.Runtime.Intercept = null;
+                await rig.Page.ReconnectAsync();
+                Check(!rig.Page.ExecutionFailed && rig.Page.CanSelectDirectory && rig.Native.Commits == 1 &&
+                    rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == "media.started") == (accepted ? 1 : 2),
+                    "recovery verifies the accepted occurrence or retries its report without recommitting native output");
+            });
+        yield return Test("temporary presentation covers preserve pending and accepted playback while explicit navigation drains them", async () =>
+        {
+            await using var rig = new FilmPlaybackRig();
+            await using var module = new FilmCapability(new EmptyHome(), rig.Session, rig.Library);
+            await module.OpenPlaybackAsync(Card(), Card().PlaybackContext!);
+            var entered = Gate(); var finish = Gate();
+            CancellationToken preparing = default;
+            rig.Native.Preparing = async token => { preparing = token; entered.TrySetResult(); await finish.Task.WaitAsync(token); };
+            rig.Runtime.Attempt("covered", Candidate("covered"));
+            await entered.Task;
+            try
+            {
+                module.SuspendPresentation();
+                Check(!preparing.IsCancellationRequested && rig.Session.HasSession &&
+                    !rig.Runtime.Released.Contains("covered"), "settings visibility is not a navigation leave");
+                finish.TrySetResult();
+                await Until(() => rig.Session.HasOutput && rig.Native.SettledIdentity == "covered");
+                module.SuspendPresentation();
+                Check(rig.Session.HasOutput && rig.Native.Stops == 0, "a temporary cover keeps accepted output alive");
+                await module.LeaveNavigationAsync();
+                Check(!rig.Session.HasSession && !rig.Session.HasOutput && rig.Native.Stops == 1 &&
+                    rig.Runtime.Released.Contains("covered"), "actual navigation awaits media and receipt retirement");
+            }
+            finally { finish.TrySetResult(); }
+        });
         yield return Test("closed execution reconnects read-only without replacing the displayed directory or browsing position", async () =>
         {
             await using var rig = new FilmPlaybackRig();
@@ -952,11 +1036,8 @@ public static class FilmPlaybackSessionTests
             await rig.OpenAsync(); await Play(rig);
             await rig.Session.SeekAsync(81); await rig.Session.SetPausedAsync(true);
             await rig.Session.RateAsync(2); await rig.Session.AspectAsync("1:1");
-            var owner = new Window
-            {
-                WindowStartupLocation = WindowStartupLocation.Manual, Left = -10000, Top = -10000,
-                ShowActivated = false, ShowInTaskbar = false, Content = rig.Native.View
-            };
+            var owner = new DesktopWindow { Content = rig.Native.View };
+            owner.Resize(480, 270);
             try
             {
                 owner.Show(); rig.Page.RetainOwner(owner);

@@ -79,7 +79,7 @@ function fixture(t, overrides = {}) {
   const state = id => service.snapshot({ sessionId: id });
   const command = (id, action, fields = {}) => service.command({ sessionId: id, action, ...fields });
   const rawTarget = catalog.sourceRows(source('a'), { list: [{ id: 'detail-a', title: 'Film' }] }).list[0].playbackTarget;
-  return { open, state, command, calls, released, rawTarget };
+  return { open, state, command, calls, released, rawTarget, catalog, library, service };
 }
 
 test('initial directory is loading and the detail menu is published before the selected line completes', async t => {
@@ -249,6 +249,194 @@ test('Douban series totals use the confirmed distinct seasons and never the sele
   await f.command(first.sessionId, 'browse.season', { season: 2 });
   await until(() => !f.state(first.sessionId).browsing.loading);
   assert.deepEqual(f.state(first.sessionId).workInfo, { provider: 'douban', metadataId: '55', kind: 'tv', title: 'Film',
-    summary: 'Douban summary', seasonCount: 3, episodeCount: 30 });
+    summary: 'Douban summary', seasonCount: 3, episodeCount: 30,
+    metadata: f.catalog.metadata('douban', '/rexxar/api/v2/tv/55', metadata) });
   assert.equal(f.state(first.sessionId).browsing.season, 2);
+});
+
+const workMetadata = { id: 17, title: 'Stable film', original_title: 'Stable original', overview: 'TMDB summary',
+  poster_path: '/stable-poster', vote_average: 8.5, genres: [{ id: 1, name: 'Drama' }], runtime: 100,
+  credits: { cast: [{ id: 3, name: 'Stable actor' }], crew: [{ id: 4, name: 'Stable director', job: 'Director' }] },
+  images: { posters: [{ file_path: '/stable-poster' }], backdrops: [] },
+  similar: { results: [{ id: 18, title: 'Related film', media_type: 'movie' }] } };
+const otherMetadata = { id: 55, title: 'Douban film', intro: 'Douban summary', genres: [],
+  actors: [{ name: 'Douban actor' }], rating: { value: 9 }, pic: { normal: '/douban-poster' } };
+const metadataRows = () => [
+  { provider: 'tmdb', metadataId: 17, kind: 'movie', title: workMetadata.title, metadata: structuredClone(workMetadata) },
+  { provider: 'douban', metadataId: 55, kind: 'movie', title: otherMetadata.title, metadata: structuredClone(otherMetadata),
+    association: { targetProvider: 'tmdb', targetMetadataId: 17 } },
+];
+
+test('workInfo exposes detached full catalog metadata and stays independent of the directory provider', async t => {
+  const f = fixture(t, { async metadataSources() { return metadataRows(); } });
+  const first = await f.open({ results: [{ sourceKey: 'a', items: [{ id: 'detail-a', title: 'Film' }] }] });
+  const before = await until(() => {
+    const state = f.state(first.sessionId);
+    return state.metadataSources.length === 2 && !state.browsing.loading && state;
+  });
+  assert.deepEqual(before.workInfo.metadata, f.catalog.metadata('tmdb', '/3/movie/17', workMetadata));
+  assert.equal(before.workInfo.metadata.businessId, first.entryTarget.id);
+  assert.equal(before.workInfo.metadata.similar.results[0].playbackTarget.id, 'tmdb:movie:18');
+  const copy = f.state(first.sessionId);
+  copy.workInfo.metadata.credits.cast[0].name = 'Changed outside the owner';
+  assert.deepEqual(f.state(first.sessionId).workInfo, before.workInfo);
+  await f.command(first.sessionId, 'browse', { sourceId: before.sources[0].id, lineId: 'B' });
+  await until(() => !f.state(first.sessionId).browsing.loading);
+  const sourceDisplay = f.state(first.sessionId);
+  await f.command(first.sessionId, 'browse.metadata', {
+    metadataSourceId: before.metadataSources.find(row => row.provider === 'douban').id,
+  });
+  await until(() => !f.state(first.sessionId).browsing.loading);
+  const after = f.state(first.sessionId);
+  assert.deepEqual(after.entryTarget, before.entryTarget);
+  assert.deepEqual(after.workInfo, before.workInfo);
+  assert.equal(after.metadata.id, 55);
+  assert.equal(after.browsing.sourceId, sourceDisplay.browsing.sourceId);
+  assert.equal(after.browsing.lineId, 'B');
+  await f.command(first.sessionId, 'browse', { sourceId: null });
+  await until(() => !f.state(first.sessionId).browsing.loading);
+  assert.equal(f.state(first.sessionId).metadataSourceId, after.metadataSourceId);
+});
+
+for (const preference of ['tmdb', 'douban']) {
+  for (const available of [['tmdb'], ['douban'], ['tmdb', 'douban']]) {
+    test(`first metadata discovery uses ${preference} preference with ${available.join('/')} without writing a fallback`, async t => {
+      const rows = metadataRows().filter(row => available.includes(row.provider));
+      const entry = rows[0];
+      const f = fixture(t, {
+        async tmdbTargetEntry() { return null; },
+        async targetMetadataEntry(target) {
+          return { value: target.metadataProvider === 'douban' ? structuredClone(otherMetadata) : structuredClone(workMetadata),
+            cache: { status: 'fresh', components: {} }, fetchedAt: 0, expiresAt: Number.MAX_SAFE_INTEGER };
+        },
+        async metadataSources() { return rows; },
+      });
+      await f.service.setSettings({ ...defaultPreferences(), metadataViewProvider: preference });
+      const first = await f.open({ sources: [], target: {
+        id: `${entry.provider}:movie:${entry.metadataId}`, kind: 'movie', title: entry.title,
+        metadataProvider: entry.provider, metadataId: String(entry.metadataId),
+      } });
+      const selectedProvider = available.includes(preference) ? preference : available[0];
+      const state = await until(() => {
+        const value = f.state(first.sessionId);
+        return value.metadataSources.length === rows.length && !value.browsing.loading &&
+          value.metadataSources.find(row => row.id === value.metadataSourceId)?.provider === selectedProvider && value;
+      });
+      assert.equal(state.preferences.metadataViewProvider, preference);
+      assert.equal(f.library.read().preferences.metadataViewProvider, preference);
+      assert.equal(state.workInfo.provider, available.includes('tmdb') ? 'tmdb' : 'douban');
+      assert.deepEqual(state.entryTarget, first.entryTarget);
+      assert.equal(state.attempt, null);
+      assert.deepEqual(f.released, []);
+    });
+  }
+}
+
+test('a missing preferred view does not erase the preference used on the next entry', async t => {
+  let available = ['tmdb'];
+  const f = fixture(t, { async metadataSources() { return metadataRows().filter(row => available.includes(row.provider)); } });
+  await f.service.setSettings({ ...defaultPreferences(), metadataViewProvider: 'douban' });
+  const first = await f.open();
+  await until(() => !f.state(first.sessionId).browsing.loading);
+  assert.equal(f.state(first.sessionId).metadataSources.find(row => row.id === f.state(first.sessionId).metadataSourceId).provider, 'tmdb');
+  await f.service.release({ sessionId: first.sessionId });
+  available = ['tmdb', 'douban'];
+  const second = await f.open();
+  await until(() => f.state(second.sessionId).metadataSources.length === 2 &&
+    f.state(second.sessionId).metadataSourceId === f.state(second.sessionId).metadataSources.find(row => row.provider === 'douban').id);
+  assert.equal(f.library.read().preferences.metadataViewProvider, 'douban');
+  assert.equal(f.state(second.sessionId).workInfo.provider, 'tmdb');
+});
+
+test('first preferred-view discovery preserves a site chosen while association lookup was in flight', async t => {
+  const waiting = deferred();
+  t.after(() => waiting.resolve(metadataRows()));
+  const f = fixture(t, { async metadataSources() { return waiting.promise; } });
+  await f.service.setSettings({ ...defaultPreferences(), metadataViewProvider: 'douban' });
+  const first = await f.open({ results: [{ sourceKey: 'a', items: [{ id: 'detail-a', title: 'Film' }] }] });
+  await until(() => f.state(first.sessionId).stage === 'idle');
+  await f.command(first.sessionId, 'browse', { sourceId: f.state(first.sessionId).sources[0].id, lineId: 'B' });
+  await until(() => !f.state(first.sessionId).browsing.loading);
+  const before = f.state(first.sessionId), reads = f.calls.length;
+  waiting.resolve(metadataRows());
+  await until(() => f.state(first.sessionId).metadataSources.length === 2 &&
+    f.state(first.sessionId).metadataSourceId === f.state(first.sessionId).metadataSources.find(row => row.provider === 'douban').id &&
+    !f.state(first.sessionId).browsing.loading);
+  const after = f.state(first.sessionId);
+  assert.equal(after.browsing.sourceId, before.browsing.sourceId);
+  assert.equal(after.browsing.lineId, 'B');
+  assert.deepEqual(after.target, before.target);
+  assert.equal(f.calls.length, reads);
+});
+
+test('preferred metadata discovery does not truncate an in-flight site directory', async t => {
+  const discovery = deferred(), expansion = deferred();
+  t.after(() => { discovery.resolve(metadataRows()); expansion.resolve(line('B')); });
+  const f = fixture(t, {
+    async metadataSources() { return discovery.promise; },
+    async expand(value, selected) {
+      f.calls.push(['expand', value.key, selected.id]);
+      return expansion.promise;
+    },
+  });
+  await f.service.setSettings({ ...defaultPreferences(), metadataViewProvider: 'douban' });
+  const first = await f.open({ results: [{ sourceKey: 'a', items: [{ id: 'detail-a', title: 'Film' }] }] });
+  await until(() => f.state(first.sessionId).stage === 'idle');
+  const site = f.state(first.sessionId).sources[0].id;
+  await f.command(first.sessionId, 'browse', { sourceId: site, lineId: 'B' });
+  await until(() => f.calls.some(row => row[0] === 'expand'));
+  discovery.resolve(metadataRows());
+  await until(() => f.state(first.sessionId).metadataSources.length === 2 &&
+    f.state(first.sessionId).metadataSources.find(row => row.id === f.state(first.sessionId).metadataSourceId)?.provider === 'douban');
+  assert.equal(f.state(first.sessionId).browsing.loading, true);
+  assert.deepEqual(f.state(first.sessionId).browsing.episodes, []);
+  expansion.resolve(line('B'));
+  await until(() => !f.state(first.sessionId).browsing.loading);
+  const after = f.state(first.sessionId);
+  assert.equal(after.browsing.sourceId, site);
+  assert.equal(after.browsing.lineId, 'B');
+  assert.equal(after.browsing.episodes.length, 1);
+  assert.deepEqual(after.target, first.target);
+  assert.equal(after.attempt, null);
+});
+
+test('an explicit view choice wins over a late first discovery without rewriting the stored provider', async t => {
+  const waiting = deferred();
+  t.after(() => waiting.resolve(metadataRows()));
+  const f = fixture(t, { async metadataSources() { return waiting.promise; } });
+  await f.service.setSettings({ ...defaultPreferences(), metadataViewProvider: 'douban' });
+  const first = await f.open();
+  await until(() => !f.state(first.sessionId).browsing.loading);
+  const selected = f.state(first.sessionId).metadataSourceId;
+  await f.command(first.sessionId, 'browse.metadata', { metadataSourceId: selected, keepSource: true });
+  await until(() => !f.state(first.sessionId).browsing.loading);
+  waiting.resolve(metadataRows());
+  await until(() => f.state(first.sessionId).metadataSources.length === 2);
+  assert.equal(f.state(first.sessionId).metadataSourceId, selected);
+  assert.equal(f.library.read().preferences.metadataViewProvider, 'douban');
+});
+
+test('metadata discovery stays anchored to the entry after selecting a different provider for formal playback', async t => {
+  const f = fixture(t, {
+    async metadataSources(target) {
+      f.calls.push(['discovery', target.metadataProvider, target.metadataId]);
+      return metadataRows().map(row => ({ ...row, title: 'Film', metadata: { ...row.metadata, title: 'Film' } }));
+    },
+    async targetMetadataEntry(target) {
+      return { value: { ...structuredClone(target.metadataProvider === 'douban' ? otherMetadata : workMetadata), title: 'Film' },
+        cache: { status: 'fresh', components: {} }, fetchedAt: 0, expiresAt: Number.MAX_SAFE_INTEGER };
+    },
+  });
+  const first = await f.open();
+  await until(() => f.state(first.sessionId).metadataSources.length === 2 && !f.state(first.sessionId).browsing.loading);
+  const before = f.state(first.sessionId);
+  const selected = before.metadataSources.find(row => row.provider === 'douban');
+  await f.command(first.sessionId, 'select.target', { target: selected.playbackTarget, metadataSourceId: selected.id });
+  await until(() => f.state(first.sessionId).attempt);
+  assert.equal(f.state(first.sessionId).target.metadataProvider, 'douban');
+  await f.command(first.sessionId, 'browse.refresh');
+  await until(() => f.calls.filter(row => row[0] === 'discovery').length === 2);
+  assert.deepEqual(f.calls.filter(row => row[0] === 'discovery').map(row => row.slice(1)), [['tmdb', '17'], ['tmdb', '17']]);
+  assert.deepEqual(f.state(first.sessionId).workInfo, before.workInfo);
+  assert.deepEqual(f.state(first.sessionId).entryTarget, before.entryTarget);
 });

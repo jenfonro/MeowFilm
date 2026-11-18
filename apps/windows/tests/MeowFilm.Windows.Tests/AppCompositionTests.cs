@@ -1,11 +1,14 @@
 using System.Security.Cryptography;
 using System.Text.Json.Nodes;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Color = Windows.UI.Color;
+using Colors = Microsoft.UI.Colors;
+using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.AppHost;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
@@ -17,7 +20,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
-// Real WPF, DPAPI and an explicit script process; no product Main or user profile.
+// Real WinUI, DPAPI and an explicit script process; no product Main or user profile.
 public static class AppCompositionTests
 {
     private static string Required(string name) => Environment.GetEnvironmentVariable(name)
@@ -78,8 +81,8 @@ public static class AppCompositionTests
             await music.NavigateAsync("favorites", default);
             Check(music.Status.Length == 0 && music.View != music.SettingsView);
             Check(music.Navigation.Count > 0 && music.Navigation.Select(n => n.Route).Distinct().Count() == music.Navigation.Count);
-            RenderComponent(music.View, 1050, 650);
-            RenderComponent(music.SettingsView, 860, 650);
+            await RenderComponent(music.View, 1050, 650);
+            await RenderComponent(music.SettingsView, 860, 650);
             Check(!playback.HasMedia, "native browsing does not start playback");
             var status = await runtime.CallAsync("music.script.sources.list", new { });
             Check(status.GetProperty("ok").GetBoolean() && status.GetProperty("value").GetProperty("items").GetArrayLength() == 0 &&
@@ -135,25 +138,25 @@ public static class AppCompositionTests
             try
             {
                 CheckRecommendationPage(music);
-                shell.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent));
+                shell.Show();
                 await Until(() => music.IsCatalogHome && !music.Busy && ShellStatus(shell).Length == 0 &&
-                    ((ListBox)shell.FindName("ModuleNavigationList")).SelectedItem is ModuleSession session &&
+                    ((ListView)DesktopTestUi.WindowRoot(shell).FindName("ModuleNavigationList")).SelectedItem is ModuleSession session &&
                     ReferenceEquals(session.Module, music));
                 Check(music.Status.Length == 0 && music.CatalogSections.Sum(section => section.Items.Count) > 0,
                     "default recommendation must contain native platform data");
                 Check(music.CatalogSourcePlatform == "wy" && !music.HasCatalogSourceError,
                     "cold shell startup consumes the source settings get contract before home");
-                Check(((ListBox)shell.FindName("ModuleNavigationList")).SelectedItem is ModuleSession selected &&
+                Check(((ListView)DesktopTestUi.WindowRoot(shell).FindName("ModuleNavigationList")).SelectedItem is ModuleSession selected &&
                     ReferenceEquals(selected.Module, music) && music.CaptureNavigationLocation() == "catalog-home",
                     "Shell commits its actual home through the selected media item");
                 var destinations = new[] { "NavigationList", "CollectionNavigationList" }
-                    .SelectMany(name => ((ListBox)shell.FindName(name)).Items.OfType<ShellNavigationEntry>()).ToArray();
+                    .SelectMany(name => ((ListView)DesktopTestUi.WindowRoot(shell).FindName(name)).Items.OfType<ShellNavigationEntry>()).ToArray();
                 Check(destinations.Length > 0 && destinations.All(item =>
                     ReferenceEquals(item.Owner.Module, music) && item.Route != "catalog-home"),
                     "the current owner keeps its content navigation without a second home entry");
-                RenderComponent((FrameworkElement)shell.Content, 1244, 848);
-                shell.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent));
-                await Dispatcher.Yield(DispatcherPriority.Background);
+                await RenderComponent((FrameworkElement)shell.Content, 1244, 848);
+                shell.Show();
+                await DesktopTestUi.DrainAsync();
                 Check(runtime.Requests.Count == 1 && runtime.Requests[0].Operation == "home" && !playback.HasMedia,
                     "startup consumes one canonical page without automatic playback");
                 if (pass == 0)
@@ -189,7 +192,7 @@ public static class AppCompositionTests
                 shell.Close();
                 await Task.WhenAll(shell.ShutdownCompletion, closed.Task).WaitAsync(TimeSpan.FromSeconds(8));
                 Check(shell.ShutdownSucceeded, "startup fixture must close through the actual App lifecycle");
-                await Dispatcher.Yield(DispatcherPriority.Background);
+                await DesktopTestUi.DrainAsync();
             }
         }
     }
@@ -216,14 +219,14 @@ public static class AppCompositionTests
         try
         {
             CheckRecommendationPage(music);
-            shell.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent));
+            shell.Show();
             await Until(() => ShellStatus(shell) == expected);
-            Check(((ShellState)shell.DataContext).CanRetry, "explicit retry must remain available");
+            Check(((ShellState)DesktopTestUi.WindowRoot(shell).DataContext).CanRetry, "explicit retry must remain available");
             CheckRecommendationPage(music);
-            RenderComponent((FrameworkElement)shell.Content, 1244, 848);
+            await RenderComponent((FrameworkElement)shell.Content, 1244, 848);
             CheckRecommendationPage(music);
             Check(messages.Count == 0 && music.Status.Length == 0 &&
-                ((NoticeStack)shell.FindName("Notices")).Children.Count == 0,
+                ((NoticeStack)DesktopTestUi.WindowRoot(shell).FindName("Notices")).Children.Count == 0,
                 "Shell-owned failure must not publish a second module notification");
             Check(runtime.Requests.Count == 0 && !playback.HasMedia,
                 "rejected startup must not start unrelated work");
@@ -234,10 +237,10 @@ public static class AppCompositionTests
             shell.Close();
             await Task.WhenAll(shell.ShutdownCompletion, closed.Task).WaitAsync(TimeSpan.FromSeconds(8));
             Check(shell.ShutdownSucceeded, "failed startup must still release the actual App");
-            await Dispatcher.Yield(DispatcherPriority.Background);
+            await DesktopTestUi.DrainAsync();
         }
     }
-    private static string ShellStatus(ShellWindow shell) => ((TextBlock)shell.FindName("StatusText")).Text;
+    private static string ShellStatus(ShellWindow shell) => ((TextBlock)DesktopTestUi.WindowRoot(shell).FindName("StatusText")).Text;
     private static void CheckRecommendationPage(MusicCapability music)
     {
         Check(music.IsCatalogHome,
@@ -253,7 +256,7 @@ public static class AppCompositionTests
         {
             Check(DateTime.UtcNow < deadline, "App shell startup did not settle");
             await Task.Delay(5);
-            await Dispatcher.Yield(DispatcherPriority.Background);
+            await DesktopTestUi.DrainAsync();
         }
     }
     private static MusicPlatformRuntimeFixture StartupRuntime() => new()
@@ -275,28 +278,15 @@ public static class AppCompositionTests
             }));
         }
     };
-    private static void RenderComponent(FrameworkElement view, int width, int height)
+    private static async Task RenderComponent(FrameworkElement view, int width, int height)
     {
-        view.Measure(new Size(width, height)); view.Arrange(new Rect(0, 0, width, height)); view.UpdateLayout();
-        var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32); bitmap.Render(view);
-
+        using var host = view.XamlRoot is null ? new DesktopTestUi.Host(view, width, height) : null;
+        await DesktopTestUi.DrainAsync();
+        var pixels = await DesktopTestUi.Pixels(view, width, height);
+        Check(pixels.Length == width * height * 4, "real WinUI rendering has the requested pixel extent");
     }
     private static void Check(bool condition, string message = "App composition assertion")
     { if (!condition) throw new InvalidOperationException(message); }
     private static async Task Sta(Func<Task> action)
-    {
-        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            _ = dispatcher.InvokeAsync(async () =>
-            {
-                try { await action(); done.TrySetResult(); } catch (Exception e) { done.TrySetException(e); }
-                finally { dispatcher.BeginInvokeShutdown(DispatcherPriority.Background); }
-            });
-            Dispatcher.Run();
-        }) { IsBackground = true };
-        thread.SetApartmentState(ApartmentState.STA); thread.Start();
-        await done.Task.WaitAsync(TimeSpan.FromSeconds(60)); Check(thread.Join(TimeSpan.FromSeconds(5)));
-    }
+    { await TestUiHost.InvokeAsync(action); }
 }

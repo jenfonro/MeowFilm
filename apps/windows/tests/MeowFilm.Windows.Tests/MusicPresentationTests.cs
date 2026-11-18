@@ -1,5 +1,6 @@
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 
@@ -88,48 +89,47 @@ public static partial class MusicUiTests
             Layout();
             var bodies = (Grid)view.FindName("BodyPages");
             var presenter = (ContentControl)bodies.Children[0];
-            var songs = (DataGrid)view.FindName("SongsGrid");
-            True(ReferenceEquals(presenter.Content, songs), "songs own the active body");
-            True(!Visuals(view).OfType<MusicCatalogView>().Any(), "catalog is not a hidden mounted page");
-            True(!Visuals(view).OfType<MusicDiscoveryView>().Any(), "discovery is not a hidden mounted page");
+            var songs = (ListView)view.FindName("SongsGrid");
+            True(ReferenceEquals(presenter.Content, view.FindName("SongsPage")), "songs own the active body");
+            True(!DesktopTestUi.Visuals(view).OfType<MusicCatalogView>().Any(), "catalog is not a hidden mounted page");
+            True(!DesktopTestUi.Visuals(view).OfType<MusicDiscoveryView>().Any(), "discovery is not a hidden mounted page");
             await f.Module.NavigateAsync("archives", default);
             Layout();
             True(ReferenceEquals(presenter.Content, view.FindName("ArchiveScroll")), "archive is the sole body");
-            True(!Visuals(view).OfType<DataGrid>().Any(), "inactive song table leaves layout/input");
+            True(!DesktopTestUi.Visuals(view).OfType<ListView>().Any(), "inactive song table leaves layout/input");
             True(ReferenceEquals(songs.DataContext, f.Module) &&
                 ReferenceEquals(songs.ItemsSource, f.Module.CatalogSongsSource),
                 "unmount keeps the same binding owner and song source");
             await f.Module.NavigateAsync("favorites", default);
             Layout();
-            True(ReferenceEquals(presenter.Content, songs), "same page state and input owner return");
+            True(ReferenceEquals(presenter.Content, view.FindName("SongsPage")), "same page state and input owner return");
         });
         yield return Case("presentation seek rail animation never writes media state and stops on pause hide and scrub", async () =>
         {
             var bar = new SeekBar { Maximum = 30, Value = 1, IsPlaying = true, PlaybackRate = 2, PresentationKey = "test:1" };
             DesktopTheme.SetIsHighContrast(bar, false);
-            var window = new Window { Content = bar, Width = 500, Height = 100,
-                Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false };
+            var window = new DesktopWindow { Content = bar }; window.AttachRoot(); window.Resize(500, 100);
             try
             {
-                window.Show(); window.UpdateLayout(); await Drain();
-                await Task.Delay(160); await Drain();
+                window.Activate(); bar.UpdateLayout(); await MusicTestUi.Drain();
+                await Task.Delay(160); await MusicTestUi.Drain();
                 Equal(1d, bar.Value);
-                if (SystemParameters.ClientAreaAnimation)
+                if (MusicVisuals.CanAnimate(bar))
                     True(bar.DisplayValue > 1.1, "framework advances the painted rail between samples");
                 bar.IsPlaying = false;
                 double paused = bar.DisplayValue;
-                await Task.Delay(120); await Drain();
+                await Task.Delay(120); await MusicTestUi.Drain();
                 Equal(paused, bar.DisplayValue);
                 bar.Value = 10; Equal(10d, bar.DisplayValue);
                 bar.IsPlaying = true;
                 bar.BeginScrub(); bar.UpdateScrub(20);
-                await Task.Delay(100); await Drain();
+                await Task.Delay(100); await MusicTestUi.Drain();
                 Equal(20d, bar.DisplayValue);
                 bar.CancelScrub(); bar.Visibility = Visibility.Collapsed;
                 double hidden = bar.DisplayValue;
-                await Task.Delay(100); await Drain(); Equal(hidden, bar.DisplayValue);
+                await Task.Delay(100); await MusicTestUi.Drain(); Equal(hidden, bar.DisplayValue);
                 bar.Visibility = Visibility.Visible; bar.PlaybackRate = null;
-                await Task.Delay(100); await Drain(); Equal(bar.Value, bar.DisplayValue);
+                await Task.Delay(100); await MusicTestUi.Drain(); Equal(bar.Value, bar.DisplayValue);
             }
             finally { window.Close(); }
         });

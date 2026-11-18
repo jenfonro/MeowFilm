@@ -114,7 +114,6 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
 public sealed record MusicCatalogCoverReference(string Kind, string Id);
 public sealed record MusicCatalogTab(string Id, string Title, IReadOnlyList<MusicCatalogCard> Items);
 public sealed record MusicCatalogSongColumn(IReadOnlyList<MusicCatalogCard> Items);
-public sealed record MusicCatalogPlaylistRow(IReadOnlyList<MusicCatalogCard> Items);
 public enum MusicCatalogSectionPresentation
 {
     Shelf,

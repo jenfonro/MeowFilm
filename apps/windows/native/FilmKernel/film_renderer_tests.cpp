@@ -7,6 +7,7 @@
  * cases. --device additionally requires the logged-in desktop and exercises
  * the production D3D11 renderer, not a dummy GPU. */
 #include "film_renderer.cpp"
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <libplacebo/dummy.h>
@@ -20,6 +21,13 @@ extern "C" {
 } } while (0)
 
 namespace {
+static_assert(MFK_ABI == 2 && sizeof(mfk_surface) == 40 && alignof(mfk_surface) == 8);
+static_assert(offsetof(mfk_surface, size) == 0 && offsetof(mfk_surface, abi) == 4);
+static_assert(offsetof(mfk_surface, display_window) == 8);
+static_assert(offsetof(mfk_surface, width) == 16 && offsetof(mfk_surface, height) == 20);
+static_assert(offsetof(mfk_surface, scale_x) == 24 && offsetof(mfk_surface, scale_y) == 28);
+static_assert(offsetof(mfk_surface, visible) == 32);
+
 bool near_value(float a, float b) { return std::abs(a - b) < 0.00001f; }
 
 struct DoviFrame {
@@ -287,14 +295,11 @@ void device_rendering()
         L"Meowfilm renderer validation", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
         CW_USEDEFAULT, 480, 320, nullptr, nullptr, type.hInstance, nullptr);
     CHECK(window);
-    HWND parking = CreateWindowExW(0, L"STATIC", L"", WS_POPUP,
-        0, 0, 1, 1, nullptr, nullptr, type.hInstance, nullptr);
-    CHECK(parking);
     ShowWindow(window, SW_SHOWNOACTIVATE); UpdateWindow(window);
     CHECK(IsWindowVisible(window));
     {
         FilmRenderer renderer;
-        CHECK(renderer.open(parking) == MFK_OK);
+        CHECK(renderer.open(nullptr) == MFK_OK);
         auto *hardware = renderer.hardware_device();
         CHECK(hardware);
         auto *device = reinterpret_cast<AVD3D11VADeviceContext *>(
@@ -317,17 +322,61 @@ void device_rendering()
                 memset(frame->data[plane] + y * frame->linesize[plane],
                        plane ? 128 : 160, plane ? 80 : 160);
         CHECK(renderer.inspect(frame, nullptr) == MFK_OK && !renderer.native_hdr());
-        CHECK(renderer.attach(window) == MFK_OK);
+        mfk_surface surface{sizeof(mfk_surface), MFK_ABI, window, 480, 320, 1, 1, 1};
+        void *target = nullptr;
+        auto hidden = surface;
+        hidden.display_window = nullptr; hidden.visible = 0;
+        CHECK(valid_surface(hidden));
+        CHECK(renderer.attach(&hidden, &target) == MFK_INVALID_REQUEST && !target);
+        hidden.visible = 1;
+        CHECK(!valid_surface(hidden));
+        CHECK(renderer.attach(&surface, nullptr) == MFK_INVALID_REQUEST);
+        CHECK(renderer.attach(&surface, &target) == MFK_OK && target);
+        auto *swapchain = static_cast<IDXGISwapChain1 *>(target);
+        void *duplicate = target;
+        CHECK(renderer.attach(&surface, &duplicate) == MFK_INVALID_REQUEST && !duplicate);
+        CHECK(renderer.submitted_pictures() == 0);
+        UINT presents = 0;
+        CHECK(SUCCEEDED(swapchain->GetLastPresentCount(&presents)) && presents == 0);
+        DXGI_SWAP_CHAIN_DESC1 target_description{};
+        CHECK(SUCCEEDED(swapchain->GetDesc1(&target_description)));
+        CHECK(target_description.Format == DXGI_FORMAT_R16G16B16A16_FLOAT);
         CHECK(renderer.present(frame, nullptr, 0, 0) == MFK_OK && renderer.submitted_pictures() == 1);
-        CHECK(SetWindowPos(window, nullptr, 0, 0, 640, 400, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE));
+        surface.width = 640; surface.height = 400;
+        surface.scale_x = surface.scale_y = 1.5f;
+        CHECK(renderer.surface_update(surface) == MFK_OK);
+        CHECK(SUCCEEDED(swapchain->GetDesc1(&target_description)));
+        CHECK(target_description.Width == 640 && target_description.Height == 400);
+        IDXGISwapChain2 *scaled = nullptr;
+        CHECK(SUCCEEDED(swapchain->QueryInterface(__uuidof(IDXGISwapChain2),
+                                               reinterpret_cast<void **>(&scaled))));
+        DXGI_MATRIX_3X2_F matrix{};
+        CHECK(SUCCEEDED(scaled->GetMatrixTransform(&matrix)));
+        CHECK(near_value(matrix._11, 1.0f / surface.scale_x) &&
+              near_value(matrix._22, 1.0f / surface.scale_y));
+        release(scaled);
         CHECK(renderer.present(frame, nullptr, 4.0 / 3, 1) == MFK_OK && renderer.submitted_pictures() == 2);
-        CHECK(renderer.attach(nullptr) == MFK_OK && renderer.hardware_device() == hardware);
-        CHECK(renderer.attach(window) == MFK_OK);
+        CHECK(SUCCEEDED(swapchain->GetLastPresentCount(&presents)) && presents == 2);
+        surface.width = surface.height = 0;
+        CHECK(renderer.surface_update(surface) == MFK_OK);
+        CHECK(renderer.present(frame, nullptr, 0, 1) == MFK_OK && renderer.submitted_pictures() == 2);
+        CHECK(SUCCEEDED(swapchain->GetLastPresentCount(&presents)) && presents == 2);
+        surface.width = 640; surface.height = 400;
+        surface.visible = 0; surface.display_window = nullptr;
+        CHECK(renderer.surface_update(surface) == MFK_OK);
+        CHECK(renderer.present(frame, nullptr, 0, 1) == MFK_OK && renderer.submitted_pictures() == 2);
+        CHECK(SUCCEEDED(swapchain->GetLastPresentCount(&presents)) && presents == 2);
+        release(swapchain); target = nullptr;
+        CHECK(renderer.attach(nullptr, &target) == MFK_OK && !target && renderer.hardware_device() == hardware);
+        surface.visible = 1; surface.display_window = window;
+        CHECK(renderer.attach(&surface, &target) == MFK_OK && target);
+        swapchain = static_cast<IDXGISwapChain1 *>(target);
         CHECK(renderer.present(frame, nullptr, 0, 2) == MFK_OK && renderer.submitted_pictures() == 3);
-        std::puts("production D3D11 SDR shader/Present, resize and detached handoff passed");
-        // Preparation checks format/metadata, but a parking HWND cannot decide
-        // the user's display. No mode changes or SDR downgrade are performed.
-        CHECK(renderer.attach(nullptr) == MFK_OK);
+        std::puts("production D3D11 composition shader/Present, stable resize and detached handoff passed; no UI surface bound");
+        // Silent preparation does not decide the user's display. No mode
+        // changes or SDR downgrade are performed.
+        release(swapchain); target = nullptr;
+        CHECK(renderer.attach(nullptr, &target) == MFK_OK && !target);
         frame->color_primaries = AVCOL_PRI_BT2020; frame->color_trc = AVCOL_TRC_SMPTE2084;
         frame->colorspace = AVCOL_SPC_BT2020_NCL;
         CHECK(renderer.inspect(frame, nullptr) == MFK_FORMAT_UNSUPPORTED); // Eight-bit HDR is rejected.
@@ -342,7 +391,7 @@ void device_rendering()
                 std::fill(row, row + (plane ? 80 : 160), plane ? 512 : 600);
             }
         CHECK(renderer.inspect(frame, nullptr) == MFK_OK && renderer.native_hdr());
-        const int attached = renderer.attach(window);
+        const int attached = renderer.attach(&surface, &target);
         if (attached == MFK_HDR_DISPLAY_UNSUPPORTED) {
             CHECK(renderer.submitted_pictures() == 3);
             std::puts("native HDR unsupported display rejected; no SDR fallback or mode switch");
@@ -350,12 +399,14 @@ void device_rendering()
             CHECK(attached == MFK_OK);
             CHECK(renderer.present(frame, nullptr, 0, 3) == MFK_OK && renderer.submitted_pictures() == 4);
             std::puts("native HDR swapchain/shader/Present accepted; physical signal not measured");
+            swapchain = static_cast<IDXGISwapChain1 *>(target);
+            release(swapchain);
+            CHECK(renderer.attach(nullptr, &target) == MFK_OK && !target);
         }
         av_frame_free(&frame);
         CHECK(SUCCEEDED(device->GetDeviceRemovedReason()));
     }
     CHECK(DestroyWindow(window));
-    CHECK(DestroyWindow(parking));
     CHECK(UnregisterClassW(type.lpszClassName, type.hInstance));
     CoUninitialize();
 }

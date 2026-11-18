@@ -6,9 +6,10 @@ using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using System.Windows.Threading;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.Library;
@@ -32,7 +33,7 @@ public static class MusicAccountIntegrationTests
                 data = f.Data;
                 f.Module.SelectedAccount = f.Module.Accounts[0];
                 await f.Module.BeginAccountQrAsync();
-                Check(f.Module.HasAccountQr && f.Module.AccountQrImage is { IsFrozen: true });
+                Check(f.Module.HasAccountQr && f.Module.AccountQrImage is { PixelWidth: > 0, PixelHeight: > 0 });
                 Check(f.Module.AccountStatus == "等待扫码");
                 await f.Calls.CompleteInternalAccountReadAsync(f.Module, "tx");
                 Check(f.Module.AccountStatus == "等待扫码" && f.Module.HasAccountQr);
@@ -120,21 +121,21 @@ public static class MusicAccountIntegrationTests
             Check(f.Module.SelectedAccount!.State == "none");
             Check(f.Module.AccountStatus == "");
         });
-        yield return Case("local QR raster is bounded, frozen and includes white quiet zone", () =>
+        yield return Case("local QR raster is bounded and includes an opaque white quiet zone", () =>
         {
             var image = MusicAccountQrImage.Create("https://music.163.com/login?codekey=SYNTHETIC_QR");
-            Check(image.IsFrozen && image.PixelWidth == image.PixelHeight && image.PixelWidth is > 100 and <= 1024);
-            var pixels = new byte[image.PixelWidth * image.PixelHeight];
-            image.CopyPixels(pixels, image.PixelWidth, 0);
-            Check(pixels.Take(image.PixelWidth * 16).All(pixel => pixel == 255));
+            Check(image.PixelWidth == image.PixelHeight && image.PixelWidth is > 100 and <= 1024);
+            var pixels = MusicTestUi.Pixels(image);
+            Check(pixels.Take(image.PixelWidth * 16 * 4).All(pixel => pixel == 255));
             Check(pixels.Any(pixel => pixel == 0) && pixels.All(pixel => pixel is 0 or 255));
+            Check(pixels.Where((_, index) => index % 4 == 3).All(alpha => alpha == 255));
             // Encoding protocol text never opens it. URI-use restrictions belong to actual loaders.
             foreach (var address in new[] { "https://attacker.invalid/login?codekey=x", "http://music.163.com/login?codekey=x",
                 "https://music.163.com/login?codekey=x&redirect=x", "https://music.163.com:444/login?codekey=x",
                 "file:///fixture", "https://music.163.com/login?codekey=", "relative-text", "https://user@qr.invalid/" })
             {
                 var encoded = MusicAccountQrImage.Create(address);
-                Check(encoded.IsFrozen && encoded.PixelWidth == encoded.PixelHeight && encoded.PixelWidth <= 1024);
+                Check(encoded.PixelWidth == encoded.PixelHeight && encoded.PixelWidth <= 1024);
             }
             return Task.CompletedTask;
         });
@@ -147,12 +148,12 @@ public static class MusicAccountIntegrationTests
             Check(qr.Source is null);
             f.Module.SelectedAccount = f.Module.Accounts[0];
             await f.Module.BeginAccountQrAsync();
-            await Dispatcher.Yield(DispatcherPriority.DataBind);
+            await MusicTestUi.Drain();
             view.UpdateLayout();
             Check(qr.Source is not null && ReferenceEquals(qr.Source, f.Module.AccountQrImage));
             await f.Module.LeaveAccountQrAsync();
             Check(!f.Module.HasAccountQr);
-            await Dispatcher.Yield(DispatcherPriority.DataBind);
+            await MusicTestUi.Drain();
             Check(qr.Source is null);
         });
         yield return Case("switching SMS and QR modes suspends and resumes only visible QR polling", async () =>
@@ -160,21 +161,20 @@ public static class MusicAccountIntegrationTests
             await using var f = await Fixture.Create();
             f.Module.SelectedAccount = f.Module.Accounts[0];
             var view = new MusicAccountsView { DataContext = f.Module };
-            var window = new Window { Content = view, Width = 620, Height = 1000,
-                Left = -32000, Top = -32000, ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None };
+            var window = MusicTestUi.Window(view, 620, 1000);
             try
             {
-                window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
-                ((Popup)view.FindName("LoginPopup")).IsOpen = true;
+                window.Show(); await MusicTestUi.Drain();
+                MusicTestUi.OpenAccountLogin(view);
                 await f.Module.BeginAccountQrAsync();
                 int before = f.Transport.Requests;
-                ((Button)view.FindName("SmsModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                DesktopTestUi.Invoke(((Button)view.FindName("SmsModeButton")));
                 await Task.Delay(2300);
                 Check(f.Transport.Requests == before && f.Module.HasAccountQr);
-                ((Button)view.FindName("QrModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                DesktopTestUi.Invoke(((Button)view.FindName("QrModeButton")));
                 using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
                 while (f.Transport.Requests == before || f.Module.AccountBusy) await Task.Delay(20, deadline.Token);
-                ((Button)view.FindName("SmsModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                DesktopTestUi.Invoke(((Button)view.FindName("SmsModeButton")));
                 int polled = f.Transport.Requests;
                 await Task.Delay(2300);
                 Check(polled > before && f.Transport.Requests == polled && !f.Module.SelectedAccount!.HasSession);
@@ -366,16 +366,15 @@ public static class MusicAccountIntegrationTests
         f.Module.SelectedAccount = f.Module.Accounts[0];
         f.Transport.LimitQrPolling = true;
         var view = new MusicAccountsView { DataContext = f.Module };
-        var window = new Window { Content = view, Width = 620, Height = 1000,
-            Left = -32000, Top = -32000, ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None };
-        var popup = (Popup)view.FindName("LoginPopup");
+        var window = MusicTestUi.Window(view, 620, 1000);
+        var popup = (ContentDialog)view.FindName("LoginPopup");
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
-            popup.IsOpen = true;
+            window.Show(); await MusicTestUi.Drain();
+            MusicTestUi.OpenAccountLogin(view);
             await f.Module.BeginAccountQrAsync();
-            await Dispatcher.Yield(DispatcherPriority.ContextIdle);
-            Check(popup.IsOpen && ((Image)view.FindName("AccountQrImage")).IsVisible);
+            await MusicTestUi.Drain();
+            Check(MusicTestUi.IsDialogOpen(popup) && DesktopVisual.IsVisible((Image)view.FindName("AccountQrImage")));
             await Until(() => f.Transport.QrPollTimes.Count >= 2 && !f.Module.AccountBusy);
             var polls = f.Transport.QrPollTimes.ToArray();
             Check(polls.Length >= 2 && Volatile.Read(ref f.Transport.QrRateLimits) == 0 &&
@@ -383,9 +382,9 @@ public static class MusicAccountIntegrationTests
             Check(polls.Zip(polls.Skip(1), (before, after) => Stopwatch.GetElapsedTime(before, after))
                 .All(interval => interval >= TimeSpan.FromSeconds(3)));
             int stopped = f.Transport.QrPollTimes.Count;
-            popup.IsOpen = false;
+            popup.Hide();
             await Until(() => !f.Module.HasAccountQr && !f.Module.AccountBusy);
-            await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+            await MusicTestUi.Drain();
             await Task.Delay(TimeSpan.FromMilliseconds(3300));
             Check(f.Transport.QrPollTimes.Count == stopped && Volatile.Read(ref f.Transport.QrRateLimits) == 0);
         }
@@ -398,21 +397,20 @@ public static class MusicAccountIntegrationTests
             await using var f = await Fixture.Create();
             f.Module.SelectedAccount = f.Module.Accounts[0];
             var view = new MusicAccountsView { DataContext = f.Module };
-            var window = new Window { Content = view, Width = 620, Height = 1000,
-                Left = -32000, Top = -32000, ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None };
-            var popup = (Popup)view.FindName("LoginPopup");
+            var window = MusicTestUi.Window(view, 620, 1000);
+            var popup = (ContentDialog)view.FindName("LoginPopup");
             var qrMode = (Button)view.FindName("QrModeButton");
             var smsMode = (Button)view.FindName("SmsModeButton");
             var qrText = ((StackPanel)view.FindName("QrPanel")).Children.OfType<TextBlock>().Single();
             var notices = new List<DesktopNoticeEventArgs>();
-            window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, notice) =>
-            { if (notice.Message.Length > 0) notices.Add(notice); }));
+            NoticeOutlet.SetReceiver(DesktopTestUi.WindowRoot(window), notice =>
+            { if (notice.Message.Length > 0) notices.Add(notice); });
             try
             {
-                window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
-                popup.IsOpen = true;
-                smsMode.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+                window.Show(); await MusicTestUi.Drain();
+                MusicTestUi.OpenAccountLogin(view);
+                DesktopTestUi.Invoke(smsMode);
+                await MusicTestUi.Drain();
                 await f.Module.BeginAccountQrAsync();
                 await CheckVisibleStatus("等待扫码");
                 foreach (string state in new[] { "waiting", "waiting", "confirming", "confirming", "waiting", "confirming" })
@@ -441,15 +439,15 @@ public static class MusicAccountIntegrationTests
                 await f.Configure(new { qrStatus = "authenticated", expired });
                 int terminalPolls = f.Transport.QrPollTimes.Count;
                 await f.Module.CheckAccountQrAsync();
-                await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+                await MusicTestUi.Drain();
                 string expected = expired ? "会话无效或已过期" : "会话验证成功";
                 Check(!f.Module.HasAccountQr && f.Module.AccountStatus == expected &&
                     f.Module.SelectedAccount!.State == (expired ? "none" : "verified"));
-                Check(notices.Count == 1 && notices[0].Message == expected && view.IsAncestorOf(notices[0].Outlet));
+                Check(notices.Count == 1 && notices[0].Message == expected && DesktopVisual.Contains(view, notices[0].Outlet));
                 var accountOutlet = notices[0].Outlet;
                 await f.Calls.CompleteInternalAccountReadAsync(f.Module, "tx");
                 await f.Module.CheckAccountQrAsync();
-                await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+                await MusicTestUi.Drain();
                 Check(f.Module.AccountStatus == expected);
                 Check(f.Transport.QrPollTimes.Count == terminalPolls + 1);
                 Check(notices.Count(notice => ReferenceEquals(notice.Outlet, accountOutlet)) == 1);
@@ -462,17 +460,17 @@ public static class MusicAccountIntegrationTests
 
             async Task CheckVisibleStatus(string expected)
             {
-                qrMode.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                DesktopTestUi.Invoke(qrMode);
                 try
                 {
-                    await Dispatcher.Yield(DispatcherPriority.ContextIdle);
-                    Check(popup.IsOpen && qrText.IsVisible && qrText.Text == expected &&
+                    await MusicTestUi.Drain();
+                    Check(MusicTestUi.IsDialogOpen(popup) && DesktopVisual.IsVisible(qrText) && qrText.Text == expected &&
                         f.Module.AccountStatus == expected && notices.Count == 0);
                 }
                 finally
                 {
-                    smsMode.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+                    DesktopTestUi.Invoke(smsMode);
+                    await MusicTestUi.Drain();
                 }
             }
         }
@@ -886,7 +884,7 @@ public static class MusicAccountIntegrationTests
     private static async Task WaitForEditable(MusicCapability module)
     {
         // Admit the posted resume refresh before observing actual idle state.
-        await Dispatcher.Yield(DispatcherPriority.Background);
+        await MusicTestUi.Drain();
         var idle = Signal();
         PropertyChangedEventHandler changed = (_, _) => { if (module.CanEdit) idle.TrySetResult(); };
         module.PropertyChanged += changed;
@@ -898,23 +896,7 @@ public static class MusicAccountIntegrationTests
         finally { module.PropertyChanged -= changed; }
     }
     private static async Task Sta(Func<Task> action)
-    {
-        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            _ = dispatcher.InvokeAsync(async () =>
-            {
-                try { await action(); done.TrySetResult(); }
-                catch (Exception error) { done.TrySetException(error); }
-                finally { dispatcher.BeginInvokeShutdown(DispatcherPriority.Background); }
-            });
-            Dispatcher.Run();
-        }) { IsBackground = true };
-        thread.SetApartmentState(ApartmentState.STA); thread.Start();
-        await done.Task.WaitAsync(TimeSpan.FromSeconds(45));
-        Check(thread.Join(TimeSpan.FromSeconds(5)));
-    }
+    { await TestUiHost.InvokeAsync(action); }
     private sealed class Fixture : IAsyncDisposable
     {
         public readonly MusicPlatformRuntimeFixture Runtime = new();

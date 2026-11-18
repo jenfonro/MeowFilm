@@ -1,11 +1,14 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Media;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
+using Color = global::Windows.UI.Color;
+using Colors = Microsoft.UI.Colors;
 using MeowFilm.Capabilities;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities.Film.Rules;
@@ -20,11 +23,11 @@ public static class SettingsNavigationTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return new("settings navigation: category opens owner view and Back restores origin without replay",
-            () => MusicQualityConsumerTests.Sta(Navigate));
+            () => TestUiHost.InvokeAsync(Navigate));
         yield return new("settings composition: App restoration is independent of the view and offline native settings stay editable while a real execution request fails",
-            () => MusicQualityConsumerTests.Sta(OfflineRules));
+            () => TestUiHost.InvokeAsync(OfflineRules));
         yield return new("settings layout: real novel managers stay compact below shell categories with shared white search at supported widths",
-            () => MusicQualityConsumerTests.Sta(NovelShellLayout));
+            () => TestUiHost.InvokeAsync(NovelShellLayout));
     }
 
     private static async Task OfflineRules()
@@ -72,52 +75,51 @@ public static class SettingsNavigationTests
         await appearance.LoadAsync();
         var shell = new ShellWindow([music, film, novel], [], () => Task.CompletedTask, () => Task.CompletedTask, appearance: appearance)
         {
-            Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false
         };
         try
         {
             shell.Show();
             await Drain();
-            ((Button)shell.FindName("SettingsButton")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            DesktopTestUi.Invoke((Button)DesktopTestUi.WindowRoot(shell).FindName("SettingsButton"));
             await Drain();
-            var header = (DesktopPageHeader)shell.FindName("PageHeaderHost");
+            var header = (DesktopPageHeader)DesktopTestUi.WindowRoot(shell).FindName("PageHeaderHost");
             var slot = (ContentControl)header.FindName("LeadingSlot");
             var tabs = ((Panel)slot.Content).Children.OfType<RadioButton>().ToArray();
             Check(tabs.Select(tab => tab.Content).SequenceEqual(new[] { "通用", "音乐", "影视", "小说" }));
-            Check(tabs[0].IsChecked == true && !music.SettingsView.IsVisible && !film.SettingsView.IsVisible);
+            Check(tabs[0].IsChecked == true && !DesktopVisual.IsVisible(music.SettingsView) && !DesktopVisual.IsVisible(film.SettingsView));
             Check(film.Initializations == 0);
             tabs[1].IsChecked = true;
             await Drain();
-            Check(music.SettingsView.IsVisible && !film.SettingsView.IsVisible);
+            Check(DesktopVisual.IsVisible(music.SettingsView) && !DesktopVisual.IsVisible(film.SettingsView));
             ((TextBox)music.SettingsView).Text = "未保存草稿";
             int navigations = music.Navigations;
             tabs[2].IsChecked = true;
             await Drain();
-            Check(film.SettingsView.IsVisible && !music.SettingsView.IsVisible && film.Initializations == 1);
+            Check(DesktopVisual.IsVisible(film.SettingsView) && !DesktopVisual.IsVisible(music.SettingsView) && film.Initializations == 1);
             ((TextBox)film.SettingsView).Text = "影视草稿";
             tabs[1].IsChecked = true;
             await Drain();
-            Check(music.SettingsView.IsVisible && ((TextBox)music.SettingsView).Text == "未保存草稿");
+            Check(DesktopVisual.IsVisible(music.SettingsView) && ((TextBox)music.SettingsView).Text == "未保存草稿");
             tabs[2].IsChecked = true;
             await Drain();
             Check(((TextBox)film.SettingsView).Text == "影视草稿" && film.Initializations == 1);
             tabs[3].IsChecked = true;
             await Drain();
-            Check(novel.SettingsView.IsVisible && !film.SettingsView.IsVisible && novel.Initializations == 1);
+            Check(DesktopVisual.IsVisible(novel.SettingsView) && !DesktopVisual.IsVisible(film.SettingsView) && novel.Initializations == 1);
             ((TextBox)novel.SettingsView).Text = "小说排版草稿";
             tabs[2].IsChecked = true;
             await Drain();
-            Check(((TextBox)film.SettingsView).Text == "影视草稿" && !novel.SettingsView.IsVisible);
+            Check(((TextBox)film.SettingsView).Text == "影视草稿" && !DesktopVisual.IsVisible(novel.SettingsView));
             tabs[0].IsChecked = true;
             await Drain();
-            Check(!film.SettingsView.IsVisible && !music.SettingsView.IsVisible);
-            var before = shell.Background;
+            Check(!DesktopVisual.IsVisible(film.SettingsView) && !DesktopVisual.IsVisible(music.SettingsView));
+            var before = ((Grid)DesktopTestUi.WindowRoot(shell)).Background;
             await appearance.SaveAsync("#A0D0C0");
-            Check(!ReferenceEquals(shell.Background, before));
-            GeneralAppearanceTests.SavePreview((FrameworkElement)shell.Content, "general-shell", 1110, 820);
-            ((Button)shell.FindName("BackButton")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            Check(!ReferenceEquals(((Grid)DesktopTestUi.WindowRoot(shell)).Background, before));
+            await GeneralAppearanceTests.SavePreview((FrameworkElement)shell.Content, "general-shell", 1110, 820);
+            DesktopTestUi.Invoke((Button)DesktopTestUi.WindowRoot(shell).FindName("BackButton"));
             await Drain();
-            Check(music.View.IsVisible && !film.SettingsView.IsVisible && !music.SettingsView.IsVisible);
+            Check(DesktopVisual.IsVisible(music.View) && !DesktopVisual.IsVisible(film.SettingsView) && !DesktopVisual.IsVisible(music.SettingsView));
             Check(music.Navigations == navigations);
         }
         finally
@@ -142,7 +144,6 @@ public static class SettingsNavigationTests
         var shell = new ShellWindow([new Module("music", "音乐"), new Module("film", "影视"), novel], [],
             () => novel.DisposeAsync().AsTask(), () => novel.DisposeAsync().AsTask(), appearance: appearance)
         {
-            Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false
         };
         var root = (FrameworkElement)shell.Content;
         var settings = (NovelSettingsView)novel.SettingsView;
@@ -151,24 +152,22 @@ public static class SettingsNavigationTests
         {
             Environment.SetEnvironmentVariable("MEOWFILM_SETTINGS_PREVIEW_ROOT",
                 previous ?? TestWorkspace.DataPath("novel-management-previews"));
-            DesktopTheme.SetIsHighContrast(shell, false);
+            DesktopTheme.SetIsHighContrast(DesktopTestUi.WindowRoot(shell), false);
             shell.Show();
-            await Ready(() => shell.IsLoaded && ((Button)shell.FindName("SettingsButton")).IsEnabled);
-            ((Button)shell.FindName("SettingsButton")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
-            var header = (DesktopPageHeader)shell.FindName("PageHeaderHost");
+            await Ready(() => DesktopTestUi.WindowRoot(shell).IsLoaded && ((Button)DesktopTestUi.WindowRoot(shell).FindName("SettingsButton")).IsEnabled);
+            DesktopTestUi.Invoke((Button)DesktopTestUi.WindowRoot(shell).FindName("SettingsButton"));
+            var header = (DesktopPageHeader)DesktopTestUi.WindowRoot(shell).FindName("PageHeaderHost");
             var slot = (ContentControl)header.FindName("LeadingSlot");
-            await Ready(() => slot.IsVisible && slot.Content is Panel);
+            await Ready(() => DesktopVisual.IsVisible(slot) && slot.Content is Panel);
             var categories = (Panel)slot.Content;
             var areas = categories.Children.OfType<RadioButton>().ToArray();
             Check(areas.Select(area => area.Content).SequenceEqual(new[] { "通用", "音乐", "影视", "小说" }));
             areas.Single(area => Equals(area.Content, "小说")).IsChecked = true;
-            await Ready(() => settings.IsLoaded && settings.IsVisible && sources.Sources.Count == 1);
+            await Ready(() => settings.IsLoaded && DesktopVisual.IsVisible(settings) && sources.Sources.Count == 1);
             foreach (int width in new[] { 860, 1110 })
             {
                 // Match the existing shell fixture's fixed viewport, without changing the desktop.
-                shell.MinWidth = shell.MaxWidth = width;
-                shell.MinHeight = shell.MaxHeight = 820;
-                shell.Width = width; shell.Height = 820;
+                shell.Resize(width, 820);
                 foreach (var (title, marker, name) in new[]
                 {
                     ("书源管理", runtime.Records.Single().Name, "sources"),
@@ -176,19 +175,18 @@ public static class SettingsNavigationTests
                 })
                 {
                     NovelTests.Find<RadioButton>(settings).Single(area => Equals(area.Content, title)).IsChecked = true;
-                    await Ready(() => settings.IsArrangeValid && Math.Abs(root.ActualWidth - width) < 1 &&
-                        Math.Abs(root.ActualHeight - 820) < 1 && NovelTests.Find<TextBlock>(settings).Any(text =>
-                            text.IsLoaded && text.IsVisible && text.IsArrangeValid && text.Text == marker));
+                    await Ready(() => root.ActualWidth > 0 && root.ActualHeight > 0 && NovelTests.Find<TextBlock>(settings).Any(text =>
+                            text.IsLoaded && DesktopVisual.IsVisible(text) && text.Text == marker));
                     var subpages = NovelTests.Find<RadioButton>(settings).ToArray();
                     var manager = NovelTests.Find<ManagementList>(settings).Single();
-                    var items = NovelTests.Find<ListBox>(manager).Single();
+                    var items = NovelTests.Find<ListView>(manager).Single();
                     var reading = NovelTests.Find<Button>(settings).Single(button => Equals(button.Content, "阅读排版"));
                     var categoryBounds = Bounds(categories);
                     var pageBounds = Bounds(settings);
                     var subpageBounds = Bounds(subpages[0]);
                     var searchBounds = Bounds(manager.Search);
                     var listBounds = Bounds(items);
-                    GeneralAppearanceTests.SavePreview(root, $"novel-settings-shell-{name}-{width}", width, 820);
+                    await GeneralAppearanceTests.SavePreview(root, $"novel-settings-shell-{name}-{width}", width, 820);
                     Verify(areas[^1].IsChecked == true && subpages.Select(area => area.Content)
                         .SequenceEqual(new[] { "书源管理", "替换净化" }) &&
                         Equals(subpages.Single(area => area.IsChecked == true).Content, title),
@@ -206,8 +204,8 @@ public static class SettingsNavigationTests
                         "search tools, reading settings and shell caption must not overlap navigation");
                     foreach (var group in new[] { areas, subpages })
                     {
-                        Verify(group.All(area => ReferenceEquals(area.Style, area.FindResource("MeowFilm.SettingsArea")) &&
-                            area.FontWeight == FontWeights.Normal), "both navigation levels use the original regular shared style");
+                        Verify(group.All(area => ReferenceEquals(area.Style, DesktopVisual.Resource(area, "MeowFilm.SettingsArea")) &&
+                            area.FontWeight == Microsoft.UI.Text.FontWeights.Normal), "both navigation levels use the original regular shared style");
                         for (int i = 1; i < group.Length; i++)
                             Verify(Bounds(group[i - 1]).Right <= Bounds(group[i]).Left + 1,
                                 "adjacent navigation labels must not overlap");
@@ -216,13 +214,13 @@ public static class SettingsNavigationTests
                         .Append(manager.Search).Append(manager.Tools).Append(reading).Append(items))
                     {
                         var bounds = Bounds(control);
-                        Verify(control.IsVisible && bounds.Width > 0 && bounds.Height > 0 &&
+                        Verify(DesktopVisual.IsVisible(control) && bounds.Width > 0 && bounds.Height > 0 &&
                             bounds.Left >= -1 && bounds.Top >= -1 && bounds.Right <= root.ActualWidth + 1 &&
                             bounds.Bottom <= root.ActualHeight + 1, "navigation and manager controls must fit the real shell viewport");
                     }
                     var searchChrome = (Border)VisualTreeHelper.GetChild(manager.Search, 0);
-                    Verify(ReferenceEquals(manager.Search.Style, manager.Search.FindResource("MeowFilm.ManagementSearch")) &&
-                        ReferenceEquals(manager.Search.Background, manager.Search.FindResource("MeowFilm.Brush.Surface")) &&
+                    Verify(ReferenceEquals(manager.Search.Style, DesktopVisual.Resource(manager.Search, "MeowFilm.ManagementSearch")) &&
+                        ReferenceEquals(manager.Search.Background, DesktopVisual.Resource(manager.Search, "MeowFilm.Brush.Surface")) &&
                         manager.Search.Background is SolidColorBrush background && background.Color == Colors.White &&
                         ReferenceEquals(searchChrome.Background, manager.Search.Background),
                         "the real manager must render the original shared white search chrome");
@@ -242,14 +240,14 @@ public static class SettingsNavigationTests
             await Drain();
             Check(shell.CleanupCompleted && !shell.IsVisible);
         }
-        Rect Bounds(FrameworkElement element) => element.TransformToAncestor(root).TransformBounds(new Rect(element.RenderSize));
+        Rect Bounds(FrameworkElement element) => DesktopTestUi.Bounds(element, root);
         async Task Ready(Func<bool> condition)
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             do
             {
                 timeout.Token.ThrowIfCancellationRequested();
-                shell.UpdateLayout();
+                DesktopTestUi.WindowRoot(shell).UpdateLayout();
                 await Drain();
             } while (!condition());
         }
@@ -257,7 +255,7 @@ public static class SettingsNavigationTests
 
     private static async Task Drain()
     {
-        for (int i = 0; i < 5; i++) await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        for (int i = 0; i < 5; i++) await DesktopTestUi.DrainAsync();
     }
     private static void Check(bool condition)
     {

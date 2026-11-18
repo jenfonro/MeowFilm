@@ -300,9 +300,9 @@ public static partial class MusicUiTests
             Equal(1, module.SongSearch.Pages);
             await module.ClearSearchHistoryAsync();
             True(!module.HasSearchHistory, "history cleared"); Equal(0, runtime.Calls.Count);
-            module.SettingsView.Measure(new System.Windows.Size(1000, 1800));
-            module.SettingsView.Arrange(new System.Windows.Rect(0, 0, 1000, 1800)); module.SettingsView.UpdateLayout();
-            var buttons = Visuals(module.SettingsView).OfType<System.Windows.Controls.Button>()
+            module.SettingsView.Measure(new global::Windows.Foundation.Size(1000, 1800));
+            module.SettingsView.Arrange(new global::Windows.Foundation.Rect(0, 0, 1000, 1800)); module.SettingsView.UpdateLayout();
+            var buttons = Visuals(module.SettingsView).OfType<Microsoft.UI.Xaml.Controls.Button>()
                 .Select(button => button.Content as string).ToArray();
             True(buttons.Contains("清空搜索历史"), "search history can be cleared from settings");
         });

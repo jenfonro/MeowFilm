@@ -1,9 +1,8 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 
 namespace MeowFilm.Desktop;
 
@@ -33,9 +32,9 @@ public partial class DesktopPageHeader : UserControl
         string? HeadingFallback, IReadOnlyList<DesktopHeaderAction> AdditionalActions);
 
     public static readonly DependencyProperty NavigationProperty = DependencyProperty.Register(
-        nameof(Navigation), typeof(FrameworkElement), typeof(DesktopPageHeader));
+        nameof(Navigation), typeof(FrameworkElement), typeof(DesktopPageHeader), new PropertyMetadata(null, SlotsChanged));
     public static readonly DependencyProperty CenterProperty = DependencyProperty.Register(
-        nameof(Center), typeof(FrameworkElement), typeof(DesktopPageHeader));
+        nameof(Center), typeof(FrameworkElement), typeof(DesktopPageHeader), new PropertyMetadata(null, SlotsChanged));
 
     private readonly ObservableCollection<DesktopHeaderActionItem> actions = [];
     private Presentation? presentation;
@@ -54,6 +53,13 @@ public partial class DesktopPageHeader : UserControl
             catch (Exception) { OperationFailed?.Invoke(this, EventArgs.Empty); }
         };
         Unloaded += (_, _) => ReleasePresentation();
+    }
+
+    private static void SlotsChanged(DependencyObject owner, DependencyPropertyChangedEventArgs args)
+    {
+        var header = (DesktopPageHeader)owner;
+        if (header.NavigationSlot is not null) header.NavigationSlot.Content = header.Navigation;
+        if (header.CenterSlot is not null) header.CenterSlot.Content = header.Center;
     }
 
     public FrameworkElement? Navigation
@@ -80,7 +86,7 @@ public partial class DesktopPageHeader : UserControl
     public void Present(IDesktopHeaderSource? source, DesktopHeaderContribution fallback,
         string? headingFallback = null, IReadOnlyList<DesktopHeaderAction>? additionalActions = null)
     {
-        Dispatcher.VerifyAccess();
+        if (!DispatcherQueue.HasThreadAccess) throw new InvalidOperationException("DESKTOP_HEADER_THREAD");
         ArgumentNullException.ThrowIfNull(fallback);
         if (!ReferenceEquals(presentation?.Source, source)) ReleasePresentation();
         presentation = new(source, fallback, headingFallback, additionalActions ?? []);
@@ -90,7 +96,7 @@ public partial class DesktopPageHeader : UserControl
 
     public void Retire()
     {
-        Dispatcher.VerifyAccess();
+        if (!DispatcherQueue.HasThreadAccess) throw new InvalidOperationException("DESKTOP_HEADER_THREAD");
         ReleasePresentation();
         presentation = null;
     }
@@ -102,18 +108,12 @@ public partial class DesktopPageHeader : UserControl
         if (presentation?.Source is not { } source) return;
         headerChanged = (_, _) =>
         {
-            if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
-            try
+            DispatcherQueue.TryEnqueue(() =>
             {
-                _ = Dispatcher.InvokeAsync(() =>
-                {
-                    if (lifetime is null || generation != currentGeneration ||
-                        !ReferenceEquals(presentation?.Source, source)) return;
-                    try { Refresh(); }
-                    catch (Exception) { OperationFailed?.Invoke(this, EventArgs.Empty); }
-                }, DispatcherPriority.DataBind);
-            }
-            catch (InvalidOperationException) { /* Dispatcher teardown retires this presentation. */ }
+                if (lifetime is null || generation != currentGeneration || !ReferenceEquals(presentation?.Source, source)) return;
+                try { Refresh(); }
+                catch (Exception) { OperationFailed?.Invoke(this, EventArgs.Empty); }
+            });
         };
         source.HeaderChanged += headerChanged;
     }
@@ -132,8 +132,7 @@ public partial class DesktopPageHeader : UserControl
         if (!ReferenceEquals(slotHost.Content, slot))
         {
             slotHost.Content = null;
-            if (slot is not null && (!slot.Dispatcher.CheckAccess() ||
-                LogicalTreeHelper.GetParent(slot) is not null || VisualTreeHelper.GetParent(slot) is not null))
+            if (slot is not null && (!slot.DispatcherQueue.HasThreadAccess || VisualTreeHelper.GetParent(slot) is not null))
                 throw new InvalidOperationException("DESKTOP_HEADER_SLOT_ATTACHED");
             slotHost.Content = slot;
         }

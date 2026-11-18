@@ -1,5 +1,6 @@
 using System.ComponentModel;
-using System.Windows;
+using System.Runtime.InteropServices;
+using Microsoft.UI.Xaml;
 using MeowFilm.Media;
 using Microsoft.Win32;
 
@@ -107,8 +108,9 @@ public interface IMusicDialogs
 
 internal sealed class MusicDialogs : IMusicDialogs
 {
-    public bool Confirm(string message, string title) =>
-        MessageBox.Show(message, title, MessageBoxButton.OKCancel, MessageBoxImage.Warning) == MessageBoxResult.OK;
+    public bool Confirm(string message, string title) => MessageBox(0, message, title, 0x31) == 1;
+    [DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = CharSet.Unicode)]
+    private static extern int MessageBox(nint window, string text, string caption, uint flags);
     public string[]? SelectAudioFiles()
     {
         var dialog = new OpenFileDialog { Multiselect = true, CheckFileExists = true, Title = "添加音乐",

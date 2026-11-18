@@ -1,5 +1,6 @@
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -12,7 +13,6 @@ public sealed class FilmLoadingCards : AdaptiveCardPanel
     public FilmLoadingCards()
     {
         IsHitTestVisible = false;
-        ClipToBounds = true;
     }
 
     protected override Size MeasureOverride(Size constraint)

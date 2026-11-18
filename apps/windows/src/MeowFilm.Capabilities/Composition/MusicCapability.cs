@@ -3,7 +3,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
-using System.Windows;
+using Microsoft.UI.Xaml;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
 using MeowFilm.Media;
@@ -109,11 +109,11 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     public FrameworkElement HomeSourceSettingsView => Presentation.HomeSourceSettings;
     public FrameworkElement CacheSettingsView => Presentation.CacheSettings;
     public FrameworkElement PlayerView => Presentation.Player;
-    public System.Windows.Media.Brush PlayerBackground => Presentation.PlayerBackground;
-    public System.Windows.Media.Brush PlayerProgressBrush => Presentation.PlayerProgress;
+    public Microsoft.UI.Xaml.Media.Brush PlayerBackground => Presentation.PlayerBackground;
+    public Microsoft.UI.Xaml.Media.Brush PlayerProgressBrush => Presentation.PlayerProgress;
     internal void RefreshPlayerBackground()
     { Changed(nameof(PlayerBackground)); Changed(nameof(PlayerProgressBrush)); }
-    internal void RefreshPlayerAppearance(System.Windows.Media.Brush sampled, bool animate = true) => Presentation.RefreshAppearance(sampled, animate);
+    internal void RefreshPlayerAppearance(Microsoft.UI.Xaml.Media.Brush sampled, bool animate = true) => Presentation.RefreshAppearance(sampled, animate);
     public MusicContentPage ContentPage => IsDiscovery ? MusicContentPage.Discovery :
         IsArchives ? MusicContentPage.Archives : IsSearchSongs ? MusicContentPage.SearchSongs :
         ShowsSongTable ? MusicContentPage.Songs : MusicContentPage.Catalog;

@@ -1,17 +1,18 @@
 using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+
+using Microsoft.UI.Dispatching;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
 /// <summary>One sampled playback timeline for the realized words of a virtualized lyric list.</summary>
-public sealed class MusicLyricList : ListBox
+public sealed class MusicLyricList : ListView
 {
     public static readonly DependencyProperty PositionProperty = DependencyProperty.Register(nameof(Position),
         typeof(double), typeof(MusicLyricList), new PropertyMetadata(0d, OnPlaybackChanged));
@@ -30,38 +31,51 @@ public sealed class MusicLyricList : ListBox
     private readonly HashSet<MusicLyricWordView> words = [];
     private readonly HashSet<MusicLyricWordView> visibleWords = [];
     private readonly HashSet<MusicLyricWordView> animatedWords = [];
-    private DispatcherOperation? refresh;
+    private bool refresh;
+    private long refreshEpoch;
     private double sample;
     private long sampledAt;
     private double? sampleRate;
     private double? boundary;
-    private Clock? boundaryClock;
+    private DispatcherQueueTimer? boundaryClock;
     private long boundaryEpoch;
     private bool recalibrate;
     private bool viewportDirty = true;
-    private TranslateTransform? presentationTranslation;
-    private double presentationFrom;
+    private readonly Windows.UI.ViewManagement.UISettings uiSettings = new();
+    private DesktopWindow? window;
 
     public MusicLyricList()
     {
+        SelectionMode = ListViewSelectionMode.None;
         Loaded += (_, _) =>
         {
-            SystemParameters.StaticPropertyChanged += OnSystemSettingChanged;
-            InvalidateViewport();
-            Rebase();
+            if (MusicVisuals.Descendant<ScrollViewer>(this) is { } scroll)
+            { scroll.ViewChanged -= OnViewChanged; scroll.ViewChanged += OnViewChanged; }
+            uiSettings.ColorValuesChanged += AccessibilityChanged;
+            uiSettings.AnimationsEnabledChanged += AnimationsChanged;
+            window = DesktopWindow.GetWindow(this);
+            if (window is not null) window.VisibilityChanged += WindowVisibilityChanged;
+            InvalidateViewport(); Rebase();
         };
         Unloaded += (_, _) =>
         {
-            SystemParameters.StaticPropertyChanged -= OnSystemSettingChanged;
+            uiSettings.ColorValuesChanged -= AccessibilityChanged;
+            uiSettings.AnimationsEnabledChanged -= AnimationsChanged;
+            if (window is not null) window.VisibilityChanged -= WindowVisibilityChanged;
+            window = null;
             Suspend();
         };
-        IsVisibleChanged += (_, _) =>
+        RegisterPropertyChangedCallback(DesktopTheme.IsHighContrastProperty, (_, _) => Rebase());
+        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
         {
-            if (IsVisible) { InvalidateViewport(); Rebase(); }
-            else Suspend();
-        };
-        AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler((_, _) => InvalidateViewport()));
+            if (IsVisible) { InvalidateViewport(); Rebase(); } else Suspend();
+        });
+        ContainerContentChanging += (_, _) => InvalidateViewport();
     }
+    private bool IsVisible => DesktopVisual.IsVisible(this);
+    private void WindowVisibilityChanged(object? sender, EventArgs e)
+    { if (IsVisible) { InvalidateViewport(); Rebase(); } else Suspend(); }
+    private void OnViewChanged(object? sender, ScrollViewerViewChangedEventArgs e) => InvalidateViewport();
 
     private static void OnPlaybackChanged(DependencyObject owner, DependencyPropertyChangedEventArgs args)
     {
@@ -71,7 +85,7 @@ public sealed class MusicLyricList : ListBox
 
     private bool CanAdvance => IsLoaded && IsVisible && IsPlaying && !string.IsNullOrEmpty(PresentationKey) &&
         double.IsFinite(Position) && PlaybackRate is > 0 && double.IsFinite(PlaybackRate.Value) &&
-        SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast && !DesktopTheme.GetIsHighContrast(this);
+        MusicVisuals.CanAnimate(this);
 
     private void Rebase(bool retireClocks = false)
     {
@@ -99,27 +113,14 @@ public sealed class MusicLyricList : ListBox
         InvalidateViewport();
     }
 
-    internal void InvalidateViewport()
+    internal new void InvalidateViewport()
     {
         viewportDirty = true;
         RefreshWords();
     }
 
-    // The scroll owner translates its ItemsPresenter vertically from this list-space
-    // DIP offset to zero, then resets the transform before ending or cancelling.
-    internal void BeginPresentationMotion(TranslateTransform translation, double from)
-    {
-        presentationTranslation = translation;
-        presentationFrom = from;
-        InvalidateViewport();
-    }
-
-    internal void EndPresentationMotion(TranslateTransform translation)
-    {
-        if (!ReferenceEquals(presentationTranslation, translation)) return;
-        presentationTranslation = null;
-        InvalidateViewport();
-    }
+    private void AccessibilityChanged(Windows.UI.ViewManagement.UISettings sender, object args) => DispatcherQueue.TryEnqueue(() => Rebase());
+    private void AnimationsChanged(Windows.UI.ViewManagement.UISettings sender, object args) => DispatcherQueue.TryEnqueue(() => Rebase());
 
     protected override Size ArrangeOverride(Size arrangeBounds)
     {
@@ -128,20 +129,16 @@ public sealed class MusicLyricList : ListBox
         return result;
     }
 
-    protected override void OnItemsChanged(NotifyCollectionChangedEventArgs e)
-    {
-        base.OnItemsChanged(e);
-        InvalidateViewport();
-    }
-
     internal void RefreshWords()
     {
-        if (!IsLoaded || !IsVisible || refresh is not null) return;
-        refresh = Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(() =>
+        if (!IsLoaded || !IsVisible || refresh) return;
+        refresh = true;
+        var epoch = refreshEpoch;
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
         {
-            refresh = null;
-            PresentWords();
-        }));
+            if (epoch != refreshEpoch) return;
+            refresh = false; PresentWords();
+        });
     }
 
     private void PresentWords()
@@ -153,25 +150,15 @@ public sealed class MusicLyricList : ListBox
         {
             viewportDirty = false;
             visibleWords.Clear();
-            var viewport = new Rect(RenderSize);
-            var translation = presentationTranslation?.Y ?? 0;
+            var viewport = new Rect(0, 0, ActualWidth, ActualHeight);
             foreach (var view in words)
             {
-                var visible = view.IsVisible && view.IsArrangeValid && view.RenderSize.Width > 0 &&
-                    view.RenderSize.Height > 0 && IsAncestorOf(view);
+                var visible = view.Visibility == Visibility.Visible && view.ActualWidth > 0 &&
+                    view.ActualHeight > 0 && MusicVisuals.IsWithin(view, this);
                 if (visible)
                 {
-                    var bounds = view.TransformToAncestor(this).TransformBounds(new Rect(view.RenderSize));
-                    if (presentationTranslation is not null)
-                    {
-                        // Normalize away the current animated value, including when layout
-                        // invalidates this cache partway through the compositor motion.
-                        bounds.Offset(0, -translation);
-                        var start = bounds;
-                        start.Offset(0, presentationFrom);
-                        bounds.Union(start);
-                    }
-                    visible = bounds.IntersectsWith(viewport);
+                    var bounds = view.TransformToVisual(this).TransformBounds(new Rect(0, 0, view.ActualWidth, view.ActualHeight));
+                    bounds.Intersect(viewport); visible = !bounds.IsEmpty;
                 }
                 if (visible) visibleWords.Add(view);
                 else
@@ -203,21 +190,15 @@ public sealed class MusicLyricList : ListBox
         if (next is null || rate is null) return;
         boundary = next;
         var epoch = boundaryEpoch;
-        var timeline = new ParallelTimeline
-        {
-            Duration = TimeSpan.FromSeconds((next.Value - position) / rate.Value),
-            FillBehavior = FillBehavior.Stop
-        };
-        var clock = timeline.CreateClock(true);
-        boundaryClock = clock;
-        clock.Completed += (_, _) =>
+        var clock = DispatcherQueue.CreateTimer();
+        clock.Interval = TimeSpan.FromSeconds(Math.Max(.001, (next.Value - position) / rate.Value));
+        clock.IsRepeating = false; boundaryClock = clock;
+        clock.Tick += (_, _) =>
         {
             if (epoch != boundaryEpoch) return;
-            StopBoundary();
-            // WPF completion is a boundary event, not a frame callback or a business notification.
-            PresentWords();
+            StopBoundary(); PresentWords();
         };
-        clock.Controller!.Begin();
+        clock.Start();
     }
 
     private void StopBoundary()
@@ -225,7 +206,7 @@ public sealed class MusicLyricList : ListBox
         boundaryEpoch++;
         if (boundary is null) return;
         boundary = null;
-        boundaryClock?.Controller?.Remove();
+        boundaryClock?.Stop();
         boundaryClock = null;
     }
 
@@ -238,24 +219,9 @@ public sealed class MusicLyricList : ListBox
 
     private void Suspend()
     {
-        refresh?.Abort(); refresh = null;
+        refreshEpoch++; refresh = false;
         StopClocks();
         sampleRate = null;
-        presentationTranslation = null;
     }
 
-    private void OnSystemSettingChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName is nameof(SystemParameters.ClientAreaAnimation) or nameof(SystemParameters.HighContrast))
-        {
-            foreach (var word in words) word.InvalidateVisual();
-            Rebase();
-        }
-    }
-
-    protected override void OnPropertyChanged(DependencyPropertyChangedEventArgs e)
-    {
-        base.OnPropertyChanged(e);
-        if (e.Property == DesktopTheme.IsHighContrastProperty) Rebase();
-    }
 }

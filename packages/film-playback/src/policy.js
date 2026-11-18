@@ -7,7 +7,7 @@ const qualityRanks = { '4k_hdr': 6, '4k_fps': 5, '4k': 4, '1080p': 2, '720p': 1 
 
 export function defaultPreferences() {
   return { ruleOrder: [...ruleOrder], panOrder: [...panOrder], keywords: [],
-    siteCleanKeywords: [...siteCleanKeywords], iosAutoPrepare: true };
+    siteCleanKeywords: [...siteCleanKeywords], iosAutoPrepare: true, metadataViewProvider: 'tmdb' };
 }
 
 function invalidPreferences() {
@@ -33,6 +33,10 @@ export function normalizePreferences(value = {}) {
   if (Object.hasOwn(value, 'iosAutoPrepare')) {
     if (typeof value.iosAutoPrepare !== 'boolean') invalidPreferences();
     result.iosAutoPrepare = value.iosAutoPrepare;
+  }
+  if (Object.hasOwn(value, 'metadataViewProvider')) {
+    if (!['tmdb', 'douban'].includes(value.metadataViewProvider)) invalidPreferences();
+    result.metadataViewProvider = value.metadataViewProvider;
   }
   return result;
 }

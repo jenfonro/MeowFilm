@@ -1,12 +1,14 @@
 using System.ComponentModel;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
-using System.Windows.Interop;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Key = System.Windows.Input.Key;
+using ModifierKeys = System.Windows.Input.ModifierKeys;
+using KeyInterop = System.Windows.Input.KeyInterop;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Windows.Tests;
@@ -43,7 +45,7 @@ public static class MediaShortcutTests
         second.Settings.RequestRegistrationRefresh();
         Check(second.Settings.GlobalErrors.Count == 0 && second.Native.Latest.Success, "release and explicit re-registration");
         second.Post(second.Native.Latest); await Pump();
-        Check(second.Actions.SequenceEqual([MediaShortcutAction.TogglePlayback]), "real HWND hook receives PostMessage");
+        Check(second.Actions.SequenceEqual([MediaShortcutAction.TogglePlayback]), "registered attachment consumes its native message payload");
     }
 
     private static async Task RegistrationLifetime()
@@ -125,15 +127,15 @@ public static class MediaShortcutTests
         fixture.Native.Foreground = fixture.Handle;
         fixture.Attach();
         var registration = fixture.Native.Latest;
-        Check(fixture.SendKey(fixture.Button, ShortcutFixture.GlobalGesture).Handled && fixture.Actions.Count == 0, "WPF defers registered overlap");
+        Check(fixture.SendKey(fixture.Button, ShortcutFixture.GlobalGesture).Handled && fixture.Actions.Count == 0, "WinUI defers registered overlap");
         fixture.Post(registration); await Pump();
-        Check(fixture.Actions.Count == 1, "WPF then WM_HOTKEY executes once");
+        Check(fixture.Actions.Count == 1, "WinUI then WM_HOTKEY executes once");
         Check(fixture.SendKey(fixture.Button, ShortcutFixture.GlobalGesture, down: false).Handled, "paired release consumed");
         fixture.Post(registration); await Pump();
         fixture.SendKey(fixture.Button, ShortcutFixture.GlobalGesture);
         fixture.SendKey(fixture.Button, ShortcutFixture.GlobalGesture, repeat: true);
         fixture.SendKey(fixture.Button, ShortcutFixture.GlobalGesture, down: false);
-        Check(fixture.Actions.Count == 2, "WM_HOTKEY then WPF executes once");
+        Check(fixture.Actions.Count == 2, "WM_HOTKEY then WinUI executes once");
         fixture.Settings.SetPreferences(fixture.Settings.Preferences with { GlobalEnabled = false });
         fixture.SendKey(fixture.Button, ShortcutFixture.GlobalGesture);
         fixture.SendKey(fixture.Button, ShortcutFixture.GlobalGesture, down: false);
@@ -156,7 +158,7 @@ public static class MediaShortcutTests
         var gesture = new MediaShortcutGesture(Key.P, ModifierKeys.Control);
         await using var fixture = new ShortcutFixture(ShortcutFixture.Preferences(global: false, local: gesture));
         fixture.Native.Foreground = fixture.Handle; fixture.Attach();
-        UIElement[] editors = [new TextBox(), new RichTextBox(), new PasswordBox(), new ComboBox { IsEditable = true }, new MenuItem()];
+        UIElement[] editors = [new TextBox(), new RichEditBox(), new PasswordBox(), new ComboBox { IsEditable = true }, new MenuFlyoutItem()];
         foreach (var editor in editors)
         {
             fixture.Root.Children.Add(editor);
@@ -164,7 +166,7 @@ public static class MediaShortcutTests
             fixture.SendKey(editor, gesture, down: false);
         }
         var popupTarget = new Button();
-        var popup = new Popup { Child = popupTarget, PlacementTarget = fixture.Button };
+        var popup = new Popup { Child = popupTarget, XamlRoot = fixture.Root.XamlRoot };
         fixture.Root.Children.Add(popup);
         Check(!fixture.SendKey(popupTarget, gesture).Handled && fixture.Actions.Count == 0, "popup does not route into main-window input");
         fixture.SendKey(fixture.Button, gesture);
@@ -193,7 +195,7 @@ public static class MediaShortcutTests
         fixture.Settings.SetPreferences(ShortcutFixture.Preferences(global: false, local: windowsGesture));
         Check(fixture.SendKey(fixture.Button, windowsGesture).Handled, "explicit Windows modifier binding routes");
         fixture.SendKey(fixture.Button, windowsGesture, down: false);
-        Check(fixture.Actions.Count == 2, "Windows modifier is not lost by WPF's modifier projection");
+        Check(fixture.Actions.Count == 2, "Windows modifier is not lost by WinUI's modifier projection");
         Check(fixture.SendKey(fixture.Button, windowsGesture, rightWindows: true).Handled, "right Windows modifier binding routes");
         fixture.SendKey(fixture.Button, windowsGesture, down: false, rightWindows: true);
         Check(fixture.Actions.Count == 3, "either Windows key can satisfy the explicit modifier");
@@ -220,13 +222,10 @@ public static class MediaShortcutTests
         fixture.Post(fixture.Native.Latest); await Pump();
         Check(fixture.Actions.Count == 2, "own foreground native menu protected");
         fixture.Native.Menu = false;
-        using var popup = new HwndSource(new HwndSourceParameters("media-shortcut-owned-popup")
-        {
-            WindowStyle = unchecked((int)0x80000000), ParentWindow = fixture.Handle,
-            ExtendedWindowStyle = 0x08000080, PositionX = -32000, PositionY = -32000, Width = 20, Height = 20
-        });
-        Check(fixture.Native.OwnsWindow(fixture.Handle, popup.Handle), "fixture is a real owned popup HWND");
-        fixture.Native.Foreground = popup.Handle;
+        using var popup = new DesktopTestUi.Host(new Grid(), 100, 80);
+        SetWindowLongPtr(popup.Window.Handle, -8, fixture.Handle);
+        Check(fixture.Native.OwnsWindow(fixture.Handle, popup.Window.Handle), "fixture is a real owned popup HWND");
+        fixture.Native.Foreground = popup.Window.Handle;
         fixture.Post(fixture.Native.Latest); await Pump();
         Check(fixture.Actions.Count == 2, "owned foreground popup protected without stale-focus guesses");
     }
@@ -290,14 +289,16 @@ public static class MediaShortcutTests
         await using var fixture = new ShortcutFixture(ShortcutFixture.Preferences(global: false, local: gesture),
             _ => throw new InvalidOperationException("private-native-provider-text"));
         var messages = new List<string>();
-        fixture.Window.AddHandler(NoticeOutlet.NoticeEvent,
-            new EventHandler<DesktopNoticeEventArgs>((_, args) => messages.Add(args.Message)));
+        NoticeOutlet.SetReceiver(fixture.Root, args => messages.Add(args.Message));
         fixture.Native.Foreground = fixture.Handle; fixture.Attach();
         fixture.SendKey(fixture.Button, gesture); fixture.SendKey(fixture.Button, gesture, down: false);
         await Pump();
         Check(messages.Contains("暂时无法完成媒体操作") &&
             messages.All(message => !message.Contains("private-native-provider-text", StringComparison.Ordinal)), "fixed existing window notice");
     }
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    private static extern nint SetWindowLongPtr(nint hwnd, int index, nint value);
 
     internal static void Check(bool value, string message)
     {
@@ -306,29 +307,13 @@ public static class MediaShortcutTests
 
     internal static async Task Pump()
     {
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await DesktopTestUi.DrainAsync();
         await Task.Delay(10);
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await DesktopTestUi.DrainAsync();
     }
 
     internal static async Task Sta(Func<Task> action)
-    {
-        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            _ = dispatcher.InvokeAsync(async () =>
-            {
-                try { await action(); done.TrySetResult(); }
-                catch (Exception error) { done.TrySetException(error); }
-                finally { dispatcher.BeginInvokeShutdown(DispatcherPriority.Background); }
-            });
-            Dispatcher.Run();
-        }) { IsBackground = true };
-        thread.SetApartmentState(ApartmentState.STA); thread.Start();
-        await done.Task.WaitAsync(TimeSpan.FromSeconds(20));
-        Check(thread.Join(TimeSpan.FromSeconds(5)), "dispatcher exits");
-    }
+    { await TestUiHost.InvokeAsync(action); }
 }
 
 internal sealed class ShortcutFixture : IAsyncDisposable
@@ -341,7 +326,6 @@ internal sealed class ShortcutFixture : IAsyncDisposable
     internal readonly ShortcutNative Native = new();
     internal readonly List<MediaShortcutAction> Actions = [];
     internal readonly nint Handle;
-    internal readonly HwndSource Source;
     internal MediaShortcutWindowAttachment? Attachment;
     private readonly Func<MediaShortcutAction, Task>? execute;
 
@@ -349,11 +333,11 @@ internal sealed class ShortcutFixture : IAsyncDisposable
         Window? window = null)
     {
         Window = window ?? new Window();
-        Window.ShowInTaskbar = false; Window.ShowActivated = false; Window.Width = 300; Window.Height = 180;
+        Window.Resize(300, 180);
         Settings = new(preferences ?? Preferences()); this.execute = execute;
         Root.Children.Add(Button); Window.Content = Root;
-        Handle = new WindowInteropHelper(Window).EnsureHandle();
-        Source = HwndSource.FromHwnd(Handle)!;
+        Window.AttachRoot(); Window.Activate();
+        Handle = Window.Handle;
     }
 
     internal static MediaControlPreferences Preferences(bool global = true, MediaShortcutGesture? local = null, Key key = Key.F24) =>
@@ -367,24 +351,34 @@ internal sealed class ShortcutFixture : IAsyncDisposable
         return execute?.Invoke(action) ?? Task.CompletedTask;
     }, Native);
 
-    internal KeyEventArgs SendKey(UIElement target, MediaShortcutGesture gesture, bool down = true, bool repeat = false,
+    internal readonly record struct InputResult(bool Handled);
+    internal InputResult SendKey(UIElement target, MediaShortcutGesture gesture, bool down = true, bool repeat = false,
         bool rightWindows = false)
     {
-        var args = new KeyEventArgs(new ShortcutKeyboard(gesture.Modifiers, rightWindows), Source, Environment.TickCount, gesture.Key)
-            { RoutedEvent = down ? Keyboard.PreviewKeyDownEvent : Keyboard.PreviewKeyUpEvent };
-        typeof(KeyEventArgs).GetMethod("SetRepeat", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(args, [repeat]);
-        target.RaiseEvent(args);
-        return args;
+        // Exercise the real input owner without synthesizing an OS or XAML input event.
+        var modifiers = MediaShortcutInput.Modifiers(gesture.Modifiers.HasFlag(ModifierKeys.Control),
+            gesture.Modifiers.HasFlag(ModifierKeys.Alt), gesture.Modifiers.HasFlag(ModifierKeys.Shift),
+            gesture.Modifiers.HasFlag(ModifierKeys.Windows) && !rightWindows,
+            gesture.Modifiers.HasFlag(ModifierKeys.Windows) && rightWindows);
+        MediaShortcutTests.Check(modifiers == gesture.Modifiers, "both Windows keys preserve the modifier projection");
+        var recorder = DesktopTestUi.Visuals(Root).OfType<MediaControlSettingsView>().FirstOrDefault();
+        bool handled = recorder?.ProcessKey(target, gesture.Key, modifiers, down, repeat) == true;
+        if (!handled && Attachment is not null)
+            handled = Attachment.ProcessKey(target, gesture.Key, gesture.Modifiers, down, repeat);
+        return new(handled);
     }
 
     internal void Post(ShortcutNative.Call call, MediaShortcutGesture? gesture = null)
     {
         gesture ??= new(KeyInterop.KeyFromVirtualKey((int)call.Key), (ModifierKeys)(call.Modifiers & 0xf));
         nint packed = (nint)((KeyInterop.VirtualKeyFromKey(gesture.Key) << 16) | (int)gesture.Modifiers);
-        bool success = PostMessageW(Handle, MediaShortcutNative.HotKeyMessage, call.Id, packed);
-        int error = success ? 0 : Marshal.GetLastWin32Error();
-        MediaShortcutTests.Check(success, $"PostMessage to test HWND; {ShortcutNative.WindowEvidence(Handle)} id=0x{call.Id:X} error={error}");
+        MediaShortcutTests.Check(PostMessageW(Handle, MediaShortcutNative.HotKeyMessage, call.Id, packed),
+            "the native message queue delivers the payload to the actual window attachment");
     }
+
+    [DllImport("user32.dll", ExactSpelling = true, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessageW(nint hwnd, int message, nint wParam, nint lParam);
 
     public async ValueTask DisposeAsync()
     {
@@ -392,22 +386,6 @@ internal sealed class ShortcutFixture : IAsyncDisposable
         Window.Close();
     }
 
-    [DllImport("user32.dll", ExactSpelling = true, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool PostMessageW(nint hwnd, int message, nint wParam, nint lParam);
-
-    private sealed class ShortcutKeyboard(ModifierKeys modifiers, bool rightWindows) : KeyboardDevice(InputManager.Current)
-    {
-        protected override KeyStates GetKeyStatesFromSystem(Key key) => key switch
-        {
-            Key.LeftCtrl when modifiers.HasFlag(ModifierKeys.Control) => KeyStates.Down,
-            Key.LeftAlt when modifiers.HasFlag(ModifierKeys.Alt) => KeyStates.Down,
-            Key.LeftShift when modifiers.HasFlag(ModifierKeys.Shift) => KeyStates.Down,
-            Key.LWin when modifiers.HasFlag(ModifierKeys.Windows) && !rightWindows => KeyStates.Down,
-            Key.RWin when modifiers.HasFlag(ModifierKeys.Windows) && rightWindows => KeyStates.Down,
-            _ => KeyStates.None
-        };
-    }
 }
 
 internal sealed class ShortcutNative : MediaShortcutNative
@@ -420,11 +398,11 @@ internal sealed class ShortcutNative : MediaShortcutNative
     internal int? AllocateError;
     internal int? UnregisterError;
     internal nint Foreground;
-    internal IInputElement? Focus;
+    internal DependencyObject? Focus;
     internal bool Menu;
     public override nint ForegroundWindow => Foreground;
-    public override IInputElement? FocusedElement => Focus;
-    public override bool HasMenuOrChildFocus(nint window) => Menu;
+    public override DependencyObject? FocusedElement(FrameworkElement root) => Focus;
+    public override bool HasMenuOrChildFocus(nint window, FrameworkElement root) => Menu;
     public override (int Id, int Error) AllocateId()
     {
         var result = AllocateError is { } error ? (Id: 0, Error: error) : base.AllocateId();
@@ -453,10 +431,8 @@ internal sealed class ShortcutNative : MediaShortcutNative
     internal static string WindowEvidence(nint hwnd)
     {
         uint ownerThread = GetWindowThreadProcessId(hwnd, out uint ownerProcess);
-        var source = HwndSource.FromHwnd(hwnd);
         return $"hwnd=0x{hwnd.ToInt64():X} valid={IsWindow(hwnd)} visible={IsWindowVisible(hwnd)} " +
             $"ownerThread={ownerThread} currentThread={GetCurrentThreadId()} ownerProcess={ownerProcess} currentProcess={Environment.ProcessId} " +
-            $"source={source is not null} sourceDisposed={source?.IsDisposed} rootVisual={source is { IsDisposed: false, RootVisual: not null }} " +
             $"apartment={Thread.CurrentThread.GetApartmentState()}";
     }
 

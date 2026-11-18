@@ -2,12 +2,12 @@ using System.Net.Http;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Media;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
@@ -21,7 +21,7 @@ namespace MeowFilm.Windows.Tests;
 public static class FilmCatPanBridgeConsumerTests
 {
     private static TestCase Test(string name, Func<Task> run) =>
-        new("film-cat-pan-consumer: " + name, () => MusicQualityConsumerTests.Sta(run));
+        new("film-cat-pan-consumer: " + name, () => TestUiHost.InvokeAsync(run));
 
     public static IEnumerable<TestCase> Cases()
     {
@@ -76,14 +76,14 @@ public static class FilmCatPanBridgeConsumerTests
         CheckReceipt(scene, scene.Native.Inputs.Single().Receipt, high);
         foreach (double width in new[] { 1150d, 780d })
         {
-            scene.Window.Width = width; scene.Window.UpdateLayout();
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            scene.Window.UpdateLayout();
+            scene.Window.Resize(width, 900); DesktopTestUi.WindowRoot(scene.Window).UpdateLayout();
+            await FilmUiTest.Pump();
+            DesktopTestUi.WindowRoot(scene.Window).UpdateLayout();
             var station = scene.Element<ComboBox>("SourcePicker");
             var pan = scene.Element<ComboBox>("LinePicker");
             var row = station.Parent as Grid;
-            var stationPoint = row is null ? new Point(double.NaN, double.NaN) : station.TranslatePoint(new(), row);
-            var panPoint = row is null ? new Point(double.NaN, double.NaN) : pan.TranslatePoint(new(), row);
+            var stationPoint = row is null ? new Point(double.NaN, double.NaN) : station.TransformToVisual(row).TransformPoint(new Point());
+            var panPoint = row is null ? new Point(double.NaN, double.NaN) : pan.TransformToVisual(row).TransformPoint(new Point());
             Check(row is not null && ReferenceEquals(station.Parent, pan.Parent),
                 $"source and pan share one horizontal row at width {width}");
             Check(Math.Abs(stationPoint.Y - panPoint.Y) < .5 &&
@@ -186,7 +186,7 @@ public static class FilmCatPanBridgeConsumerTests
             "Windows metadata entry automatically starts the real first episode and retains Node's display metadata");
         CheckReceipt(scene, input.Receipt, candidate);
         var source = page.Sources.Single(row => row.MetadataSourceId is null);
-        scene.Element<ComboBox>("SourcePicker").SetCurrentValue(ComboBox.SelectedItemProperty, source);
+        await DesktopTestUi.SelectAsync(scene.Element<ComboBox>("SourcePicker"), source);
         await scene.Ready(() => page.SourceId == source.Id && !page.ListLoading && page.Episodes.Count == 3);
         var browse = scene.Traffic.Commands("browse").Single();
         Check(FilmJson.Text(browse.Input, "sourceId") == source.Id &&
@@ -262,7 +262,7 @@ public static class FilmCatPanBridgeConsumerTests
             scene.Traffic.Snapshots.Any(snapshot =>
                 FilmJson.Text(FilmJson.Member(snapshot, "browsing"), "error") == "UPSTREAM_HTTP") &&
             scene.Element<ComboBox>("SourcePicker").IsEnabled &&
-            !Visuals(scene.View).OfType<TextBlock>().Any(row => row.IsVisible && row.Text == scene.Page.ListError),
+            !Visuals(scene.View).OfType<TextBlock>().Any(row => FilmUiTest.Visible(row) && row.Text == scene.Page.ListError),
             "the classified provider error uses the floating notice and exposes no stale playable file");
         await scene.Control("scenario", new { scenario = "success" });
         int refreshes = scene.Traffic.Commands("browse.refresh").Count();
@@ -430,7 +430,7 @@ public static class FilmCatPanBridgeConsumerTests
             "the intercepted share and passcode reach the product pan service and its actual provider request");
     }
 
-    private static void Click(ButtonBase button) => button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+    private static void Click(ButtonBase button) => FilmUiTest.Click(button);
     private static IEnumerable<DependencyObject> Visuals(DependencyObject root)
     {
         yield return root;
@@ -448,7 +448,7 @@ public static class FilmCatPanBridgeConsumerTests
         internal readonly FilmNativeProbe Native = new();
         internal readonly FilmPlaybackSession Session;
         private readonly FilmCapability module;
-        internal readonly Window Window;
+        internal readonly DesktopWindow Window;
         internal readonly FilmPlaybackView View;
         internal readonly Uri ControlOrigin;
         internal readonly JsonElement Source;
@@ -472,10 +472,9 @@ public static class FilmCatPanBridgeConsumerTests
             Session = new(_ => Task.FromResult(connection), Native);
             module = new(new EmptyHome(), Session, library);
             View = (FilmPlaybackView)((FilmView)module.View).FindName("PlaybackView");
-            Window = new() { Content = module.View, Width = 1200, Height = 900, Left = -10000, Top = -10000,
-                ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None };
-            Window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, args) =>
-            { if (args.Message.Length > 0) Notices.Add(args.Message); }));
+            Window = FilmUiTest.Window(module.View, 1200, 900);
+            NoticeOutlet.SetReceiver(DesktopTestUi.WindowRoot(Window), args =>
+            { if (args.Message.Length > 0) Notices.Add(args.Message); });
         }
         internal static async Task<Scene> Connect()
         {
@@ -508,7 +507,7 @@ public static class FilmCatPanBridgeConsumerTests
             await Ready(() => Page.HasPlaybackSnapshot && View.IsLoaded);
         }
         internal Task Close() => Session.CloseSessionAsync();
-        internal T Element<T>(string name) where T : FrameworkElement => (T)View.FindName(name);
+        internal T Element<T>(string name) where T : FrameworkElement => FilmUiTest.Named<T>(View, name);
         internal async Task Ready(Func<bool> predicate)
         {
             var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
@@ -519,8 +518,8 @@ public static class FilmCatPanBridgeConsumerTests
                         (module.Playback is { } page ? page.StatusText + "; " + page.ListStatus : "opening"));
                 await Task.Delay(10);
             }
-            Window.UpdateLayout();
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            DesktopTestUi.WindowRoot(Window).UpdateLayout();
+            await FilmUiTest.Pump();
         }
         private Task<JsonElement> Rpc(string method, object input) => new FilmPlaybackClient(Traffic).CallAsync(method, input);
         internal Task<JsonElement> Evidence() => Control("evidence");

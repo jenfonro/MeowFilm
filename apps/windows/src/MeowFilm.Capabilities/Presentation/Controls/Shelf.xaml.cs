@@ -1,543 +1,237 @@
 using System.Collections;
-using System.ComponentModel;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
-using System.Windows.Threading;
+using Microsoft.UI.Input;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Windows.Foundation;
+using Windows.System;
+using Windows.UI.Core;
+using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
-// Presentation-only rail. Paging never changes platform, selection, or playback.
+// Native ItemsStackPanel recycles horizontal cards; the shelf owns only page offsets.
 public partial class Shelf : UserControl
 {
-    public static readonly DependencyProperty CardTemplateProperty = DependencyProperty.Register(nameof(CardTemplate), typeof(DataTemplate), typeof(Shelf));
-    public static readonly DependencyProperty ItemsSourceProperty = DependencyProperty.Register(nameof(ItemsSource), typeof(IEnumerable), typeof(Shelf),
-        new PropertyMetadata(null, (value, _) => ((Shelf)value).OnItemsSourceChanged()));
+    public static readonly DependencyProperty CardTemplateProperty = DependencyProperty.Register(nameof(CardTemplate), typeof(DataTemplate), typeof(Shelf), new PropertyMetadata(null));
+    public static readonly DependencyProperty ItemsSourceProperty = DependencyProperty.Register(nameof(ItemsSource), typeof(IEnumerable), typeof(Shelf), new PropertyMetadata(null, Changed));
     public static readonly DependencyProperty CardWidthProperty = DependencyProperty.Register(nameof(CardWidth), typeof(double), typeof(Shelf), new PropertyMetadata(168d));
-    public static readonly DependencyProperty MinimumCardWidthProperty = DependencyProperty.Register(nameof(MinimumCardWidth), typeof(double), typeof(Shelf),
-        new PropertyMetadata(150d, (value, _) => ((Shelf)value).InvalidateCardLayout()));
-    public static readonly DependencyProperty NavigationButtonStyleProperty = DependencyProperty.Register(
-        nameof(NavigationButtonStyle), typeof(Style), typeof(Shelf));
-    public static readonly DependencyProperty HorizontalOffsetProperty = DependencyProperty.Register(
-        nameof(HorizontalOffset), typeof(double), typeof(Shelf),
-        new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.BindsTwoWayByDefault,
-            (value, _) =>
-            {
-                var shelf = (Shelf)value;
-                if (shelf.committingOffset) return;
-                shelf.CancelPointerInput();
-                shelf.StopMotion();
-                shelf.RequestRestore();
-            }));
-    private static readonly DependencyProperty AnimatedOffsetProperty = DependencyProperty.Register(
-        "AnimatedOffset", typeof(double), typeof(Shelf),
-        new PropertyMetadata(0d, (value, args) => ((Shelf)value).ApplyAnimatedOffset((double)args.NewValue)));
-    public double MinimumCardWidth { get => (double)GetValue(MinimumCardWidthProperty); set => SetValue(MinimumCardWidthProperty, value); }
-    public DataTemplate CardTemplate { get => (DataTemplate)GetValue(CardTemplateProperty); set => SetValue(CardTemplateProperty, value); }
+    public static readonly DependencyProperty MinimumCardWidthProperty = DependencyProperty.Register(nameof(MinimumCardWidth), typeof(double), typeof(Shelf), new PropertyMetadata(150d, Changed));
+    public static readonly DependencyProperty NavigationButtonStyleProperty = DependencyProperty.Register(nameof(NavigationButtonStyle), typeof(Style), typeof(Shelf), new PropertyMetadata(null, Changed));
+    public static readonly DependencyProperty HorizontalOffsetProperty = DependencyProperty.Register(nameof(HorizontalOffset), typeof(double), typeof(Shelf), new PropertyMetadata(0d, Changed));
+    public DataTemplate? CardTemplate { get => (DataTemplate?)GetValue(CardTemplateProperty); set => SetValue(CardTemplateProperty, value); }
     public IEnumerable? ItemsSource { get => (IEnumerable?)GetValue(ItemsSourceProperty); set => SetValue(ItemsSourceProperty, value); }
     public double CardWidth { get => (double)GetValue(CardWidthProperty); private set => SetValue(CardWidthProperty, value); }
+    public double MinimumCardWidth { get => (double)GetValue(MinimumCardWidthProperty); set => SetValue(MinimumCardWidthProperty, value); }
     public Style? NavigationButtonStyle { get => (Style?)GetValue(NavigationButtonStyleProperty); set => SetValue(NavigationButtonStyleProperty, value); }
     public double HorizontalOffset { get => (double)GetValue(HorizontalOffsetProperty); set => SetValue(HorizontalOffsetProperty, value); }
-    private readonly DispatcherTimer settle;
     private ScrollViewer? rail;
-    private ShelfVirtualizingPanel? scrollPanel;
-    private MusicCatalogSection? offsetSection;
-    private Window? ownerWindow;
+    private MusicCatalogSection? section;
+    private int visibleCards = 1;
+    private bool committing, dragging, pendingPointer, restoring;
+    private bool usesSectionItems = true, settingSectionItems;
+    private double? targetOffset;
+    private DesktopWindow? window;
+    private IDisposable? visibility;
     private Point pointerOrigin;
     private double dragOrigin;
-    private double? settlingTarget;
-    private int visibleCardCount = 1;
-    private bool presentationActive;
-    private bool pointerPending, dragging, animating, restorePending, commitLayoutOffset;
-    private bool usesDataContextItems = true, settingDataContextItems, committingOffset;
-    private long motionGeneration;
     internal ScrollViewer? ScrollHost => rail;
-    internal double MaximumOffset => scrollPanel?.MaximumOffset ?? LogicalMaxOffset();
-    internal double PresentedOffset => scrollPanel?.HorizontalOffset ?? rail?.HorizontalOffset ?? 0;
-    internal bool IsSettled => !animating;
-
+    internal double MaximumOffset => Math.Max(0, (ItemsHost.Items.Count - visibleCards) * CardWidth);
+    internal double PresentedOffset => rail?.HorizontalOffset ?? 0;
+    internal bool IsSettled { get; private set; } = true;
     public Shelf()
     {
         InitializeComponent();
-        settle = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
-        { Interval = TimeSpan.FromMilliseconds(130) };
-        settle.Tick += (_, _) =>
+        Loaded += (_, _) =>
         {
-            settle.Stop();
-            if (!presentationActive) return;
-            if (AreAnyTouchesCapturedWithin)
+            rail = MusicVisuals.Descendant<ScrollViewer>(ItemsHost);
+            if (rail is not null) { rail.ViewChanged -= Scrolled; rail.ViewChanged += Scrolled; }
+            window = DesktopWindow.GetWindow(this);
+            if (window is not null) window.Deactivated += Deactivated;
+            visibility = DesktopVisual.ObserveVisibility(this, visible =>
             {
-                settle.Start();
-                return;
-            }
-            if (!restorePending && !dragging && !animating) SnapToNearest();
+                if (visible) { UpdateLayoutMetrics(); Restore(); }
+                else
+                {
+                    CommitOffset(); CancelPointer();
+                    rail?.ChangeView(section?.HorizontalOffset ?? HorizontalOffset, null, null, true);
+                    targetOffset = null; IsSettled = true; UpdateButtons();
+                }
+            });
         };
-        Loaded += (_, _) => UpdatePresentation();
-        Unloaded += (_, _) => StopPresentation();
-        IsVisibleChanged += (_, _) => UpdatePresentation();
-        DataContextChanged += (_, e) =>
+        Unloaded += (_, _) =>
         {
-            CommitSettledOffset(e.OldValue as MusicCatalogSection);
-            offsetSection = e.NewValue as MusicCatalogSection;
-            if (offsetSection is null && !BindingOperations.IsDataBound(this, HorizontalOffsetProperty))
-                StoreOffset(0);
-            if (usesDataContextItems && !BindingOperations.IsDataBound(this, ItemsSourceProperty))
-            {
-                settingDataContextItems = true;
-                try { SetCurrentValue(ItemsSourceProperty, (e.NewValue as MusicCatalogSection)?.Items); }
-                finally { settingDataContextItems = false; }
-            }
-            else usesDataContextItems = false;
-            CancelPointerInput();
-            StopMotion();
-            RequestRestore();
+            CommitOffset(); CancelPointer();
+            visibility?.Dispose(); visibility = null;
+            if (rail is not null) rail.ViewChanged -= Scrolled;
+            if (window is not null) window.Deactivated -= Deactivated;
+            window = null; rail = null; targetOffset = null;
         };
-    }
-    private void UpdatePresentation()
-    {
-        if (!IsLoaded || !IsVisible) { StopPresentation(); return; }
-        if (presentationActive) return;
-        presentationActive = true;
-        SystemParameters.StaticPropertyChanged += OnSystemSettingChanged;
-        AttachScrollHost();
-    }
-    private void StopPresentation()
-    {
-        if (!presentationActive) return;
-        presentationActive = false;
-        SystemParameters.StaticPropertyChanged -= OnSystemSettingChanged;
-        DetachScrollHost();
-    }
-    private void OnItemsSourceChanged()
-    {
-        if (settingDataContextItems) return;
-        usesDataContextItems = false;
-        // A bound ItemsSource can reevaluate before DataContextChanged. That event
-        // owns committing the previous section before accepting the new restore.
-        if (!ReferenceEquals(offsetSection, DataContext as MusicCatalogSection)) return;
-        CancelPointerInput();
-        StopMotion();
-        RequestRestore();
-    }
-    private void InvalidateCardLayout()
-    {
-        scrollPanel?.InvalidateMeasure();
-        InvalidateMeasure();
-    }
-    internal (double Target, double Gap) LayoutMetrics() =>
-        DataContext is MusicCatalogSection { IsBannerSection: true } ? (260, 20) :
-        DataContext is MusicCatalogSection { IsEntrySection: true } ? (150, 16) :
-        (MinimumCardWidth, 16);
-    internal static (int Count, double Width) MeasureCards(double width, double target, double gap, bool banner = false)
-    {
-        var count = banner ? 2 : Math.Max(1, (int)Math.Floor((width + gap) / (target + gap)));
-        return (count, Math.Max(1, (width + gap) / count));
-    }
-
-    // Called during the panel's measure, before any card is measured at the new pitch.
-    internal double PrepareCardLayout(ShelfVirtualizingPanel panel, double viewport, int count, double pitch, double maximum)
-    {
-        scrollPanel = panel;
-        var changed = visibleCardCount != count || CardWidth != pitch;
-        var target = restorePending ? offsetSection?.HorizontalOffset ?? HorizontalOffset : panel.HorizontalOffset;
-        var resizing = panel.ViewportWidth > 0 && panel.ViewportWidth != viewport;
-        if (changed && (!restorePending || resizing))
+        SizeChanged += (_, _) => UpdateLayoutMetrics();
+        ItemsHost.ContainerContentChanging += (_, e) => SizeCard(e.ItemContainer);
+        DataContextChanged += (_, _) =>
         {
-            if (!restorePending) target = settlingTarget ?? target;
-            var previousCount = visibleCardCount;
-            var previousPitch = CardWidth;
-            if (restorePending)
+            CommitOffset(); section = DataContext as MusicCatalogSection;
+            if (usesSectionItems && GetBindingExpression(ItemsSourceProperty) is null)
             {
-                // A new section can have a different card shape at the previous
-                // viewport; its saved pixels must not use the outgoing pitch.
-                var (minimum, gap) = LayoutMetrics();
-                (previousCount, previousPitch) = MeasureCards(panel.ViewportWidth, minimum, gap,
-                    banner: offsetSection is { IsBannerSection: true });
+                settingSectionItems = true;
+                try { ItemsSource = section?.Items; }
+                finally { settingSectionItems = false; }
             }
-            var previousMaximum = restorePending
-                ? Math.Max(0, ItemsHost.Items.Count - previousCount) * previousPitch : panel.MaximumOffset;
-            if (offsetSection is { IsBannerSection: true })
-                target = NearestOffset(target, previousMaximum, previousPitch);
-            var atEnd = previousMaximum > .5 && previousMaximum - target <= .5;
-            target = atEnd ? maximum : Math.Round(target / previousPitch, MidpointRounding.AwayFromZero) * pitch;
-        }
-        if (changed)
+            CancelPointer(); targetOffset = null;
+            UpdateLayoutMetrics(); Restore();
+        };
+        CardMotion.SetEnabled(this, true);
+        RegisterPropertyChangedCallback(CardMotion.ProgressProperty, (_, _) => UpdateArrowOpacity());
+        PointerWheelChanged += (_, e) =>
         {
-            CancelPointerInput();
-            StopMotion();
-        }
-        target = Math.Clamp(target, 0, maximum);
-        commitLayoutOffset |= changed || restorePending ||
-            Math.Abs(target - panel.HorizontalOffset) > .01 && !animating;
-        restorePending = false;
-        visibleCardCount = count;
-        CardWidth = pitch;
-        return target;
-    }
-    internal void CompleteCardLayout(ShelfVirtualizingPanel panel)
-    {
-        if (!presentationActive || !ReferenceEquals(scrollPanel, panel)) return;
-        if (commitLayoutOffset)
-        {
-            commitLayoutOffset = false;
-            CommitOffset();
-        }
-        UpdateButtons();
-    }
-    internal void OnNativeScroll()
-    {
-        if (!restorePending && !dragging)
-        {
-            if (animating) StopMotion();
-            ScheduleSnap();
-        }
-    }
-    private void OnSystemSettingChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (!string.IsNullOrEmpty(e.PropertyName) &&
-            e.PropertyName != nameof(SystemParameters.ClientAreaAnimation) &&
-            e.PropertyName != nameof(SystemParameters.HighContrast))
-            return;
-        if (animating) StopMotion();
-        if (!restorePending && !dragging) SnapToNearest();
-        PageIndicator.InvalidateVisual();
-    }
-    private double LogicalMaxOffset(MusicCatalogSection? section = null)
-    {
-        var itemCount = section is { IsSongShelfSection: true }
-            ? (section.Items.Count + 2) / 3
-            : section?.Items.Count ?? ItemsHost.Items.Count;
-        return Math.Max(0, itemCount - visibleCardCount) * CardWidth;
-    }
-    private void OnPreviewMouseWheel(object sender, MouseWheelEventArgs e)
-    {
-        if (!presentationActive) return;
-        if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))
-        {
-            if (scrollPanel is null) return;
-            restorePending = false;
-            StopMotion();
-            scrollPanel.SetHorizontalOffset(PresentedOffset - e.Delta);
+            CancelPointer();
+            if (targetOffset is not null)
+            { targetOffset = null; rail?.ChangeView(PresentedOffset, null, null, true); }
+            if (rail is null || MaximumOffset <= 0 ||
+                (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift) & CoreVirtualKeyStates.Down) == 0) return;
             e.Handled = true;
-            return;
-        }
-        for (DependencyObject? parent = VisualTreeHelper.GetParent(this); parent is not null; parent = VisualTreeHelper.GetParent(parent))
-            if (parent is ScrollViewer outer)
-            {
-                // Re-route once: native ScrollViewer owns wheel line/page settings.
-                outer.RaiseEvent(new MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta)
-                    { RoutedEvent = Mouse.MouseWheelEvent, Source = outer });
-                e.Handled = true;
-                return;
-            }
-    }
-    private void Previous_Click(object sender, RoutedEventArgs e) => Page(-1);
-    private void Next_Click(object sender, RoutedEventArgs e) => Page(1);
-    private void AttachScrollHost()
-    {
-        ownerWindow = Window.GetWindow(this);
-        if (ownerWindow is not null) ownerWindow.Deactivated += OwnerDeactivated;
-        ItemsHost.ApplyTemplate();
-        if (rail is not null) rail.ScrollChanged -= OnScrollChanged;
-        rail = ItemsHost.Template.FindName("PART_ScrollViewer", ItemsHost) as ScrollViewer;
-        if (rail is not null) rail.ScrollChanged += OnScrollChanged;
-        scrollPanel = VisualDescendant<ShelfVirtualizingPanel>(ItemsHost);
-        RequestRestore();
-    }
-    private void DetachScrollHost()
-    {
-        settle.Stop();
-        if (DataContext is MusicCatalogSection section) CommitSettledOffset(section);
-        else if (!restorePending && !pointerPending && !dragging && !AreAnyTouchesCapturedWithin)
-            StoreOffset(Math.Clamp(settlingTarget ?? NearestOffset(PresentedOffset, MaximumOffset, CardWidth),
-                0, MaximumOffset));
-        CancelPointerInput();
-        StopMotion();
-        restorePending = true;
-        commitLayoutOffset = false;
-        if (rail is not null) rail.ScrollChanged -= OnScrollChanged;
-        rail = null;
-        if (ownerWindow is not null) ownerWindow.Deactivated -= OwnerDeactivated;
-        ownerWindow = null;
-    }
-    private void RequestRestore()
-    {
-        restorePending = true;
-        InvalidateCardLayout();
-    }
-    private void OnScrollChanged(object sender, ScrollChangedEventArgs e) => UpdateButtons();
-    private void ScheduleSnap()
-    {
-        if (!presentationActive || restorePending) return;
-        settle.Stop();
-        settle.Start();
-    }
-    private bool Page(int direction)
-    {
-        if (!presentationActive) return false;
-        if (PageTarget(direction) is not { } target) return false;
-        AnimateTo(target);
-        return true;
-    }
-    private void SnapToNearest()
-    {
-        if (!presentationActive || scrollPanel is null || restorePending) return;
-        if (AreAnyTouchesCapturedWithin)
-        {
-            ScheduleSnap();
-            return;
-        }
-        AnimateTo(NearestOffset(PresentedOffset, MaximumOffset, CardWidth));
-    }
-    private void AnimateTo(double target)
-    {
-        if (scrollPanel is null) return;
-        restorePending = false;
-        target = Math.Clamp(target, 0, MaximumOffset);
-        var from = StopMotion();
-        var generation = motionGeneration;
-        settlingTarget = target;
-        UpdateButtons();
-        if (!SystemParameters.ClientAreaAnimation || SystemParameters.HighContrast || Math.Abs(target - from) < .5)
-        {
-            scrollPanel.ScrollTo(target);
-            CommitOffset();
-            settlingTarget = null;
-            UpdateButtons();
-            return;
-        }
-        SetValue(AnimatedOffsetProperty, from);
-        animating = true;
-        var duration = TimeSpan.FromMilliseconds(260 * Math.Min(1, Math.Abs(target - from) / Math.Max(1, scrollPanel.ViewportWidth)));
-        var animation = new DoubleAnimation(from, target, duration)
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-            FillBehavior = FillBehavior.Stop
+            rail.ChangeView(Math.Clamp(PresentedOffset - e.GetCurrentPoint(this).Properties.MouseWheelDelta, 0, MaximumOffset), null, null, true);
         };
-        animation.Completed += (_, _) =>
+        KeyDown += (_, e) =>
         {
-            if (generation != motionGeneration || scrollPanel is null) return;
-            animating = false;
-            BeginAnimation(AnimatedOffsetProperty, null);
-            scrollPanel.ScrollTo(target);
-            CommitOffset();
-            settlingTarget = null;
-            UpdateButtons();
+            if (DesktopVisual.Modifiers != VirtualKeyModifiers.None) return;
+            if (Navigate(e.Key)) e.Handled = true;
         };
-        BeginAnimation(AnimatedOffsetProperty, animation, HandoffBehavior.SnapshotAndReplace);
-    }
-    private double StopMotion()
-    {
-        motionGeneration++;
-        settle?.Stop();
-        var offset = PresentedOffset;
-        animating = false;
-        BeginAnimation(AnimatedOffsetProperty, null);
-        settlingTarget = null;
-        return offset;
-    }
-    private void ApplyAnimatedOffset(double offset)
-    {
-        if (animating) scrollPanel?.ScrollTo(offset);
-    }
-    private static T? VisualDescendant<T>(DependencyObject root) where T : DependencyObject
-    {
-        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(root); index++)
+        AddHandler(PointerPressedEvent, new PointerEventHandler((_, e) =>
         {
-            var child = VisualTreeHelper.GetChild(root, index);
-            if (child is T match) return match;
-            if (VisualDescendant<T>(child) is { } nested) return nested;
-        }
-        return null;
+            if (e.Pointer.PointerDeviceType != Microsoft.UI.Input.PointerDeviceType.Mouse || !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+            pointerOrigin = e.GetCurrentPoint(this).Position; dragOrigin = PresentedOffset; pendingPointer = true;
+        }), true);
+        AddHandler(PointerMovedEvent, new PointerEventHandler((_, e) =>
+        {
+            if (!pendingPointer || rail is null) return;
+            double dx = e.GetCurrentPoint(this).Position.X - pointerOrigin.X;
+            if (!dragging && Math.Abs(dx) < 4) return;
+            if (!dragging && !CapturePointer(e.Pointer)) { pendingPointer = false; return; }
+            targetOffset = null; dragging = true; e.Handled = true; rail.ChangeView(Math.Clamp(dragOrigin - dx, 0, MaximumOffset), null, null, true);
+        }), true);
+        AddHandler(PointerReleasedEvent, new PointerEventHandler((_, e) =>
+        {
+            pendingPointer = false; if (!dragging) return;
+            dragging = false; e.Handled = true; ReleasePointerCapture(e.Pointer); Snap();
+        }), true);
+        PointerCaptureLost += (_, _) => { pendingPointer = dragging = false; Snap(); };
     }
-    private void CommitOffset()
+    private static void Changed(DependencyObject owner, DependencyPropertyChangedEventArgs e)
     {
-        if (DataContext is MusicCatalogSection section) section.HorizontalOffset = PresentedOffset;
-        else StoreOffset(PresentedOffset);
+        var shelf = (Shelf)owner; if (shelf.ItemsHost is null || shelf.committing) return;
+        if (e.Property == NavigationButtonStyleProperty) { shelf.Previous.Style = shelf.Next.Style = shelf.NavigationButtonStyle; return; }
+        if (e.Property == ItemsSourceProperty && !shelf.settingSectionItems) shelf.usesSectionItems = false;
+        shelf.UpdateLayoutMetrics(); shelf.Restore();
     }
-    private void StoreOffset(double offset)
+    internal (double Target, double Gap) LayoutMetrics() => section is { IsBannerSection: true } ? (260, 20) : section is { IsEntrySection: true } ? (150, 16) : (MinimumCardWidth, 16);
+    internal static (int Count, double Width) MeasureCards(double width, double target, double gap, bool banner = false)
+    { int count = banner ? 2 : Math.Max(1, (int)Math.Floor((width + gap) / (target + gap))); return (count, Math.Max(1, (width + gap) / count)); }
+    private void UpdateLayoutMetrics()
     {
-        committingOffset = true;
-        try { SetCurrentValue(HorizontalOffsetProperty, offset); }
-        finally { committingOffset = false; }
+        if (!IsLoaded || !DesktopVisual.IsVisible(this) || ItemsHost.ActualWidth <= 0) return;
+        var (target, gap) = LayoutMetrics(); double previous = CardWidth, oldMaximum = MaximumOffset;
+        var (count, pitch) = MeasureCards(ItemsHost.ActualWidth, target, gap, section is { IsBannerSection: true });
+        if (count == visibleCards && pitch == previous) { UpdateButtons(); return; }
+        double old = targetOffset ?? PresentedOffset; visibleCards = count; CardWidth = pitch;
+        for (int i = 0; i < ItemsHost.Items.Count; i++) if (ItemsHost.ContainerFromIndex(i) is ListViewItem item) SizeCard(item);
+        double next = oldMaximum > .5 && oldMaximum - old < .5 ? MaximumOffset : Math.Round(old / previous) * pitch;
+        targetOffset = null;
+        rail?.ChangeView(Math.Clamp(next, 0, MaximumOffset), null, null, true); UpdateButtons();
     }
-    internal void ScrollToIndex(int index)
+    private void SizeCard(SelectorItem item) { item.Width = Math.Max(1, CardWidth); item.Padding = new Thickness(0, 0, LayoutMetrics().Gap, 0); }
+    private void Restore()
     {
-        CancelPointerInput();
-        StopMotion();
-        StoreOffset(Math.Max(0, index) * CardWidth);
-        RequestRestore();
+        if (rail is null || !DesktopVisual.IsVisible(this)) return;
+        restoring = true; rail.ChangeView(Math.Clamp(section?.HorizontalOffset ?? HorizontalOffset, 0, MaximumOffset), null, null, true);
+        restoring = false; UpdateButtons();
     }
-    private void CommitSettledOffset(MusicCatalogSection? section)
+    private void Scrolled(object? sender, ScrollViewerViewChangedEventArgs e)
     {
-        if (scrollPanel is null || section is null || restorePending) return;
-        if (pointerPending || dragging || IsMouseCaptured || AreAnyTouchesCapturedWithin) return;
-        var maximum = LogicalMaxOffset(section);
-        section.HorizontalOffset = Math.Clamp(
-            settlingTarget ?? NearestOffset(PresentedOffset, maximum, CardWidth), 0, maximum);
+        IsSettled = !e.IsIntermediate; UpdateButtons();
+        if (e.IsIntermediate || dragging || restoring) return;
+        if (targetOffset is { } target && Math.Abs(PresentedOffset - target) < .5) targetOffset = null;
+        if (targetOffset is null) Snap();
+    }
+    private void Snap()
+    {
+        double target = NearestOffset(PresentedOffset, MaximumOffset, CardWidth);
+        if (Math.Abs(target - PresentedOffset) < .5) { IsSettled = true; CommitOffset(); return; }
+        Move(target);
     }
     private double NearestOffset(double offset, double maximum, double pitch)
     {
-        // DataContext may already be the incoming section while the outgoing
-        // section still owns the visible geometry and its settled offset.
-        if (offsetSection is { IsBannerSection: true })
+        if (section is { IsBannerSection: true })
         {
-            var page = 2 * pitch;
-            var before = Math.Floor(offset / page) * page;
-            var after = Math.Min(maximum, before + page);
+            double before = Math.Floor(offset / (2 * pitch)) * (2 * pitch), after = Math.Min(maximum, before + 2 * pitch);
             return Math.Clamp(offset - before < after - offset ? before : after, 0, maximum);
         }
-        return Math.Clamp(Math.Round(offset / pitch, MidpointRounding.AwayFromZero) * pitch, 0, maximum);
+        return Math.Clamp(Math.Round(offset / Math.Max(1, pitch), MidpointRounding.AwayFromZero) * pitch, 0, maximum);
     }
-    private void UpdateButtons()
+    private void Move(double target)
     {
-        if (rail is null || Previous is null || Next is null) return;
-        var previous = PageTarget(-1).HasValue;
-        var next = PageTarget(1).HasValue;
-        Previous.Visibility = previous ? Visibility.Visible : Visibility.Collapsed;
-        Next.Visibility = next ? Visibility.Visible : Visibility.Collapsed;
-        Previous.IsEnabled = previous;
-        Next.IsEnabled = next;
-        UpdatePageIndicator();
-    }
-    private void UpdatePageIndicator()
-    {
-        var maximum = MaximumOffset;
-        if (DataContext is not MusicCatalogSection { IsBannerSection: true } || maximum <= .5)
-        {
-            PageIndicator.Visibility = Visibility.Collapsed;
-            return;
-        }
-        double page = visibleCardCount * CardWidth;
-        double offset = Math.Clamp(PresentedOffset, 0, maximum);
-        // Count from items, not floating-point division of pixel extents. The
-        // final interval may be shorter than a page when the item count is odd.
-        int pages = (ItemsHost.Items.Count + visibleCardCount - 1) / visibleCardCount;
-        double lastStart = (pages - 2) * page;
-        PageIndicator.PageCount = pages;
-        PageIndicator.Position = offset > lastStart
-            ? pages - 2 + (offset - lastStart) / (maximum - lastStart) : offset / page;
-        PageIndicator.Visibility = Visibility.Visible;
+        if (rail is null) return;
+        target = Math.Clamp(target, 0, MaximumOffset);
+        if (Math.Abs(PresentedOffset - target) < .5) { targetOffset = null; IsSettled = true; CommitOffset(); return; }
+        targetOffset = target; IsSettled = false;
+        rail.ChangeView(target, null, null, !MusicVisuals.CanAnimate(this)); UpdateButtons();
     }
     private double? PageTarget(int direction)
     {
-        if (scrollPanel is null || restorePending || direction is not (-1 or 1)) return null;
-        var maximum = MaximumOffset;
-        var offset = Math.Clamp(settlingTarget ?? PresentedOffset, 0, maximum);
-        var aligned = NearestOffset(offset, maximum, CardWidth);
-        var page = visibleCardCount * CardWidth;
-        var target = direction < 0 && maximum - offset <= .5
-            ? Math.Max(0, Math.Floor(Math.Max(0, maximum - .5) / page) * page)
-            : Math.Clamp(aligned + direction * page, 0, maximum);
+        double offset = Math.Clamp(targetOffset ?? PresentedOffset, 0, MaximumOffset), page = visibleCards * CardWidth;
+        double target = direction < 0 && MaximumOffset - offset <= .5
+            ? Math.Max(0, Math.Floor(Math.Max(0, MaximumOffset - .5) / page) * page)
+            : Math.Clamp(NearestOffset(offset, MaximumOffset, CardWidth) + direction * page, 0, MaximumOffset);
         return Math.Abs(target - offset) > .5 ? target : null;
     }
-    private void OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    private bool Page(int direction)
     {
-        if (rail is null || e.ChangedButton != MouseButton.Left) return;
-        restorePending = false;
-        pointerOrigin = e.GetPosition(this);
-        dragOrigin = PresentedOffset;
-        pointerPending = true;
+        if (PageTarget(direction) is not { } target) return false;
+        Move(target); return true;
     }
-    private void OnPreviewMouseMove(object sender, MouseEventArgs e)
+    internal bool Navigate(VirtualKey key)
     {
-        if (!pointerPending || scrollPanel is null || e.LeftButton != MouseButtonState.Pressed) return;
-        var delta = e.GetPosition(this).X - pointerOrigin.X;
-        if (!dragging && Math.Abs(delta) < SystemParameters.MinimumHorizontalDragDistance) return;
-        if (!dragging && !CaptureMouse()) { pointerPending = false; return; }
-        if (!dragging) dragOrigin = StopMotion();
-        dragging = true;
-        scrollPanel.ScrollTo(dragOrigin - delta);
-        e.Handled = true;
+        if (rail is null || !IsEnabled || !DesktopVisual.IsVisible(this)) return false;
+        if (key is VirtualKey.Left or VirtualKey.Right or VirtualKey.PageUp or VirtualKey.PageDown)
+            return Page(key is VirtualKey.Right or VirtualKey.PageDown ? 1 : -1);
+        double offset = targetOffset ?? PresentedOffset;
+        if (key == VirtualKey.Home && offset > .5) { Move(0); return true; }
+        if (key == VirtualKey.End && MaximumOffset - offset > .5) { Move(MaximumOffset); return true; }
+        return false;
     }
-    private void OnPreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    internal void ScrollToIndex(int index) { CancelPointer(); Move(Math.Max(0, index) * CardWidth); }
+    private void CancelPointer() { pendingPointer = dragging = false; ReleasePointerCaptures(); }
+    private void Deactivated(object? sender, EventArgs e) { CancelPointer(); Snap(); }
+    private void CommitOffset()
     {
-        if (!pointerPending) return;
-        pointerPending = false;
-        if (!dragging)
-        {
-            if (!animating && !settle.IsEnabled) SnapToNearest();
-            return;
-        }
-        dragging = false;
-        e.Handled = true;
-        if (IsMouseCaptured) ReleaseMouseCapture();
-        SnapToNearest();
+        if (rail is null || restoring || dragging || pendingPointer) return;
+        double offset = Math.Clamp(targetOffset ?? NearestOffset(PresentedOffset, MaximumOffset, CardWidth), 0, MaximumOffset);
+        if (section is not null) section.HorizontalOffset = offset;
+        committing = true; HorizontalOffset = offset; committing = false;
     }
-    private void OnLostMouseCapture(object sender, MouseEventArgs e)
+    private void UpdateButtons()
     {
-        if (!dragging) return;
-        pointerPending = dragging = false;
-        SnapToNearest();
+        bool visible = IsEnabled && DesktopVisual.IsVisible(this);
+        Previous.IsEnabled = visible && PageTarget(-1).HasValue; Next.IsEnabled = visible && PageTarget(1).HasValue;
+        Previous.Visibility = PageTarget(-1).HasValue ? Visibility.Visible : Visibility.Collapsed;
+        Next.Visibility = PageTarget(1).HasValue ? Visibility.Visible : Visibility.Collapsed;
+        UpdateArrowOpacity();
+        PageIndicator.PageCount = (int)Math.Ceiling(ItemsHost.Items.Count / (double)visibleCards);
+        double page = visibleCards * CardWidth, lastStart = (PageIndicator.PageCount - 2) * page;
+        PageIndicator.Position = PageIndicator.PageCount > 1 && PresentedOffset > lastStart
+            ? PageIndicator.PageCount - 2 + (PresentedOffset - lastStart) / (MaximumOffset - lastStart)
+            : PresentedOffset / Math.Max(1, page);
+        PageIndicator.Visibility = section is { IsBannerSection: true } && PageIndicator.PageCount > 1 ? Visibility.Visible : Visibility.Collapsed;
     }
-    private void OnPreviewTouchDown(object sender, TouchEventArgs e)
+    private void UpdateArrowOpacity()
     {
-        if (!presentationActive) return;
-        restorePending = false;
-        StopMotion();
+        bool active = CardMotion.GetProgress(this) > 0;
+        Previous.Opacity = Next.Opacity = active ? 1 : 0;
+        Previous.IsHitTestVisible = Next.IsHitTestVisible = active;
     }
-    private void OnPreviewTouchUp(object sender, TouchEventArgs e) => ScheduleSnap();
-    private void OnLostTouchCapture(object sender, TouchEventArgs e) => ScheduleSnap();
-    private void OwnerDeactivated(object? sender, EventArgs e)
-    {
-        CancelPointerInput();
-        if (!restorePending && !AreAnyTouchesCapturedWithin) SnapToNearest();
-    }
-    private void CancelPointerInput()
-    {
-        pointerPending = dragging = false;
-        if (IsMouseCaptured) ReleaseMouseCapture();
-    }
-    private void OnPreviewKeyDown(object sender, KeyEventArgs e)
-    {
-        if (!presentationActive || e.KeyboardDevice.Modifiers != ModifierKeys.None) return;
-        var handled = false;
-        switch (e.Key)
-        {
-            case Key.Left: handled = Page(-1); break;
-            case Key.Right: handled = Page(1); break;
-            case Key.PageUp: handled = Page(-1); break;
-            case Key.PageDown: handled = Page(1); break;
-            case Key.Home when (settlingTarget ?? PresentedOffset) > .5:
-                AnimateTo(0); handled = true; break;
-            case Key.End when scrollPanel is not null && MaximumOffset - (settlingTarget ?? PresentedOffset) > .5:
-                AnimateTo(MaximumOffset); handled = true; break;
-        }
-        if (handled) e.Handled = true;
-    }
-}
-
-public sealed class ColumnsConverter : System.Windows.Data.IValueConverter
-{
-    public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture) =>
-        value is double width ? Math.Clamp((int)((width + 20) / 420), 1, 2) : 2;
-    public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture) => throw new NotSupportedException();
-}
-
-// Native clipping for the whole card, including the image and colored caption.
-public static class CardClip
-{
-    public static readonly DependencyProperty RadiusProperty = DependencyProperty.RegisterAttached("Radius", typeof(double),
-        typeof(CardClip), new PropertyMetadata(0d, Changed));
-    public static double GetRadius(DependencyObject value) => (double)value.GetValue(RadiusProperty);
-    public static void SetRadius(DependencyObject value, double radius) => value.SetValue(RadiusProperty, radius);
-    private static void Changed(DependencyObject value, DependencyPropertyChangedEventArgs e)
-    {
-        if (value is not FrameworkElement element) return;
-        element.SizeChanged -= OnSizeChanged;
-        element.SizeChanged += OnSizeChanged;
-        Clip(element);
-    }
-    private static void OnSizeChanged(object sender, SizeChangedEventArgs e) => Clip((FrameworkElement)sender);
-    private static void Clip(FrameworkElement e) =>
-        e.Clip = new RectangleGeometry(new Rect(0, 0, e.ActualWidth, e.ActualHeight), GetRadius(e), GetRadius(e));
-}
-public sealed class BannerHeightConverter : System.Windows.Data.IMultiValueConverter
-{
-    public object Convert(object[] values, Type targetType, object parameter, System.Globalization.CultureInfo culture) =>
-        values.Length > 0 && values[0] is double width && width > 0 ? width / 2.56 : 0d;
-    public object[] ConvertBack(object value, Type[] targetTypes, object parameter, System.Globalization.CultureInfo culture) => throw new NotSupportedException();
+    private void Previous_Click(object sender, RoutedEventArgs e) => Page(-1);
+    private void Next_Click(object sender, RoutedEventArgs e) => Page(1);
 }

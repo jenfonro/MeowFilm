@@ -1,9 +1,26 @@
 import Foundation
 import XCTest
+import Combine
 @testable import MeowFilmFeature
 
 @MainActor
 final class FilmPlayerPreferencesTests: XCTestCase {
+    func testReloadAndSameValueDoNotPublishDuplicatePreferences() {
+        isolated { defaults in
+            let store = FilmPlayerPreferencesStore(defaults: defaults)
+            var values: [FilmPlayerPreferences] = []
+            let observation = store.$preferences.dropFirst().sink { values.append($0) }
+            defer { observation.cancel() }
+            store.reload()
+            XCTAssertTrue(store.set(\.holdRate, 2))
+            store.reload()
+            XCTAssertTrue(values.isEmpty)
+            XCTAssertTrue(store.set(\.seekStep, 30))
+            store.reload()
+            XCTAssertEqual(values.count, 1)
+        }
+    }
+
     private func isolated(_ body: (UserDefaults) throws -> Void) rethrows {
         let suite = "meowfilm.tests.film-player." + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!

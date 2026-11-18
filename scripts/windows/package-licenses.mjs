@@ -29,6 +29,8 @@ export const licenseFiles = [
   'GCC-Runtime-Library-Exception-3.1.txt',
   'MinGW-w64-runtime-NOTICE.txt', 'winpthreads-LICENSE.txt',
   'WebView2-LICENSE.txt', 'WebView2-NOTICE.txt',
+  'WindowsAppSDK-LICENSE.txt', 'WindowsAppSDK-NOTICE.txt',
+  'Win2D-MIT.txt',
   'NAudio-MIT.txt', 'FFmpeg.AutoGen-MIT.txt', 'dotnet-runtime-MIT.txt', 'FFmpeg-audio-NOTICES.txt',
   'sqlite-LICENSE.md',
 ];

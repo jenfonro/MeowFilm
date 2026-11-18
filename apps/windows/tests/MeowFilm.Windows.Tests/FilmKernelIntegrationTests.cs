@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Windows;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.Graphics;
 using System.Windows.Threading;
 using MeowFilm.Media;
 using static MeowFilm.Windows.Tests.NativeMediaFixtures;
@@ -15,6 +17,60 @@ public static class FilmKernelIntegrationTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (string completion in new[] { "mount", "cancel", "stop" })
+            yield return Case("film kernel unmounted commit waits for actual " + completion, async () =>
+            {
+                var kernel = new ObservedKernel();
+                var player = new FilmPlayback(Dispatcher.CurrentDispatcher, kernel);
+                Window? window = null;
+                try
+                {
+                    await using var origin = Fixture("progressive");
+                    var lease = new Lease(origin.Uri("/root"), origin.Headers);
+                    var intent = Intent(paused: true);
+                    await player.PrepareAsync(intent, lease.Address, Input("progressive"), lease);
+                    Check(kernel.Prepared.State == 1 && !player.VideoView.IsLoaded && !player.HasOutput,
+                        "silent preparation decodes without creating a presentation window");
+                    using var cancellation = new CancellationTokenSource();
+                    var commit = player.TryCommitAsync(intent, () => true, () => { }, cancellation.Token);
+                    Check(!commit.IsCompleted && kernel.Starts == 0 && player.Scope is null,
+                        "an unmounted composition target cannot publish or start audio");
+                    if (completion == "mount")
+                    {
+                        window = new Window { Content = player.VideoView, Title = "Meowfilm mount validation" };
+                        window.AppWindow.Resize(new SizeInt32(640, 400));
+                        window.Activate();
+                        await TestUiHost.LoadedAsync(player.VideoView);
+                        Check(await commit.WaitAsync(TimeSpan.FromSeconds(8)) &&
+                            kernel.Starts == 1 && player.Output is { SubmittedPictures: > 0 } &&
+                            player.Scope is not null && player.IsPaused,
+                            "the same prepared candidate commits only after real XAML mounting");
+                        await player.StopAsync();
+                    }
+                    else
+                    {
+                        Task stopped;
+                        if (completion == "cancel") { cancellation.Cancel(); stopped = Task.CompletedTask; }
+                        else stopped = player.StopAsync();
+                        try
+                        {
+                            await commit.WaitAsync(TimeSpan.FromSeconds(8));
+                            throw new InvalidOperationException("Unmounted cancelled commit succeeded");
+                        }
+                        catch (PlaybackException error) when (error.Code == PlaybackError.Superseded) { }
+                        await stopped.WaitAsync(TimeSpan.FromSeconds(8));
+                        Check(kernel.Starts == 0, "cancellation never starts the prepared output");
+                    }
+                    Check(!player.HasOutput && player.Scope is null &&
+                        kernel.Releases == 1 && lease.Disposals == 1 && lease.DisposeCalls == 1,
+                        "target waiting and stopping share one actual native and lease retirement");
+                }
+                finally
+                {
+                    try { await player.DisposeAsync(); }
+                    finally { if (window is not null) { window.Content = null; window.Close(); } }
+                }
+            });
         yield return Case("film kernel decoded picture is actually visible on the desktop", () => WithPlayer(async (player, _) =>
         {
             await using var origin = Fixture("progressive");
@@ -23,18 +79,31 @@ public static class FilmKernelIntegrationTests
             await player.PrepareAsync(intent, lease.Address, Input("progressive"), lease);
             Check(await player.TryCommitAsync(intent, () => true, () => { }), "visible picture commit");
             uint pixel = 0;
-            await Until(() =>
+            Point point = new();
+            try
             {
-                var point = player.VideoView.PointToScreen(new Point(
-                    player.VideoView.ActualWidth / 2, player.VideoView.ActualHeight / 2));
-                IntPtr screen = GetDC(IntPtr.Zero);
-                try { pixel = GetPixel(screen, (int)point.X, (int)point.Y); }
-                finally { ReleaseDC(IntPtr.Zero, screen); }
-                int red = (int)(pixel & 255), green = (int)((pixel >> 8) & 255), blue = (int)((pixel >> 16) & 255);
-                // The first synthetic JPEG is RGB(32,50,180). Allow color
-                // conversion/desktop quantization, but never an empty HWND.
-                return pixel != uint.MaxValue && blue > green + 40 && blue > red + 40 && green < 150;
-            }, "decoded blue picture reaches actual desktop pixels");
+                await Until(() =>
+                {
+                    point = NativeDesktopCapture.ScreenPoint(player.VideoView, new Point(
+                        player.VideoView.ActualWidth / 2, player.VideoView.ActualHeight / 2));
+                    IntPtr screen = GetDC(IntPtr.Zero);
+                    try { pixel = GetPixel(screen, (int)point.X, (int)point.Y); }
+                    finally { ReleaseDC(IntPtr.Zero, screen); }
+                    int red = (int)(pixel & 255), green = (int)((pixel >> 8) & 255), blue = (int)((pixel >> 16) & 255);
+                    // The first synthetic JPEG is RGB(32,50,180). Allow color
+                    // conversion/desktop quantization, but never an empty HWND.
+                    return pixel != uint.MaxValue && blue > green + 40 && blue > red + 40 && green < 150;
+                }, "decoded blue picture reaches actual desktop pixels");
+            }
+            catch
+            {
+                Console.Error.WriteLine($"OBSERVED_FILM_FIRST_PICTURE_FAILURE colorref=0x{pixel:X8}; " +
+                    $"screen={point.X},{point.Y}; size={player.VideoView.ActualWidth}x{player.VideoView.ActualHeight}; " +
+                    $"scale={player.VideoView.XamlRoot?.RasterizationScale}; pictures={player.Output?.SubmittedPictures}");
+                try { await NativeDesktopCapture.SaveAsync(player.VideoView, "decoded-blue-picture-failure"); }
+                catch (Exception captureError) { Console.Error.WriteLine(captureError); }
+                throw;
+            }
             Console.WriteLine($"OBSERVED_FILM_DESKTOP_PIXEL colorref=0x{pixel:X6}; source=synthetic-blue-jpeg");
             await NativeDesktopCapture.SaveAsync(player.VideoView, "decoded-blue-picture");
         }));
@@ -83,12 +152,27 @@ public static class FilmKernelIntegrationTests
                 Math.Abs(after.Position - before.Position) < .000001 && after.SubtitleTrack == -1 && after.Seekable == 0,
                 "subtitle disable synchronously submits a replacement without advancing or unpausing");
             uint[] cleared = [];
-            await Until(() =>
+            try
             {
-                cleared = SubtitleDesktopPixels(player);
-                return white.All(i => BluePixel(cleared[i]) && SamePixel(cleared[i], baseline[i])) &&
-                    !cleared.Any(WhitePixel);
-            }, "all observed white subtitle pixels disappear from the real desktop without resuming or remounting");
+                await Until(() =>
+                {
+                    cleared = SubtitleDesktopPixels(player);
+                    Check(cleared.Length == baseline.Length, "subtitle observations retain the same desktop extent");
+                    return white.All(i => BluePixel(cleared[i]) && SamePixel(cleared[i], baseline[i])) &&
+                        !cleared.Any(WhitePixel);
+                }, "all observed white subtitle pixels disappear from the real desktop without resuming or remounting");
+            }
+            catch
+            {
+                Console.Error.WriteLine($"OBSERVED_FILM_SUBTITLE_CLEAR_FAILURE baselineBlue={baseline.Count(BluePixel)}; " +
+                    $"observedWhite={white.Length}; clearedBlue={cleared.Count(BluePixel)}; clearedWhite={cleared.Count(WhitePixel)}; " +
+                    $"replacedWhite={white.Count(i => i < cleared.Length && BluePixel(cleared[i]) && SamePixel(cleared[i], baseline[i]))}; " +
+                    $"samples={cleared.Length}; size={player.VideoView.ActualWidth}x{player.VideoView.ActualHeight}; " +
+                    $"presentBefore={before.SubmittedPictures}; presentAfter={after.SubmittedPictures}; state={after.State}");
+                try { await NativeDesktopCapture.SaveAsync(player.VideoView, "subtitle-clear-failure"); }
+                catch (Exception captureError) { Console.Error.WriteLine(captureError); }
+                throw;
+            }
             int[] background = Enumerable.Range(0, baseline.Length)
                 .Where(i => BluePixel(baseline[i]) && SamePixel(subtitled[i], baseline[i])).ToArray();
             Check(background.Length > baseline.Length * .7 &&
@@ -416,13 +500,14 @@ public static class FilmKernelIntegrationTests
         var player = new FilmPlayback(Dispatcher.CurrentDispatcher, kernel) { Volume = 5 };
         var window = new Window
         {
-            Title = "Meowfilm film kernel validation", Width = 640, Height = 400, Content = player.VideoView,
-            WindowStartupLocation = WindowStartupLocation.CenterScreen, Topmost = true, ShowActivated = false
+            Title = "Meowfilm film kernel validation", Content = player.VideoView
         };
+        window.AppWindow.Resize(new SizeInt32(640, 400));
         try
         {
-            window.Show(); window.UpdateLayout();
-            await Dispatcher.Yield(DispatcherPriority.Loaded);
+            window.Activate();
+            await Until(() => player.VideoView.IsLoaded && player.VideoView.ActualWidth > 0,
+                "the composition surface is mounted in the real window");
             await body(player, kernel);
         }
         finally
@@ -564,11 +649,10 @@ public static class FilmKernelIntegrationTests
     }
     private static uint[] SubtitleDesktopPixels(FilmPlayback player)
     {
-        // Sample actual screen pixels across the lower video, not a WPF
-        // RenderTargetBitmap (the D3D11 child HWND is absent from that bitmap).
-        var first = player.VideoView.PointToScreen(new Point(player.VideoView.ActualWidth * .15,
+        // Sample the actual composited desktop, not a XAML-only bitmap.
+        var first = NativeDesktopCapture.ScreenPoint(player.VideoView, new Point(player.VideoView.ActualWidth * .15,
             player.VideoView.ActualHeight * .5));
-        var last = player.VideoView.PointToScreen(new Point(player.VideoView.ActualWidth * .85,
+        var last = NativeDesktopCapture.ScreenPoint(player.VideoView, new Point(player.VideoView.ActualWidth * .85,
             player.VideoView.ActualHeight * .98));
         var pixels = new List<uint>();
         int width = (int)last.X - (int)first.X, height = (int)last.Y - (int)first.Y;

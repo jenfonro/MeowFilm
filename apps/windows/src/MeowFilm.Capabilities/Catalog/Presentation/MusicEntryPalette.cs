@@ -1,5 +1,8 @@
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using Microsoft.UI.Xaml.Media;
+using Windows.UI;
+using System.IO;
+using System.Runtime.InteropServices.WindowsRuntime;
+using Microsoft.UI.Xaml.Media.Imaging;
 
 namespace MeowFilm.Capabilities;
 
@@ -9,12 +12,23 @@ internal static class MusicEntryPalette
 {
     internal static SolidColorBrush Sample(BitmapSource? source, bool preview = false)
     {
-        if (source is null) return Brushes.Gray;
-        var small = new TransformedBitmap(source, new ScaleTransform(48d / source.PixelWidth, 48d / source.PixelHeight));
-        // Bgra32 is straight alpha in sRGB, matching the shared 48x48 sampling rule.
-        var rgba = new FormatConvertedBitmap(small, PixelFormats.Bgra32, null, 0);
-        var bytes = new byte[rgba.PixelWidth * rgba.PixelHeight * 4];
-        rgba.CopyPixels(bytes, rgba.PixelWidth * 4, 0);
+        if (source is null) return MusicVisuals.Brush("#808080");
+        // ArtworkImage borrows the cache owner's shared WriteableBitmap. Read that buffer
+        // once per source change; never acquire/decode the artwork a second time.
+        if (source is not WriteableBitmap bitmap) throw new ArgumentException("Entry artwork must expose decoded pixels.", nameof(source));
+        var pixels = new byte[bitmap.PixelWidth * bitmap.PixelHeight * 4];
+        using (var input = bitmap.PixelBuffer.AsStream()) input.ReadExactly(pixels);
+        const int width = 48, height = 48;
+        var bytes = new byte[width * height * 4];
+        for (int y = 0; y < height; y++)
+        for (int x = 0; x < width; x++)
+        {
+            int from = ((y * bitmap.PixelHeight / height) * bitmap.PixelWidth + x * bitmap.PixelWidth / width) * 4;
+            int to = (y * width + x) * 4;
+            int alpha = pixels[from + 3]; bytes[to + 3] = (byte)alpha;
+            for (int channel = 0; channel < 3; channel++)
+                bytes[to + channel] = alpha == 0 ? (byte)0 : (byte)Math.Min(255, (pixels[from + channel] * 255 + alpha / 2) / alpha);
+        }
         double red = 0, green = 0, blue = 0, weight = 0;
         for (int i = 0; i < bytes.Length; i += 4)
         {
@@ -22,14 +36,13 @@ internal static class MusicEntryPalette
             blue += bytes[i] * alpha; green += bytes[i + 1] * alpha; red += bytes[i + 2] * alpha;
             weight += alpha;
         }
-        if (weight == 0) return Brushes.Gray;
+        if (weight == 0) return MusicVisuals.Brush("#808080");
         red /= weight; green /= weight; blue /= weight;
         if (!preview) { red = red * .35 + 75 * .65; green = green * .35 + 56 * .65; blue = blue * .35 + 50 * .65; }
         double luminance = .2126 * red + .7152 * green + .0722 * blue;
         double scale = Math.Min(1, (preview ? 170d : 96d) / luminance);
         static byte Channel(double value) => (byte)Math.Clamp(Math.Round(value, MidpointRounding.AwayFromZero), 0, 255);
-        var brush = new SolidColorBrush(Color.FromRgb(Channel(red * scale), Channel(green * scale), Channel(blue * scale)));
-        brush.Freeze(); return brush;
+        return new SolidColorBrush(Color.FromArgb(255, Channel(red * scale), Channel(green * scale), Channel(blue * scale)));
     }
 
     internal static Color TitleShade(Color source)
@@ -66,7 +79,7 @@ internal static class MusicEntryPalette
                 x = Math.Clamp(x, 0, 1);
                 return (byte)Math.Round(255 * (x <= .0031308 ? 12.92 * x : 1.055 * Math.Pow(x, 1 / 2.4) - .055));
             }
-            return Color.FromRgb(Encoded(4.0767416621 * l - 3.3077115913 * m + .2309699292 * s),
+            return Color.FromArgb(255, Encoded(4.0767416621 * l - 3.3077115913 * m + .2309699292 * s),
                 Encoded(-1.2684380046 * l + 2.6097574011 * m - .3413193965 * s),
                 Encoded(-.0041960863 * l - .7034186147 * m + 1.707614701 * s));
         }

@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-#define MFK_ABI 1u
+#define MFK_ABI 2u
 #define MFK_IO_BUFFER 65536
 
 /* Synchronous callbacks on kernel threads. The caller retains the callbacks
@@ -62,16 +62,39 @@ typedef struct {
     char codec[32], language[32], title[128];
 } mfk_track;
 
+/* The UI owns layout and visibility. Dimensions are physical pixels (zero
+ * suspends presentation); scale is SwapChainPanel.CompositionScaleX/Y.
+ * display_window is a top-level HWND used only for display capability queries,
+ * never a picture target. Updates may use null only while visible is zero;
+ * attach always requires a valid display_window.
+ * The kernel copies this structure during the call. */
+typedef struct {
+    uint32_t size, abi;
+    void *display_window;
+    int32_t width, height;
+    float scale_x, scale_y;
+    int32_t visible;
+} mfk_surface;
+
 /* URI, headers and keys never appear in a public lookup token or log. create
  * copies key bytes. Each owner has independent IO, decode and output state. */
 MFK_EXPORT int MFK_CALL mfk_create(const mfk_callbacks *, const char *uri, int format,
     const mfk_clear_key *, uint32_t count, const uint8_t *default_key, void **owner);
-/* prepare is silent and blocking. cancel interrupts it. HWND is the intended
- * native picture target, not a WPF bitmap or an upstream player control. */
-MFK_EXPORT int MFK_CALL mfk_prepare(void *owner, double position, void *hwnd);
-/* A null target releases the swapchain, retaining decoder/clock/last picture.
- * Only one committed owner may hold a flip swapchain for a picture HWND. */
-MFK_EXPORT int MFK_CALL mfk_attach(void *owner, void *hwnd);
+/* prepare is silent and blocking. cancel interrupts it. An optional top-level
+ * HWND selects the decoder/render adapter; null selects the default adapter.
+ * Neither case creates a target or proves HDR display support. */
+MFK_EXPORT int MFK_CALL mfk_prepare(void *owner, double position, void *display_window);
+/* Creates a fixed FP16/scRGB composition target without presenting a frame.
+ * swapchain is required and receives an AddRef'd IDXGISwapChain1 on success;
+ * the caller releases its reference after UI-thread SetSwapChain. Reattaching
+ * an attached owner is invalid: update preserves the existing COM identity.
+ * A null surface drains/releases the target, retaining decoder/clock/picture.
+ * The UI must SetSwapChain(null) before detach or owner release. */
+MFK_EXPORT int MFK_CALL mfk_attach(void *owner, const mfk_surface *, void **swapchain);
+/* Resize/scale/visibility/display changes never replace the swapchain. After
+ * mounting an already committed owner, call this to repaint its retained frame.
+ * A newly prepared owner instead starts only after UI SetSwapChain succeeds. */
+MFK_EXPORT int MFK_CALL mfk_surface_update(void *owner, const mfk_surface *);
 MFK_EXPORT int MFK_CALL mfk_start(void *owner, int paused);
 MFK_EXPORT int MFK_CALL mfk_pause(void *owner, int paused);
 MFK_EXPORT int MFK_CALL mfk_seek(void *owner, double position);

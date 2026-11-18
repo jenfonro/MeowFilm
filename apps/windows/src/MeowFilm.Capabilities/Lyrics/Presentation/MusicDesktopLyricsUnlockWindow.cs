@@ -1,66 +1,45 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Interop;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Windowing;
+using Microsoft.UI.Xaml.Media;
+using MeowFilm.Desktop;
+using Windows.Foundation;
+using Windows.UI.ViewManagement;
 
 namespace MeowFilm.Capabilities;
 
-internal sealed class MusicDesktopLyricsUnlockWindow : MeowFilm.Desktop.DesktopWindow
+internal sealed class MusicDesktopLyricsUnlockWindow : Window
 {
-    private HwndSource? source;
-
+    private readonly MusicDesktopLyricsNative.SubclassProc hook;
+    internal nint Handle { get; }
     internal MusicDesktopLyricsUnlockWindow(MusicDesktopLyricsWindow lyrics)
     {
-        Owner = lyrics;
-        Width = Height = 32;
-        WindowStyle = WindowStyle.None;
-        ResizeMode = ResizeMode.NoResize;
-        WindowStartupLocation = WindowStartupLocation.Manual;
-        Topmost = true; ShowActivated = false; ShowInTaskbar = false; Focusable = false;
-        AllowsTransparency = true; Background = Brushes.Transparent;
         Title = "解锁桌面歌词";
-        Resources.MergedDictionaries.Add(new ResourceDictionary
-        { Source = new Uri("/MeowFilm.Desktop;component/Theme.xaml", UriKind.Relative) });
-        Resources["DesktopLyrics.UnlockBackground"] = new SolidColorBrush(Color.FromArgb(210, 33, 33, 33));
-        var style = new Style(typeof(Button), (Style)lyrics.FindResource("DesktopLyrics.Tool"));
-        style.Setters.Add(new Setter(BackgroundProperty, Resources["DesktopLyrics.UnlockBackground"]));
-        var contrast = new Trigger { Property = MeowFilm.Desktop.DesktopTheme.IsHighContrastProperty, Value = true };
-        contrast.Setters.Add(new Setter(BackgroundProperty, SystemColors.WindowBrush));
-        style.Triggers.Add(contrast);
-        var button = new Button
-        {
-            Content = "\uE785", ToolTip = "解锁桌面歌词",
-            Style = style, Margin = new(0)
-        };
-        AutomationProperties.SetName(button, "解锁桌面歌词");
-        button.Click += (_, _) => lyrics.UnlockLyrics();
-        Content = button;
+        var button = new Button { Content = new FontIcon { Glyph = "\uE785", FontSize = 15 }, Width = 32, Height = 32,
+            Padding = new Thickness(0), CornerRadius = new CornerRadius(5), Background = MusicVisuals.Brush("#D2212121"),
+            Foreground = MusicVisuals.Brush("#F5F5F5") };
+        AutomationProperties.SetName(button, Title); button.Click += (_, _) => lyrics.UnlockLyrics(); Content = button;
+        Handle = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        if (AppWindow.Presenter is OverlappedPresenter presenter)
+        { presenter.SetBorderAndTitleBar(false, false); presenter.IsResizable = false; presenter.IsAlwaysOnTop = true; }
+        AppWindow.IsShownInSwitchers = false; AppWindow.Resize(new(32, 32));
+        MusicDesktopLyricsNative.SetInputStyle(Handle, false);
+        hook = (hwnd, message, wParam, lParam, _, _) => message == 0x0021 ? 3 : MusicDesktopLyricsNative.DefSubclassProc(hwnd, message, wParam, lParam);
+        if (!MusicDesktopLyricsNative.SetWindowSubclass(Handle, hook, 1, 0)) throw new Win32Exception();
+        Closed += (_, _) => MusicDesktopLyricsNative.RemoveWindowSubclass(Handle, hook, 1);
     }
-
-    protected override void OnSourceInitialized(EventArgs e)
+    internal void Show() => AppWindow.Show(false);
+    internal void Hide() => AppWindow.Hide();
+    internal void ApplyHighContrast(bool enabled)
     {
-        base.OnSourceInitialized(e);
-        var handle = new WindowInteropHelper(this).Handle;
-        MusicDesktopLyricsNative.SetInputStyle(handle, clickThrough: false);
-        source = HwndSource.FromHwnd(handle)!;
-        source.AddHook(WindowMessage);
-    }
-
-    private nint WindowMessage(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
-    {
-        if (message == 0x0021) { handled = true; return 3; }
-        return 0;
-    }
-
-    protected override void OnClosed(EventArgs e)
-    {
-        if (source is { IsDisposed: false }) source.RemoveHook(WindowMessage);
-        source = null;
-        Content = null;
-        base.OnClosed(e);
+        var button = (Button)Content;
+        DesktopTheme.SetIsHighContrast(button, enabled);
+        var ui = new UISettings();
+        button.Background = enabled ? new SolidColorBrush(ui.UIElementColor(UIElementType.Window)) : MusicVisuals.Brush("#D2212121");
+        button.Foreground = enabled ? new SolidColorBrush(ui.UIElementColor(UIElementType.WindowText)) : MusicVisuals.Brush("#F5F5F5");
     }
 }
 
@@ -161,6 +140,24 @@ internal static class MusicDesktopLyricsNative
         if (SetWindowLongPtr(handle, -20, style) == 0 && Marshal.GetLastPInvokeError() != 0)
             throw new Win32Exception();
     }
+
+    internal delegate nint SubclassProc(nint hwnd, uint message, nint wParam, nint lParam, nuint id, nuint data);
+    [DllImport("comctl32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetWindowSubclass(nint window, SubclassProc callback, nuint id, nuint data);
+    [DllImport("comctl32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool RemoveWindowSubclass(nint window, SubclassProc callback, nuint id);
+    [DllImport("comctl32.dll")]
+    internal static extern nint DefSubclassProc(nint window, uint message, nint wParam, nint lParam);
+    [DllImport("user32.dll")]
+    internal static extern nint SendMessageW(nint window, uint message, nint wParam, nint lParam);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool ReleaseCapture();
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool EnableWindow(nint handle, [MarshalAs(UnmanagedType.Bool)] bool enabled);
 
     internal static void Place(nint handle, Point start, Point end)
     {

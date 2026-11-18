@@ -1,12 +1,10 @@
-using System.Diagnostics;
-using System.Reflection;
-using System.Windows;
-using System.Windows.Automation.Peers;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Documents;
-using System.Windows.Media;
-using System.Windows.Threading;
+using FontWeights = Microsoft.UI.Text.FontWeights;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
+using Windows.UI.Text;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 
@@ -14,443 +12,170 @@ namespace MeowFilm.Windows.Tests;
 
 public static class WindowsDefaultTypographyTests
 {
-    private const string ApplicationCaseName =
-        "Windows default typography: application install reaches new roots and dynamic family";
-    private const string ApplicationChildVariable = "MEOWFILM_TYPOGRAPHY_CHILD";
-
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new(ApplicationCaseName, RunApplicationInstall);
-        yield return Case("new window roots and user controls inherit body typography without local setup",
-            VerifyNewRoots);
-        yield return Case("dynamic system family override and recovery reaches roots popup and self-drawn text",
-            VerifyDynamicFamily);
-        yield return Case("shared text roles keep regular fonts and their size hierarchy", VerifyRoles);
-        yield return Case("desktop lyric user colors and sizes remain outside the body default",
-            VerifyDesktopLyricExceptions);
-        yield return Case("popup menu tooltip and derived window content use the shared family and keep their own roles",
-            VerifyOverlayAndWindowConsumers);
-    }
-
-    private static async Task RunApplicationInstall()
-    {
-        if (Environment.GetEnvironmentVariable(ApplicationChildVariable) != "1")
+        yield return Case("application installs one shared theme without replacing the running application", async () =>
         {
-            var info = new ProcessStartInfo(Environment.ProcessPath!)
-            {
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                WorkingDirectory = TestWorkspace.SourceRoot
-            };
-            if (Path.GetFileNameWithoutExtension(info.FileName).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
-                info.ArgumentList.Add(Assembly.GetExecutingAssembly().Location);
-            info.ArgumentList.Add("--case");
-            info.ArgumentList.Add(ApplicationCaseName);
-            info.Environment[ApplicationChildVariable] = "1";
-            using var child = Process.Start(info) ?? throw new InvalidOperationException("Typography child missing");
-            var output = child.StandardOutput.ReadToEndAsync();
-            var errors = child.StandardError.ReadToEndAsync();
-            try { await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(45)); }
-            catch { child.Kill(entireProcessTree: true); await child.WaitForExitAsync(); throw; }
-            var text = await output;
-            var diagnostics = await errors;
-            if (child.ExitCode != 0 ||
-                !text.Contains("TOTAL 1; PASSED 1; FAILED 0; SKIPPED 0", StringComparison.Ordinal))
-                throw new InvalidOperationException("Typography child failed: " + text + diagnostics);
-            return;
-        }
-
-        await MusicQualityConsumerTests.Sta(VerifyApplicationInstall);
-    }
-
-    private static async Task VerifyApplicationInstall()
-    {
-        var application = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-        DesktopTypography.Install(application);
-        var first = new DesktopWindow
-        {
-            Width = 640, Height = 400, Left = -32000, Top = -32000,
-            ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None
-        };
-        var second = new DesktopWindow
-        {
-            Width = 640, Height = 400, Left = -32000, Top = -32000,
-            ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None
-        };
-        try
-        {
-            var installed = application.Resources.MergedDictionaries
-                .Where(dictionary => dictionary.Source?.OriginalString.Contains("Typography.xaml", StringComparison.Ordinal) == true)
-                .ToArray();
-            Equal(1, installed.Length, "application installs one shared typography dictionary");
-            DesktopTypography.Install(application);
-            Equal(1, application.Resources.MergedDictionaries
-                .Count(dictionary => dictionary.Source?.OriginalString.Contains("Typography.xaml", StringComparison.Ordinal) == true),
-                "repeated application install is idempotent");
-
-            var popupText = new TextBlock { Text = "浮层" };
-            var popup = new Popup { Child = popupText, PlacementTarget = first };
-            var word = new MusicLyricWordView { Word = new("自绘", 0, 1), FontSize = 20 };
-            var selfDrawn = new MusicDesktopLyricTextView { Text = "自绘", FontSize = 20 };
-            var list = new ListBox();
-            list.Items.Add(new ListBoxItem { Content = new TextBlock { Text = "列表" } });
-            var text = new TextBlock { Text = "正文" };
-            var button = new Button { Content = "按钮" };
-            var textBox = new TextBox { Text = "输入" };
-            first.Content = new StackPanel
-            {
-                Children = { text, button, textBox, list, word, selfDrawn, popup }
-            };
-            second.Content = new TextBlock { Text = "重建" };
-            first.Show();
-            second.Show();
-            first.UpdateLayout();
-            second.UpdateLayout();
-            popup.IsOpen = true;
-            first.UpdateLayout();
-
-            var listItem = (ListBoxItem)list.ItemContainerGenerator.ContainerFromIndex(0);
-            foreach (var control in new DependencyObject[] { text, button, textBox, listItem, word, selfDrawn })
-            {
-                Equal(SystemFonts.MessageFontFamily, TextElement.GetFontFamily(control), "application root family");
-                Equal(FontWeights.Normal, TextElement.GetFontWeight(control), "application body weight");
-                Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(control), "application display metrics");
-                Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(control), "application native rendering");
-            }
-            foreach (var control in new DependencyObject[] { text, button, textBox, listItem })
-                Equal(14d, TextElement.GetFontSize(control), "application body size");
-            Equal(20d, word.FontSize, "timed lyric keeps its explicit size");
-            Equal(20d, selfDrawn.FontSize, "self-drawn lyric keeps its explicit size");
-            Equal(SystemFonts.MessageFontFamily, ((TextBlock)second.Content).FontFamily, "rebuilt root family");
-            Equal(14d, ((TextBlock)second.Content).FontSize, "rebuilt root size");
-            Equal(SystemFonts.MessageFontFamily, popupText.FontFamily, "popup content family");
-            Equal(14d, popupText.FontSize, "popup body size");
-
-            var alternate = new FontFamily("Arial");
-            application.Resources[SystemFonts.MessageFontFamilyKey] = alternate;
-            first.UpdateLayout();
-            second.UpdateLayout();
-            await Drain();
-            foreach (var control in new DependencyObject[] { text, button, textBox, listItem, word, selfDrawn })
-                Equal(alternate, TextElement.GetFontFamily(control), "application dynamic family reaches root controls");
-            Equal(alternate, ((TextBlock)second.Content).FontFamily, "application dynamic family reaches rebuilt root");
-            Equal(alternate, popupText.FontFamily, "application dynamic family reaches popup content");
-
-            application.Resources.Remove(SystemFonts.MessageFontFamilyKey);
-            first.UpdateLayout();
-            second.UpdateLayout();
-            await Drain();
-            foreach (var control in new DependencyObject[] { text, button, textBox, listItem, word, selfDrawn })
-                Equal(SystemFonts.MessageFontFamily, TextElement.GetFontFamily(control), "removing the override restores system family");
-            Equal(SystemFonts.MessageFontFamily, popupText.FontFamily, "removing the override restores popup family");
-        }
-        finally
-        {
-            first.Content = null;
-            second.Content = null;
-            first.Close();
-            second.Close();
-            application.Shutdown();
-        }
+            var app = Application.Current;
+            DesktopTypography.Install(app); DesktopTypography.Install(app);
+            Check(app.Resources.MergedDictionaries.Count(dictionary => dictionary.Source?.OriginalString ==
+                "ms-appx:///MeowFilm.Desktop/Theme.xaml") == 1, "theme installation is idempotent");
+            Check(app.Resources.MergedDictionaries.OfType<XamlControlsResources>().Count() == 1, "one native control resource dictionary");
+            await VerifyNewRoots();
+            Check(ReferenceEquals(app, Application.Current), "tests never create a second application");
+        });
+        yield return Case("new and derived roots retain regular system body typography", VerifyNewRoots);
+        yield return Case("live family resources reach retained content and recover after removal", VerifyDynamicFamily);
+        yield return Case("shared text roles retain regular fonts and size hierarchy", VerifyRoles);
+        yield return Case("desktop lyrics preserve user colors and explicit sizes", VerifyDesktopLyrics);
+        yield return Case("popup menu tooltip and derived windows retain their native text roles", VerifyOverlays);
     }
 
     private static async Task VerifyNewRoots()
     {
-        var text = new TextBlock { Text = "无配置正文" };
-        var button = new Button { Content = "无配置按钮" };
-        var textBox = new TextBox { Text = "无配置输入" };
-        var listItem = new ListBoxItem { Content = new TextBlock { Text = "无配置列表" } };
-        var content = new UserControl
-        {
-            Content = new StackPanel { Children = { text, button, textBox, listItem } }
-        };
-        var window = new DesktopWindow { Content = content };
-        var derived = new DerivedDesktopWindow
-        {
-            Content = new UserControl { Content = new TextBlock { Text = "派生窗口正文" } }
-        };
-
+        var text = new TextBlock { Text = "正文" };
+        var button = new Button { Content = "按钮" };
+        var input = new TextBox { Text = "输入" };
+        var item = new ListViewItem { Content = "列表" };
+        var root = new UserControl { Content = new StackPanel { Children = { text, button, input, item } } };
+        using var host = new DesktopTestUi.Host(root, 640, 400);
+        var derivedText = new TextBlock { Text = "派生窗口正文" };
+        var derived = new DerivedDesktopWindow { Content = new UserControl { Content = derivedText } };
+        derived.AttachRoot(); derived.Resize(640, 400);
         try
         {
-            window.Show();
-            derived.Show();
-            window.UpdateLayout();
-            derived.UpdateLayout();
-            await Drain();
-            foreach (var control in new DependencyObject[] { text, button, textBox, listItem })
-            {
-                Equal(SystemFonts.MessageFontFamily, TextElement.GetFontFamily(control), "new root inherits the system family");
-                Equal(14d, TextElement.GetFontSize(control), "new root inherits body size");
-                Equal(FontWeights.Normal, TextElement.GetFontWeight(control), "new root inherits normal weight");
-                Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(control), "new root inherits Display");
-                Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(control), "new root inherits Auto");
-            }
-            Equal(SystemFonts.MessageFontFamily,
-                ((TextBlock)((UserControl)derived.Content).Content).FontFamily, "derived root inherits the system family");
-            True(window.UseLayoutRounding && window.SnapsToDevicePixels, "new root keeps display pixel layout");
-            True(derived.UseLayoutRounding && derived.SnapsToDevicePixels, "derived root keeps display pixel layout");
+            derived.Activate(); await DesktopTestUi.DrainAsync();
+            foreach (var element in new FrameworkElement[] { text, button, input, item, derivedText })
+                Typography(element, 14, SystemFamily);
+            Check(root.UseLayoutRounding && derived.Root.UseLayoutRounding, "both roots retain native pixel layout");
         }
-        finally
-        {
-            window.Content = null;
-            derived.Content = null;
-            window.Close();
-            derived.Close();
-        }
+        finally { derived.Content = null; derived.Close(); }
     }
 
     private static async Task VerifyDynamicFamily()
     {
         var text = new TextBlock { Text = "正文" };
         var button = new Button { Content = "按钮" };
-        var textBox = new TextBox { Text = "输入" };
-        var listItem = new ListBoxItem { Content = new TextBlock { Text = "列表" } };
+        var input = new TextBox { Text = "输入" };
         var word = new MusicLyricWordView { Word = new("自绘", 0, 1), FontSize = 20 };
-        var selfDrawn = new MusicDesktopLyricTextView { Text = "自绘", FontSize = 20 };
+        var lyric = new MusicDesktopLyricTextView { Text = "歌词", FontSize = 20 };
         var popupText = new TextBlock { Text = "浮层" };
         var popup = new Popup { Child = popupText };
-        var window = new DesktopWindow
-        {
-            Width = 640, Height = 400, Left = -32000, Top = -32000,
-            ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None,
-            Content = new StackPanel { Children = { text, button, textBox, listItem, word, selfDrawn, popup } }
-        };
-        popup.PlacementTarget = window;
+        var root = new UserControl { Content = new StackPanel { Children = { text, button, input, word, lyric, popup } } };
+        using var host = new DesktopTestUi.Host(root, 640, 400);
+        await DesktopTestUi.DrainAsync();
+        popup.XamlRoot = root.XamlRoot; popup.IsOpen = true;
+        string[] keys = ["ContentControlThemeFontFamily", "TextControlThemeFontFamily"];
+        var resources = Application.Current.Resources;
+        var prior = keys.ToDictionary(key => key, key => resources.TryGetValue(key, out var value) ? value : null);
         try
         {
-            window.Show();
-            window.UpdateLayout();
-            popup.IsOpen = true;
-            await Drain();
             var alternate = new FontFamily("Arial");
-            window.Resources[SystemFonts.MessageFontFamilyKey] = alternate;
-            await Drain();
-            foreach (var control in new DependencyObject[] { text, button, textBox, listItem, word, selfDrawn })
-                Equal(alternate, TextElement.GetFontFamily(control), "window override reaches text and self-drawn controls");
-            Equal(alternate, popupText.FontFamily, "window override reaches popup content");
-
-            window.Resources.Remove(SystemFonts.MessageFontFamilyKey);
-            await Drain();
-            foreach (var control in new DependencyObject[] { text, button, textBox, listItem, word, selfDrawn })
-                Equal(SystemFonts.MessageFontFamily, TextElement.GetFontFamily(control), "removing the override restores root controls");
-            Equal(SystemFonts.MessageFontFamily, popupText.FontFamily, "removing the override restores popup content");
+            foreach (var key in keys) resources[key] = alternate;
+            root.RequestedTheme = ElementTheme.Dark; await DesktopTestUi.DrainAsync();
+            root.RequestedTheme = ElementTheme.Light; await DesktopTestUi.DrainAsync();
+            foreach (var element in new FrameworkElement[] { text, button, input, word, lyric, popupText })
+                Check(Family(element).Source == alternate.Source, "a retained text consumer follows the current native family resources");
+            Restore(); root.RequestedTheme = ElementTheme.Default; await DesktopTestUi.DrainAsync();
+            foreach (var element in new FrameworkElement[] { text, button, input, word, lyric, popupText })
+                Check(Family(element).Source == SystemFamily, "removing the override restores the native system family");
         }
-        finally
+        finally { Restore(); popup.IsOpen = false; }
+        void Restore()
         {
-            popup.IsOpen = false;
-            window.Content = null;
-            window.Close();
+            foreach (var key in keys)
+                if (prior[key] is { } value) resources[key] = value;
+                else resources.Remove(key);
         }
     }
 
     private static async Task VerifyRoles()
     {
-        var window = new DesktopWindow();
-        window.Resources.MergedDictionaries.Add(new ResourceDictionary
+        var root = new StackPanel();
+        root.Resources.MergedDictionaries.Add(new ResourceDictionary
+        { Source = new Uri("ms-appx:///MeowFilm.Capabilities/Lyrics/Presentation/LyricTypography.xaml") });
+        var roles = new[] { ("MeowFilm.Heading", 26d), ("MeowFilm.SectionHeading", 18d),
+            ("MeowFilm.SettingsSectionTitle", 16d), ("MeowFilm.Title", 20d) };
+        var texts = roles.Select(role => new TextBlock { Text = role.Item1,
+            Style = (Style)DesktopVisual.Resource(root, role.Item1) }).ToArray();
+        foreach (var text in texts) root.Children.Add(text);
+        var lyric = new MusicDesktopLyricTextView { Text = "歌词", Style = (Style)DesktopVisual.Resource(root, "MeowFilm.Lyric") };
+        var tab = new RadioButton { Content = "设置分类", Style = (Style)DesktopVisual.Resource(root, "MeowFilm.SettingsArea") };
+        root.Children.Add(lyric); root.Children.Add(tab);
+        using var host = new DesktopTestUi.Host(root, 640, 500); await DesktopTestUi.DrainAsync();
+        for (int index = 0; index < texts.Length; index++) Typography(texts[index], roles[index].Item2, SystemFamily);
+        Typography(lyric, 14, SystemFamily);
+        foreach (bool selected in new[] { false, true, false })
         {
-            Source = new Uri("/MeowFilm.Desktop;component/Theme.xaml", UriKind.Relative)
-        });
-        window.Resources.MergedDictionaries.Add(new ResourceDictionary
-        {
-            Source = new Uri("/MeowFilm.Capabilities;component/Lyrics/Presentation/LyricTypography.xaml", UriKind.Relative)
-        });
-        var heading = new TextBlock { Text = "标题", Style = (Style)window.FindResource("MeowFilm.Heading") };
-        var section = new TextBlock { Text = "分组", Style = (Style)window.FindResource("MeowFilm.SectionHeading") };
-        var settings = new TextBlock { Text = "设置", Style = (Style)window.FindResource("MeowFilm.SettingsSectionTitle") };
-        var title = new TextBlock { Text = "页标题", Style = (Style)window.FindResource("MeowFilm.Title") };
-        var lyric = new MusicDesktopLyricTextView { Text = "歌词", Style = (Style)window.FindResource("MeowFilm.Lyric") };
-        var tab = new RadioButton { Content = "设置分类", Style = (Style)window.FindResource("MeowFilm.SettingsArea") };
-        window.Width = 640;
-        window.Height = 400;
-        window.Left = -32000;
-        window.Top = -32000;
-        window.ShowActivated = false;
-        window.ShowInTaskbar = false;
-        window.WindowStyle = WindowStyle.None;
-        window.Content = new StackPanel { Children = { heading, section, settings, title, lyric, tab } };
-        try
-        {
-            window.Show();
-            window.UpdateLayout();
-            await Drain();
-
-            Equal(FontWeights.Normal, (FontWeight)window.FindResource("MeowFilm.Font.Weight.Normal"),
-                "body role is regular");
-            Equal(26d, heading.FontSize, "heading role size");
-            Equal(FontWeights.Normal, heading.FontWeight, "heading role is regular");
-            Equal(18d, section.FontSize, "section heading role size");
-            Equal(FontWeights.Normal, section.FontWeight, "section heading role is regular");
-            Equal(16d, settings.FontSize, "settings section title role size");
-            Equal(FontWeights.Normal, settings.FontWeight, "settings section title role is regular");
-            Equal(20d, title.FontSize, "title role size");
-            Equal(FontWeights.Normal, title.FontWeight, "title role is regular");
-            Equal(14d, lyric.FontSize, "body default size reaches lyric role");
-            Equal(FontWeights.Normal, lyric.FontWeight, "lyric role is regular");
-            Equal(SystemFonts.MessageFontFamily, lyric.FontFamily, "lyric role follows the system family");
-            foreach (var selected in new[] { false, true, false })
-            {
-                tab.IsChecked = selected;
-                window.UpdateLayout();
-                await Drain();
-                Equal(FontWeights.Normal, tab.FontWeight, "selection keeps regular text");
-                Equal(14d, tab.FontSize, "selection preserves the tab size");
-            }
-        }
-        finally
-        {
-            window.Content = null;
-            window.Close();
+            tab.IsChecked = selected; await DesktopTestUi.DrainAsync(); Typography(tab, 14, SystemFamily);
+            foreach (var label in DesktopTestUi.Visuals(tab).OfType<TextBlock>())
+                Check(label.FontWeight == FontWeights.Normal, "selection never bolds rendered labels");
         }
     }
 
-    private static async Task VerifyDesktopLyricExceptions()
+    private static async Task VerifyDesktopLyrics()
     {
         var row = new MusicLyricRow(0, "用户原文 🙂", "用户译文");
-        var line = new MusicDesktopLyricLineView
+        var normal = new SolidColorBrush(Microsoft.UI.Colors.LightPink);
+        var highlight = new SolidColorBrush(Microsoft.UI.Colors.Gold);
+        var line = new MusicDesktopLyricLineView { Width = 700, Height = 120, Row = row,
+            Normal = normal, Highlight = highlight, ShowTranslation = true };
+        using var host = new DesktopTestUi.Host(line, 740, 200); await DesktopTestUi.DrainAsync();
+        var plain = (MusicDesktopLyricTextView)line.FindName("PlainText");
+        var translation = (MusicDesktopLyricTextView)line.FindName("TranslationText");
+        Typography(plain, 32, SystemFamily); Typography(translation, 17, SystemFamily);
+        Check(ReferenceEquals(plain.Foreground, normal) && ReferenceEquals(translation.Foreground, normal), "user lyric colors remain authoritative");
+        Check(DesktopTestUi.Visuals(line).OfType<MusicLyricWordView>().Count() == 0, "line-timed lyrics stay plain");
+        Check(AutomationProperties.GetName(plain) == row.Text, "lyric keeps accessible text");
+        line.Row = row with { Words = [new("用户", 0, 1), new("原文", 1, 1)] }; await DesktopTestUi.DrainAsync();
+        var words = DesktopTestUi.Visuals(line).OfType<MusicLyricWordView>().ToArray();
+        Check(words.Length == 2, "both real timed words are retained");
+        foreach (var word in words)
         {
-            Width = 700, Height = 120, Row = row,
-            Normal = Brushes.LightPink, Highlight = Brushes.Gold, ShowTranslation = true
-        };
-        var window = new DesktopWindow
-        {
-            Width = 720, Height = 160, Left = -32000, Top = -32000,
-            ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None,
-            Content = line
-        };
-        try
-        {
-            window.Show();
-            window.UpdateLayout();
-            await Drain();
-
-            var plain = (MusicDesktopLyricTextView)line.FindName("PlainText");
-            var translation = (MusicDesktopLyricTextView)line.FindName("TranslationText");
-            var words = Visuals(line).OfType<MusicLyricWordView>().ToArray();
-            True(plain.Visibility == Visibility.Visible && words.Length == 0, "line-timed lyric stays ordinary text");
-            Equal(32d, plain.FontSize, "desktop lyric keeps its source size");
-            Equal(FontWeights.Normal, plain.FontWeight, "desktop lyric uses the normal role");
-            Equal(SystemFonts.MessageFontFamily, plain.FontFamily, "desktop lyric follows the system family");
-            Equal(Brushes.LightPink, plain.Foreground, "desktop lyric keeps the user normal color");
-            Equal(17d, translation.FontSize, "desktop translation keeps its source size");
-            Equal(Brushes.LightPink, translation.Foreground, "desktop translation keeps the user color");
-            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(plain), "desktop lyrics retain automatic rendering");
-            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(translation), "desktop translation retains automatic rendering");
-
-            line.Row = row with { Words = [new("用户", 0, 1), new("原文", 1, 1)] };
-            window.UpdateLayout();
-            await Drain();
-            words = Visuals(line).OfType<MusicLyricWordView>().ToArray();
-            Equal(2, words.Length, "real timed words remain in the desktop lyric");
-            True(words.All(word => word.FontSize == 32 && word.FontWeight == FontWeights.Normal &&
-                word.FontFamily.Equals(SystemFonts.MessageFontFamily)), "timed words keep the lyric role and size");
-            True(words.All(word => TextOptions.GetTextRenderingMode(word) == TextRenderingMode.Auto),
-                "desktop timed words retain automatic rendering");
-            True(words.All(word => Equals(word.Foreground, line.Normal) && Equals(word.Highlight, line.Highlight) &&
-                word.Stroke is not null && word.StrokeThickness > 0), "user colors and outline remain separate roles");
-            Equal("用户原文 🙂", UIElementAutomationPeer.CreatePeerForElement(plain)!.GetName(), "lyric retains accessible text");
-        }
-        finally
-        {
-            window.Content = null;
-            window.Close();
+            Typography(word, 32, SystemFamily);
+            Check(ReferenceEquals(word.Foreground, normal) && ReferenceEquals(word.Highlight, highlight) &&
+                word.Stroke is not null && word.StrokeThickness > 0, "timed words retain user colors and outline");
         }
     }
 
-    private static async Task VerifyOverlayAndWindowConsumers()
+    private static async Task VerifyOverlays()
     {
+        var anchor = new Button { Content = "菜单" };
+        var root = new StackPanel { Children = { anchor } };
+        using var host = new DesktopTestUi.Host(root, 640, 400); await DesktopTestUi.DrainAsync();
         var popupText = new TextBlock { Text = "浮层正文" };
-        var popup = new Popup { Child = popupText };
-        var menuText = new TextBlock { Text = "菜单项" };
-        var menu = new ContextMenu();
-        menu.Items.Add(new MenuItem { Header = menuText });
+        var popup = new Popup { Child = popupText, XamlRoot = root.XamlRoot };
+        var item = new MenuFlyoutItem { Text = "菜单项", Style = (Style)DesktopVisual.Resource(root, "MeowFilm.MenuItem") };
+        var menu = new MenuFlyout { MenuFlyoutPresenterStyle = (Style)DesktopVisual.Resource(root, "MeowFilm.ContextMenu") };
+        menu.Items.Add(item);
         var tooltipText = new TextBlock { Text = "提示内容" };
-        var tooltip = new ToolTip { Content = tooltipText };
-        var windowText = new TextBlock { Text = "独立窗口" };
-        var directory = new DerivedDesktopWindow
-        {
-            Content = new StackPanel { Children = { windowText } }
-        };
-        var window = new DesktopWindow
-        {
-            Width = 640, Height = 400, Left = -32000, Top = -32000,
-            ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None,
-            Content = new StackPanel { Children = { popup } },
-            ContextMenu = menu,
-            ToolTip = tooltip
-        };
-        popup.PlacementTarget = window;
-        menu.PlacementTarget = window;
-        tooltip.PlacementTarget = window;
+        var tooltip = new ToolTip { Content = tooltipText, Style = (Style)DesktopVisual.Resource(root, "MeowFilm.ToolTip") };
+        ToolTipService.SetToolTip(anchor, tooltip);
         try
         {
-            window.Resources.MergedDictionaries.Add(new ResourceDictionary
-            {
-                Source = new Uri("/MeowFilm.Desktop;component/Theme.xaml", UriKind.Relative)
-            });
-            tooltip.Style = (Style)window.FindResource("MeowFilm.ToolTip");
-            window.Show();
-            directory.Show();
-            window.UpdateLayout();
-            directory.UpdateLayout();
-            popup.IsOpen = true;
-            menu.IsOpen = true;
-            tooltip.IsOpen = true;
-            await Drain();
-
-            Equal(SystemFonts.MessageFontFamily, popupText.FontFamily, "popup actual content uses the shared family");
-            Equal(SystemFonts.MessageFontFamily, TextElement.GetFontFamily(menu), "menu uses the shared family");
-            Equal(13d, menu.FontSize, "menu keeps its compact role size");
-            Equal(FontWeights.Normal, menu.FontWeight, "menu keeps its normal role weight");
-            Equal(SystemFonts.MessageFontFamily, TextElement.GetFontFamily(menuText),
-                "actual menu item content uses the shared family");
-            Equal(SystemFonts.MessageFontFamily, tooltipText.FontFamily, "tooltip actual content uses the shared family");
-            Equal(12d, tooltipText.FontSize, "tooltip keeps its caption role size");
-            Equal(SystemFonts.MessageFontFamily, windowText.FontFamily, "derived window content uses the shared family");
-            Equal(14d, windowText.FontSize, "derived window content uses the body size");
-            True(tooltip.IsOpen && menu.IsOpen && popup.IsOpen, "the consumers under test are actual opened WPF layers");
-            True(menu.Items.OfType<MenuItem>().Single().Header is TextBlock, "menu keeps the real command header");
-            True(windowText.FontWeight == FontWeights.Normal, "derived window body is not bold");
+            popup.IsOpen = true; menu.ShowAt(anchor); tooltip.IsOpen = true; await DesktopTestUi.DrainAsync();
+            Check(popup.IsOpen && tooltip.IsOpen && item.IsLoaded, "the consumers are actual opened native layers");
+            Typography(popupText, 14, SystemFamily); Typography(item, 13, SystemFamily);
+            Typography(tooltipText, 12, SystemFamily);
         }
-        finally
+        finally { tooltip.IsOpen = false; menu.Hide(); popup.IsOpen = false; }
+    }
+
+    private const string SystemFamily = "XamlAutoFontFamily";
+    private static FontFamily Family(FrameworkElement element) => element switch
+    { TextBlock text => text.FontFamily, Control control => control.FontFamily, _ => throw new InvalidOperationException("not a text consumer") };
+    private static void Typography(FrameworkElement element, double size, string family)
+    {
+        var actual = element switch
         {
-            tooltip.IsOpen = false;
-            menu.IsOpen = false;
-            popup.IsOpen = false;
-            window.Content = null;
-            directory.Content = null;
-            window.Close();
-            directory.Close();
-        }
+            TextBlock text => (text.FontSize, text.FontWeight, text.FontStyle),
+            Control control => (control.FontSize, control.FontWeight, control.FontStyle),
+            _ => throw new InvalidOperationException("not a text consumer")
+        };
+        Check(actual.Item1 == size && actual.Item2 == FontWeights.Normal && actual.Item3 == FontStyle.Normal &&
+            Family(element).Source == family, $"{element.GetType().Name} retains regular system typography at {size}");
     }
-
-    private static IEnumerable<DependencyObject> Visuals(DependencyObject root)
-    {
-        yield return root;
-        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(root); index++)
-            foreach (var child in Visuals(VisualTreeHelper.GetChild(root, index))) yield return child;
-    }
-
-    private static TestCase Case(string name, Func<Task> body) =>
-        new("desktop typography: " + name, () => MusicQualityConsumerTests.Sta(body));
-
-    private static async Task Drain()
-    {
-        for (var index = 0; index < 3; index++) await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-    }
-
-    private static void Equal<T>(T expected, T actual, string message)
-    {
-        if (!EqualityComparer<T>.Default.Equals(expected, actual))
-            throw new InvalidOperationException($"{message}: expected '{expected}', actual '{actual}'");
-    }
-
-    private static void True(bool condition, string message)
-    {
-        if (!condition) throw new InvalidOperationException(message);
-    }
-
-    private sealed class DerivedDesktopWindow : DesktopWindow
-    {
-    }
+    private static TestCase Case(string name, Func<Task> body) => new("desktop typography: " + name, () => TestUiHost.InvokeAsync(body));
+    private static void Check(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
+    private sealed class DerivedDesktopWindow : DesktopWindow { }
 }

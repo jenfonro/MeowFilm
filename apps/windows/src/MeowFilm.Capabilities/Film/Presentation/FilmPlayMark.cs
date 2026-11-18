@@ -1,76 +1,55 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Shapes;
+using Microsoft.UI;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Shapes;
+using Windows.Foundation;
+using Windows.UI;
 
 namespace MeowFilm.Capabilities;
 
-/// <summary>Film card play affordance; its host centers it over the artwork and drives its opacity.</summary>
+/// <summary>Film card play affordance, in the same composition tree as the artwork.</summary>
 public sealed class FilmPlayMark : Grid
 {
-    private static readonly Geometry Triangle = Frozen(Geometry.Parse("M 20,15 L 34,25 L 20,35 Z"));
-    private static readonly Brush Active = Frozen(new SolidColorBrush(Color.FromRgb(0x22, 0xC5, 0x5E)));
-    private readonly ScaleTransform scale = new();
-    private readonly Ellipse ring = new()
-    {
-        Margin = new Thickness(2), Stroke = Brushes.White, StrokeThickness = .8, Fill = Brushes.Transparent
-    };
-    private readonly System.Windows.Shapes.Path glyph = new()
-    {
-        Data = Triangle, Stroke = Brushes.White, StrokeThickness = .8,
-        StrokeLineJoin = PenLineJoin.Round, Fill = Brushes.Transparent
-    };
-
     public FilmPlayMark()
     {
-        Width = 50; Height = 50;
-        Background = Brushes.Transparent;
+        Width = Height = 50;
         HorizontalAlignment = HorizontalAlignment.Center;
         VerticalAlignment = VerticalAlignment.Center;
-        RenderTransformOrigin = new Point(.5, .5);
-        RenderTransform = scale;
-        Children.Add(ring);
-        Children.Add(glyph);
+        var scale = new ScaleTransform();
+        RenderTransform = scale; RenderTransformOrigin = new Point(.5, .5);
+        var ring = new Ellipse { Margin = new Thickness(2), Stroke = new SolidColorBrush(Colors.White), StrokeThickness = .8 };
+        var glyph = new Microsoft.UI.Xaml.Shapes.Path
+        {
+            Data = FilmVisuals.Geometry("M20,15 L34,25 L20,35 Z"),
+            Stroke = new SolidColorBrush(Colors.White), StrokeThickness = .8
+        };
+        Children.Add(ring); Children.Add(glyph);
+        void Update(bool active)
+        {
+            ring.Fill = glyph.Fill = new SolidColorBrush(active ? Color.FromArgb(255, 34, 197, 94) : Colors.Transparent);
+            scale.ScaleX = scale.ScaleY = active ? 1.1 : 1;
+        }
+        PointerEntered += (_, _) => Update(true);
+        PointerExited += (_, _) => Update(false);
+        Update(false);
     }
-
-    protected override void OnMouseEnter(MouseEventArgs e) { base.OnMouseEnter(e); Update(); }
-    protected override void OnMouseLeave(MouseEventArgs e) { base.OnMouseLeave(e); Update(); }
-
-    private void Update()
-    {
-        bool active = IsMouseOver;
-        ring.Fill = glyph.Fill = active ? Active : Brushes.Transparent;
-        scale.ScaleX = scale.ScaleY = active ? 1.1 : 1;
-    }
-
-    private static T Frozen<T>(T value) where T : Freezable { value.Freeze(); return value; }
 }
 
-/// <summary>Bottom-weighted artwork scrim shared by film cards; it never takes input.</summary>
-public sealed class FilmHoverShade : Border
+public sealed class FilmHoverShade : Grid
 {
-    private static readonly Brush Shade = CreateShade();
-
     public FilmHoverShade()
     {
         IsHitTestVisible = false;
-        Background = Shade;
-    }
-
-    private static Brush CreateShade()
-    {
-        var brush = new LinearGradientBrush
+        Background = new LinearGradientBrush
         {
             StartPoint = new Point(.5, 1), EndPoint = new Point(.5, 0),
             GradientStops =
             {
-                new GradientStop(Color.FromArgb(0xCC, 0, 0, 0), 0),
-                new GradientStop(Color.FromArgb(0x38, 0, 0, 0), .55),
-                new GradientStop(Color.FromArgb(0, 0, 0, 0), 1)
+                new GradientStop { Color = Color.FromArgb(0xCC, 0, 0, 0), Offset = 0 },
+                new GradientStop { Color = Color.FromArgb(0x38, 0, 0, 0), Offset = .55 },
+                new GradientStop { Color = Colors.Transparent, Offset = 1 }
             }
         };
-        brush.Freeze();
-        return brush;
     }
 }

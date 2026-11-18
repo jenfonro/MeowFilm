@@ -1,5 +1,6 @@
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Desktop;
 
@@ -24,13 +25,14 @@ public partial class ColorSelection : UserControl
     public string Label { get => (string)GetValue(LabelProperty); set => SetValue(LabelProperty, value); }
     public event EventHandler<ColorSelectionEventArgs>? ValueCommitted;
     private bool updating;
+    private IDisposable? visibility;
 
     public ColorSelection()
     {
         InitializeComponent();
         RestoreSelection();
-        Loaded += (_, _) => RestoreSelection();
-        IsVisibleChanged += (_, _) => { if (IsVisible) RestoreSelection(); };
+        Loaded += (_, _) => visibility = DesktopVisual.ObserveVisibility(this, visible => { if (visible) RestoreSelection(); });
+        Unloaded += (_, _) => { visibility?.Dispose(); visibility = null; };
     }
     private static void Changed(DependencyObject owner, DependencyPropertyChangedEventArgs e) =>
         ((ColorSelection)owner).RestoreSelection();

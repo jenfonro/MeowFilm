@@ -1,9 +1,10 @@
 using System.IO;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -25,12 +26,14 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     private readonly DispatcherTimer auto;
     private readonly DispatcherTimer save;
     private readonly NovelWork saves = new();
+    private readonly NovelPresentation.VisibilityWatch visibility;
     private bool automatic, advancing, disposed;
     private Task automaticOperation = Task.CompletedTask;
     private int autoTicks;
     private string renderedRoute = "";
     private NovelBookSession? renderedSession;
-    private Window? attachedWindow;
+    private DesktopWindow? attachedWindow;
+    private DesktopWindowState attachedState;
     private object? presentationStamp;
     private readonly Dictionary<string, double> scrollPositions = [];
     private readonly Button purchase;
@@ -41,9 +44,9 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         Content = root; root.Children.Add(body); root.Children.Add(notice);
         purchase = NovelUi.Button("购买本章", () => module.RunUi(PurchaseAsync));
         BuildReader();
-        auto = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(50) };
+        auto = new DispatcherTimer() { Interval = TimeSpan.FromMilliseconds(50) };
         auto.Tick += AutoTick;
-        save = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(700) };
+        save = new DispatcherTimer() { Interval = TimeSpan.FromMilliseconds(700) };
         save.Tick += (_, _) => { save.Stop(); module.RunUi(_ => SavePositionAsync()); };
         surface.PositionChanged += (_, _) => { pageStatus.Text = surface.PageStatus; progress.Value = surface.CaptureAnchor().Ratio * 100; save.Stop(); save.Start(); };
         surface.LayoutCompleted += (_, _) => { pageStatus.Text = surface.PageStatus; progress.Value = surface.CaptureAnchor().Ratio * 100; };
@@ -51,13 +54,13 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         surface.UserInteracted += (_, _) => PauseReading();
         surface.CrossChapterAsync = index => ChangeChapterAsync(index, automatic);
         surface.RunInteraction = module.RunUi;
-        IsVisibleChanged += (_, _) =>
+        visibility = new(this, visible =>
         {
             if (disposed) return;
-            if (!IsVisible) { discoveryChannelBar?.Close(); module.CancelPresentation(); module.Session?.Cancel(); module.RunUi(_ => SavePositionAsync()); }
+            if (!visible) { discoveryChannelBar?.Close(); module.CancelPresentation(); module.Session?.Cancel(); module.RunUi(_ => SavePositionAsync()); }
             else if (module.Route == NovelCapability.ReaderRoute)
                 module.RefreshReaderSettings();
-        };
+        });
         Loaded += (_, _) => { AttachWindow(); Present(); RestoreDiscoveryFocus(); }; Unloaded += (_, _) => { PauseReading(); DetachWindow(); };
     }
     public DesktopHeaderContribution Header => new(module.Route == NovelCapability.HomeRoute ? "小说" : module.Route == NovelCapability.CategoriesRoute ? "分类" : "",
@@ -105,7 +108,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
                 if (body.Content is ScrollViewer scroll)
                 {
                     if (scrollPositions.TryGetValue(module.Route, out double position))
-                        scroll.Loaded += (_, _) => scroll.ScrollToVerticalOffset(position);
+                        scroll.Loaded += (_, _) => scroll.ChangeView(null, position, null, true);
                     scroll.Loaded += (_, _) => RestoreDiscoveryFocus();
                 }
             }
@@ -140,7 +143,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     {
         reader.Children.Add(surface);
         readerControls.VerticalAlignment = VerticalAlignment.Top; readerControls.Margin = new(16);
-        readerControls.SetResourceReference(Panel.BackgroundProperty, "MeowFilm.Brush.Surface");
+        readerControls.UseResource(Panel.BackgroundProperty, "MeowFilm.Brush.Surface");
         readerControls.Children.Add(NovelUi.Bar(NovelUi.Button("返回书籍", () => module.Request(NovelCapability.BookRoute)),
             NovelUi.Button("目录", () => module.RunUi(CatalogAsync)), NovelUi.Button("换源", () => module.RunUi(SwitchSourceAsync)),
             NovelUi.Button("加入／移出书架", () => module.RunUi(ct => module.Session!.ShelfAsync(ct))),
@@ -152,9 +155,9 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
             NovelUi.Button("自动阅读", () => { automatic = !automatic; autoTicks = 0; if (automatic) { readerControls.Visibility = Visibility.Collapsed; auto.Start(); } else PauseReading(); }),
             purchase));
         var slider = progress;
-        System.Windows.Automation.AutomationProperties.SetName(slider, "章内进度");
-        slider.PreviewMouseLeftButtonUp += (_, _) => surface.Seek(slider.Value / 100);
-        slider.PreviewKeyUp += (_, e) => { if (e.Key is Key.Left or Key.Right or Key.Home or Key.End) surface.Seek(slider.Value / 100); };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(slider, "章内进度");
+        slider.AddHandler(PointerReleasedEvent, new PointerEventHandler((_, _) => surface.Seek(slider.Value / 100)), true);
+        slider.KeyUp += (_, e) => { if (e.Key is VirtualKey.Left or VirtualKey.Right or VirtualKey.Home or VirtualKey.End) surface.Seek(slider.Value / 100); };
         readerControls.Children.Add(NovelUi.Bar(pageStatus, slider, NovelUi.Button("隐藏工具栏", () => readerControls.Visibility = Visibility.Collapsed)));
         reader.Children.Add(readerControls);
     }
@@ -166,14 +169,14 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         await SavePositionAsync(); await session.ReadAsync(index, token: token);
         await SavePositionAfterLayoutAsync();
     }
-    private void AutoTick(object? sender, EventArgs e)
+    private void AutoTick(object? sender, object e)
     {
         if (!automaticOperation.IsCompleted) return;
         automaticOperation = AdvanceAutomaticAsync();
     }
     private async Task AdvanceAutomaticAsync()
     {
-        if (advancing || !automatic || !IsVisible || attachedWindow?.IsActive != true || module.Route != NovelCapability.ReaderRoute || module.Session?.Loading == true) { if (attachedWindow?.IsActive != true) PauseReading(); return; }
+        if (advancing || !automatic || !DesktopVisual.IsVisible(this) || attachedWindow?.IsActive != true || module.Route != NovelCapability.ReaderRoute || module.Session?.Loading == true) { if (attachedWindow?.IsActive != true) PauseReading(); return; }
         advancing = true;
         try
         {
@@ -191,8 +194,10 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     internal void PauseReading() { automatic = false; auto.Stop(); autoTicks = 0; }
     private async Task SavePositionAfterLayoutAsync()
     {
-        await Dispatcher.Yield(DispatcherPriority.Render);
-        if (IsVisible && module.Route == NovelCapability.ReaderRoute) { surface.UpdateLayout(); await SavePositionAsync(); }
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => ready.TrySetResult())) return;
+        await ready.Task;
+        if (DesktopVisual.IsVisible(this) && module.Route == NovelCapability.ReaderRoute) { surface.UpdateReadingLayout(); await SavePositionAsync(); }
     }
     private Task SavePositionAsync()
     {
@@ -215,10 +220,8 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
             var names = result.GetProperty("blocks");
             for (int i = 0; i < labels.Length; i++) labels[i] = labels[i] with { Name = NovelJson.Text(names[i], "text") };
         }
-        var list = new ListBox { ItemsSource = labels, MaxHeight = Math.Max(200, Window.GetWindow(this)?.ActualHeight - 300 ?? 420),
+        var list = new ListView { ItemsSource = labels, MaxHeight = Math.Max(200, DesktopWindow.GetWindow(this)?.Root.ActualHeight - 300 ?? 420),
             SelectedIndex = Math.Clamp(module.Session?.Chapter?.Index ?? 0, 0, Math.Max(0, chapters.Count - 1)) };
-        VirtualizingPanel.SetIsVirtualizing(list, true); VirtualizingPanel.SetVirtualizationMode(list, VirtualizationMode.Recycling);
-        ScrollViewer.SetCanContentScroll(list, true);
         tools.Children.Add(NovelUi.Button("顺序", () => list.ItemsSource = labels));
         tools.Children.Add(NovelUi.Button("倒序", () => list.ItemsSource = labels.Reverse().ToArray()));
         tools.Children.Add(NovelUi.Button("顶部", () => { if (list.Items.Count > 0) list.ScrollIntoView(list.Items[0]); }));
@@ -243,7 +246,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         var search = new NovelSearch(module.Sources, module.Rules);
         using var cancel = CancellationTokenSource.CreateLinkedTokenSource(token);
         var panel = new DockPanel(); var tools = NovelUi.Bar(); DockPanel.SetDock(tools, Dock.Top); panel.Children.Add(tools);
-        var list = new ListBox { MinHeight = 200, MaxHeight = Math.Max(200, Window.GetWindow(this)?.ActualHeight - 300 ?? 420) };
+        var list = new ListView { MinHeight = 200, MaxHeight = Math.Max(200, DesktopWindow.GetWindow(this)?.Root.ActualHeight - 300 ?? 420) };
         var group = new ComboBox { Width = 180, ItemsSource = module.Sources.Sources.Select(s => s.Group).Prepend("全部分组").Distinct().ToArray(), SelectedIndex = 0 };
         tools.Children.Add(group);
         void Refresh()
@@ -312,17 +315,22 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     { PauseReading(); return NovelWebInteraction.ShowAsync(this, module.Rules, request, token); }
     private void AttachWindow()
     {
-        DetachWindow(); attachedWindow = Window.GetWindow(this);
-        if (attachedWindow is not null) { attachedWindow.Deactivated += WindowDeactivated; attachedWindow.StateChanged += WindowDeactivated; }
+        DetachWindow(); attachedWindow = DesktopWindow.GetWindow(this);
+        if (attachedWindow is not null) { attachedState = attachedWindow.WindowState; attachedWindow.Deactivated += WindowDeactivated; attachedWindow.AppWindow.Changed += WindowChanged; }
+    }
+    private void WindowChanged(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowChangedEventArgs args)
+    {
+        if (attachedWindow is null || attachedState == attachedWindow.WindowState) return;
+        attachedState = attachedWindow.WindowState; WindowDeactivated(sender, EventArgs.Empty);
     }
     private void WindowDeactivated(object? sender, EventArgs e) { PauseReading(); module.RunUi(_ => SavePositionAsync()); }
     private void DetachWindow()
     {
-        if (attachedWindow is not null) { attachedWindow.Deactivated -= WindowDeactivated; attachedWindow.StateChanged -= WindowDeactivated; attachedWindow = null; }
+        if (attachedWindow is not null) { attachedWindow.Deactivated -= WindowDeactivated; attachedWindow.AppWindow.Changed -= WindowChanged; attachedWindow = null; }
     }
     private sealed record SourceCandidate(NovelBook Book, string Label) { public override string ToString() => Label; }
     internal async Task DrainSavesAsync() { await automaticOperation; await saves.PauseAsync(); }
     internal void Resume() { saves.Resume(); surface.ResumeImages(); }
     internal Task DrainImagesAsync() => surface.DrainImagesAsync();
-    public void Dispose() { if (disposed) return; disposed = true; discoveryChannelBar?.Close(); PauseReading(); save.Stop(); DetachWindow(); surface.Dispose(); }
+    public void Dispose() { if (disposed) return; disposed = true; visibility.Dispose(); discoveryChannelBar?.Close(); PauseReading(); save.Stop(); DetachWindow(); surface.Dispose(); }
 }

@@ -1,5 +1,7 @@
-using System.Windows;
-using System.Windows.Input;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Input;
+using Windows.System;
 using System.Windows.Threading;
 
 namespace MeowFilm.Desktop;
@@ -7,10 +9,10 @@ namespace MeowFilm.Desktop;
 public sealed partial class ShellWindow
 {
     private readonly IDesktopClosePreferences? _closePreferences;
-    private readonly Func<Window, Action, Action, Action, IDesktopTrayIcon>? _trayIconFactory;
+    private readonly Func<DesktopWindow, Action, Action, Action, IDesktopTrayIcon>? _trayIconFactory;
     private IDesktopTrayIcon? _trayIcon;
-    private IInputElement? _closeChoiceFocus;
-    private WindowState _trayRestoreState = WindowState.Normal;
+    private DependencyObject? _closeChoiceFocus;
+    private DesktopWindowState _trayRestoreState = DesktopWindowState.Normal;
     private bool _hiddenToTray, _closeChoiceQueued, _sessionEnding;
     private long _closeChoiceGeneration;
 
@@ -37,7 +39,7 @@ public sealed partial class ShellWindow
     {
         try
         {
-            // Visibility/Close cannot be changed while WPF is dispatching Closing.
+            // Do not change visibility or re-enter Close inside the native Closing callback.
             await Dispatcher.Yield(DispatcherPriority.Background);
             if (_isClosing || _isClosed || _sessionEnding) return;
             switch (_closePreferences!.Behavior)
@@ -49,8 +51,8 @@ public sealed partial class ShellWindow
                     BeginShutdown();
                     break;
                 case WindowCloseBehavior.Ask:
-                    _closeChoiceFocus = Keyboard.FocusedElement;
-                    RootLayout.IsEnabled = NotificationOverlay.IsEnabled = false;
+                    _closeChoiceFocus = DesktopVisual.Focused(Root);
+                    RootInteractionGate.IsEnabled = NotificationInteractionGate.IsEnabled = false;
                     CloseDialog.Open();
                     break;
             }
@@ -103,11 +105,11 @@ public sealed partial class ShellWindow
         if (!CloseDialog.IsOpen) return;
         _closeChoiceGeneration++;
         CloseDialog.Visibility = Visibility.Collapsed;
-        RootLayout.IsEnabled = NotificationOverlay.IsEnabled = true;
+        RootInteractionGate.IsEnabled = NotificationInteractionGate.IsEnabled = true;
         Notices.Show(CloseDialog, "");
         var focus = _closeChoiceFocus;
         _closeChoiceFocus = null;
-        if (restoreFocus && focus is UIElement { IsEnabled: true, IsVisible: true } target) target.Focus();
+        if (restoreFocus && focus is Control { IsEnabled: true, Visibility: Visibility.Visible } target) target.Focus(FocusState.Programmatic);
     }
 
     private bool EnsureTrayAvailable()
@@ -121,7 +123,7 @@ public sealed partial class ShellWindow
     {
         if (!EnsureTrayAvailable()) return;
         DismissCloseChoice(restoreFocus: false);
-        if (WindowState != WindowState.Minimized) _trayRestoreState = WindowState;
+        if (WindowState != DesktopWindowState.Minimized) _trayRestoreState = WindowState;
         _hiddenToTray = true;
         Hide();
     }
@@ -131,7 +133,7 @@ public sealed partial class ShellWindow
         Dispatcher.VerifyAccess();
         if (_isClosed || _sessionEnding) return;
         var restore = _trayRestoreState;
-        bool restoreState = _hiddenToTray || WindowState == WindowState.Minimized;
+        bool restoreState = _hiddenToTray || WindowState == DesktopWindowState.Minimized;
         _hiddenToTray = false;
         if (!IsVisible) Show();
         if (restoreState) WindowState = restore;
@@ -157,6 +159,7 @@ public sealed partial class ShellWindow
     public void PrepareForSessionEnding()
     {
         Dispatcher.VerifyAccess();
+        if (_sessionEnding) return;
         _sessionEnding = true;
         DismissCloseChoice(restoreFocus: false);
         BeginShutdown();

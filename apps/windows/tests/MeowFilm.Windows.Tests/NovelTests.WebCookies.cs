@@ -1,12 +1,13 @@
+using System.Runtime.InteropServices.WindowsRuntime;
 using System.IO;
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Runtime;
 using Microsoft.Web.WebView2.Core;
-using Microsoft.Web.WebView2.Wpf;
+using WebView2 = Microsoft.UI.Xaml.Controls.WebView2;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -22,7 +23,7 @@ public static partial class NovelTests
             TestWorkspace.DataPath("novel-web-cookie-scope"), deadline.Token);
         var sources = NovelTestSources.Create(runtime);
         await using var rules = new NovelRuleProgram(runtime);
-        var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(host); host.Show();
+        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
         try
         {
             foreach (bool domainBefore in new[] { false, true })
@@ -49,9 +50,9 @@ public static partial class NovelTests
                     var operation = NovelWebInteraction.ShowAsync(owner, rules, pending, interaction.Token);
                     try
                     {
-                        await Until(() => PopupItems<WebView2>().Any(w => w.CoreWebView2 is not null));
-                        var web = PopupItems<WebView2>().Single();
-                        while (await web.CoreWebView2.ExecuteScriptAsync("typeof window.finishFixture").WaitAsync(ct) != "\"function\"")
+                        await Until(() => DialogItems<WebView2>(owner).Any(w => w.CoreWebView2 is not null));
+                        var web = DialogItems<WebView2>(owner).Single();
+                        while (await web.CoreWebView2.ExecuteScriptAsync("typeof window.finishFixture").AsTask().WaitAsync(ct) != "\"function\"")
                             await Task.Delay(10, ct);
                         var manager = web.CoreWebView2.CookieManager;
                         var original = (await manager.GetCookiesAsync(null)).Single();
@@ -60,7 +61,7 @@ public static partial class NovelTests
                             original.Path == "/private" && original.IsSecure && original.IsHttpOnly);
                         // This isolated fixture contains only the seed. Await the
                         // browser's deletion receipt before creating its replacement.
-                        await web.CoreWebView2.Profile.ClearBrowsingDataAsync(CoreWebView2BrowsingDataKinds.Cookies).WaitAsync(ct);
+                        await web.CoreWebView2.Profile.ClearBrowsingDataAsync(CoreWebView2BrowsingDataKinds.Cookies).AsTask().WaitAsync(ct);
                         Check(!(await manager.GetCookiesAsync(page)).Any(c => c.Name == "scope"));
                         var replacement = manager.CreateCookie("scope", "new",
                             domainBefore ? "a.example.invalid" : ".a.example.invalid", "/private");
@@ -105,7 +106,7 @@ public static partial class NovelTests
     {
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await using var rules = new NovelRuleProgram(ruleRuntime);
-        var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(host); host.Show();
+        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
         await using var server = new WebFixture();
         try
         {
@@ -144,7 +145,7 @@ public static partial class NovelTests
     {
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await using var rules = new NovelRuleProgram(ruleRuntime);
-        var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(host); host.Show();
+        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
         try
         {
             using var token = new CancellationTokenSource(TimeSpan.FromSeconds(45));
@@ -169,9 +170,9 @@ public static partial class NovelTests
                         "document.cookie='domain=new; Domain=example.invalid; Path=/private; Secure; SameSite=Strict; Expires=" + expiresText + "'; " +
                         "resolve(" + scalar + "); }; })"
                 } }), token.Token);
-                await Until(() => PopupItems<Microsoft.Web.WebView2.Wpf.WebView2>().Any(w => w.CoreWebView2 is not null));
-                var web = PopupItems<Microsoft.Web.WebView2.Wpf.WebView2>().Single();
-                while (await web.CoreWebView2.ExecuteScriptAsync("typeof window.finishFixture").WaitAsync(token.Token) != "\"function\"")
+                await Until(() => DialogItems<Microsoft.UI.Xaml.Controls.WebView2>(owner).Any(w => w.CoreWebView2 is not null));
+                var web = DialogItems<Microsoft.UI.Xaml.Controls.WebView2>(owner).Single();
+                while (await web.CoreWebView2.ExecuteScriptAsync("typeof window.finishFixture").AsTask().WaitAsync(token.Token) != "\"function\"")
                     await Task.Delay(10, token.Token);
                 var seeded = await web.CoreWebView2.CookieManager.GetCookiesAsync(null);
                 Check(seeded.Single(c => c.Name == "domain").Domain == ".example.invalid");
@@ -179,7 +180,7 @@ public static partial class NovelTests
                 Check(untouched.Domain == "a.example.invalid" && untouched.Path == "/private" && untouched.IsSecure && untouched.IsHttpOnly);
                 Check(seeded.Single(c => c.Name == "__Host-native").Domain == "a.example.invalid");
                 Check(!seeded.Single(c => c.Name == "domain").IsSession &&
-                    Math.Abs((seeded.Single(c => c.Name == "domain").Expires.ToUniversalTime() - expires.UtcDateTime).TotalSeconds) < 1);
+                    Math.Abs((DateTimeOffset.FromUnixTimeSeconds((long)seeded.Single(c => c.Name == "domain").Expires) - expires).TotalSeconds) < 1);
                 await web.CoreWebView2.ExecuteScriptAsync("window.finishFixture()");
                 var result = BridgeCodec.Value((await operation)!);
                 using var expected = JsonDocument.Parse(scalar); Check(JsonElement.DeepEquals(result.GetProperty("value"), expected.RootElement));

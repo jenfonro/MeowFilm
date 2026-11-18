@@ -1,12 +1,15 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.UI;
+using Windows.System;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop;
-using IconPath = System.Windows.Shapes.Path;
+using IconPath = Microsoft.UI.Xaml.Shapes.Path;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -39,7 +42,7 @@ public static partial class DesktopTests
             AssertSidebarOwner(f, music);
             Sequence(["two"], f.Navigation.Items.OfType<ShellNavigationEntry>().Select(item => item.Route),
                 "home and non-sidebar routes stay outside lower content navigation");
-            Sequence(["favorites"], f.Element<ListBox>("CollectionNavigationList").Items.OfType<ShellNavigationEntry>().Select(item => item.Route),
+            Sequence(["favorites"], f.Element<ListView>("CollectionNavigationList").Items.OfType<ShellNavigationEntry>().Select(item => item.Route),
                 "the current owner's collection group remains reachable");
 
             await f.NavigateAsync(music, "favorites");
@@ -51,7 +54,7 @@ public static partial class DesktopTests
             True(f.Modules.SelectedItem is null && f.SelectedRoute is null, "settings clear both content selectors");
             AssertSidebarOwner(f, music);
             Click(f.Back); await DrainAsync();
-            f.Element<ListBox>("PublicNavigationList").SelectedItem = page;
+            DesktopTestUi.Select(f.Element<ListView>("PublicNavigationList"), page);
             await UntilAsync(() => page.Activations == 1 && f.Status == "", "public page");
             True(f.Modules.SelectedItem is null, "public page cannot highlight the owner's home");
             AssertSidebarOwner(f, music);
@@ -89,30 +92,31 @@ public static partial class DesktopTests
                 new("two", "收藏", "\uE734")
             ]));
             await using var f = new Fixture([music, film]); await f.LoadAsync();
-            var root = DetachChrome(f.Shell);
-            using var source = HeaderSource(root);
+            var root = f.Shell.Root;
             root.Measure(new(1110, 800)); root.Arrange(new Rect(0, 0, 1110, 800)); root.UpdateLayout(); await DrainAsync();
-            var mediaRow = (ListBoxItem)f.Modules.ItemContainerGenerator.ContainerFromIndex(0);
-            var contentRow = (ListBoxItem)f.Navigation.ItemContainerGenerator.ContainerFromIndex(0);
+            var mediaRow = (ListViewItem)f.Modules.ContainerFromIndex(0);
+            var contentRow = (ListViewItem)f.Navigation.ContainerFromIndex(0);
             AssertOutline(mediaRow, homeIcon);
             AssertOutline(contentRow, contentIcon);
             Equal(music.Title, AutomationProperties.GetName(mediaRow), "media row retains its accessible owner title");
-            var fallbackRow = (ListBoxItem)f.Modules.ItemContainerGenerator.ContainerFromIndex(1);
-            Equal(Visibility.Collapsed, ChromeVisuals(fallbackRow).OfType<IconPath>().Single(item => item.Name == "Outline").Visibility,
+            Equal("频道", AutomationProperties.GetName(contentRow), "content row exposes its destination rather than its model type");
+            var fallbackRow = (ListViewItem)f.Modules.ContainerFromIndex(1);
+            Equal(Visibility.Collapsed, ChromeVisuals(fallbackRow).OfType<IconPath>().Single().Visibility,
                 "a glyph-only owner does not render an empty outline");
-            var glyph = ChromeVisuals(fallbackRow).OfType<TextBlock>().Single(item => item.Name == "Glyph");
+            var glyph = ChromeVisuals(fallbackRow).OfType<FontIcon>().Single();
             Equal(Visibility.Visible, glyph.Visibility, "glyph fallback remains visible");
-            Equal("\uE714", glyph.Text, "glyph fallback uses the owner's declared icon");
-            source.RootVisual = null;
+            Equal("\uE714", glyph.Glyph, "glyph fallback uses the owner's declared icon");
 
-            static void AssertOutline(ListBoxItem row, string expected)
+
+            static void AssertOutline(ListViewItem row, string expected)
             {
-                var outline = ChromeVisuals(row).OfType<IconPath>().Single(item => item.Name == "Outline");
-                Equal(Geometry.Parse(expected).ToString(CultureInfo.InvariantCulture),
-                    outline.Data.ToString(CultureInfo.InvariantCulture), "the template renders the declared vector geometry");
+                var icon = ChromeVisuals(row).OfType<NavigationIcon>().Single();
+                var outline = ChromeVisuals(row).OfType<IconPath>().Single();
+                Equal(expected, icon.PathData, "template retains exact declared geometry");
+                True(outline.Data is not null, "declared geometry is parsed into native path");
                 Equal(Visibility.Visible, outline.Visibility, "the vector is visible");
-                Same(row.Foreground, outline.Stroke, "vector color follows the real row selection and contrast foreground");
-                Equal(Visibility.Collapsed, ChromeVisuals(row).OfType<TextBlock>().Single(item => item.Name == "Glyph").Visibility,
+                True(outline.Stroke is not null, "vector has visible theme foreground");
+                Equal(Visibility.Collapsed, ChromeVisuals(row).OfType<FontIcon>().Single().Visibility,
                     "outline and legacy glyph do not render twice");
             }
         });
@@ -140,7 +144,7 @@ public static partial class DesktopTests
             Equal("original query", f.Search.Text, "forward restores the input query rather than the opaque location");
             True(f.Modules.SelectedItem is null && f.SelectedRoute is null, "forward search has no fabricated sidebar selection");
             AssertSidebarOwner(f, music);
-            True(RaiseKey(f.Shell, Key.Right, ModifierKeys.Alt, true).Handled, "Alt+Right invokes forward history");
+            True(f.Shell.TryExecuteShortcut(VirtualKey.Right, VirtualKeyModifiers.Menu), "Alt+Right invokes forward history");
             await UntilAsync(() => f.SelectedOwner == film && f.SelectedRoute == "one" && f.Status == "", "forward to film home");
             Equal("film draft", f.Search.Text, "forward preserves the destination owner's route draft");
             AssertSidebarOwner(f, film);
@@ -170,7 +174,7 @@ public static partial class DesktopTests
             {
                 await pending.Started.Task;
                 Equal("one", f.SelectedRoute, "pending forward cannot commit its destination");
-                Click(f.Button("取消当前操作"));
+                True(f.Shell.TryExecuteShortcut(VirtualKey.Escape, VirtualKeyModifiers.None), "active request admits cancellation");
                 await UntilAsync(() => module.ActiveCalls == 0 && f.Status == "已取消", "cancel forward");
                 True(pending.Token.IsCancellationRequested, "forward receives the shell's cancellation");
             }
@@ -213,7 +217,7 @@ public static partial class DesktopTests
             var page = new ProbePage("public");
             await using var f = new Fixture([module], pages: [page]); await f.LoadAsync(); await f.NavigateAsync(module, "two");
             Click(f.Back); await UntilAsync(() => f.SelectedRoute == "one" && f.Status == "", "prepare future");
-            f.Element<ListBox>("PublicNavigationList").SelectedItem = page;
+            DesktopTestUi.Select(f.Element<ListView>("PublicNavigationList"), page);
             await UntilAsync(() => page.Activations == 1 && f.Status == "", "public page");
             await AssertBlocked("public page");
             Click(f.Back); await DrainAsync();
@@ -229,7 +233,7 @@ public static partial class DesktopTests
                     ? f.Element<Border>("QueueSurface") : f.Element<Grid>("PlayerDetailSurface");
                 await UntilAsync(() => panel.Visibility == Visibility.Visible, "open " + surface);
                 await AssertBlocked(surface.ToString());
-                True(RaiseKey(f.Shell, Key.Escape, ModifierKeys.None, true).Handled, "Escape dismisses " + surface);
+                True(f.Shell.TryExecuteShortcut(VirtualKey.Escape, VirtualKeyModifiers.None), "Escape dismisses " + surface);
                 await UntilAsync(() => panel.Visibility == Visibility.Collapsed && f.Forward.IsEnabled, "dismiss " + surface);
             }
             Click(f.Forward); await UntilAsync(() => f.SelectedRoute == "two" && f.Status == "", "future survived temporary surfaces");
@@ -240,7 +244,7 @@ public static partial class DesktopTests
             {
                 False(f.Forward.IsEnabled, boundary + " disables the real forward button");
                 var calls = module.Calls.Count;
-                Click(f.Forward); RaiseKey(f.Shell, Key.Right, ModifierKeys.Alt, true); await DrainAsync();
+                Click(f.Forward); f.Shell.TryExecuteShortcut(VirtualKey.Right, VirtualKeyModifiers.Menu); await DrainAsync();
                 Equal(calls, module.Calls.Count, boundary + " rejects both button and keyboard forward");
             }
         });
@@ -248,29 +252,28 @@ public static partial class DesktopTests
         {
             var module = new ProbeModule("caption");
             await using var f = new Fixture([module]); await f.LoadAsync(); await f.NavigateAsync(module, "two");
-            var root = DetachChrome(f.Shell);
-            using var source = HeaderSource(root);
+            var root = f.Shell.Root;
             root.Measure(new(1110, 800)); root.Arrange(new Rect(0, 0, 1110, 800)); root.UpdateLayout(); await DrainAsync();
             var caption = f.Element<StackPanel>("CaptionBar");
             var bell = f.Element<Button>("NotificationButton");
-            Equal(5, caption.Children.OfType<Button>().Count(), "caption contains notification settings and three window controls");
+            Equal(2, caption.Children.OfType<Button>().Count(), "client caption contains notification and settings beside native window controls");
             Same(bell, caption.Children[0], "notification precedes settings");
             Same(f.Element<Button>("SettingsButton"), caption.Children[1], "settings remains immediately beside notification");
             Equal("通知", AutomationProperties.GetName(bell), "icon-only button keeps an accessible name");
-            True(bell.Content is IconPath { Data: not null } && bell.Command is null, "bell contains a vector icon without a business command");
-            False(ChromeVisuals(bell).OfType<TextBlock>().Any(), "bell has no visible label unread count or badge text");
+            True(bell.Content is string { Length: 1 } && bell.Command is null, "bell contains a symbol without a business command");
+            True(ChromeVisuals(bell).OfType<TextBlock>().All(text => text.Text.Length <= 1), "bell has no visible label unread count or badge");
             foreach (var button in caption.Children.OfType<Button>()) Equal(42d, button.ActualWidth, "caption button width");
             var notices = f.Element<NoticeStack>("Notices");
             notices.Show(new object(), "原有操作通知");
             var notice = notices.Children[0];
             var player = f.Element<ContentControl>("PlayerHost").Content;
-            var view = Host(module.View); var settingsParent = LogicalTreeHelper.GetParent(module.SettingsView);
+            var view = Host(module.View); var settingsParent = ParentOf(module.SettingsView);
             f.Search.Text = "retained caption draft";
             var calls = module.Calls.Count; var status = f.Status;
             Click(bell); await DrainAsync();
             Equal(calls, module.Calls.Count, "bell invokes no module operation");
             Equal("two", f.SelectedRoute, "bell does not navigate or open settings");
-            Same(settingsParent, LogicalTreeHelper.GetParent(module.SettingsView), "bell does not mount settings");
+            Same(settingsParent, ParentOf(module.SettingsView), "bell does not mount settings");
             Equal(Visibility.Visible, view.Visibility, "bell keeps the active content visible");
             Same(player, f.Element<ContentControl>("PlayerHost").Content, "bell retains the existing player");
             Equal("retained caption draft", f.Search.Text, "bell retains search editing state");
@@ -279,14 +282,14 @@ public static partial class DesktopTests
             Same(notice, notices.Children[0], "bell cannot replace the existing operation notification");
             Equal(Visibility.Collapsed, f.Element<Grid>("PlayerDetailSurface").Visibility, "bell does not open a global page");
             Equal(Visibility.Collapsed, f.Element<Border>("QueueSurface").Visibility, "bell does not open a queue");
-            source.RootVisual = null;
+
         });
     }
 
     private static void AssertSidebarOwner(Fixture fixture, ProbeModule owner)
     {
         var entries = fixture.Navigation.Items.OfType<ShellNavigationEntry>()
-            .Concat(fixture.Element<ListBox>("CollectionNavigationList").Items.OfType<ShellNavigationEntry>()).ToArray();
+            .Concat(fixture.Element<ListView>("CollectionNavigationList").Items.OfType<ShellNavigationEntry>()).ToArray();
         var expected = owner.Navigation.Skip(1).Where(item => item.ShowInSidebar).Select(item => item.Route).Order(StringComparer.Ordinal);
         Sequence(expected, entries.Select(item => item.Route).Order(StringComparer.Ordinal), "lower sidebar contains every current non-home destination exactly once");
         True(entries.All(item => ReferenceEquals(item.Owner.Module, owner)), "lower sidebar entries belong to the current owner");

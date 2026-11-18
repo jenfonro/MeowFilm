@@ -1,7 +1,11 @@
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
@@ -398,37 +402,38 @@ public static partial class NovelTests
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         var sources = NovelTestSources.Create(runtime); await using var rules = new NovelRuleProgram(ruleRuntime);
         var session = new NovelBookSession(sources, library, rules, new("image-anchor", "key", Book())); await session.ContinueAsync();
-        var surface = new NovelReadingSurface(sources); var host = GeneralAppearanceTests.Window(surface); host.Width = 880; host.Height = 680;
+        var surface = new NovelReadingSurface(sources); var host = GeneralAppearanceTests.Window(surface); DesktopTestUi.ResizeWindow(host, 880, DesktopTestUi.WindowSize(host).Height); DesktopTestUi.ResizeWindow(host, DesktopTestUi.WindowSize(host).Width, 680);
         try
         {
-            host.Show(); surface.Present(session, new() { Mode = "scroll" }); host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            host.Show(); surface.Present(session, new() { Mode = "scroll" }); DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
             // The logical midpoint of the image is independent of preceding text height.
             double ratio = (before.Length + .5) / (before.Length + 1 + after.Length);
             surface.Seek(ratio); await Until(() => MidpointVisible(surface));
             var anchor = surface.CaptureAnchor(); Check(anchor.BlockIndex == 1 && Math.Abs(anchor.Ratio - ratio) < .00001);
             surface.Present(session, new() { Mode = "scroll", FontSize = 32, Margin = 48 });
-            host.Width = 720; host.Height = 560; host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            DesktopTestUi.ResizeWindow(host, 720, DesktopTestUi.WindowSize(host).Height); DesktopTestUi.ResizeWindow(host, DesktopTestUi.WindowSize(host).Width, 560); DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
             Check(MidpointVisible(surface) && surface.CaptureAnchor().BlockIndex == 1);
             int reads = runtime.ImageReads;
-            host.Width = 980; host.Height = 700; host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            DesktopTestUi.ResizeWindow(host, 980, DesktopTestUi.WindowSize(host).Height); DesktopTestUi.ResizeWindow(host, DesktopTestUi.WindowSize(host).Width, 700); DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
             await Until(() => runtime.ImageReads > reads && MidpointVisible(surface));
             Check(surface.CaptureAnchor().BlockIndex == 1 && Math.Abs(surface.CaptureAnchor().Ratio - ratio) < .00001);
             await surface.DrainImagesAsync();
             runtime.ImageReadStarted = new(TaskCreationOptions.RunContinuationsAsynchronously); runtime.ImageReadHold = new(TaskCreationOptions.RunContinuationsAsynchronously);
             await session.ReadAsync(0, anchor); surface.Present(session, new() { Mode = "scroll", FontSize = 28, Margin = 48 }); surface.ResumeImages();
-            host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render); await runtime.ImageReadStarted.Task;
-            host.Width = 660; host.Height = 620; host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync(); await runtime.ImageReadStarted.Task;
+            DesktopTestUi.ResizeWindow(host, 660, DesktopTestUi.WindowSize(host).Height); DesktopTestUi.ResizeWindow(host, DesktopTestUi.WindowSize(host).Width, 620); DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
             runtime.ImageReadHold.TrySetResult(); await Until(() => MidpointVisible(surface));
             Check(surface.CaptureAnchor().BlockIndex == 1 && Math.Abs(surface.CaptureAnchor().Ratio - ratio) < .00001);
-            Preview(surface, "novel-reading-image-anchor", 660, 570);
+            await Preview(surface, "novel-reading-image-anchor", 660, 570);
         }
         finally { await surface.DrainImagesAsync(); surface.Dispose(); host.Close(); await session.PrepareShutdownAsync(); await sources.PrepareShutdownAsync(); }
         static bool MidpointVisible(NovelReadingSurface surface)
         {
             if (surface.ActualWidth < 1 || surface.ActualHeight < 1) return false;
-            var frame = new RenderTargetBitmap((int)surface.ActualWidth, (int)surface.ActualHeight, 96, 96, PixelFormats.Pbgra32);
-            frame.Render(surface); byte[] pixel = new byte[4];
-            frame.CopyPixels(new Int32Rect((int)surface.ActualWidth / 2, 68, 1, 1), pixel, 4, 0);
+            if (surface.Children.OfType<Microsoft.UI.Xaml.Controls.Image>().Last().Source is not WriteableBitmap frame) return false;
+            var bytes = MusicTestUi.Pixels(frame); double scale = frame.PixelWidth / surface.ActualWidth;
+            int offset = ((int)(68 * scale) * frame.PixelWidth + frame.PixelWidth / 2) * 4;
+            var pixel = bytes[offset..(offset + 4)];
             return pixel[0] is >= 120 and <= 140 && pixel[1] == pixel[0] && pixel[2] == pixel[0] && pixel[3] == 255;
         }
     }

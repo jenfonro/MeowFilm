@@ -2,13 +2,15 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using System.Windows.Threading;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
+using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -47,23 +49,7 @@ public static class MusicWySmsUiTests
         { throw new TimeoutException($"WY SMS account wait at {member}:{line}: {expression}"); }
     }
     private static async Task Sta(Func<Task> action)
-    {
-        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            _ = dispatcher.InvokeAsync(async () =>
-            {
-                try { await action(); done.TrySetResult(); }
-                catch (Exception error) { done.TrySetException(error); }
-                finally { dispatcher.BeginInvokeShutdown(DispatcherPriority.Background); }
-            });
-            Dispatcher.Run();
-        }) { IsBackground = true };
-        thread.SetApartmentState(ApartmentState.STA); thread.Start();
-        await done.Task.WaitAsync(TimeSpan.FromSeconds(35));
-        Check(thread.Join(TimeSpan.FromSeconds(5)));
-    }
+    { await TestUiHost.InvokeAsync(action); }
     private static Task Send(Fixture f) => f.Module.SendAccountSmsAsync(MusicAccountRuntimeFixture.Phone);
     private static Task Login(Fixture f) => f.Module.LoginAccountSmsAsync(MusicAccountRuntimeFixture.Phone, "86", MusicAccountRuntimeFixture.Captcha);
     private static async Task Flow()
@@ -80,12 +66,11 @@ public static class MusicWySmsUiTests
         await f.Module.LogoutAccountAsync(f.Module.SelectedAccount!, confirmed: true);
         Check(f.Module.SelectedAccount!.State == "none" && f.Transport.Calls == 2 && f.Runtime.Calls.Count == 0);
     }
-    private static Window Offscreen(object content) => new() { Content = content, Width = 620, Height = 1000,
-        Left = -20000, Top = -20000, ShowInTaskbar = false, WindowStyle = WindowStyle.ToolWindow };
+    private static DesktopWindow Offscreen(UIElement content) => MusicTestUi.Window(content, 620, 1000);
     private static void OpenSms(MusicAccountsView view)
     {
-        ((Popup)view.FindName("LoginPopup")).IsOpen = true;
-        ((Button)view.FindName("SmsModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        MusicTestUi.OpenAccountLogin(view);
+        DesktopTestUi.Invoke(((Button)view.FindName("SmsModeButton")));
     }
     private static void Fill(MusicAccountsView view)
     {
@@ -97,14 +82,14 @@ public static class MusicWySmsUiTests
         Check(((TextBox)view.FindName("SmsPhoneInput")).Text == "" && ((PasswordBox)view.FindName("SmsCodeInput")).Password == "");
     }
     private static void Click(MusicAccountsView view, string name) =>
-        ((Button)view.FindName(name)).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        DesktopTestUi.Invoke(((Button)view.FindName(name)));
     private static async Task Controls()
     {
         await using var f = await Fixture.Create();
         var view = new MusicAccountsView { DataContext = f.Module }; var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded); OpenSms(view); Fill(view);
+            window.Show(); await MusicTestUi.Drain(); OpenSms(view); Fill(view);
             Check(((PasswordBox)view.FindName("SmsCodeInput")).MaxLength == 8);
             Click(view, "SmsSendButton");
             Check(((PasswordBox)view.FindName("SmsCodeInput")).Password == "");
@@ -131,7 +116,7 @@ public static class MusicWySmsUiTests
         var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
+            window.Show(); await MusicTestUi.Drain();
             OpenSms(view);
             await Task.Delay(2200); Check(f.Transport.Calls == 0);
             await Send(f); await Task.Delay(2200);
@@ -148,7 +133,7 @@ public static class MusicWySmsUiTests
         var view = new MusicAccountsView { DataContext = f.Module }; var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded); OpenSms(view); Fill(view);
+            window.Show(); await MusicTestUi.Drain(); OpenSms(view); Fill(view);
             var operation = step == "sms.send" ? Send(f) : Login(f);
             await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(4));
             window.Hide(); Cleared(view);
@@ -169,7 +154,7 @@ public static class MusicWySmsUiTests
         var view = new MusicAccountsView { DataContext = f.Module }; var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded); OpenSms(view); Fill(view);
+            window.Show(); await MusicTestUi.Drain(); OpenSms(view); Fill(view);
             var login = Login(f); await f.Transport.Arrived.Task;
             f.Module.SelectedAccount = f.Module.Accounts[1]; Cleared(view);
             Check(!f.Module.ShowAccountSms && !f.Module.CanLoginAccountSms);
@@ -185,7 +170,7 @@ public static class MusicWySmsUiTests
         var view = new MusicAccountsView { DataContext = f.Module }; var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded); OpenSms(view); Fill(view);
+            window.Show(); await MusicTestUi.Drain(); OpenSms(view); Fill(view);
             var send = Send(f); await f.Transport.Arrived.Task;
             view.DataContext = other.Module; Cleared(view);
             f.Transport.Release.TrySetResult(); await send;
@@ -200,8 +185,8 @@ public static class MusicWySmsUiTests
         var view = new MusicAccountsView { DataContext = f.Module }; var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded); OpenSms(view); Fill(view); await Send(f);
-            window.Content = null; await Dispatcher.Yield(DispatcherPriority.Loaded); Cleared(view);
+            window.Show(); await MusicTestUi.Drain(); OpenSms(view); Fill(view); await Send(f);
+            window.Content = null; await MusicTestUi.Drain(); Cleared(view);
             await Until(() => !f.Module.HasAccountSms && !f.Module.AccountBusy);
             Check(f.Transport.Calls == 1 && !f.Module.CanSendAccountSms);
         }
@@ -213,10 +198,10 @@ public static class MusicWySmsUiTests
         var view = new MusicAccountsView { DataContext = f.Module }; var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded); OpenSms(view); Fill(view); await Send(f);
-            window.WindowState = WindowState.Minimized; Cleared(view);
+            window.Show(); await MusicTestUi.Drain(); OpenSms(view); Fill(view); await Send(f);
+            window.WindowState = DesktopWindowState.Minimized; Cleared(view);
             await Until(() => !f.Module.HasAccountSms);
-            window.WindowState = WindowState.Normal; await Task.Delay(2200);
+            window.WindowState = DesktopWindowState.Normal; await Task.Delay(2200);
             Check(f.Transport.Calls == 1 && !f.Module.CanSendAccountSms);
         }
         finally { window.Close(); }
@@ -267,7 +252,7 @@ public static class MusicWySmsUiTests
     {
         await using var f = await Fixture.Create(); await Send(f);
         await f.Module.BeginAccountQrAsync();
-        Check(!f.Module.HasAccountSms && f.Module.HasAccountQr && f.Module.AccountQrImage is { IsFrozen: true });
+        Check(!f.Module.HasAccountSms && f.Module.HasAccountQr && f.Module.AccountQrImage is { PixelWidth: > 0, PixelHeight: > 0 });
         await f.Module.CancelAccountAsync();
         Check(!f.Module.HasAccountQr && !f.Module.CanSendAccountSms && f.Transport.Calls == 2);
     }

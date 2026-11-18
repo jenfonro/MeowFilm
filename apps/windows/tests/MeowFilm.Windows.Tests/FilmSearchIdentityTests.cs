@@ -1,8 +1,9 @@
 using System.Collections.Specialized;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 
@@ -23,7 +24,7 @@ public static class FilmSearchIdentityTests
     }
 
     private static TestCase Case(string name, Func<Task> run) =>
-        new("film-search-identity: " + name, () => MusicQualityConsumerTests.Sta(run));
+        new("film-search-identity: " + name, () => TestUiHost.InvokeAsync(run));
     private static void Check(bool condition, string reason) => SearchFixture.Check(condition, reason);
     private static JsonElement Card(string key, string title, string poster = "", string badge = "高清") =>
         FilmJson.Encode(new
@@ -177,7 +178,7 @@ public static class FilmSearchIdentityTests
                 f.Runtime.PublishSearch(SearchFixture.Snapshot(Guid.Parse(session.Id), session.Query,
                     [Tmdb("tmdb:tv:7", "/blocked.jpg")], [], revision: 2));
                 await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                await Dispatcher.Yield();
+                await FilmUiTest.Pump();
                 if (retirement == "query")
                 {
                     var current = service.Start("新词"); await SearchFixture.Settle(current);
@@ -286,7 +287,9 @@ public static partial class MusicUiTests
         f.Page.RawListMode = true;
         var card = new FilmCard { DataContext = rawCards[0] };
         FilmCardItem? selected = null; card.Activated += (_, e) => selected = e.Item;
-        ((Button)card.FindName("HitButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        using var host = new DesktopTestUi.Host(card);
+        await FilmUiTest.Pump();
+        FilmUiTest.Click((Button)card.FindName("HitButton"));
         True(selected is not null && ReferenceEquals(selected.SearchContext, rawCards[0].SearchContext) &&
             JsonElement.DeepEquals(selected.SearchContext!.Item, raw) && selected.Title == rawCards[0].Title,
             "the native FilmCard event carries the selected original typed zero row through the existing playback contract");

@@ -22,6 +22,7 @@ public sealed partial class MusicCapability
     public ObservableCollection<MusicSourceChoice> SourceChoices { get; } = [];
     public bool HasSourceChoices => SourceChoices.Count > 0;
     public bool HasConfirmedSourceChoices => SourceChoices.Any(choice => choice.Key != "auto" && choice.Selectable);
+    public bool HasEmptySources => !HasConfirmedSourceChoices && !IsLoadingSources;
     public MusicSourceChoice? AutomaticSourceChoice => SourceChoices.FirstOrDefault(choice => choice.Key == "auto");
     public bool CanLoadMoreSources => CanSwitchSource && musicRecovery?.Recovering == false && sourceExpansion is null &&
         (musicRecovery?.Session?.CanExpand == true || musicRecovery?.Session?.Revision != selectionSourcesRevision ||
@@ -120,7 +121,7 @@ public sealed partial class MusicCapability
                 });
             }
         }
-        Changed(nameof(HasSourceChoices)); Changed(nameof(HasConfirmedSourceChoices)); Changed(nameof(AutomaticSourceChoice));
+        Changed(nameof(HasSourceChoices)); Changed(nameof(HasConfirmedSourceChoices)); Changed(nameof(HasEmptySources)); Changed(nameof(AutomaticSourceChoice));
         Changed(nameof(CanSwitchSource)); Changed(nameof(CanLoadMoreSources));
     }
     public void OpenSourceChoices() => UpdateSourceChoices();
@@ -129,8 +130,8 @@ public sealed partial class MusicCapability
         sourceExpansion?.Cancel();
         sourceExpansion = null;
         SourceChoices.Clear();
-        Changed(nameof(HasSourceChoices)); Changed(nameof(HasConfirmedSourceChoices)); Changed(nameof(AutomaticSourceChoice));
-        Changed(nameof(CanLoadMoreSources)); Changed(nameof(IsLoadingSources));
+        Changed(nameof(HasSourceChoices)); Changed(nameof(HasConfirmedSourceChoices)); Changed(nameof(HasEmptySources)); Changed(nameof(AutomaticSourceChoice));
+        Changed(nameof(CanLoadMoreSources)); Changed(nameof(IsLoadingSources)); Changed(nameof(HasEmptySources));
     }
     /// <summary>Explores the next group of declared source qualities, cache first.</summary>
     public Task LoadMoreSourcesAsync()
@@ -138,7 +139,7 @@ public sealed partial class MusicCapability
         if (!CanLoadMoreSources || musicRecovery is not { Session: not null } state) return Task.CompletedTask;
         var request = CancellationTokenSource.CreateLinkedTokenSource(state.Token);
         sourceExpansion = request;
-        Changed(nameof(CanLoadMoreSources)); Changed(nameof(IsLoadingSources));
+        Changed(nameof(CanLoadMoreSources)); Changed(nameof(IsLoadingSources)); Changed(nameof(HasEmptySources));
         var work = Run();
         eventWrites.Add(work); _ = Observe();
         return work;
@@ -153,7 +154,7 @@ public sealed partial class MusicCapability
                 if (ReferenceEquals(sourceExpansion, request)) sourceExpansion = null;
                 request.Dispose();
                 if (ReferenceEquals(musicRecovery, state) && SourceChoices.Count > 0) UpdateSourceChoices();
-                Changed(nameof(CanLoadMoreSources)); Changed(nameof(IsLoadingSources));
+                Changed(nameof(CanLoadMoreSources)); Changed(nameof(IsLoadingSources)); Changed(nameof(HasEmptySources));
             }
         }
     }

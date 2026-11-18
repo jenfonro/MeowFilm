@@ -1,4 +1,4 @@
-using System.Windows;
+using Microsoft.UI.Xaml;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -42,7 +42,7 @@ public sealed partial class MusicCapability
     {
         ArgumentNullException.ThrowIfNull(window);
         Presentation.Dispatcher.VerifyAccess();
-        window.Dispatcher.VerifyAccess();
+        if (!window.DispatcherQueue.HasThreadAccess) throw new InvalidOperationException("Desktop lyrics owner requires its UI thread.");
         if (stopping || disposed) throw new InvalidOperationException("CLOSED");
         activateDesktopLyricsOwner = activate;
         if (ReferenceEquals(desktopLyricsOwner, window)) return;
@@ -108,7 +108,7 @@ public sealed partial class MusicCapability
         if (!NeedsLyrics) CancelLyrics();
     }
 
-    private void DesktopLyricsClosed(object? sender, EventArgs e)
+    private void DesktopLyricsClosed(object sender, WindowEventArgs e)
     {
         var window = (MusicDesktopLyricsWindow)sender!;
         window.Closed -= DesktopLyricsClosed;
@@ -122,7 +122,7 @@ public sealed partial class MusicCapability
             _ = ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
     }
 
-    private void DesktopLyricsOwnerClosed(object? sender, EventArgs e) => ReleaseDesktopLyrics();
+    private void DesktopLyricsOwnerClosed(object sender, WindowEventArgs e) => ReleaseDesktopLyrics();
 
     private void DesktopLyricsBindings()
     {

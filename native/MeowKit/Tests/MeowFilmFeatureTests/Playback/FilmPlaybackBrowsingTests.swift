@@ -7,6 +7,8 @@ final class FilmPlaybackBrowsingTests: XCTestCase {
     func testInitialLoadingFollowsTheFirstResolvedDirectoryWithoutAnEarlyEmptyState() async throws {
         var initial = FilmPlaybackFixture.snapshot(stage: "loading").filmObject!
         initial["sources"] = .array([])
+        initial["browsing"] = .object(["sourceId": .null, "lineId": .null, "loading": .bool(true),
+            "error": .null, "lines": .array([]), "episodes": .array([])])
         let server = FilmPlaybackWireServer(.object(initial)), model = makeModel(server)
         await model.open()?.value; await server.awaitObservation()
         XCTAssertFalse(model.directoryHasNoVideoSource)
@@ -157,7 +159,37 @@ final class FilmPlaybackBrowsingTests: XCTestCase {
         await model.close()
     }
 
-    func testRefreshFromLocallyRestoredSliceCarriesAllSelectorsAndHidesOldRows() async throws {
+    func testLoadedDirectoryFailureIsVisibleWithoutDiscardingTheReusableSlice() async throws {
+        let server = FilmPlaybackWireServer(value(1, source: "result-a", line: .number(0)))
+        let model = makeModel(server)
+        await model.open()?.value; await server.awaitObservation()
+        let original = try XCTUnwrap(model.presentation)
+        model.browse(sourceID: "result-a", lineID: .number(0))
+        var failed = value(10, source: "result-a", line: .number(0)).filmObject!
+        var browsing = failed["browsing"]!.filmObject!
+        browsing["error"] = .string("UPSTREAM_ERROR")
+        failed["browsing"] = .object(browsing)
+        try await server.publish(.object(failed))
+        XCTAssertEqual(model.presentation?.browsing.error, "UPSTREAM_ERROR")
+        XCTAssertFalse(try XCTUnwrap(model.presentation).browsing.loading)
+        XCTAssertTrue(try XCTUnwrap(model.presentation).browsing.files.isEmpty)
+        XCTAssertFalse(model.canSelectFromPresentation)
+        XCTAssertEqual(model.loadedDirectory(sourceID: "result-a", lineID: .number(0),
+            metadataSourceID: original.metadataSourceID, season: original.browsing.season)?.browsing, original.browsing)
+        try await server.publish(value(20, source: "result-b", line: .number(0)))
+        XCTAssertEqual(model.presentation?.browsing.sourceID, "result-a")
+        XCTAssertEqual(model.presentation?.browsing.error, "UPSTREAM_ERROR",
+                       "An unrelated completion cannot clear the selected directory's failure")
+        model.browse(sourceID: "result-b", lineID: .number(0))
+        XCTAssertNil(model.presentation?.browsing.error)
+        model.browse(sourceID: "result-a", lineID: .number(0))
+        XCTAssertEqual(model.presentation?.browsing, original.browsing)
+        let calls = await server.calls().filter { $0.1.filmObject?["action"] == .string("browse") }
+        XCTAssertTrue(calls.isEmpty, "Explicit loaded returns reuse their successful data without new RPC")
+        await model.close()
+    }
+
+    func testRefreshFromLocallyRestoredSliceCarriesAllSelectorsAndRetainsSuccessfulRows() async throws {
         let server = FilmPlaybackWireServer(value(1, source: "result-a", line: .number(0)))
         let model = makeModel(server), entered = FilmPlaybackGate(), finish = FilmPlaybackGate()
         await model.open()?.value
@@ -170,8 +202,9 @@ final class FilmPlaybackBrowsingTests: XCTestCase {
         }
         await server.reply(to: "browse.refresh", with: value(20, source: "result-a", line: .number(0)))
         let refresh = model.refreshBrowsing()
-        XCTAssertTrue(try XCTUnwrap(model.presentation).browsing.loading)
-        XCTAssertTrue(try XCTUnwrap(model.presentation).browsing.files.isEmpty)
+        XCTAssertFalse(try XCTUnwrap(model.presentation).browsing.loading)
+        XCTAssertTrue(try XCTUnwrap(model.presentation).browsing.refreshing)
+        XCTAssertFalse(try XCTUnwrap(model.presentation).browsing.files.isEmpty)
         await entered.wait()
         let call = await server.calls().last!
         XCTAssertEqual(call.1.filmObject?["sourceId"], .string("result-a"))
@@ -184,14 +217,18 @@ final class FilmPlaybackBrowsingTests: XCTestCase {
     }
 
     func testMetadataBrowsingDoesNotCancelAnAdmittedNativePreparation() async throws {
-        let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "pending",
-            attempt: FilmPlaybackFixture.attempt("native")))
+        var fields = value(1, source: nil, line: nil).filmObject!
+        fields["stage"] = .string("pending"); fields["attempt"] = FilmPlaybackFixture.attempt("native")
+        let server = FilmPlaybackWireServer(.object(fields))
         let media = FilmPlaybackTestMedia(), entered = FilmPlaybackGate(), finish = FilmPlaybackGate()
         media.preparationEntered = entered; media.preparationGate = finish
         let model = makeModel(server, media: media)
         await model.open()?.value
         await entered.wait()
         let cancellations = media.pendingCancellations
+        var reply = value(10, source: nil, line: nil, metadata: .douban).filmObject!
+        reply["stage"] = .string("pending"); reply["attempt"] = FilmPlaybackFixture.attempt("native")
+        await server.reply(to: "browse.metadata", with: .object(reply))
         model.browseMetadata("confirmed-douban")
         await server.awaitCalls(3)
         await finish.release()
@@ -248,6 +285,112 @@ final class FilmPlaybackBrowsingTests: XCTestCase {
         }
     }
 
+    func testReadyDirectoryCanSelectDespiteAnUnrelatedLoadingOrUnavailablePlayback() async throws {
+        for stage in ["loading", "unavailable", "error"] {
+            var fields = value(1, source: "result-a", line: .number(0)).filmObject!
+            fields["stage"] = .string(stage)
+            let server = FilmPlaybackWireServer(.object(fields)), model = makeModel(server)
+            await model.open()?.value
+            XCTAssertTrue(model.canSelectFromPresentation)
+            XCTAssertFalse(model.directoryHasNoVideoSource)
+            let file = try XCTUnwrap(model.presentation?.browsing.files.first)
+            model.selectTarget(file.playbackTarget, metadataSourceID: model.presentation?.metadataSourceID)
+            await model.waitForPendingWork()
+            let calls = await server.calls()
+            XCTAssertEqual(calls.filter { $0.1.filmObject?["action"] == .string("select.target") }.count, 1)
+            await model.close()
+        }
+    }
+
+    func testRefreshFailureKeepsSuccessButExplicitSourceRevocationRemovesIt() async throws {
+        for error in ["UPSTREAM_HTTP", "STALE_SOURCE"] {
+            let server = FilmPlaybackWireServer(value(1, source: "result-a", line: .number(0)))
+            let model = makeModel(server)
+            await model.open()?.value
+            let files = try XCTUnwrap(model.presentation).browsing.files
+            await server.fail("browse.refresh", with: .remote(error))
+            await model.refreshBrowsing()?.value
+            XCTAssertEqual(model.actionError?.code, error)
+            if error == "STALE_SOURCE" {
+                XCTAssertTrue(try XCTUnwrap(model.presentation).browsing.files.isEmpty)
+                XCTAssertNil(model.loadedDirectory(sourceID: "result-a", lineID: .number(0),
+                    metadataSourceID: "confirmed-tmdb", season: 1))
+            } else {
+                XCTAssertEqual(model.presentation?.browsing.files, files)
+                XCTAssertTrue(model.canSelectFromPresentation)
+                XCTAssertFalse(try XCTUnwrap(model.presentation).browsing.refreshing)
+            }
+            await model.close()
+        }
+    }
+
+    func testMetadataPreferenceSavesOnCachedReturnsAndDoesNotChangeAggregateOrSiteSelection() async throws {
+        let server = FilmPlaybackWireServer(value(1, source: "result-a", line: .number(0)))
+        let store = try FilmNativeSettingsStore(self, block: .preferences)
+        let settings = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.document)
+        let model = FilmPlaybackModel(transport: server.transport, media: FilmPlaybackTestMedia(),
+            playbackPreferences: settings) { FilmPlaybackFixture.request() }
+        addTeardownBlock { await model.close() }
+        await model.open()?.value
+        XCTAssertNil(try store.document.read(), "Default and automatic projection never save a preference")
+        await server.reply(to: "browse.metadata", with: value(10, source: "result-a", line: .number(0), metadata: .douban))
+        model.browseMetadata("confirmed-douban")
+        await model.waitForPendingWork()
+        XCTAssertEqual(settings.preferences?.metadataViewProvider, .douban)
+        XCTAssertEqual(model.presentation?.browsing.sourceID, "result-a")
+        XCTAssertEqual(model.presentation?.browsing.lineID, .number(0))
+        model.browseMetadata("confirmed-tmdb")
+        XCTAssertEqual(settings.preferences?.metadataViewProvider, .tmdb)
+        XCTAssertEqual(model.presentation?.metadataSourceID, "confirmed-tmdb")
+        model.browseMetadata("confirmed-douban")
+        await model.waitForPendingWork()
+        var commands = await server.calls().filter { $0.0 == "session.command" }
+        XCTAssertEqual(commands.count, 1)
+        XCTAssertEqual(commands[0].1.filmObject?["keepSource"], .bool(true))
+        XCTAssertEqual(store.notifications.count, 3, "A cached user selection still persists")
+        await server.reply(to: "browse", with: value(20, source: nil, line: nil, metadata: .douban))
+        model.browseAggregate(.tmdb)
+        await model.waitForPendingWork()
+        model.browseAggregate(.douban)
+        await model.waitForPendingWork()
+        XCTAssertEqual(model.aggregateSourceProvider, .douban)
+        XCTAssertEqual(model.presentation?.metadataSourceID, "confirmed-douban")
+        XCTAssertEqual(settings.preferences?.metadataViewProvider, .douban)
+        XCTAssertEqual(store.notifications.count, 3)
+        commands = await server.calls().filter { $0.0 == "session.command" }
+        XCTAssertEqual(commands.count, 2, "Changing aggregate labels reuses the same loaded directory")
+        await model.close()
+        let reopened = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.makeDocument())
+        try await reopened.loadPreferences()
+        XCTAssertEqual(reopened.preferences?.metadataViewProvider, .douban)
+    }
+
+    func testOnlyAvailableProviderTemporarilyOverridesEitherPreferenceWithoutSaving() async throws {
+        for preferred in [FilmMetadataProvider.tmdb, .douban] {
+            let available: FilmMetadataProvider = preferred == .tmdb ? .douban : .tmdb
+            let store = try FilmNativeSettingsStore(self, block: .preferences)
+            var preferences = FilmPlaybackPreferences.defaults
+            preferences.metadataViewProvider = preferred
+            try store.seed(store.envelope(preferences.value, key: "preferences"))
+            var fields = value(1, source: nil, line: nil, metadata: available).filmObject!
+            fields["metadataSources"] = .array(fields["metadataSources"]!.filmArray!.filter {
+                $0.filmObject?["provider"] == .string(available.rawValue)
+            })
+            let server = FilmPlaybackWireServer(.object(fields))
+            let settings = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.document)
+            let model = FilmPlaybackModel(transport: server.transport, media: FilmPlaybackTestMedia(),
+                playbackPreferences: settings) { FilmPlaybackFixture.request() }
+            await model.open()?.value; await model.waitForPendingWork()
+            XCTAssertEqual(model.metadataViewProvider, preferred)
+            XCTAssertEqual(model.presentation?.metadataSourceID, "confirmed-\(available.rawValue)")
+            XCTAssertEqual(settings.preferences?.metadataViewProvider, preferred)
+            XCTAssertTrue(store.notifications.isEmpty)
+            let calls = await server.calls()
+            XCTAssertEqual(calls.map(\.0), ["session.open"])
+            await model.close()
+        }
+    }
+
     private func makeModel(_ server: FilmPlaybackWireServer,
                            media: FilmPlaybackTestMedia? = nil) -> FilmPlaybackModel {
         let model = FilmPlaybackModel(transport: server.transport, media: media ?? FilmPlaybackTestMedia()) {
@@ -280,9 +423,8 @@ final class FilmPlaybackBrowsingTests: XCTestCase {
                 "id": .string("confirmed-\(provider.rawValue)"), "provider": .string(provider.rawValue),
                 "metadataId": .number(19), "kind": .string("tv"), "title": .string("浏览资料")]) },
             metadataSourceID: "confirmed-\(metadata.rawValue)",
-            workInfo: .object(["provider": .string("tmdb"), "metadataId": .number(19), "kind": .string("tv"),
-                "title": .string("主作品"), "summary": .string("可靠主简介"),
-                "seasonCount": .number(3), "episodeCount": .number(24)])).filmObject!
+            workInfo: FilmPlaybackFixture.workInfo(title: "主作品", summary: "可靠主简介",
+                seasonCount: 3, episodeCount: 24)).filmObject!
         fields["sources"] = .array(fields["sources"]!.filmArray! + [.object([
             "businessId": .string("source-second"), "id": .string("result-b"), "title": .string("第二来源"),
             "source": .object(secondSource), "state": .string("ready"), "error": .null,

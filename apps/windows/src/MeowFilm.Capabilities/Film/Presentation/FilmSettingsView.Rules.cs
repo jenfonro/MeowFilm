@@ -1,6 +1,7 @@
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Capabilities.Film.Rules;
 
 namespace MeowFilm.Capabilities;
@@ -96,7 +97,7 @@ public partial class FilmSettingsView
     {
         while (editor.Rows.Count > 0) editor.Rows.RemoveAt(editor.Rows.Count - 1);
         foreach (var value in values)
-            editor.Rows.Add(new(editor.Title, editor.Rows.Count + 1, value.Pattern, value.Replace, value.Flags));
+            editor.Rows.Add(new(editor.Title, editor.Rows.Count + 1, value.Pattern, value.Replace, value.Flags, editor.HasReplacement));
     }
 
     private async void Rule_ActionRequested(object? sender, FilmSettingsRuleActionEventArgs e)
@@ -199,7 +200,7 @@ public partial class FilmSettingsView
         void Add(string name, string value)
         {
             var text = new TextBlock { Text = name + "：" + value, TextWrapping = TextWrapping.Wrap, Margin = new(0, 3, 0, 0) };
-            text.SetResourceReference(StyleProperty, "Settings.Text");
+            text.SetValue(StyleProperty, MeowFilm.Desktop.DesktopVisual.Resource(this, "Settings.Text"));
             AutomationProperties.SetName(text, name);
             panel.Children.Add(text);
         }

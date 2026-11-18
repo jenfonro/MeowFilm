@@ -1,6 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Windows;
+using Microsoft.UI.Xaml;
 
 namespace MeowFilm.Desktop;
 

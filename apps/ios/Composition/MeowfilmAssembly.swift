@@ -63,6 +63,13 @@ final class MeowfilmAssembly: ObservableObject {
     private var foreground = UIApplication.shared.applicationState == .active
     private(set) var filmPlayback: FilmPlaybackModel?
     private var filmMedia: MeowfilmFilmMedia?
+    var filmMediaPlayback: FilmPlaybackModel? { filmMedia?.currentModel }
+    private var filmModels: [FilmPlaybackModel] {
+        var identities = Set<ObjectIdentifier>()
+        return ([filmPlayback].compactMap { $0 } + (filmMedia?.models ?? [])).filter {
+            identities.insert(ObjectIdentifier($0)).inserted
+        }
+    }
     private var filmBackground: Task<Void, Never>?
     var restoreFilmPlaybackUI: (@MainActor (UUID) async -> Bool)? {
         didSet { filmMedia?.restoreUI = restoreFilmPlaybackUI }
@@ -97,11 +104,12 @@ final class MeowfilmAssembly: ObservableObject {
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, let model = self.filmPlayback else { return }
+                guard let self else { return }
+                let models = self.filmModels
                 let previous = self.filmBackground
                 self.filmBackground = Task {
                     await previous?.value
-                    await model.applicationDidEnterBackground()
+                    for model in models { await model.applicationDidEnterBackground() }
                 }
             }
         })
@@ -138,7 +146,7 @@ final class MeowfilmAssembly: ObservableObject {
             for await _ in await resources.scriptSession.connections() {
                 guard !Task.isCancelled, let self, !self.closed else { return }
                 self.filmSearch?.runtimeDidBecomeAvailable()
-                self.filmPlayback?.runtimeDidBecomeAvailable()
+                for model in self.filmModels { model.runtimeDidBecomeAvailable() }
             }
         }
         filmSearch = FilmSearchService(sources: resources.filmSourceSettings,
@@ -155,7 +163,9 @@ final class MeowfilmAssembly: ObservableObject {
         let playbackSettings = FilmPlaybackSettingsModel(transport: FilmPlaybackTransport {
             try await resources.scriptSession.connection()
         }, settingsDocument: resources.filmSettings[.preferences])
-        playbackSettings.playbackSnapshot = { [weak self] in self?.filmPlayback?.snapshot }
+        playbackSettings.playbackSnapshot = { [weak self] in
+            self?.filmMediaPlayback?.snapshot ?? self?.filmPlayback?.snapshot
+        }
         let pan = PanAccountsModel(service: PanAccountService(document: resources.filmSettings[.panAccounts],
             connection: { try await resources.scriptSession.connection() }))
         let filmSettings = FilmSettingsModel(rules: resources.filmRules, sources: resources.filmSourceSettings,
@@ -314,9 +324,13 @@ final class MeowfilmAssembly: ObservableObject {
             media.restoreUI = restoreFilmPlaybackUI
             filmMedia = media
         }
-        return FilmPlaybackModel(transport: FilmPlaybackTransport {
+        let binding = MeowfilmFilmMedia.Session(owner: filmMedia!)
+        let model = FilmPlaybackModel(transport: FilmPlaybackTransport {
             try await resources.scriptSession.connection()
-        }, media: filmMedia!, searchContext: searchContext, playerPreferences: playerPreferences, request: request)
+        }, media: binding, searchContext: searchContext, playerPreferences: playerPreferences,
+           playbackPreferences: filmSettings?.playback, request: request)
+        binding.model = model
+        return model
     }
 
     private func filmPlaybackSources(resources: MeowfilmResources) async throws -> [FilmPlaybackSource] {
@@ -339,20 +353,23 @@ final class MeowfilmAssembly: ObservableObject {
         await filmBackground?.value
         guard !closed else { throw FilmPlaybackError(code: "CLOSED") }
         if let current = filmPlayback, current !== model {
-            await current.close()
-            guard current.canLeave else { throw current.actionError ?? FilmPlaybackError(code: "MEDIA_UNAVAILABLE") }
+            await current.close(allowSystemOwner: true)
+            guard current.canLeave || current.hasSystemOwner else {
+                throw current.actionError ?? FilmPlaybackError(code: "MEDIA_UNAVAILABLE")
+            }
         }
         try Task.checkCancellation()
         guard !closed else { throw FilmPlaybackError(code: "CLOSED") }
         filmPlayback = model
-        filmMedia?.model = model
     }
 
     func leaveFilm(allowSystemOwner: Bool = true) async throws {
-        guard let model = filmPlayback else { return }
-        await model.close(allowSystemOwner: allowSystemOwner)
-        guard model.canLeave || allowSystemOwner && model.hasSystemOwner else {
-            throw model.actionError ?? FilmPlaybackError(code: "MEDIA_RELEASE_FAILED")
+        let models = allowSystemOwner ? [filmPlayback].compactMap { $0 } : filmModels
+        for model in models {
+            await model.close(allowSystemOwner: allowSystemOwner)
+            guard model.canLeave || allowSystemOwner && model.hasSystemOwner else {
+                throw model.actionError ?? FilmPlaybackError(code: "MEDIA_RELEASE_FAILED")
+            }
         }
     }
 
@@ -375,7 +392,7 @@ final class MeowfilmAssembly: ObservableObject {
         let model = music, service = service
         let resources = resources, pendingScripts = scriptStartup, lease = lease
         let pendingStartup = startup
-        let filmSearch = filmSearch, film = filmPlayback, filmMedia = filmMedia, filmBackground = filmBackground
+        let filmSearch = filmSearch, films = filmModels, filmMedia = filmMedia, filmBackground = filmBackground
         let novel = novel
         stopping = Task { [weak self] in
             await model?.close()
@@ -387,9 +404,11 @@ final class MeowfilmAssembly: ObservableObject {
             await novel?.close()
             await filmSearch?.close()
             await filmBackground?.value
-            await film?.close()
-            if let film, !film.isReleased {
-                self?.shutdownError = (film.actionError ?? FilmPlaybackError(code: "MEDIA_RELEASE_FAILED")).localizedDescription
+            for film in films {
+                await film.close()
+                if !film.isReleased, self?.shutdownError == nil {
+                    self?.shutdownError = (film.actionError ?? FilmPlaybackError(code: "MEDIA_RELEASE_FAILED")).localizedDescription
+                }
             }
             do { try await filmMedia?.close() }
             catch { if self?.shutdownError == nil { self?.shutdownError = error.localizedDescription } }
@@ -463,8 +482,14 @@ final class MeowfilmAssembly: ObservableObject {
             await closeNovel?()
             await filmSearch?.close()
             await filmBackground?.value
-            await film?.close()
-            if let film, !film.isReleased { NSLog("Film session shutdown failed") }
+            var identities = Set<ObjectIdentifier>()
+            let films = ([film].compactMap { $0 } + (filmMedia?.models ?? [])).filter {
+                identities.insert(ObjectIdentifier($0)).inserted
+            }
+            for film in films {
+                await film.close()
+                if !film.isReleased { NSLog("Film session shutdown failed") }
+            }
             do { try await filmMedia?.close() }
             catch { NSLog("Film media shutdown failed") }
             if let resources {
@@ -488,13 +513,17 @@ final class MeowfilmAssembly: ObservableObject {
 
 /// The product supplies only this adapter to FilmFeature. Credentials remain in
 /// the runtime receipt/private native input, and one stable video lease owns the
-/// decoder, system commands and surface across inline/fullscreen/PiP lifetimes.
+/// decoder, system commands and surface across fullscreen/PiP lifetimes.
 @MainActor
-private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
+private final class MeowfilmFilmMedia {
     // Only physically live or draining transports. The native receipt callback
     // removes its exact record after decoder/PiP close, before the remote ACK.
     private var undrained: [Media] = []
-    weak var model: FilmPlaybackModel?
+    var currentModel: FilmPlaybackModel? {
+        guard let current, attempt(current.sessionID) != nil else { return nil }
+        return current.model
+    }
+    var models: [FilmPlaybackModel] { (undrained + [pending, current].compactMap { $0 }).map(\.model) }
     var restoreUI: (@MainActor (UUID) async -> Bool)?
     private let playback: PlaybackController
     private let preferences: FilmPlayerPreferencesStore
@@ -508,14 +537,52 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
         let sessionID: UUID
         let attemptID: String
         let receive: @MainActor (FilmMediaEvent) -> Void
+        let model: FilmPlaybackModel
         var nativeAttempt: PlayAttempt?
         var state = FilmMediaState()
-        init(input: FilmPlaybackMediaInput, receive: @escaping @MainActor (FilmMediaEvent) -> Void) {
+        init(input: FilmPlaybackMediaInput, model: FilmPlaybackModel,
+             receive: @escaping @MainActor (FilmMediaEvent) -> Void) {
             sessionID = input.sessionID; attemptID = input.attemptID; self.receive = receive
+            self.model = model
             state.sessionID = input.sessionID; state.attemptID = input.attemptID
             state.resourceID = input.resourceID
             state.position = input.position; state.paused = input.paused
         }
+    }
+
+    @MainActor
+    final class Session: FilmPlaybackMediaControlling {
+        weak var model: FilmPlaybackModel?
+        private let owner: MeowfilmFilmMedia
+        init(owner: MeowfilmFilmMedia) { self.owner = owner }
+        func play(_ input: FilmPlaybackMediaInput, preservePosition: Bool,
+                  waitForCommit: @escaping @MainActor () async throws -> Void,
+                  canCommit: @escaping @MainActor () -> Bool,
+                  release: @escaping @MainActor () async throws -> Void,
+                  receive: @escaping @MainActor (FilmMediaEvent) -> Void) async throws {
+            guard let model, model.sessionID == input.sessionID else { throw FilmPlaybackError(code: "STALE_SESSION") }
+            try await owner.play(input, model: model, preservePosition: preservePosition,
+                                 waitForCommit: waitForCommit, canCommit: canCommit, release: release, receive: receive)
+        }
+        func cancelPending(sessionID: UUID) async throws { try await owner.cancelPending(sessionID: sessionID) }
+        func stop(sessionID: UUID) async throws { try await owner.stop(sessionID: sessionID) }
+        func isLocallyDrained(sessionID: UUID) -> Bool { owner.isLocallyDrained(sessionID: sessionID) }
+        func isCurrent(sessionID: UUID, attemptID: String) -> Bool { owner.isCurrent(sessionID: sessionID, attemptID: attemptID) }
+        func pause(sessionID: UUID, attemptID: String) -> Bool { owner.pause(sessionID: sessionID, attemptID: attemptID) }
+        func resume(sessionID: UUID, attemptID: String, userInitiated: Bool) {
+            owner.resume(sessionID: sessionID, attemptID: attemptID, userInitiated: userInitiated)
+        }
+        func seek(sessionID: UUID, to position: Double) { owner.seek(sessionID: sessionID, to: position) }
+        func setRate(sessionID: UUID, rate: Double) { owner.setRate(sessionID: sessionID, rate: rate) }
+        func setTemporaryRate(sessionID: UUID, attemptID: String, rate: Double?) {
+            owner.setTemporaryRate(sessionID: sessionID, attemptID: attemptID, rate: rate)
+        }
+        func setVolume(sessionID: UUID, volume: Double) { owner.setVolume(sessionID: sessionID, volume: volume) }
+        func startPictureInPicture(sessionID: UUID) { owner.startPictureInPicture(sessionID: sessionID) }
+        func stopPictureInPicture(sessionID: UUID) { owner.stopPictureInPicture(sessionID: sessionID) }
+        func hasSystemOwner(sessionID: UUID) -> Bool { owner.hasSystemOwner(sessionID: sessionID) }
+        func makeVideoView(sessionID: UUID) -> UIView { owner.makeVideoView(sessionID: sessionID) }
+        func setVideoScale(sessionID: UUID, scale: FilmVideoScale) { owner.setVideoScale(sessionID: sessionID, scale: scale) }
     }
 
     init(playback: PlaybackController, preferences: FilmPlayerPreferencesStore,
@@ -536,12 +603,12 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
             }
     }
 
-    func play(_ input: FilmPlaybackMediaInput, preservePosition: Bool,
+    func play(_ input: FilmPlaybackMediaInput, model: FilmPlaybackModel, preservePosition: Bool,
               waitForCommit: @escaping @MainActor () async throws -> Void,
               canCommit: @escaping @MainActor () -> Bool,
               release: @escaping @MainActor () async throws -> Void,
               receive: @escaping @MainActor (FilmMediaEvent) -> Void) async throws {
-        let record = Media(input: input, receive: receive)
+        let record = Media(input: input, model: model, receive: receive)
         let native: PlaybackVideoInput
         do {
             native = try PlaybackVideoInput(resourceID: input.resourceID, url: input.url, title: input.title,
@@ -550,6 +617,8 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
         } catch { throw Self.failure(error) }
         let receipt = try PlaybackVideoMediaLease(attemptID: input.attemptID, input: native) { [weak self, record] in
             self?.undrained.removeAll { $0 === record }
+            if self?.current === record { self?.current = nil }
+            if self?.pending === record { self?.pending = nil }
             try await release()
         }
         undrained.append(record)
@@ -583,6 +652,7 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
         switch event.kind {
         case .preparing, .prepared: return
         case .started:
+            let previous = current
             current = record
             if pending === record { pending = nil }
             if let attempt = record.nativeAttempt {
@@ -590,6 +660,9 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
             }
             record.receive(.state(record.state))
             record.receive(.started(attemptID: record.attemptID))
+            if let previous, previous.sessionID != record.sessionID {
+                previous.receive(.ownerEnded(attemptID: previous.attemptID))
+            }
         case .progress, .paused:
             record.receive(.state(record.state))
         case .stopped:
@@ -608,7 +681,7 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
         case .pictureInPictureChanged:
             record.receive(.state(record.state))
             if event.pictureInPicture == .failed {
-                model?.reportMediaControlError(Self.failure(PlaybackVideoError.pictureInPictureFailed))
+                record.model.reportMediaControlError(Self.failure(PlaybackVideoError.pictureInPictureFailed))
             }
         case .systemOwnerEnded:
             record.receive(.state(record.state))
@@ -617,8 +690,8 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
     }
 
     private func navigate(_ attempt: PlayAttempt, forward: Bool) -> Bool {
-        guard current?.nativeAttempt == attempt, model?.sessionID == current?.sessionID else { return false }
-        return model?.navigateFromSystem(forward: forward) ?? false
+        guard let current, current.nativeAttempt == attempt else { return false }
+        return current.model.navigateFromSystem(forward: forward)
     }
     func cancelPending(sessionID: UUID) async throws {
         guard pending?.sessionID == sessionID else { return }
@@ -628,14 +701,20 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
         guard pending?.sessionID == sessionID || current?.sessionID == sessionID else { return }
         stopping = true
         defer { stopping = false }
-        do { try await lease.stop() } catch { throw Self.failure(error) }
+        do {
+            if current?.sessionID == sessionID { try await lease.stop() }
+            else { try await lease.cancelPending() }
+        } catch { throw Self.failure(error) }
         if pending?.sessionID == sessionID { pending = nil }
         if current?.sessionID == sessionID { current = nil }
     }
     func isLocallyDrained(sessionID: UUID) -> Bool {
         !undrained.contains { $0.sessionID == sessionID }
     }
-    func close() async throws { try await lease.close() }
+    func close() async throws {
+        try await lease.close()
+        pending = nil; current = nil
+    }
     private func attempt(_ sessionID: UUID) -> PlayAttempt? {
         guard current?.sessionID == sessionID, lease.currentAttempt == current?.nativeAttempt else { return nil }
         return current?.nativeAttempt
@@ -673,7 +752,7 @@ private final class MeowfilmFilmMedia: FilmPlaybackMediaControlling {
     }
     func startPictureInPicture(sessionID: UUID) {
         if let value = attempt(sessionID), !lease.startPictureInPicture(attempt: value) {
-            model?.reportMediaControlError(.init(code: "PICTURE_IN_PICTURE_UNAVAILABLE"))
+            current?.model.reportMediaControlError(.init(code: "PICTURE_IN_PICTURE_UNAVAILABLE"))
         }
     }
     func stopPictureInPicture(sessionID: UUID) {

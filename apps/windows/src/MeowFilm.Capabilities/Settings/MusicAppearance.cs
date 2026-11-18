@@ -1,5 +1,5 @@
 using System.Text.Json;
-using System.Windows.Media;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -22,9 +22,8 @@ public sealed record MusicAppearancePalette(string Key, string Name, string Colo
     public static Brush Brush(string key)
     {
         var value = ColorValue(key);
-        var brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(value));
-        brush.Freeze();
-        return brush;
+        AppearanceColors.TryParse(value, out var color);
+        return new SolidColorBrush(color);
     }
     public static bool IsValid(string key) =>
         Options.Any(p => p.Key == key) || AppearanceColors.TryParse(key, out _);
@@ -55,6 +54,7 @@ public sealed partial class MusicCapability
     public string AppearanceColorPalette => savedColorPalette;
     public string AppearancePlaylistView => savedPlaylistView;
     public bool PlaylistListView => savedPlaylistView == "list";
+    public bool CanEditFixedAppearance => CanEditAppearance && AppearanceColorMode == "fixed";
     public bool CanEditAppearance => CanEdit && appearanceLoaded && !appearanceBusy;
     public string AppearanceStatus => appearanceStatus;
     internal Brush PlayerPalette(Brush cover) => savedColorMode == "fixed"
@@ -63,6 +63,7 @@ public sealed partial class MusicCapability
     internal void AppearanceBindings()
     {
         Changed(nameof(CanEditAppearance));
+        Changed(nameof(CanEditFixedAppearance));
         Changed(nameof(AppearanceStatus));
         Changed(nameof(AppearanceColorMode));
         Changed(nameof(AppearanceColorPalette));

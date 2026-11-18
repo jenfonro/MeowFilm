@@ -1,7 +1,11 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
 using System.Reflection;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
@@ -24,34 +28,34 @@ public static partial class MusicUiTests
             var window = SearchPlaylistWindow(f.Module.View, 1042, 700);
             try
             {
-                window.Show(); window.UpdateLayout(); await Drain();
+                window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
                 // Preparing a retained template must not mount an inactive body.
                 foreach (string name in new[] { "SongsGrid", "SearchSongsGrid" })
-                    ((DataGrid)f.Module.View.FindName(name)).ApplyTemplate();
+                    ((ListView)f.Module.View.FindName(name)).ApplyTemplate();
                 await f.Search("滚动条"); await f.Module.OpenSearchTabAsync("songs");
-                window.UpdateLayout(); await Drain();
+                DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
                 AssertChrome("SearchSongsGrid");
                 string searchLocation = f.Module.CaptureNavigationLocation();
-                await f.Module.NavigateAsync("favorites", default); window.UpdateLayout(); await Drain();
+                await f.Module.NavigateAsync("favorites", default); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
                 AssertChrome("SongsGrid");
-                await f.Module.RestoreNavigationAsync(searchLocation, default); window.UpdateLayout(); await Drain();
+                await f.Module.RestoreNavigationAsync(searchLocation, default); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
                 AssertChrome("SearchSongsGrid");
             }
             finally { window.Content = null; window.Close(); }
 
             void AssertChrome(string name)
             {
-                var grid = (DataGrid)f.Module.View.FindName(name);
-                True(ReferenceEquals(grid, Visuals(f.Module.View).OfType<DataGrid>().Single()),
+                var grid = (ListView)f.Module.View.FindName(name);
+                True(ReferenceEquals(grid, Visuals(f.Module.View).OfType<ListView>().Single()),
                     name + " is the only mounted song table");
-                var scroll = Visuals(grid).OfType<ScrollViewer>().First(value => ReferenceEquals(value.TemplatedParent, grid));
-                var bar = (ScrollBar)scroll.Template.FindName("PART_VerticalScrollBar", scroll);
-                var content = (FrameworkElement)scroll.Template.FindName("PART_ScrollContentPresenter", scroll);
-                True(ReferenceEquals(bar.Style, grid.FindResource("Capability.OverlayScrollBar")), name + " uses overlay style");
+                var scroll = Visuals(grid).OfType<ScrollViewer>().First(value => DesktopVisual.Contains(grid, value));
+                var bar = (ScrollBar)DesktopTestUi.Part(scroll, "VerticalScrollBar");
+                var content = (FrameworkElement)DesktopTestUi.Part(scroll, "ScrollContentPresenter");
+                True(bar.Template is not null && scroll.VerticalScrollBarVisibility == ScrollBarVisibility.Auto, name + " retains its native overlay scroll chrome");
                 True(ReferenceEquals(VisualTreeHelper.GetParent(bar), VisualTreeHelper.GetParent(content)), name + " has common grid parent");
                 Equal(Grid.GetColumn(content), Grid.GetColumn(bar));
                 Equal(Grid.GetRow(content), Grid.GetRow(bar));
-                True(Panel.GetZIndex(bar) > Panel.GetZIndex(content), name + " overlays content");
+                True(Canvas.GetZIndex(bar) > Canvas.GetZIndex(content), name + " overlays content");
             }
         });
         yield return Case("music header suppresses unchanged refresh publications and changes with real actions", async () =>

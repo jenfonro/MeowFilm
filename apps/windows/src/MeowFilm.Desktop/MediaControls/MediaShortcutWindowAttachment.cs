@@ -1,7 +1,9 @@
 using System.ComponentModel;
-using System.Windows;
-using System.Windows.Input;
-using System.Windows.Interop;
+using System.Runtime.InteropServices;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Input;
+using Key = System.Windows.Input.Key;
+using KeyInterop = System.Windows.Input.KeyInterop;
 
 namespace MeowFilm.Desktop;
 
@@ -15,8 +17,13 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
     }
 
     private readonly Window window;
-    private readonly HwndSource source;
+    private readonly FrameworkElement root;
     private readonly nint hwnd;
+    private static long nextSubclassId;
+    private readonly nuint subclassId = (nuint)Interlocked.Increment(ref nextSubclassId);
+    private readonly MediaShortcutNative.Subclass callback;
+    private readonly KeyEventHandler keyUpHandler;
+    private GCHandle callbackRoot;
     private readonly IDesktopMediaControlSettings settings;
     private readonly Func<MediaShortcutAction, Task> execute;
     private readonly MediaShortcutNative native;
@@ -28,7 +35,7 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
     private readonly HashSet<Task> running = [];
     private MediaControlPreferences? observedPreferences;
     private bool observedAvailable, observedRecording;
-    private bool stopped, finished;
+    private bool stopped, finished, destroyed;
     private Task? disposing;
 
     public MediaShortcutWindowAttachment(Window window, IDesktopMediaControlSettings settings,
@@ -37,15 +44,21 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
     internal MediaShortcutWindowAttachment(Window window, IDesktopMediaControlSettings settings,
         Func<MediaShortcutAction, Task> execute, MediaShortcutNative native)
     {
-        window.Dispatcher.VerifyAccess();
+        if (!window.DispatcherQueue.HasThreadAccess) throw new InvalidOperationException("MEDIA_SHORTCUT_THREAD_ACCESS");
         this.window = window; this.settings = settings; this.execute = execute; this.native = native;
-        hwnd = new WindowInteropHelper(window).EnsureHandle();
-        source = HwndSource.FromHwnd(hwnd) ?? throw new InvalidOperationException("MEDIA_SHORTCUT_WINDOW_UNAVAILABLE");
-        source.AddHook(Message);
-        source.Disposed += SourceDisposed;
-        window.PreviewKeyDown += KeyDown;
-        window.PreviewKeyUp += KeyUp;
-        window.Deactivated += Deactivated;
+        root = window.Content as FrameworkElement ?? throw new InvalidOperationException("MEDIA_SHORTCUT_ROOT_UNAVAILABLE");
+        hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+        callback = WindowMessage;
+        keyUpHandler = KeyUp;
+        callbackRoot = GCHandle.Alloc(callback);
+        if (!MediaShortcutNative.Attach(hwnd, callback, subclassId))
+        {
+            callbackRoot.Free();
+            throw new InvalidOperationException("MEDIA_SHORTCUT_WINDOW_UNAVAILABLE");
+        }
+        root.PreviewKeyDown += KeyDown;
+        root.AddHandler(UIElement.PreviewKeyUpEvent, keyUpHandler, true);
+        window.Activated += Activated;
         window.Closed += Closed;
         settings.PropertyChanged += SettingsChanged;
         settings.RegistrationRefreshRequested += RefreshRequested;
@@ -63,9 +76,9 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
 
     private void OnDispatcher(Action action)
     {
-        if (stopped || window.Dispatcher.HasShutdownStarted) return;
-        if (window.Dispatcher.CheckAccess()) action();
-        else _ = window.Dispatcher.InvokeAsync(() => { if (!stopped) action(); });
+        if (stopped) return;
+        if (window.DispatcherQueue.HasThreadAccess) action();
+        else window.DispatcherQueue.TryEnqueue(() => { if (!stopped) action(); });
     }
 
     private void Refresh(bool force)
@@ -116,11 +129,11 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
         {
             var result = native.Unregister(hwnd, registration.Id);
             // A destroyed HWND or an already removed registration owns no hotkey.
-            if (!result.Success && result.Error is not (1400 or 1419)) continue;
+            if (!destroyed && !result.Success && result.Error is not (1400 or 1419)) continue;
             owned.Remove(registration.Id);
             var retirement = new Retirement();
             retiring.Add(registration.Id, retirement);
-            if (source.IsDisposed) CompleteRetirement(registration.Id);
+            if (destroyed) CompleteRetirement(registration.Id);
             else retirement.Posted = native.PostRetirement(hwnd, registration.Id);
         }
         return owned.Count == 0;
@@ -133,9 +146,29 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
         retirement.Done.TrySetResult();
     }
 
+    private nint WindowMessage(nint target, uint message, nuint wParam, nint lParam, nuint id, nuint data)
+    {
+        if (message == MediaShortcutNative.DestroyMessage)
+        {
+            destroyed = true;
+            Stop();
+            ReleaseRegistrations();
+            foreach (int registration in retiring.Keys.ToArray()) CompleteRetirement(registration);
+            MediaShortcutNative.Detach(hwnd, callback, subclassId);
+            if (callbackRoot.IsAllocated) callbackRoot.Free();
+        }
+        else
+        {
+            bool handled = false;
+            var result = Message(target, (int)message, (nint)wParam, lParam, ref handled);
+            if (handled) return result;
+        }
+        return MediaShortcutNative.Continue(target, message, wParam, lParam);
+    }
+
     private nint Message(nint target, int message, nint wParam, nint lParam, ref bool handled)
     {
-        if (message == MediaShortcutNative.RetirementMessage)
+        if (message == MediaShortcutNative.RetirementMessage && retiring.ContainsKey((int)wParam))
         {
             CompleteRetirement((int)wParam);
             handled = true;
@@ -147,36 +180,45 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
             if (!stopped && settings.IsAvailable && !settings.IsRecording && settings.Preferences.GlobalEnabled &&
                 (uint)(packed & 0x0f) == (uint)registration.Gesture.Modifiers &&
                 ((packed >> 16) & 0xffff) == KeyInterop.VirtualKeyFromKey(registration.Gesture.Key) &&
-                !MediaShortcutInput.ProtectsForeground(window, source, native))
+                !MediaShortcutInput.ProtectsForeground(root, hwnd, native))
                 Start(registration.Action);
         }
         return 0;
     }
 
-    private void KeyDown(object sender, KeyEventArgs args)
+    private void KeyDown(object sender, KeyRoutedEventArgs args)
     {
-        if (args.Handled || stopped || !settings.IsAvailable || settings.IsRecording ||
-            native.ForegroundWindow != hwnd || native.HasMenuOrChildFocus(hwnd) || InputManager.Current.IsInMenuMode ||
-            !MediaShortcutInput.AllowsLocal(window, source, args.OriginalSource)) return;
-        var key = MediaShortcutInput.Key(args);
-        if (held.Contains(key)) { args.Handled = true; return; }
-        var gesture = new MediaShortcutGesture(key, MediaShortcutInput.Modifiers(args.KeyboardDevice));
+        if (!args.Handled && ProcessKey(args.OriginalSource, MediaShortcutInput.Key(args),
+            MediaShortcutInput.Modifiers(), down: true, args.KeyStatus.WasKeyDown)) args.Handled = true;
+    }
+
+    private void KeyUp(object sender, KeyRoutedEventArgs args)
+    {
+        if (ProcessKey(args.OriginalSource, MediaShortcutInput.Key(args),
+            MediaShortcutInput.Modifiers(), down: false, repeat: false)) args.Handled = true;
+    }
+
+    internal bool ProcessKey(object? target, Key key, System.Windows.Input.ModifierKeys modifiers, bool down, bool repeat)
+    {
+        if (!down) return held.Remove(key);
+        if (stopped || !settings.IsAvailable || settings.IsRecording ||
+            native.ForegroundWindow != hwnd || native.HasMenuOrChildFocus(hwnd, root) ||
+            !MediaShortcutInput.AllowsLocal(root, target)) return false;
+        if (held.Contains(key)) return true;
+        var gesture = new MediaShortcutGesture(key, modifiers);
         var binding = settings.Preferences.Bindings.FirstOrDefault(item => item.Local == gesture);
-        if (binding is null) return;
+        if (binding is null) return false;
         held.Add(key);
-        args.Handled = true;
-        // RegisterHotKey is authoritative for an overlapping gesture, regardless
-        // of whether WM_HOTKEY arrives before or after WPF's key event.
-        if (!args.IsRepeat && !active.Values.Any(item => item.Action == binding.Action && item.Gesture == gesture))
+        // RegisterHotKey remains authoritative when the local gesture overlaps.
+        if (!repeat && !active.Values.Any(item => item.Action == binding.Action && item.Gesture == gesture))
             Start(binding.Action);
+        return true;
     }
 
-    private void KeyUp(object sender, KeyEventArgs args)
+    private void Activated(object sender, WindowActivatedEventArgs args)
     {
-        if (held.Remove(MediaShortcutInput.Key(args))) args.Handled = true;
+        if (args.WindowActivationState == WindowActivationState.Deactivated) held.Clear();
     }
-
-    private void Deactivated(object? sender, EventArgs args) => held.Clear();
 
     private void Start(MediaShortcutAction action)
     {
@@ -195,18 +237,18 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
         finally { running.Remove(completion.Task); completion.TrySetResult(); }
     }
 
-    private void Notify(string message) => window.RaiseEvent(new DesktopNoticeEventArgs(notice, message));
+    private void Notify(string message) => NoticeOutlet.Publish(root, new DesktopNoticeEventArgs(notice, message));
 
-    private void Closed(object? sender, EventArgs args) => Stop();
+    private void Closed(object sender, WindowEventArgs args) => Stop();
 
     private void Stop()
     {
         if (stopped) return;
         stopped = true;
         active.Clear(); held.Clear();
-        window.PreviewKeyDown -= KeyDown;
-        window.PreviewKeyUp -= KeyUp;
-        window.Deactivated -= Deactivated;
+        root.PreviewKeyDown -= KeyDown;
+        root.RemoveHandler(UIElement.PreviewKeyUpEvent, keyUpHandler);
+        window.Activated -= Activated;
         window.Closed -= Closed;
         settings.PropertyChanged -= SettingsChanged;
         settings.RegistrationRefreshRequested -= RefreshRequested;
@@ -215,16 +257,9 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
         Notify("");
     }
 
-    private void SourceDisposed(object? sender, EventArgs args)
-    {
-        Stop();
-        ReleaseRegistrations();
-        foreach (int id in retiring.Keys.ToArray()) CompleteRetirement(id);
-    }
-
     public ValueTask DisposeAsync()
     {
-        window.Dispatcher.VerifyAccess();
+        if (!window.DispatcherQueue.HasThreadAccess) throw new InvalidOperationException("MEDIA_SHORTCUT_THREAD_ACCESS");
         if (finished) return ValueTask.CompletedTask;
         if (disposing is null || disposing.IsFaulted) disposing = DisposeCore();
         return new(disposing);
@@ -237,7 +272,7 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
         if (!ReleaseRegistrations()) throw new InvalidOperationException("MEDIA_SHORTCUT_RELEASE_FAILED");
         foreach (var pair in retiring.ToArray())
         {
-            if (source.IsDisposed) CompleteRetirement(pair.Key);
+            if (destroyed) CompleteRetirement(pair.Key);
             else if (!pair.Value.Posted)
             {
                 pair.Value.Posted = native.PostRetirement(hwnd, pair.Key);
@@ -245,8 +280,9 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
             }
         }
         await Task.WhenAll(retiring.Values.Select(item => item.Done.Task).ToArray());
-        source.Disposed -= SourceDisposed;
-        if (!source.IsDisposed) source.RemoveHook(Message);
+        if (!destroyed && !MediaShortcutNative.Detach(hwnd, callback, subclassId))
+            throw new InvalidOperationException("MEDIA_SHORTCUT_RELEASE_FAILED");
+        if (callbackRoot.IsAllocated) callbackRoot.Free();
         finished = true;
     }
 }

@@ -1,11 +1,10 @@
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Windows.Foundation;
 using MeowFilm.Capabilities;
+using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Windows.Tests;
@@ -33,93 +32,77 @@ public static partial class MusicUiTests
     {
         await using var f = await ViewportScene.Create(1200);
         True(f.Items.Items.Count == 1200, "virtualization does not truncate the observable cards");
-        True(f.Scroll.CanContentScroll && ReferenceEquals(f.Panel.ScrollOwner, f.Scroll) &&
-            Math.Abs(f.Panel.ViewportHeight - f.Scroll.ViewportHeight) < 1,
-            "the actual template delegates a finite viewport to the grid IScrollInfo");
-        CheckViewportMapping(f);
-        CheckViewportRange(f);
+        True(f.Scroll.ViewportHeight > 0 && f.Panel.ItemHeight > 0 && f.Panel.ItemWidth > 0,
+            "the native GridView owns a finite scroll viewport and measured ItemsWrapGrid cells");
+        CheckViewportMapping(f); CheckViewportRange(f);
         var firstContainers = ViewportContainers(f).ToArray();
-        var firstCards = firstContainers.SelectMany(container => Visuals(container).OfType<FilmCard>()).ToArray();
+        var firstCards = firstContainers.SelectMany(container => FilmUiTest.Visuals(container).OfType<FilmCard>()).ToArray();
         True(firstContainers.Length > 0 && firstContainers.Length < 1200, "only nearby rows are realized initially");
-        f.Scroll.ScrollToVerticalOffset(18000);
-        await f.Layout();
-        True(f.Scroll.VerticalOffset > 17000 && f.Items.ItemContainerGenerator.ContainerFromIndex(0) is null,
+        f.Scroll.ChangeView(null, 18000, null, true); await f.Layout();
+        True(f.Scroll.VerticalOffset > 17000 && f.Items.ContainerFromIndex(0) is null,
             "a distant restore does not retain the first row or create all intervening rows");
-        CheckViewportMapping(f);
-        CheckViewportRange(f);
+        CheckViewportMapping(f); CheckViewportRange(f);
         var distantContainers = ViewportContainers(f).ToArray();
         True(distantContainers.Any(firstContainers.Contains) &&
-            distantContainers.SelectMany(container => Visuals(container).OfType<FilmCard>()).Any(firstCards.Contains),
-            "the actual fixed card template and its containers are recycled, not recreated for every row");
-        var cached = distantContainers.First(container =>
-            container.TransformToAncestor(f.Panel).TransformBounds(new Rect(container.RenderSize)).Bottom < 0);
-        f.Panel.MakeVisible(cached, new Rect(cached.RenderSize));
-        await f.Layout();
-        True(cached.TransformToAncestor(f.Panel).TransformBounds(new Rect(cached.RenderSize)).Top >= -.5,
-            "native bring-into-view can expose a clipped cached card without losing its identity");
+            distantContainers.SelectMany(container => FilmUiTest.Visuals(container).OfType<FilmCard>()).Any(firstCards.Contains),
+            "the fixed native card template and containers are recycled rather than recreated for every row");
+        var cached = distantContainers.First(container => FilmUiTest.Bounds(container, f.Scroll).Bottom < 0);
+        var cachedItem = f.Items.Items[f.Items.IndexFromContainer(cached)];
+        f.Items.ScrollIntoView(cachedItem, ScrollIntoViewAlignment.Leading); await f.Layout();
+        var brought = (GridViewItem)f.Items.ContainerFromItem(cachedItem);
+        True(FilmUiTest.Bounds(brought, f.Scroll).Top >= -.5 && ReferenceEquals(brought.Content, cachedItem),
+            "native bring-into-view exposes a cached card without losing its item identity");
 
-        f.Scroll.ScrollToEnd();
-        await f.Layout();
+        f.Scroll.ChangeView(null, f.Scroll.ScrollableHeight, null, true); await f.Layout();
         True(Math.Abs(f.Scroll.VerticalOffset - f.Scroll.ScrollableHeight) < 1,
             "the full result extent reaches its actual final boundary");
-        var more = ViewportMore(f.Panel);
-        var bounds = more.TransformToAncestor(f.Panel).TransformBounds(new Rect(more.RenderSize));
-        True(more.IsVisible && more.IsEnabled && bounds.Top >= -.5 && bounds.Bottom <= f.Panel.ViewportHeight + .5,
-            "the real more button is fully reachable in the same scroll viewport");
-        True(f.Items.Items.Count == 1200 && f.Items.ItemContainerGenerator.ContainerFromItem(more) is null,
-            "status and more never become fake cards or participate in the card generator");
+        var more = ViewportMore(f); var bounds = FilmUiTest.Bounds(more, f.Scroll);
+        True(DesktopVisual.IsVisible(more) && more.IsEnabled && bounds.Top >= -.5 && bounds.Bottom <= f.Scroll.ViewportHeight + .5,
+            "the real more button is fully reachable in the same native scroll viewport");
+        True(f.Items.Items.Count == 1200 && !f.Items.Items.Contains(more),
+            "status and more belong to GridView.Footer and never become fake cards");
         CheckViewportRange(f);
     }
 
     private static async Task SearchViewportResize()
     {
         await using var f = await ViewportScene.Create(900);
-        f.Scroll.ScrollToVerticalOffset(7200);
-        await f.Layout();
-        int anchor = ViewportTopIndex(f);
+        f.Scroll.ChangeView(null, 7200, null, true); await f.Layout();
+        int anchor = f.Panel.FirstVisibleIndex;
         foreach (int width in new[] { 1180, 820, 620 })
         {
-            f.Width = width;
-            await f.Layout();
-            int columns = ViewportColumns(f);
-            True(ViewportTopIndex(f) <= anchor && anchor < ViewportTopIndex(f) + columns,
+            f.Width = width; await f.Layout();
+            int columns = ViewportColumns(f), first = f.Panel.FirstVisibleIndex;
+            True(first <= anchor && anchor < first + columns,
                 "a width change keeps the previous first film in the first visible row");
-            anchor = ViewportTopIndex(f);
-            double expectedWidth = (f.Panel.ViewportWidth + 36) / columns - 36;
-            foreach (var container in ViewportContainers(f))
-                True(Math.Abs(container.RenderSize.Width - expectedWidth) < 1,
-                    "search fills the frontend grid with a 180 DIP minimum and 36 DIP gaps");
+            anchor = first;
+            var (_, pitch) = Shelf.MeasureCards(f.Items.ActualWidth, 180, 36);
+            double expectedWidth = pitch - 36;
             var positions = ViewportContainers(f).Select(container =>
-                (Index: f.Items.ItemContainerGenerator.IndexFromContainer(container),
-                 Bounds: container.TransformToAncestor(f.Panel).TransformBounds(new Rect(container.RenderSize)))).ToArray();
+            {
+                var card = FilmUiTest.Visuals(container).OfType<FilmCard>().Single();
+                True(Math.Abs(card.ActualWidth - expectedWidth) < 1,
+                    "search retains the responsive 144-176 DIP card-width calculation");
+                return (Index: f.Items.IndexFromContainer(container), Bounds: FilmUiTest.Bounds(card, f.Scroll));
+            }).ToArray();
             foreach (var item in positions)
             {
                 var nextColumn = positions.Where(other => other.Index == item.Index + 1 && other.Index / columns == item.Index / columns).ToArray();
                 if (nextColumn.Length == 1)
-                {
-                    double pitch = (f.Panel.ViewportWidth + 36) / columns;
-                    True(Math.Abs(nextColumn[0].Bounds.Left - item.Bounds.Left - pitch) < 1,
-                        "column pitch retains the existing trailing-gap layout");
-                }
+                    True(Math.Abs(nextColumn[0].Bounds.Left - item.Bounds.Right - 36) < 1,
+                        "native cells retain the 36 DIP trailing card gap");
                 var nextRow = positions.Where(other => other.Index == item.Index + columns).ToArray();
                 if (nextRow.Length == 1)
-                    True(Math.Abs(nextRow[0].Bounds.Top - item.Bounds.Bottom - 36) < 1,
-                        "row gap follows the frontend's 36 DIP spacing");
+                    True(Math.Abs(nextRow[0].Bounds.Top - item.Bounds.Bottom - 36) < 1, "row gap remains 36 DIP");
             }
-            CheckViewportMapping(f);
-            CheckViewportRange(f);
+            CheckViewportMapping(f); CheckViewportRange(f);
         }
-        f.Scroll.ScrollToEnd();
-        await f.Layout();
-        f.Width = 980;
-        await f.Layout();
+        f.Scroll.ChangeView(null, f.Scroll.ScrollableHeight, null, true); await f.Layout();
+        f.Width = 980; await f.Layout();
         True(Math.Abs(f.Scroll.VerticalOffset - f.Scroll.ScrollableHeight) < 1,
-            "resizing at the true end retains the reachable footer rather than a stale pixel extent");
-        f.Items.Visibility = Visibility.Collapsed;
-        f.Width = 720;
-        await f.Layout();
-        f.Items.Visibility = Visibility.Visible;
-        await f.Layout();
+            "resizing at the true end retains the reachable footer instead of a stale extent");
+        f.Items.Visibility = Visibility.Collapsed; f.Width = 720; await f.Layout();
+        f.Items.Visibility = Visibility.Visible; await f.Layout();
         True(Math.Abs(f.Scroll.VerticalOffset - f.Scroll.ScrollableHeight) < 1,
             "returning after a hidden resize reapplies the actual viewport and end anchor");
         CheckViewportRange(f);
@@ -128,196 +111,133 @@ public static partial class MusicUiTests
     private static async Task SearchViewportChanges()
     {
         await using var f = await ViewportScene.Create(180);
-        var first = f.Scene.Page.Cards[0];
-        var firstContainer = f.Items.ItemContainerGenerator.ContainerFromIndex(0);
-        var inserted = f.Scene.Page.Cards[f.Scene.Page.Cards.Count - 1];
-        f.Scene.Page.Cards.RemoveAt(f.Scene.Page.Cards.Count - 1);
-        f.Scene.Page.Cards.Insert(0, inserted);
-        await f.Layout();
-        True(ReferenceEquals(f.Items.ItemContainerGenerator.ContainerFromIndex(1), firstContainer) &&
-            ReferenceEquals(f.Scene.Page.Cards[1], first), "front insertion retains the original film's container identity");
-        f.Scene.Page.Cards.Move(1, 9);
-        f.Scene.Page.Cards.RemoveAt(2);
-        var replacement = f.Scene.Page.Cards[f.Scene.Page.Cards.Count - 1];
-        f.Scene.Page.Cards.RemoveAt(f.Scene.Page.Cards.Count - 1);
-        f.Scene.Page.Cards[3] = replacement;
-        await f.Layout();
-        CheckViewportMapping(f);
-        f.Scroll.ScrollToVerticalOffset(6000);
-        await f.Layout();
-        var appended = f.Scene.Page.Cards[0];
-        f.Scene.Page.Cards.RemoveAt(0);
-        f.Scene.Page.Cards.Add(appended);
-        await f.Layout();
-        CheckViewportMapping(f);
-        CheckViewportRange(f);
+        var first = f.Scene.Page.Cards[0]; var firstContainer = f.Items.ContainerFromIndex(0);
+        var inserted = f.Scene.Page.Cards[^1]; f.Scene.Page.Cards.RemoveAt(f.Scene.Page.Cards.Count - 1);
+        f.Scene.Page.Cards.Insert(0, inserted); await f.Layout();
+        True(ReferenceEquals(f.Items.ContainerFromIndex(1), firstContainer) && ReferenceEquals(f.Scene.Page.Cards[1], first),
+            "front insertion retains the original film's container identity");
+        f.Scene.Page.Cards.Move(1, 9); f.Scene.Page.Cards.RemoveAt(2);
+        var replacement = f.Scene.Page.Cards[^1]; f.Scene.Page.Cards.RemoveAt(f.Scene.Page.Cards.Count - 1);
+        f.Scene.Page.Cards[3] = replacement; await f.Layout(); CheckViewportMapping(f);
+        f.Scroll.ChangeView(null, 6000, null, true); await f.Layout();
+        var appended = f.Scene.Page.Cards[0]; f.Scene.Page.Cards.RemoveAt(0); f.Scene.Page.Cards.Add(appended);
+        await f.Layout(); CheckViewportMapping(f); CheckViewportRange(f);
         FilmCardItem? activated = null;
         f.Scene.Page.NavigateToPlaybackAsync = (item, _) => { activated = item; return Task.CompletedTask; };
         var currentContainer = ViewportContainers(f).First(container =>
         {
-            var bounds = container.TransformToAncestor(f.Panel).TransformBounds(new Rect(container.RenderSize));
-            return bounds.Bottom > 0 && bounds.Top < f.Panel.ViewportHeight;
+            var bounds = FilmUiTest.Bounds(container, f.Scroll);
+            return bounds.Bottom > 0 && bounds.Top < f.Scroll.ViewportHeight;
         });
-        f.Panel.MakeVisible(currentContainer, new Rect(currentContainer.RenderSize));
-        await f.Layout();
-        var currentBounds = currentContainer.TransformToAncestor(f.Panel).TransformBounds(new Rect(currentContainer.RenderSize));
-        True(currentBounds.Top >= -.5 && currentBounds.Bottom <= f.Panel.ViewportHeight + .5,
-            "the current card is fully visible before activation regardless of row height");
-        var current = f.Scene.Page.Cards[f.Items.ItemContainerGenerator.IndexFromContainer(currentContainer)];
-        Visuals(currentContainer).OfType<Button>().Single(button => button.Name == "HitButton")
-            .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        var current = f.Scene.Page.Cards[f.Items.IndexFromContainer(currentContainer)];
+        f.Items.ScrollIntoView(current); await f.Layout();
+        currentContainer = (GridViewItem)f.Items.ContainerFromItem(current);
+        var currentBounds = FilmUiTest.Bounds(currentContainer, f.Scroll);
+        True(currentBounds.Top >= -.5 && currentBounds.Bottom <= f.Scroll.ViewportHeight + .5,
+            "the current recycled card is completely visible before its semantic activation");
+        DesktopTestUi.Invoke(FilmUiTest.Visuals(currentContainer).OfType<Button>().Single(button => button.Name == "HitButton"));
         await Drain();
         True(activated is not null && ReferenceEquals(activated.SearchContext, current.SearchContext),
-            "a recycled card invokes only its current exact selection, not its former identity");
-
-        var restart = f.Scene.Page.Cards.Take(20).ToArray();
-        f.Scene.Page.Cards.Clear();
-        await f.Layout();
-        True(ViewportContainers(f).Count() == 0 && f.Scroll.VerticalOffset == 0 &&
-            f.Panel.ExtentHeight > 0 && ViewportMore(f.Panel).IsVisible,
+            "a recycled card invokes its current exact selection, never its former identity");
+        var restart = f.Scene.Page.Cards.Take(20).ToArray(); f.Scene.Page.Cards.Clear(); await f.Layout();
+        True(!ViewportContainers(f).Any() && f.Scroll.VerticalOffset == 0 && DesktopVisual.IsVisible(ViewportMore(f)),
             "reset removes old containers and leaves the empty-state footer accessible");
         foreach (var card in restart) f.Scene.Page.Cards.Add(card);
-        await f.Layout();
-        CheckViewportMapping(f);
-        CheckViewportRange(f);
+        await f.Layout(); CheckViewportMapping(f); CheckViewportRange(f);
     }
 
     private static async Task SearchViewportModes()
     {
         await using var scene = await UnifiedScene.Create();
         var source = scene.Sources.Sources[0];
-        var raw = Enumerable.Range(0, 600).Select(index =>
-            SearchFixture.Member(source, index.ToString(), "影片" + index)).ToArray();
-        var aggregate = raw.Take(300).Select((member, index) =>
-            SearchFixture.Card("group:" + index, "site", "影片" + index, [member])).ToArray();
-        scene.Runtime.SearchOpen = (id, input) =>
-            SearchFixture.Snapshot(id, FilmJson.Text(input, "query"), aggregate, raw);
-        await scene.Submit("独立滚动", "film");
-        await SearchFixture.Settle(scene.Film.Search.Current!);
+        var raw = Enumerable.Range(0, 600).Select(index => SearchFixture.Member(source, index.ToString(), "影片" + index)).ToArray();
+        var aggregate = raw.Take(300).Select((member, index) => SearchFixture.Card("group:" + index, "site", "影片" + index, [member])).ToArray();
+        scene.Runtime.SearchOpen = (id, input) => SearchFixture.Snapshot(id, FilmJson.Text(input, "query"), aggregate, raw);
+        await scene.Submit("独立滚动", "film"); await SearchFixture.Settle(scene.Film.Search.Current!);
         await SearchFixture.Until(() => scene.Page.Cards.Count == 300);
-        using var hwnd = SearchRenderSource(scene.Shell, out var root);
-        SearchLayout(root, 860, 760);
-        await Drain();
-        var view = (SearchResultsView)scene.Page.View;
-        var scroll = (ScrollViewer)view.FindName("FilmScroll");
+        scene.Shell.Resize(860, 760); await Drain(); scene.Shell.Root.UpdateLayout();
+        var view = (SearchResultsView)scene.Page.View; var scroll = view.FilmScroll!;
         var toggle = (CheckBox)view.FindName("RawListToggle");
-        scroll.ScrollToVerticalOffset(4100);
-        await Drain(); SearchLayout(root, 860, 760);
+        scroll.ChangeView(null, 4100, null, true); await Drain(); view.UpdateLayout();
         double aggregateOffset = scroll.VerticalOffset;
         True(aggregateOffset > 4000, "aggregate has its own nonzero pixel position");
-        toggle.SetCurrentValue(ToggleButton.IsCheckedProperty, true);
-        await SearchFixture.Until(() => scene.Page.Cards.Count == 600);
-        await Drain(); SearchLayout(root, 860, 760);
+        ((Microsoft.UI.Xaml.Automation.Provider.IToggleProvider)new Microsoft.UI.Xaml.Automation.Peers.CheckBoxAutomationPeer(toggle)
+            .GetPattern(Microsoft.UI.Xaml.Automation.Peers.PatternInterface.Toggle)).Toggle();
+        await SearchFixture.Until(() => scene.Page.Cards.Count == 600); await Drain(); view.UpdateLayout();
         True(scroll.VerticalOffset < 1, "the first raw visit starts at its own saved position");
-        scroll.ScrollToVerticalOffset(8500);
-        await Drain(); SearchLayout(root, 860, 760);
+        scroll.ChangeView(null, 8500, null, true); await Drain(); view.UpdateLayout();
         double rawOffset = scroll.VerticalOffset;
         True(rawOffset > 8400, "raw has a distinct nonzero pixel position");
-        toggle.SetCurrentValue(ToggleButton.IsCheckedProperty, false);
-        await SearchFixture.Until(() => scene.Page.Cards.Count == 300);
-        await Drain(); SearchLayout(root, 860, 760);
+        FilmUiTest.Click(toggle); await SearchFixture.Until(() => scene.Page.Cards.Count == 300); await Drain(); view.UpdateLayout();
         True(Math.Abs(scroll.VerticalOffset - aggregateOffset) < 1, "aggregate restores its exact independent position");
-        toggle.SetCurrentValue(ToggleButton.IsCheckedProperty, true);
-        await SearchFixture.Until(() => scene.Page.Cards.Count == 600);
-        await Drain(); SearchLayout(root, 860, 760);
+        FilmUiTest.Click(toggle); await SearchFixture.Until(() => scene.Page.Cards.Count == 600); await Drain(); view.UpdateLayout();
         True(Math.Abs(scroll.VerticalOffset - rawOffset) < 1 && scene.Runtime.SearchOpens == 1,
-            "raw restores its exact position without a new search or partial card list");
-        hwnd.RootVisual = null;
+            "raw restores its exact position without a new search or a partial card list");
     }
 
     private static async Task SearchViewportArtwork()
     {
-        var loader = new ViewportArtworkLoader();
-        await using var f = await ViewportScene.Create(900, loader);
+        var loader = new ViewportArtworkLoader(); await using var f = await ViewportScene.Create(900, loader);
         var initial = loader.Leases.Where(lease => lease.Disposals == 0).ToArray();
         True(initial.Length > 0, "real loaded FilmCard artwork acquires visible leases");
-        int calls = loader.Leases.Count;
-        var more = ViewportMore(f.Panel);
-        more.IsEnabled = false;
-        f.Panel.InvalidateMeasure();
-        await f.Layout();
+        int calls = loader.Leases.Count; ViewportMore(f).IsEnabled = false; f.Panel.InvalidateMeasure(); await f.Layout();
         True(loader.Leases.Count == calls && initial.All(lease => lease.Disposals == 0),
             "unrelated footer state and repeated grid layout do not reacquire unchanged artwork");
-        f.Scroll.ScrollToVerticalOffset(14000);
-        await f.Layout();
-        True(initial.All(lease => lease.Disposals == 1), "all old visible artwork leases retire exactly once after distant recycling");
-        True(loader.Leases.Skip(calls).Any(lease => lease.Disposals == 0),
-            "recycled cards acquire the new visible posters rather than retain old pixels");
+        f.Scroll.ChangeView(null, 14000, null, true); await f.Layout();
+        True(initial.All(lease => lease.Disposals == 1), "old visible artwork retires exactly once after distant recycling");
+        True(loader.Leases.Skip(calls).Any(lease => lease.Disposals == 0), "recycled cards acquire their current posters");
         CheckViewportMapping(f);
-        f.Hwnd.RootVisual = null;
-        await Drain();
-        True(loader.Leases.All(lease => lease.Disposals == 1),
-            "unloading the search viewport releases remaining visible and cached artwork leases");
+        f.Scene.Shell.Content = new Grid(); f.Scene.Shell.AttachRoot(); await Drain();
+        True(loader.Leases.All(lease => lease.Disposals == 1), "actual viewport unloading releases visible and cached leases");
     }
 
-    private static IEnumerable<ContentPresenter> ViewportContainers(ViewportScene f) =>
-        Enumerable.Range(0, VisualTreeHelper.GetChildrenCount(f.Panel))
-            .Select(index => VisualTreeHelper.GetChild(f.Panel, index))
-            .OfType<ContentPresenter>()
-            .Where(container => f.Items.ItemContainerGenerator.IndexFromContainer(container) >= 0);
-
-    private static int ViewportColumns(ViewportScene f) =>
-        Math.Max(1, (int)Math.Floor((f.Panel.ViewportWidth + 36) / (180 + 36)));
-
-    private static int ViewportTopIndex(ViewportScene f)
-    {
-        double height = ViewportContainers(f).First().RenderSize.Height;
-        return (int)Math.Floor(f.Scroll.VerticalOffset / (height + 36)) * ViewportColumns(f);
-    }
-
+    private static IEnumerable<GridViewItem> ViewportContainers(ViewportScene f) =>
+        f.Panel.Children.OfType<GridViewItem>().Where(container => f.Items.IndexFromContainer(container) >= 0);
+    private static int ViewportColumns(ViewportScene f) => Math.Max(1, (int)Math.Floor(f.Items.ActualWidth / f.Panel.ItemWidth));
     private static void CheckViewportRange(ViewportScene f)
     {
-        int columns = ViewportColumns(f);
+        int columns = ViewportColumns(f); double height = f.Panel.ItemHeight;
         var containers = ViewportContainers(f).ToArray();
-        double height = containers.First().RenderSize.Height;
-        int bound = columns * ((int)Math.Ceiling(f.Panel.ViewportHeight / (height + 36)) + 3);
-        True(containers.Length <= bound, "realized card count is bounded by the viewport plus adjacent cache rows");
+        // WinUI's native cache is measured in viewport lengths, not the removed WPF panel's row count.
+        double cache = f.Panel.CacheLength * f.Scroll.ViewportHeight;
+        int bound = columns * ((int)Math.Ceiling((f.Scroll.ViewportHeight + 2 * cache) / height) + 2);
+        True(containers.Length <= bound && containers.Length < f.Items.Items.Count,
+            "native realization stays bounded by the viewport and its configured nearby cache");
         foreach (var container in containers)
         {
-            var bounds = container.TransformToAncestor(f.Panel).TransformBounds(new Rect(container.RenderSize));
-            True(bounds.Bottom >= -height - 72 && bounds.Top <= f.Panel.ViewportHeight + height + 72,
-                "realized containers stay near the viewport rather than accumulating at old positions");
+            var bounds = FilmUiTest.Bounds(container, f.Scroll);
+            True(bounds.Bottom >= -cache - height && bounds.Top <= f.Scroll.ViewportHeight + cache + height,
+                "realized containers remain near the viewport instead of accumulating at old positions");
         }
     }
-
     private static void CheckViewportMapping(ViewportScene f)
     {
         foreach (var container in ViewportContainers(f))
         {
-            int index = f.Items.ItemContainerGenerator.IndexFromContainer(container);
-            True(ReferenceEquals(container.DataContext, f.Items.Items[index]) &&
-                ReferenceEquals(Visuals(container).OfType<FilmCard>().Single().DataContext, f.Items.Items[index]),
-                "container, card and generator agree on the current exact item after layout");
+            int index = f.Items.IndexFromContainer(container);
+            True(ReferenceEquals(container.Content, f.Items.Items[index]) &&
+                ReferenceEquals(FilmUiTest.Visuals(container).OfType<FilmCard>().Single().DataContext, f.Items.Items[index]),
+                "container, card and native index agree on the current exact item");
         }
     }
-
-    private static Button ViewportMore(FilmSearchVirtualizingPanel panel) =>
-        Visuals(panel).OfType<Button>().Single(button => button.Content as string == "加载更多");
+    private static Button ViewportMore(ViewportScene f) =>
+        FilmUiTest.Visuals((DependencyObject)f.Items.Footer).OfType<Button>().Single(button => button.Content as string == "加载更多");
 
     private sealed class ViewportScene : IAsyncDisposable
     {
         internal readonly UnifiedScene Scene;
-        internal readonly HwndSource Hwnd;
-        internal readonly FrameworkElement Root;
-        internal readonly ItemsControl Items;
-        internal readonly ScrollViewer Scroll;
-        internal FilmSearchVirtualizingPanel Panel => Visuals(Items).OfType<FilmSearchVirtualizingPanel>().Single();
+        internal readonly GridView Items;
+        internal ScrollViewer Scroll => ((SearchResultsView)Scene.Page.View).FilmScroll!;
+        internal ItemsWrapGrid Panel => (ItemsWrapGrid)Items.ItemsPanelRoot;
         internal int Width = 860;
-
         private ViewportScene(UnifiedScene scene, IArtworkLoader? loader)
         {
-            Scene = scene;
-            Hwnd = SearchRenderSource(scene.Shell, out Root, Width, 760);
-            ArtworkScope.SetLoader(Root, loader);
-            var view = (SearchResultsView)scene.Page.View;
-            Items = (ItemsControl)view.FindName("FilmItems");
-            Scroll = (ScrollViewer)view.FindName("FilmScroll");
+            Scene = scene; ArtworkScope.SetLoader(Scene.Shell.Root, loader);
+            Items = (GridView)scene.Page.View.FindName("FilmItems");
         }
-
         internal static async Task<ViewportScene> Create(int count, IArtworkLoader? loader = null)
         {
             var scene = await UnifiedScene.Create();
-            ViewportScene? viewport = null;
             try
             {
                 var source = scene.Sources.Sources[0];
@@ -325,61 +245,35 @@ public static partial class MusicUiTests
                 {
                     var member = SearchFixture.Member(source, index.ToString(), "影片" + index);
                     if (loader is null) return member;
-                    var node = JsonNode.Parse(member.GetRawText())!.AsObject();
-                    node["poster"] = "https://fixture.invalid/poster-" + index + ".jpg";
+                    var node = JsonNode.Parse(member.GetRawText())!.AsObject(); node["poster"] = "https://fixture.invalid/poster-" + index + ".jpg";
                     return FilmJson.Encode(node);
                 }).ToArray();
-                scene.Runtime.SearchOpen = (id, input) =>
-                    SearchFixture.Snapshot(id, FilmJson.Text(input, "query"), cards, cards, hasMore: true);
-                await scene.Submit("网格生命周期", "film");
-                await SearchFixture.Settle(scene.Film.Search.Current!);
+                scene.Runtime.SearchOpen = (id, input) => SearchFixture.Snapshot(id, FilmJson.Text(input, "query"), cards, cards, hasMore: true);
+                await scene.Submit("网格生命周期", "film"); await SearchFixture.Settle(scene.Film.Search.Current!);
                 await SearchFixture.Until(() => scene.Page.Cards.Count == count);
-                await Drain();
-                viewport = new ViewportScene(scene, loader);
-                await viewport.Layout();
-                return viewport;
+                var viewport = new ViewportScene(scene, loader); await viewport.Layout(); return viewport;
             }
-            catch
-            {
-                if (viewport is not null) await viewport.DisposeAsync();
-                else await scene.DisposeAsync();
-                throw;
-            }
+            catch { await scene.DisposeAsync(); throw; }
         }
-
         internal async Task Layout()
         {
-            SearchLayout(Root, Width, 760);
-            await Drain();
-            SearchLayout(Root, Width, 760);
-            await Drain();
+            Scene.Shell.Resize(Width, 760); await Drain(); Scene.Shell.Root.UpdateLayout(); await Drain();
         }
-
-        public async ValueTask DisposeAsync()
-        {
-            Hwnd.RootVisual = null;
-            Hwnd.Dispose();
-            await Scene.DisposeAsync();
-        }
+        public ValueTask DisposeAsync() => Scene.DisposeAsync();
     }
-
     private sealed class ViewportArtworkLoader : IArtworkLoader
     {
         internal readonly List<ViewportArtworkLease> Leases = [];
         public Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var lease = new ViewportArtworkLease();
-            Leases.Add(lease);
+            cancellationToken.ThrowIfCancellationRequested(); var lease = new ViewportArtworkLease(); Leases.Add(lease);
             return Task.FromResult<IArtworkLease>(lease);
         }
     }
-
     private sealed class ViewportArtworkLease : IArtworkLease
     {
         internal int Disposals;
-        public BitmapSource Image { get; } = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgra32, null,
-            new byte[] { 100, 200, 250, 255 }, 4);
+        public ArtworkPixels Image { get; } = new(1, 1, new byte[] { 100, 200, 250, 255 });
         public void Dispose() => Disposals++;
     }
 }

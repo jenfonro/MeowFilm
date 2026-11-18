@@ -1,6 +1,5 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
 using MeowFilm.Capabilities;
 using static MeowFilm.Windows.Tests.FilmPlaybackFixture;
 
@@ -9,10 +8,119 @@ namespace MeowFilm.Windows.Tests;
 public static class FilmBrowsingConsumerTests
 {
     private static TestCase Test(string name, Func<Task> run) =>
-        new("film-browsing-consumer: " + name, () => MusicQualityConsumerTests.Sta(run));
+        new("film-browsing-consumer: " + name, () => TestUiHost.InvokeAsync(run));
 
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Test("all work fields and favorite entry identity are independent from browsing and exact playback targets", async () =>
+        {
+            await using var rig = new FilmPlaybackRig();
+            await rig.OpenAsync();
+            var entry = rig.Page.EntryTarget;
+            var work = JsonNode.Parse(rig.Runtime.Metadata.GetRawText())!.AsObject();
+            work["title"] = "固定主标题"; work["vote_average"] = 9.1;
+            work["backdrop_path"] = "work-backdrop"; work["logo_path"] = "work-logo";
+            rig.Runtime.Change(root => root["workInfo"] = Node(WorkInfo(entry with { Title = "固定主标题" }, FilmJson.Encode(work))));
+            await Until(() => rig.Page.Title == "固定主标题");
+            var expected = new[] { rig.Page.Title, rig.Page.Poster, rig.Page.Backdrop, rig.Page.Logo, rig.Page.Metadata,
+                rig.Page.Genres, rig.Page.Score, rig.Page.ScoreProvider, rig.Page.Directors, rig.Page.Cast, rig.Page.Overview };
+            var recommendations = rig.Page.Recommendations;
+            var changes = new List<string?>();
+            rig.Page.PropertyChanged += (_, args) => changes.Add(args.PropertyName);
+            rig.Runtime.Change(root =>
+            {
+                root["target"] = Node(Candidate("selected-file").GetProperty("playbackTarget"));
+                root["metadata"] = Node(FilmJson.Encode(new { title = "浏览标题", pic = new { normal = "browse-poster" },
+                    intro = "浏览简介", rating = new { value = 1.2 }, actors = new[] { new { name = "浏览演员" } } }));
+                root["metadataSourceId"] = "douban:200";
+                root["metadataSources"] = Node(FilmJson.Encode(new[] { new { id = "douban:200", provider = "douban", metadataId = "200", kind = "tv" } }));
+                root["browsing"] = Node(Browsing("other", FilmJson.Encode(0)));
+            });
+            await Until(() => rig.Page.SourceId == "other");
+            Check(expected.SequenceEqual(new[] { rig.Page.Title, rig.Page.Poster, rig.Page.Backdrop, rig.Page.Logo, rig.Page.Metadata,
+                    rig.Page.Genres, rig.Page.Score, rig.Page.ScoreProvider, rig.Page.Directors, rig.Page.Cast, rig.Page.Overview }) &&
+                ReferenceEquals(recommendations, rig.Page.Recommendations) &&
+                !changes.Any(name => name is nameof(FilmPlaybackPage.Title) or nameof(FilmPlaybackPage.Poster) or
+                    nameof(FilmPlaybackPage.Cast) or nameof(FilmPlaybackPage.Overview)),
+                "unrelated browse snapshots do not republish or replace stable work content");
+            await rig.Page.ToggleFavoriteAsync();
+            var favorite = (await rig.Library.ReadAsync()).Single();
+            Check(favorite.Id == entry.Id && favorite.PlaybackContext!.Target == entry &&
+                favorite.Title == rig.Page.Title && favorite.Poster == rig.Page.Poster && favorite.Score == rig.Page.Score,
+                "favorite identity is the entry, while all saved visible fields belong to stable workInfo");
+        });
+        yield return Test("aggregate source choices and cached provider views never update one another or write automatic fallback", async () =>
+        {
+            await using var rig = new FilmPlaybackRig();
+            await rig.OpenAsync();
+            rig.Runtime.Change(root => root["metadataSources"]!.AsArray().Add(Node(FilmJson.Encode(new
+                { id = "douban:200", provider = "douban", metadataId = "200", kind = "tv" }))));
+            await Until(() => rig.Page.MetadataSources.Count == 2);
+            var tmdb = rig.Page.MetadataSources.Single(row => row.Provider == "tmdb");
+            var douban = rig.Page.MetadataSources.Single(row => row.Provider == "douban");
+            var original = rig.Page.EpisodeDirectory;
+            await rig.Page.BrowseMetadataMappingAsync(douban);
+            var other = rig.Page.EpisodeDirectory;
+            Check(rig.Page.SelectedSource?.Provider == "tmdb" && rig.Page.MetadataSourceId == douban.MetadataSourceId &&
+                (await rig.Preferences.ReadPreferencesAsync(default)).MetadataViewProvider == "douban",
+                "the explicit view pick persists its provider without changing the aggregate source selection");
+            int calls = BrowseCalls(rig), writes = rig.PreferencesStore.Writes;
+            await rig.Page.BrowseSourceAsync(rig.Page.Sources.Single(row => row.Provider == "douban"));
+            await rig.Page.BrowseSourceAsync(rig.Page.Sources.Single(row => row.Provider == "tmdb"));
+            Check(rig.Page.MetadataSourceId == douban.MetadataSourceId && BrowseCalls(rig) == calls &&
+                rig.PreferencesStore.Writes == writes && ReferenceEquals(other, rig.Page.EpisodeDirectory),
+                "aggregate labels change neither the selected directory nor its saved provider preference");
+            await rig.Page.BrowseMetadataMappingAsync(tmdb);
+            Check(BrowseCalls(rig) == calls && ReferenceEquals(original, rig.Page.EpisodeDirectory) &&
+                rig.Page.SelectedSource?.Provider == "tmdb" &&
+                (await rig.Preferences.ReadPreferencesAsync(default)).MetadataViewProvider == "tmdb",
+                "an explicit cached provider return still persists its preference but makes no browse RPC");
+            await rig.Page.BrowseMetadataMappingAsync(douban);
+            Check(BrowseCalls(rig) == calls && ReferenceEquals(other, rig.Page.EpisodeDirectory),
+                "both successful provider slices are retained");
+            writes = rig.PreferencesStore.Writes;
+            rig.Runtime.Change(root =>
+            {
+                root["metadataSources"]!.AsArray().RemoveAt(1);
+                root["metadataSourceId"] = tmdb.MetadataSourceId;
+            });
+            await Until(() => rig.Page.MetadataSourceId == tmdb.MetadataSourceId);
+            Check(rig.PreferencesStore.Writes == writes &&
+                (await rig.Preferences.ReadPreferencesAsync(default)).MetadataViewProvider == "douban",
+                "revoked provider availability replaces the local view without overwriting the user's preference");
+        });
+        yield return Test("either single provider is displayed as supplied without persisting the temporary fallback", async () =>
+        {
+            foreach (string preferred in new[] { "tmdb", "douban" })
+            {
+                await using var rig = new FilmPlaybackRig();
+                await rig.Preferences.SavePreferencesAsync(FilmPreferences.Defaults with { MetadataViewProvider = preferred }, "metadataViewProvider");
+                int writes = rig.PreferencesStore.Writes;
+                string available = preferred == "tmdb" ? "douban" : "tmdb";
+                var target = new FilmPlaybackTarget($"{available}:tv:100", "tv", "唯一可靠资料", available, "100");
+                await rig.OpenAsync(Card() with { PlaybackContext = new(target, Metadata: Metadata(target, "")) });
+                Check(rig.Page.MetadataSources.Single().Provider == available &&
+                    rig.Page.MetadataSourceId == available + ":100" && !rig.Page.HasMetadataMappings &&
+                    rig.PreferencesStore.Writes == writes &&
+                    (await rig.Preferences.ReadPreferencesAsync(default)).MetadataViewProvider == preferred &&
+                    BrowseCalls(rig) == 0, "the native consumer accepts the runtime's available provider without an automatic write or RPC");
+            }
+        });
+        yield return Test("a previous unavailable target cannot disable a successful exact directory", async () =>
+        {
+            await using var rig = new FilmPlaybackRig();
+            await rig.OpenAsync();
+            rig.Runtime.Change(root =>
+            {
+                root["stage"] = "unavailable"; root["error"] = "NO_MATCH";
+                root["browsing"] = Node(Browsing("available", FilmJson.Encode(0)));
+            });
+            await Until(() => rig.Page.SourceId == "available");
+            Check(rig.Page.CanSelectDirectory && !rig.Page.CanPlay, "directory and old formal-target eligibility are independent");
+            await rig.Page.SelectEpisodeAsync(rig.Page.Episodes.Single());
+            Check(rig.Runtime.Calls.Any(call => FilmJson.Text(call.Parameters, "action") == "select.target"),
+                "the exact valid row reaches the authoritative selection owner");
+        });
         yield return Test("workInfo accepts explicit null and rejects malformed current-contract projections", async () =>
         {
             var target = Card().PlaybackContext!.Target;
@@ -35,10 +143,13 @@ public static class FilmBrowsingConsumerTests
             });
             foreach (var invalid in new[]
             {
-                """{"provider":"site","metadataId":"100","kind":"tv","title":"资料","summary":"","seasonCount":null,"episodeCount":null}""",
-                """{"provider":"tmdb","metadataId":"100","kind":"source","title":"资料","summary":"","seasonCount":null,"episodeCount":null}""",
-                """{"provider":"tmdb","metadataId":"100","kind":"tv","title":"资料","summary":"","seasonCount":-1,"episodeCount":null}""",
-                """{"provider":"tmdb","metadataId":"100","kind":"tv","title":"资料","summary":"","seasonCount":null,"episodeCount":"12"}"""
+                """{"provider":"site","metadataId":"100","kind":"tv","title":"资料","summary":"","seasonCount":null,"episodeCount":null,"metadata":{}}""",
+                """{"provider":"tmdb","metadataId":"100","kind":"source","title":"资料","summary":"","seasonCount":null,"episodeCount":null,"metadata":{}}""",
+                """{"provider":"tmdb","metadataId":"100","kind":"tv","title":"资料","summary":"","seasonCount":-1,"episodeCount":null,"metadata":{}}""",
+                """{"provider":"tmdb","metadataId":"100","kind":"tv","title":"资料","summary":"","seasonCount":null,"episodeCount":"12","metadata":{}}""",
+                """{"provider":"tmdb","metadataId":"100","kind":"tv","title":"资料","summary":"","seasonCount":null,"episodeCount":null}""",
+                """{"provider":"tmdb","metadataId":"100","kind":"tv","title":"资料","summary":"","seasonCount":null,"episodeCount":null,"metadata":null}""",
+                """{"provider":"tmdb","metadataId":"100","kind":"tv","title":"资料","summary":"","seasonCount":null,"episodeCount":null,"metadata":[]}"""
             })
             {
                 original["workInfo"] = JsonNode.Parse(invalid);
@@ -167,16 +278,16 @@ public static class FilmBrowsingConsumerTests
             var first = rig.Page.EpisodeDirectory;
             await rig.Page.BrowseSeasonAsync(rig.Page.Seasons[1]);
             var secondDirectory = rig.Page.EpisodeDirectory;
-            await rig.Page.BrowseSourceAsync(rig.Page.Sources.Single(row => row.MetadataSourceId == "douban:200"));
+            await rig.Page.BrowseMetadataMappingAsync(rig.Page.MetadataSources.Single(row => row.MetadataSourceId == "douban:200"));
             var douban = rig.Page.EpisodeDirectory;
             int calls = BrowseCalls(rig);
-            await rig.Page.BrowseSourceAsync(rig.Page.Sources.Single(row => row.MetadataSourceId == "tmdb:100"));
+            await rig.Page.BrowseMetadataMappingAsync(rig.Page.MetadataSources.Single(row => row.MetadataSourceId == "tmdb:100"));
             Check(BrowseCalls(rig) == calls && ReferenceEquals(secondDirectory, rig.Page.EpisodeDirectory) && rig.Page.Season == 2,
                 "returning to metadata restores its previous season locally");
             await rig.Page.BrowseSeasonAsync(rig.Page.Seasons[0]);
             Check(BrowseCalls(rig) == calls && ReferenceEquals(first, rig.Page.EpisodeDirectory),
                 "the original successful season remains a local slice");
-            await rig.Page.BrowseSourceAsync(rig.Page.Sources.Single(row => row.MetadataSourceId == "douban:200"));
+            await rig.Page.BrowseMetadataMappingAsync(rig.Page.MetadataSources.Single(row => row.MetadataSourceId == "douban:200"));
             Check(BrowseCalls(rig) == calls && ReferenceEquals(douban, rig.Page.EpisodeDirectory) && rig.Page.Season == 2,
                 "the other metadata provider preserves its own last season");
         });
@@ -281,7 +392,8 @@ public static class FilmBrowsingConsumerTests
             rig.Runtime.Change(root =>
             {
                 root["workInfo"] = Node(FilmJson.Encode(new { provider = "tmdb", metadataId = "100", kind = "tv",
-                    title = "主资料", summary = "可靠关联填缺简介", seasonCount = 3, episodeCount = 48 }));
+                    title = "主资料", summary = "可靠关联填缺简介", seasonCount = 3, episodeCount = 48,
+                    metadata = new { title = "主资料" } }));
                 root["metadataSourceId"] = "douban:200";
                 root["metadataSources"] = Node(FilmJson.Encode(new[] { new { id = "douban:200", provider = "douban", metadataId = "200", kind = "tv" } }));
                 root["metadata"] = Node(FilmJson.Encode(new { title = "浏览资料", intro = "不是主简介" }));

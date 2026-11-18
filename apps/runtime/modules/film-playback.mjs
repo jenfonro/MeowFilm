@@ -32,10 +32,13 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
     const method = { cat: 'cat.script.status', source: 'source.runtime.status',
       pan: 'pan.settings.get', tmdb: 'tmdb.data.settings.get', douban: 'douban.data.settings.get' }[moduleId];
     const reply = await owner.methods[method]({});
-    return reply?.ok === true ? reply.value : null;
+    if (reply?.ok !== true) return null;
+    return ['tmdb', 'douban'].includes(moduleId) ? { revision: reply.value?.revision } : reply.value;
   }
+  const providerStates = new Map(nativeSettings ? ['cat', 'source', 'pan', 'tmdb', 'douban']
+    .filter(id => owners.has(id)).map(id => [id, providerState(id).catch(() => null)]) : []);
   const sourceChanged = (a, b) => ['generation', 'revision', 'state', 'enabled', 'sourceHash', 'contentHash']
-    .some(key => a?.[key] !== b?.[key]);
+    .some(key => a?.[key] !== b?.[key]) || !!a !== !!b;
   const sourceMatches = (scope, domain) => object(domain) ? domain.kind === 'source' &&
     scope.sourceEngine === domain.engine &&
     (domain.installationId === undefined || scope.sourceInstallationId === domain.installationId)
@@ -53,6 +56,45 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
     const failure = results.find((result, index) => result.status === 'rejected' &&
       !(discardCacheError && index === 0 && result.reason?.code === 'STORAGE_ERROR'));
     if (failure) throw failure.reason;
+  }
+  async function applyProviderChange(moduleId, before, after, { operation, input, value, succeeded } = {}) {
+    const work = [];
+    let instances;
+    if (moduleId === 'cat' || moduleId === 'source') {
+      const old = before?.instances ?? [], next = after?.instances ?? [];
+      instances = next;
+      const ids = new Set([...old, ...next].map(row => row.installationId));
+      for (const installationId of ids) {
+        if (sourceChanged(old.find(row => row.installationId === installationId),
+            next.find(row => row.installationId === installationId)) ||
+            succeeded && operation === 'management.sync' && value?.status === 'saved' &&
+              installationId === input.installationId) {
+          work.push(invalidate({ kind: 'source', engine: moduleId, installationId }, next));
+        }
+      }
+    } else if (moduleId === 'pan') {
+      const providers = new Set([...(before?.accounts ?? []), ...(after?.accounts ?? [])].map(row => row.provider));
+      for (const provider of providers) {
+        if (before?.accounts?.find(row => row.provider === provider)?.revision !==
+            after?.accounts?.find(row => row.provider === provider)?.revision) work.push(invalidate(provider));
+      }
+    } else if (after?.revision !== before?.revision || succeeded && after?.revision === undefined) {
+      work.push(invalidate(moduleId, undefined, true));
+    }
+    const results = await Promise.allSettled(work);
+    const failure = results.find(result => result.status === 'rejected');
+    if (failure) throw failure.reason;
+    if (instances) await service.updateSourceDisplay(moduleId, instances);
+  }
+  function observeProviderChange(moduleId, before, change) {
+    const previous = providerStates.get(moduleId) ?? Promise.resolve(before);
+    const work = previous.then(async state => {
+      const after = change?.operation === 'close' ? { instances: [] } : await providerState(moduleId);
+      await applyProviderChange(moduleId, state, after, change);
+      return after;
+    });
+    providerStates.set(moduleId, work.catch(() => previous));
+    return work;
   }
   const operations = {
     'session.open': async input => {
@@ -125,12 +167,9 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
     async settingsChanged(block) {
       if (block === 'film.rules') await rules.settingsChanged();
       else if (block === 'film.preferences') await service.settingsChanged();
-      else if (block === 'pan.accounts') await invalidate('pan');
-      else if (block === 'tmdb' || block === 'douban') await invalidate(block, undefined, true);
-      else if (block === 'cat.sources') {
-        const reply = await owners.get('cat').methods['cat.script.status']({});
-        await invalidate({ kind: 'source', engine: 'cat' }, reply.value?.instances);
-      }
+      else if (block === 'pan.accounts') await observeProviderChange('pan');
+      else if (block === 'tmdb' || block === 'douban') await observeProviderChange(block);
+      else if (block === 'cat.sources') await observeProviderChange('cat');
     },
     observesMutation,
     methods: Object.fromEntries(Object.entries(operations).map(([operation, handler]) =>
@@ -153,39 +192,14 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
     },
     async afterMutation(moduleId, operation, input, value, before, succeeded) {
       if (before === undefined) return;
-      if (sourceMutations[moduleId]?.has(operation)) {
-        const after = operation === 'close' ? { instances: [] } : await providerState(moduleId);
-        const old = before?.instances ?? [], next = after?.instances ?? [];
-        const ids = input?.installationId ? [input.installationId]
-          : [...new Set([...old, ...next].map(row => row.installationId))];
-        for (const installationId of ids) {
-          if (sourceChanged(old.find(row => row.installationId === installationId),
-              next.find(row => row.installationId === installationId)) ||
-              succeeded && operation === 'management.sync' && value?.status === 'saved') {
-            await invalidate({ kind: 'source', engine: moduleId, installationId }, next);
-          }
-        }
-        await service.updateSourceDisplay(moduleId, next);
-      } else if (moduleId === 'pan') {
-        const after = await providerState(moduleId);
-        const providers = new Set([...(before?.accounts ?? []), ...(after?.accounts ?? [])].map(row => row.provider));
-        for (const provider of providers) {
-          if (before?.accounts?.find(row => row.provider === provider)?.revision !==
-              after?.accounts?.find(row => row.provider === provider)?.revision) {
-            await invalidate(provider);
-          }
-        }
-      } else if (['tmdb', 'douban'].includes(moduleId)) {
-        const after = await providerState(moduleId);
-        if (after?.revision !== before?.revision || succeeded && after?.revision === undefined) await invalidate(moduleId, undefined, true);
-      }
+      await observeProviderChange(moduleId, before, { operation, input, value, succeeded });
     },
     close() {
       return closing ??= (async () => {
         closed = true;
         // Revoke in-flight producers at application shutdown, not on page release.
         const results = await Promise.allSettled([data.close(), cache.close(), service.close(), media.close(),
-          search.close(), rules.close()]);
+          search.close(), rules.close(), ...providerStates.values()]);
         await library.close();
         const failure = results.find(result => result.status === 'rejected');
         if (failure) throw failure.reason;

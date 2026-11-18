@@ -1,284 +1,151 @@
 using System.Collections.Specialized;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Documents;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Windows.Foundation;
+using Windows.UI.ViewManagement;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
-internal sealed record SettingsReorderMove(ListBox List, object Source, object Target);
+internal sealed record SettingsReorderMove(ListView List, object Source, object Target);
 
 internal sealed class SettingsReorderDrag
 {
     private readonly FrameworkElement viewport;
-    private readonly DispatcherTimer scrolling;
+    private readonly Canvas overlay;
+    private readonly DispatcherTimer scrolling = new() { Interval = TimeSpan.FromMilliseconds(32) };
     private readonly SettingsReorderShift shifts = new();
+    private readonly UISettings settings = new();
     private ScrollViewer? scroller;
     private Thumb? grip;
-    private ListBox? list;
-    private ListBoxItem? sourceContainer;
+    private ListView? list;
+    private ListViewItem? sourceContainer;
+    private INotifyCollectionChanged? collection;
     private object[] rows = [];
     private Rect[] rowBounds = [];
-    private int sourceIndex;
-    private object? source;
-    private Point start;
+    private int sourceIndex, destination = -1, generation;
+    private Point start, position;
     private double sourceOpacity;
     private bool moved, highContrast;
-    private int destination = -1;
-    private AdornerLayer? layer;
-    private PriorityDragAdorner? preview;
-
-    internal SettingsReorderDrag(FrameworkElement viewport)
+    private Image? preview;
+    internal SettingsReorderDrag(FrameworkElement viewport, Canvas overlay)
     {
-        this.viewport = viewport;
-        scrolling = new(DispatcherPriority.Input, viewport.Dispatcher)
-        { Interval = TimeSpan.FromMilliseconds(32) };
-        scrolling.Tick += ScrollTick;
+        this.viewport = viewport; this.overlay = overlay;
+        scrolling.Tick += (_, _) => ScrollTick();
     }
-
     internal bool IsActive => grip is not null;
     internal int DestinationIndex => destination;
-
-    internal void Begin(Thumb handle, ListBox owner, Point position)
+    internal void Begin(Thumb handle, ListView owner, Point point)
     {
         Cancel();
-        if (!owner.IsEnabled || !owner.IsVisible ||
-            ItemsControl.ContainerFromElement(owner, handle) is not ListBoxItem container ||
-            owner.ItemContainerGenerator.ItemFromContainer(container) is not { } item ||
-            item == DependencyProperty.UnsetValue) return;
-        grip = handle; list = owner; sourceContainer = container; source = item;
-        rows = owner.Items.Cast<object>().ToArray();
-        rowBounds = new Rect[rows.Length];
+        if (!owner.IsEnabled || !DesktopVisual.IsVisible(owner) ||
+            owner.ContainerFromItem(handle.DataContext) is not ListViewItem container) return;
+        grip = handle; list = owner; sourceContainer = container;
+        rows = owner.Items.Cast<object>().ToArray(); rowBounds = new Rect[rows.Length];
         for (int index = 0; index < rows.Length; index++)
         {
-            if (owner.ItemContainerGenerator.ContainerFromIndex(index) is not ListBoxItem row)
-            { Cancel(); return; }
-            rowBounds[index] = new(row.TranslatePoint(new Point(), owner), row.RenderSize);
+            if (owner.ContainerFromIndex(index) is not ListViewItem row) { Cancel(); return; }
+            rowBounds[index] = row.TransformToVisual(owner).TransformBounds(new Rect(0, 0, row.ActualWidth, row.ActualHeight));
         }
-        sourceIndex = Array.IndexOf(rows, source);
-        start = position; sourceOpacity = container.Opacity;
+        sourceIndex = Array.IndexOf(rows, handle.DataContext); start = position = point; sourceOpacity = container.Opacity;
         highContrast = DesktopTheme.GetIsHighContrast(owner);
-        ((INotifyCollectionChanged)owner.Items).CollectionChanged += RowsChanged;
-        owner.IsEnabledChanged += AvailabilityChanged;
-        owner.IsVisibleChanged += AvailabilityChanged;
-        for (DependencyObject? parent = VisualTreeHelper.GetParent(viewport); parent is not null;
-             parent = VisualTreeHelper.GetParent(parent))
-            if (parent is ScrollViewer scroll)
-            {
-                scroller = scroll;
-                scroller.ScrollChanged += ScrollerChanged;
-                break;
-            }
-        SystemParameters.StaticPropertyChanged += SystemParametersChanged;
+        collection = owner.ItemsSource as INotifyCollectionChanged;
+        if (collection is not null) collection.CollectionChanged += RowsChanged;
+        for (DependencyObject? parent = VisualTreeHelper.GetParent(viewport); parent is not null; parent = VisualTreeHelper.GetParent(parent))
+            if (parent is ScrollViewer scroll) { scroller = scroll; break; }
     }
-
-    internal void Update(Point position)
+    internal void Delta(double x, double y) => Update(new(position.X + x, position.Y + y));
+    internal Point Position => position;
+    internal void Update(Point point)
     {
+        position = point;
         if (!Current()) { Cancel(); return; }
-        if (!moved && Math.Abs(position.X - start.X) < SystemParameters.MinimumHorizontalDragDistance &&
-            Math.Abs(position.Y - start.Y) < SystemParameters.MinimumVerticalDragDistance) return;
+        if (!moved && Math.Abs(point.X - start.X) < 4 && Math.Abs(point.Y - start.Y) < 4) return;
         if (!moved)
         {
-            moved = true;
-            layer = AdornerLayer.GetAdornerLayer(viewport);
-            if (layer is null) { Cancel(); return; }
-            preview = new(viewport, list!, sourceContainer!, highContrast);
-            layer.Add(preview);
-            sourceContainer!.SetCurrentValue(UIElement.OpacityProperty, 0d);
-            if (grip!.IsDragging) scrolling.Start();
+            moved = true; scrolling.Start();
+            _ = CapturePreview(generation);
         }
-
-        var owner = list!;
-        var point = viewport.TranslatePoint(position, owner);
-        var visible = VisibleBounds();
+        var owner = list!; var local = viewport.TransformToVisual(owner).TransformPoint(point);
         destination = -1;
-        if (!visible.IsEmpty && visible.Contains(position) && point.X >= 0 &&
-            point.X <= owner.ActualWidth && point.Y >= 0 && point.Y <= owner.ActualHeight)
+        if (InsideViewport(point) && local.X >= 0 && local.X <= owner.ActualWidth && local.Y >= 0 && local.Y <= owner.ActualHeight)
         {
             int slot = rows.Length;
-            double center = point.Y - (viewport.TranslatePoint(start, owner).Y - rowBounds[sourceIndex].Top) +
-                rowBounds[sourceIndex].Height / 2;
+            double center = local.Y - (start.Y - rowBounds[sourceIndex].Top) + rowBounds[sourceIndex].Height / 2;
             for (int index = 0; index < rows.Length; index++)
-                if (center < rowBounds[index].Top + rowBounds[index].Height / 2)
-                { slot = index; break; }
+                if (center < rowBounds[index].Top + rowBounds[index].Height / 2) { slot = index; break; }
             destination = Math.Clamp(slot - (sourceIndex < slot ? 1 : 0), 0, rows.Length - 1);
         }
-        int target = destination < 0 ? sourceIndex : destination;
         for (int index = 0; index < rows.Length; index++)
-            if (owner.ItemContainerGenerator.ContainerFromIndex(index) is ListBoxItem row)
-                shifts.Apply(row, index, sourceIndex, target, rowBounds[sourceIndex].Height,
-                    SystemParameters.ClientAreaAnimation && !highContrast);
-        double sourceTop = owner.TranslatePoint(new Point(0, rowBounds[sourceIndex].Top), viewport).Y;
-        preview?.Move(position.Y - (start.Y - sourceTop), visible);
+            if (owner.ContainerFromIndex(index) is ListViewItem row)
+                shifts.Apply(row, index, sourceIndex, destination < 0 ? sourceIndex : destination, rowBounds[sourceIndex].Height,
+                    settings.AnimationsEnabled && !highContrast);
+        if (preview is not null)
+        {
+            Canvas.SetLeft(preview, 0);
+            Canvas.SetTop(preview, Math.Clamp(point.Y - start.Y + rowBounds[sourceIndex].Top, 0,
+                Math.Max(0, viewport.ActualHeight - preview.Height)));
+        }
     }
-
-    internal SettingsReorderMove? Complete(Point position, bool cancelled)
+    private bool InsideViewport(Point point)
     {
-        if (!cancelled) Update(position);
+        for (DependencyObject? parent = viewport; parent is not null; parent = VisualTreeHelper.GetParent(parent))
+            if (parent is ScrollViewer scroll)
+            {
+                var local = viewport.TransformToVisual(scroll).TransformPoint(point);
+                if (local.X < 0 || local.Y < 0 || local.X > scroll.ActualWidth || local.Y > scroll.ActualHeight) return false;
+            }
+        return true;
+    }
+    private async Task CapturePreview(int current)
+    {
+        var row = sourceContainer!;
+        var bitmap = new RenderTargetBitmap();
+        try { await bitmap.RenderAsync(row); }
+        catch { if (current == generation) Cancel(); return; }
+        if (current != generation || !Current()) return;
+        preview = new Image { Source = bitmap, Width = row.ActualWidth, Height = row.ActualHeight, IsHitTestVisible = false };
+        overlay.Children.Add(preview); row.Opacity = 0; Update(position);
+    }
+    internal SettingsReorderMove? Complete(Point point, bool cancelled)
+    {
+        if (!cancelled) Update(point);
         var result = !cancelled && moved && Current() && destination >= 0 && destination != sourceIndex
-            ? new SettingsReorderMove(list!, source!, rows[destination]) : null;
-        Reset();
-        return result;
+            ? new SettingsReorderMove(list!, rows[sourceIndex], rows[destination]) : null;
+        Reset(); return result;
     }
-
-    internal void Cancel()
-    {
-        var handle = grip;
-        Reset();
-        if (handle?.IsDragging == true) handle.CancelDrag();
-    }
-
-    private bool Current() => grip is not null && list is not null && list.IsEnabled && list.IsVisible &&
+    internal void Cancel() { var handle = grip; Reset(); if (handle?.IsDragging == true) handle.CancelDrag(); }
+    private bool Current() => grip is not null && list is { IsEnabled: true } && DesktopVisual.IsVisible(list) &&
         DesktopTheme.GetIsHighContrast(list) == highContrast && list.Items.Count == rows.Length &&
         list.Items.Cast<object>().Zip(rows).All(pair => ReferenceEquals(pair.First, pair.Second));
-
-    private void ScrollTick(object? sender, EventArgs e)
+    private void ScrollTick()
     {
-        if (!Current() || Mouse.LeftButton != MouseButtonState.Pressed) { Cancel(); return; }
+        if (!Current()) { Cancel(); return; }
         if (scroller is null) return;
-        var point = Mouse.GetPosition(viewport);
-        var visible = VisibleBounds();
-        if (visible.IsEmpty || point.X < visible.Left || point.X > visible.Right) return;
-        double offset = ScrollOffset(scroller.VerticalOffset, scroller.ScrollableHeight, visible.Height, point.Y - visible.Top);
-        if (offset != scroller.VerticalOffset)
-        {
-            scroller.ScrollToVerticalOffset(offset);
-            scroller.UpdateLayout();
-        }
-        Update(Mouse.GetPosition(viewport));
+        var local = viewport.TransformToVisual(scroller).TransformPoint(position);
+        double next = ScrollOffset(scroller.VerticalOffset, scroller.ScrollableHeight, scroller.ViewportHeight, local.Y);
+        double delta = next - scroller.VerticalOffset;
+        if (delta == 0) return;
+        scroller.ChangeView(null, next, null, true); Update(new(position.X, position.Y + delta));
     }
-    private void ScrollerChanged(object sender, ScrollChangedEventArgs e)
-    {
-        if (!ReferenceEquals(e.OriginalSource, scroller)) return;
-        if (e.ViewportWidthChange != 0 || e.ViewportHeightChange != 0) { Cancel(); return; }
-        if (e.VerticalChange != 0 && grip?.IsDragging == true) Update(Mouse.GetPosition(viewport));
-    }
-    private void SystemParametersChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName is nameof(SystemParameters.ClientAreaAnimation) or nameof(SystemParameters.HighContrast)) Cancel();
-    }
-
-    private Rect VisibleBounds()
-    {
-        var bounds = new Rect(viewport.RenderSize);
-        for (DependencyObject? parent = VisualTreeHelper.GetParent(viewport); parent is Visual;
-             parent = VisualTreeHelper.GetParent(parent))
-        {
-            if (parent is not FrameworkElement element) continue;
-            if (element.ClipToBounds || element is ScrollViewer or ScrollContentPresenter)
-            {
-                var transform = viewport.TransformToAncestor(element).Inverse;
-                if (transform is null) return Rect.Empty;
-                bounds.Intersect(transform.TransformBounds(new Rect(element.RenderSize)));
-            }
-            if (bounds.IsEmpty) break;
-        }
-        return bounds;
-    }
-
-    internal static BitmapSource Snapshot(FrameworkElement element)
-    {
-        var bounds = new Rect(element.RenderSize);
-        var offset = VisualTreeHelper.GetOffset(element);
-        var visual = new DrawingVisual();
-        using (var drawing = visual.RenderOpen())
-            drawing.DrawRectangle(new VisualBrush(element)
-                {
-                    ViewboxUnits = BrushMappingMode.Absolute,
-                    Viewbox = new Rect(offset.X, offset.Y, bounds.Width, bounds.Height)
-                },
-                null, bounds);
-        var bitmap = new RenderTargetBitmap(Math.Max(1, (int)Math.Ceiling(bounds.Width)),
-            Math.Max(1, (int)Math.Ceiling(bounds.Height)), 96, 96, PixelFormats.Pbgra32);
-        bitmap.Render(visual); bitmap.Freeze();
-        return bitmap;
-    }
-
     internal static double ScrollOffset(double current, double maximum, double height, double y) =>
         y < 28 ? Math.Max(0, current - 12) : y > height - 28 ? Math.Min(maximum, current + 12) : current;
-
-    internal static object? KeyboardTarget(ListBox list, object source, int direction)
+    internal static object? KeyboardTarget(ListView list, object source, int direction)
     {
-        int from = list.Items.IndexOf(source);
-        int to = from + direction;
-        return list.IsEnabled && from >= 0 && direction is -1 or 1 && to >= 0 && to < list.Items.Count
-            ? list.Items[to] : null;
+        int from = list.Items.IndexOf(source), to = from + direction;
+        return list.IsEnabled && from >= 0 && direction is -1 or 1 && to >= 0 && to < list.Items.Count ? list.Items[to] : null;
     }
-
     private void RowsChanged(object? sender, NotifyCollectionChangedEventArgs e) => Cancel();
-    private void AvailabilityChanged(object sender, DependencyPropertyChangedEventArgs e)
-    { if (e.NewValue is false) Cancel(); }
-
     private void Reset()
     {
-        scrolling.Stop();
-        if (scroller is not null) scroller.ScrollChanged -= ScrollerChanged;
-        SystemParameters.StaticPropertyChanged -= SystemParametersChanged;
-        if (list is not null)
-        {
-            ((INotifyCollectionChanged)list.Items).CollectionChanged -= RowsChanged;
-            list.IsEnabledChanged -= AvailabilityChanged;
-            list.IsVisibleChanged -= AvailabilityChanged;
-        }
-        sourceContainer?.SetCurrentValue(UIElement.OpacityProperty, sourceOpacity);
-        shifts.Clear();
-        if (preview is not null) layer?.Remove(preview);
-        grip = null; list = null; sourceContainer = null; source = null;
-        rows = []; rowBounds = []; scroller = null; moved = false; destination = -1; layer = null; preview = null;
-    }
-
-    private sealed class PriorityDragAdorner : Adorner
-    {
-        private readonly VisualCollection visuals;
-        private readonly Border card;
-        private readonly double left;
-        private double top;
-        private Rect visible;
-
-        internal PriorityDragAdorner(FrameworkElement viewport, ListBox list, ListBoxItem sourceRow, bool contrast) : base(viewport)
-        {
-            visuals = new(this);
-            IsHitTestVisible = false;
-            var background = contrast ? SystemColors.WindowBrush : (Brush)list.FindResource("MeowFilm.Brush.Surface");
-            var snapshot = Snapshot(sourceRow);
-            visible = new Rect(viewport.RenderSize);
-            left = sourceRow.TranslatePoint(new Point(), viewport).X;
-            card = new()
-            {
-                Background = background, BorderBrush = contrast ? SystemColors.WindowTextBrush :
-                    (Brush)list.FindResource("MeowFilm.Brush.Border"),
-                BorderThickness = new(1), CornerRadius = new(6), Height = Math.Max(1, sourceRow.ActualHeight),
-                Width = Math.Max(1, Math.Min(sourceRow.ActualWidth, viewport.ActualWidth)),
-                Child = new Image { Source = snapshot, Stretch = Stretch.Fill },
-            };
-            if (!contrast)
-                card.Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 16, ShadowDepth = 3, Opacity = .12 };
-            visuals.Add(card);
-        }
-
-        internal void Move(double position, Rect visibleBounds)
-        {
-            top = position; visible = visibleBounds;
-            Clip = new RectangleGeometry(visibleBounds.IsEmpty ? new Rect() : visibleBounds);
-            InvalidateArrange(); InvalidateVisual();
-        }
-
-        protected override int VisualChildrenCount => visuals.Count;
-        protected override Visual GetVisualChild(int index) => visuals[index];
-        protected override Size MeasureOverride(Size constraint)
-        { card.Measure(new(card.Width, card.Height)); return AdornedElement.RenderSize; }
-        protected override Size ArrangeOverride(Size finalSize)
-        {
-            var bounds = visible.IsEmpty ? new Rect(finalSize) : visible;
-            double x = Math.Clamp(left, bounds.Left, Math.Max(bounds.Left, bounds.Right - card.DesiredSize.Width));
-            double y = Math.Clamp(top, bounds.Top, Math.Max(bounds.Top, bounds.Bottom - card.DesiredSize.Height));
-            card.Arrange(new Rect(new Point(x, y), card.DesiredSize));
-            return finalSize;
-        }
+        generation++; scrolling.Stop();
+        if (collection is not null) collection.CollectionChanged -= RowsChanged;
+        if (sourceContainer is not null) sourceContainer.Opacity = sourceOpacity;
+        shifts.Clear(); overlay.Children.Clear();
+        grip = null; list = null; sourceContainer = null; collection = null; rows = []; rowBounds = [];
+        scroller = null; moved = false; destination = -1; preview = null;
     }
 }

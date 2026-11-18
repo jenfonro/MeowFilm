@@ -55,7 +55,7 @@ public sealed partial class FilmPlayback
                         Interlocked.CompareExchange(ref callbackError, FilmKernelNative.Code(error), null))];
                 table = new FilmKernelNative.Callbacks
                 {
-                    Size = (uint)Marshal.SizeOf<FilmKernelNative.Callbacks>(), Abi = 1,
+                    Size = (uint)Marshal.SizeOf<FilmKernelNative.Callbacks>(), Abi = FilmKernelNative.Abi,
                     Open = Marshal.GetFunctionPointerForDelegate(callbacks[0]),
                     Location = Marshal.GetFunctionPointerForDelegate(callbacks[1]),
                     Read = Marshal.GetFunctionPointerForDelegate(callbacks[2]),

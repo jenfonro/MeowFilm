@@ -1,18 +1,20 @@
-using System.Diagnostics;
-using System.Globalization;
 using System.Reflection;
-using System.Security.Principal;
 
 namespace MeowFilm.Windows.Tests;
 
 internal static class Program
 {
-    private static async Task<int> Main(string[] args)
+    [STAThread]
+    private static int Main(string[] args) =>
+        Environment.GetEnvironmentVariable("MEOWFILM_RESET_LAUNCHER_CHILD") == "1"
+            ? RunAsync(args).GetAwaiter().GetResult() : TestUiHost.Run(() => RunAsync(args));
+
+    private static async Task<int> RunAsync(string[] args)
     {
         if (args is ["--live-music"]) return await MusicLiveAcceptance.RunAsync();
         if (args is ["--live-music-kg-home"]) return await MusicLiveAcceptance.RunAsync(kugouHomeOnly: true);
         if (args is ["--live-music-catalog"]) return await MusicLiveAcceptance.RunAsync(catalogOnly: true);
-        if (!CheckDesktopContext()) return 1;
+        if (!TestDesktopContext.Verify()) return 1;
         TestWorkspace.Initialize();
         if (args is ["--novel-restore", var path]) return await NovelTests.RestoreChild(path);
         var groups = Assembly.GetExecutingAssembly().GetTypes()
@@ -67,34 +69,4 @@ internal static class Program
         return failed == 0 ? 0 : 1;
     }
 
-    internal static bool CheckDesktopContext(bool requireTarget = false)
-    {
-        string? expectedUser = Environment.GetEnvironmentVariable("MEOWFILM_TEST_DESKTOP_EXPECTED_USER");
-        string? expectedSessionId = Environment.GetEnvironmentVariable("MEOWFILM_TEST_DESKTOP_EXPECTED_SESSION_ID");
-        if (!requireTarget && expectedUser is null && expectedSessionId is null) return true;
-        if (!OperatingSystem.IsWindows())
-        {
-            Console.WriteLine("TEST_DESKTOP_CHECK FAIL UNSUPPORTED");
-            return false;
-        }
-        try
-        {
-            using var process = Process.GetCurrentProcess();
-            using var identity = WindowsIdentity.GetCurrent();
-            string user = identity.Name;
-            int sessionId = process.SessionId;
-            bool interactive = Environment.UserInteractive;
-            Console.WriteLine($"TEST_DESKTOP_CONTEXT PID={process.Id}; Identity={user}; SessionId={sessionId}; UserInteractive={interactive}");
-            bool matches = !string.IsNullOrWhiteSpace(expectedUser) &&
-                int.TryParse(expectedSessionId, NumberStyles.Integer, CultureInfo.InvariantCulture, out int expectedSession) &&
-                string.Equals(user, expectedUser, StringComparison.OrdinalIgnoreCase) && sessionId == expectedSession && interactive;
-            Console.WriteLine(matches ? "TEST_DESKTOP_CHECK PASS" : "TEST_DESKTOP_CHECK FAIL MISMATCH");
-            return matches;
-        }
-        catch
-        {
-            Console.WriteLine("TEST_DESKTOP_CHECK FAIL UNAVAILABLE");
-            return false;
-        }
-    }
 }

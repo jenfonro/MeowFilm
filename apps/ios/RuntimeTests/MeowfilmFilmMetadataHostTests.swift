@@ -2,7 +2,6 @@ import XCTest
 import UIKit
 import MeowUI
 import MeowRuntime
-import MeowMusicFeature
 @testable import MeowFilmFeature
 @testable import Meowfilm
 
@@ -33,7 +32,6 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         let (coordinator, root) = try await fixture.coordinator()
         let main = try XCTUnwrap(root.navigation.topViewController as? MeowfilmPrimaryShellViewController)
         try await waitFor { main.isPageVisible && root.transitionCoordinator == nil }
-        try await dismissKnownMusicNotice(root)
         try await waitFor { main.canPresentPageAlert }
         try await navigate(root.navigation, to: { $0 is FilmDetailViewController }) {
             coordinator.showFilmSearchResult(context)
@@ -79,14 +77,14 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         let directoryAction = try menuAction("Metadata directory · \(fixture.values.title)", in: source)
         invoke(directoryAction)
         try await waitFor {
-            model.snapshot?.browsing.sourceID != nil && model.snapshot?.browsing.loading == false &&
-                model.snapshot?.browsing.originalFiles.count == 4
+            model.presentation?.browsing.sourceID != nil && model.presentation?.browsing.loading == false &&
+                model.presentation?.browsing.originalFiles.count == 4
         }
-        XCTAssertEqual(model.snapshot?.browsing.originalFiles.map(\.name),
+        XCTAssertEqual(model.presentation?.browsing.originalFiles.map(\.name),
                        ["第1集.1080p", "第2集.1080p", "第3集.1080p", "第99集.1080p"])
         invoke(try menuAction("TMDB · \(fixture.values.title)", in: source))
         try await waitFor {
-            model.snapshot?.browsing.sourceID == nil && model.snapshot?.browsing.loading == false &&
+            model.presentation?.browsing.sourceID == nil && model.presentation?.browsing.loading == false &&
                 self.episodeIDs(page).count == 2
         }
         let more = try button("film.detail.more", page)
@@ -99,7 +97,7 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
             "film.episode.tmdb:tv:\(fixture.values.tvID):season:1:episode:2",
             "film.episode.tmdb:tv:\(fixture.values.tvID):season:1:episode:3",
         ], "Preview reveals only the real future episode, never the directory's maximum file number")
-        XCTAssertEqual(model.snapshot?.episodes.last?.raw["air_date"], .string("2999-01-01"),
+        XCTAssertEqual(model.presentation?.episodes.last?.raw["air_date"], .string("2999-01-01"),
                        "Returning to the same metadata source must retain its already-read real future episode fields")
         invoke(try menuAction("点映", in: more))
         try await waitFor { model.snapshot?.previewEpisodes == false && self.episodeIDs(page).count == 2 }
@@ -108,18 +106,18 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         XCTAssertEqual(season.menu?.children.compactMap { ($0 as? UIAction)?.title }, ["特别篇", "第一季", "第二季"])
         invoke(try menuAction("特别篇", in: season))
         try await waitFor {
-            model.snapshot?.browsing.season == 0 && model.snapshot?.browsing.loading == false &&
+            model.presentation?.browsing.season == 0 && model.presentation?.browsing.loading == false &&
                 self.episodeIDs(page) == ["film.episode.tmdb:tv:\(fixture.values.tvID):season:0:episode:0"]
         }
-        XCTAssertEqual(model.snapshot?.episodes.first?.position, .init(season: 0, episode: 0))
+        XCTAssertEqual(model.presentation?.episodes.first?.position, .init(season: 0, episode: 0))
         XCTAssertEqual(fixture.seasonReads, [1, 0], "Selecting specials must not fetch all other seasons")
         invoke(try menuAction("第二季", in: season))
         try await waitFor {
-            model.snapshot?.browsing.season == 2 && model.snapshot?.browsing.loading == false &&
+            model.presentation?.browsing.season == 2 && model.presentation?.browsing.loading == false &&
                 self.episodeIDs(page).isEmpty
         }
-        XCTAssertNil(model.snapshot?.browsing.error)
-        XCTAssertTrue(model.snapshot?.episodes.isEmpty == true)
+        XCTAssertNil(model.presentation?.browsing.error)
+        XCTAssertTrue(model.presentation?.episodes.isEmpty == true)
         XCTAssertEqual(fixture.seasonReads, [1, 0, 2])
         invoke(try menuAction("点映", in: more))
         try await waitFor { model.snapshot?.previewEpisodes == true }
@@ -129,7 +127,7 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         try await waitFor { model.snapshot?.previewEpisodes == false }
         invoke(try menuAction("第一季", in: season))
         try await waitFor {
-            model.snapshot?.browsing.season == 1 && model.snapshot?.browsing.loading == false &&
+            model.presentation?.browsing.season == 1 && model.presentation?.browsing.loading == false &&
                 self.episodeIDs(page).count == 2
         }
         XCTAssertEqual(fixture.seasonReads, [1, 0, 2], "Re-selecting a real season uses the original data owner")
@@ -189,7 +187,8 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         XCTAssertEqual(model.snapshot?.target.value["metadataId"], .number(Double(fixture.values.tvID)),
                        "The raw seed year selects 2020, not the first same-title 2019 TMDB result")
         XCTAssertEqual(model.snapshot?.target.value["year"], .number(2020))
-        XCTAssertEqual(page.detail.item.sourceID, "tmdb")
+        XCTAssertEqual(page.detail.item.sourceID, "douban")
+        XCTAssertEqual(page.detail.item.identity, item.identity)
         XCTAssertEqual(page.detail.summary, "完整资料简介")
         XCTAssertTrue(try button("film.detail.search", page).isHidden)
         XCTAssertFalse(model.snapshot?.metadataSources.contains { $0.provider == .douban } == true)
@@ -223,7 +222,7 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         let installed = try await fixture.installDirectory(title: fixture.values.doubanTitle)
         let (page, _) = try await openHomeItem(fixture, section: 0)
         let model = try XCTUnwrap(page.filmPlaybackModel)
-        try await waitFor { model.snapshot?.entryResolution == "unmatched" && model.snapshot?.stage == "idle" && !model.opening }
+        try await waitFor { model.snapshot?.entryResolution == "unmatched" && model.snapshot?.stage == "unavailable" && !model.opening }
         let searchButton = try button("film.detail.search", page)
         try await waitFor { !searchButton.isHidden }
         XCTAssertEqual(page.detail.item.sourceID, "douban")
@@ -235,7 +234,8 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         XCTAssertEqual(model.snapshot?.target.kind, .group)
         XCTAssertEqual(model.snapshot?.target.value["members"], .array([]))
         XCTAssertNil(model.snapshot?.target.metadataProvider)
-        XCTAssertTrue(model.snapshot?.metadataSources.isEmpty == true)
+        XCTAssertEqual(model.snapshot?.metadataSources.map(\.provider), [.douban],
+                       "The original Douban entry remains available as independent display metadata")
         XCTAssertTrue(model.snapshot?.sources.isEmpty == true,
                       "A TMDB miss does not automatically search every site")
         let poster = try XCTUnwrap(page.detail.item.posterURL)
@@ -253,7 +253,7 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         await model.open()?.value
         try await waitFor {
             model.sessionID != oldSession && model.snapshot?.entryResolution == "unmatched" &&
-                model.snapshot?.stage == "idle" && !model.opening
+                model.snapshot?.stage == "unavailable" && !model.opening
         }
         XCTAssertNil(model.actionError, "A seed-generated wait group must not be sent back as an invalid empty resume")
         XCTAssertNil(model.snapshot?.error); XCTAssertNil(model.snapshot?.browsing.error)
@@ -298,23 +298,30 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
             images: fixture.assembly.filmImages, themeProvider: fixture.assembly.appearance, model: model)
         try await fixture.mount(page)
         try await waitFor { page.presentedViewController is UIAlertController }
+        let alert = try XCTUnwrap(page.presentedViewController as? UIAlertController)
         XCTAssertEqual(model.snapshot?.entrySurface, "home")
         XCTAssertEqual(model.snapshot?.entryTarget?.metadataProvider, .douban)
         XCTAssertEqual(model.snapshot?.stage, "error")
         XCTAssertNotNil(model.snapshot?.error)
-        XCTAssertTrue(try button("film.detail.search", page).isHidden)
+        let searchButton = try button("film.detail.search", page)
+        XCTAssertTrue(searchButton.isHidden)
         let sourceActions = try button("film.detail.source", page).menu?.children.compactMap { $0 as? UIAction } ?? []
         XCTAssertFalse(sourceActions.contains { $0.title == "加载更多来源" })
-        XCTAssertFalse(descendants(page.view).compactMap { $0 as? UILabel }.contains {
-            $0.text?.contains(model.snapshot?.error ?? "UPSTREAM_HTTP") == true
-        })
+        let rawErrorLabels = descendants(page.view).compactMap { $0 as? UILabel }.filter {
+            !$0.isDescendant(of: alert.view) &&
+                $0.text?.contains(model.snapshot?.error ?? "UPSTREAM_HTTP") == true
+        }
+        for label in rawErrorLabels {
+            print("ENTRY_ERROR_LABEL text=\(label.text ?? "nil") hidden=\(label.isHidden) " +
+                "identifier=\(label.accessibilityIdentifier ?? "nil") parent=\(String(describing: label.superview))")
+        }
+        XCTAssertTrue(rawErrorLabels.isEmpty)
         XCTAssertEqual(model.snapshot?.entryResolution, "error")
         XCTAssertEqual(model.snapshot?.target.kind, .group)
         XCTAssertEqual(model.snapshot?.target.value["members"], .array([]))
         XCTAssertTrue(model.snapshot?.sources.isEmpty == true)
         let before = try await fixture.directoryCalls(installed)
         XCTAssertEqual(before, [])
-        let alert = try XCTUnwrap(page.presentedViewController as? UIAlertController)
         XCTAssertEqual(alert.actions.map(\.title), ["确定", "重试"])
         fixture.responses.forceTMDBFailure = false
         fixture.responses.forceNoTMDBMatch = true
@@ -324,9 +331,29 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         alert.dismiss(animated: false) { dismissed.fulfill() }
         await fulfillment(of: [dismissed], timeout: 10)
         await model.refreshBrowsing()?.value
-        try await waitFor { model.snapshot?.entryResolution == "unmatched" && model.snapshot?.stage == "idle" }
+        do {
+            try await waitFor {
+                model.snapshot?.entryResolution == "unmatched" && model.snapshot?.stage == "unavailable" &&
+                    !searchButton.isHidden
+            }
+        } catch {
+            let snapshot = model.snapshot
+            print("ENTRY_RETRY_STATE resolution=\(snapshot?.entryResolution ?? "nil") " +
+                "stage=\(snapshot?.stage ?? "nil") error=\(snapshot?.error ?? "nil") " +
+                "actionError=\(model.actionError?.code ?? "nil") " +
+                "searchReads=\(fixture.reads("/tmdb-api/3/search/multi"))")
+            let presentation = model.presentation
+            print("ENTRY_RETRY_PRESENTATION resolution=\(presentation?.entryResolution ?? "nil") " +
+                "loading=\(presentation?.browsing.loading.description ?? "nil") " +
+                "error=\(presentation?.browsing.error ?? "nil") " +
+                "source=\(presentation?.browsing.sourceID ?? "nil") " +
+                "metadata=\(presentation?.metadataSourceID ?? "nil") " +
+                "snapshotMetadata=\(snapshot?.metadataSourceID ?? "nil") " +
+                "active=\(page.isPageActive) visible=\(page.isPageVisible) searchHidden=\(searchButton.isHidden)")
+            throw error
+        }
         XCTAssertNil(model.snapshot?.error)
-        XCTAssertFalse(try button("film.detail.search", page).isHidden)
+        XCTAssertFalse(searchButton.isHidden)
         let after = try await fixture.directoryCalls(installed)
         XCTAssertEqual(after, [])
         XCTAssertNil(model.snapshot?.attempt); XCTAssertNil(model.snapshot?.current)
@@ -395,7 +422,7 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         try await waitFor { root.navigation.topViewController is MeowfilmPrimaryShellViewController }
         let main = try XCTUnwrap(root.navigation.topViewController as? MeowfilmPrimaryShellViewController)
         try await waitFor { main.isPageVisible && root.transitionCoordinator == nil }
-        try await dismissKnownMusicNotice(root)
+        try await waitFor { main.canPresentPageAlert }
         main.select(.film)
         try await waitFor {
             self.controllers(main).compactMap { $0 as? FilmHomeViewController }.first?.isPageVisible == true
@@ -421,6 +448,9 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         try await waitFor { UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive } }
         let app = try XCTUnwrap(UIApplication.shared.delegate as? MeowfilmAppDelegate)
         let assembly = try XCTUnwrap(app.readyAssembly())
+        try await waitFor { assembly.music != nil || assembly.startupFailed }
+        XCTAssertFalse(assembly.startupFailed, "The actual App must start from the current empty-data contract")
+        _ = try XCTUnwrap(assembly.music, "The primary Shell requires the actual published music model")
         let client = try await resources.scriptSession.connection()
         try await client.validateAppModules()
         let image = UIGraphicsImageRenderer(size: CGSize(width: 24, height: 36)).pngData {
@@ -458,12 +488,13 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
         })
     }
 
-    private func waitFor(_ predicate: @escaping @MainActor () -> Bool) async throws {
+    private func waitFor(file: StaticString = #filePath, line: UInt = #line,
+                         _ predicate: @escaping @MainActor () -> Bool) async throws {
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             MainActor.assumeIsolated { predicate() }
         }, object: nil)
         let result = await XCTWaiter.fulfillment(of: [ready], timeout: 10)
-        XCTAssertEqual(result, .completed)
+        XCTAssertEqual(result, .completed, file: file, line: line)
         guard result == .completed, predicate() else { throw FilmMetadataHostFailure.notReady }
     }
     private func navigate(_ navigation: PageNavigationController, to matches: @escaping @MainActor (UIViewController) -> Bool,
@@ -475,26 +506,6 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
                 (page as? PageViewController)?.isPageVisible == true
         }
         XCTAssertNotNil(navigation.topViewController?.viewIfLoaded?.window)
-    }
-    private func dismissKnownMusicNotice(_ root: MeowfilmRootContainerViewController) async throws {
-        guard let alert = root.presentedViewController as? UIAlertController else { return }
-        // A dedicated simulator can retain an unrelated music Keychain-policy
-        // or document error. Accept only the exact music read notice; a film or
-        // unexpected application failure must still throw below.
-        let known = alert.title == "错误" && alert.actions.map(\.title) == ["取消", "重试"] &&
-            alert.actions.map(\.style) == [.cancel, .default] &&
-            [MusicServiceError.storagePolicyMismatch, .corruptDocument].contains {
-                let prefix = $0.message(operation: "音乐内容读取")
-                let pattern = "^" + NSRegularExpression.escapedPattern(for: prefix) +
-                    "(?:（诊断 [A-Fa-f0-9]{8}）)?$"
-                return alert.message?.range(of: pattern, options: .regularExpression) != nil
-            }
-        XCTAssertTrue(known, "Do not dismiss a metadata or unexpected application failure")
-        guard known else { throw FilmMetadataHostFailure.unexpectedNotice }
-        try await waitFor { !alert.isBeingPresented && alert.transitionCoordinator == nil }
-        let dismissed = expectation(description: "Known unrelated music notice dismissed without retry")
-        alert.dismiss(animated: false) { dismissed.fulfill() }
-        await fulfillment(of: [dismissed], timeout: 10)
     }
     private func descendants(_ view: UIView) -> [UIView] { view.subviews.flatMap { [$0] + descendants($0) } }
     private func episodeIDs(_ page: FilmDetailViewController) -> [String] {
@@ -517,7 +528,7 @@ final class MeowfilmFilmMetadataHostTests: XCTestCase {
     }
 }
 
-private enum FilmMetadataHostFailure: Error { case dedicatedSimulatorRequired, notReady, unexpectedNotice }
+private enum FilmMetadataHostFailure: Error { case dedicatedSimulatorRequired, notReady }
 
 @MainActor
 private final class FilmMetadataHostFixture {

@@ -1,147 +1,93 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Windows.Foundation;
+using Windows.System;
 
 namespace MeowFilm.Desktop;
 
-/// <summary>The shell's in-content channel dialog. No native popup or desktop-wide input subscription.</summary>
+/// <summary>One in-content modal channel. No native popup, clipping copy or secondary HWND.</summary>
 public sealed class PlayerDialogHost : Grid
 {
-    private static readonly DependencyProperty HostProperty = DependencyProperty.RegisterAttached(
-        "Host", typeof(PlayerDialogHost), typeof(PlayerDialogHost));
-    private FrameworkElement? anchor, panel;
+    private static readonly DependencyProperty HostProperty = DependencyProperty.RegisterAttached("Host", typeof(PlayerDialogHost), typeof(PlayerDialogHost), new PropertyMetadata(null));
+    private FrameworkElement? panel;
     private Action? closed, closeRequested;
-    private MouseButton? dismissButton;
+    private uint? dismissPointer;
+    private IDisposable? visibility;
     private bool dismissOnOutside = true;
     public bool IsOpen => panel is not null;
-    public bool HasOutsidePress => dismissButton is not null;
-
+    public bool HasOutsidePress => dismissPointer is not null;
     public PlayerDialogHost()
     {
         Visibility = Visibility.Collapsed;
-        SetResourceReference(StyleProperty, "MeowFilm.DialogHost");
-        ClipToBounds = true;
-        FocusManager.SetIsFocusScope(this, true);
-        KeyboardNavigation.SetTabNavigation(this, KeyboardNavigationMode.Cycle);
+        this.UseResource(StyleProperty, "MeowFilm.DialogHost");
+        TabFocusNavigation = KeyboardNavigationMode.Cycle;
         SizeChanged += (_, _) => ConstrainPanel();
         Unloaded += (_, _) => Close();
+        PointerPressed += Outside; PointerReleased += Outside;
+        PointerCaptureLost += (_, _) => dismissPointer = null;
     }
-
-    public void Attach(Window window)
+    public void Attach(DesktopWindow window)
     {
-        window.SetValue(HostProperty, this);
+        window.Root.SetValue(HostProperty, this);
         window.Deactivated += (_, _) => CancelPress();
-        window.IsVisibleChanged += (_, e) => { if (!(bool)e.NewValue) Close(); };
+        window.VisibilityChanged += (_, _) => { if (!window.IsVisible) Close(); };
         window.Closed += (_, _) => Close();
     }
-
     public static PlayerDialogHost? Find(DependencyObject owner) =>
-        Window.GetWindow(owner)?.GetValue(HostProperty) as PlayerDialogHost;
-
-    public void Show(FrameworkElement owner, FrameworkElement content, Action onClosed, bool dismissOnOutside = true,
-        Action? onCloseRequested = null)
+        owner is FrameworkElement { XamlRoot.Content: FrameworkElement root } ? root.GetValue(HostProperty) as PlayerDialogHost : null;
+    public void Show(FrameworkElement owner, FrameworkElement content, Action onClosed, bool dismissOnOutside = true, Action? onCloseRequested = null)
     {
         Close();
-        anchor = owner; panel = content; closed = onClosed; closeRequested = onCloseRequested; this.dismissOnOutside = dismissOnOutside;
-        owner.Unloaded += OwnerUnloaded;
-        owner.IsVisibleChanged += OwnerVisibilityChanged;
-        content.HorizontalAlignment = HorizontalAlignment.Center;
-        content.VerticalAlignment = VerticalAlignment.Center;
-        Children.Add(content);
-        Visibility = Visibility.Visible;
-        ConstrainPanel();
+        panel = content; closed = onClosed; closeRequested = onCloseRequested; this.dismissOnOutside = dismissOnOutside;
+        content.HorizontalAlignment = HorizontalAlignment.Center; content.VerticalAlignment = VerticalAlignment.Center;
+        Children.Add(content); Visibility = Visibility.Visible; ConstrainPanel();
+        var observation = DesktopVisual.ObserveVisibility(owner, visible => { if (!visible) Close(); });
+        if (IsOpen) visibility = observation; else observation.Dispose();
     }
-
     private void ConstrainPanel()
     {
         if (panel is null) return;
-        panel.MaxHeight = Math.Max(0, ActualHeight - 32);
-        panel.MaxWidth = Math.Max(0, ActualWidth - 32);
+        panel.MaxHeight = Math.Max(0, ActualHeight - 32); panel.MaxWidth = Math.Max(0, ActualWidth - 32);
     }
-    private void OwnerUnloaded(object sender, RoutedEventArgs e) => Close();
-    private void OwnerVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e)
-    { if (!(bool)e.NewValue) Close(); }
-
-    public bool HandleEscape(KeyEventArgs e)
+    public bool HandleEscape(KeyRoutedEventArgs args)
     {
-        if (!IsOpen || e.Key != Key.Escape) return false;
-        e.Handled = true;
-        RequestClose();
-        return true;
+        bool handled = HandleEscape(args.Key);
+        args.Handled |= handled; return handled;
     }
-
-    protected override void OnPreviewMouseDown(MouseButtonEventArgs e)
+    public bool HandleEscape(VirtualKey key)
     {
-        base.OnPreviewMouseDown(e);
-        if (panel is null ||
-            e.OriginalSource is DependencyObject node && (ReferenceEquals(node, panel) || panel.IsAncestorOf(node))) return;
-        if (!dismissOnOutside)
-        {
-            e.Handled = true;
-            return;
-        }
-        HandleOutsidePointer(e, this);
+        if (!IsOpen || key != VirtualKey.Escape) return false;
+        RequestClose(); return true;
     }
-    protected override void OnPreviewMouseUp(MouseButtonEventArgs e)
+    private void Outside(object sender, PointerRoutedEventArgs args)
     {
-        base.OnPreviewMouseUp(e);
-        if (!dismissOnOutside && panel is not null &&
-            e.OriginalSource is DependencyObject node && (ReferenceEquals(node, panel) || panel.IsAncestorOf(node))) return;
-        HandleOutsidePointer(e, this);
+        if (panel is null || !HasOutsidePress && args.OriginalSource is DependencyObject node && DesktopVisual.Contains(panel, node)) return;
+        HandleOutsidePointer(args, this);
     }
-    // The shell routes header pointers through the same outside-press barrier.
-    public void HandleOutsidePointer(MouseButtonEventArgs e, FrameworkElement bounds)
+    public void HandleOutsidePointer(PointerRoutedEventArgs args, FrameworkElement bounds)
     {
         if (!IsOpen) return;
-        if (!dismissOnOutside)
+        args.Handled = true;
+        if (!dismissOnOutside) return;
+        var point = args.GetCurrentPoint(bounds);
+        if (point.IsInContact)
+        { dismissPointer = args.Pointer.PointerId; CapturePointer(args.Pointer); }
+        else if (dismissPointer == args.Pointer.PointerId)
         {
-            e.Handled = true;
-            return;
-        }
-        if (e.RoutedEvent == Mouse.PreviewMouseDownEvent)
-        {
-            // Keep the barrier until release so neither half of the gesture reaches underlying controls.
-            e.Handled = true;
-            dismissButton = e.ChangedButton;
-            Mouse.Capture(this, CaptureMode.SubTree);
-        }
-        else if (e.RoutedEvent == Mouse.PreviewMouseUpEvent && dismissButton == e.ChangedButton)
-        {
-            e.Handled = true;
-            bool inside = new Rect(bounds.RenderSize).Contains(e.GetPosition(bounds));
-            CancelPress();
-            if (inside) RequestClose();
+            bool inside = new Rect(0, 0, bounds.ActualWidth, bounds.ActualHeight).Contains(point.Position);
+            CancelPress(); if (inside) RequestClose();
         }
     }
-    protected override void OnLostMouseCapture(MouseEventArgs e)
-    { base.OnLostMouseCapture(e); dismissButton = null; }
-    private void CancelPress()
-    {
-        dismissButton = null;
-        if (ReferenceEquals(Mouse.Captured, this)) Mouse.Capture(null);
-    }
-    public void RequestClose()
-    {
-        if (!IsOpen) return;
-        if (closeRequested is { } request) request(); else Close();
-    }
+    private void CancelPress() { dismissPointer = null; ReleasePointerCaptures(); }
+    public void RequestClose() { if (IsOpen) { if (closeRequested is { } request) request(); else Close(); } }
     public void Close()
     {
         CancelPress();
-        if (anchor is not null)
-        {
-            anchor.Unloaded -= OwnerUnloaded;
-            anchor.IsVisibleChanged -= OwnerVisibilityChanged;
-        }
-        anchor = null;
+        visibility?.Dispose(); visibility = null;
         if (panel is null) return;
-        Children.Remove(panel);
-        panel = null;
-        closeRequested = null;
-        Visibility = Visibility.Collapsed;
-        dismissOnOutside = true;
-        FocusManager.SetFocusedElement(this, null);
-        var callback = closed; closed = null;
-        callback?.Invoke();
+        Children.Remove(panel); panel = null; closeRequested = null;
+        Visibility = Visibility.Collapsed; dismissOnOutside = true;
+        var callback = closed; closed = null; callback?.Invoke();
     }
 }

@@ -1,201 +1,158 @@
-using System.Windows;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using System.Runtime.InteropServices.WindowsRuntime;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Windows.Foundation;
+using Windows.Storage.Streams;
 
 namespace MeowFilm.Capabilities;
 
-/// <summary>A cached outside stroke of the hinted glyph coverage, not the unhinted font curves.</summary>
-internal sealed class MusicLyricOutline : IDisposable
+// The outside stroke uses the native hinted glyph coverage. The foreground and
+// compositor highlight remain native text, not shifted duplicate text layers.
+internal sealed class MusicLyricOutline
 {
-    private readonly FrameworkElement owner;
-    private DrawingGroup? source;
-    private ImageBrush? mask;
-    private Matrix? deviceTransform;
-    private Matrix toLocal;
-    private Rect bounds;
+    private readonly Canvas layer = new() { IsHitTestVisible = false };
+    private readonly Image image = new() { IsHitTestVisible = false };
+    private TextBlock? source;
+    private SolidColorBrush? stroke;
     private double thickness;
-    private bool observing;
+    private long epoch;
+    private bool queued;
+    private RasterKey? key;
+    private byte[]? coverage;
+    private int width, height;
+    private double scaleX, scaleY;
+    private readonly record struct RasterKey(string Text, string Family, double FontSize,
+        string Language, FlowDirection Direction, double Width, double Height,
+        double ScaleX, double ScaleY, double PhaseX, double PhaseY, double Thickness);
+    internal Task RenderWork { get; private set; } = Task.CompletedTask;
+    internal byte[]? Coverage => coverage;
 
-    internal MusicLyricOutline(FrameworkElement owner)
+    internal MusicLyricOutline(Grid host)
     {
-        this.owner = owner;
-        owner.Loaded += OnLoaded;
-        owner.Unloaded += OnUnloaded;
-        owner.IsVisibleChanged += OnVisibilityChanged;
-        Observe();
+        layer.Children.Add(image); host.Children.Add(layer);
+        layer.Loaded += (_, _) => Queue();
+        layer.Unloaded += (_, _) => Clear();
     }
 
-    internal void Invalidate()
+    internal void Update(TextBlock text, Brush? brush, double strokeThickness)
     {
-        source = null;
-        mask = null;
-    }
-
-    private void OnLoaded(object sender, RoutedEventArgs e) { Observe(); owner.InvalidateVisual(); }
-    private void OnUnloaded(object sender, RoutedEventArgs e) => Observe();
-    private void OnVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e)
-    {
-        Observe();
-        if (owner.IsVisible) owner.InvalidateVisual();
-    }
-
-    private void Observe()
-    {
-        bool next = owner.IsLoaded && owner.IsVisible;
-        if (next == observing) return;
-        if (next) owner.LayoutUpdated += OnLayoutUpdated;
-        else owner.LayoutUpdated -= OnLayoutUpdated;
-        observing = next;
-    }
-
-    private void OnLayoutUpdated(object? sender, EventArgs e)
-    {
-        if (deviceTransform != DeviceTransform()) owner.InvalidateVisual();
-    }
-
-    private Matrix DeviceTransform()
-    {
-        Matrix result;
-        if (PresentationSource.FromVisual(owner) is { RootVisual: Visual root, CompositionTarget: { } target })
+        if (!ReferenceEquals(source, text))
         {
-            var transform = owner.TransformToAncestor(root);
-            Point origin = transform.Transform(new());
-            Vector x = transform.Transform(new(1, 0)) - origin;
-            Vector y = transform.Transform(new(0, 1)) - origin;
-            result = new Matrix(x.X, x.Y, y.X, y.Y, origin.X, origin.Y) * target.TransformToDevice;
+            if (source is not null) { source.SizeChanged -= SizeChanged; source.LayoutUpdated -= LayoutChanged; }
+            source = text; text.SizeChanged += SizeChanged; text.LayoutUpdated += LayoutChanged;
+            key = null;
         }
-        else
+        stroke = brush as SolidColorBrush; thickness = strokeThickness;
+        if (stroke is null || thickness <= 0) { Clear(); return; }
+        if (key == CurrentKey()) Paint();
+        else Queue();
+    }
+
+    private void SizeChanged(object sender, SizeChangedEventArgs args) => Queue();
+    private void LayoutChanged(object? sender, object args)
+    {
+        if (key != CurrentKey()) Queue();
+    }
+    private RasterKey? CurrentKey()
+    {
+        if (source is not { IsLoaded: true, ActualWidth: > 0, ActualHeight: > 0, XamlRoot: { } root } text ||
+            !root.IsHostVisible || stroke is null || thickness <= 0) return null;
+        var transform = text.TransformToVisual(root.Content);
+        var origin = transform.TransformPoint(new Point());
+        var x = transform.TransformPoint(new Point(1, 0));
+        var y = transform.TransformPoint(new Point(0, 1));
+        double sx = Math.Sqrt(Math.Pow(x.X - origin.X, 2) + Math.Pow(x.Y - origin.Y, 2)) * root.RasterizationScale;
+        double sy = Math.Sqrt(Math.Pow(y.X - origin.X, 2) + Math.Pow(y.Y - origin.Y, 2)) * root.RasterizationScale;
+        return new(text.Text, text.FontFamily.Source, text.FontSize, text.Language, text.FlowDirection,
+            text.ActualWidth, text.ActualHeight, sx, sy,
+            origin.X * root.RasterizationScale % 1, origin.Y * root.RasterizationScale % 1, thickness);
+    }
+    private void Queue()
+    {
+        if (queued || !layer.IsLoaded || stroke is null || thickness <= 0) return;
+        queued = true;
+        layer.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, async () =>
         {
-            var dpi = VisualTreeHelper.GetDpi(owner);
-            result = new(dpi.DpiScaleX, 0, 0, dpi.DpiScaleY, 0, 0);
+            queued = false;
+            RenderWork = RasterizeAsync();
+            await RenderWork;
+        });
+    }
+    private async Task RasterizeAsync()
+    {
+        if (CurrentKey() is not { } next || source is not { } text) return;
+        if (key == next) { Paint(); return; }
+        long request = ++epoch;
+        var bitmap = new RenderTargetBitmap();
+        int w = Math.Max(1, (int)Math.Ceiling(next.Width * next.ScaleX));
+        int h = Math.Max(1, (int)Math.Ceiling(next.Height * next.ScaleY));
+        await bitmap.RenderAsync(text, w, h);
+        var buffer = await bitmap.GetPixelsAsync();
+        if (request != epoch || !layer.IsLoaded || next != CurrentKey()) { Queue(); return; }
+        byte[] pixels = new byte[buffer.Length];
+        using (var reader = DataReader.FromBuffer(buffer)) reader.ReadBytes(pixels);
+        if (bitmap.PixelWidth <= 0 || bitmap.PixelHeight <= 0) return;
+        scaleX = bitmap.PixelWidth / next.Width; scaleY = bitmap.PixelHeight / next.Height;
+        int padX = (int)Math.Ceiling(next.Thickness * scaleX / 2) + 2;
+        int padY = (int)Math.Ceiling(next.Thickness * scaleY / 2) + 2;
+        width = bitmap.PixelWidth + padX * 2; height = bitmap.PixelHeight + padY * 2;
+        var alpha = new byte[width * height];
+        double opacity = text.Opacity * (text.Foreground is SolidColorBrush fill ? fill.Opacity * fill.Color.A / 255d : 1);
+        for (int y = 0; y < bitmap.PixelHeight; y++)
+        for (int x = 0; x < bitmap.PixelWidth; x++)
+            alpha[(y + padY) * width + x + padX] = opacity > 0
+                ? (byte)Math.Clamp(Math.Round(pixels[(y * bitmap.PixelWidth + x) * 4 + 3] / opacity), 0, 255) : (byte)0;
+        coverage = Expand(alpha, width, height, next.Thickness * scaleX / 2, next.Thickness * scaleY / 2);
+        image.Width = width / scaleX; image.Height = height / scaleY;
+        Canvas.SetLeft(image, -padX / scaleX); Canvas.SetTop(image, -padY / scaleY);
+        key = next; Paint();
+    }
+    private void Paint()
+    {
+        if (coverage is null || stroke is null || thickness <= 0) return;
+        var color = stroke.Color; var pixels = new byte[coverage.Length * 4];
+        for (int i = 0; i < coverage.Length; i++)
+        {
+            int alpha = (int)Math.Round(coverage[i] * color.A / 255d * stroke.Opacity);
+            pixels[i * 4] = (byte)((color.B * alpha + 127) / 255);
+            pixels[i * 4 + 1] = (byte)((color.G * alpha + 127) / 255);
+            pixels[i * 4 + 2] = (byte)((color.R * alpha + 127) / 255);
+            pixels[i * 4 + 3] = (byte)alpha;
         }
-        // Integer movement reuses exactly the same device pixels. Fractional movement does not.
-        result.OffsetX -= Math.Floor(result.OffsetX);
-        result.OffsetY -= Math.Floor(result.OffsetY);
+        var bitmap = new WriteableBitmap(width, height);
+        using (var stream = bitmap.PixelBuffer.AsStream()) stream.Write(pixels);
+        bitmap.Invalidate(); image.Source = bitmap;
+    }
+    private static byte[] Expand(byte[] alpha, int width, int height, double rx, double ry)
+    {
+        var samples = new List<(double X, double Y)>();
+        for (int i = 0; i < 16; i++) samples.Add((Math.Cos(i * Math.PI / 8) * rx, Math.Sin(i * Math.PI / 8) * ry));
+        for (int y = -(int)ry; y <= ry; y++)
+        for (int x = -(int)rx; x <= rx; x++)
+            if (rx > 0 && ry > 0 && x * x / (rx * rx) + y * y / (ry * ry) <= 1) samples.Add((x, y));
+        double At(int x, int y) => x >= 0 && x < width && y >= 0 && y < height ? alpha[y * width + x] : 0;
+        var result = new byte[alpha.Length];
+        for (int y = 0; y < height; y++)
+        for (int x = 0; x < width; x++)
+        {
+            int original = alpha[y * width + x];
+            if (original == 255) continue;
+            double expanded = original;
+            foreach (var (dx, dy) in samples)
+            {
+                int left = (int)Math.Floor(x + dx), top = (int)Math.Floor(y + dy);
+                double fx = x + dx - left, fy = y + dy - top;
+                expanded = Math.Max(expanded, At(left, top) * (1 - fx) * (1 - fy) + At(left + 1, top) * fx * (1 - fy) +
+                    At(left, top + 1) * (1 - fx) * fy + At(left + 1, top + 1) * fx * fy);
+            }
+            result[y * width + x] = (byte)Math.Clamp(Math.Round((expanded - original) * 255 / (255 - original)), 0, 255);
+        }
         return result;
     }
-
-    internal void Draw(DrawingContext drawing, DrawingGroup text, Brush stroke, double strokeThickness)
+    internal void Clear()
     {
-        Matrix transform = DeviceTransform();
-        if (!ReferenceEquals(source, text) || deviceTransform != transform || thickness != strokeThickness)
-        {
-            source = text;
-            deviceTransform = transform;
-            thickness = strokeThickness;
-            mask = CreateMask(text, transform, strokeThickness / 2);
-        }
-        if (mask is null) return;
-        // Only the outline is masked; native foreground/highlight glyphs remain direct drawings.
-        drawing.PushTransform(new MatrixTransform(toLocal));
-        drawing.PushOpacityMask(mask);
-        drawing.DrawRectangle(stroke, null, bounds);
-        drawing.Pop();
-        drawing.Pop();
-    }
-
-    private ImageBrush? CreateMask(DrawingGroup text, Matrix transform, double radius)
-    {
-        if (text.Bounds.IsEmpty || !transform.HasInverse) return null;
-        toLocal = transform;
-        toLocal.Invert();
-        var ink = Rect.Transform(text.Bounds, transform);
-        double rx = radius * Math.Sqrt(transform.M11 * transform.M11 + transform.M21 * transform.M21);
-        double ry = radius * Math.Sqrt(transform.M12 * transform.M12 + transform.M22 * transform.M22);
-        // Include raster overhang and the stroke without changing the control's text metrics.
-        ink.Inflate(rx + 2, ry + 2);
-        bounds = new(new Point(Math.Floor(ink.Left), Math.Floor(ink.Top)),
-            new Point(Math.Ceiling(ink.Right), Math.Ceiling(ink.Bottom)));
-        int width = (int)bounds.Width, height = (int)bounds.Height;
-        var glyphs = text.Clone();
-        Opaque(glyphs);
-        var visual = new DrawingVisual();
-        TextOptions.SetTextFormattingMode(visual, TextOptions.GetTextFormattingMode(owner));
-        TextOptions.SetTextRenderingMode(visual, TextOptions.GetTextRenderingMode(owner));
-        TextOptions.SetTextHintingMode(visual, TextOptions.GetTextHintingMode(owner));
-        transform.Translate(-bounds.X, -bounds.Y);
-        using (var drawing = visual.RenderOpen())
-        {
-            drawing.PushTransform(new MatrixTransform(transform));
-            drawing.DrawDrawing(glyphs);
-            drawing.Pop();
-        }
-        var image = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
-        image.Render(visual);
-        int stride = width * 4;
-        var pixels = new byte[stride * height];
-        image.CopyPixels(pixels, stride, 0);
-        var outline = new byte[pixels.Length];
-        var samples = Samples(transform, radius, rx, ry);
-        for (int y = 0; y < height; y++)
-            for (int x = 0; x < width; x++)
-            {
-                int index = y * stride + x * 4 + 3;
-                int alpha = pixels[index];
-                if (alpha == 255) continue;
-                double expanded = alpha;
-                foreach (var sample in samples)
-                {
-                    int sx = x + sample.X, sy = y + sample.Y;
-                    double coverage = 0;
-                    if (sx >= 0 && sx + 1 < width && sy >= 0 && sy + 1 < height)
-                    {
-                        int p = sy * stride + sx * 4 + 3;
-                        coverage = pixels[p] * sample.TopLeft + pixels[p + 4] * sample.TopRight +
-                            pixels[p + stride] * sample.BottomLeft + pixels[p + stride + 4] * sample.BottomRight;
-                    }
-                    expanded = Math.Max(expanded, coverage);
-                }
-                // Source-over the native fill must produce the expanded coverage, not darken it twice.
-                outline[index] = (byte)Math.Clamp(Math.Round((expanded - alpha) * 255 / (255 - alpha)), 0, 255);
-            }
-        var bitmap = BitmapSource.Create(width, height, 96, 96, PixelFormats.Pbgra32, null, outline, stride);
-        bitmap.Freeze();
-        var brush = new ImageBrush(bitmap) { Stretch = Stretch.Fill };
-        brush.Freeze();
-        return brush;
-    }
-
-    private readonly record struct Sample(int X, int Y, double TopLeft, double TopRight,
-        double BottomLeft, double BottomRight);
-
-    private static List<Sample> Samples(Matrix transform, double radius, double rx, double ry)
-    {
-        var samples = new List<Sample>();
-        void Add(double x, double y)
-        {
-            int left = (int)Math.Floor(x), top = (int)Math.Floor(y);
-            double fx = x - left, fy = y - top;
-            samples.Add(new(left, top, (1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy));
-        }
-        for (int i = 0; i < 16; i++)
-        {
-            double angle = i * Math.PI / 8;
-            Vector offset = transform.Transform(new Vector(Math.Cos(angle) * radius, Math.Sin(angle) * radius));
-            Add(offset.X, offset.Y);
-        }
-        // Interior device samples also cover strokes wider than one device pixel.
-        transform.Invert();
-        for (int y = -(int)ry; y <= (int)ry; y++)
-            for (int x = -(int)rx; x <= (int)rx; x++)
-                if ((x != 0 || y != 0) && transform.Transform(new Vector(x, y)).Length <= radius) Add(x, y);
-        return samples;
-    }
-
-    private static void Opaque(DrawingGroup drawing)
-    {
-        foreach (var child in drawing.Children)
-            if (child is GlyphRunDrawing glyph) glyph.ForegroundBrush = Brushes.White;
-            else if (child is DrawingGroup group) Opaque(group);
-    }
-
-    public void Dispose()
-    {
-        owner.Loaded -= OnLoaded;
-        owner.Unloaded -= OnUnloaded;
-        owner.IsVisibleChanged -= OnVisibilityChanged;
-        if (observing) owner.LayoutUpdated -= OnLayoutUpdated;
-        observing = false;
-        Invalidate();
+        epoch++; queued = false; key = null; coverage = null; image.Source = null;
     }
 }

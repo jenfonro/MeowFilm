@@ -1,57 +1,60 @@
 using System.IO;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
 public sealed partial class NovelView
 {
-    private const string DiscoveryThemeUri = "/MeowFilm.Capabilities;component/Novel/Presentation/NovelDiscoveryTheme.xaml";
+    private const string DiscoveryThemeUri = "ms-appx:///MeowFilm.Capabilities/Novel/Presentation/NovelDiscoveryTheme.xaml";
     private const string StackIcon = "M3,7 L12,3 21,7 12,11 Z M3,12 L12,16 21,12 M3,17 L12,21 21,17";
     private long shownDiscoveryFailure;
     private bool showingDiscoveryFailure, changingDiscoveryShelf;
-    private (string Id, IInputElement? Previous)? discoveryFocus;
+    private (string Id, DependencyObject? Previous)? discoveryFocus;
     private NovelDiscoveryChannelBar? discoveryChannelBar;
 
     private void AddDiscoveryTheme() => Resources.MergedDictionaries.Add(new()
-        { Source = new Uri(DiscoveryThemeUri, UriKind.Relative) });
+        { Source = new Uri(DiscoveryThemeUri) });
 
     private void RememberDiscoveryFocus()
     {
-        var focused = Keyboard.FocusedElement;
+        var focused = DesktopVisual.Focused(this);
         for (var node = focused as DependencyObject; node is not null;
-            node = node is Visual ? VisualTreeHelper.GetParent(node) : LogicalTreeHelper.GetParent(node))
+            node = VisualTreeHelper.GetParent(node))
         {
             Control? control = node is ComboBox or RadioButton ? (Control)node :
                 node is ComboBoxItem item ? ItemsControl.ItemsControlFromItemContainer(item) as ComboBox : null;
-            if (control is null || !body.IsAncestorOf(control)) continue;
+            if (control is null || !DesktopVisual.Contains(body, control)) continue;
             string id = AutomationProperties.GetAutomationId(control);
             if (!id.StartsWith("novel.discovery.", StringComparison.Ordinal)) continue;
             discoveryFocus = (id, focused); return;
         }
         if (discoveryFocus is { } remembered && !CanRestoreDiscoveryFocus(remembered.Previous)) discoveryFocus = null;
     }
-    private bool CanRestoreDiscoveryFocus(IInputElement? previous)
+    private bool CanRestoreDiscoveryFocus(DependencyObject? previous)
     {
-        var focused = Keyboard.FocusedElement;
+        var focused = DesktopVisual.Focused(this);
         return focused is null || ReferenceEquals(focused, previous) || ReferenceEquals(focused, this) ||
-            ReferenceEquals(focused, body) || ReferenceEquals(focused, body.Content) || ReferenceEquals(focused, Window.GetWindow(this));
+            ReferenceEquals(focused, body) || ReferenceEquals(focused, body.Content) || ReferenceEquals(focused, DesktopWindow.GetWindow(this));
     }
     private void RestoreDiscoveryFocus()
     {
         if (discoveryFocus is not { } remembered) return;
-        if (!IsVisible || !CanRestoreDiscoveryFocus(remembered.Previous)) { discoveryFocus = null; return; }
+        if (!DesktopVisual.IsVisible(this) || !CanRestoreDiscoveryFocus(remembered.Previous)) { discoveryFocus = null; return; }
         if (!IsLoaded || body.Content is not FrameworkElement { IsLoaded: true }) return;
         discoveryFocus = null;
-        FindDiscoveryFocus(body, remembered.Id)?.Focus();
+        FindDiscoveryFocus(body, remembered.Id)?.Focus(FocusState.Programmatic);
     }
     private static Control? FindDiscoveryFocus(DependencyObject parent, string id)
     {
-        if (parent is Control control && control.IsVisible && control.IsEnabled && AutomationProperties.GetAutomationId(control) == id)
+        if (parent is Control control && DesktopVisual.IsVisible(control) && control.IsEnabled && AutomationProperties.GetAutomationId(control) == id)
             return control;
         for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
             if (FindDiscoveryFocus(VisualTreeHelper.GetChild(parent, i), id) is { } found) return found;
@@ -65,9 +68,9 @@ public sealed partial class NovelView
     }
     private static Viewbox DiscoveryIcon(string data, double size = 14)
     {
-        var path = new System.Windows.Shapes.Path { Data = Geometry.Parse(data), StrokeThickness = 1.4,
+        var path = new Microsoft.UI.Xaml.Shapes.Path { Data = NovelPresentation.Geometry(data), StrokeThickness = 1.4,
             StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round, StrokeLineJoin = PenLineJoin.Round };
-        path.SetResourceReference(StyleProperty, "Novel.Discovery.Icon");
+        path.UseResource(StyleProperty, "Novel.Discovery.Icon");
         var canvas = new Canvas { Width = 24, Height = 24 }; canvas.Children.Add(path);
         return new Viewbox { Width = size, Height = size, Child = canvas, VerticalAlignment = VerticalAlignment.Center };
     }
@@ -92,8 +95,7 @@ public sealed partial class NovelView
         }
         if (scale) content = new Viewbox { Child = content, Stretch = Stretch.Uniform };
         var border = new Border { Child = content, CornerRadius = new(3) };
-        if (missing) border.SetResourceReference(StyleProperty, "Novel.Discovery.Surface");
-        border.SizeChanged += (_, _) => border.Clip = new RectangleGeometry(new Rect(border.RenderSize), 3, 3);
+        if (missing) border.UseResource(StyleProperty, "Novel.Discovery.Surface");
         return border;
     }
     private string DiscoverySourceName(NovelBook book) =>
@@ -135,7 +137,7 @@ public sealed partial class NovelView
             choices.Insert(0, selected);
         var sources = new ComboBox { ItemsSource = choices, SelectedItem = module.ExploreSource,
             Width = 154, MaxDropDownHeight = 300, Margin = new(0, 0, 16, 0), VerticalAlignment = VerticalAlignment.Center };
-        sources.SetResourceReference(StyleProperty, "Novel.Discovery.Source");
+        sources.UseResource(StyleProperty, "Novel.Discovery.Source");
         AutomationProperties.SetName(sources, "发现书源"); AutomationProperties.SetAutomationId(sources, "novel.discovery.source");
         sources.SelectionChanged += (_, _) =>
         {
@@ -150,7 +152,7 @@ public sealed partial class NovelView
         });
         refresh.Width = 30; refresh.Content = DiscoveryIcon(module.LoadingDiscovery
             ? "M6,6 L18,18 M6,18 L18,6" : "M20,7 A9,9 0 1 0 21,15 M20,2 L20,7 15,7", 18);
-        refresh.ToolTip = module.LoadingDiscovery ? "取消加载" : "刷新";
+        ToolTipService.SetToolTip(refresh, module.LoadingDiscovery ? "取消加载" : "刷新");
         tools.Children.Add(refresh);
         return tools;
     }
@@ -167,7 +169,7 @@ public sealed partial class NovelView
     private RadioButton DiscoveryTab(string title, NovelKind kind, bool selected, string id)
     {
         var tab = new RadioButton { Content = title, IsChecked = selected, GroupName = "novel.discovery.channels" };
-        tab.SetResourceReference(StyleProperty, "Novel.Discovery.Tab");
+        tab.UseResource(StyleProperty, "Novel.Discovery.Tab");
         AutomationProperties.SetName(tab, title); AutomationProperties.SetAutomationId(tab, id);
         tab.Checked += (_, _) =>
         {
@@ -196,24 +198,23 @@ public sealed partial class NovelView
     }
     private static ScrollViewer DiscoveryNavigation(Panel choices)
     {
-        KeyboardNavigation.SetDirectionalNavigation(choices, KeyboardNavigationMode.Cycle);
         var scroll = new ScrollViewer { Content = choices, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, PanningMode = PanningMode.HorizontalOnly,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, HorizontalScrollMode = ScrollMode.Enabled, VerticalScrollMode = ScrollMode.Disabled,
             HorizontalContentAlignment = HorizontalAlignment.Left };
         scroll.Resources.MergedDictionaries.Add(new()
-            { Source = new Uri("/MeowFilm.Desktop;component/SettingsScrollChrome.xaml", UriKind.Relative) });
-        scroll.SetResourceReference(StyleProperty, "MeowFilm.SettingsScrollViewer");
+            { Source = new Uri("ms-appx:///MeowFilm.Desktop/SettingsScrollChrome.xaml") });
+        scroll.UseResource(StyleProperty, "MeowFilm.SettingsScrollViewer");
         return scroll;
     }
-    private static void DiscoveryNavigation_KeyDown(object sender, KeyEventArgs e)
+    private static void DiscoveryNavigation_KeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (sender is not RadioButton { Parent: Panel panel } current ||
-            e.Key is not (Key.Home or Key.End or Key.Left or Key.Right)) return;
+            e.Key is not (VirtualKey.Home or VirtualKey.End or VirtualKey.Left or VirtualKey.Right)) return;
         var choices = panel.Children.OfType<RadioButton>().ToArray();
         int index = Array.IndexOf(choices, current);
-        int next = e.Key switch { Key.Home => 0, Key.End => choices.Length - 1,
-            Key.Left => (index + choices.Length - 1) % choices.Length, _ => (index + 1) % choices.Length };
-        choices[next].Focus(); choices[next].IsChecked = true; choices[next].BringIntoView(); e.Handled = true;
+        int next = e.Key switch { VirtualKey.Home => 0, VirtualKey.End => choices.Length - 1,
+            VirtualKey.Left => (index + choices.Length - 1) % choices.Length, _ => (index + 1) % choices.Length };
+        choices[next].Focus(FocusState.Programmatic); choices[next].IsChecked = true; choices[next].StartBringIntoView(); e.Handled = true;
     }
     private FrameworkElement BuildDiscovery(bool categories)
     {
@@ -263,8 +264,8 @@ public sealed partial class NovelView
     private static Border DiscoveryRule(UIElement child)
     {
         var rule = new Border { Child = child, BorderThickness = new(0, 0, 0, 1), Margin = new(0, 0, 0, 16) };
-        Panel.SetZIndex(rule, 1);
-        rule.SetResourceReference(Border.BorderBrushProperty, "MeowFilm.Brush.SidebarBorder"); return rule;
+        Canvas.SetZIndex(rule, 1);
+        rule.UseResource(Border.BorderBrushProperty, "MeowFilm.Brush.SidebarBorder"); return rule;
     }
     private FrameworkElement DiscoveryFilters(NovelDiscoveryGroup group)
     {
@@ -272,8 +273,9 @@ public sealed partial class NovelView
         AutomationProperties.SetName(row, "当前频道筛选");
         row.ColumnDefinitions.Add(new() { Width = GridLength.Auto }); row.ColumnDefinitions.Add(new());
         var label = new TextBlock { Text = group.Title, MaxWidth = 150,
-            TextTrimming = TextTrimming.CharacterEllipsis, ToolTip = group.Title };
-        label.SetResourceReference(StyleProperty, "MeowFilm.FilterLabel");
+            TextTrimming = TextTrimming.CharacterEllipsis };
+        ToolTipService.SetToolTip(label, group.Title);
+        label.UseResource(StyleProperty, "MeowFilm.FilterLabel");
         var labelSlot = new Grid { Height = 36, VerticalAlignment = VerticalAlignment.Top, Margin = new(0, 0, 14, 0) };
         labelSlot.Children.Add(label); row.Children.Add(labelSlot);
         var choices = new StackPanel { Orientation = Orientation.Horizontal };
@@ -281,7 +283,7 @@ public sealed partial class NovelView
         {
             var choice = new RadioButton { Content = kind.Title, IsChecked = kind.Url == module.ExploreKind?.Url,
                 GroupName = "novel.discovery.kinds" };
-            choice.SetResourceReference(StyleProperty, "Novel.Discovery.Choice");
+            choice.UseResource(StyleProperty, "Novel.Discovery.Choice");
             AutomationProperties.SetName(choice, kind.Title);
             AutomationProperties.SetAutomationId(choice, "novel.discovery.kind:" + kind.Url);
             choice.Checked += (_, _) =>
@@ -289,12 +291,12 @@ public sealed partial class NovelView
                 if (kind.Url != module.ExploreKind?.Url)
                     module.RunUi(ct => module.LoadDiscoveryAsync(module.ExploreSource, kind, false, ct));
             };
-            choice.PreviewKeyDown += DiscoveryNavigation_KeyDown;
-            choice.Loaded += (_, _) => { if (choice.IsChecked == true) choice.BringIntoView(); };
+            choice.KeyDown += DiscoveryNavigation_KeyDown;
+            choice.Loaded += (_, _) => { if (choice.IsChecked == true) choice.StartBringIntoView(); };
             choices.Children.Add(choice);
         }
         var capsule = new Border { Child = DiscoveryNavigation(choices), HorizontalAlignment = HorizontalAlignment.Left };
-        capsule.SetResourceReference(StyleProperty, "MeowFilm.FilterGroup");
+        capsule.UseResource(StyleProperty, "MeowFilm.FilterGroup");
         Grid.SetColumn(capsule, 1); row.Children.Add(capsule);
         return row;
     }
@@ -324,7 +326,7 @@ public sealed partial class NovelView
     private FrameworkElement DiscoveryFeaturedBook()
     {
         var card = new Border { Height = 216, Padding = new(30, 22, 30, 22) };
-        card.SetResourceReference(StyleProperty, "Novel.Discovery.Feature");
+        card.UseResource(StyleProperty, "Novel.Discovery.Feature");
         AutomationProperties.SetName(card, "选读");
         if (module.DiscoverBooks.FirstOrDefault() is not { } book) return card;
         var layout = new Grid(); layout.ColumnDefinitions.Add(new()); layout.ColumnDefinitions.Add(new() { Width = new(149) });
@@ -358,7 +360,7 @@ public sealed partial class NovelView
     private FrameworkElement DiscoveryContinuation()
     {
         var card = new Border { Height = 216, Padding = new(20) };
-        card.SetResourceReference(StyleProperty, "Novel.Discovery.Surface");
+        card.UseResource(StyleProperty, "Novel.Discovery.Surface");
         AutomationProperties.SetName(card, "继续阅读");
         var panel = new DockPanel(); card.Child = panel;
         var last = module.Library.Entries.Where(e => e.ReadAt is not null).OrderByDescending(e => e.ReadAt).FirstOrDefault();
@@ -379,7 +381,7 @@ public sealed partial class NovelView
         var bottom = new Grid { Margin = new(0, 12, 0, 0) };
         var resume = DiscoveryButton("接着读", () => module.RunUi(ct => module.ContinueReadingAsync(last, ct)));
         resume.Content = "接着读 →"; resume.HorizontalAlignment = HorizontalAlignment.Left;
-        resume.SetResourceReference(Control.ForegroundProperty, "MeowFilm.Brush.AccentText");
+        resume.UseResource(Control.ForegroundProperty, "MeowFilm.Brush.AccentText");
         bottom.Children.Add(resume);
         if (last.Anchor is { } anchor)
         {
@@ -432,10 +434,10 @@ public sealed partial class NovelView
         bool onShelf = IsOnShelf(book);
         var shelf = DiscoveryButton(onShelf ? "移出书架" : "加入书架", () => module.RunUi(ct => ShelfDiscoveryBookAsync(book, !onShelf, ct)));
         shelf.Content = DiscoveryIcon(onShelf ? "M5,12 L9,16 19,6" : "M12,5 L12,19 M5,12 L19,12");
-        shelf.ToolTip = onShelf ? "移出书架" : "加入书架"; shelf.Width = 24; shelf.Height = 24;
+        ToolTipService.SetToolTip(shelf, onShelf ? "移出书架" : "加入书架"); shelf.Width = 24; shelf.Height = 24;
         shelf.HorizontalAlignment = HorizontalAlignment.Right; shelf.VerticalAlignment = VerticalAlignment.Top; row.Children.Add(shelf);
         var border = new Border { Child = row, Padding = new(0, 0, 0, 22), BorderThickness = new(0, 0, 0, 1) };
-        border.SetResourceReference(Border.BorderBrushProperty, "MeowFilm.Brush.SidebarBorder"); return border;
+        border.UseResource(Border.BorderBrushProperty, "MeowFilm.Brush.SidebarBorder"); return border;
     }
     private void AddDiscoveryStatus(Panel panel, bool categories)
     {
@@ -462,7 +464,7 @@ public sealed partial class NovelView
     private void PresentDiscoveryFailure()
     {
         if (module.Route is not (NovelCapability.HomeRoute or NovelCapability.CategoriesRoute) ||
-            module.DiscoveryState != NovelDiscoveryState.Failed || module.LoadingDiscovery || !IsLoaded || !IsVisible) return;
+            module.DiscoveryState != NovelDiscoveryState.Failed || module.LoadingDiscovery || !IsLoaded || !DesktopVisual.IsVisible(this)) return;
         if (showingDiscoveryFailure || shownDiscoveryFailure == module.DiscoveryGeneration) return;
         module.RunUi(ShowDiscoveryRetryAsync);
     }
@@ -504,22 +506,22 @@ internal sealed class NovelBookGrid(int maximumColumns, double minimumWidth, dou
         columns = Math.Min(maximumColumns, Math.Max(1, (int)((width + columnGap) / (minimumWidth + columnGap))));
         itemWidth = Math.Max(0, (width - (columns - 1) * columnGap) / columns);
         rowHeights.Clear();
-        for (int i = 0; i < InternalChildren.Count; i++)
+        for (int i = 0; i < Children.Count; i++)
         {
-            InternalChildren[i].Measure(new Size(itemWidth, double.PositiveInfinity));
+            Children[i].Measure(new Size(itemWidth, double.PositiveInfinity));
             int row = i / columns; if (row == rowHeights.Count) rowHeights.Add(0);
-            rowHeights[row] = Math.Max(rowHeights[row], InternalChildren[i].DesiredSize.Height);
+            rowHeights[row] = Math.Max(rowHeights[row], Children[i].DesiredSize.Height);
         }
         return new Size(width, rowHeights.Sum() + Math.Max(0, rowHeights.Count - 1) * rowGap);
     }
     protected override Size ArrangeOverride(Size finalSize)
     {
         double top = 0;
-        for (int i = 0; i < InternalChildren.Count; i++)
+        for (int i = 0; i < Children.Count; i++)
         {
             int row = i / columns, column = i % columns;
             if (column == 0 && row > 0) top += rowHeights[row - 1] + rowGap;
-            InternalChildren[i].Arrange(new Rect(column * (itemWidth + columnGap), top, itemWidth, rowHeights[row]));
+            Children[i].Arrange(new Rect(column * (itemWidth + columnGap), top, itemWidth, rowHeights[row]));
         }
         return finalSize;
     }

@@ -1,6 +1,6 @@
 using System.ComponentModel;
-using System.Windows;
-using System.Windows.Interop;
+using Microsoft.UI.Xaml;
+using Windows.Graphics;
 using System.Windows.Threading;
 using MeowFilm.SystemMedia;
 using Windows.Media;
@@ -345,13 +345,14 @@ public static class SystemMediaTests
     }
     private static Task RealBackend()
     {
-        var window = new Window { ShowInTaskbar = false, Width = 100, Height = 100 };
+        var window = new Window();
+        window.AppWindow.Resize(new SizeInt32(100, 100));
         try
         {
             using var backend = new WindowsSystemMediaBackend(window);
             backend.Update(new(null, null, "", false, false, 0, 0));
             backend.Disable();
-            var controls = SystemMediaTransportControlsInterop.GetForWindow(new WindowInteropHelper(window).Handle);
+            var controls = SystemMediaTransportControlsInterop.GetForWindow(WinRT.Interop.WindowNative.GetWindowHandle(window));
             var state = new SystemPlaybackState("audio", "one", "Generated fixture", true, true, 10, 120);
             backend.Update(state);
             Check(controls.IsEnabled && controls.DisplayUpdater.MusicProperties.Title == state.Title);
@@ -377,25 +378,7 @@ public static class SystemMediaTests
         await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
     }
     private static void Check(bool value) { if (!value) throw new InvalidOperationException("System media assertion"); }
-    private static async Task Sta(Func<Task> action)
-    {
-        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            _ = dispatcher.InvokeAsync(async () =>
-            {
-                try { await action(); done.TrySetResult(); }
-                catch (Exception error) { done.TrySetException(error); }
-                finally { dispatcher.BeginInvokeShutdown(DispatcherPriority.Background); }
-            });
-            Dispatcher.Run();
-        }) { IsBackground = true };
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        await done.Task.WaitAsync(TimeSpan.FromSeconds(20));
-        Check(thread.Join(TimeSpan.FromSeconds(5)));
-    }
+    private static Task Sta(Func<Task> action) => TestUiHost.InvokeAsync(action);
     private sealed class Player : ISystemPlayback
     {
         public SystemPlaybackState State { get; set; } = new("audio", "one", "Generated fixture", true, true, 10, 120);

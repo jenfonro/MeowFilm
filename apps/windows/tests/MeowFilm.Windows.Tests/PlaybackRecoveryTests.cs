@@ -7,7 +7,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
+using Microsoft.UI.Xaml;
 using System.Windows.Threading;
 using MeowFilm.Media;
 using MeowFilm.Capabilities;
@@ -528,7 +528,7 @@ public static partial class PlaybackRecoveryTests
                 f.App.HoldResolution = input => input.GetProperty("quality").GetString() == "128k";
                 var choose = f.Module.SwitchQualityAsync("standard");
                 await f.App.RefreshEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                Check(((System.Windows.Controls.Button)((MusicPlayerView)f.Module.PlayerView).FindName("PlayButton")).IsEnabled,
+                Check(((Microsoft.UI.Xaml.Controls.Button)((MusicPlayerView)f.Module.PlayerView).FindName("PlayButton")).IsEnabled,
                     "real pause button stays enabled during source resolution");
                 Task? close = null;
                 if (action == "stop") await f.Native.StopAsync(); else close = f.Module.PrepareShutdownAsync();
@@ -1784,9 +1784,9 @@ public static partial class PlaybackRecoveryTests
                 await f.ValidationEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 if (paused) await f.Module.TogglePlaybackAsync();
                 f.Module.OpenSourceChoices();
-                var currentQuality = new System.Windows.Controls.TextBlock();
-                currentQuality.SetBinding(System.Windows.Controls.TextBlock.TextProperty,
-                    new System.Windows.Data.Binding(nameof(MusicCapability.CurrentSourceQuality)) { Source = f.Module });
+                var currentQuality = new Microsoft.UI.Xaml.Controls.TextBlock();
+                currentQuality.SetBinding(Microsoft.UI.Xaml.Controls.TextBlock.TextProperty,
+                    new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath(nameof(MusicCapability.CurrentSourceQuality)), Source = f.Module });
                 await Dispatcher.Yield(DispatcherPriority.DataBind);
                 Check(currentQuality.Text == "音质未知", "unverified media is not presented as confirmed quality");
                 string? identity = f.Output.Identity;

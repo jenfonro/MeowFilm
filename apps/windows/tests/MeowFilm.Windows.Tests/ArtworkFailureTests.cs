@@ -1,12 +1,11 @@
-using System.Runtime.ExceptionServices;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Automation.Peers;
-using System.Windows.Controls;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Dispatching;
+using MeowFilm.Desktop;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Windows.Tests;
@@ -32,7 +31,7 @@ public static class ArtworkFailureTests
             var image = new FakeLease();
             loader.Next.TrySetResult(image);
             using var presentation = await preparation.WaitAsync(TimeSpan.FromSeconds(5));
-            Check(ReferenceEquals(image.Image, view.Source));
+            Check(ReferenceEquals(image.Image.GetSource(DispatcherQueue.GetForCurrentThread()), view.Source));
             Check(receipts.SequenceEqual(new[] { ("https://art.example.test/first", false), ("https://art.example.test/second", true) }));
             presentation.Dispose();
             Check(image.Disposed && view.Source is null);
@@ -52,12 +51,12 @@ public static class ArtworkFailureTests
 
                 var status = FailureStatus(view);
                 Check(view.Source is null && view.Children.OfType<Image>().Single().Source is null);
-                Check(note.IsVisible);
+                Check(DesktopVisual.IsVisible(note));
                 Check(view.Background is null || view.Background is SolidColorBrush brush && brush.Color.A == 0,
                     "Failed artwork must keep the underlying note visible");
-                Check(!view.Children.OfType<TextBlock>().Any(text => text.IsVisible),
+                Check(!view.Children.OfType<TextBlock>().Any(text => DesktopVisual.IsVisible(text)),
                     "Failure status must not add text over the small cover");
-                Check(view.InputHitTest(new Point(30, 30)) is not null, "The failure tooltip must be reachable");
+                Check(VisualTreeHelper.FindElementsInHostCoordinates(view.TransformToVisual(null).TransformPoint(new Point(30, 30)), view).Any(), "The failure tooltip must be reachable");
                 Equal(Visibility.Collapsed, Retry(view).Visibility);
                 foreach (bool show in new[] { false, true, false, true })
                 {
@@ -98,11 +97,12 @@ public static class ArtworkFailureTests
                     Equal(status, FailureStatus(view)); Equal(1, loader.Calls.Count);
                 }
 
-                var click = new RoutedEventArgs(Button.ClickEvent); Retry(view).RaiseEvent(click);
-                Check(click.Handled); Equal(2, loader.Calls.Count);
+                DesktopTestUi.Invoke(Retry(view));
+                await Tick();
+                Equal(2, loader.Calls.Count);
                 CheckNoError(view); Equal(Visibility.Collapsed, Retry(view).Visibility);
                 var lease = new FakeLease(); loader.Calls[1].Completion.SetResult(lease); await Tick();
-                Check(ReferenceEquals(lease.Image, view.Source));
+                Check(ReferenceEquals(lease.Image.GetSource(DispatcherQueue.GetForCurrentThread()), view.Source));
                 CheckNoError(view); Equal(Visibility.Collapsed, Retry(view).Visibility);
                 Layout(host); await Tick(); Equal(2, loader.Calls.Count);
                 host.Children.Remove(view); await Tick(); Check(lease.Disposed);
@@ -128,7 +128,7 @@ public static class ArtworkFailureTests
                 }
                 view.Address = "https://art.example.test/recovered"; Equal(2, loader.Calls.Count);
                 var lease = new FakeLease(); loader.Calls[1].Completion.SetResult(lease); await Tick();
-                Check(ReferenceEquals(lease.Image, view.Source)); CheckNoError(view);
+                Check(ReferenceEquals(lease.Image.GetSource(DispatcherQueue.GetForCurrentThread()), view.Source)); CheckNoError(view);
                 Equal(Visibility.Collapsed, Retry(view).Visibility);
                 host.Children.Remove(view); await Tick(); Check(lease.Disposed);
             }));
@@ -152,7 +152,7 @@ public static class ArtworkFailureTests
                 Equal(replaceScope ? 1 : 2, second.Calls.Count);
                 CheckNoError(view); Equal(Visibility.Collapsed, Retry(view).Visibility);
                 var lease = new FakeLease(); second.Calls[^1].Completion.SetResult(lease); await Tick();
-                Check(ReferenceEquals(lease.Image, view.Source)); CheckNoError(view);
+                Check(ReferenceEquals(lease.Image.GetSource(DispatcherQueue.GetForCurrentThread()), view.Source)); CheckNoError(view);
                 Equal(Visibility.Collapsed, Retry(view).Visibility);
                 host.Children.Remove(view); await Tick(); Check(lease.Disposed); CheckNoError(view);
             }));
@@ -241,68 +241,36 @@ public static class ArtworkFailureTests
     private sealed class FakeLease : IArtworkLease
     {
         internal bool Disposed;
-        public BitmapSource Image { get; }
+        public ArtworkPixels Image { get; }
         internal FakeLease()
         {
-            Image = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgra32, null, new byte[] { 100, 200, 250, 255 }, 4);
-            Image.Freeze();
+            Image = new(1, 1, new byte[] { 100, 200, 250, 255 });
         }
         public void Dispose() => Disposed = true;
     }
     private static Button Retry(ArtworkImage view) => view.Children.OfType<Button>().Single();
     private static string FailureStatus(ArtworkImage view)
     {
-        if (view.ToolTip is not string status || string.IsNullOrWhiteSpace(status))
+        if (ToolTipService.GetToolTip(view) is not string status || string.IsNullOrWhiteSpace(status))
             throw new InvalidOperationException("Expected a brief artwork failure tooltip");
         Equal(status, AutomationProperties.GetHelpText(view));
-        Equal(status, UIElementAutomationPeer.CreatePeerForElement(view)!.GetHelpText());
+        Equal(status, FrameworkElementAutomationPeer.CreatePeerForElement(view)!.GetHelpText());
         return status;
     }
     private static void CheckNoError(ArtworkImage view)
     {
-        Check(view.ToolTip is null, "The previous artwork tooltip must be cleared");
+        Check(ToolTipService.GetToolTip(view) is null, "The previous artwork tooltip must be cleared");
         Equal("", AutomationProperties.GetHelpText(view));
-        Equal("", UIElementAutomationPeer.CreatePeerForElement(view)!.GetHelpText());
+        Equal("", FrameworkElementAutomationPeer.CreatePeerForElement(view)!.GetHelpText());
     }
     private static void Layout(FrameworkElement view)
     { view.Measure(new Size(view.Width, view.Height)); view.Arrange(new Rect(0, 0, view.Width, view.Height)); view.UpdateLayout(); }
-    private static HwndSource Mount(FrameworkElement root)
-    {
-        var source = new HwndSource(new HwndSourceParameters("artwork-failure-fixture")
-        {
-            WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x80,
-            PositionX = -32000, PositionY = -32000, Width = (int)root.Width, Height = (int)root.Height
-        });
-        source.RootVisual = root; return source;
-    }
-    private static async Task Tick()
-    { await Dispatcher.Yield(DispatcherPriority.Background); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle); }
+    private static DesktopTestUi.Host Mount(FrameworkElement root) =>
+        new(root, (int)root.Width, (int)root.Height);
+    private static Task Tick() => DesktopTestUi.DrainAsync();
     private static void Check(bool value, string message = "Artwork failure assertion failed")
     { if (!value) throw new InvalidOperationException(message); }
     private static void Equal<T>(T expected, T actual)
     { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Artwork failure expected {expected}, actual {actual}"); }
-    private static async Task Sta(Func<Task> action)
-    {
-        var done = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Dispatcher? dispatcher = null;
-        var thread = new Thread(() =>
-        {
-            var current = Dispatcher.CurrentDispatcher; Volatile.Write(ref dispatcher, current);
-            SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(current));
-            _ = current.BeginInvoke(async () =>
-            {
-                Exception? error = null;
-                try { await action(); } catch (Exception e) { error = e; }
-                finally { done.TrySetResult(error); current.BeginInvokeShutdown(DispatcherPriority.Background); }
-            });
-            try { Dispatcher.Run(); } finally { stopped.TrySetResult(); }
-        }) { IsBackground = true, Name = "artwork-failure-test" };
-        thread.SetApartmentState(ApartmentState.STA); thread.Start();
-        Exception? failure;
-        try { failure = await done.Task.WaitAsync(TimeSpan.FromSeconds(45)); }
-        catch { Volatile.Read(ref dispatcher)?.BeginInvokeShutdown(DispatcherPriority.Send); throw; }
-        await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
-    }
+    private static Task Sta(Func<Task> action) => TestUiHost.InvokeAsync(action);
 }

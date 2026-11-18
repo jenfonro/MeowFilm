@@ -1,7 +1,8 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Media.Animation;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Windows.System;
+using Microsoft.UI.Xaml.Media.Animation;
 
 namespace MeowFilm.Desktop;
 
@@ -67,14 +68,13 @@ public sealed partial class ShellWindow
         _playerDetailOpen = true;
         var generation = ++_playerDetailGeneration;
         PlayerDetailSurface.Visibility = Visibility.Visible;
-        UpdatePlayerDetailChrome();
         ApplyPresentation();
         PlayerDetailSurface.UpdateLayout();
         AnimatePlayerDetail(open: true, generation);
         QueueUi(() =>
         {
             if (generation == _playerDetailGeneration && _playerDetailOpen)
-                PlayerDetailHost.MoveFocus(new(FocusNavigationDirection.First));
+                DesktopVisual.FocusFirst(PlayerDetailHost);
         });
         try
         {
@@ -96,7 +96,6 @@ public sealed partial class ShellWindow
         ++_playerDetailGeneration;
         RetireActivation(ref _playerDetailActivation);
         _playerDetailSource?.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail);
-        UpdatePlayerDetailChrome();
         ApplyPresentation();
         AnimatePlayerDetail(open: false, _playerDetailGeneration);
         return Task.CompletedTask;
@@ -119,14 +118,14 @@ public sealed partial class ShellWindow
         _queueSource = source;
         _queueSession = session;
         _queueOpen = true;
-        PlayerMenuInput.For(this).QueueOpened(() => RunUiAction(CloseQueueAsync));
-        PlayerSurfaceInput.SetQueueOpen(this, true);
+        PlayerMenuInput.For(Root).QueueOpened(() => RunUiAction(CloseQueueAsync));
+        PlayerSurfaceInput.SetQueueOpen(Root, true);
         var generation = ++_queueGeneration;
         QueueDismissSurface.Visibility = Visibility.Visible;
         QueueSurface.Visibility = Visibility.Visible;
         ApplyPresentation();
         AnimateQueue(open: true, generation);
-        QueueUi(() => QueueHost.MoveFocus(new(FocusNavigationDirection.First)));
+        QueueUi(() => DesktopVisual.FocusFirst(QueueHost));
         try
         {
             await source.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, activation.Token);
@@ -144,8 +143,8 @@ public sealed partial class ShellWindow
     {
         if (!_queueOpen && QueueSurface.Visibility != Visibility.Visible) return Task.CompletedTask;
         _queueOpen = false;
-        PlayerMenuInput.For(this).QueueClosed();
-        PlayerSurfaceInput.SetQueueOpen(this, false);
+        PlayerMenuInput.For(Root).QueueClosed();
+        PlayerSurfaceInput.SetQueueOpen(Root, false);
         ++_queueGeneration;
         RetireActivation(ref _queueActivation);
         _queueSource?.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
@@ -175,7 +174,7 @@ public sealed partial class ShellWindow
     private void AnimatePlayerDetail(bool open, long generation)
     {
         var presented = PlayerDetailTransform.Y;
-        PlayerDetailTransform.BeginAnimation(System.Windows.Media.TranslateTransform.YProperty, null);
+        detailMotion?.Stop();
         var height = Math.Max(1, PresentationSurface.ActualHeight);
         var from = Math.Clamp(presented, 0, height);
         if (open && from < 1) from = height;
@@ -187,24 +186,16 @@ public sealed partial class ShellWindow
             return;
         }
         var duration = TimeSpan.FromMilliseconds((open ? 520d : 360d) * Math.Abs(to - from) / height);
-        var animation = new DoubleAnimation(from, to, duration)
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-            FillBehavior = FillBehavior.Stop
-        };
-        animation.Completed += (_, _) => Complete();
-        PlayerDetailTransform.BeginAnimation(System.Windows.Media.TranslateTransform.YProperty, animation,
-            HandoffBehavior.SnapshotAndReplace);
+        detailMotion = Animate(PlayerDetailTransform, "Y", from, to, duration, Complete);
 
         void Complete()
         {
             if (generation != _playerDetailGeneration) return;
-            PlayerDetailTransform.BeginAnimation(System.Windows.Media.TranslateTransform.YProperty, null);
+            detailMotion?.Stop();
             PlayerDetailTransform.Y = to;
             if (!open)
             {
                 PlayerDetailSurface.Visibility = Visibility.Collapsed;
-                UpdatePlayerDetailChrome();
                 PlayerDetailHost.Content = null;
                 _playerDetailSource = null;
                 _playerDetailSession = null;
@@ -215,7 +206,7 @@ public sealed partial class ShellWindow
     private void AnimateQueue(bool open, long generation)
     {
         var presented = QueueTransform.X;
-        QueueTransform.BeginAnimation(System.Windows.Media.TranslateTransform.XProperty, null);
+        queueMotion?.Stop();
         var width = Math.Max(1, QueueSurface.ActualWidth > 0 ? QueueSurface.ActualWidth : QueueSurface.Width);
         var from = Math.Clamp(presented, 0, width + 24);
         if (open && from < 1) from = width + 24;
@@ -227,19 +218,12 @@ public sealed partial class ShellWindow
             return;
         }
         var duration = TimeSpan.FromMilliseconds(open ? 180 : 120);
-        var animation = new DoubleAnimation(from, to, duration)
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-            FillBehavior = FillBehavior.Stop
-        };
-        animation.Completed += (_, _) => Complete();
-        QueueTransform.BeginAnimation(System.Windows.Media.TranslateTransform.XProperty, animation,
-            HandoffBehavior.SnapshotAndReplace);
+        queueMotion = Animate(QueueTransform, "X", from, to, duration, Complete);
 
         void Complete()
         {
             if (generation != _queueGeneration) return;
-            QueueTransform.BeginAnimation(System.Windows.Media.TranslateTransform.XProperty, null);
+            queueMotion?.Stop();
             QueueTransform.X = to;
             if (!open)
             {
@@ -253,13 +237,8 @@ public sealed partial class ShellWindow
 
     private void OnQueueDismissClick(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
         RunUiAction(CloseQueueAsync);
     }
-
-    private void OnQueueHostSizeChanged(object sender, SizeChangedEventArgs e) =>
-        QueueHost.Clip = new System.Windows.Media.RectangleGeometry(
-            new Rect(new Point(), e.NewSize), 11, 11);
 
     private static void RetireActivation(ref CancellationTokenSource? source)
     {
@@ -279,8 +258,8 @@ public sealed partial class ShellWindow
     {
         _playerDetailOpen = false;
         _queueOpen = false;
-        PlayerMenuInput.For(this).QueueClosed();
-        PlayerSurfaceInput.SetQueueOpen(this, false);
+        PlayerMenuInput.For(Root).QueueClosed();
+        PlayerSurfaceInput.SetQueueOpen(Root, false);
         RetireActivation(ref _playerDetailActivation);
         RetireActivation(ref _queueActivation);
         _playerDetailSource?.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail);

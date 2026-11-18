@@ -1,10 +1,11 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Windows.System;
 
 namespace MeowFilm.Desktop;
 
-internal partial class CloseWindowDialog : UserControl
+public partial class CloseWindowDialog : UserControl
 {
     internal event Action<WindowCloseBehavior>? ChoiceRequested;
     internal event Action? CancelRequested;
@@ -19,30 +20,35 @@ internal partial class CloseWindowDialog : UserControl
         RememberChoice.IsChecked = false;
         SetPending(false);
         Visibility = Visibility.Visible;
-        CancelChoice.Focus();
+        CancelChoice.Focus(FocusState.Programmatic);
     }
 
     internal void SetPending(bool pending)
     {
         IsPending = pending;
-        RememberChoice.IsEnabled = Choices.IsEnabled = DismissButton.IsEnabled = !pending;
+        RememberChoice.IsEnabled = DismissButton.IsEnabled = !pending;
+        foreach (var choice in Choices.Children.OfType<Control>()) choice.IsEnabled = !pending;
     }
 
     private void OnChoiceClick(object sender, RoutedEventArgs e)
     {
-        if (!IsPending && sender is Button { Tag: WindowCloseBehavior behavior })
+        if (!IsPending && sender is Button { Tag: string choice } && Enum.TryParse<WindowCloseBehavior>(choice, out var behavior))
             ChoiceRequested?.Invoke(behavior);
     }
 
-    private void OnCancelClick(object sender, RoutedEventArgs e)
+    private void OnCancelClick(object sender, RoutedEventArgs e) => TryCancel();
+
+    internal bool TryCancel()
     {
-        if (!IsPending) CancelRequested?.Invoke();
+        if (!IsOpen || IsPending) return false;
+        CancelRequested?.Invoke();
+        return true;
     }
 
-    private void OnPreviewKeyDown(object sender, KeyEventArgs e)
+    private void OnPreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key != Key.Escape || e.KeyboardDevice.Modifiers != ModifierKeys.None) return;
+        if (e.Key != VirtualKey.Escape || DesktopVisual.Modifiers != VirtualKeyModifiers.None) return;
         e.Handled = true;
-        if (!IsPending) CancelRequested?.Invoke();
+        TryCancel();
     }
 }

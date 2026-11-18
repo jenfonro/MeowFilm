@@ -5,7 +5,7 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Capabilities;
 
 internal sealed record FilmPreferences(string[] RuleOrder, string[] PanOrder, string[] Keywords,
-    string[] SiteCleanKeywords, bool IosAutoPrepare)
+    string[] SiteCleanKeywords, bool IosAutoPrepare, string MetadataViewProvider = "tmdb")
 {
     private JsonElement Original { get; init; }
     internal static FilmPreferences Defaults => new(["quality", "pan", "keyword"],
@@ -19,8 +19,10 @@ internal sealed record FilmPreferences(string[] RuleOrder, string[] PanOrder, st
             return FilmJson.Array(value, name).Where(row => row.ValueKind == JsonValueKind.String)
                 .Select(row => row.GetString()!).ToArray();
         }
+        string provider = FilmJson.RequiredText(value, "metadataViewProvider");
+        if (provider is not ("tmdb" or "douban")) throw new FilmPlaybackException("INVALID_RESPONSE");
         return new(Values("ruleOrder"), Values("panOrder"), Values("keywords"),
-            Values("siteCleanKeywords"), FilmJson.Bool(value, "iosAutoPrepare")) { Original = value.Clone() };
+            Values("siteCleanKeywords"), FilmJson.Bool(value, "iosAutoPrepare"), provider) { Original = value.Clone() };
     }
 
     internal JsonElement Wire(string? field)
@@ -29,7 +31,7 @@ internal sealed record FilmPreferences(string[] RuleOrder, string[] PanOrder, st
         var before = Original.ValueKind == JsonValueKind.Undefined ? default : FilmJson.Encode(Read(Original));
         var next = Original.ValueKind == JsonValueKind.Undefined ? edited : Original;
         // Detect edits before normalization so untouched raw fields retain their original shape.
-        foreach (string name in new[] { "ruleOrder", "panOrder", "keywords", "siteCleanKeywords", "iosAutoPrepare" })
+        foreach (string name in new[] { "ruleOrder", "panOrder", "keywords", "siteCleanKeywords", "iosAutoPrepare", "metadataViewProvider" })
         {
             var value = FilmJson.Member(edited, name);
             if (field is not null ? name != field :
@@ -44,6 +46,12 @@ internal sealed record FilmPreferences(string[] RuleOrder, string[] PanOrder, st
     private static JsonElement Normalize(string field, JsonElement value)
     {
         if (field == "iosAutoPrepare") return value;
+        if (field == "metadataViewProvider")
+        {
+            if (value.ValueKind != JsonValueKind.String || value.GetString() is not ("tmdb" or "douban"))
+                throw new FilmPlaybackException("INVALID_PREFERENCES");
+            return value;
+        }
         if (value.ValueKind != JsonValueKind.Array || value.EnumerateArray().Any(item => item.ValueKind != JsonValueKind.String))
             throw new FilmPlaybackException("INVALID_PREFERENCES");
         var items = value.EnumerateArray().Select(item => item.GetString()!.Trim(InputWhitespace)).ToArray();

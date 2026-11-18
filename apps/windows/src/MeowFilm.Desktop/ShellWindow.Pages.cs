@@ -1,5 +1,5 @@
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Desktop;
 
@@ -30,7 +30,7 @@ public sealed partial class ShellWindow
 
     private void OnPublicPageSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_suppressSelection || _isClosing || !ReferenceEquals(e.Source, PublicNavigationList)) return;
+        if (_suppressSelection || _isClosing || !ReferenceEquals(e.OriginalSource, PublicNavigationList)) return;
         if (PublicNavigationList.SelectedItem is IDesktopPage page)
             RunUiAction(() => ActivatePageAsync(_pages.Single(item => ReferenceEquals(item.Page, page))));
     }

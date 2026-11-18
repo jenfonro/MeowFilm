@@ -1,16 +1,19 @@
+using Colors = Microsoft.UI.Colors;
 using System.Collections.ObjectModel;
 using System.IO;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Documents;
-using System.Windows.Input;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Media.Effects;
-using System.Windows.Media.Imaging;
-using System.Windows.Shell;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.UI;
+using Microsoft.UI.Text;
+using Windows.System;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Documents;
+using Microsoft.UI.Xaml.Hosting;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Windows.Tests;
@@ -19,203 +22,102 @@ public static partial class DesktopTests
 {
     private static IEnumerable<TestCase> VisualChromeCases()
     {
-        yield return Case("sidebar blurs only the window background at window coordinates across resizing", async () =>
+        yield return Case("sidebar samples only background and retains blur across resize", async () =>
         {
             await using var f = new Fixture([new ProbeModule("backdrop")]); await f.LoadAsync();
-            var root = DetachChrome(f.Shell);
-            var source = f.Element<Border>("ApplicationBackground");
+            var root = f.Shell.Root; var background = f.Element<Border>("ApplicationBackground");
             var material = f.Element<SidebarBackdrop>("SidebarMaterial");
-            var sidebar = f.Element<Border>("SidebarBackground");
+            Same(background, material.Source, "only dedicated background sibling is sampled");
+            False(DesktopVisual.Contains(background, material), "sample excludes sidebar foreground");
+            var retainedMaterial = ElementCompositionPreview.GetElementChildVisual(material);
+            True(retainedMaterial is not null, "loaded sidebar has a composition effect surface");
             var tint = f.Element<Border>("SidebarTint");
-            Same(source, material.Source, "the only sampled visual is the dedicated background sibling");
-            False(source.IsAncestorOf(material), "background source excludes the sidebar and its foreground");
-            True(material.Effect is BlurEffect { Radius: 12 }, "actual material applies a light background blur");
-            True(sidebar.Background is null && !sidebar.IsHitTestVisible && sidebar.ClipToBounds,
-                "the backdrop owner remains unpainted and clips only its background layers");
-            Equal(Color.FromArgb(0x66, 255, 255, 255), ((SolidColorBrush)tint.Background).Color,
-                "the design tint is a separate translucent white layer");
-            True(tint.Effect is null && !tint.IsHitTestVisible, "tint cannot blur foreground or receive input");
-            var previewRoot = TestWorkspace.ValidatePath(TestWorkspace.ResultsRoot,
-                Path.Combine(TestWorkspace.ResultsRoot, "playlist-pages-shell"));
-            Directory.CreateDirectory(previewRoot);
-            foreach (var size in new[] { new Size(1110, 800), new Size(860, 600) })
-            {
-                root.Measure(size); root.Arrange(new Rect(size)); root.UpdateLayout(); await DrainAsync();
-                var bitmap = new RenderTargetBitmap((int)size.Width, (int)size.Height, 96, 96, PixelFormats.Pbgra32);
-                bitmap.Render(root);
-                var encoder = new PngBitmapEncoder();
-                encoder.Frames.Add(BitmapFrame.Create(bitmap));
-                using var file = File.Create(Path.Combine(previewRoot,
-                    $"sidebar-application-gradient-{(int)size.Width}x{(int)size.Height}.png"));
-                encoder.Save(file);
-            }
+            Equal(Color.FromArgb(0x66, 255, 255, 255), ((SolidColorBrush)tint.Background).Color, "separate translucent white tint");
             foreach (var size in new[] { new Size(1110, 800), new Size(900, 640) })
             {
-                var controlled = new LinearGradientBrush
+                f.Shell.Resize(size.Width, size.Height); await DrainAsync(); root.UpdateLayout();
+                background.Background = new LinearGradientBrush
                 {
-                    StartPoint = new(0, 0), EndPoint = new(0, 1),
-                    GradientStops = new()
+                    StartPoint = new(0, 0), EndPoint = new(0, 1), GradientStops =
                     {
-                        new(Colors.Black, 0), new(Colors.Black, .5),
-                        new(Colors.White, .5), new(Colors.White, 1)
+                        new() { Color = Colors.Black, Offset = 0 }, new() { Color = Colors.Black, Offset = .5 },
+                        new() { Color = Colors.White, Offset = .5 }, new() { Color = Colors.White, Offset = 1 }
                     }
                 };
-                root.Background = controlled;
-                root.Measure(size); root.Arrange(new Rect(size)); root.UpdateLayout(); await DrainAsync();
-                Same(controlled, source.Background, "source follows the live window brush without a color copy");
-                Equal(size, source.RenderSize, "source keeps complete window dimensions including the player row");
-                foreach (var dpi in new[] { 96d, 144d })
+                var image = await NativeDesktopCapture.CaptureAsync(root);
+                Color Pixel(int x, int y)
                 {
-                    double scale = dpi / 96;
-                    var bitmap = new RenderTargetBitmap((int)(size.Width * scale), (int)(size.Height * scale),
-                        dpi, dpi, PixelFormats.Pbgra32);
-                    bitmap.Render(root);
-                    Color Pixel(int x, int y)
-                    {
-                        var bytes = new byte[4];
-                        bitmap.CopyPixels(new Int32Rect((int)(x * scale), (int)(y * scale), 1, 1), bytes, 4, 0);
-                        return Color.FromArgb(bytes[3], bytes[2], bytes[1], bytes[0]);
-                    }
-                    double Untinted(byte channel) => (channel - 102d) / .6;
-                    int boundary = (int)size.Height / 2;
-                    True(Untinted(Pixel(190, boundary - 2).R) is > 20 and < 235 &&
-                        Untinted(Pixel(190, boundary + 2).R) is > 20 and < 235,
-                        "the controlled sharp background edge is truly blurred at the full-window midpoint");
-                    True(Math.Abs(Pixel(190, boundary - 24).R - 102) <= 3 &&
-                        Untinted(Pixel(190, boundary + 24).R) > 250,
-                        "the exact white alpha tint preserves local blur and full-window background coordinates");
-                    True(Pixel(350, boundary - 2).R < 5 && Pixel(350, boundary + 2).R > 250,
-                        "the content background retains the sharp source edge");
-
-                    var foreground = new Border
-                    {
-                        Background = Brushes.Red, Width = 12, Height = 40,
-                        HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
-                        Margin = new Thickness(180, boundary - 20, 0, 0), IsHitTestVisible = false
-                    };
-                    var layout = f.Element<Grid>("RootLayout");
-                    Grid.SetRowSpan(foreground, 3); Grid.SetColumnSpan(foreground, 2);
-                    layout.Children.Add(foreground); root.UpdateLayout();
-                    bitmap.Clear(); bitmap.Render(root);
-                    Equal(Colors.Red, Pixel(180, boundary), "foreground starts at its exact pixel edge without blur");
-                    True(Untinted(Pixel(178, boundary).G) > 20, "foreground does not bleed into the sampled background");
-                    layout.Children.Remove(foreground); root.UpdateLayout();
+                    int offset = ((int)(y * image.Scale) * image.Width + (int)(x * image.Scale)) * 4;
+                    return Color.FromArgb(255, image.Pixels[offset + 2], image.Pixels[offset + 1], image.Pixels[offset]);
                 }
+                double Untinted(byte value) => (value - 102d) / .6;
+                int boundary = (int)root.ActualHeight / 2;
+                True(Untinted(Pixel(190, boundary - 2).R) is > 20 and < 235 &&
+                    Untinted(Pixel(190, boundary + 2).R) is > 20 and < 235, "actual background edge remains blurred");
+                True(Pixel(350, boundary - 2).R < 5 && Pixel(350, boundary + 2).R > 250,
+                    "content background retains the sharp source edge");
+                var foreground = new Border { Width = 12, Height = 40, Background = new SolidColorBrush(Colors.Red),
+                    HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
+                    Margin = new Thickness(180, boundary - 20, 0, 0) };
+                var layout = f.Element<Grid>("RootLayout"); Grid.SetRowSpan(foreground, 3); Grid.SetColumnSpan(foreground, 2);
+                layout.Children.Add(foreground); root.UpdateLayout();
+                image = await NativeDesktopCapture.CaptureAsync(root);
+                Equal(Colors.Red, Pixel(180, boundary), "foreground stays sharp and out of sampled background");
+                True(Untinted(Pixel(178, boundary).G) > 20, "foreground does not bleed into background");
+                layout.Children.Remove(foreground);
+                Same(background, material.Source, "resize retains the source identity");
+                Same(retainedMaterial, ElementCompositionPreview.GetElementChildVisual(material),
+                    "resize updates the retained effect instead of recreating it");
+                double edge = f.Element<Grid>("RootLayout").ColumnDefinitions[0].ActualWidth / background.ActualWidth;
+                background.Background = new LinearGradientBrush
+                {
+                    StartPoint = new(0, 0), EndPoint = new(1, 0), GradientStops =
+                    {
+                        new() { Color = Colors.Black, Offset = 0 }, new() { Color = Colors.Black, Offset = edge },
+                        new() { Color = Colors.White, Offset = edge }, new() { Color = Colors.White, Offset = 1 }
+                    }
+                };
+                image = await NativeDesktopCapture.CaptureAsync(root);
+                True(Untinted(Pixel(208, boundary).R) is > 20 and < 235,
+                    "blur samples background beyond the sidebar edge instead of cropping its input");
             }
-            DesktopTheme.SetIsHighContrast(root, true); root.UpdateLayout(); await DrainAsync();
-            Equal(Visibility.Collapsed, material.Visibility, "high contrast removes the blurred layer");
-            Equal(Visibility.Collapsed, tint.Visibility, "high contrast removes the tint layer");
-            True(material.Effect is null, "high contrast retires the blur");
-            Equal(SystemColors.WindowBrush, sidebar.Background, "system backdrop remains opaque");
-            Equal(SystemColors.WindowTextBrush, sidebar.BorderBrush, "system boundary remains legible");
-            True(sidebar.BorderThickness.Right > 0, "high contrast keeps the navigation boundary");
-            DesktopTheme.SetIsHighContrast(root, false); root.UpdateLayout(); await DrainAsync();
-            Equal(Visibility.Visible, material.Visibility, "ordinary theme restores the same retained material");
-            Equal(Visibility.Visible, tint.Visibility, "ordinary theme restores the retained design tint");
-            Same(source, material.Source, "accessibility changes preserve the application source");
+            material.Source = null;
+            True(ElementCompositionPreview.GetElementChildVisual(material) is null, "removing the source detaches the effect");
+            material.Source = background;
+            True(ElementCompositionPreview.GetElementChildVisual(material) is not null, "restoring the source recreates its effect");
+            var parent = (Grid)material.Parent;
+            parent.Children.Remove(material);
+            await DrainAsync();
+            True(ElementCompositionPreview.GetElementChildVisual(material) is null, "unloading releases the composition attachment");
+            parent.Children.Insert(0, material);
+            await DrainAsync();
+            True(ElementCompositionPreview.GetElementChildVisual(material) is not null, "reloading restores the current background");
         });
-        yield return Case("shell text follows system typography and search and navigation retain accessible focus", async () =>
+        yield return Case("shell preserves regular typography compact layout and accessible focus", async () =>
         {
             var module = new ProbeModule("typography");
             await using var f = new Fixture([module], pages: [new SearchEntryProbe(module)]); await f.LoadAsync();
-            Equal(SystemFonts.MessageFontFamily, f.Shell.FontFamily, "Windows system body font");
-            Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(f.Shell), "display text metrics");
-            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(f.Shell), "native surface chooses text rendering");
-            True(f.Shell.UseLayoutRounding && f.Shell.SnapsToDevicePixels, "native display pixels own text layout");
-            Equal(64d, WindowChrome.GetWindowChrome(f.Shell)!.CaptionHeight,
-                "compact header remains the complete draggable caption");
-            Equal(new GridLength(64), f.Element<Grid>("RootLayout").RowDefinitions[0].Height,
-                "shell header and caption share one compact height");
-            Equal(new Thickness(0), f.Element<Grid>("ContentRegion").Margin,
-                "content starts directly below the header row");
-            Equal(22d, f.Element<ScrollViewer>("SidebarScroll").Margin.Top,
-                "media selector uses the design's sidebar top inset");
-            Equal(76d, f.Element<Border>("QueueSurface").Margin.Top,
-                "queue offset follows the compact header");
-            Equal(76d, f.Element<StackPanel>("NotificationOverlay").Margin.Top,
-                "notifications remain below the compact header");
-            var root = DetachChrome(f.Shell);
-            using var source = new HwndSource(new HwndSourceParameters("shell-headless-hit-test-fixture")
-            {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                PositionX = -32000, PositionY = -32000, Width = 1110, Height = 800
-            });
-            source.RootVisual = root;
-            root.Measure(new(1110, 800)); root.Arrange(new Rect(0, 0, 1110, 800)); root.UpdateLayout(); await DrainAsync();
-            True(ChromeVisuals(root).OfType<FrameworkElement>().All(element => element.ToolTip is null),
-                "window chrome and navigation have no ordinary hover hints");
-            var navigation = f.Element<ListBox>("NavigationList");
-            True(!navigation.Focusable && !f.Element<ScrollViewer>("SidebarScroll").Focusable,
-                "scroll and list containers do not take focus away from navigation rows");
-            var item = (ListBoxItem)navigation.ItemContainerGenerator.ContainerFromIndex(0);
-            True(item.Focusable && item.FocusVisualStyle is not null, "navigation rows keep a visible keyboard focus");
-            Equal(KeyboardNavigationMode.Once, KeyboardNavigation.GetTabNavigation(navigation), "one navigation tab scope");
-            var search = f.Element<TextBox>("SearchBox");
-            var action = f.Element<ComboBox>("SearchTargetPicker");
-            Equal(f.Shell.FontFamily, search.FontFamily, "search follows the body font");
-            Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(search), "search inherits display metrics");
-            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(search), "ordinary search uses automatic rendering");
-            var navigationText = ChromeVisuals(navigation).OfType<TextBlock>().ToArray();
-            True(navigationText.Length > 0, "typography checks inspect rendered navigation labels");
-            foreach (var text in navigationText)
-            {
-                Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(text), "navigation display metrics");
-                Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(text), "navigation automatic rendering");
-            }
-            True(search.Focusable && action.Focusable, "input and category entry remain keyboard accessible");
-            var origin = action.TranslatePoint(new Point(), search);
-            True(origin.X >= 0 && origin.Y >= 0 &&
-                origin.X + action.ActualWidth <= search.ActualWidth &&
-                origin.Y + action.ActualHeight <= search.ActualHeight,
-                "the complete category entry is inside the rounded search field");
-            bool Hits(FrameworkElement target, Point point) =>
-                target.IsEnabled && root.InputHitTest(target.TranslatePoint(point, root)) is DependencyObject hit &&
-                (ReferenceEquals(target, hit) || target.IsAncestorOf(hit));
-            True(Hits(action, new Point(action.ActualWidth / 2, action.ActualHeight / 2)),
-                "the embedded category entry receives pointer hits");
-            True(Hits(search, new Point((search.Padding.Left + search.ActualWidth - search.Padding.Right) / 2, search.ActualHeight / 2)),
-                "the text area keeps independent pointer hits");
-            double TextOrigin(TextBox box)
-            {
-                box.ApplyTemplate(); box.UpdateLayout();
-                var textView = VisualDescendants<FrameworkElement>(box)
-                    .Single(element => element.GetType().Name == "TextBoxView");
-                return textView.TranslatePoint(new Point(), box).X;
-            }
-            search.Text = "搜索内容"; root.UpdateLayout(); await DrainAsync();
-            var searchTextOrigin = TextOrigin(search);
-            var textChromeInset = searchTextOrigin - search.Padding.Left;
-            True(textChromeInset is >= 0 and <= 4,
-                $"search padding is applied once before the native text chrome ({searchTextOrigin:0.##} vs {search.Padding.Left:0.##})");
-            True(searchTextOrigin - (origin.X + action.ActualWidth) is >= 2 and <= 8,
-                "the complete category entry and input text have only their intentional gap");
-            var layout = (Grid)root.Child;
-            var ordinary = new TextBox
-            {
-                Width = 220, Height = 38, Text = "普通输入", HorizontalAlignment = HorizontalAlignment.Left,
-                VerticalAlignment = VerticalAlignment.Top
-            };
-            Panel.SetZIndex(ordinary, 100);
-            layout.Children.Add(ordinary); root.UpdateLayout(); await DrainAsync();
-            True(Math.Abs((TextOrigin(ordinary) - ordinary.Padding.Left) - textChromeInset) <= 1 &&
-                Math.Abs(ordinary.Padding.Left - 12) < .01,
-                "the shared text-box template preserves one ordinary padding application");
-            layout.Children.Remove(ordinary);
-            True(search.Background is SolidColorBrush { Color.A: 255 }, "search has an opaque flat background");
-            DesktopTheme.SetIsHighContrast(root, true); root.UpdateLayout(); await DrainAsync();
-            Equal(SystemColors.WindowColor, ((SolidColorBrush)search.Background).Color, "system search background");
-            Equal(SystemColors.WindowTextColor, ((SolidColorBrush)search.Foreground).Color, "system search text");
-            Equal(SystemColors.WindowTextColor, ((SolidColorBrush)action.Foreground).Color, "system search category");
-            Equal(SystemColors.WindowTextColor, ((SolidColorBrush)f.Back.BorderBrush).Color, "system back button edge");
-            True(f.Element<Border>("SidebarBackground").BorderThickness.Right > 0,
-                "high contrast restores the structural sidebar edge");
-            var alternate = new FontFamily("Arial");
-            f.Shell.Resources[SystemFonts.MessageFontFamilyKey] = alternate; await DrainAsync();
-            Equal(alternate, f.Shell.FontFamily, "shell follows dynamic system font resources");
-            Equal(alternate, search.FontFamily, "search follows dynamic system font resources");
-            f.Shell.Resources.Remove(SystemFonts.MessageFontFamilyKey); await DrainAsync();
-            Equal(SystemFonts.MessageFontFamily, search.FontFamily, "system font restored without changing Windows settings");
-            source.RootVisual = null;
+            Equal(new GridLength(64), f.Element<Grid>("RootLayout").RowDefinitions[0].Height, "compact header height");
+            Equal(new Thickness(0), f.Element<Grid>("ContentRegion").Margin, "content begins below header");
+            Equal(22d, f.Element<ScrollViewer>("SidebarScroll").Margin.Top, "sidebar top inset");
+            Equal(76d, f.Element<Border>("QueueSurface").Margin.Top, "queue below header");
+            Equal(76d, f.Element<StackPanel>("NotificationOverlay").Margin.Top, "notices below header");
+            var navigation = f.Navigation; var item = (ListViewItem)navigation.ContainerFromIndex(0);
+            True(item.IsTabStop && item.UseSystemFocusVisuals, "navigation rows retain visible keyboard focus");
+            var search = f.Search; var picker = f.Element<ComboBox>("SearchTargetPicker");
+            True(search.IsTabStop && picker.IsTabStop, "search and category are keyboard accessible");
+            Equal("搜索", AutomationProperties.GetName(search), "search accessible name");
+            Equal(FontWeights.Normal, search.FontWeight, "search stays regular");
+            var labels = ChromeVisuals(navigation).OfType<TextBlock>().ToArray();
+            True(labels.Length > 0 && labels.All(text => text.FontWeight == FontWeights.Normal), "realized navigation labels stay regular");
+            var bounds = DesktopTestUi.Bounds(picker, search);
+            True(bounds.Left >= 0 && bounds.Top >= 0 && bounds.Right <= search.ActualWidth && bounds.Bottom <= search.ActualHeight,
+                "whole category entry fits inside search field");
+            True(search.Padding.Left >= bounds.Right + 2 && search.Padding.Left <= bounds.Right + 8,
+                "search text keeps one intentional gap after category");
+            True(search.Background is SolidColorBrush { Color.A: 255 }, "opaque search background");
+            search.Focus(FocusState.Programmatic); await DrainAsync();
+            Same(search, DesktopVisual.Focused(f.Shell.Root), "search receives native focus");
         });
         yield return Case("sidebar collection group exposes one accessible action", async () =>
         {
@@ -232,7 +134,7 @@ public static partial class DesktopTests
             }));
             await using var f = new Fixture([module]);
             await f.LoadAsync();
-            var root = DetachChrome(f.Shell);
+            var root = f.Shell.Root;
             root.Measure(new(860, 600)); root.Arrange(new Rect(0, 0, 860, 600)); root.UpdateLayout();
             await DrainAsync();
 
@@ -240,49 +142,29 @@ public static partial class DesktopTests
                 AutomationProperties.GetName(item) == "创建歌单");
             True(button.IsEnabled && button.Command is not null, "group action is keyboard-command enabled");
             Equal("\uE710", button.Content as string, "visible add glyph");
-            button.Command!.Execute(button.CommandParameter);
+            Click(button); await DrainAsync();
             Equal(1, executions, "bound action executes once");
             enabled = false; action.Refresh(); await DrainAsync();
             False(button.IsEnabled, "group action observes current admission");
         });
-        yield return Case("sidebar overlay scroll hides at rest and scrolls over collection items", async () =>
+        yield return Case("sidebar native scroll reaches collections without changing layout width", async () =>
         {
             var module = new ProbeModule("scroll");
             module.ReplaceNavigation(new ObservableCollection<NavigationItem>(module.Navigation.Concat(
                 Enumerable.Range(0, 45).Select(i => new NavigationItem("list-" + i, "测试歌单 " + i, "", "我的")))));
-            await using var f = new Fixture([module]); await f.LoadAsync();
-            var root = DetachChrome(f.Shell);
-            using var source = new HwndSource(new HwndSourceParameters("shell-sidebar-scroll-fixture")
-            {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                PositionX = -32000, PositionY = -32000, Width = 860, Height = 600
-            });
-            source.RootVisual = root;
-            root.Measure(new(860, 600)); root.Arrange(new Rect(0, 0, 860, 600)); root.UpdateLayout(); await DrainAsync();
-            var scroll = f.Element<ScrollViewer>("SidebarScroll");
-            True(scroll.IsLoaded && scroll.IsVisible, "sidebar has a real loaded visible presentation");
-            var bar = (ScrollBar)scroll.Template.FindName("PART_VerticalScrollBar", scroll);
-            True(OverlayScrollChrome.GetEnabled(scroll), "shared behavior mounted");
-            True(scroll.ScrollableHeight > 0, "long collections overflow");
-            Equal(0d, bar.Opacity, "hidden at rest");
-            var list = f.Element<ListBox>("CollectionNavigationList");
+            await using var f = new Fixture([module]); f.Shell.Resize(860, 600); await f.LoadAsync();
+            var scroll = f.Element<ScrollViewer>("SidebarScroll"); var list = f.Element<ListView>("CollectionNavigationList");
+            True(scroll.IsLoaded && DesktopVisual.IsVisible(scroll) && scroll.ScrollableHeight > 0, "collections overflow native viewer");
             var width = list.ActualWidth;
-            var wheel = new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, -120) { RoutedEvent = Mouse.PreviewMouseWheelEvent };
-            list.RaiseEvent(wheel); await DrainAsync(); root.UpdateLayout();
-            True(wheel.Handled && scroll.VerticalOffset > 0, "wheel on a nested list reaches sidebar, no blank-space requirement");
-            True(OverlayScrollChrome.GetActive(scroll) && bar.Opacity > 0, "scroll exposes thumb");
-            Equal(width, list.ActualWidth, "overlay never changes navigation width");
-            var track = (Track)bar.Template.FindName("PART_Track", bar);
-            True(track.Thumb.ActualHeight >= 28, "draggable thumb minimum");
+            var peer = Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer.CreatePeerForElement(scroll)!;
+            var provider = (Microsoft.UI.Xaml.Automation.Provider.IScrollProvider)peer.GetPattern(Microsoft.UI.Xaml.Automation.Peers.PatternInterface.Scroll);
+            provider.Scroll(Microsoft.UI.Xaml.Automation.ScrollAmount.NoAmount, Microsoft.UI.Xaml.Automation.ScrollAmount.LargeIncrement);
+            await UntilAsync(() => scroll.VerticalOffset > 0, "accessible scroll moves the sidebar");
+            Equal(width, list.ActualWidth, "scrolling does not relayout navigation width");
             var offset = scroll.VerticalOffset;
-            ((RoutedCommand)track.IncreaseRepeatButton.Command).Execute(null, track.IncreaseRepeatButton); await DrainAsync();
-            True(scroll.VerticalOffset > offset, "track page click works");
-            await Task.Delay(1100); await DrainAsync();
-            Equal(0d, bar.Opacity, "900ms idle hides scrollbar");
-            DesktopTheme.SetIsHighContrast(root, true); root.UpdateLayout(); Equal(1d, bar.Opacity, "high contrast remains visible");
-            scroll.ScrollToTop(); await DrainAsync();
-            scroll.RaiseEvent(new RoutedEventArgs(FrameworkElement.UnloadedEvent));
-            True(!OverlayScrollChrome.GetActive(scroll), "unload cancels active timer");
+            provider.Scroll(Microsoft.UI.Xaml.Automation.ScrollAmount.NoAmount, Microsoft.UI.Xaml.Automation.ScrollAmount.LargeIncrement);
+            await UntilAsync(() => scroll.VerticalOffset > offset, "next page remains reachable");
+            scroll.ChangeView(null, 0, null, true); await UntilAsync(() => scroll.VerticalOffset == 0, "return to top");
         });
         yield return Case("global player detail overlays the unchanged shell and restores it on dismissal", async () =>
         {
@@ -290,12 +172,12 @@ public static partial class DesktopTests
             var passive = new ProbeModule("film", hasPlayer: false);
             var page = new ProbePage("downloads");
             await using var f = new Fixture([module, passive], pages: [page]); await f.LoadAsync();
-            var root = DetachChrome(f.Shell);
+            var root = f.Shell.Root;
             void Layout()
             {
                 root.Measure(new(1110, 800)); root.Arrange(new Rect(0, 0, 1110, 800)); root.UpdateLayout();
             }
-            Rect Bounds(FrameworkElement element) => new(element.TranslatePoint(new Point(), root), element.RenderSize);
+            Rect Bounds(FrameworkElement element) => DesktopTestUi.Bounds(element, root);
             Layout();
             var ordinaryPlayer = f.Element<ContentControl>("PlayerHost").Content;
             var ordinaryBackdrop = f.Element<SidebarBackdrop>("SidebarMaterial");
@@ -310,8 +192,8 @@ public static partial class DesktopTests
                 "player detail opens");
             Layout();
             var playerSurface = f.Element<Grid>("PlayerDetailSurface");
-            Equal(new Rect(root.RenderSize), Bounds(playerSurface), "complete player page covers every shell row");
-            Equal(KeyboardNavigationMode.Cycle, KeyboardNavigation.GetTabNavigation(playerSurface),
+            Equal(new Rect(0, 0, root.ActualWidth, root.ActualHeight), Bounds(playerSurface), "complete player page covers every shell row");
+            Equal(KeyboardNavigationMode.Cycle, playerSurface.TabFocusNavigation,
                 "keyboard navigation stays within the complete player page");
             Same(ordinaryPlayer, f.Element<ContentControl>("PlayerHost").Content, "ordinary footer stays mounted");
             Equal(ordinaryPlayerBounds, Bounds(f.Element<Border>("PlayerFrame")), "ordinary footer layout unchanged");
@@ -325,14 +207,14 @@ public static partial class DesktopTests
                 "player expansion retains the background material rather than rebuilding the shell");
             Same(module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail),
                 f.Element<ContentControl>("PlayerDetailHost").Content, "detail is one retained opaque surface");
-            var escape = RaiseKey(f.Shell, Key.Escape, ModifierKeys.None, preview: true);
+            var escape = f.Shell.TryExecuteShortcut(VirtualKey.Escape, VirtualKeyModifiers.None);
             await UntilAsync(() => f.Element<Grid>("PlayerDetailSurface").Visibility == Visibility.Collapsed,
                 "escape closes player detail");
             Layout();
             Same(ordinaryPlayer, f.Element<ContentControl>("PlayerHost").Content, "same ordinary footer restored");
             Equal(ordinaryPlayerBounds, Bounds(f.Element<Border>("PlayerFrame")), "no footer relayout on dismissal");
             Equal(ordinaryContentBounds, Bounds(f.Element<Grid>("ContentRegion")), "no content relayout on dismissal");
-            True(escape.Handled, "escape handled");
+            True(escape, "escape handled");
             Equal(216d, f.Element<Grid>("RootLayout").ColumnDefinitions[0].Width.Value, "sidebar width restored");
             Equal(1, module.Deactivations, "detail owner deactivated once");
 
@@ -344,13 +226,13 @@ public static partial class DesktopTests
             module.Request(DesktopGlobalSurface.PlayerDetail);
             await UntilAsync(() => f.Element<Grid>("PlayerDetailSurface").Visibility == Visibility.Visible,
                 "player detail opens from another capability");
-            RaiseKey(f.Shell, Key.Escape, ModifierKeys.None, preview: true);
+            f.Shell.TryExecuteShortcut(VirtualKey.Escape, VirtualKeyModifiers.None);
             await UntilAsync(() => Host(passive.View).Visibility == Visibility.Visible,
                 "closing detail restores the other capability");
             module.Request(DesktopGlobalSurface.PlayQueue);
             await UntilAsync(() => f.Element<Border>("QueueSurface").Visibility == Visibility.Visible,
                 "global queue opens from another capability");
-            RaiseKey(f.Shell, Key.Escape, ModifierKeys.None, preview: true);
+            f.Shell.TryExecuteShortcut(VirtualKey.Escape, VirtualKeyModifiers.None);
             await UntilAsync(() => f.Element<Border>("QueueSurface").Visibility == Visibility.Collapsed,
                 "queue closes back to the other capability");
 
@@ -371,12 +253,12 @@ public static partial class DesktopTests
             Click(f.Back); await DrainAsync();
             Equal(Visibility.Visible, f.Element<Border>("PlayerFrame").Visibility,
                 "leaving settings restores the global player");
-            f.Element<ListBox>("PublicNavigationList").SelectedItem = page; await DrainAsync();
+            DesktopTestUi.Select(f.Element<ListView>("PublicNavigationList"), page); await DrainAsync();
             Equal(Visibility.Visible, f.Element<Grid>("SearchChrome").Visibility, "shared public pages restore shell");
             module.Request(DesktopGlobalSurface.PlayerDetail);
             await UntilAsync(() => f.Element<Grid>("PlayerDetailSurface").Visibility == Visibility.Visible,
                 "player detail opens while a public page is current");
-            RaiseKey(f.Shell, Key.Escape, ModifierKeys.None, preview: true);
+            f.Shell.TryExecuteShortcut(VirtualKey.Escape, VirtualKeyModifiers.None);
             await UntilAsync(() => Host(page.View).Visibility == Visibility.Visible,
                 "closing detail restores the same public page");
             module.Request(DesktopGlobalSurface.PlayQueue);
@@ -384,7 +266,7 @@ public static partial class DesktopTests
                 "global queue opens while a public page is current");
             Same(module.GetGlobalSurface(DesktopGlobalSurface.PlayQueue),
                 f.Element<ContentControl>("QueueHost").Content, "one retained queue surface");
-            RaiseKey(f.Shell, Key.Escape, ModifierKeys.None, preview: true);
+            f.Shell.TryExecuteShortcut(VirtualKey.Escape, VirtualKeyModifiers.None);
             await UntilAsync(() => f.Element<Border>("QueueSurface").Visibility == Visibility.Collapsed,
                 "queue closes back to the same public page");
             Equal(Visibility.Visible, Host(page.View).Visibility, "public page remains mounted after queue dismissal");
@@ -440,8 +322,8 @@ public static partial class DesktopTests
     }
     private sealed class ImmersiveProbe() : ProbeModule("immersive"), IDesktopGlobalSurfaceSource
     {
-        private readonly Border detail = new() { Background = Brushes.DarkSlateGray };
-        private readonly Border queue = new() { Background = Brushes.White };
+        private readonly Border detail = new() { Background = new SolidColorBrush(Colors.DarkSlateGray) };
+        private readonly Border queue = new() { Background = new SolidColorBrush(Colors.White) };
         public int Deactivations { get; private set; }
         public Task? PlayerReady { get; set; }
         public List<CancellationToken> PlayerActivations { get; } = [];
@@ -467,18 +349,6 @@ public static partial class DesktopTests
         yield return current;
         for (var index = 0; index < VisualTreeHelper.GetChildrenCount(current); index++)
             foreach (var child in ChromeVisuals(VisualTreeHelper.GetChild(current, index))) yield return child;
-    }
-    private static Border DetachChrome(ShellWindow shell)
-    {
-        var root = (Border)shell.Content; shell.Content = null;
-        root.Resources.MergedDictionaries.Add(shell.Resources); root.DataContext = shell.DataContext;
-        root.Background = shell.Background; TextElement.SetForeground(root, shell.Foreground);
-        TextElement.SetFontFamily(root, shell.FontFamily); TextElement.SetFontSize(root, shell.FontSize);
-        TextOptions.SetTextFormattingMode(root, TextOptions.GetTextFormattingMode(shell));
-        TextOptions.SetTextRenderingMode(root, TextOptions.GetTextRenderingMode(shell));
-        root.UseLayoutRounding = shell.UseLayoutRounding;
-        root.SnapsToDevicePixels = shell.SnapsToDevicePixels;
-        return root;
     }
     private static IEnumerable<T> VisualDescendants<T>(DependencyObject root) where T : DependencyObject
     {

@@ -1,7 +1,12 @@
+using SystemParameters = System.Windows.SystemParameters;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media.Imaging;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
@@ -618,7 +623,7 @@ public static partial class MusicCatalogPersonalTests
         Equal(0, Calls(f, "music.catalog.daily"));
         using var mount = new HomeNoticeMount(f.Module.View);
         await Drain();
-        Check(Visuals<EntryCard>(f.Module.View).Where(view => view.IsVisible).Select(view => view.DataContext)
+        Check(Visuals<EntryCard>(f.Module.View).Where(view => DesktopVisual.IsVisible(view)).Select(view => view.DataContext)
             .SequenceEqual(f.Module.HomeSections.Single().Items.Cast<object>(), ReferenceEqualityComparer.Instance),
             "actual home entry cards bind only the ordered display projection");
         f.App.Authenticated = true; f.App.AccountGeneration++;
@@ -627,7 +632,7 @@ public static partial class MusicCatalogPersonalTests
         await f.Module.RefreshCatalogAsync().WaitAsync(HomeGuard);
         Equal("每日推荐,风格推荐,心动模式,私人漫游,暂不可用", HomeTitles(f));
         await Drain();
-        Equal(5, Visuals<EntryCard>(f.Module.View).Count(view => view.IsVisible));
+        Equal(5, Visuals<EntryCard>(f.Module.View).Count(view => DesktopVisual.IsVisible(view)));
         AssertNoHomeCommit(f);
     }
 
@@ -648,7 +653,7 @@ public static partial class MusicCatalogPersonalTests
             "snapshot retains producer account declarations without restoring their display authority");
         using var mount = new HomeNoticeMount(f.Module.View);
         await Drain();
-        Check(Visuals<EntryCard>(f.Module.View).Where(view => view.IsVisible)
+        Check(Visuals<EntryCard>(f.Module.View).Where(view => DesktopVisual.IsVisible(view))
             .All(view => view.DataContext is MusicCatalogCard { RequiresAccount: false }),
             "anonymous restored home renders no old private entry");
         home.Release();
@@ -974,10 +979,8 @@ public static partial class MusicCatalogPersonalTests
         public List<string> Messages { get; } = [];
         public HomeNoticeMount(FrameworkElement view)
         {
-            window = new() { Content = view, Width = 900, Height = 720, Left = -10000, Top = -10000,
-                ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None };
-            window.AddHandler(NoticeOutlet.NoticeEvent,
-                new EventHandler<DesktopNoticeEventArgs>((_, notice) => Messages.Add(notice.Message)));
+            window = DesktopTestUi.CreateWindow(view, 900, 720);
+            NoticeOutlet.SetReceiver(DesktopTestUi.WindowRoot(window), notice => Messages.Add(notice.Message));
             window.Show();
         }
         public void Dispose() { window.Content = null; window.Close(); }

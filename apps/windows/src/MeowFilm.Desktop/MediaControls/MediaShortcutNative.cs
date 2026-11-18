@@ -1,15 +1,23 @@
 using System.Runtime.InteropServices;
-using System.Windows;
-using System.Windows.Input;
+using Microsoft.UI.Input;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Input;
 
 namespace MeowFilm.Desktop;
 
 internal class MediaShortcutNative
 {
     internal const int HotKeyMessage = 0x0312;
+    internal const uint DestroyMessage = 0x0082;
     internal const uint NoRepeat = 0x4000;
     internal static readonly int RetirementMessage =
         unchecked((int)RegisterWindowMessageW("MeowFilm.Desktop.MediaShortcut.RetireRegistration"));
+
+    internal delegate nint Subclass(nint hwnd, uint message, nuint wParam, nint lParam, nuint id, nuint data);
+    internal static bool Attach(nint hwnd, Subclass callback, nuint id) => SetWindowSubclass(hwnd, callback, id, 0);
+    internal static bool Detach(nint hwnd, Subclass callback, nuint id) => RemoveWindowSubclass(hwnd, callback, id);
+    internal static nint Continue(nint hwnd, uint message, nuint wParam, nint lParam) =>
+        DefSubclassProc(hwnd, message, wParam, lParam);
 
     public virtual (int Id, int Error) AllocateId()
     {
@@ -36,15 +44,20 @@ internal class MediaShortcutNative
         RetirementMessage != 0 && PostMessageW(hwnd, RetirementMessage, id, 0);
 
     public virtual nint ForegroundWindow => GetForegroundWindow();
-    public virtual IInputElement? FocusedElement => Keyboard.FocusedElement;
+    public virtual DependencyObject? FocusedElement(FrameworkElement root) => root.XamlRoot is { } xamlRoot
+        ? FocusManager.GetFocusedElement(xamlRoot) as DependencyObject : null;
     public virtual bool OwnsWindow(nint window, nint candidate) =>
         candidate != 0 && (candidate == window || GetAncestor(candidate, 3) == window);
 
-    public virtual bool HasMenuOrChildFocus(nint window)
+    public virtual bool HasMenuOrChildFocus(nint window, FrameworkElement root)
     {
         var info = new GuiThreadInfo { Size = (uint)Marshal.SizeOf<GuiThreadInfo>() };
+        // WinUI normally focuses its content island's child HWND. Only foreign
+        // child focus (or a native menu) is outside that root's input ownership.
         return GetGUIThreadInfo(0, ref info) &&
-            ((info.Flags & 0x1c) != 0 || info.Focus != 0 && info.Focus != window);
+            ((info.Flags & 0x1c) != 0 || info.Focus != 0 && info.Focus != window &&
+                (root.XamlRoot is not { } xamlRoot ||
+                 !InputFocusController.GetForIsland(xamlRoot.ContentIsland).HasFocus));
     }
 
     internal static string RegistrationError(int error) => error switch
@@ -87,4 +100,12 @@ internal class MediaShortcutNative
     [DllImport("user32.dll", ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);
+    [DllImport("comctl32.dll", ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowSubclass(nint hwnd, Subclass callback, nuint id, nuint data);
+    [DllImport("comctl32.dll", ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool RemoveWindowSubclass(nint hwnd, Subclass callback, nuint id);
+    [DllImport("comctl32.dll", ExactSpelling = true)]
+    private static extern nint DefSubclassProc(nint hwnd, uint message, nuint wParam, nint lParam);
 }

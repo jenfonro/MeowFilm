@@ -13,17 +13,3 @@ internal sealed record FilmMetadataCache(string Status, string ErrorCode, JsonEl
             components.ValueKind == JsonValueKind.Object ? components.Clone() : default);
     }
 }
-
-internal sealed record FilmMetadataSupplement(string MetadataId, string Kind, JsonElement Metadata)
-{
-    internal static FilmMetadataSupplement? Read(JsonElement value)
-    {
-        if (value.ValueKind != JsonValueKind.Object) return null;
-        string kind = FilmJson.Text(value, "kind");
-        var metadata = FilmJson.Member(value, "metadata");
-        if (FilmJson.Text(value, "provider") != "tmdb" || kind is not ("movie" or "tv") ||
-            !FilmJson.IsIdentity(FilmJson.Member(value, "metadataId")) || metadata.ValueKind != JsonValueKind.Object)
-            return null;
-        return new(FilmJson.Text(value, "metadataId"), kind, metadata.Clone());
-    }
-}

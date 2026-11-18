@@ -348,7 +348,8 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
 
     private func render() {
         guard isViewLoaded else { return }
-        if gestureIdentity != model.controlIdentity || gesturePreferences != model.playerPreferences {
+        if gestureIdentity != model.controlIdentity ||
+            gesturePreferences?.hasSameGestureSettings(as: model.playerPreferences) != true {
             gestureIdentity = model.controlIdentity
             gesturePreferences = model.playerPreferences
             cancelVideoGestures()

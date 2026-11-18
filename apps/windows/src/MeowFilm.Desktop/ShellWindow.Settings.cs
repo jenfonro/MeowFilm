@@ -1,36 +1,14 @@
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
+using Windows.System;
 
 namespace MeowFilm.Desktop;
 
 public sealed partial class ShellWindow
 {
-    static ShellWindow() => EventManager.RegisterClassHandler(typeof(ContextMenu), ContextMenu.OpenedEvent,
-        new RoutedEventHandler(StyleAutomaticEditorMenu));
-
-    private static void StyleAutomaticEditorMenu(object sender, RoutedEventArgs e)
-    {
-        if (sender is not ContextMenu { PlacementTarget: FrameworkElement editor } menu ||
-            editor is not (TextBoxBase or PasswordBox) || editor.ContextMenu is not null) return;
-        var owner = Window.GetWindow(editor);
-        while (owner is not null && owner is not ShellWindow) owner = owner.Owner;
-        if (owner is not ShellWindow shell) return;
-        menu.SetCurrentValue(StyleProperty, shell.FindResource("MeowFilm.ContextMenu"));
-        // WPF's EditorMenuItem/SpellingMenuItem are private derived types, so the
-        // MenuItem implicit key is insufficient. Keep every generated action and target.
-        ApplyItems(menu);
-        void ApplyItems(ItemsControl parent)
-        {
-            foreach (var item in parent.Items.OfType<MenuItem>())
-            {
-                item.SetCurrentValue(StyleProperty, shell.FindResource("MeowFilm.MenuItem"));
-                ApplyItems(item);
-            }
-        }
-    }
     private readonly ContentControl _generalSettingsHost = new()
     {
         Visibility = Visibility.Collapsed, HorizontalContentAlignment = HorizontalAlignment.Stretch,
@@ -50,6 +28,7 @@ public sealed partial class ShellWindow
         {
             if (appliedColor == appearance.ThemeColor) return;
             Resources["MeowFilm.Brush.AppBackground"] = AppearanceColors.Background(appearance.ThemeColor);
+            ApplyAccessibilityPresentation();
             AppearanceColors.ApplyFloatingPalette(appearance.ThemeColor);
             appliedColor = appearance.ThemeColor;
         }
@@ -77,7 +56,7 @@ public sealed partial class ShellWindow
             var general = new RadioButton
             {
                 Content = "通用", GroupName = "SettingsArea",
-                Style = (Style)FindResource("MeowFilm.SettingsArea")
+                Style = (Style)DesktopVisual.Resource(Root, "MeowFilm.SettingsArea")
             };
             AutomationProperties.SetName(general, "通用设置");
             general.Checked += (_, _) =>
@@ -86,7 +65,7 @@ public sealed partial class ShellWindow
                 CancelActive();
                 _generalSettingsOpen = true;
                 ApplyPresentation();
-                _generalSettingsHost.MoveFocus(new(FocusNavigationDirection.First));
+                DesktopVisual.FocusFirst(_generalSettingsHost);
             };
             _settingsTabs.Children.Add(general);
         }
@@ -97,7 +76,7 @@ public sealed partial class ShellWindow
                 Content = session.Module.Title,
                 Tag = session,
                 GroupName = "SettingsArea",
-                Style = (Style)FindResource("MeowFilm.SettingsArea")
+                Style = (Style)DesktopVisual.Resource(Root, "MeowFilm.SettingsArea")
             };
             AutomationProperties.SetName(tab, session.Module.Title + "设置");
             tab.Checked += (_, _) =>
@@ -135,6 +114,6 @@ public sealed partial class ShellWindow
         ApplyPresentation();
         if (!target.Initialized) await RunRequestAsync(new(target));
         if (ReferenceEquals(_current, target) && target.IsSettingsOpen)
-            target.SettingsHost.MoveFocus(new(FocusNavigationDirection.First));
+            DesktopVisual.FocusFirst(target.SettingsHost);
     }
 }

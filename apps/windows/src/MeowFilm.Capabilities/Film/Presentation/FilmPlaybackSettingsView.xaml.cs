@@ -3,9 +3,10 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Automation;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Automation;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -29,7 +30,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     private CancellationTokenSource? read;
     private Task? reading;
     private Task<bool>? mutation;
-    private Window? editor;
+    private ContentDialog? editor;
     private string section = "preferences";
     private long generation;
     private bool readBusy, libraryBusy, mutating, stopping;
@@ -66,7 +67,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     {
         SelectSection(value);
         if (stopping) return;
-        if (preferences is null && IsLoaded && IsVisible) await LoadAsync();
+        if (preferences is null && IsLoaded && MeowFilm.Desktop.DesktopVisual.IsVisible(this)) await LoadAsync();
     }
     private void PresentSection()
     {
@@ -77,7 +78,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     {
         generation++;
         read?.Cancel();
-        editor?.Close(); editor = null;
+        editor?.Hide(); editor = null;
         readBusy = libraryBusy = false; ReadFailed = LibraryFailed = false; preferences = null; rows = []; ManualGroups = []; BlockGroups = []; Work = ""; Changed();
     }
     internal async Task PrepareShutdownAsync()
@@ -97,7 +98,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     private async void Retry_Click(object sender, RoutedEventArgs e) { if (HasReadFailure && CanRetryRead) await LoadAsync(); }
     private Task LoadAsync()
     {
-        if (stopping || !IsLoaded || !IsVisible) return Task.CompletedTask;
+        if (stopping || !IsLoaded || !MeowFilm.Desktop.DesktopVisual.IsVisible(this)) return Task.CompletedTask;
         if (mutation is { IsCompleted: false } || reading is { IsCompleted: false } && read?.IsCancellationRequested == true)
             return AfterPendingAsync(generation);
         if (reading is { IsCompleted: false }) return reading;
@@ -246,7 +247,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
             {
                 // Durable work keeps its original payload and settles after a view retires.
                 var saved = await action();
-                if (ticket == generation && IsLoaded && IsVisible) { publish?.Invoke(saved); Notify(success); }
+                if (ticket == generation && IsLoaded && MeowFilm.Desktop.DesktopVisual.IsVisible(this)) { publish?.Invoke(saved); Notify(success); }
                 return true;
             }
             catch (Exception)
@@ -263,7 +264,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     {
         if (!CanEditLibrary || sender is not Button { Tag: FilmSettingRow row } || !Rows.Contains(row)) return;
         long ticket = generation;
-        if (!Confirm("删除记录", row.Title)) return;
+        if (!await ConfirmAsync("删除记录", row.Title)) return;
         if (ticket != generation) return;
         await MutateAsync(async () =>
         {
@@ -277,17 +278,21 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     {
         if (!CanEditLibrary || section != "preferences") return;
         long ticket = generation;
-        if (!Confirm("清空匹配禁用记录", "清空全部匹配禁用记录？") || ticket != generation) return;
+        if (!await ConfirmAsync("清空匹配禁用记录", "清空全部匹配禁用记录？") || ticket != generation) return;
         await MutateAsync(() => service.RemoveBlockAsync(null), null, "匹配禁用记录已清空");
         if (ticket == generation) await LoadAsync();
     }
-    private bool Confirm(string title, string content) => MessageBox.Show(Window.GetWindow(this), content, title,
-        MessageBoxButton.OKCancel, MessageBoxImage.Question) == MessageBoxResult.OK;
+    private async Task<bool> ConfirmAsync(string title, string content)
+    {
+        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = title, Content = content,
+            PrimaryButtonText = "确定", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Close };
+        return await dialog.ShowAsync() == ContentDialogResult.Primary;
+    }
     private void AddManual_Click(object sender, RoutedEventArgs e) => OpenEditor(null);
     private void Edit_Click(object sender, RoutedEventArgs e)
     { if (sender is Button { Tag: FilmSettingRow row } && Rows.Contains(row)) OpenEditor(row.Value); }
 
-    private void OpenEditor(JsonElement? stored)
+    private async void OpenEditor(JsonElement? stored)
     {
         if (!CanEditLibrary || section != "preferences" || editor is not null) return;
         long ticket = generation;
@@ -296,7 +301,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         TextBox Field(string label, string text)
         {
             content.Children.Add(new TextBlock { Text = label, Margin = new(0, 10, 0, 5) });
-            var box = new TextBox { Text = text, Style = (Style)FindResource("Settings.TextBox") };
+            var box = new TextBox { Text = text, Style = (Style)MeowFilm.Desktop.DesktopVisual.Resource(this, "Settings.TextBox") };
             AutomationProperties.SetName(box, label); content.Children.Add(box); return box;
         }
         var id = FilmJson.Text(value, "id");
@@ -321,22 +326,22 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         providerBox.SelectedValue = FilmJson.Text(value, "provider"); content.Children.Add(providerBox);
         var share = FilmJson.Member(value, "share");
         content.Children.Add(new TextBlock { Text = "分享链接", Margin = new(0, 10, 0, 5) });
-        var urlBox = new TextBox { Text = FilmJson.Text(share, "url"), Style = (Style)FindResource("Settings.TextBox") };
+        var urlBox = new TextBox { Text = FilmJson.Text(share, "url"), Style = (Style)MeowFilm.Desktop.DesktopVisual.Resource(this, "Settings.TextBox") };
         AutomationProperties.SetName(urlBox, "分享链接"); content.Children.Add(urlBox);
         content.Children.Add(new TextBlock { Text = "提取码", Margin = new(0, 10, 0, 5) });
-        var password = new TextBox { Text = FilmJson.Text(share, "password"), Style = (Style)FindResource("Settings.TextBox") };
+        var password = new TextBox { Text = FilmJson.Text(share, "password"), Style = (Style)MeowFilm.Desktop.DesktopVisual.Resource(this, "Settings.TextBox") };
         AutomationProperties.SetName(password, "分享提取码"); content.Children.Add(password);
         var seasonBox = Field("季线索", FilmJson.Text(value, "seasonHint"));
         var enabled = new CheckBox { Content = "启用", IsChecked = stored is null || FilmJson.Bool(value, "enabled"), Margin = new(0, 16, 0, 0) };
         var autoDisable = new CheckBox { Content = "连续失败自动停用", IsChecked = FilmJson.Bool(value, "autoDisable"), Margin = new(0, 10, 0, 0) };
         content.Children.Add(enabled); content.Children.Add(autoDisable);
-        var save = new Button { Content = "保存", Style = (Style)FindResource("Settings.PrimaryButton"), HorizontalAlignment = HorizontalAlignment.Right, Margin = new(0, 20, 0, 0) };
+        var save = new Button { Content = "保存", Style = (Style)MeowFilm.Desktop.DesktopVisual.Resource(this, "Settings.PrimaryButton"), HorizontalAlignment = HorizontalAlignment.Right, Margin = new(0, 20, 0, 0) };
         content.Children.Add(save);
-        var dialog = new DesktopWindow { Owner = Window.GetWindow(this), Title = stored is null ? "添加人工匹配" : "编辑人工匹配",
-            Content = new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }, Width = 460, Height = 700,
-            WindowStartupLocation = WindowStartupLocation.CenterOwner, ShowInTaskbar = false };
+        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = stored is null ? "添加人工匹配" : "编辑人工匹配",
+            Content = new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, MaxHeight = 560 },
+            CloseButtonText = "取消" };
         editor = dialog;
-        dialog.Closed += (_, _) => { urlBox.Clear(); password.Clear(); if (ReferenceEquals(editor, dialog)) editor = null; };
+        dialog.Closed += (_, _) => { urlBox.Text = ""; password.Text = ""; if (ReferenceEquals(editor, dialog)) editor = null; };
         save.Click += async (_, _) =>
         {
             if (ticket != generation || !ReferenceEquals(editor, dialog) || !Idle) return;
@@ -374,8 +379,8 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
             save.IsEnabled = false;
             bool saved = await MutateAsync(() => service.SaveManualAsync(payload), null, "人工匹配已保存");
             if (ticket != generation || !ReferenceEquals(editor, dialog)) return;
-            if (saved) { dialog.Close(); await LoadAsync(); } else save.IsEnabled = true;
+            if (saved) { dialog.Hide(); await LoadAsync(); } else save.IsEnabled = true;
         };
-        dialog.Show();
+        await dialog.ShowAsync();
     }
 }

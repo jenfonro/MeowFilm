@@ -1,7 +1,8 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Capabilities;
@@ -10,7 +11,7 @@ namespace MeowFilm.Capabilities;
 public sealed class FilmPlaybackPoster : Grid
 {
     private const string BundledPrefix =
-        "pack://application:,,,/MeowFilm.Capabilities;component/Film/Presentation/Assets/";
+        "ms-appx:///MeowFilm.Capabilities/Film/Presentation/Assets/";
 
     public static readonly DependencyProperty AddressProperty = DependencyProperty.Register(
         nameof(Address), typeof(string), typeof(FilmPlaybackPoster),
@@ -27,7 +28,7 @@ public sealed class FilmPlaybackPoster : Grid
 
     public FilmPlaybackPoster()
     {
-        ClipToBounds = true;
+        SizeChanged += (_, e) => Clip = new RectangleGeometry { Rect = new Rect(0, 0, e.NewSize.Width, e.NewSize.Height) };
         Children.Add(bundledImage);
         Children.Add(artwork);
     }

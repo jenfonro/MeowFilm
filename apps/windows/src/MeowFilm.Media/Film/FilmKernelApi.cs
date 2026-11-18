@@ -12,7 +12,10 @@ internal class FilmKernelApi
         NativeVideoFormat format, byte[] keys, byte[]? defaultKey) =>
         FilmKernelNative.Create(ref callbacks, address, format, keys, defaultKey);
     internal virtual int Prepare(IntPtr owner, double position, IntPtr target) => FilmKernelNative.Prepare(owner, position, target);
-    internal virtual int Attach(IntPtr owner, IntPtr target) => FilmKernelNative.Attach(owner, target);
+    internal virtual int Attach(IntPtr owner, FilmKernelNative.Surface? target, out IntPtr swapchain) =>
+        FilmKernelNative.Attach(owner, target, out swapchain);
+    internal virtual int UpdateSurface(IntPtr owner, ref FilmKernelNative.Surface target) =>
+        FilmKernelNative.UpdateSurface(owner, ref target);
     internal virtual int Start(IntPtr owner, int paused) => FilmKernelNative.Start(owner, paused);
     internal virtual int Pause(IntPtr owner, int paused) => FilmKernelNative.Pause(owner, paused);
     internal virtual int Seek(IntPtr owner, double position) => FilmKernelNative.Seek(owner, position);

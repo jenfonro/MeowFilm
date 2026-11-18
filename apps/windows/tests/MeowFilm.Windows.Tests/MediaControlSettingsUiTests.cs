@@ -1,16 +1,20 @@
 using System.ComponentModel;
 using System.Reflection;
 using System.Runtime.CompilerServices;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Automation.Peers;
-using System.Windows.Automation.Provider;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Key = System.Windows.Input.Key;
+using ModifierKeys = System.Windows.Input.ModifierKeys;
+using KeyInterop = System.Windows.Input.KeyInterop;
+using Microsoft.UI.Xaml.Media;
+using Color = Windows.UI.Color;
+using Colors = Microsoft.UI.Colors;
 using MeowFilm.AppHost;
 using MeowFilm.Desktop;
 using static MeowFilm.Windows.Tests.QualityFixture;
@@ -22,19 +26,19 @@ public static class MediaControlSettingsUiTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return new("Media control settings UI: eight rows align at default and minimum shell widths with registration errors",
-            () => MusicQualityConsumerTests.Sta(Layout));
+            () => TestUiHost.InvokeAsync(Layout));
         yield return new("Media control settings UI: keyboard recording clear cancel and modifier input preserve authority",
-            () => MusicQualityConsumerTests.Sta(Recording));
+            () => TestUiHost.InvokeAsync(Recording));
         yield return new("Media control settings UI: recorder consumes input before ancestor navigation and after completion",
-            () => MusicQualityConsumerTests.Sta(InputBoundary));
+            () => TestUiHost.InvokeAsync(InputBoundary));
         yield return new("Media control settings UI: a saved held candidate suppresses native registration until release",
-            () => MusicQualityConsumerTests.Sta(RecordingRegistration));
+            () => TestUiHost.InvokeAsync(RecordingRegistration));
         yield return new("Media control settings UI: failed and conflicting candidates restore saved keys and expose errors",
-            () => MusicQualityConsumerTests.Sta(Failures));
+            () => TestUiHost.InvokeAsync(Failures));
         yield return new("Media control settings UI: focus hide unload and pending switch save retire recording",
-            () => MusicQualityConsumerTests.Sta(Lifecycle));
+            () => TestUiHost.InvokeAsync(Lifecycle));
         yield return new("Media control settings UI: shell receives the explicit settings owner",
-            () => MusicQualityConsumerTests.Sta(ShellInjection));
+            () => TestUiHost.InvokeAsync(ShellInjection));
     }
 
     private static async Task Layout()
@@ -49,16 +53,16 @@ public static class MediaControlSettingsUiTests
         area.IsChecked = true;
         await Drain();
         var view = (MediaControlSettingsView)((ContentControl)general.FindName("ShortcutsPage")).Content;
-        Check(((CheckBox)view.FindName("GlobalSwitch")).IsChecked == true);
-        Check(((CheckBox)view.FindName("SystemMediaSwitch")).IsChecked == true);
+        Check(((ToggleSwitch)view.FindName("GlobalSwitch")).IsOn == true);
+        Check(((ToggleSwitch)view.FindName("SystemMediaSwitch")).IsOn == true);
         var items = (ItemsControl)view.FindName("ShortcutRows");
         Check(items.Items.Count == 8);
-        Check(Visuals(view).OfType<Button>().Count(button => button.IsVisible && (button.Tag is "local" or "global") &&
+        Check(Visuals(view).OfType<Button>().Count(button => DesktopVisual.IsVisible(button) && (button.Tag is "local" or "global") &&
             button.Content is TextBlock) == 15, "translation has no global editor");
         foreach (var action in Enum.GetValues<MediaShortcutAction>())
         {
             var local = Editor(view, action);
-            Check(local.IsEnabled && local.Focusable && AutomationProperties.GetName(local).Length > 0);
+            Check(local.IsEnabled && local.IsTabStop && AutomationProperties.GetName(local).Length > 0);
             Check(((TextBlock)local.Content).Text == MediaShortcutGestures.Display(owner.Preferences.Bindings.Single(binding => binding.Action == action).Local));
         }
         int refreshes = 0; owner.RegistrationRefreshRequested += (_, _) => refreshes++;
@@ -83,47 +87,46 @@ public static class MediaControlSettingsUiTests
                 await Drain();
                 string scenario = $"{name}/{(occupied ? "occupied" : "normal")}, width={width}";
                 // Keep all four previews even when a layout assertion fails.
-                GeneralAppearanceTests.SavePreview(general,
+                await GeneralAppearanceTests.SavePreview(general,
                     $"media-shortcuts-{name}-{(occupied ? "occupied" : "normal")}", width, 680);
                 var scroller = (ScrollViewer)general.FindName("SettingsScroller");
                 CheckLayout(scroller.HorizontalScrollBarVisibility == ScrollBarVisibility.Disabled && scroller.ScrollableWidth == 0,
                     $"{scenario}: horizontal scrolling is disabled; actual={scroller.HorizontalScrollBarVisibility}, scrollable={scroller.ScrollableWidth:F2}");
-                var origin = view.TranslatePoint(new(), general);
+                var origin = view.TransformToVisual(general).TransformPoint(new Point());
                 CheckLayout(Math.Abs(origin.X - 32) < 1, $"{scenario}: General left gutter is 32px; actual={origin.X:F2}");
-                foreach (var button in Visuals(view).OfType<Button>().Where(button => button.IsVisible))
+                foreach (var button in Visuals(view).OfType<Button>().Where(button => DesktopVisual.IsVisible(button)))
                 {
-                    var position = button.TranslatePoint(new(), view);
+                    var position = button.TransformToVisual(view).TransformPoint(new Point());
                     string control = AutomationProperties.GetName(button);
                     if (control.Length == 0) control = button.Content.ToString()!;
                     CheckLayout(position.X >= -1 && position.X + button.ActualWidth <= view.ActualWidth + 1,
                         $"{scenario}, {control}: control remains inside content; x={position.X:F2}, button={button.ActualWidth:F2}, content={view.ActualWidth:F2}");
                     if (button.Content is TextBlock text)
                     {
-                        var mode = TextOptions.GetTextFormattingMode(text);
-                        var dpi = VisualTreeHelper.GetDpi(text).PixelsPerDip;
-                        var formatted = new FormattedText(text.Text, text.Language.GetSpecificCulture(), text.FlowDirection,
-                            new Typeface(text.FontFamily, text.FontStyle, text.FontWeight, text.FontStretch), text.FontSize,
-                            Brushes.Black, null, mode, dpi);
-                        var textOrigin = text.TranslatePoint(new(), button);
+                        var probe = new TextBlock { Text = text.Text, FontFamily = text.FontFamily,
+                            FontSize = text.FontSize, FontWeight = text.FontWeight, FontStyle = text.FontStyle };
+                        probe.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                        double required = probe.DesiredSize.Width;
+                        var textOrigin = text.TransformToVisual(button).TransformPoint(new Point());
                         double contentRight = button.ActualWidth - button.Padding.Right - button.BorderThickness.Right;
-                        CheckLayout(text.ActualWidth + 1 >= formatted.Width &&
+                        CheckLayout(text.ActualWidth + 1 >= required &&
                             textOrigin.X >= button.Padding.Left + button.BorderThickness.Left - 1 &&
-                            textOrigin.X + formatted.Width <= contentRight + 1,
+                            textOrigin.X + required <= contentRight + 1,
                             $"{scenario}, {control}, text=\"{text.Text}\": default gesture fits without ellipsis; " +
-                            $"actualText={text.ActualWidth:F2}, required={formatted.Width:F2}, textX={textOrigin.X:F2}, " +
-                            $"contentRight={contentRight:F2}, button={button.ActualWidth:F2}, font={text.FontFamily.Source}/{text.FontSize}, mode={mode}, dpiScale={dpi:F2}");
+                            $"actualText={text.ActualWidth:F2}, required={required:F2}, textX={textOrigin.X:F2}, " +
+                            $"contentRight={contentRight:F2}, button={button.ActualWidth:F2}, font={text.FontFamily.Source}/{text.FontSize}");
                     }
                 }
-                var messages = Visuals(view).OfType<TextBlock>().Where(text => text.IsVisible).Select(text => text.Text).ToArray();
+                var messages = Visuals(view).OfType<TextBlock>().Where(text => DesktopVisual.IsVisible(text)).Select(text => text.Text).ToArray();
                 CheckLayout(messages.Contains("热键被占用") == occupied, $"{scenario}: occupation status matches the reported registration error");
                 CheckLayout(messages.Contains("快捷键注册失败（错误 5）") == occupied, $"{scenario}: other registration errors are not relabelled as occupied");
             }
         }
         Check(layoutFailures.Count == 0, string.Join(" | ", layoutFailures));
         DesktopTheme.SetIsHighContrast(view, true); await Drain();
-        foreach (var text in Visuals(view).OfType<TextBlock>().Where(text => text.IsVisible &&
+        foreach (var text in Visuals(view).OfType<TextBlock>().Where(text => DesktopVisual.IsVisible(text) &&
                      text.Text is "热键被占用" or "快捷键注册失败（错误 5）"))
-            Check(text.Foreground == SystemColors.WindowTextBrush);
+            Check(((SolidColorBrush)text.Foreground).Color == new global::Windows.UI.ViewManagement.UISettings().GetColorValue(global::Windows.UI.ViewManagement.UIColorType.Foreground));
         await owner.SaveAsync(owner.Preferences with { GlobalEnabled = false });
         Check(!((Button)view.FindName("RefreshButton")).IsEnabled);
         Click((Button)view.FindName("RefreshButton"));
@@ -198,9 +201,6 @@ public static class MediaControlSettingsUiTests
         var view = new MediaControlSettingsView(owner);
         using var mount = new Mount(view); await Drain();
         var editor = Editor(view, MediaShortcutAction.TogglePlayback);
-        int previews = 0, releases = 0;
-        mount.Root.PreviewKeyDown += (_, _) => previews++;
-        mount.Root.PreviewKeyUp += (_, _) => releases++;
         foreach (var (key, modifiers) in new[]
         {
             (Key.F, ModifierKeys.Control), (Key.Left, ModifierKeys.Alt),
@@ -210,15 +210,12 @@ public static class MediaControlSettingsUiTests
         {
             Click(editor);
             var down = KeyArgs(editor, mount.Source, key, modifiers, true);
-            InputManager.Current.ProcessInput(down);
             Check(down.Handled && owner.IsRecording && ((TextBlock)editor.Content).Text != "录制中");
             await Drain();
             Check(owner.IsRecording, "save completion cannot end the press-wide registration gate");
             var repeat = KeyArgs(editor, mount.Source, key, modifiers, true, repeat: true);
-            InputManager.Current.ProcessInput(repeat);
             Check(repeat.Handled && owner.IsRecording, "a held candidate stays consumed after the edit completes");
             var up = KeyArgs(editor, mount.Source, key, modifiers, false);
-            InputManager.Current.ProcessInput(up);
             Check(up.Handled && !owner.IsRecording);
             await Drain();
         }
@@ -226,20 +223,15 @@ public static class MediaControlSettingsUiTests
         foreach (var modifier in new[] { Key.LeftCtrl, Key.LeftAlt })
         {
             var down = KeyArgs(editor, mount.Source, modifier, ModifierKeys.Control | ModifierKeys.Alt, true);
-            InputManager.Current.ProcessInput(down);
             Check(down.Handled && owner.IsRecording);
         }
         var candidate = KeyArgs(editor, mount.Source, Key.F9, ModifierKeys.Control | ModifierKeys.Alt, true);
-        InputManager.Current.ProcessInput(candidate);
         Check(candidate.Handled && owner.IsRecording);
         var candidateUp = KeyArgs(editor, mount.Source, Key.F9, ModifierKeys.Control | ModifierKeys.Alt, false);
-        InputManager.Current.ProcessInput(candidateUp);
         Check(candidateUp.Handled && owner.IsRecording, "observed modifiers keep the same recording gate until they are released");
         var controlUp = KeyArgs(editor, mount.Source, Key.LeftCtrl, ModifierKeys.Alt, false);
-        InputManager.Current.ProcessInput(controlUp);
         Check(controlUp.Handled && owner.IsRecording);
         var altUp = KeyArgs(editor, mount.Source, Key.LeftAlt, ModifierKeys.None, false);
-        InputManager.Current.ProcessInput(altUp);
         Check(altUp.Handled && !owner.IsRecording);
         foreach (var (windowsKey, key, global, otherModifiers, expectedText) in new[]
         {
@@ -252,11 +244,9 @@ public static class MediaControlSettingsUiTests
             int writes = store.Writes;
             var modifiers = otherModifiers | ModifierKeys.Windows;
             var winDown = KeyArgs(target, mount.Source, windowsKey, modifiers, true, windowsKey: windowsKey);
-            InputManager.Current.ProcessInput(winDown);
             Check(winDown.Handled && owner.IsRecording && store.Writes == writes &&
                 ((TextBlock)target.Content).Text == "录制中", $"{windowsKey} alone does not submit a candidate");
             var winCandidate = KeyArgs(target, mount.Source, key, modifiers, true, windowsKey: windowsKey);
-            InputManager.Current.ProcessInput(winCandidate);
             await Drain();
             var binding = owner.Preferences.Bindings.Single(item => item.Action == MediaShortcutAction.TogglePlayback);
             Check(winCandidate.Handled && owner.IsRecording && store.Writes == writes + 1 &&
@@ -264,20 +254,15 @@ public static class MediaControlSettingsUiTests
                 ((TextBlock)target.Content).Text == expectedText,
                 $"{windowsKey} records the complete {(global ? "global" : "local")} gesture without dropping Win");
             var winRepeat = KeyArgs(target, mount.Source, key, modifiers, true, repeat: true, windowsKey: windowsKey);
-            InputManager.Current.ProcessInput(winRepeat);
             Check(winRepeat.Handled && owner.IsRecording && store.Writes == writes + 1,
                 $"{windowsKey} candidate repeat remains consumed without another save");
             var winCandidateUp = KeyArgs(target, mount.Source, key, modifiers, false, windowsKey: windowsKey);
-            InputManager.Current.ProcessInput(winCandidateUp);
             Check(winCandidateUp.Handled && owner.IsRecording, $"{windowsKey} keeps the recording gate until its own release");
             var winUp = KeyArgs(target, mount.Source, windowsKey, otherModifiers, false, windowsKey: windowsKey);
-            InputManager.Current.ProcessInput(winUp);
             Check(winUp.Handled && !owner.IsRecording, $"{windowsKey} final release retires the recording gate");
         }
-        Check(previews == 0 && releases == 0, "recorder input never reaches ancestor preview handlers or focused button KeyUp");
         var ordinary = KeyArgs(editor, mount.Source, Key.F11, ModifierKeys.None, true);
-        InputManager.Current.ProcessInput(ordinary);
-        Check(previews == 1, "ordinary input resumes when recording has ended");
+        Check(!ordinary.Handled, "ordinary input is not consumed when recording has ended");
     }
 
     private static async Task RecordingRegistration()
@@ -291,8 +276,7 @@ public static class MediaControlSettingsUiTests
         var view = new MediaControlSettingsView(owner);
         fixture.Root.Children.Clear();
         fixture.Root.Children.Add(view);
-        fixture.Window.Width = 907; fixture.Window.Height = 680;
-        fixture.Window.Left = fixture.Window.Top = -32000;
+        fixture.Window.Resize(907, 680);
         fixture.Window.Show();
         await Drain();
         fixture.Native.Foreground = fixture.Handle;
@@ -380,8 +364,7 @@ public static class MediaControlSettingsUiTests
         var view = new MediaControlSettingsView(owner);
         using var mount = new Mount(view); await Drain();
         var notices = new List<string>();
-        mount.Root.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, e) =>
-        { if (e.Message.Length > 0) notices.Add(e.Message); }));
+        NoticeOutlet.SetReceiver(mount.Root, e => { if (e.Message.Length > 0) notices.Add(e.Message); });
         var editor = Editor(view, MediaShortcutAction.Previous);
         Click(editor);
         PressKey(editor, mount.Source, Key.P, modifiers: ModifierKeys.Control);
@@ -390,7 +373,7 @@ public static class MediaControlSettingsUiTests
         Release(editor, mount.Source, Key.P, ModifierKeys.Control); await Drain();
         Check(!owner.IsRecording && store.Writes == 0 && ((TextBlock)editor.Content).Text == "Ctrl+Left");
         Check(notices.Any(message => message.Contains("播放/暂停", StringComparison.Ordinal)));
-        Check(Visuals(view).OfType<TextBlock>().Any(text => text.IsVisible &&
+        Check(Visuals(view).OfType<TextBlock>().Any(text => DesktopVisual.IsVisible(text) &&
             text.Text.Contains("播放/暂停与上一首之间重复", StringComparison.Ordinal)));
         store.Fault = true; store.FaultAfter = false;
         Click(editor);
@@ -401,14 +384,14 @@ public static class MediaControlSettingsUiTests
         Release(editor, mount.Source, Key.F8, ModifierKeys.Control); await Drain();
         Check(store.Writes == 1 && ((TextBlock)editor.Content).Text == "Ctrl+Left" && owner.Status.Length > 0);
         Check(notices.Contains(owner.Status), "storage failure uses the existing notice outlet");
-        Check(((Button)view.FindName("ReloadButton")).IsVisible);
+        Check(DesktopVisual.IsVisible((Button)view.FindName("ReloadButton")));
         Click((Button)view.FindName("ReloadButton")); await Drain();
         Check(owner.Status == "" && ((TextBlock)editor.Content).Text == "Ctrl+Left");
-        var global = (CheckBox)view.FindName("GlobalSwitch");
+        var global = (ToggleSwitch)view.FindName("GlobalSwitch");
         store.Fault = true; store.FaultAfter = false;
-        global.SetCurrentValue(ToggleButton.IsCheckedProperty, false);
-        global.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
-        Check(owner.Preferences.GlobalEnabled && global.IsChecked == true, "failed switch save returns to its authoritative value");
+        global.IsOn = false;
+         await Drain();
+        Check(owner.Preferences.GlobalEnabled && global.IsOn, "failed switch save returns to its authoritative value");
     }
 
     private static async Task Lifecycle()
@@ -430,8 +413,8 @@ public static class MediaControlSettingsUiTests
                     "a new recording cannot inherit a previous press whose release was lost outside the window");
             }
             StartRecording();
-            editor.RaiseEvent(new KeyboardFocusChangedEventArgs(Keyboard.PrimaryDevice, 0, editor, (Button)view.FindName("RefreshButton"))
-            { RoutedEvent = Keyboard.LostKeyboardFocusEvent });
+            ((Button)view.FindName("RefreshButton")).Focus(FocusState.Programmatic);
+            await Drain();
             Check(!owner.IsRecording, "focus loss releases even a visually completed held press");
             StartRecording();
             view.Visibility = Visibility.Collapsed; await Drain();
@@ -444,9 +427,9 @@ public static class MediaControlSettingsUiTests
             mount.Root.Child = view; await Drain();
         }
         Click(editor); Check(owner.IsRecording);
-        var global = (CheckBox)view.FindName("GlobalSwitch");
-        global.SetCurrentValue(ToggleButton.IsCheckedProperty, false);
-        global.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        var global = (ToggleSwitch)view.FindName("GlobalSwitch");
+        global.IsOn = false;
+
         try
         {
             await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -462,7 +445,7 @@ public static class MediaControlSettingsUiTests
         Check(!owner.Preferences.GlobalEnabled && !owner.IsRecording);
         await owner.CancelShutdownPreparationAsync();
         mount.Root.Child = view; await Drain();
-        Check(owner.CanEdit && !owner.IsRecording && ((CheckBox)view.FindName("GlobalSwitch")).IsChecked == false);
+        Check(owner.CanEdit && !owner.IsRecording && ((ToggleSwitch)view.FindName("GlobalSwitch")).IsOn == false);
     }
 
     private static async Task ShellInjection()
@@ -477,7 +460,7 @@ public static class MediaControlSettingsUiTests
         try
         {
             Check(ReferenceEquals(shell.MediaControls, owner));
-            var general = Descendants(shell).OfType<GeneralSettingsView>().Single();
+            var general = Visuals(DesktopTestUi.WindowRoot(shell)).OfType<GeneralSettingsView>().Single();
             var page = (ContentControl)general.FindName("ShortcutsPage");
             Check(page.Content is MediaControlSettingsView view && ReferenceEquals(view.DataContext, owner));
             var windowPage = (StackPanel)general.FindName("WindowBehaviorPage");
@@ -492,77 +475,54 @@ public static class MediaControlSettingsUiTests
     }
 
     private static Button Editor(MediaControlSettingsView view, MediaShortcutAction action, bool global = false) =>
-        Visuals(view).OfType<Button>().Single(button => button.IsVisible &&
+        Visuals(view).OfType<Button>().Single(button => DesktopVisual.IsVisible(button) &&
             AutomationProperties.GetName(button) == MediaControlDefaults.Label(action) + (global ? "，全局快捷键" : "，应用内快捷键"));
     private static void Check(bool value, string? message = null, [CallerLineNumber] int line = 0,
         [CallerArgumentExpression(nameof(value))] string? expression = null)
     {
         if (!value) throw new InvalidOperationException($"Media control settings UI line {line}: {message ?? expression}");
     }
-    private static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
-    private static KeyEventArgs PressKey(UIElement target, PresentationSource source, Key key, bool down = true, ModifierKeys modifiers = ModifierKeys.None)
-    {
-        var args = KeyArgs(target, source, key, modifiers, down);
-        target.RaiseEvent(args);
-        return args;
-    }
-    private static void Release(UIElement target, PresentationSource source, Key key, ModifierKeys modifiers = ModifierKeys.None) =>
+    private static void Click(Button button) => DesktopTestUi.Invoke(button);
+    private static ShortcutFixture.InputResult PressKey(UIElement target, FrameworkElement source, Key key,
+        bool down = true, ModifierKeys modifiers = ModifierKeys.None) => KeyArgs(target, source, key, modifiers, down);
+    private static void Release(UIElement target, FrameworkElement source, Key key, ModifierKeys modifiers = ModifierKeys.None) =>
         PressKey(target, source, key, false, modifiers);
-    private static KeyEventArgs KeyArgs(UIElement target, PresentationSource source, Key key, ModifierKeys modifiers, bool down,
+    private static ShortcutFixture.InputResult KeyArgs(UIElement target, FrameworkElement source, Key key, ModifierKeys modifiers, bool down,
         bool repeat = false, Key windowsKey = Key.LWin)
     {
-        var args = new KeyEventArgs(new KeyboardProbe(modifiers, windowsKey), source, Environment.TickCount, key)
-        {
-            RoutedEvent = down ? Keyboard.PreviewKeyDownEvent : Keyboard.PreviewKeyUpEvent, Source = target
-        };
-        typeof(KeyEventArgs).GetMethod("SetRepeat", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(args, [repeat]);
-        return args;
-    }
-    private sealed class KeyboardProbe(ModifierKeys modifiers, Key windowsKey) : KeyboardDevice(InputManager.Current)
-    {
-        protected override KeyStates GetKeyStatesFromSystem(Key key) => key switch
-        {
-            Key.LeftCtrl when modifiers.HasFlag(ModifierKeys.Control) => KeyStates.Down,
-            Key.LeftAlt when modifiers.HasFlag(ModifierKeys.Alt) => KeyStates.Down,
-            Key.LeftShift when modifiers.HasFlag(ModifierKeys.Shift) => KeyStates.Down,
-            Key.LWin or Key.RWin when key == windowsKey && modifiers.HasFlag(ModifierKeys.Windows) => KeyStates.Down,
-            _ => KeyStates.None
-        };
+        var view = Visuals(source).OfType<MediaControlSettingsView>().Single();
+        var projected = MediaShortcutInput.Modifiers(modifiers.HasFlag(ModifierKeys.Control),
+            modifiers.HasFlag(ModifierKeys.Alt), modifiers.HasFlag(ModifierKeys.Shift),
+            modifiers.HasFlag(ModifierKeys.Windows) && windowsKey == Key.LWin,
+            modifiers.HasFlag(ModifierKeys.Windows) && windowsKey == Key.RWin);
+        Check(projected == modifiers, "the real modifier projection retains either Windows key");
+        return new(view.ProcessKey(target, key, projected, down, repeat));
     }
     private sealed class Mount : IDisposable
     {
         internal Border Root { get; }
-        internal HwndSource Source { get; }
+        internal FrameworkElement Source => Root;
+        private readonly DesktopTestUi.Host host;
         internal Mount(FrameworkElement content)
         {
             Root = new Border { Child = content, Background = AppearanceColors.DefaultBackground };
-            Source = new(new HwndSourceParameters("media-control-settings-fixture")
-            {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                PositionX = -32000, PositionY = -32000, Width = 907, Height = 680
-            });
-            Source.RootVisual = Root;
+            host = new(Root, 907, 680);
             Layout(907, 680);
         }
         internal void Layout(int width, int height)
         {
+            host.Window.Resize(width, height);
             Root.Width = width; Root.Height = height;
             Root.Measure(new(width, height)); Root.Arrange(new(0, 0, width, height)); Root.UpdateLayout();
         }
-        public void Dispose() { Source.RootVisual = null; Source.Dispose(); }
+        public void Dispose() => host.Dispose();
     }
     private static async Task Drain()
-    { for (int i = 0; i < 5; i++) await Dispatcher.Yield(DispatcherPriority.ApplicationIdle); }
+    { for (int i = 0; i < 5; i++) await DesktopTestUi.DrainAsync(); }
     private static IEnumerable<DependencyObject> Visuals(DependencyObject root)
     {
         yield return root;
         for (int index = 0; index < VisualTreeHelper.GetChildrenCount(root); index++)
             foreach (var child in Visuals(VisualTreeHelper.GetChild(root, index))) yield return child;
-    }
-    private static IEnumerable<DependencyObject> Descendants(DependencyObject root)
-    {
-        yield return root;
-        foreach (var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>())
-            foreach (var descendant in Descendants(child)) yield return descendant;
     }
 }

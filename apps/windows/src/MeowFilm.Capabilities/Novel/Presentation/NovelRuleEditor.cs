@@ -1,6 +1,8 @@
 using System.IO;
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -15,8 +17,8 @@ internal sealed class NovelRuleEditor : DockPanel
     {
         original = rule;
         var actions = new WrapPanel();
-        actions.Children.Add(NovelUi.Button("复制规则", () => { try { Clipboard.SetText(System.Text.Json.JsonSerializer.Serialize(Read(), NovelJson.Options)); notice("规则已复制"); } catch (Exception error) { notice(error.Message); } }));
-        actions.Children.Add(NovelUi.Button("粘贴规则", () => { try { var pasted = NovelRuleImport.Parse(Clipboard.GetText()).FirstOrDefault() ?? throw new InvalidDataException(); Render(pasted); } catch { notice("剪贴板内容格式不对"); } }));
+        actions.Children.Add(NovelUi.Button("复制规则", () => { try { NovelPresentation.CopyText(System.Text.Json.JsonSerializer.Serialize(Read(), NovelJson.Options)); notice("规则已复制"); } catch (Exception error) { notice(error.Message); } }));
+        actions.Children.Add(NovelUi.Button("粘贴规则", async () => { try { var pasted = NovelRuleImport.Parse(await NovelPresentation.ClipboardTextAsync()).FirstOrDefault() ?? throw new InvalidDataException(); Render(pasted); } catch { notice("剪贴板内容格式不对"); } }));
         SetDock(actions, Dock.Top); Children.Add(actions); Children.Add(form.Card()); Render(rule);
     }
     private void Render(NovelRule rule)
@@ -28,7 +30,7 @@ internal sealed class NovelRuleEditor : DockPanel
         var checks = new StackPanel { Orientation = Orientation.Horizontal, Margin = new(0, 0, 0, 14) };
         title = new CheckBox { Content = "作用于标题", IsChecked = rule.ScopeTitle, Tag = "round", Margin = new(0, 0, 14, 0), MinHeight = 32, VerticalContentAlignment = VerticalAlignment.Center };
         content = new CheckBox { Content = "作用于正文", IsChecked = rule.ScopeContent, Tag = "round", MinHeight = 32, VerticalContentAlignment = VerticalAlignment.Center };
-        title.SetResourceReference(StyleProperty, "MeowFilm.ManagementCheck"); content.SetResourceReference(StyleProperty, "MeowFilm.ManagementCheck");
+        title.UseResource(StyleProperty, "MeowFilm.ManagementCheck"); content.UseResource(StyleProperty, "MeowFilm.ManagementCheck");
         checks.Children.Add(title); checks.Children.Add(content); form.Section(checks);
         scope = form.Field("替换范围，选填书名或者书源 URL（scope）", rule.Scope, id: "novel.rule.field.scope");
         exclude = form.Field("排除范围，选填书名或者书源 URL（excludeScope）", rule.ExcludeScope, id: "novel.rule.field.excludeScope");

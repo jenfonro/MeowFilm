@@ -9,6 +9,7 @@ using MeowFilm.Media;
 using MeowFilm.SystemMedia;
 using MeowFilm.Platform.Storage;
 using System.IO;
+using System.Runtime.InteropServices;
 
 internal static class Program
 {
@@ -17,8 +18,7 @@ internal static class Program
     {
         if (!AppInstallationLifetime.TryEnter())
         {
-            System.Windows.MessageBox.Show("正在安装或卸载 meowfilm，请完成后重试。", "meowfilm",
-                System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
+            MessageBox(0, "正在安装或卸载 meowfilm，请完成后重试。", "meowfilm", 0x40);
             return;
         }
         NativeAudioPlayback? musicPlayback = null;
@@ -67,6 +67,7 @@ internal static class Program
                 capabilities.Add(pendingNovel);
                 pendingNovel = null;
             },
+            launch => new NativeApplication(launch),
             async () =>
             {
                 if (pendingMediaAttachment is not null)
@@ -173,4 +174,6 @@ internal static class Program
             capabilities => [searchPage = new SearchResultsPage(capabilities.OfType<MusicCapability>().Single(),
                 capabilities.OfType<FilmCapability>().Single(), capabilities.OfType<NovelCapability>().Single())]);
     }
+    [DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = CharSet.Unicode)]
+    private static extern int MessageBox(nint window, string text, string caption, uint flags);
 }

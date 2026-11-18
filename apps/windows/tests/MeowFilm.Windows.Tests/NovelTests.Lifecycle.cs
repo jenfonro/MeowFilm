@@ -1,39 +1,53 @@
+using System.Runtime.InteropServices.WindowsRuntime;
 using System.IO;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
 using Microsoft.Web.WebView2.Core;
-using Microsoft.Web.WebView2.Wpf;
+using WebView2 = Microsoft.UI.Xaml.Controls.WebView2;
 
 namespace MeowFilm.Windows.Tests;
 
 public static partial class NovelTests
 {
-    private static Popup DialogPopup(DependencyObject child)
+    private sealed record DialogSurface(PlayerDialogHost Host, FrameworkElement Panel)
     {
-        for (DependencyObject? item = child; item is not null; item = LogicalTreeHelper.GetParent(item))
-            if (item is Popup popup) return popup;
-        throw new InvalidOperationException("Dialog body has no owning Popup.");
+        internal bool IsAttached => Host.Children.Contains(Panel);
     }
-    private static Task DialogClosed(Popup popup)
+    private static DialogSurface ObserveDialog(DependencyObject child)
+    {
+        var host = PlayerDialogHost.Find(child) ?? throw new InvalidOperationException("Dialog has no application owner.");
+        var panel = host.Children.OfType<FrameworkElement>().Single(element => DesktopVisual.Contains(element, child));
+        return new(host, panel);
+    }
+    private static Task DialogClosed(DialogSurface surface)
     {
         var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        popup.Closed += Closed;
-        return closed.Task;
-        void Closed(object? sender, EventArgs e) { popup.Closed -= Closed; closed.TrySetResult(); }
+        long observation = 0;
+        observation = surface.Host.RegisterPropertyChangedCallback(UIElement.VisibilityProperty, (_, _) => CheckClosed());
+        CheckClosed(); return closed.Task;
+        void CheckClosed()
+        {
+            if (surface.IsAttached) return;
+            surface.Host.UnregisterPropertyChangedCallback(UIElement.VisibilityProperty, observation);
+            closed.TrySetResult();
+        }
     }
-    private static void ClickDialog(Popup popup, string label) =>
-        Find<Button>(popup.Child).Single(b => b.Content as string == label && b.IsVisible)
-            .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+    private static void ClickDialog(DialogSurface surface, string label) =>
+        DesktopTestUi.Invoke(Find<Button>(surface.Panel).Single(b => b.Content as string == label && DesktopVisual.IsVisible(b)));
 
     private static async Task DialogClosure()
     {
-        var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(host); host.Show();
+        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
         try
         {
             foreach (string mode in new[] { "manual", "automatic", "automatic-failure" })
@@ -47,12 +61,12 @@ public static partial class NovelTests
                     entered.TrySetResult();
                     return mode == "manual" ? Task.FromResult(true) : release.Task;
                 }, cancellation.Token, autoSubmit: mode != "manual");
-                var popup = DialogPopup(body); var closed = DialogClosed(popup);
+                var popup = ObserveDialog(body); var closed = DialogClosed(popup);
                 try
                 {
                     if (mode == "manual")
                     {
-                        await Until(() => Find<Button>(popup.Child).Any(b => b.Content as string == "确认" && b.IsVisible));
+                        await Until(() => Find<Button>(popup.Panel).Any(b => b.Content as string == "确认" && DesktopVisual.IsVisible(b)));
                         ClickDialog(popup, "确认");
                     }
                     else
@@ -68,8 +82,8 @@ public static partial class NovelTests
                         catch (IOException e) { Check(e.Message == "Synthetic automatic submission failure."); }
                     }
                     else Check(await dialog, mode + ": successful dialog was not accepted.");
-                    Check(closed.IsCompleted && !popup.IsOpen && popup.Child is null, mode + ": incomplete popup retirement.");
-                    await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                    Check(closed.IsCompleted && !popup.IsAttached && popup.Panel.Parent is null, mode + ": incomplete popup retirement.");
+                    await DesktopTestUi.DrainAsync();
                 }
                 finally { cancellation.Cancel(); release.TrySetResult(true); }
             }
@@ -81,24 +95,23 @@ public static partial class NovelTests
     {
         foreach (string mode in new[] { "cancel", "escape", "token", "owner-hidden", "owner-closed" })
         {
-            var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(host); host.Show();
+            var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
             using var cancellation = new CancellationTokenSource();
             var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var physical = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var body = new TextBlock { Text = "等待合成提交释放" };
             var dialog = NovelUi.DialogAsync(owner, "取消提交", body, "确认", Save, cancellation.Token);
-            var popup = DialogPopup(body); var closed = DialogClosed(popup);
+            var popup = ObserveDialog(body); var closed = DialogClosed(popup);
             try
             {
-                await Until(() => Find<Button>(popup.Child).Any(b => b.Content as string == "确认" && b.IsVisible));
+                await Until(() => Find<Button>(popup.Panel).Any(b => b.Content as string == "确认" && DesktopVisual.IsVisible(b)));
                 ClickDialog(popup, "确认"); await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 switch (mode)
                 {
                     case "cancel": ClickDialog(popup, "取消"); break;
                     case "escape":
-                        popup.Child.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(popup.Child), 0, Key.Escape)
-                        { RoutedEvent = UIElement.PreviewKeyDownEvent }); break;
+                        Check(popup.Host.HandleEscape(VirtualKey.Escape), "real dialog owner accepts Escape"); break;
                     case "token": cancellation.Cancel(); break;
                     case "owner-hidden": owner.Visibility = Visibility.Collapsed; break;
                     case "owner-closed": host.Close(); break;
@@ -108,8 +121,8 @@ public static partial class NovelTests
                 Check(!dialog.IsCompleted, mode + ": dialog acknowledged cancellation before save physically ended.");
                 physical.SetResult();
                 Check(!await dialog, mode + ": cancelled save's late success was accepted.");
-                Check(popup.Child is null && !popup.IsOpen, mode + ": popup remained attached.");
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(popup.Panel.Parent is null && !popup.IsAttached, mode + ": popup remained attached.");
+                await DesktopTestUi.DrainAsync();
             }
             finally { physical.TrySetResult(); cancellation.Cancel(); host.Close(); }
             async Task<bool> Save(CancellationToken token)
@@ -122,7 +135,7 @@ public static partial class NovelTests
 
     private static async Task DialogIsolation()
     {
-        var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(host); host.Show();
+        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
         using var oldCancellation = new CancellationTokenSource();
         using var currentCancellation = new CancellationTokenSource();
         try
@@ -131,18 +144,18 @@ public static partial class NovelTests
             var firstBody = new TextBlock { Text = "旧确认" };
             var first = NovelUi.DialogAsync(owner, "旧确认", firstBody, "确认", _ =>
             { saves++; return Task.FromResult(true); }, oldCancellation.Token);
-            var oldPopup = DialogPopup(firstBody); var oldClosed = DialogClosed(oldPopup);
-            await Until(() => Find<Button>(oldPopup.Child).Any(b => b.Content as string == "取消" && b.IsVisible));
+            var oldPopup = ObserveDialog(firstBody); var oldClosed = DialogClosed(oldPopup);
+            await Until(() => Find<Button>(oldPopup.Panel).Any(b => b.Content as string == "取消" && DesktopVisual.IsVisible(b)));
             ClickDialog(oldPopup, "取消"); Check(!await first && saves == 0 && oldClosed.IsCompleted);
             var nextBody = new TextBlock { Text = "当前确认" };
             var next = NovelUi.DialogAsync(owner, "当前确认", nextBody, "确认", _ =>
             { saves++; return Task.FromResult(true); }, currentCancellation.Token);
-            var popup = DialogPopup(nextBody); var closed = DialogClosed(popup);
-            oldCancellation.Cancel(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            Check(popup.IsOpen && !next.IsCompleted && saves == 0, "Retired dialog cancelled or submitted the next confirmation.");
-            await Until(() => Find<Button>(popup.Child).Any(b => b.Content as string == "确认" && b.IsVisible));
+            var popup = ObserveDialog(nextBody); var closed = DialogClosed(popup);
+            oldCancellation.Cancel(); await DesktopTestUi.DrainAsync();
+            Check(popup.IsAttached && !next.IsCompleted && saves == 0, "Retired dialog cancelled or submitted the next confirmation.");
+            await Until(() => Find<Button>(popup.Panel).Any(b => b.Content as string == "确认" && DesktopVisual.IsVisible(b)));
             ClickDialog(popup, "确认"); Check(await next && closed.IsCompleted && saves == 1);
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await DesktopTestUi.DrainAsync();
         }
         finally { currentCancellation.Cancel(); host.Close(); }
     }
@@ -152,17 +165,17 @@ public static partial class NovelTests
         foreach (string mode in new[] { "io", "document", "cancel" })
         {
             await using var store = new MemoryStore(); var library = new NovelLibrary(store); await library.InitializeAsync();
-            var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(host); host.Show();
+            var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
             store.Accepted = new(TaskCreationOptions.RunContinuationsAsynchronously);
             var physical = store.Hold = new(TaskCreationOptions.RunContinuationsAsynchronously);
             using var cancellation = new CancellationTokenSource();
             var body = new TextBlock { Text = "已接纳的本地保存" };
             var dialog = NovelUi.DialogAsync(owner, "保存排版", body, "保存", async ct =>
             { await library.SaveAppearanceAsync(new() { FontSize = 28 }, ct); return true; }, cancellation.Token);
-            var popup = DialogPopup(body); var closed = DialogClosed(popup);
+            var popup = ObserveDialog(body); var closed = DialogClosed(popup);
             try
             {
-                await Until(() => Find<Button>(popup.Child).Any(b => b.Content as string == "保存" && b.IsVisible));
+                await Until(() => Find<Button>(popup.Panel).Any(b => b.Content as string == "保存" && DesktopVisual.IsVisible(b)));
                 ClickDialog(popup, "保存"); await store.Accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 ClickDialog(popup, "取消"); await closed.WaitAsync(TimeSpan.FromSeconds(5));
                 Check(!dialog.IsCompleted && library.Appearance.FontSize == 22 && store.Bytes is null,
@@ -181,29 +194,29 @@ public static partial class NovelTests
                     try { await dialog; } catch (Exception error) { failure = error; }
                     Check(ReferenceEquals(failure, store.WriteFailure), mode + ": closed dialog lost the real write failure.");
                 }
-                Check(library.Appearance.FontSize == 22 && store.Bytes is null && popup.Child is null && !popup.IsOpen);
+                Check(library.Appearance.FontSize == 22 && store.Bytes is null && popup.Panel.Parent is null && !popup.IsAttached);
             }
             finally { physical.TrySetResult(); cancellation.Cancel(); host.Close(); await library.PrepareShutdownAsync(); }
         }
         await using var retryStore = new MemoryStore(); var retryLibrary = new NovelLibrary(retryStore); await retryLibrary.InitializeAsync();
-        var retryOwner = new StackPanel(); var retryHost = GeneralAppearanceTests.Window(retryOwner); NovelUi.Theme(retryHost); retryHost.Show();
+        var retryOwner = new StackPanel(); var retryHost = NovelTestUi.Window(retryOwner); NovelUi.Theme(DesktopTestUi.WindowRoot(retryHost)); retryHost.Show();
         using var retryCancellation = new CancellationTokenSource();
         retryStore.FailWrite = true;
         var retryBody = new TextBlock { Text = "保留输入与原位重试" };
         var retry = NovelUi.DialogAsync(retryOwner, "保存排版", retryBody, "保存", async ct =>
         { await retryLibrary.SaveAppearanceAsync(new() { FontSize = 28 }, ct); return true; }, retryCancellation.Token);
-        var retryPopup = DialogPopup(retryBody); var retryClosed = DialogClosed(retryPopup);
+        var retryPopup = ObserveDialog(retryBody); var retryClosed = DialogClosed(retryPopup);
         try
         {
-            await Until(() => Find<Button>(retryPopup.Child).Any(b => b.Content as string == "保存" && b.IsVisible));
-            var content = retryPopup.Child; ClickDialog(retryPopup, "保存");
-            await Until(() => Find<TextBlock>(retryPopup.Child).Any(t => t.Text == "操作失败，请检查输入或重试" && t.IsVisible) &&
-                Find<Button>(retryPopup.Child).Single(b => b.Content as string == "保存").IsEnabled);
-            Check(!retry.IsCompleted && !retryClosed.IsCompleted && retryPopup.IsOpen &&
-                ReferenceEquals(content, retryPopup.Child) && ReferenceEquals(DialogPopup(retryBody), retryPopup) &&
+            await Until(() => Find<Button>(retryPopup.Panel).Any(b => b.Content as string == "保存" && DesktopVisual.IsVisible(b)));
+            var content = retryPopup.Panel; ClickDialog(retryPopup, "保存");
+            await Until(() => Find<TextBlock>(retryPopup.Panel).Any(t => t.Text == "操作失败，请检查输入或重试" && DesktopVisual.IsVisible(t)) &&
+                Find<Button>(retryPopup.Panel).Single(b => b.Content as string == "保存").IsEnabled);
+            Check(!retry.IsCompleted && !retryClosed.IsCompleted && retryPopup.IsAttached &&
+                ReferenceEquals(content, retryPopup.Panel) && ReferenceEquals(ObserveDialog(retryBody).Panel, retryPopup.Panel) &&
                 retryLibrary.Appearance.FontSize == 22 && retryStore.Bytes is null);
             retryStore.FailWrite = false; ClickDialog(retryPopup, "保存");
-            Check(await retry && retryClosed.IsCompleted && retryPopup.Child is null &&
+            Check(await retry && retryClosed.IsCompleted && retryPopup.Panel.Parent is null &&
                 retryLibrary.Appearance.FontSize == 28 && retryStore.Writes == 2);
             var reopened = new NovelLibrary(retryStore); await reopened.InitializeAsync();
             Check(reopened.Appearance.FontSize == 28);
@@ -225,7 +238,7 @@ public static partial class NovelTests
             root.Children.Add(view);
             var dialogHost = new PlayerDialogHost();
             root.Children.Add(dialogHost);
-            var host = GeneralAppearanceTests.Window(root);
+            var host = NovelTestUi.Window(root);
             dialogHost.Attach(host);
             host.Show();
             var physical = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -235,27 +248,25 @@ public static partial class NovelTests
                     await Until(() => Find<TextBlock>(view).Any(text => text.Text == runtime.Records.Single().Name));
                 store.Hold = physical; store.Accepted = new(TaskCreationOptions.RunContinuationsAsynchronously);
                 if (owner == "settings")
-                    Find<Button>(view).Single(b => b.Content as string == "阅读排版").RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                    DesktopTestUi.Invoke(Find<Button>(view).Single(b => b.Content as string == "阅读排版"));
                 else module.RunUi(async ct =>
                 {
                     await NovelUi.DialogAsync(view, "本地写入", new TextBlock(), "保存", async token =>
                     { await module.Library.SaveAppearanceAsync(new() { FontSize = 28 }, token); return true; }, ct);
                 });
-                Popup? popup = null;
+                DialogSurface? popup = null;
                 if (owner == "settings")
                 {
                     await Until(() => dialogHost.IsOpen);
-                    Find<Button>(dialogHost).Single(b => b.Content as string == "保存")
-                        .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                    DesktopTestUi.Invoke(Find<Button>(dialogHost).Single(b => b.Content as string == "保存"));
                     await store.Accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                    Find<Button>(dialogHost).Single(b => b.Content as string == "取消")
-                        .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                    DesktopTestUi.Invoke(Find<Button>(dialogHost).Single(b => b.Content as string == "取消"));
                     await Until(() => !dialogHost.IsOpen);
                 }
                 else
                 {
-                    await Until(() => PopupItems<Button>().Any(b => b.Content as string == "保存" && b.IsVisible));
-                    popup = DialogPopup(PopupItems<Button>().Single(b => b.Content as string == "保存" && b.IsVisible));
+                    await Until(() => DialogItems<Button>(view).Any(b => b.Content as string == "保存" && DesktopVisual.IsVisible(b)));
+                    popup = ObserveDialog(DialogItems<Button>(view).Single(b => b.Content as string == "保存" && DesktopVisual.IsVisible(b)));
                     var closed = DialogClosed(popup); ClickDialog(popup, "保存");
                     await store.Accepted.Task.WaitAsync(TimeSpan.FromSeconds(5)); ClickDialog(popup, "取消");
                     await closed.WaitAsync(TimeSpan.FromSeconds(5));
@@ -269,11 +280,11 @@ public static partial class NovelTests
                 {
                     if (owner == "settings") await ((NovelSettingsView)module.SettingsView).DrainAsync();
                     else await module.PrepareShutdownAsync();
-                    await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                    await DesktopTestUi.DrainAsync();
                     Check(module.Notice.Length == 0, owner + ": cancellation became a visible write failure.");
                 }
                 Check(module.Library.Appearance.FontSize == 22 && store.Bytes is null &&
-                    (owner == "settings" ? !dialogHost.IsOpen : popup?.Child is null));
+                    (owner == "settings" ? !dialogHost.IsOpen : popup is null || !popup.IsAttached));
             }
             finally { physical.TrySetResult(); host.Close(); await module.PrepareShutdownAsync(); }
         }
@@ -286,7 +297,7 @@ public static partial class NovelTests
         var profiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (string mode in new[] { "success", "failure", "token", "owner-closed" })
         {
-            var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(host); host.Show();
+            var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
             using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             var operation = NovelWebInteraction.ShowAsync(owner, rules, Json(new { mode = "rule", request = new
             {
@@ -298,23 +309,23 @@ public static partial class NovelTests
             CoreWebView2Environment? environment = null; bool exited = false, returnedAtExit = false;
             try
             {
-                await Until(() => PopupItems<WebView2>().Any(w => w.CoreWebView2 is not null));
-                var web = PopupItems<WebView2>().Single(); var popup = DialogPopup(web); var closed = DialogClosed(popup);
+                await Until(() => DialogItems<WebView2>(owner).Any(w => w.CoreWebView2 is not null));
+                var web = DialogItems<WebView2>(owner).Single(); var popup = ObserveDialog(web); var closed = DialogClosed(popup);
                 environment = web.CoreWebView2.Environment; string profile = environment.UserDataFolder;
                 environment.BrowserProcessExited += Exited;
                 Check(Directory.Exists(profile) && profiles.Add(profile), "Web interaction reused or lost its private profile.");
-                while (await web.CoreWebView2.ExecuteScriptAsync("typeof window.finishFixture").WaitAsync(cancellation.Token) != "\"function\"")
+                while (await web.CoreWebView2.ExecuteScriptAsync("typeof window.finishFixture").AsTask().WaitAsync(cancellation.Token) != "\"function\"")
                 {
                     cancellation.Token.ThrowIfCancellationRequested();
-                    await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                    await DesktopTestUi.DrainAsync();
                 }
                 if (mode == "success")
                 {
-                    Preview((FrameworkElement)popup.Child, "novel-web-lifecycle", 640, 520);
+                    await Preview((FrameworkElement)popup.Panel, "novel-web-lifecycle", 640, 520);
                     string path = Environment.GetEnvironmentVariable("MEOWFILM_SETTINGS_PREVIEW_ROOT") ?? TestWorkspace.DataPath("novel-previews");
                     TestWorkspace.ValidatePath(TestWorkspace.DataRoot, path); Directory.CreateDirectory(path);
                     using var image = File.Create(Path.Combine(path, "novel-web-lifecycle-browser.png"));
-                    await web.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, image);
+                    await web.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, image.AsRandomAccessStream());
                 }
                 if (mode == "token") cancellation.Cancel();
                 else if (mode == "owner-closed") host.Close();
@@ -332,8 +343,8 @@ public static partial class NovelTests
                 else Check(Json((await operation)!).GetProperty("value").GetString() == "completed");
                 Check(closed.IsCompleted && exited && !returnedAtExit && !Directory.Exists(profile),
                     mode + ": Web returned before actual Closed, whole browser-group exit, or profile deletion.");
-                Check(!PopupItems<WebView2>().Any(), mode + ": WebView remained attached.");
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(!DialogItems<WebView2>(owner).Any(), mode + ": WebView remained attached.");
+                await DesktopTestUi.DrainAsync();
             }
             finally
             {
