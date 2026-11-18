@@ -1,7 +1,11 @@
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
@@ -167,20 +171,20 @@ public static partial class NovelTests
         await using var store = new MemoryStore(); var runtime = new Runtime { Text = "广告漢語" };
         var sources = NovelTestSources.Create(runtime); await using var engine = new RuleProbe();
         await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(engine));
-        var shell = new ShellWindow([module], [], () => module.PrepareShutdownAsync(), () => module.AbortAsync(), module.CancelShutdownPreparationAsync)
-        { Width = 1050, Height = 760, Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false };
+        var shell = new ShellWindow([module], [], () => module.PrepareShutdownAsync(), () => module.AbortAsync(), module.CancelShutdownPreparationAsync);
+        shell.Resize(1050, 760);
         try
         {
             shell.Show(); await Until(() => module.ExploreSource is not null && !module.LoadingDiscovery);
             await module.ReceiveBookAsync(Book(), default); module.Request(NovelCapability.BookRoute);
             await Until(() => module.Route == NovelCapability.BookRoute && module.Session!.Chapters.Count > 0);
-            await module.StartReadingAsync(); await Until(() => module.Route == NovelCapability.ReaderRoute && module.View.IsVisible);
+            await module.StartReadingAsync(); await Until(() => module.Route == NovelCapability.ReaderRoute && DesktopVisual.IsVisible(module.View));
             var session = module.Session!; string location = module.CaptureNavigationLocation(); var chapter = session.Chapter;
             int reads = runtime.Calls.Count(c => IsAction(c, "content"));
             await OpenSettings();
             await module.Library.SaveRulesAsync([new() { Pattern = "[", IsRegex = true }]);
             await module.Library.SaveAppearanceAsync(module.Library.Appearance with { Conversion = "simplified" });
-            Back(); await Until(() => module.View.IsVisible && !session.Loading && module.Notice == "小说设置已保存，当前正文暂未生效");
+            Back(); await Until(() => DesktopVisual.IsVisible(module.View) && !session.Loading && module.Notice == "小说设置已保存，当前正文暂未生效");
             Check(session.Blocks.Single().Text == "广告漢語" && module.CaptureNavigationLocation() == location);
             await OpenSettings();
             await module.Library.SaveRulesAsync([new() { Pattern = "广告", Replacement = "返回", IsRegex = false }]);
@@ -188,20 +192,20 @@ public static partial class NovelTests
             Check(ReferenceEquals(module.Session, session) && ReferenceEquals(session.Chapter, chapter) &&
                 module.CaptureNavigationLocation() == location && runtime.Calls.Count(c => IsAction(c, "content")) == reads);
             int processed = engine.Transforms;
-            await OpenSettings(); Back(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            Check(module.View.IsVisible && engine.Transforms == processed, "Unchanged settings return reprocessed content");
+            await OpenSettings(); Back(); await DesktopTestUi.DrainAsync();
+            Check(DesktopVisual.IsVisible(module.View) && engine.Transforms == processed, "Unchanged settings return reprocessed content");
         }
         finally { shell.Close(); await shell.ShutdownCompletion.WaitAsync(TimeSpan.FromSeconds(10)); }
         async Task OpenSettings()
         {
-            ((Button)shell.FindName("SettingsButton")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
-            await Until(() => !module.View.IsVisible);
-            var header = (DesktopPageHeader)shell.FindName("PageHeaderHost");
+            DesktopTestUi.Invoke(((Button)DesktopTestUi.WindowRoot(shell).FindName("SettingsButton")));
+            await Until(() => !DesktopVisual.IsVisible(module.View));
+            var header = (DesktopPageHeader)DesktopTestUi.WindowRoot(shell).FindName("PageHeaderHost");
             var slot = (ContentControl)header.FindName("LeadingSlot");
             ((Panel)slot.Content).Children.OfType<RadioButton>().Single(tab => tab.Content as string == "小说").IsChecked = true;
-            await Until(() => module.SettingsView.IsVisible);
+            await Until(() => DesktopVisual.IsVisible(module.SettingsView));
         }
-        void Back() => ((Button)shell.FindName("BackButton")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        void Back() => DesktopTestUi.Invoke((Button)DesktopTestUi.WindowRoot(shell).FindName("BackButton"));
     }
     private static async Task LayoutLabels()
     {
@@ -214,11 +218,11 @@ public static partial class NovelTests
         await module.InitializeAsync(default); await library.SaveAppearanceAsync(new() { Mode = "none" });
         await module.ReceiveBookAsync(Book(), default); await module.NavigateAsync(NovelCapability.BookRoute, default);
         await module.Session!.ContinueAsync();
-        var host = GeneralAppearanceTests.Window(module.View); host.Width = 900; host.Height = 700; host.Show();
+        var host = GeneralAppearanceTests.Window(module.View); DesktopTestUi.ResizeWindow(host, 900, DesktopTestUi.WindowSize(host).Height); DesktopTestUi.ResizeWindow(host, DesktopTestUi.WindowSize(host).Width, 700); host.Show();
         try
         {
             await module.NavigateAsync(NovelCapability.ReaderRoute, default);
-            host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
             await runtime.ImageReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
             await Until(() => library.Entries.SingleOrDefault()?.ReadAt is not null);
             var surface = Find<NovelReadingSurface>(module.View).Single();
@@ -232,13 +236,13 @@ public static partial class NovelTests
             string before = surface.PageStatus;
             await library.SaveAppearanceAsync(library.Appearance with { FontSize = 32 });
             int expectedWrites = store.Writes;
-            host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
             await Until(() => surface.PageStatus != before);
             Check(label.Text == surface.PageStatus && layouts > 0, "Font reflow did not refresh the visible page label.");
             await NoProgressSave(expectedWrites);
 
             before = surface.PageStatus; int previousLayouts = layouts;
-            host.Width = 560; host.Height = 520; host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            DesktopTestUi.ResizeWindow(host, 560, DesktopTestUi.WindowSize(host).Height); DesktopTestUi.ResizeWindow(host, DesktopTestUi.WindowSize(host).Width, 520); DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
             await Until(() => surface.PageStatus != before);
             Check(label.Text == surface.PageStatus && layouts > previousLayouts, "Window reflow left a stale page label.");
             await NoProgressSave(expectedWrites);
@@ -252,7 +256,7 @@ public static partial class NovelTests
             async Task NoProgressSave(int writes)
             {
                 // The view's real position-save timer is 700 ms.
-                await Task.Delay(850); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                await Task.Delay(850); await DesktopTestUi.DrainAsync();
                 Check(positionChanges == 0 && store.Writes == writes && library.Entries.Single().ReadAt == readAt &&
                     library.Entries.Single().Anchor == savedAnchor, "Layout notification masqueraded as a persisted position change.");
             }

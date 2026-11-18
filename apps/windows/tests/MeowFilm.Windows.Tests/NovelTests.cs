@@ -5,10 +5,15 @@ using System.Windows.Media.Imaging;
 using MeowFilm.Platform.Runtime;
 using System.Text;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using FontWeights = Microsoft.UI.Text.FontWeights;
+using Color = Windows.UI.Color;
+using PixelFormats = System.Windows.Media.PixelFormats;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
@@ -20,6 +25,7 @@ public static partial class NovelTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("novel page raster: shared current buffer independent animation snapshot scale and retirement", () => Sta(NovelTestUi.RasterOwnership));
         yield return new("novel native library: independent shelf/history stable identity accepted write and corruption", Library);
         yield return new("novel native library: raw extensions exact numbers and UTF8 keys survive edits and reopen", LibraryRoundTrip);
         yield return new("novel native rules: management projections preserve raw execution through cold open edits and real failures", () => Sta(RuleProjectionExecution));
@@ -85,7 +91,7 @@ public static partial class NovelTests
         yield return new("novel shell: immersive reading hides navigation and exit restores retained book", () => Sta(Shell));
         yield return new("novel composition: native sidebar detail reading settings and local offline state", () => Sta(Composition));
     }
-    internal static Task Sta(Func<Task> action) => MusicQualityConsumerTests.Sta(action);
+    internal static Task Sta(Func<Task> action) => TestUiHost.InvokeAsync(action);
     private static void Check(bool condition, string message = "Novel assertion failed") { if (!condition) throw new InvalidOperationException(message); }
     private static JsonElement Json(object value) => JsonSerializer.SerializeToElement(value, new JsonSerializerOptions(JsonSerializerDefaults.Web));
     private static NovelBook Book(string installation = "a", string url = "https://novel.invalid/book", string author = "作者") =>
@@ -277,23 +283,30 @@ public static partial class NovelTests
         var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync(); await using var rules = new NovelRuleProgram(ruleRuntime);
         var session = new NovelBookSession(sources, library, rules, new("layout", "key", Book())); await session.ContinueAsync();
         var surface = new NovelReadingSurface(sources);
-        var host = new Window { Content = surface, Width = 900, Height = 720, Left = -10000, Top = -10000, ShowInTaskbar = false, ShowActivated = false };
-        NovelUi.Theme(host);
+        var host = NovelTestUi.Window(surface, 900, 720);
+        NovelUi.Theme(host.Root);
         try
         {
-            host.Show();
+            host.Activate();
             foreach (string mode in new[] { "cover", "slide", "none", "scroll" })
             {
-                surface.Present(session, new() { Mode = mode }); host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+                surface.Present(session, new() { Mode = mode }); host.Root.UpdateLayout(); await DesktopTestUi.DrainAsync();
                 await surface.TurnAsync(1); var before = surface.CaptureAnchor();
                 surface.Present(session, new() { Mode = mode, FontSize = 28, Margin = 48 });
-                host.Width = 760; host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+                host.Resize(760, 720); host.Root.UpdateLayout(); await DesktopTestUi.DrainAsync();
                 var after = surface.CaptureAnchor();
                 Check(before.ChapterUrl == after.ChapterUrl && before.BlockIndex == after.BlockIndex && Math.Abs(before.Utf16Offset - after.Utf16Offset) < 80);
                 Check(!string.IsNullOrEmpty(surface.PageStatus));
+                NovelTestUi.ReadingFrame(surface);
             }
-            Preview(surface, "novel-reading", 760, 650);
-            runtime.Text = ""; await session.ReadAsync(0); surface.Present(session, new()); host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            var retained = surface.CaptureAnchor();
+            await surface.DrainImagesAsync(); await DesktopTestUi.DrainAsync();
+            Check(surface.Children.OfType<Image>().All(image => image.Source is null), "Resource drain must release both page rasters.");
+            surface.ResumeImages(); await DesktopTestUi.DrainAsync();
+            NovelTestUi.ReadingFrame(surface);
+            Check(surface.CaptureAnchor() == retained, "Raster retirement and resume changed the logical reading anchor.");
+            await NovelTestUi.Preview(surface, "novel-reading", 760, 650);
+            runtime.Text = ""; await session.ReadAsync(0); surface.Present(session, new()); host.Root.UpdateLayout(); await DesktopTestUi.DrainAsync();
             Check(surface.CaptureAnchor().Ratio == 0 && surface.PageStatus == "1 / 1");
         }
         finally { await surface.DrainImagesAsync(); surface.Dispose(); host.Close(); }
@@ -308,35 +321,35 @@ public static partial class NovelTests
         await module.InitializeAsync(default);
         Check(module.Navigation.Where(n => n.ShowInSidebar).Select(n => n.Route).SequenceEqual(new[] { NovelCapability.CategoriesRoute }));
         Check(module.Navigation[0] is { Route: NovelCapability.HomeRoute, ShowInSidebar: false, IconData: not null });
-        var host = GeneralAppearanceTests.Window(module.View); host.Width = 1080; host.Height = 780; host.Show();
+        var host = NovelTestUi.Window(module.View, 1080, 780); host.Activate();
         try
         {
-            await module.NavigateAsync(NovelCapability.HomeRoute, default); await Dispatcher.Yield(DispatcherPriority.Render);
-            Preview(module.View, "novel-home-empty", 1000, 700);
+            await module.NavigateAsync(NovelCapability.HomeRoute, default); await DesktopTestUi.DrainAsync();
+            await NovelTestUi.Preview(module.View, "novel-home-empty", 1000, 700);
             Check(Find<Button>(module.View).Any(b => b.Content as string == "导入书源"));
             await module.NavigateAsync(NovelCapability.CategoriesRoute, default);
-            Preview(module.View, "novel-categories-empty", 1000, 700);
+            await NovelTestUi.Preview(module.View, "novel-categories-empty", 1000, 700);
             runtime.Records = [Source()]; await sources.RefreshAsync(); await module.LoadDiscoveryAsync(null, null, true);
             await module.NavigateAsync(NovelCapability.HomeRoute, default);
-            Preview(module.View, "novel-home-books", 1000, 700);
+            await NovelTestUi.Preview(module.View, "novel-home-books", 1000, 700);
             Check(Find<TextBlock>(module.View).Any(b => b.Text == "合成小说"));
-            await module.NavigateAsync(NovelCapability.CategoriesRoute, default); Preview(module.View, "novel-categories-books", 1000, 700);
+            await module.NavigateAsync(NovelCapability.CategoriesRoute, default); await NovelTestUi.Preview(module.View, "novel-categories-books", 1000, 700);
             await module.ReceiveBookAsync(Book(), default); await module.NavigateAsync(NovelCapability.BookRoute, default);
             Check(module.CaptureNavigationLocation().StartsWith("novel-book:") && module.Library.Entries.Count == 0);
-            Preview(module.View, "novel-book", 1000, 700);
+            await NovelTestUi.Preview(module.View, "novel-book", 1000, 700);
             await module.Session!.ShelfAsync();
             Check(module.Library.Entries.Single().OnShelf && module.Library.Entries.Single().ReadAt is null);
             await module.Session.ContinueAsync(); await module.NavigateAsync(NovelCapability.ReaderRoute, default); Check(module.IsImmersive);
-            module.View.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            module.View.UpdateLayout(); await DesktopTestUi.DrainAsync();
             Check(Find<NovelReadingSurface>(module.View).Any());
             await module.NavigateAsync(NovelCapability.HomeRoute, default); Check(!module.IsImmersive);
             Check(module.Library.Entries.Single() is { OnShelf: true, ReadAt: not null, Anchor: not null });
-            Preview(module.View, "novel-home-continuation", 1000, 700);
-            host.Content = module.SettingsView; await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            Preview(module.SettingsView, "novel-settings", 1000, 700);
+            await NovelTestUi.Preview(module.View, "novel-home-continuation", 1000, 700);
+            ((Grid)host.Root).Children.Remove(module.View); ((Grid)host.Root).Children.Insert(0, module.SettingsView); await DesktopTestUi.DrainAsync();
+            await NovelTestUi.Preview(module.SettingsView, "novel-settings", 1000, 700);
             var labels = Find<RadioButton>(module.SettingsView).Select(b => b.Content as string).ToArray(); Check(labels.Contains("书源管理") && labels.Contains("替换净化"));
             Find<RadioButton>(module.SettingsView).Single(b => b.Content as string == "替换净化").IsChecked = true;
-            Preview(module.SettingsView, "novel-settings-rules", 1000, 700);
+            await NovelTestUi.Preview(module.SettingsView, "novel-settings-rules", 1000, 700);
             await module.PrepareShutdownAsync(); await module.CancelShutdownPreparationAsync();
         }
         finally { host.Close(); }

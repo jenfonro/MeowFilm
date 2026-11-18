@@ -1,30 +1,33 @@
 using System.ComponentModel;
 using System.Globalization;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Data;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Data;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Windows.System;
+using MeowFilm.Media;
+using Microsoft.UI.Windowing;
+using Microsoft.UI;
+using Windows.Graphics;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
 public partial class FilmPlaybackView : UserControl
 {
-    private const double MetadataFade = 20;
-    private (bool Top, bool Bottom, double Height) metadataFade;
     private FilmPlaybackPage? boundPage, seekingPage;
     private FilmEpisodeDirectory? shownDirectory;
     private ItemsControl? episodeList;
     private bool restoringDirectory, restoringPage, shownList;
     private FilmDirectoryDialog? directory;
-    private Window? playerWindow;
+    private DesktopWindow? playerWindow;
     private bool pip, selectingControl;
     private int rateIndex = 2, aspectIndex;
-    private ContentControl? mediaSurface;
+    private FilmVideoSurface? mediaSurface;
     private Point? swipeStart;
     private long lastSwipe;
     private long rateGeneration, aspectGeneration;
@@ -36,18 +39,15 @@ public partial class FilmPlaybackView : UserControl
     public FilmPlaybackView()
     {
         InitializeComponent();
-        LeftPill.LayoutTransform = RightPill.LayoutTransform = controlsScale;
-        // Keep the overlay's context when VideoView moves it to another window.
-        // A binding also avoids re-entering DataContext inheritance in its change callback.
-        PlayerOverlay.SetBinding(DataContextProperty, new Binding(nameof(DataContext)) { Source = this });
+        PlayerOverlay.SetBinding(DataContextProperty, new Binding { Path = new PropertyPath(nameof(DataContext)), Source = this });
         DataContextChanged += (_, _) =>
         {
             RememberPagePosition();
             CancelPlayerInput();
             if (boundPage is not null) boundPage.PropertyChanged -= PageChanged;
-            directory?.Close(); directory = null;
+            directory?.Hide(); directory = null;
             playerWindow?.Close();
-            DetachOverlay();
+            DetachControls();
             VideoHost.Content = null;
             boundPage = DataContext as FilmPlaybackPage;
             if (boundPage is not null) boundPage.PropertyChanged += PageChanged;
@@ -60,44 +60,35 @@ public partial class FilmPlaybackView : UserControl
             UpdateMedia();
             ShowPlayerControls();
         };
-        Loaded += (_, _) => { UpdateLayoutMode(); UpdateMedia(); AttachKeyboard(); };
+        Loaded += (_, _) => { UpdateLayoutMode(); UpdateMedia();  };
         Unloaded += (_, _) =>
         {
             RememberPagePosition();
-            DetachKeyboard();
-            if (!pip) { CancelPlayerInput(); DetachOverlay(); VideoHost.Content = null; }
+            if (!pip) { CancelPlayerInput(); DetachControls(); VideoHost.Content = null; }
         };
-        IsVisibleChanged += (_, _) =>
+        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
         {
-            if (!IsVisible)
-            {
-                RememberPagePosition();
-                directory?.Close();
-                if (!pip)
-                {
-                    CancelPlayerInput();
-                    playerWindow?.Close();
-                    DetachOverlay();
-                    VideoHost.Content = null;
-                }
-            }
+            if (Visibility != Visibility.Visible) RememberPagePosition();
             else { RestorePagePosition(); UpdateMedia(); }
-        };
-        PageScroll.ScrollChanged += (_, e) =>
+        });
+        PageScroll.ViewChanged += (_, _) =>
         {
-            if (!restoringPage && IsVisible && boundPage is { } page && ReferenceEquals(e.OriginalSource, PageScroll))
+            if (!restoringPage && MeowFilm.Desktop.DesktopVisual.IsVisible(this) && boundPage is { } page)
                 page.PageOffset = PageScroll.VerticalOffset;
         };
-        MetadataScroll.ScrollChanged += (_, e) =>
+        MetadataScroll.ViewChanged += (_, _) =>
         {
-            if (!restoringPage && IsVisible && boundPage is { } page && ReferenceEquals(e.OriginalSource, MetadataScroll))
+            if (!restoringPage && MeowFilm.Desktop.DesktopVisual.IsVisible(this) && boundPage is { } page)
                 page.MetadataOffset = MetadataScroll.VerticalOffset;
         };
-        RelatedScroll.ScrollChanged += (_, e) =>
+        RelatedScroll.ViewChanged += (_, _) =>
         {
-            if (!restoringPage && IsVisible && boundPage is { } page && ReferenceEquals(e.OriginalSource, RelatedScroll))
+            if (!restoringPage && MeowFilm.Desktop.DesktopVisual.IsVisible(this) && boundPage is { } page)
                 page.RecommendationOffset = RelatedScroll.HorizontalOffset;
         };
+        SeekSlider.AddHandler(PointerPressedEvent, new PointerEventHandler(Seek_Begin), true);
+        SeekSlider.AddHandler(PointerReleasedEvent, new PointerEventHandler(Seek_End), true);
+        SeekSlider.AddHandler(PointerCaptureLostEvent, new PointerEventHandler(Seek_CaptureLost), true);
     }
 
     private void RememberPagePosition()
@@ -112,14 +103,14 @@ public partial class FilmPlaybackView : UserControl
     {
         restoringPage = true;
         var page = boundPage;
-        _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+        DispatcherQueue.TryEnqueue(() =>
         {
             if (!ReferenceEquals(page, boundPage)) return;
-            PageScroll.ScrollToVerticalOffset(page?.PageOffset ?? 0);
-            MetadataScroll.ScrollToVerticalOffset(page?.MetadataOffset ?? 0);
-            RelatedScroll.ScrollToHorizontalOffset(page?.RecommendationOffset ?? 0);
+            PageScroll.ChangeView(null, page?.PageOffset ?? 0, null, true);
+            MetadataScroll.ChangeView(null, page?.MetadataOffset ?? 0, null, true);
+            RelatedScroll.ChangeView(page?.RecommendationOffset ?? 0, null, null, true);
             restoringPage = false;
-        }));
+        });
     }
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e) => UpdateLayoutMode();
@@ -149,59 +140,44 @@ public partial class FilmPlaybackView : UserControl
         }
     }
 
-    // Fade only the edges where metadata continues beyond the panel.
-    private void Metadata_ScrollChanged(object sender, ScrollChangedEventArgs e)
-    {
-        var scroll = MetadataScroll;
-        (bool Top, bool Bottom, double Height) fade = (scroll.VerticalOffset > .5,
-            scroll.ScrollableHeight - scroll.VerticalOffset > .5, scroll.ActualHeight);
-        if (fade == metadataFade) return;
-        metadataFade = fade;
-        if ((!fade.Top && !fade.Bottom) || fade.Height < MetadataFade * 2)
-        {
-            scroll.ClearValue(OpacityMaskProperty);
-            return;
-        }
-        var clear = Color.FromArgb(0, 0, 0, 0);
-        double edge = MetadataFade / fade.Height;
-        var mask = new LinearGradientBrush
-        {
-            MappingMode = BrushMappingMode.Absolute, StartPoint = new(0, 0), EndPoint = new(0, fade.Height)
-        };
-        mask.GradientStops.Add(new(fade.Top ? clear : Colors.Black, 0));
-        mask.GradientStops.Add(new(Colors.Black, edge));
-        mask.GradientStops.Add(new(Colors.Black, 1 - edge));
-        mask.GradientStops.Add(new(fade.Bottom ? clear : Colors.Black, 1));
-        mask.Freeze();
-        scroll.OpacityMask = mask;
-    }
-
     private async void Episode_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (DataContext is FilmPlaybackPage page && sender is Button { Tag: FilmEpisodeItem episode })
             await ExecuteAsync(page, () => page.SelectEpisodeAsync(episode));
     }
 
     private void HorizontalLayout_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (DataContext is not FilmPlaybackPage page) return;
         page.SetListLayout(false);
+        HorizontalLayout.SetBinding(ToggleButton.IsCheckedProperty, new Binding
+        { Path = new PropertyPath(nameof(FilmPlaybackPage.IsHorizontalLayout)), Mode = BindingMode.OneWay });
     }
 
     private void PageChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (!Dispatcher.CheckAccess())
+        if (!DispatcherQueue.HasThreadAccess)
         {
-            _ = Dispatcher.BeginInvoke(new Action(() => PageChanged(sender, e)));
+            DispatcherQueue.TryEnqueue(() => PageChanged(sender, e));
             return;
         }
+        if (e.PropertyName is nameof(FilmPlaybackPage.PlaybackRate) or nameof(FilmPlaybackPage.PlaybackAspect)) UpdateControlSelections();
+        if (e.PropertyName == nameof(FilmPlaybackPage.CurrentCandidateId)) directory?.RefreshCurrent();
         if (e.PropertyName is nameof(FilmPlaybackPage.EpisodeDirectory) or nameof(FilmPlaybackPage.Episodes) or
             nameof(FilmPlaybackPage.ShowEpisodeList) || string.IsNullOrEmpty(e.PropertyName))
             RestoreDirectory();
-        if (e.PropertyName == nameof(FilmPlaybackPage.MediaView) || string.IsNullOrEmpty(e.PropertyName))
-            UpdateMedia();
+        if (e.PropertyName is nameof(FilmPlaybackPage.MediaView) or nameof(FilmPlaybackPage.MediaIdentity) or
+            nameof(FilmPlaybackPage.OwnsNativeMedia) || string.IsNullOrEmpty(e.PropertyName)) UpdateMedia();
+        else if (e.PropertyName is nameof(FilmPlaybackPage.IsPlaying) or nameof(FilmPlaybackPage.PlayerBusy) or
+            nameof(FilmPlaybackPage.PlayerBuffering) or nameof(FilmPlaybackPage.Position) or nameof(FilmPlaybackPage.Duration) or
+            nameof(FilmPlaybackPage.Volume) or nameof(FilmPlaybackPage.CanRetryMedia) or nameof(FilmPlaybackPage.NoOutput) or
+            nameof(FilmPlaybackPage.PlayerPanLabel) or nameof(FilmPlaybackPage.PlayerQualityLabel) or
+            nameof(FilmPlaybackPage.OverviewExpanded) or nameof(FilmPlaybackPage.IsFavorite) or nameof(FilmPlaybackPage.Overview) or
+            nameof(FilmPlaybackPage.HasOutput) or nameof(FilmPlaybackPage.PlayerPanOptions) or nameof(FilmPlaybackPage.PlayerQualityOptions) or
+            nameof(FilmPlaybackPage.ShowPlayerSwitchActions))
+            UpdatePlayerState();
     }
 
     private void RestoreDirectory()
@@ -212,60 +188,47 @@ public partial class FilmPlaybackView : UserControl
         if (!changedLayout && ReferenceEquals(shownDirectory, boundPage?.EpisodeDirectory)) return;
         shownDirectory = boundPage?.EpisodeDirectory;
         DirectoryHost.Children.Clear();
-        foreach (string name in new[] { "EpisodeShelf", "EpisodeList", "MovieCandidates" })
-            if (FindName(name) is not null) UnregisterName(name);
         episodeList = null;
         if (shownDirectory is { } selected)
         {
             if (selected.Presentation is null)
             {
-                var root = (FrameworkElement)((DataTemplate)FindResource("Film.DirectoryPresentation")).LoadContent();
+                var root = (FrameworkElement)((DataTemplate)Resources["Film.DirectoryPresentation"]).LoadContent();
                 var shelf = (Shelf)root.FindName("EpisodeShelf");
                 var list = (ItemsControl)root.FindName("EpisodeList");
                 var movies = (ItemsControl)root.FindName("MovieCandidates");
-                shelf.SetBinding(Shelf.ItemsSourceProperty, new Binding(nameof(FilmEpisodeDirectory.Episodes)) { Source = selected });
-                shelf.SetBinding(Shelf.HorizontalOffsetProperty, new Binding(nameof(FilmEpisodeDirectory.HorizontalOffset))
-                    { Source = selected, Mode = BindingMode.TwoWay });
-                list.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(FilmEpisodeDirectory.Episodes)) { Source = selected });
-                movies.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(FilmEpisodeDirectory.Candidates)) { Source = selected });
+                shelf.SetBinding(Shelf.ItemsSourceProperty, new Binding { Path = new PropertyPath(nameof(FilmEpisodeDirectory.Episodes)), Source = selected });
+                shelf.SetBinding(Shelf.HorizontalOffsetProperty, new Binding { Path = new PropertyPath(nameof(FilmEpisodeDirectory.HorizontalOffset)), Source = selected, Mode = BindingMode.TwoWay });
+                list.SetBinding(ItemsControl.ItemsSourceProperty, new Binding { Path = new PropertyPath(nameof(FilmEpisodeDirectory.Episodes)), Source = selected });
+                movies.SetBinding(ItemsControl.ItemsSourceProperty, new Binding { Path = new PropertyPath(nameof(FilmEpisodeDirectory.Candidates)), Source = selected });
                 selected.Presentation = root;
             }
             var presentation = selected.Presentation;
             presentation.DataContext = boundPage;
             DirectoryHost.Children.Add(presentation);
-            foreach (string name in new[] { "EpisodeShelf", "EpisodeList", "MovieCandidates" })
-                RegisterName(name, presentation.FindName(name));
             episodeList = (ItemsControl)presentation.FindName("EpisodeList");
         }
         restoringDirectory = true;
         var directory = shownDirectory;
-        _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+        DispatcherQueue.TryEnqueue(() =>
         {
             if (!ReferenceEquals(directory, shownDirectory)) return;
             if (episodeList is { } list && FindScroll(list) is { } scroll)
             {
-                scroll.ScrollToVerticalOffset(directory?.VerticalOffset ?? 0);
+                scroll.ViewChanged -= EpisodeList_ViewChanged;
+                scroll.ViewChanged += EpisodeList_ViewChanged;
+                scroll.ChangeView(null, directory?.VerticalOffset ?? 0, null, true);
                 scroll.UpdateLayout();
             }
             restoringDirectory = false;
-        }));
+        });
     }
 
-    private void EpisodeList_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    private void EpisodeList_ViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
     {
-        if (!restoringDirectory && episodeList?.IsVisible == true && ReferenceEquals(shownDirectory, boundPage?.EpisodeDirectory) &&
-            shownDirectory is { } directory && e.OriginalSource is ScrollViewer scroll)
-            directory.VerticalOffset = scroll.VerticalOffset;
-    }
-
-    private void EpisodeList_MouseWheel(object sender, MouseWheelEventArgs e)
-    {
-        if (episodeList is not { } list || FindScroll(list) is not { } scroll ||
-            e.Delta > 0 && scroll.VerticalOffset > .5 ||
-            e.Delta < 0 && scroll.ScrollableHeight - scroll.VerticalOffset > .5) return;
-        PageScroll.RaiseEvent(new MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta)
-            { RoutedEvent = Mouse.MouseWheelEvent, Source = PageScroll });
-        e.Handled = true;
+        if (!restoringDirectory && episodeList?.Visibility == Visibility.Visible &&
+            ReferenceEquals(shownDirectory, boundPage?.EpisodeDirectory) && shownDirectory is { } selected && sender is ScrollViewer scroll)
+            selected.VerticalOffset = scroll.VerticalOffset;
     }
 
     private static ScrollViewer? FindScroll(DependencyObject parent)
@@ -287,35 +250,39 @@ public partial class FilmPlaybackView : UserControl
             rateGeneration++; aspectGeneration++;
             UpdateControlSelections();
         }
-        // Mount the stable surface before commit; an empty HWND is not media
-        // output, but the first real Present must not target its parking window.
-        if (pip ? !page.OwnsNativeMedia : !IsLoaded || !IsVisible)
+        // Mount the stable composition surface before the first committed frame.
+        if (pip ? !page.OwnsNativeMedia : !IsLoaded)
         {
-            DetachOverlay();
+            DetachControls();
             VideoHost.Content = null;
             if (pip || !page.CanPlay) playerWindow?.Close();
         }
-        else if (page.MediaView is { } surface)
+        else if (page.MediaView is FilmVideoSurface surface)
         {
             if (!ReferenceEquals(mediaSurface, surface))
             {
-                DetachOverlay();
+                DetachControls();
                 VideoPicture.Children.Remove(PlayerOverlay);
                 mediaSurface = surface;
                 surface.Content = PlayerOverlay;
             }
             if (!ReferenceEquals(VideoHost.Content, surface)) VideoHost.Content = surface;
         }
+        else
+        {
+            DetachControls();
+            if (!ReferenceEquals(VideoHost.Content, page.MediaView)) VideoHost.Content = page.MediaView;
+        }
         UpdatePlayerState();
         if (seekingPage is null)
         {
-            SeekSlider.GetBindingExpression(RangeBase.MaximumProperty)?.UpdateTarget();
+            SeekSlider.Maximum = Math.Max(0, page.Duration);
             SeekSlider.Value = page.Position;
         }
         if (directory is { } dialog)
         {
             if (dialog.IsCurrent(page)) dialog.RefreshCurrent();
-            else { dialog.Close(); directory = null; }
+            else { dialog.Hide(); directory = null; }
         }
     }
     private void UpdateControlSelections()
@@ -348,63 +315,57 @@ public partial class FilmPlaybackView : UserControl
         DataContext is FilmPlaybackPage page ? ExecuteAsync(page, () => page.CommandAsync(action, parameters), failure) : Task.CompletedTask;
     private async void Play_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (DataContext is FilmPlaybackPage page) await ExecuteAsync(page, page.PlayAsync, "播放操作失败");
     }
     private async void PauseOrResume_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (DataContext is FilmPlaybackPage page) await ExecuteAsync(page, page.PauseOrResumeAsync, "播放操作失败");
     }
-    private async void Previous_Click(object sender, RoutedEventArgs e) { e.Handled = true; await ActAsync("previous"); }
-    private async void Next_Click(object sender, RoutedEventArgs e) { e.Handled = true; await ActAsync("next"); }
+    private async void Previous_Click(object sender, RoutedEventArgs e) {  await ActAsync("previous"); }
+    private async void Next_Click(object sender, RoutedEventArgs e) {  await ActAsync("next"); }
     private async void Switch_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (boundPage is { } page && !page.PlayerActionPending("switch")) await ActAsync("switch");
     }
     private async void RetryMedia_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (DataContext is FilmPlaybackPage page)
             await ExecuteAsync(page, page.RetryMediaAsync, "取址失败");
     }
     private async void Block_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (DataContext is not FilmPlaybackPage { HasCurrent: true, PlayerBusy: false } page) return;
         string attemptId = page.CurrentAttemptId!;
         await ExecuteAsync(page, () => page.CommandAsync("block", new { attemptId }), "片源屏蔽保存失败");
     }
     private void Pan_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (boundPage is { } page && sender is Button button)
             ShowMenu(button, page.PlayerPanOptions, "pan", "provider");
     }
     private void Quality_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (boundPage is { } page && sender is Button button)
             ShowMenu(button, page.PlayerQualityOptions, "quality", "quality");
     }
     private void ShowMenu(Button button, IReadOnlyList<FilmPlayerOption> options, string action, string field)
     {
         if (boundPage is not { } page || options.Count == 0) return;
-        if (button.ContextMenu is { IsOpen: true } existing) { existing.IsOpen = false; return; }
         ClosePlayerMenus();
-        var menu = new ContextMenu
-        {
-            PlacementTarget = button, Placement = PlacementMode.Top, VerticalOffset = -10,
-            Style = (Style)FindResource("Film.PlayerMenu")
-        };
+        var menu = new MenuFlyout { Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Top };
         foreach (var choice in options)
         {
-            var item = new MenuItem { Header = choice.Label, IsCheckable = true, IsChecked = choice.IsSelected,
-                Style = (Style)FindResource("Film.PlayerMenuItem") };
+            var item = new ToggleMenuFlyoutItem { Text = choice.Label, IsChecked = choice.IsSelected };
             item.Click += async (_, _) =>
             {
-                menu.IsOpen = false;
+                menu.Hide();
                 if (ReferenceEquals(boundPage, page) && !choice.IsSelected && !page.PlayerActionPending(action, choice.Value))
                     await ExecuteAsync(page, () => page.CommandAsync(action, FilmJson.Encode(new Dictionary<string, string> { [field] = choice.Value })));
             };
@@ -416,50 +377,51 @@ public partial class FilmPlaybackView : UserControl
             if (ReferenceEquals(playerMenu, menu)) playerMenu = null;
             ShowPlayerControls();
         };
-        button.ContextMenu = playerMenu = menu;
-        AutomationProperties.SetItemStatus(button, "已展开");
-        menu.IsOpen = true;
-        ShowPlayerControls();
+        playerMenu = menu; AutomationProperties.SetItemStatus(button, "已展开");
+        menu.ShowAt(button); ShowPlayerControls();
     }
     private async void SearchMoreSources_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (DataContext is not FilmPlaybackPage { CanSearchMore: true } page) return;
         SourcePicker.IsDropDownOpen = false;
         await ExecuteAsync(page, page.SearchMoreSourcesAsync, "搜索失败，请重试");
     }
     private async void SearchSources_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (DataContext is FilmPlaybackPage page)
             await ExecuteAsync(page, page.SearchSourcesAsync, "搜索失败，请重试");
     }
     private async void Reconnect_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (DataContext is FilmPlaybackPage page) await ExecuteAsync(page, page.ReconnectAsync, "重连失败");
     }
     private async void Favorite_Changed(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (DataContext is not FilmPlaybackPage page || sender is not ToggleButton toggle ||
             !page.CanFavorite || toggle.IsChecked == page.IsFavorite) return;
         try { await ExecuteAsync(page, page.ToggleFavoriteAsync, "收藏保存失败"); }
-        finally { toggle.GetBindingExpression(ToggleButton.IsCheckedProperty)?.UpdateTarget(); }
+        finally { toggle.SetBinding(ToggleButton.IsCheckedProperty, new Binding
+            { Path = new PropertyPath(nameof(FilmPlaybackPage.IsFavorite)), Mode = BindingMode.OneWay }); }
     }
     private async void Preview_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (sender is not CheckBox box) return;
         try { await ActAsync("preview", new { enabled = box.IsChecked == true }, "点映设置保存失败"); }
-        finally { box.GetBindingExpression(CheckBox.IsCheckedProperty)?.UpdateTarget(); }
+        finally { box.SetBinding(ToggleButton.IsCheckedProperty, new Binding
+            { Path = new PropertyPath(nameof(FilmPlaybackPage.PreviewEpisodes)), Mode = BindingMode.OneWay }); }
     }
     private async void ShortVideo_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (sender is not CheckBox box) return;
         try { await ActAsync("shortvideo", new { enabled = box.IsChecked == true }); }
-        finally { box.GetBindingExpression(CheckBox.IsCheckedProperty)?.UpdateTarget(); }
+        finally { box.SetBinding(ToggleButton.IsCheckedProperty, new Binding
+            { Path = new PropertyPath(nameof(FilmPlaybackPage.ShortVideo)), Mode = BindingMode.OneWay }); }
     }
     private async void Source_Changed(object sender, SelectionChangedEventArgs e)
     {
@@ -475,93 +437,80 @@ public partial class FilmPlaybackView : UserControl
     }
     private async void Season_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (DataContext is FilmPlaybackPage page && sender is Button { Tag: FilmSelection value } &&
             value.Season != page.SelectedSeason?.Season)
             await ExecuteAsync(page, () => page.BrowseSeasonAsync(value), "季度加载失败");
     }
     private async void MetadataMapping_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
-        if (DataContext is FilmPlaybackPage page && sender is Button { Tag: FilmSelection value } &&
-            value.MetadataSourceId != page.MetadataSourceId)
+
+        if (DataContext is FilmPlaybackPage page && sender is Button { Tag: FilmSelection value })
             await ExecuteAsync(page, () => page.BrowseMetadataMappingAsync(value), "分季映射加载失败");
     }
     private async void Candidate_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (DataContext is FilmPlaybackPage page && sender is Button { Tag: FilmCandidateItem value })
             await ExecuteAsync(page, () => page.SelectCandidateAsync(value.Id), "候选播放失败");
     }
-    private void Directory_Click(object sender, RoutedEventArgs e)
+    private async void Directory_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
-        if (DataContext is not FilmPlaybackPage { CanBrowseRaw: true } page) return;
-        if (directory is not null) { directory.Activate(); return; }
-        var dialog = new FilmDirectoryDialog(page) { Owner = Window.GetWindow(this) };
+        if (DataContext is not FilmPlaybackPage { CanBrowseRaw: true } page || directory is not null) return;
+        var dialog = new FilmDirectoryDialog(page) { XamlRoot = XamlRoot };
         directory = dialog;
-        dialog.Closed += (_, _) => { if (ReferenceEquals(directory, dialog)) directory = null; };
-        dialog.Show();
+        try { await dialog.ShowAsync(); }
+        finally { if (ReferenceEquals(directory, dialog)) directory = null; }
     }
-    private void Seek_Begin(object sender, MouseButtonEventArgs e)
+    private void Seek_Begin(object sender, PointerRoutedEventArgs e)
     {
         if (boundPage is not { CanSeek: true }) return;
-        seekingPage = boundPage;
-        seekingIdentity = seekingPage?.MediaIdentity;
+        seekingPage = boundPage; seekingIdentity = boundPage.MediaIdentity;
         ShowPlayerControls();
     }
-    private async void Seek_End(object sender, MouseButtonEventArgs e) => await CommitSeekAsync();
+    private async void Seek_End(object sender, PointerRoutedEventArgs e) => await CommitSeekAsync();
     private async Task CommitSeekAsync()
     {
         var page = seekingPage; seekingPage = null;
         var identity = seekingIdentity; seekingIdentity = null;
         if (page is not null && ReferenceEquals(page, boundPage) && page.MediaIdentity == identity)
             await ExecuteAsync(page, () => page.SeekAsync(SeekSlider.Value), "跳转失败");
-        if (seekingPage is null) CancelSeek();
-        ShowPlayerControls();
+        CancelSeek(); ShowPlayerControls();
     }
-    private void Seek_CaptureLost(object sender, MouseEventArgs e)
+    private void Seek_CaptureLost(object sender, PointerRoutedEventArgs e)
     {
-        // A normal release commits in the control bar's preview route, before Thumb drops capture.
-        // Capture lost by deactivation/cancellation must not issue a seek.
+        // PointerReleased is handled before capture loss; cancellation never seeks.
         CancelSeek();
     }
-    private void Seek_LostFocus(object sender, KeyboardFocusChangedEventArgs e) => CancelSeek();
+    private void Seek_LostFocus(object sender, RoutedEventArgs e) => CancelSeek();
     private void CancelSeek()
     {
         seekingPage = null; seekingIdentity = null;
-        if (Mouse.Captured is UIElement captured &&
-            (ReferenceEquals(captured, SeekSlider) || SeekSlider.IsAncestorOf(captured)))
-            captured.ReleaseMouseCapture();
         if (boundPage is { } page)
         {
-            SeekSlider.Value = page.Position;
-            PlayerTime.Text = page.ProgressLabel;
-            UpdateControlLayout();
+            SeekSlider.Value = page.Position; PlayerTime.Text = page.ProgressLabel;
         }
     }
-    private void Seek_Preview(object sender, RoutedPropertyChangedEventArgs<double> e)
+    private void Seek_Preview(object sender, RangeBaseValueChangedEventArgs e)
     {
         if (seekingPage is not null && boundPage is { } page)
-        {
             PlayerTime.Text = $"{FilmJson.Time(SeekSlider.Value)} / {FilmJson.Time(page.Duration)}";
-            UpdateControlLayout();
-        }
     }
-    private static bool IsSeekKey(Key key) =>
-        key is Key.Left or Key.Right or Key.Up or Key.Down or Key.PageUp or Key.PageDown or Key.Home or Key.End;
-    private void Seek_KeyDown(object sender, KeyEventArgs e)
+    private static bool IsSeekKey(VirtualKey key) => key is VirtualKey.Left or VirtualKey.Right or VirtualKey.Up or
+        VirtualKey.Down or VirtualKey.PageUp or VirtualKey.PageDown or VirtualKey.Home or VirtualKey.End;
+    private void Seek_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (!IsSeekKey(e.Key) || e.IsRepeat || boundPage is not { CanSeek: true }) return;
-        seekingPage = boundPage;
-        seekingIdentity = seekingPage.MediaIdentity;
-        ShowPlayerControls();
+        if (IsSeekKey(e.Key)) BeginKeyboardSeek(e.KeyStatus.WasKeyDown);
     }
-    private async void Seek_KeyUp(object sender, KeyEventArgs e)
+    internal void BeginKeyboardSeek(bool repeat)
+    {
+        if (boundPage is not { CanSeek: true } || repeat && seekingPage is null) return;
+        seekingPage = boundPage; seekingIdentity = boundPage.MediaIdentity; ShowPlayerControls();
+    }
+    private async void Seek_KeyUp(object sender, KeyRoutedEventArgs e)
     {
         if (!IsSeekKey(e.Key)) return;
-        e.Handled = true;
-        await CommitSeekAsync();
+        e.Handled = true; await CommitSeekAsync();
     }
     private async void Rate_Changed(object sender, SelectionChangedEventArgs e)
     {
@@ -601,94 +550,84 @@ public partial class FilmPlaybackView : UserControl
             if (error is not OperationCanceledException) Notices.Message = FilmPlaybackError.Message(error, "比例设置失败");
         }
     }
-    private void Fullscreen_Click(object sender, RoutedEventArgs e) { e.Handled = true; ToggleFullscreen(); }
+    private void Fullscreen_Click(object sender, RoutedEventArgs e) {  ToggleFullscreen(); }
     private void Pip_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (playerWindow is not null && pip) playerWindow.Close(); else OpenPlayerWindow(true);
     }
     private void ToggleFullscreen()
     {
+        pictureClickTimer.Stop(); clickPage = null; clickIdentity = null;
         if (playerWindow is not null && !pip) playerWindow.Close(); else OpenPlayerWindow(false);
     }
     private void OpenPlayerWindow(bool pictureInPicture)
     {
-        if (boundPage is not FilmPlaybackPage { CanPlay: true } page || pictureInPicture && !page.HasOutput) return;
-        ClosePlayerMenus();
-        playerWindow?.Close();
-        var heightBinding = BindingOperations.GetBindingBase(VideoPicture, HeightProperty);
+        if (boundPage is not { CanPlay: true } page || pictureInPicture && !page.HasOutput) return;
+        ClosePlayerMenus(); playerWindow?.Close();
         HeroGrid.Children.Remove(PlayerFrame);
-        VideoPicture.ClearValue(HeightProperty);
-        PlayerFrame.VerticalAlignment = VerticalAlignment.Stretch;
-        var host = new Grid { Background = Brushes.Black }; host.Children.Add(PlayerFrame);
-        var dialog = new DesktopWindow
-        {
-            Title = page.Title, Owner = Window.GetWindow(this), Content = host, DataContext = page, Resources = Resources,
-            Width = 640, Height = 360, MinWidth = 380, MinHeight = 214, Background = Brushes.Black,
-            WindowStyle = pictureInPicture ? WindowStyle.ToolWindow : WindowStyle.None,
-            ResizeMode = pictureInPicture ? ResizeMode.CanResizeWithGrip : ResizeMode.NoResize,
-            WindowState = pictureInPicture ? WindowState.Normal : WindowState.Maximized,
-            WindowStartupLocation = WindowStartupLocation.CenterOwner, ShowInTaskbar = false, Topmost = pictureInPicture
-        };
+        VideoPicture.ClearValue(HeightProperty); PlayerFrame.VerticalAlignment = VerticalAlignment.Stretch;
+        var host = new Grid { Background = new SolidColorBrush(Colors.Black), DataContext = page };
+        host.Children.Add(PlayerFrame);
+        var dialog = new FilmPlayerWindow(host) { Title = page.Title, MinWidth = 380, MinHeight = 214 };
+        dialog.Resize(640, 360);
+        dialog.AppWindow.SetPresenter(pictureInPicture ? AppWindowPresenterKind.CompactOverlay : AppWindowPresenterKind.FullScreen);
         playerWindow = dialog; pip = pictureInPicture;
         UpdatePlayerWindowState();
-        dialog.PreviewKeyDown += Player_KeyDown;
-        // VideoView's foreground HWND is owned by its current host. Unmount it before
-        // the window really closes, otherwise that foreground is closed permanently.
         bool restored = false;
-        dialog.Closing += (_, e) =>
+        void Restore()
         {
             if (restored) return;
-            e.Cancel = true;
-            restored = true;
-            RestorePlayerFrame();
-            _ = dialog.Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, new Action(dialog.Close));
-        };
+            restored = true; ClosePlayerMenus(); CancelPlayerInput();
+            host.Children.Remove(PlayerFrame); PlayerFrame.VerticalAlignment = VerticalAlignment.Top;
+            VideoPicture.SetBinding(HeightProperty, new Binding
+            {
+                Path = new PropertyPath("ActualWidth"), Source = VideoPicture,
+                Converter = new FilmPlayerHeightConverter()
+            });
+            HeroGrid.Children.Insert(0, PlayerFrame); page.RetainOwner(null);
+            if (ReferenceEquals(playerWindow, dialog)) { playerWindow = null; pip = false; }
+            UpdatePlayerWindowState(); UpdateLayoutMode(); UpdateMedia(); ShowPlayerControls();
+        }
+        dialog.Closing += (_, _) => Restore();
         dialog.Closed += async (_, _) =>
         {
-            if (!restored) RestorePlayerFrame();
-            await ExecuteAsync(page, page.EndRetainedOwnerAsync, "停止画中画失败");
+            Restore(); await ExecuteAsync(page, page.EndRetainedOwnerAsync, "停止画中画失败");
         };
-        void RestorePlayerFrame()
-        {
-            ClosePlayerMenus(); CancelPlayerInput();
-            host.Children.Remove(PlayerFrame);
-            PlayerFrame.VerticalAlignment = VerticalAlignment.Top;
-            if (heightBinding is not null) BindingOperations.SetBinding(VideoPicture, HeightProperty, heightBinding);
-            HeroGrid.Children.Insert(0, PlayerFrame);
-            page.RetainOwner(null);
-            if (ReferenceEquals(playerWindow, dialog)) { playerWindow = null; pip = false; }
-            UpdatePlayerWindowState();
-            UpdateLayoutMode(); UpdateMedia(); ShowPlayerControls();
-        }
-        try { dialog.Show(); if (pictureInPicture) page.RetainOwner(dialog); ShowPlayerControls(); }
-        catch (Exception) { dialog.Close(); Notices.Message = "播放器窗口打开失败"; }
+        try { dialog.Activate(); if (pictureInPicture) page.RetainOwner(dialog); ShowPlayerControls(); }
+        catch { Restore(); dialog.Close(); Notices.Message = "播放器窗口打开失败"; }
     }
-    private void Swipe_Begin(object sender, MouseButtonEventArgs e)
+    private sealed class FilmPlayerWindow : DesktopWindow
+    {
+        internal FilmPlayerWindow(Grid root) { Content = root; AttachRoot(); }
+    }
+    private void Swipe_Begin(object sender, PointerRoutedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(ShortVideoGesture).Properties.IsLeftButtonPressed) return;
+        e.Handled = true; swipeStart = e.GetCurrentPoint(ShortVideoGesture).Position;
+        ShortVideoGesture.CapturePointer(e.Pointer);
+    }
+    private async void Swipe_End(object sender, PointerRoutedEventArgs e)
     {
         e.Handled = true;
-        swipeStart = e.GetPosition(ShortVideoGesture);
-        ShortVideoGesture.CaptureMouse();
-    }
-    private async void Swipe_End(object sender, MouseButtonEventArgs e)
-    {
-        e.Handled = true;
-        var start = swipeStart; swipeStart = null; ShortVideoGesture.ReleaseMouseCapture();
+        var start = swipeStart; swipeStart = null; ShortVideoGesture.ReleasePointerCapture(e.Pointer);
         if (start is { } point)
         {
-            double distance = e.GetPosition(ShortVideoGesture).Y - point.Y;
+            double distance = e.GetCurrentPoint(ShortVideoGesture).Position.Y - point.Y;
             if (Math.Abs(distance) < 48) SchedulePictureClick(); else await SwipeAsync(distance);
         }
     }
-    private async void Swipe_Completed(object sender, ManipulationCompletedEventArgs e)
+    private async void Swipe_Completed(object sender, ManipulationCompletedRoutedEventArgs e)
     {
-        e.Handled = true; await SwipeAsync(e.TotalManipulation.Translation.Y);
+        e.Handled = true; await SwipeAsync(e.Cumulative.Translation.Y);
     }
-    private async void ShortVideo_Wheel(object sender, MouseWheelEventArgs e)
+    private async void ShortVideo_Wheel(object sender, PointerRoutedEventArgs e)
     {
         e.Handled = true;
-        if (DataContext is FilmPlaybackPage { ShortVideo: true }) await SwipeAsync(e.Delta > 0 ? -80 : 80);
+        if (DataContext is FilmPlaybackPage { ShortVideo: true })
+            await SwipeAsync(e.GetCurrentPoint(ShortVideoGesture).Properties.MouseWheelDelta > 0 ? -80 : 80);
     }
+
     private Task SwipeAsync(double distance)
     {
         if (DataContext is not FilmPlaybackPage { ShortVideo: true } page || Math.Abs(distance) < 48) return Task.CompletedTask;
@@ -700,19 +639,24 @@ public partial class FilmPlaybackView : UserControl
 
     private void ListLayout_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
-        if (DataContext is FilmPlaybackPage page) page.SetListLayout(true);
+
+        if (DataContext is FilmPlaybackPage page)
+        {
+            page.SetListLayout(true);
+            ListLayout.SetBinding(ToggleButton.IsCheckedProperty, new Binding
+            { Path = new PropertyPath(nameof(FilmPlaybackPage.IsListLayout)), Mode = BindingMode.OneWay });
+        }
     }
 
     private void Overview_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (DataContext is FilmPlaybackPage page) page.ToggleOverview();
     }
 
     private void Recommendation_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (sender is Button { Tag: FilmCardItem item })
             RecommendationRequested?.Invoke(this, new(item));
     }
@@ -722,11 +666,11 @@ public partial class FilmPlaybackView : UserControl
 
     private static void PageRail(ScrollViewer rail, int direction, RoutedEventArgs e)
     {
-        e.Handled = true;
-        rail.ScrollToHorizontalOffset(rail.HorizontalOffset + direction * rail.ViewportWidth * .85);
+
+        rail.ChangeView(rail.HorizontalOffset + direction * rail.ViewportWidth * .85, null, null);
     }
 
-    private void Rail_ScrollChanged(object sender, ScrollChangedEventArgs e) => UpdateRailButtons();
+    private void Rail_ScrollChanged(object sender, ScrollViewerViewChangedEventArgs e) => UpdateRailButtons();
 
     private void UpdateRailButtons()
     {
@@ -735,29 +679,4 @@ public partial class FilmPlaybackView : UserControl
         RelatedNext.IsEnabled = RelatedScroll.ScrollableWidth - RelatedScroll.HorizontalOffset > .5;
     }
 
-    private void Rail_MouseWheel(object sender, MouseWheelEventArgs e)
-    {
-        if (sender is not ScrollViewer rail) return;
-        if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0)
-            rail.ScrollToHorizontalOffset(rail.HorizontalOffset - e.Delta * 2);
-        else
-            PageScroll.RaiseEvent(new MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta)
-            {
-                RoutedEvent = Mouse.MouseWheelEvent,
-                Source = PageScroll
-            });
-        e.Handled = true;
-    }
-
-    private void Rail_KeyDown(object sender, KeyEventArgs e)
-    {
-        if (sender is not ScrollViewer rail || e.KeyboardDevice.Modifiers != ModifierKeys.None) return;
-        switch (e.Key)
-        {
-            case Key.PageUp: PageRail(rail, -1, e); break;
-            case Key.PageDown: PageRail(rail, 1, e); break;
-            case Key.Home: rail.ScrollToLeftEnd(); e.Handled = true; break;
-            case Key.End: rail.ScrollToRightEnd(); e.Handled = true; break;
-        }
-    }
 }

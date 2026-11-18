@@ -2,9 +2,10 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
@@ -35,6 +36,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     private readonly FilmMetadataService? metadata;
     private readonly FilmPlaybackSession? filmPlayback;
     private readonly FilmLibrary? library;
+    private readonly FilmPlaybackSettings? business;
     private readonly System.Windows.Threading.Dispatcher dispatcher = System.Windows.Threading.Dispatcher.CurrentDispatcher;
     private Task? favoriteRefresh;
     private bool favoriteDirty;
@@ -98,6 +100,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         if (metadata is not null) metadata.Saved += MetadataSaved;
         filmPlayback = playback;
         this.library = library;
+        this.business = business;
         if (playback is not null)
         {
             playback.OperationFailed += PlaybackFailed;
@@ -117,7 +120,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         view = new(this);
         settings = rules is not null && sources is not null
             ? new FilmSettingsView(rules, sources, storage ?? sources.Storage, business, () => Playback?.ActiveTarget, metadata)
-            : new Grid { Background = Brushes.Transparent }; // Home-only test composition.
+            : new Grid { Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) }; // Home-only test composition.
     }
 
     public string Id => "film";
@@ -250,19 +253,27 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     {
         navigationGeneration++;
         RetireRequests();
-        // A tray hide is not a page exit. Only an already live output owns playback here.
-        if (hiddenToTray && filmPlayback?.HasOutput == true) return;
-        if (filmPlayback is not null) ObservePresentationLeave(filmPlayback.LeaveAsync(filmPlayback.CanRetainMedia));
+        // Ordinary covers retire presentation reads, not the active page's execution.
+        // The explicit tray policy still drains preparations without accepted output.
+        if (hiddenToTray && filmPlayback is { HasOutput: false } owner)
+            ObservePresentationLeave(owner.LeaveAsync(owner.CanRetainMedia));
+    }
+
+    public Task LeaveNavigationAsync()
+    {
+        navigationGeneration++;
+        RetireRequests();
+        return filmPlayback?.LeaveAsync(filmPlayback.CanRetainMedia) ?? Task.CompletedTask;
     }
 
     internal void ResumePresentation()
     {
-        if (stopping || disposed || !view.IsVisible || !IsPlayback || Playback is null || filmPlayback is null) return;
+        if (stopping || disposed || !DesktopVisual.IsVisible(view) || !IsPlayback || Playback is null || filmPlayback is null) return;
         if (filmPlayback.IsOpeningPage(Playback)) return;
         if (restoringPresentation is { IsCompleted: false }) return;
         restoringPresentation = dispatcher.InvokeAsync(async () =>
         {
-            if (stopping || disposed || !view.IsVisible || !IsPlayback || Playback is null) return;
+            if (stopping || disposed || !DesktopVisual.IsVisible(view) || !IsPlayback || Playback is null) return;
             if (filmPlayback.IsOpeningPage(Playback)) return;
             if (filmPlayback.HasSession && filmPlayback.IsCurrentPage(Playback))
                 await filmPlayback.ResumePresentationAsync();
@@ -296,7 +307,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         if (sources is not null) await sources.StartAsync(lifetime.Token);
         if (stopping || disposed) return;
         RuntimeRestored?.Invoke(this, EventArgs.Empty);
-        if (!view.IsVisible) return;
+        if (!DesktopVisual.IsVisible(view)) return;
         if (IsPlayback) ResumePresentation();
         else if (IsHome)
             await Task.WhenAll(Sections.Where(section => section.State is not FilmHomeSectionState.Ready)
@@ -359,7 +370,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         if (stopping || disposed) throw new FilmPlaybackException("CLOSED");
         if (page is null)
         {
-            page = new FilmPlaybackPage(item with { PlaybackContext = request }, request.Own(), filmPlayback, library);
+            page = new FilmPlaybackPage(item with { PlaybackContext = request }, request.Own(), filmPlayback, library, business);
             playbackPages.Add(page.NavigationIdentity, page);
         }
         else page.UpdateItem(item with { PlaybackContext = request });
@@ -413,7 +424,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
             throw new FilmPlaybackException("CAPABILITY_UNAVAILABLE");
         long ticket = ++navigationGeneration;
         request = (request with { EntrySurface = entrySurface ?? request.EntrySurface ?? "search" }).Own();
-        var selected = new FilmPlaybackPage(item with { PlaybackContext = request }, request, filmPlayback, library);
+        var selected = new FilmPlaybackPage(item with { PlaybackContext = request }, request, filmPlayback, library, business);
         playbackPages.Add(selected.NavigationIdentity, selected);
         Playback = selected;
         ReleaseUnreachablePages();
@@ -477,7 +488,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     private void PlaybackMediaChanged(object? sender, EventArgs args)
     {
         Changed(nameof(PlaybackMedia));
-        string identity = Playback?.ActiveTarget.Id ?? "";
+        string identity = Playback?.EntryTarget.Id ?? "";
         if (identity != favoriteTargetId)
         {
             favoriteTargetId = identity;

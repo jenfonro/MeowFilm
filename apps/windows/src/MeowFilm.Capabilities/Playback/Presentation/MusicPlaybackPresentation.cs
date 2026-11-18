@@ -12,7 +12,7 @@ public sealed partial class MusicCapability
 }
 
 // A publication boundary, not another playback clock. Only changed display
-// values cross into WPF bindings; the media port remains the source of truth.
+// values cross into WinUI bindings; the media port remains the source of truth.
 internal sealed class MusicPlaybackPresentation(MusicCapability module, Action<string> changed)
 {
     private bool playing, canSeek, canRate, canToggle, hasQuality;

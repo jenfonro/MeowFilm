@@ -1,9 +1,15 @@
+using FontWeights = Microsoft.UI.Text.FontWeights;
 using System.IO;
 using System.Text;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Color = global::Windows.UI.Color;
+using Colors = Microsoft.UI.Colors;
+using global::Windows.UI.Text;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 
@@ -48,9 +54,9 @@ public static partial class MusicUiTests
             var sources = (MusicSourcesSettingsView)settings.FindName("SourcesPage");
             Click(FindButton(sources, "添加网络源")); await Drain();
             var input = (TextBox)sources.FindName("NetworkAddress");
-            var popup = (Popup)sources.FindName("NetworkPopup");
-            var form = (FrameworkElement)popup.Child;
-            var enabledBinding = input.GetBindingExpression(UIElement.IsEnabledProperty);
+            var popup = (ContentDialog)sources.FindName("NetworkPopup");
+            var form = (FrameworkElement)popup.Content;
+            var enabledBinding = input.GetBindingExpression(Control.IsEnabledProperty);
             True(enabledBinding is not null, "the real input retains its business availability binding");
             const string address = "https://example.invalid/source.js";
             input.Text = address;
@@ -58,40 +64,41 @@ public static partial class MusicUiTests
             var states = row.Platforms.Select(item => item.State).ToArray();
             True(row.Platforms.Any(item => item.State == "unsupported") && row.Platforms.Any(item => item.State != "unsupported"),
                 "the built-in row supplies both supported and unsupported real platform cells");
-            foreach (bool highContrast in new[] { false, true, false })
+            foreach (var theme in new[] { ElementTheme.Light, ElementTheme.Dark, ElementTheme.Light })
             {
-                DesktopTheme.SetIsHighContrast(settings, highContrast);
+                settings.RequestedTheme = theme;
+                bool highContrast = new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast;
                 foreach (bool enabled in new[] { true, false, true })
                 {
                     // The input now inherits enabled state from its popup form, not the page's visual tree.
                     sources.IsEnabled = true;
-                    form.IsEnabled = enabled;
+                    popup.IsEnabled = enabled;
                     await Until(() => f.Module.CanEditScripts);
-                    if (!popup.IsOpen) { Click(FindButton(sources, "添加网络源")); await Drain(); }
+                    if (!MusicTestUi.IsDialogOpen(popup)) { Click(FindButton(sources, "添加网络源")); await Drain(); }
                     form.UpdateLayout(); sources.UpdateLayout(); await Drain();
                     Equal(enabled, input.IsEnabled);
                     Equal(address, input.Text);
-                    True(ReferenceEquals(enabledBinding, input.GetBindingExpression(UIElement.IsEnabledProperty)), "state changes preserve the original binding");
-                    var expected = highContrast ? (enabled ? SystemColors.WindowTextBrush : SystemColors.GrayTextBrush) :
-                        (Brush)input.FindResource(enabled ? "MeowFilm.Brush.Text" : "MeowFilm.Brush.Disabled");
+            True(ReferenceEquals(enabledBinding, input.GetBindingExpression(Control.IsEnabledProperty)), "state changes preserve the original binding");
+                    var expected = highContrast ? (enabled ? SystemSettingsBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText) : SystemSettingsBrush(global::Windows.UI.ViewManagement.UIElementType.GrayText)) :
+                        (Brush)DesktopVisual.Resource(input, enabled ? "MeowFilm.Brush.Text" : "MeowFilm.Brush.Disabled");
                     Equal(((SolidColorBrush)expected).Color, ((SolidColorBrush)input.Foreground).Color);
                     sources.IsEnabled = enabled; sources.UpdateLayout(); await Drain();
-                    Equal(enabled, popup.IsOpen);
+                    Equal(enabled, MusicTestUi.IsDialogOpen(popup));
                     Equal(address, input.Text);
                     foreach (var platform in row.Platforms)
                     {
-                        var text = Visuals(sources).OfType<TextBlock>().Single(element => element.IsVisible && ReferenceEquals(element.DataContext, platform) && element.Text == platform.Name);
-                        var foreground = highContrast ? SystemColors.WindowTextBrush :
-                            (Brush)text.FindResource(platform.State == "unsupported" ? "MeowFilm.Brush.Muted" : "MeowFilm.Brush.Text");
+                        var text = Visuals(sources).OfType<TextBlock>().Single(element => DesktopVisual.IsVisible(element) && ReferenceEquals(element.DataContext, platform) && element.Text == platform.Name);
+                        var foreground = highContrast ? SystemSettingsBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText) :
+                            (Brush)DesktopVisual.Resource(text, platform.State == "unsupported" ? "MeowFilm.Brush.Muted" : "MeowFilm.Brush.Text");
                         Equal(((SolidColorBrush)foreground).Color, ((SolidColorBrush)text.Foreground).Color);
                     }
                     True(states.SequenceEqual(row.Platforms.Select(item => item.State)), "visual state never changes platform support facts");
                 }
             }
-            True(popup.IsOpen, "form state changes preserve the current add session");
+            True(MusicTestUi.IsDialogOpen(popup), "form state changes preserve the current add session");
             sources.IsEnabled = false; await Drain();
-            True(!popup.IsOpen && input.Text == address, "disabling source management dismisses the popup without discarding its draft");
-            True(ReferenceEquals(enabledBinding, input.GetBindingExpression(UIElement.IsEnabledProperty)), "retirement preserves the input's business availability binding");
+            True(!MusicTestUi.IsDialogOpen(popup) && input.Text == address, "disabling source management dismisses the popup without discarding its draft");
+            True(ReferenceEquals(enabledBinding, input.GetBindingExpression(Control.IsEnabledProperty)), "retirement preserves the input's business availability binding");
         });
         yield return Case("source settings table lists built-in and script rows with type, health and fixed actions", async () =>
         {
@@ -131,8 +138,8 @@ public static partial class MusicUiTests
             True(Visuals(sources).OfType<Button>().All(button => !Equals(button.Content, "更多")), "no hidden more menu");
             var toggle = Visuals(sources).OfType<CheckBox>().Single(box => ReferenceEquals(box.DataContext, builtIn) &&
                 box.GetBindingExpression(ToggleButton.IsCheckedProperty)?.ParentBinding.Path.Path == "Enabled");
-            toggle.SetCurrentValue(ToggleButton.IsCheckedProperty, false);
-            toggle.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            toggle.SetValue(ToggleButton.IsCheckedProperty, false);
+            FilmUiTest.Click(toggle);
             await Until(() => f.Module.CanEdit && !f.Module.Sources.Single(row => row.Platform == "tx").Enabled);
             Equal(1, f.Calls.Count("music.officialSources.settings.save"));
             var persisted = await f.Rpc("music.officialSources.settings.get");
@@ -222,7 +229,7 @@ public static partial class MusicUiTests
             await InstallSettingsSources(f, 6);
             var settings = (MusicSettingsView)f.Module.SettingsView;
             using var mount = new ReplicaMount(settings);
-            mount.Window.Width = 1100; mount.Window.Height = 430;
+            mount.Window.Resize(1100, 430);
             ReplicaAnchors(settings)[^1].IsChecked = true;
             await Until(() => f.Module.CanEdit); await Drain();
             var view = (MusicSourcesSettingsView)settings.FindName("SourcesPage");
@@ -230,14 +237,14 @@ public static partial class MusicUiTests
             Equal(9, list.Items.Count);
             var scroll = Visuals(list).OfType<ScrollViewer>().First();
             // ManagementList reports a logical row count through ViewportHeight.
-            var viewport = (ScrollContentPresenter)scroll.Template.FindName("PART_ScrollContentPresenter", scroll);
+            var viewport = Visuals(scroll).OfType<ScrollContentPresenter>().Single();
             True(viewport.ActualHeight >= 64 && scroll.ScrollableHeight > 0, "a visible row and independent scroll survive a short host");
             var row = f.Module.Sources[3];
             var edit = Visuals(view).OfType<Button>().First(button => ReferenceEquals(button.DataContext, row) && Equals(button.Content, "编辑"));
             Click(edit); await Drain();
-            var popup = (Popup)view.FindName("EditPopup");
+            var popup = (ContentDialog)view.FindName("EditPopup");
             var name = (TextBox)view.FindName("EditName");
-            True(popup.IsOpen && name.Text == row.Name && ((FrameworkElement)view.FindName("EditAddressPanel")).Visibility == Visibility.Collapsed,
+            True(MusicTestUi.IsDialogOpen(popup) && name.Text == row.Name && ((FrameworkElement)view.FindName("EditAddressPanel")).Visibility == Visibility.Collapsed,
                 "a local source has no address to edit");
             name.Text = "新名称";
             Click((Button)view.FindName("EditSave"));
@@ -245,7 +252,7 @@ public static partial class MusicUiTests
             var stale = Visuals(view).OfType<Button>().First(button => button.DataContext is MusicSourceRow { IsScript: true } &&
                 Equals(button.Content, "删除"));
             ReplicaAnchors(settings)[0].IsChecked = true; await Drain();
-            stale.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            FilmUiTest.Click(stale);
             Equal(0, f.Calls.Count("music.sources.remove"));
             Equal(9, f.Module.Sources.Count);
         });
@@ -256,50 +263,51 @@ public static partial class MusicUiTests
             await InstallSettingsSources(f, 6);
             var settings = (MusicSettingsView)f.Module.SettingsView;
             using var mount = new ReplicaMount(settings);
-            mount.Window.Left = 80; mount.Window.Top = 60;
-            mount.Window.Width = 1100; mount.Window.Height = 430;
+            mount.Window.AppWindow.Move(new global::Windows.Graphics.PointInt32(80, 60));
+            mount.Window.Resize(1100, 430);
             ReplicaAnchors(settings)[^1].IsChecked = true;
             await Until(() => f.Module.CanEdit); await Drain();
             var view = (MusicSourcesSettingsView)settings.FindName("SourcesPage");
             var list = SourceItems(view);
             var scroll = Visuals(list).OfType<ScrollViewer>().First();
-            var popup = (Popup)view.FindName("EditPopup");
+            var popup = (ContentDialog)view.FindName("EditPopup");
             var name = (TextBox)view.FindName("EditName");
             await OpenLast();
             name.Text = "缩放后保存";
             double oldOffset = scroll.VerticalOffset;
             True(oldOffset > 0, "editing begins at the bottom of an overflowing source list");
             int writes = f.Calls.Count("music.sources.edit");
-            mount.Window.Width = 1000; mount.Window.Height = 820;
-            mount.Window.UpdateLayout(); await Drain();
+            mount.Window.Resize(1000, 820);
+            DesktopTestUi.WindowRoot(mount.Window).UpdateLayout(); await Drain();
             True(scroll.VerticalOffset < oldOffset, "growing the viewport actually coerces the old bottom offset");
-            True(popup.IsOpen && name.Text == "缩放后保存", "resize and its scroll change retain the open editor and draft");
+            True(MusicTestUi.IsDialogOpen(popup) && name.Text == "缩放后保存", "resize and its scroll change retain the open editor and draft");
             Equal(writes, f.Calls.Count("music.sources.edit"));
-            var surface = (FrameworkElement)popup.Child;
-            var actual = surface.PointToScreen(new(surface.ActualWidth / 2, surface.ActualHeight / 2));
-            var expected = settings.PointToScreen(new(settings.ActualWidth / 2, settings.ActualHeight / 2));
-            True((actual - expected).Length < 3, "the actual editor popup remains centered on window content after resize");
+            var surface = (FrameworkElement)popup.Content;
+            var bounds = DesktopTestUi.Bounds(surface, settings);
+            True(Math.Abs(bounds.X + bounds.Width / 2 - settings.ActualWidth / 2) < 3 &&
+                Math.Abs(bounds.Y + bounds.Height / 2 - settings.ActualHeight / 2) < 3,
+                "the actual native editor remains centered on the shared root after resize");
             Click((Button)view.FindName("EditSave"));
             await Until(() => f.Module.CanEdit && f.Module.Sources.Last().Name == "缩放后保存");
             Equal(writes + 1, f.Calls.Count("music.sources.edit"));
-            True(!popup.IsOpen, "saving the retained edit session closes the editor");
+            True(!MusicTestUi.IsDialogOpen(popup), "saving the retained edit session closes the editor");
             await OpenLast(); name.Text = "隐藏时放弃";
             ReplicaAnchors(settings)[0].IsChecked = true; await Drain();
-            True(!popup.IsOpen, "hiding the source page closes the editor");
+            True(!MusicTestUi.IsDialogOpen(popup), "hiding the source page closes the editor");
             ReplicaAnchors(settings)[^1].IsChecked = true;
             await Until(() => f.Module.CanEdit); await Drain();
             await OpenLast();
             Equal("缩放后保存", name.Text);
             mount.Window.Content = null; await Drain();
-            True(!popup.IsOpen, "unloading the source page closes the editor");
+            True(!MusicTestUi.IsDialogOpen(popup), "unloading the source page closes the editor");
             Equal(writes + 1, f.Calls.Count("music.sources.edit"));
 
             async Task OpenLast()
             {
-                scroll.ScrollToEnd(); view.UpdateLayout(); await Drain();
+                scroll.ChangeView(null, scroll.ScrollableHeight, null, true); view.UpdateLayout(); await Drain();
                 var row = f.Module.Sources.Last();
                 Click(Visuals(view).OfType<Button>().Single(button => ReferenceEquals(button.DataContext, row) && Equals(button.Content, "编辑")));
-                await Drain(); True(popup.IsOpen, "the real source edit action opens its editor");
+                await Drain(); True(MusicTestUi.IsDialogOpen(popup), "the real source edit action opens its editor");
             }
         });
 
@@ -335,44 +343,44 @@ public static partial class MusicUiTests
             True(!management.ShowToolbar && !management.ShowBulkActions && !management.EnableRowDrag,
                 "source management reuses the list without adding book-source tools or video ordering");
             var toolbar = (StackPanel)view.FindName("SourceTitleRow");
-            True(ReferenceEquals(toolbar.Style, view.FindResource("MeowFilm.ManagementTitleRow")), "shared management title chrome");
+            True(ReferenceEquals(toolbar.Style, DesktopVisual.Resource(view, "MeowFilm.ManagementTitleRow")), "shared management title chrome");
             True(toolbar.Children.OfType<Button>().Select(button => button.Content as string)
                 .SequenceEqual(["添加本地文件", "添加网络源", "检测所选", "删除所选"]), "source management toolbar order");
             True(toolbar.Children.OfType<Button>().Take(3).All(button =>
-                ReferenceEquals(button.Style, view.FindResource("Settings.PrimaryButton"))),
+                ReferenceEquals(button.Style, DesktopVisual.Resource(view, "Settings.PrimaryButton"))),
                 "source import and selected detection actions reuse the shared save button style");
             var deleteSelected = toolbar.Children.OfType<Button>().Last();
-            True(ReferenceEquals(deleteSelected.Style, view.FindResource("MeowFilm.ManagementDeleteSelected")) &&
+            True(ReferenceEquals(deleteSelected.Style, DesktopVisual.Resource(view, "MeowFilm.ManagementDeleteSelected")) &&
                 ((SolidColorBrush)deleteSelected.Background).Color.A == 0, "shared transparent outlined batch delete");
             foreach (double width in new[] { 1248, 1100, 750 })
             {
-                mount.Window.Width = width; mount.Window.Height = 430;
+                mount.Window.Resize(width, 430);
                 settings.UpdateLayout(); await Drain(); view.UpdateLayout();
                 var list = SourceItems(view);
                 var scroll = Visuals(list).OfType<ScrollViewer>().First();
-                CaptureSettings(mount.Window, "music-source-management-" + (int)width + ".png");
+                await CaptureSettings(DesktopTestUi.WindowRoot(mount.Window), "music-source-management-" + (int)width + ".png");
                 Equal(9, list.Items.Count);
                 True(scroll.HorizontalScrollBarVisibility == ScrollBarVisibility.Disabled &&
                     scroll.ScrollableWidth == 0 && scroll.ScrollableHeight > 0, "vertical-only scrolling at " + width);
                 var row = f.Module.Sources[0];
                 var name = Visuals(view).OfType<TextBlock>().Single(text => text.Text == row.Name && ReferenceEquals(text.DataContext, row));
                 var header = Visuals(management).OfType<TextBlock>().Single(text => text.Text == "名称");
-                True(Math.Abs(name.TranslatePoint(new(), view).X - header.TranslatePoint(new(), view).X) < 1,
+                True(Math.Abs(name.TransformToVisual(view).TransformPoint(new()).X - header.TransformToVisual(view).TransformPoint(new()).X) < 1,
                     "shared name column aligns at " + width);
                 foreach (var button in Visuals(view).OfType<Button>().Where(button => ReferenceEquals(button.DataContext, row) && button is not ManagementStatus))
                 {
-                    var bounds = new Rect(button.TranslatePoint(new(), view), button.RenderSize);
+                    var bounds = new Rect(button.TransformToVisual(view).TransformPoint(new()), new Size(button.ActualWidth, button.ActualHeight));
                     True(bounds.Left >= 0 && bounds.Right <= view.ActualWidth, "reachable source action at " + width);
                     True(button.FontWeight == FontWeights.Normal, "source actions retain regular text");
                 }
                 foreach (var platform in row.Platforms)
-                    True(Visuals(view).OfType<TextBlock>().Any(text => text.IsVisible &&
+                    True(Visuals(view).OfType<TextBlock>().Any(text => DesktopVisual.IsVisible(text) &&
                         ReferenceEquals(text.DataContext, platform) && text.Text == platform.Name), "platform remains visible at " + width);
             }
             var first = f.Module.Sources[0];
             var check = Visuals(management).OfType<CheckBox>().Single(box =>
-                System.Windows.Automation.AutomationProperties.GetName(box) == "选择 " + first.Name);
-            check.IsChecked = true; check.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(box) == "选择 " + first.Name);
+            check.IsChecked = true; FilmUiTest.Click(check);
             True(first.Selected && f.Module.CanCheckSelectedSources && !f.Module.CanRemoveSelectedSources,
                 "shared selection reaches the existing batch owner without making built-in sources deletable");
             await f.Module.RefreshSourceManagementAsync(); await Drain();
@@ -387,23 +395,23 @@ public static partial class MusicUiTests
             ReplicaAnchors(settings)[^1].IsChecked = true;
             await Until(() => f.Module.CanEditScripts); await Drain();
             var view = (MusicSourcesSettingsView)settings.FindName("SourcesPage");
-            var popup = (Popup)view.FindName("NetworkPopup");
+            var popup = (ContentDialog)view.FindName("NetworkPopup");
             var input = (TextBox)view.FindName("NetworkAddress");
             var save = (Button)view.FindName("NetworkSave");
             var cancel = (Button)view.FindName("NetworkCancel");
             const string address = "https://example.invalid/source.js";
             Click(FindButton(view, "添加网络源")); await Drain();
-            True(popup.IsOpen && !Visuals(view).Contains(input), "network address lives only inside the add dialog");
+            True(MusicTestUi.IsDialogOpen(popup) && !Visuals(view).Contains(input), "network address lives only inside the add dialog");
             input.Text = address;
             Click(cancel); await Drain();
-            True(!popup.IsOpen && input.Text == address, "dismissal retains the draft without submitting");
+            True(!MusicTestUi.IsDialogOpen(popup) && input.Text == address, "dismissal retains the draft without submitting");
             Equal(0, f.Calls.Count("music.sources.download"));
             Click(FindButton(view, "添加网络源")); await Drain();
             Equal(address, input.Text);
             f.Calls.FailNext("music.sources.download", "SOURCE_DOWNLOAD_FAILED");
             Click(save); await Until(() => f.Module.CanEditScripts && f.Module.Status == "音源下载失败"); await Drain();
-            True(popup.IsOpen && input.Text == address && save.IsEnabled, "failed download keeps its form and draft for retry");
-            CaptureSettings((FrameworkElement)popup.Child, "music-network-source-popup.png");
+            True(MusicTestUi.IsDialogOpen(popup) && input.Text == address && save.IsEnabled, "failed download keeps its form and draft for retry");
+            await CaptureSettings((FrameworkElement)popup.Content, "music-network-source-popup.png");
             foreach (bool dismissImmediately in new[] { true, false })
             {
                 var held = f.Calls.HoldNext("music.sources.download", failure: "SOURCE_DOWNLOAD_FAILED");
@@ -418,7 +426,7 @@ public static partial class MusicUiTests
                     ReplicaAnchors(settings)[0].IsChecked = true; await Drain();
                 }
                 await Until(() => token.IsCancellationRequested);
-                True(!popup.IsOpen && input.Text == address, "retirement cancels download and preserves the local draft");
+                True(!MusicTestUi.IsDialogOpen(popup) && input.Text == address, "retirement cancels download and preserves the local draft");
                 held.Release(); await Until(() => f.Module.CanEditScripts); await Drain();
                 if (!dismissImmediately)
                 {
@@ -426,15 +434,15 @@ public static partial class MusicUiTests
                     await Until(() => f.Module.CanEditScripts); await Drain();
                 }
                 Click(FindButton(view, "添加网络源")); await Drain();
-                True(popup.IsOpen && input.Text == address, "a stale completion cannot dismiss a later add session");
+                True(MusicTestUi.IsDialogOpen(popup) && input.Text == address, "a stale completion cannot dismiss a later add session");
             }
             mount.Window.Content = null; await Drain();
-            True(!popup.IsOpen, "unloading closes the add dialog");
+            True(!MusicTestUi.IsDialogOpen(popup), "unloading closes the add dialog");
         });
     }
 
-    private static ListBox SourceItems(MusicSourcesSettingsView view) =>
-        Visuals((ManagementList)view.FindName("SourceList")).OfType<ListBox>().Single();
+    private static ListView SourceItems(MusicSourcesSettingsView view) =>
+        Visuals((ManagementList)view.FindName("SourceList")).OfType<ListView>().Single();
 
     private static async Task InstallSettingsSources(Fixture f, int count)
     {

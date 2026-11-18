@@ -1,6 +1,9 @@
 using System.IO;
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Windowing;
+using Windows.Graphics;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
@@ -17,13 +20,14 @@ public static class AppLauncher
 {
     public static void Run(AppDefinition definition,
         Func<IRuntimeClient, IDocumentStore, IReadOnlyList<IDesktopModule>> createModules,
+        Func<Action<Application>, Application> createApplication,
         Func<ValueTask>? disposeResources = null,
-        Func<Window, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
+        Func<DesktopWindow, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
         Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null)
         => Run(definition, (runtime, store, modules) =>
         {
             foreach (var module in createModules(runtime, store)) modules.Add(module);
-        }, disposeResources, attachWindow, createPages);
+        }, createApplication, disposeResources, attachWindow, createPages);
 
     /// <summary>
     /// Incremental registration owns each completed constructor even when a
@@ -31,41 +35,71 @@ public static class AppLauncher
     /// </summary>
     public static void Run(AppDefinition definition,
         Action<IRuntimeClient, IDocumentStore, ICollection<IDesktopModule>> createModules,
+        Func<Action<Application>, Application> createApplication,
         Func<ValueTask>? disposeResources = null,
-        Func<Window, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
+        Func<DesktopWindow, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
         Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null)
-        => Run(AppDataPaths.Current, definition, createModules, disposeResources, attachWindow, createPages);
+        => Run(AppDataPaths.Current, definition, createModules, createApplication, disposeResources, attachWindow, createPages);
 
     // Isolated App-host tests use the same launcher without touching the user's data.
     internal static void Run(AppDataPaths paths, AppDefinition definition,
         Action<IRuntimeClient, IDocumentStore, ICollection<IDesktopModule>> createModules,
+        Func<Action<Application>, Application> createApplication,
         Func<ValueTask>? disposeResources = null,
-        Func<Window, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
+        Func<DesktopWindow, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
         Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null)
     {
-        var application = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-        DesktopTypography.Install(application);
-        var launchWindow = new DesktopWindow
+        var startup = new AppStartup();
+        UserDataDirectory? userData = null;
+        AppShutdown? ownedLifecycle = null;
+        WinRT.ComWrappersSupport.InitializeComWrappers();
+        try
         {
-            Title = "meowfilm", Width = 420, Height = 220, WindowStartupLocation = WindowStartupLocation.CenterScreen,
-            ResizeMode = ResizeMode.NoResize, Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(247, 249, 252))
-        };
+            Application.Start(args =>
+            {
+                SynchronizationContext.SetSynchronizationContext(
+                    new Microsoft.UI.Dispatching.DispatcherQueueSynchronizationContext(
+                        Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread()));
+                // The executable's compiled XAML root owns metadata for all
+                // referenced view libraries; the launcher owns startup.
+                _ = createApplication(Launch);
+            });
+        }
+        finally
+        {
+            startup.Dispose();
+            if (ownedLifecycle is null || ownedLifecycle.IsReleased) userData?.Dispose();
+        }
+
+        void Launch(Application application)
+        {
+        DesktopTypography.Install(application);
+        var launchWindow = new DesktopWindow { Title = "meowfilm" };
+        launchWindow.Resize(420, 220);
+        if (launchWindow.AppWindow.Presenter is OverlappedPresenter presenter)
+        {
+            presenter.IsResizable = false;
+            presenter.IsMaximizable = false;
+        }
+        var display = DisplayArea.GetFromWindowId(launchWindow.AppWindow.Id, DisplayAreaFallback.Primary);
+        var area = display.WorkArea;
+        var size = launchWindow.AppWindow.Size;
+        launchWindow.AppWindow.Move(new PointInt32(area.X + (area.Width - size.Width) / 2,
+            area.Y + (area.Height - size.Height) / 2));
         var label = new TextBlock
         {
-            Text = "正在启动", Margin = new Thickness(24), HorizontalAlignment = HorizontalAlignment.Center
+            Text = "正在启动", Margin = new Thickness(24), HorizontalAlignment = HorizontalAlignment.Center,
+            FontSize = 20
         };
-        label.SetResourceReference(TextBlock.FontSizeProperty, "MeowFilm.Font.Size.SectionHeading");
         var retry = new Button { Content = "重试", Margin = new Thickness(12), Padding = new Thickness(24, 8, 24, 8), Visibility = Visibility.Collapsed };
         var stack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-        stack.Children.Add(label); stack.Children.Add(retry); launchWindow.Content = stack;
+        stack.Children.Add(label); stack.Children.Add(retry);
+        launchWindow.Content = new Grid { Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 247, 249, 252)), Children = { stack } };
         var switched = false;
         var exitRequested = false;
         var allowLaunchClose = false;
         var exitWait = false;
-        AppShutdown? ownedLifecycle = null;
         Task<StartupOutcome>? starting = null;
-        var startup = new AppStartup();
-        UserDataDirectory? userData = null;
         launchWindow.Closing += (_, args) =>
         {
             if (switched || allowLaunchClose) return;
@@ -74,16 +108,8 @@ public static class AppLauncher
             _ = ExitStartupAsync();
         };
         retry.Click += async (_, _) => { if (exitRequested) await ExitStartupAsync(); else await StartAsync(); };
-        application.SessionEnding += (_, _) => exitRequested = true;
-        application.Startup += async (_, _) => { launchWindow.Show(); await StartAsync(); };
-        try { application.Run(); }
-        finally
-        {
-            startup.Dispose();
-            // The process owns this lease throughout all generations. OS session
-            // ending may still be draining owners; never release it ahead of them.
-            if (ownedLifecycle is null || ownedLifecycle.IsReleased) userData?.Dispose();
-        }
+        launchWindow.Activate();
+        _ = StartAsync();
 
         async Task StartAsync()
         {
@@ -121,7 +147,7 @@ public static class AppLauncher
                 if (ownedLifecycle is not null) await ownedLifecycle.ForceReleaseAsync();
                 allowLaunchClose = true;
                 launchWindow.Close();
-                application.Shutdown();
+                application.Exit();
             }
             catch
             {
@@ -224,21 +250,17 @@ public static class AppLauncher
                         });
                     }
                 }, cacheDirectory: Path.Combine(paths.Caches, "artwork-v2"));
-                ArtworkScope.SetLoader(shell, artwork);
+                ArtworkScope.SetLoader(shell.Root, artwork);
                 windowAttachment = attachWindow?.Invoke(shell, modules);
                 cancellationToken.ThrowIfCancellationRequested();
-                application.MainWindow = shell;
-                SessionEndingCancelEventHandler sessionEnding = (_, _) => shell.PrepareForSessionEnding();
-                application.SessionEnding += sessionEnding;
                 shell.Closed += (_, _) =>
                 {
                     shellClosed = true;
-                    application.SessionEnding -= sessionEnding;
                     // User-requested closure awaited cleanup; session ending keeps the OS path.
                     // Never initiate dispatcher shutdown on a failed drain receipt.
-                    if (switched && !replacing && lifecycle.IsReleased) application.Shutdown();
+                    if (switched && !replacing && lifecycle.IsReleased) application.Exit();
                 };
-                shell.Show();
+                shell.Activate();
                 switched = true;
                 // Keep the startup/retry surface for an in-process data reset.
                 launchWindow.Hide();
@@ -266,8 +288,7 @@ public static class AppLauncher
                     finally { if (!shellClosed) replacing = false; }
                     if (exitRequested) return;
                     switched = false;
-                    application.MainWindow = launchWindow;
-                    launchWindow.Show();
+                    launchWindow.Activate();
                     startup.Dispose();
                     startup = new AppStartup();
                     starting = null;
@@ -287,6 +308,8 @@ public static class AppLauncher
                 return cancellationToken.IsCancellationRequested ? StartupOutcome.Cancelled : StartupOutcome.RetryableFailure;
             }
         }
+    }
+
     }
 
     internal static async Task PrepareModulesAsync(IReadOnlyList<IDesktopModule> modules,

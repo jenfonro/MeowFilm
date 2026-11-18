@@ -1,7 +1,12 @@
+using MeowFilm.Desktop;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Capabilities;
 
 namespace MeowFilm.Windows.Tests;
@@ -15,12 +20,11 @@ public static partial class MusicCatalogTests
             {
                 await using var f = await CurrentMediaFixture();
                 var host = new Grid(); host.Children.Add(f.Module.View);
-                var window = new Window { Content = host, Width = 906, Height = 650,
-                    Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false };
+                var window = DesktopTestUi.CreateWindow(host, 906, 650);
                 try
                 {
-                    window.Show(); window.UpdateLayout(); await Drain();
-                    True(f.Module.View.IsLoaded && f.Module.View.IsVisible, "real mounted active music view");
+                    window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
+                    True(f.Module.View.IsLoaded && DesktopVisual.IsVisible(f.Module.View), "real mounted active music view");
                     var before = await f.Rpc("music.queue.get", new { limit = 100 });
                     var route = f.Module.CaptureNavigationLocation();
                     var card = f.Module.CatalogSections.SelectMany(s => s.Items).First(c => c.Kind == "playlist");
@@ -54,40 +58,38 @@ public static partial class MusicCatalogTests
                     })));
                 await f.Module.NavigateAsync("catalog-channel/wy/rock", default);
                 var host = new Grid(); host.Children.Add(f.Module.View);
-                var window = new Window { Content = host, Width = 1100, Height = 760,
-                    Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false };
-                ContextMenu? menu = null;
+                var window = DesktopTestUi.CreateWindow(host, 1100, 760);
+                MenuFlyout? menu = null;
                 try
                 {
-                    window.Show(); window.UpdateLayout(); await Drain();
-                    var targets = Descendants<Button>(f.Module.View).Where(button => button.IsLoaded && button.IsVisible &&
-                        button.DataContext is MusicCatalogCard { Kind: "playlist" } && button.ContextMenu is not null)
-                        .DistinctBy(button => ((MusicCatalogCard)button.DataContext).ActionId).Take(2).ToArray();
+                    window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
+                    var targets = Descendants<MusicCatalogCardView>(f.Module.View).Where(card => card.IsLoaded && DesktopVisual.IsVisible(card) &&
+                        card.DataContext is MusicCatalogCard { Kind: "playlist" })
+                        .DistinctBy(card => ((MusicCatalogCard)card.DataContext).ActionId).Take(2).ToArray();
                     Equal(2, targets.Length);
                     int openCalls = f.Client.Log.Count;
-                    OpenContentMenu(targets[0]); targets[0].ContextMenu.IsOpen = true; await Drain();
-                    targets[0].ContextMenu.IsOpen = false;
+                    menu = OpenContentMenu(targets[0]); await Drain(); menu.Hide(); await Drain();
                     var second = targets[1]; var card = (MusicCatalogCard)second.DataContext;
-                    OpenContentMenu(second); menu = second.ContextMenu; menu.IsOpen = true; await Drain();
-                    True(menu.IsOpen && second.IsLoaded && second.IsVisible, "B menu really opens on a mounted active target");
+                    menu = OpenContentMenu(second); await Drain();
+                    True(menu.IsOpen && second.IsLoaded && DesktopVisual.IsVisible(second), "B menu really opens on a mounted active target");
                     Equal(openCalls, f.Client.Log.Count);
-                    var items = menu.Items.OfType<MenuItem>().ToArray();
+                    var items = menu.Items.OfType<MenuFlyoutItem>().ToArray();
                     Equal(4, items.Length); True(items.All(item => item.IsEnabled), "all four callbacks are admitted before leaving");
                     var route = f.Module.CaptureNavigationLocation();
                     var routes = new List<string>(); f.Module.NavigationRequested += (_, e) => routes.Add(e.Route);
                     if (departure == "collapse") f.Module.View.Visibility = Visibility.Collapsed;
                     else host.Children.Remove(f.Module.View);
-                    await Until(() => !second.IsLoaded || !second.IsVisible, "menu.target.retired");
+                    await Until(() => !second.IsLoaded || !DesktopVisual.IsVisible(second), "menu.target.retired");
                     await Drain();
                     True(ReferenceEquals(second.DataContext, card), "the hidden target is not recycled to a different card");
                     int calls = f.Client.Log.Count;
-                    foreach (var item in items) item.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                    foreach (var item in items) MusicTestUi.Invoke(item);
                     await Drain();
                     Equal(calls, f.Client.Log.Count); Equal(0, routes.Count);
                     Equal(route, f.Module.CaptureNavigationLocation());
                     f.AssertNoScriptRuntime();
                 }
-                finally { if (menu is not null) menu.IsOpen = false; window.Content = null; window.Close(); }
+                finally { menu?.Hide(); window.Content = null; window.Close(); }
             });
 
         foreach (bool changeTab in new[] { true, false })

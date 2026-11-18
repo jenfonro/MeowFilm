@@ -3,8 +3,12 @@ using System.Net.Sockets;
 using System.IO;
 using System.Text;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
@@ -241,28 +245,20 @@ public static partial class MusicUiTests
             await f.Module.LoadMoreCollectionAsync();
             f.Module.SelectedSong = f.Module.Songs[100];
             var selected = f.Module.SelectedSong.Id;
-            using var menuSource = new System.Windows.Interop.HwndSource(new System.Windows.Interop.HwndSourceParameters("song-menu-fixture")
-                { WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                    Width = 900, Height = 700, PositionX = -32000, PositionY = -32000 });
-            menuSource.RootVisual = f.Module.View;
-            var menu = ((DataGrid)f.Module.View.FindName("SongsGrid")).ContextMenu;
-            var grid = (DataGrid)f.Module.View.FindName("SongsGrid");
-            f.Module.View.Measure(new Size(900, 700));
-            f.Module.View.Arrange(new Rect(0, 0, 900, 700)); f.Module.View.UpdateLayout();
-            var request = (ContextMenuEventArgs)typeof(ContextMenuEventArgs)
-                .GetConstructor(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic, null,
-                    [typeof(object), typeof(bool), typeof(double), typeof(double)], null)!
-                .Invoke([grid, true, -1d, -1d]);
-            grid.RaiseEvent(request);
-            menu.Measure(new Size(420, 600));
-            menu.Arrange(new Rect(0, 0, 420, 600)); menu.UpdateLayout();
-            var targets = menu.Items.OfType<MenuItem>().Single(item => item.Header as string == "添加到歌单");
-            True(ReferenceEquals(targets.DataContext, f.Module), "song menu must inherit its actual module context");
+            using var host = new DesktopTestUi.Host(f.Module.View, 900, 700); await Drain();
+            var page = (MusicView)f.Module.View;
+            var grid = (ListView)page.FindName("SongsGrid");
+            grid.ScrollIntoView(f.Module.SelectedSong); await Drain(); grid.UpdateLayout();
+            var row = (ListViewItem)grid.ContainerFromItem(f.Module.SelectedSong);
+            var body = Visuals(row).OfType<Grid>().First(panel => panel.DataContext is SongRow);
+            var menu = page.OpenSongMenu(body)!; await Drain();
+            var targets = menu.Items.OfType<MenuFlyoutSubItem>().Single(item => item.Text == "添加到歌单");
+            True(menu.IsOpen && ReferenceEquals(menu.XamlRoot, page.XamlRoot), "song menu belongs to the actual module root");
             Equal(f.Module.Playlists.Count, targets.Items.Count);
-            var favorite = targets.Items.OfType<MenuItem>().Single(item => item.Header as string ==
+            var favorite = targets.Items.OfType<MenuFlyoutItem>().Single(item => item.Text ==
                 f.Module.Playlists.Single(row => row.Id == "favorites").Name);
             var adds = f.Calls.Count("music.library.addSongs");
-            favorite.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            MusicTestUi.Invoke(favorite);
             await Until(() => f.Calls.Count("music.library.addSongs") == adds + 1 && !f.Module.Busy);
             await f.Module.NavigateAsync("favorites", default);
             Equal(1, f.Module.Songs.Count);

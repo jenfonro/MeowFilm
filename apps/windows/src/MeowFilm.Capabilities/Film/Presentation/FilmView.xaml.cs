@@ -1,6 +1,9 @@
 using System.ComponentModel;
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Data;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -16,12 +19,13 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
         DataContext = module;
         module.PropertyChanged += OnModulePropertyChanged;
         module.OperationFailed += (_, message) => Notices.Message = message;
-        IsVisibleChanged += (_, _) =>
-        {
-            if (!IsVisible) module.SuspendPresentation(
-                hiddenToTray: Window.GetWindow(this) is ShellWindow { IsHiddenToTray: true });
-            else module.ResumePresentation();
-        };
+        _ = new FilmPresentationVisibility(this, _ => UpdatePresentation());
+    }
+    private void UpdatePresentation()
+    {
+        if (!MeowFilm.Desktop.DesktopVisual.IsVisible(this)) module.SuspendPresentation(
+            hiddenToTray: DesktopWindow.GetWindow(this) is ShellWindow { IsHiddenToTray: true });
+        else module.ResumePresentation();
     }
 
     public DesktopHeaderContribution Header =>
@@ -38,7 +42,7 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
 
     private async void More_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (sender is Button { Tag: FilmHomeSection section })
             await module.OpenDataAsync(section);
     }
@@ -57,26 +61,26 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
 
     private async void HomeRefresh_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         if (sender is Button { DataContext: FilmHomeSection section })
             await module.RefreshSectionAsync(section);
     }
 
     private async void DataRefresh_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         await module.RefreshDataAsync();
     }
 
     private async void DataRetry_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         await module.RetryDataAsync();
     }
 
     private async void DataPageAction_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         await module.LoadMoreDataAsync();
     }
 
@@ -98,8 +102,12 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
 
     private async void Filter_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
-        if (sender is Button { Tag: FilmFilterOption option })
-            await module.SelectDataFilterAsync(option);
+
+        if (sender is ToggleButton { Tag: FilmFilterOption option } button)
+        {
+            try { await module.SelectDataFilterAsync(option); }
+            finally { button.SetBinding(ToggleButton.IsCheckedProperty, new Binding
+                { Path = new PropertyPath(nameof(FilmFilterOption.IsSelected)), Mode = BindingMode.OneWay }); }
+        }
     }
 }

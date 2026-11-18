@@ -1,4 +1,5 @@
-using System.Windows.Media.Imaging;
+using MeowFilm.Desktop;
+using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities;
@@ -16,7 +17,7 @@ public sealed partial class PanAccounts
         internal Task Start = Task.CompletedTask, Poll = Task.CompletedTask, Save = Task.CompletedTask;
         internal string? SessionId;
         internal long ExpiresAt;
-        internal BitmapSource? Image;
+        internal WriteableBitmap? Image;
         internal string Status = "";
         internal bool Busy, Confirmed, PollingStopped;
     }
@@ -30,7 +31,7 @@ public sealed partial class PanAccounts
     public bool CanSave => active && login is { Qr: false, Busy: false, Row.IsBusy: false };
     public bool CanChangeMethod => login is { Qr: true } or { Busy: false };
     public bool CanRetryQr => active && login is { Qr: true, Busy: false };
-    public BitmapSource? QrImage => login?.Image;
+    public WriteableBitmap? QrImage => login?.Image;
     public string LoginStatus => login?.Status ?? "";
     public string QrAccessibleName => LoginTitle + "登录二维码";
 

@@ -5,10 +5,11 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Automation.Peers;
-using System.Windows.Controls;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Controls;
+
 using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities;
 using MeowFilm.AppHost;
@@ -174,7 +175,7 @@ public static partial class MusicLyricDisplayTests
             control.Position = 0; Equal(0d, control.WordProgress);
             control.Position = 4; Equal(1d, control.WordProgress);
             control.Position = double.NaN; Equal(0d, control.WordProgress);
-            var peer = UIElementAutomationPeer.CreatePeerForElement(control)!;
+            var peer = FrameworkElementAutomationPeer.CreatePeerForElement(control)!;
             Equal("中🙂", peer.GetName()); Equal(AutomationControlType.Text, peer.GetAutomationControlType());
             return Task.CompletedTask;
         }));
@@ -194,7 +195,7 @@ public static partial class MusicLyricDisplayTests
             Equal(.75, control.WordProgress);
             control.Word = new("替换歌词 العربية", 3, 1); Layout();
             Equal(0d, control.WordProgress);
-            Equal("替换歌词 العربية", UIElementAutomationPeer.CreatePeerForElement(control)!.GetName());
+            Equal("替换歌词 العربية", FrameworkElementAutomationPeer.CreatePeerForElement(control)!.GetName());
             control.Position = 3.5; Layout(); Equal(.5, control.WordProgress);
             return Task.CompletedTask;
         }));
@@ -742,7 +743,7 @@ public static partial class MusicLyricDisplayTests
             Ok(await f.SyncRound!);
             // The Module posts its real notification at Normal priority. This
             // barrier admits that refresh while the first receipt is still held.
-            await Dispatcher.Yield(DispatcherPriority.Background);
+            await MusicTestUi.Drain();
             if (duringSave)
             {
                 Check(!save.IsCompleted);
@@ -819,28 +820,7 @@ public static partial class MusicLyricDisplayTests
     private static string PresentationResourceFile(string directory, string group, string resource) =>
         Path.Combine(directory, "r-" + group + "-" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(resource))) + ".resource");
     private static async Task Sta(Func<Task> body)
-    {
-        var done = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var stopped = Signal(); Dispatcher? dispatcher = null;
-        var thread = new Thread(() =>
-        {
-            var current = Dispatcher.CurrentDispatcher; Volatile.Write(ref dispatcher, current);
-            SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(current));
-            current.BeginInvoke(async () =>
-            {
-                Exception? failure = null;
-                try { await body(); } catch (Exception error) { failure = error; }
-                finally { done.TrySetResult(failure); current.BeginInvokeShutdown(DispatcherPriority.Background); }
-            });
-            try { Dispatcher.Run(); } finally { stopped.TrySetResult(); }
-        }) { IsBackground = true, Name = "native-lyric-display-code-test" };
-        thread.SetApartmentState(ApartmentState.STA); thread.Start();
-        Exception? error;
-        try { error = await done.Task.WaitAsync(TimeSpan.FromSeconds(35)); }
-        catch { Volatile.Read(ref dispatcher)?.BeginInvokeShutdown(DispatcherPriority.Send); throw; }
-        await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        if (error is not null) ExceptionDispatchInfo.Capture(error).Throw();
-    }
+    { await TestUiHost.InvokeAsync(body); }
     private sealed class LyricLookupApplication(IMusicApplication inner) : MusicApplicationForwarder(inner)
     {
         private readonly TaskCompletionSource releaseLookups = Signal();

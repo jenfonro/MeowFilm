@@ -206,7 +206,10 @@ public static class RuntimeImageTests
                     }
                     using var image = await read;
                     BridgeTests.Equal(512, image.Image.PixelWidth);
-                    BridgeTests.Equal(true, image.Image.IsFrozen);
+                    var firstPixels = new byte[image.Image.PixelWidth * image.Image.PixelHeight * 4];
+                    image.Image.CopyPixels(firstPixels); var originalPixels = firstPixels.ToArray();
+                    Array.Fill(firstPixels, (byte)0); image.Image.CopyPixels(firstPixels);
+                    BridgeTests.Equal(true, firstPixels.SequenceEqual(originalPixels));
                 }
             }
         }));
@@ -398,7 +401,7 @@ public static class RuntimeImageTests
         }));
     }
     private static void CheckPixels(IArtworkLease lease) =>
-        BridgeTests.Equal(true, lease.Image.IsFrozen && lease.Image.PixelWidth > 0 && lease.Image.PixelHeight > 0);
+        BridgeTests.Equal(true, lease.Image.PixelWidth > 0 && lease.Image.PixelHeight > 0);
     private sealed class PublicImageHandler(Action<System.Net.Http.HttpRequestMessage> inspect) : System.Net.Http.HttpMessageHandler
     {
         protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request,

@@ -68,6 +68,14 @@ enum FilmPlaybackFixture {
         .object(["attemptId": .string(id), "candidate": candidate(), "position": .number(0),
                  "duration": .number(600), "paused": .bool(false)])
     }
+    static func workInfo(provider: FilmMetadataProvider = .tmdb, kind: FilmPlaybackKind = .tv,
+                         title: String = "星河", summary: String = "", metadata: RuntimeObject = [:],
+                         seasonCount: Int? = nil, episodeCount: Int? = nil) -> RuntimeValue {
+        .object(["provider": .string(provider.rawValue), "metadataId": .number(19),
+                 "kind": .string(kind.rawValue), "title": .string(title), "summary": .string(summary),
+                 "metadata": .object(metadata), "seasonCount": seasonCount.map { .number(Double($0)) } ?? .null,
+                 "episodeCount": episodeCount.map { .number(Double($0)) } ?? .null])
+    }
     static func snapshot(_ sequence: Int = 1, stage: String = "idle", attempt: RuntimeValue = .null,
                          current: RuntimeValue = .null, browsing: RuntimeValue? = nil,
                          metadata: RuntimeValue = .null, candidates: [RuntimeValue] = [],

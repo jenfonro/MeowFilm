@@ -1,5 +1,4 @@
-using System.Windows;
-using System.Windows.Interop;
+using Microsoft.UI.Xaml;
 using Windows.Media;
 
 namespace MeowFilm.SystemMedia;
@@ -16,12 +15,12 @@ public sealed class WindowsSystemMediaBackend : ISystemMediaBackend
     public WindowsSystemMediaBackend(Window window)
     {
         ArgumentNullException.ThrowIfNull(window);
-        window.Dispatcher.VerifyAccess();
+        if (!window.DispatcherQueue.HasThreadAccess) throw new InvalidOperationException("SYSTEM_MEDIA_THREAD_ACCESS");
         if (Interlocked.CompareExchange(ref activeSession, 1, 0) != 0)
             throw new InvalidOperationException("SYSTEM_MEDIA_ALREADY_OWNED");
         try
         {
-            var hwnd = new WindowInteropHelper(window).EnsureHandle();
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
             controls = SystemMediaTransportControlsInterop.GetForWindow(hwnd);
             controls.IsEnabled = false;
             controls.ButtonPressed += ButtonPressed;

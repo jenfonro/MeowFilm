@@ -1,8 +1,9 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Windows.System;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 
 namespace MeowFilm.Capabilities;
 
@@ -15,38 +16,41 @@ public partial class MusicQueueView : UserControl
     public MusicQueueView(MusicCapability module)
     {
         this.module = module;
-        scrollIntent = new(Dispatcher);
+        scrollIntent = new();
         InitializeComponent();
         DataContext = module;
-        AddHandler(ScrollBar.ScrollEvent, new ScrollEventHandler((_, args) =>
+        Loaded += (_, _) =>
         {
-            if (IsVisible && Descendant<ScrollViewer>(QueueList) is { } scroll)
-                scrollIntent.ObserveScroll(scroll, args);
-        }), true);
+            if (Descendant<ScrollViewer>(QueueList) is not { } scroll) return;
+            scroll.ViewChanged -= QueueList_ViewChanged; scroll.ViewChanged += QueueList_ViewChanged;
+            scrollIntent.Attach(scroll);
+        };
         Unloaded += (_, _) => scrollIntent.Clear();
     }
 
-    private void QueueList_MouseWheel(object sender, MouseWheelEventArgs e)
+    private void QueueList_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
-        scrollIntent.Set(e.Delta < 0);
+        scrollIntent.Set(e.GetCurrentPoint(this).Properties.MouseWheelDelta < 0);
         if (scrollIntent.Active) LoadMoreNearEnd();
     }
 
-    private void QueueList_KeyDown(object sender, KeyEventArgs e)
+    private void QueueList_KeyDown(object sender, KeyRoutedEventArgs e)
+        => BrowseQueue(e.Key);
+    internal void BrowseQueue(VirtualKey key)
     {
-        scrollIntent.Set(e.Key is Key.Down or Key.PageDown or Key.End);
+        scrollIntent.Set(key is VirtualKey.Down or VirtualKey.PageDown or VirtualKey.End);
         if (scrollIntent.Active) LoadMoreNearEnd();
     }
 
-    private void QueueList_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    private void QueueList_ViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
     {
-        if (e.VerticalChange <= 0 || !scrollIntent.Accepts(QueueList)) return;
+        if (!scrollIntent.Accepts(QueueList, e.IsIntermediate)) return;
         LoadMoreNearEnd();
     }
 
     private async void LoadMoreNearEnd()
     {
-        if (loadingMore || !IsVisible || !module.CanLoadMoreQueueSurface ||
+        if (loadingMore || !MeowFilm.Desktop.DesktopVisual.IsVisible(this) || !module.CanLoadMoreQueueSurface ||
             Descendant<ScrollViewer>(QueueList) is not { } scroll ||
             scroll.ExtentHeight <= 0 ||
             scroll.VerticalOffset + scroll.ViewportHeight < scroll.ExtentHeight - 80) return;

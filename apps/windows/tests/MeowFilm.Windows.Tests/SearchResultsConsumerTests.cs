@@ -1,7 +1,9 @@
 using System.Reflection;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 
@@ -149,7 +151,7 @@ public static partial class MusicUiTests
     private static async Task UnifiedTargets()
     {
         await using var f = await UnifiedScene.Create();
-        var media = (ListBox)f.Shell.FindName("ModuleNavigationList");
+        var media = (ListView)f.Shell.Root.FindName("ModuleNavigationList");
         True(media.Items.OfType<ModuleSession>().Select(item => item.Module)
             .SequenceEqual(new IDesktopModule[] { f.Music.Module, f.Film, f.Novel }),
             "the real media selector keeps music film and novel in order and points to the actual capability owners");
@@ -567,10 +569,10 @@ public static partial class MusicUiTests
         private readonly NovelRuleRuntimeFixture novelRules = new();
         internal readonly ShellWindow Shell;
         internal FilmSearchConsumerRuntime Runtime => Search.Runtime;
-        internal TextBox Input => (TextBox)Shell.FindName("SearchBox");
-        internal ComboBox Picker => (ComboBox)Shell.FindName("SearchTargetPicker");
-        internal string Status => ((TextBlock)Shell.FindName("StatusText")).Text;
-        internal ContentControl? SearchHost => (Shell.FindName("ContentDeck") as Grid)!.Children.OfType<ContentControl>()
+        internal TextBox Input => (TextBox)DesktopTestUi.WindowRoot(Shell).FindName("SearchBox");
+        internal ComboBox Picker => (ComboBox)DesktopTestUi.WindowRoot(Shell).FindName("SearchTargetPicker");
+        internal string Status => ((TextBlock)DesktopTestUi.WindowRoot(Shell).FindName("StatusText")).Text;
+        internal ContentControl? SearchHost => (DesktopTestUi.WindowRoot(Shell).FindName("ContentDeck") as Grid)!.Children.OfType<ContentControl>()
             .SingleOrDefault(host => ReferenceEquals(host.Content, Page.View));
         private UnifiedScene(SearchScene music, SearchFixture search, FilmMetadataService? metadata, NovelTests.Runtime? novelRuntime)
         {
@@ -606,19 +608,19 @@ public static partial class MusicUiTests
                 // Mount without a default request, then use the actual native library route.
                 f.Shell.PrepareForRender();
                 await f.Navigate(music.Module, "favorites");
-                f.Shell.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent));
+                f.Shell.Show();
                 await SearchFixture.Until(() => music.Module.CaptureNavigationLocation() == "favorites" && f.Status == "");
                 await Drain(); return f;
             }
             catch { await f.DisposeAsync(); throw; }
         }
-        internal void Click(string name) => ((Button)Shell.FindName(name)).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        internal void Click(string name) => DesktopTestUi.Invoke((Button)DesktopTestUi.WindowRoot(Shell).FindName(name));
         internal async Task Navigate(IDesktopModule module, string route)
         {
-            var media = (ListBox)Shell.FindName("ModuleNavigationList");
+            var media = (ListView)DesktopTestUi.WindowRoot(Shell).FindName("ModuleNavigationList");
             var session = media.Items.OfType<ModuleSession>().Single(item => ReferenceEquals(item.Module, module));
             var home = module.Navigation[0].Route;
-            var lists = new[] { "NavigationList", "CollectionNavigationList" }.Select(name => (ListBox)Shell.FindName(name)).ToArray();
+            var lists = new[] { "NavigationList", "CollectionNavigationList" }.Select(name => (ListView)DesktopTestUi.WindowRoot(Shell).FindName(name)).ToArray();
             if (route == home || !lists.Any(list => list.Items.OfType<ShellNavigationEntry>()
                     .Any(item => ReferenceEquals(item.Owner.Module, module))))
             {

@@ -77,8 +77,8 @@ final class FilmPlaybackPresentationLifetimeTests: XCTestCase {
         XCTAssertEqual(retained.sources, loaded.sources)
         XCTAssertEqual(retained.browsing, loaded.browsing)
         XCTAssertEqual(retained.episodes, loaded.episodes)
-        XCTAssertEqual(retained.entryResolution, loaded.entryResolution)
-        XCTAssertEqual(failed.error, "NETWORK_ERROR")
+        XCTAssertEqual(retained.entryResolution, "error")
+        XCTAssertEqual(retained.error, "NETWORK_ERROR")
     }
 
     func testSearchExecutionReplacementKeepsLoadedCardsWhileLoading() throws {

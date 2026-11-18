@@ -1,6 +1,7 @@
 using System.ComponentModel;
-using System.Windows;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Window = MeowFilm.Desktop.DesktopWindow;
 using MeowFilm.AppHost;
 using MeowFilm.Desktop;
 using MeowFilm.SystemMedia;
@@ -23,7 +24,7 @@ public static class SystemMediaWindowLifecycleTests
         var player = new Player(); var backend = new Backend();
         await using var attachment = new SystemMediaWindowAttachment(window, player, backend, [new("audio")]);
         bool promptOpen = false;
-        CancelEventHandler closing = (_, args) => { args.Cancel = true; promptOpen = true; };
+        EventHandler<CancelEventArgs> closing = (_, args) => { args.Cancel = true; promptOpen = true; };
         window.Closing += closing;
         try
         {
@@ -57,10 +58,10 @@ public static class SystemMediaWindowLifecycleTests
         var window = CreateWindow();
         var player = new Player(); var backend = new Backend();
         await using var attachment = new SystemMediaWindowAttachment(window, player, backend, [new("audio")]);
-        CancelEventHandler closing = (_, args) =>
+        EventHandler<CancelEventArgs> closing = (_, args) =>
         {
             args.Cancel = true;
-            _ = window.Dispatcher.InvokeAsync(window.Hide, DispatcherPriority.Background);
+            window.DispatcherQueue.TryEnqueue(window.Hide);
         };
         window.Closing += closing;
         try
@@ -97,7 +98,7 @@ public static class SystemMediaWindowLifecycleTests
         var shutdown = new AppShutdown([owner],
             [new(attachment.DisposeAsync), new(() => { player.Dispose(); return ValueTask.CompletedTask; })]);
         Task? closingWork = null;
-        CancelEventHandler closing = (_, args) => { args.Cancel = true; closingWork ??= shutdown.CloseAsync(); };
+        EventHandler<CancelEventArgs> closing = (_, args) => { args.Cancel = true; closingWork ??= shutdown.CloseAsync(); };
         window.Closing += closing;
         try
         {
@@ -174,7 +175,7 @@ public static class SystemMediaWindowLifecycleTests
             [new(attachment.DisposeAsync), new(() => { player.Dispose(); return ValueTask.CompletedTask; })]);
         bool allowClose = false;
         Task? closingWork = null;
-        CancelEventHandler closing = (_, args) =>
+        EventHandler<CancelEventArgs> closing = (_, args) =>
         {
             if (allowClose) return;
             args.Cancel = true;
@@ -223,34 +224,13 @@ public static class SystemMediaWindowLifecycleTests
         }
     }
 
-    private static Window CreateWindow() => new()
-    {
-        ShowInTaskbar = false, ShowActivated = false, Width = 200, Height = 120,
-        WindowStartupLocation = WindowStartupLocation.Manual, Left = -10000, Top = -10000
-    };
+    private static Window CreateWindow() => FilmUiTest.Window(new Microsoft.UI.Xaml.Controls.Grid(), 200, 120);
     private static TaskCompletionSource Pending() => new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private static async Task Pump() => await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+    private static async Task Pump() => await DesktopTestUi.DrainAsync();
     private static void Check(bool value, string message)
     { if (!value) throw new InvalidOperationException(message); }
     private static async Task Sta(Func<Task> action)
-    {
-        var done = Pending();
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            _ = dispatcher.InvokeAsync(async () =>
-            {
-                try { await action(); done.TrySetResult(); }
-                catch (Exception error) { done.TrySetException(error); }
-                finally { dispatcher.BeginInvokeShutdown(DispatcherPriority.Background); }
-            });
-            Dispatcher.Run();
-        }) { IsBackground = true };
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        await done.Task.WaitAsync(TimeSpan.FromSeconds(20));
-        Check(thread.Join(TimeSpan.FromSeconds(5)), "The window test STA must terminate.");
-    }
+    { await TestUiHost.InvokeAsync(action); }
 
     private sealed class Player : ISystemPlayback, IDisposable
     {

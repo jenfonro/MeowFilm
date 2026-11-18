@@ -1,11 +1,13 @@
 using System.Collections;
 using System.Collections.Specialized;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Windows.Foundation;
+using Windows.System;
+using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
@@ -38,17 +40,18 @@ public partial class SettingsPriorityList : UserControl
     private INotifyCollectionChanged? subscribed;
     private sealed record KeyboardMove(object Row);
     private KeyboardMove? keyboardMove;
-    private bool Ready => IsLoaded && IsVisible && IsEnabled && CanEdit;
+    private bool Ready => IsLoaded && DesktopVisual.IsVisible(this) && IsEnabled && CanEdit;
 
     public SettingsPriorityList()
     {
         InitializeComponent();
-        drag = new(PriorityItems);
+        drag = new(PriorityItems, DragOverlay);
         Loaded += (_, _) => ObserveCollection();
         Unloaded += (_, _) => { drag.Cancel(); keyboardMove = null; Unsubscribe(); };
-        IsVisibleChanged += (_, e) => { if (e.NewValue is false) { drag.Cancel(); keyboardMove = null; } };
-        IsEnabledChanged += (_, e) => { if (e.NewValue is false) { drag.Cancel(); keyboardMove = null; } };
+        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => { if (!DesktopVisual.IsVisible(this)) { drag.Cancel(); keyboardMove = null; } });
+        IsEnabledChanged += (_, _) => { if (!IsEnabled) { drag.Cancel(); keyboardMove = null; } };
         SizeChanged += (_, _) => { drag.Cancel(); };
+        LayoutUpdated += (_, _) => { if (!DesktopVisual.IsVisible(this)) { drag.Cancel(); keyboardMove = null; } };
         DataContextChanged += (_, _) => { drag.Cancel(); keyboardMove = null; };
     }
 
@@ -94,26 +97,24 @@ public partial class SettingsPriorityList : UserControl
         if (keyboardMove is { } move && !PriorityItems.Items.Contains(move.Row)) keyboardMove = null;
         if (!PriorityItems.Items.Contains(PriorityItems.SelectedItem)) PriorityItems.SelectedItem = null;
     }
-    protected override void OnLostKeyboardFocus(KeyboardFocusChangedEventArgs e)
+    protected override void OnLostFocus(RoutedEventArgs e)
     {
-        base.OnLostKeyboardFocus(e);
-        if (ReferenceEquals(e.OldFocus, this)) keyboardMove = null;
+        base.OnLostFocus(e);
+        if (!ReferenceEquals(DesktopVisual.Focused(this), this)) keyboardMove = null;
     }
     private void RestoreKeyboardFocus(KeyboardMove move)
     {
-        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+        DispatcherQueue.TryEnqueue(() =>
         {
             if (!ReferenceEquals(keyboardMove, move)) return;
-            if (!IsLoaded || !IsVisible || !IsEnabled || !ReferenceEquals(Keyboard.FocusedElement, this))
+            if (!IsLoaded || !DesktopVisual.IsVisible(this) || !IsEnabled || !ReferenceEquals(DesktopVisual.Focused(this), this))
             { keyboardMove = null; return; }
             if (!CanEdit || !PriorityItems.IsEnabled) return;
             keyboardMove = null;
-            // A collection Move can recreate the row's visual container.
-            if (PriorityItems.ItemContainerGenerator.ContainerFromItem(move.Row) is ListBoxItem container &&
-                FindHandle(container) is { IsLoaded: true, IsVisible: true, IsEnabled: true, Focusable: true } handle &&
-                ReferenceEquals(handle.DataContext, move.Row))
-                handle.Focus();
-        }));
+            if (PriorityItems.ContainerFromItem(move.Row) is ListViewItem container &&
+                FindHandle(container) is { IsLoaded: true, Visibility: Visibility.Visible, IsEnabled: true } handle &&
+                ReferenceEquals(handle.DataContext, move.Row)) handle.Focus(FocusState.Keyboard);
+        });
     }
     private static Thumb? FindHandle(DependencyObject parent)
     {
@@ -122,54 +123,52 @@ public partial class SettingsPriorityList : UserControl
             if (FindHandle(VisualTreeHelper.GetChild(parent, i)) is { } child) return child;
         return null;
     }
-    private void RequestMove(Thumb handle, int direction)
+    internal bool CanMove(Thumb handle, int direction) => Ready && !drag.IsActive && handle.IsLoaded &&
+        handle.IsEnabled && DesktopVisual.Contains(PriorityItems, handle) &&
+        SettingsReorderDrag.KeyboardTarget(PriorityItems, handle.DataContext, direction) is not null;
+    internal void RequestMove(Thumb handle, int direction)
     {
-        if (!Ready || drag.IsActive || handle.DataContext is not { } source ||
-            SettingsReorderDrag.KeyboardTarget(PriorityItems, source, direction) is not { } target) return;
+        if (!CanMove(handle, direction)) return;
+        var source = handle.DataContext;
+        var target = SettingsReorderDrag.KeyboardTarget(PriorityItems, source, direction)!;
         keyboardMove = null;
         // Keep keyboard ownership outside the list while its admitted save disables the rows.
         // A user focus change or page retirement abandons this restoration, never steals focus back.
-        if (ReferenceEquals(Keyboard.FocusedElement, handle) && Focus()) keyboardMove = new(source);
+        if (ReferenceEquals(DesktopVisual.Focused(this), handle) && Focus(FocusState.Programmatic)) keyboardMove = new(source);
         MoveRequested?.Invoke(this, new(source, target));
         if (keyboardMove is { } move) RestoreKeyboardFocus(move);
     }
-    private void Move_CanExecute(object sender, CanExecuteRoutedEventArgs e)
-    {
-        e.CanExecute = Ready && !drag.IsActive && e.OriginalSource is Thumb { DataContext: { } row } &&
-            SettingsReorderDrag.KeyboardTarget(PriorityItems, row, e.Command == ComponentCommands.MoveUp ? -1 : 1) is not null;
-        e.Handled = true;
-    }
-    private void Move_Executed(object sender, ExecutedRoutedEventArgs e)
-    {
-        if (e.OriginalSource is Thumb handle)
-            RequestMove(handle, e.Command == ComponentCommands.MoveUp ? -1 : 1);
-        e.Handled = true;
-    }
     private void Enabled_Click(object sender, RoutedEventArgs e)
     {
-        if (!Ready || sender is not CheckBox { IsLoaded: true, IsVisible: true, IsEnabled: true, Tag: { } item } checkbox ||
+        if (!Ready || sender is not CheckBox { IsLoaded: true, Visibility: Visibility.Visible, IsEnabled: true, Tag: { } item } checkbox ||
             !PriorityItems.Items.Contains(item)) return;
         drag.Cancel();
         ToggleRequested?.Invoke(this, new(item, checkbox.IsChecked == true));
-        checkbox.GetBindingExpression(ToggleButton.IsCheckedProperty)?.UpdateTarget();
+        checkbox.IsChecked = item switch { MusicSearchPlatformRow row => row.Enabled, MusicQualityRow row => row.Enabled, MusicMetadataPlatformRow row => row.Enabled, _ => false };
     }
     private void Grip_Started(object sender, DragStartedEventArgs e)
     {
         if (sender is not Thumb thumb || !Ready) return;
         PriorityItems.SelectedItem = thumb.DataContext;
-        drag.Begin(thumb, PriorityItems, Mouse.GetPosition(PriorityItems));
+        drag.Begin(thumb, PriorityItems, thumb.TransformToVisual(PriorityItems).TransformPoint(new Point(e.HorizontalOffset, e.VerticalOffset)));
     }
-    private void Grip_Delta(object sender, DragDeltaEventArgs e) => drag.Update(Mouse.GetPosition(PriorityItems));
-    private void Grip_Completed(object sender, DragCompletedEventArgs e) => CompleteDrag(Mouse.GetPosition(PriorityItems), e.Canceled);
+    private void Grip_Delta(object sender, DragDeltaEventArgs e) => drag.Delta(e.HorizontalChange, e.VerticalChange);
+    private void Grip_Completed(object sender, DragCompletedEventArgs e) => CompleteDrag(drag.Position, e.Canceled);
     internal void CompleteDrag(Point point, bool cancelled)
     {
         PriorityItems.UpdateLayout();
         var move = drag.Complete(point, cancelled);
         if (Ready && move is not null) MoveRequested?.Invoke(this, new(move.Source, move.Target));
     }
-    private void Grip_KeyDown(object sender, KeyEventArgs e)
+    internal bool ProcessKey(Thumb handle, VirtualKey key, VirtualKeyModifiers modifiers)
     {
-        var key = e.Key == Key.System ? e.SystemKey : e.Key;
-        if (key == Key.Escape) { drag.Cancel(); e.Handled = true; return; }
+        if (modifiers.HasFlag(VirtualKeyModifiers.Menu) && key is VirtualKey.Up or VirtualKey.Down)
+        { RequestMove(handle, key == VirtualKey.Up ? -1 : 1); return true; }
+        if (key == VirtualKey.Escape) { drag.Cancel(); return true; }
+        return false;
+    }
+    private void Grip_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (sender is Thumb handle) e.Handled = ProcessKey(handle, e.Key, DesktopVisual.Modifiers);
     }
 }

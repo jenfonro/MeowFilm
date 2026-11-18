@@ -1,6 +1,8 @@
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -21,7 +23,7 @@ internal sealed class NovelSourceEditor : DockPanel
     private void Render()
     {
         Children.Clear();
-        var tabs = new TabControl { BorderThickness = new(0) }; tabs.SetResourceReference(StyleProperty, "MeowFilm.ManagementTabs");
+        var tabs = new TabView { IsAddTabButtonVisible = false, CanDragTabs = false, CanReorderTabs = false };
         foreach (var tab in Draft.Tabs.Concat(Draft.ExtensionFields.Length == 0 ? [] : new[] { new NovelSourceTab("扩展字段", Draft.ExtensionFields) }))
         {
             var form = new ManagementForm();
@@ -30,7 +32,7 @@ internal sealed class NovelSourceEditor : DockPanel
                 var contentType = new StackPanel { Margin = new(14, 11, 14, 10) };
                 contentType.Children.Add(NovelUi.Text("内容类型", 13, muted: true));
                 var type = new ComboBox { ItemsSource = new[] { "文本", "音频", "图片", "文件" }, MinWidth = 100, Height = 32, MinHeight = 32, HorizontalAlignment = HorizontalAlignment.Left };
-                type.SetResourceReference(StyleProperty, "Novel.ComboBox");
+                type.UseResource(StyleProperty, "Novel.ComboBox");
                 type.SelectedIndex = int.TryParse(Draft.Text(new("bookSourceType", "内容类型")), out int current) && current is >= 0 and < 4 ? current : 0;
                 AutomationProperties.SetName(type, "内容类型"); AutomationProperties.SetAutomationId(type, "novel.source.contentType");
                 type.SelectionChanged += (_, _) => Draft.Set(new("bookSourceType", "内容类型", Kind: NovelSourceFieldKind.Number), type.SelectedIndex.ToString());
@@ -46,10 +48,12 @@ internal sealed class NovelSourceEditor : DockPanel
                 if (field.Kind == NovelSourceFieldKind.Bool) { var check = form.Check(field.Label, Draft.Text(field) == "true"); check.Click += (_, _) => Draft.Set(field, check.IsChecked == true ? "true" : "false"); }
                 else { var input = form.Field(field.Label, Draft.Text(field), field.Rows, "novel.source.field." + field.Path); input.TextChanged += (_, _) => Draft.Set(field, input.Text); }
             }
-            tabs.Items.Add(new TabItem { Header = tab.Title, Content = NovelUi.Scroll(form.Card()) });
+            tabs.TabItems.Add(new TabViewItem { Header = tab.Title, IsClosable = false,
+                FontWeight = Microsoft.UI.Text.FontWeights.Normal, FontStyle = Windows.UI.Text.FontStyle.Normal,
+                Content = NovelUi.Scroll(form.Card()) });
         }
-        var card = new Border { CornerRadius = new(22), BorderThickness = new(1), Child = tabs, ClipToBounds = true };
-        card.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.FloatingSurface");
+        var card = new Border { CornerRadius = new(22), BorderThickness = new(1), Child = tabs };
+        card.UseResource(StyleProperty, "MeowFilm.FloatingSurface");
         Children.Add(card);
     }
 }

@@ -1,9 +1,11 @@
+using Windows.System;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Input;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Data;
+using Microsoft.UI.Xaml.Input;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -65,12 +67,12 @@ internal sealed class FilmDirectory
     }
 }
 
-internal sealed class FilmDirectoryDialog : DesktopWindow
+internal sealed class FilmDirectoryDialog : ContentDialog
 {
     private readonly FilmPlaybackPage page;
     private readonly JsonElement browsing;
     private readonly FilmDirectory directory;
-    private readonly ListBox list = new() { DisplayMemberPath = nameof(FilmDirectoryRow.Label) };
+    private readonly ListView list = new() { DisplayMemberPath = nameof(FilmDirectoryRow.Label), MinHeight = 220, MaxHeight = 400 };
     private readonly TextBlock path = new() { TextWrapping = TextWrapping.Wrap, Margin = new(0, 8, 0, 12) };
     private readonly Button back = new() { Content = "返回上级", MinHeight = 32 };
     private readonly Button play = new() { Content = "播放所选文件", MinHeight = 32 };
@@ -80,36 +82,15 @@ internal sealed class FilmDirectoryDialog : DesktopWindow
     {
         this.page = page; browsing = page.RawBrowsing.Clone();
         directory = new(browsing, page.CurrentCandidateId);
-        Resources.MergedDictionaries.Add(new ResourceDictionary
-        {
-            Source = new("/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml", UriKind.Relative)
-        });
-        SetResourceReference(BackgroundProperty, "MeowFilm.Brush.Window");
-        SetResourceReference(ForegroundProperty, "MeowFilm.Brush.Text");
-        back.SetResourceReference(StyleProperty, "MeowFilm.QuietButton");
-        play.SetResourceReference(StyleProperty, "MeowFilm.PrimaryButton");
-        play.Margin = new(0, 12, 0, 0);
-        list.SetResourceReference(StyleProperty, "MeowFilm.NavigationList");
-        list.ItemContainerStyle = new(typeof(ListBoxItem), (Style)FindResource("MeowFilm.NavigationItem"))
-        {
-            Setters = { new Setter(AutomationProperties.NameProperty, new Binding(nameof(FilmDirectoryRow.Label))) }
-        };
-        Title = "原始目录"; Width = 580; Height = 520; MinWidth = 360; MinHeight = 320;
-        WindowStartupLocation = WindowStartupLocation.CenterOwner; ShowInTaskbar = false;
+        Title = "原始目录"; CloseButtonText = "关闭";
         AutomationProperties.SetName(list, "原始目录与文件");
-        var body = new DockPanel { Margin = new(20) };
-        var header = new StackPanel(); header.Children.Add(back); header.Children.Add(path);
-        DockPanel.SetDock(header, Dock.Top); body.Children.Add(header);
-        DockPanel.SetDock(play, Dock.Bottom); body.Children.Add(play);
-        DockPanel.SetDock(notices, Dock.Bottom); body.Children.Add(notices);
-        var boundary = new Border { Child = list, BorderThickness = new(1), CornerRadius = new(8) };
-        boundary.SetResourceReference(Border.BorderBrushProperty, "MeowFilm.Brush.Border");
-        boundary.SetResourceReference(Border.BackgroundProperty, "MeowFilm.Brush.Surface");
-        body.Children.Add(boundary); Content = body;
+        var body = new StackPanel { Spacing = 8, MinWidth = 300 };
+        body.Children.Add(back); body.Children.Add(path); body.Children.Add(list);
+        body.Children.Add(play); body.Children.Add(notices); Content = body;
         back.Click += (_, _) => { directory.Back(); Populate(); };
         list.SelectionChanged += (_, _) => play.IsEnabled = list.SelectedItem is FilmDirectoryRow { IsDirectory: false, CandidateId: not null };
-        list.MouseDoubleClick += (_, _) => Enter();
-        list.PreviewKeyDown += (_, e) => { if (e.Key == Key.Enter && list.SelectedItem is FilmDirectoryRow { IsDirectory: true }) { Enter(); e.Handled = true; } };
+        list.DoubleTapped += (_, _) => Enter();
+        list.KeyDown += (_, e) => { if (e.Key == VirtualKey.Enter && list.SelectedItem is FilmDirectoryRow { IsDirectory: true }) { Enter(); e.Handled = true; } };
         play.Click += async (_, _) =>
         {
             if (list.SelectedItem is not FilmDirectoryRow { IsDirectory: false, CandidateId: { } id } || !IsCurrent(page)) return;

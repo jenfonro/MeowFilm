@@ -1,5 +1,5 @@
 using System.Text.Json;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
@@ -120,7 +120,7 @@ public static partial class NovelTests
             using var registration = ct.Register(() => cancelled.TrySetResult());
             entered.TrySetResult(); return await physical.Task;
         };
-        var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(host); host.Show();
+        var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
         var runtime = new Runtime(); var sources = NovelTestSources.Create(runtime);
         await sources.RefreshAsync();
         await using var server = new WebFixture();

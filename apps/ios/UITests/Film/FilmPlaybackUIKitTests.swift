@@ -108,7 +108,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertTrue(media.inputs.isEmpty, "Selecting a source is browsing, not media transport")
     }
 
-    func testMetadataMenusOnlyExposeConfirmedProvidersAndChangingProviderUpdatesDirectoryVisibility() async throws {
+    func testSourceAndMetadataMenusHaveIndependentSelectionsAndKeepTheSiteDirectory() async throws {
         let server = FilmUIKitPlaybackServer(), media = FilmUIKitPlaybackMedia()
         let model = makeModel(server, media)
         await model.open()?.value
@@ -151,14 +151,13 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(metadataAlert.message, FilmPlaybackError(code: "UPSTREAM_HTTP").localizedDescription)
         try await runnerAction { $0.alerts.buttons["确定"].tap() }
         try await waitFor { page.presentedViewController == nil && page.canPresentPageAlert }
-        await server.reply(to: "browse.metadata", with: FilmUIKitPlaybackFixture.snapshot(provider: .douban,
-            browsing: FilmUIKitPlaybackFixture.browsing(),
-            metadataSources: associated))
         invoke(try menuAction("豆瓣 · 星海航线", source.menu))
         await model.waitForPendingWork()
         await settle()
         XCTAssertFalse(try hasDirectory(page))
-        await server.reply(to: "browse", with: FilmUIKitPlaybackFixture.snapshot(provider: .douban,
+        XCTAssertEqual(model.presentation?.metadataSourceID, "confirmed-tmdb")
+        XCTAssertEqual(model.aggregateSourceProvider, .douban)
+        await server.reply(to: "browse", with: FilmUIKitPlaybackFixture.snapshot(
             browsing: FilmUIKitPlaybackFixture.browsing(sourceID: "result-a", files: files, original: files),
             metadataSources: associated))
         invoke(try menuAction("测试站 · 星海航线", source.menu))
@@ -166,13 +165,16 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertTrue(try hasDirectory(page))
         XCTAssertEqual(try button("film.detail.line", page.view).title(for: .normal), "未知原标签")
         let season = try button("film.detail.season", page.view)
-        let mapping = try XCTUnwrap(season.menu?.children.compactMap { $0 as? UIMenu }.first { $0.title == "分季资料" })
-        invoke(try menuAction("TMDB · 星海航线", mapping))
+        let mapping = try XCTUnwrap(season.menu?.children.compactMap { $0 as? UIMenu }.first { $0.title == "资料视图" })
+        await server.reply(to: "browse.metadata", with: FilmUIKitPlaybackFixture.snapshot(provider: .douban,
+            browsing: FilmUIKitPlaybackFixture.browsing(sourceID: "result-a", files: files, original: files),
+            metadataSources: associated))
+        invoke(try menuAction("豆瓣 · 星海航线", mapping))
         await model.waitForPendingWork()
         let commands = await server.calls().filter { $0.operation == "session.command" }
-        XCTAssertEqual(commands.map(\.action), ["browse.metadata", "browse", "browse.metadata"])
-        XCTAssertNil(commands[0].input.filmObject?["keepSource"])
-        XCTAssertEqual(commands[2].input.filmObject?["keepSource"], .bool(true))
+        XCTAssertEqual(commands.map(\.action), ["browse", "browse.metadata"])
+        XCTAssertEqual(commands[1].input.filmObject?["keepSource"], .bool(true))
+        XCTAssertEqual(model.presentation?.browsing.sourceID, "result-a")
         XCTAssertTrue(media.inputs.isEmpty)
     }
 
@@ -199,7 +201,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         await settle()
         XCTAssertTrue(try XCTUnwrap(view("film.detail.episode-cards", page.view)).isHidden)
         XCTAssertTrue(model.presentation?.browsing.files.isEmpty == true)
-        XCTAssertNil((view("film.detail.episodes-state", page.view) as? UILabel)?.text)
+        XCTAssertEqual((view("film.detail.episodes-state", page.view) as? UILabel)?.text, "加载失败")
         let error = try await presentedAlert(page, title: "错误", style: .alert)
         XCTAssertEqual(error.message, FilmPlaybackError(code: "UPSTREAM_HTTP").localizedDescription)
         XCTAssertEqual(error.actions.map(\.title), ["确定", "重试"])
@@ -362,7 +364,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         var fields = try FilmUIKitPlaybackFixture.snapshot().filmRequiredObject()
         fields["metadata"] = .object(["name": .string("旧资料标题"), "overview": .string("保留的旧简介")])
         fields["workInfo"] = .object(["provider": .string("tmdb"), "metadataId": .number(19), "kind": .string("tv"),
-            "title": .string("旧资料标题"), "summary": .string("保留的旧简介"), "seasonCount": .null, "episodeCount": .null])
+            "title": .string("旧资料标题"), "summary": .string("保留的旧简介"), "seasonCount": .null, "episodeCount": .null, "metadata": .object([:])])
         fields["metadataCache"] = .object([
             "status": .string("stale"), "error": .object(["code": .string("UPSTREAM_HTTP")]),
             "components": .object(["detail": .object(["status": .string("failed")])])
@@ -398,7 +400,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         var fields = try FilmUIKitPlaybackFixture.snapshot().filmRequiredObject()
         fields["metadata"] = .object(["name": .string("星海航线")])
         fields["workInfo"] = .object(["provider": .string("tmdb"), "metadataId": .number(19), "kind": .string("tv"),
-            "title": .string("星海航线"), "summary": .string("卡片旧简介"), "seasonCount": .null, "episodeCount": .null])
+            "title": .string("星海航线"), "summary": .string("卡片旧简介"), "seasonCount": .null, "episodeCount": .null, "metadata": .object([:])])
         fields["metadataCache"] = .object(["status": .string("stale"), "components": .object([
             "detail": .object(["status": .string("failed")])
         ])])
@@ -419,7 +421,9 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         ] {
             fields["sequence"] = .number(Double(try XCTUnwrap(model.snapshot).sequence) + 1)
             fields["metadataCache"] = .object(["status": .string("stale"), "components": .object(["detail": component])])
-            fields["workInfo"] = .null
+            fields["workInfo"] = .object(["provider": .string("tmdb"), "metadataId": .number(19),
+                "kind": .string("tv"), "title": .string("星海航线"), "summary": .string(""),
+                "seasonCount": .null, "episodeCount": .null, "metadata": .object([:])])
             try await server.publish(.object(fields))
             await settle()
             try await waitFor {
@@ -661,7 +665,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(alert.message, FilmPlaybackError(code: "UPSTREAM_HTTP").localizedDescription)
         XCTAssertEqual(alert.actions.map(\.title), ["确定", "重试"])
         XCTAssertTrue(search.isHidden)
-        XCTAssertNil((view("film.detail.episodes-state", page.view) as? UILabel)?.text)
+        XCTAssertEqual((view("film.detail.episodes-state", page.view) as? UILabel)?.text, "加载失败")
         fields["entryResolution"] = .string("unmatched"); fields["stage"] = .string("idle"); fields["error"] = .null
         await server.reply(to: "browse.refresh", with: .object(fields))
         try await runnerAction { $0.alerts.buttons["重试"].tap() }
@@ -856,13 +860,16 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         var fields = try FilmUIKitPlaybackFixture.snapshot().filmRequiredObject()
         fields["workInfo"] = .object(["provider": .string("tmdb"), "metadataId": .number(19), "kind": .string("tv"),
             "title": .string("星海航线"), "summary": .string("第一行简介。第二行简介。第三行简介。"),
-            "seasonCount": .null, "episodeCount": .null])
+            "seasonCount": .null, "episodeCount": .null, "metadata": .object([:])])
         fields["metadata"] = .object(["name": .string("星海航线"), "overview": .string("第一行简介。第二行简介。第三行简介。"),
             "poster_path": .string(poster.absoluteString), "seasons": .array([.object([
                 "businessId": .string("fixture-season-1"), "playbackTarget": FilmUIKitPlaybackFixture.target(),
                 "id": .number(1), "season_number": .number(1), "name": .string("第一季"),
                 "poster_path": .string(seasonPoster.absoluteString),
             ])])])
+        var work = try fields.filmValue("workInfo").filmRequiredObject()
+        work["metadata"] = .object(["poster_path": .string(poster.absoluteString)])
+        fields["workInfo"] = .object(work)
         var episodes = FilmUIKitPlaybackFixture.episodes(numbers: [1, 2])
         var first = try episodes[0].filmRequiredObject()
         first["name"] = .string("启航"); first["overview"] = .string("真实分集简介")
@@ -1501,56 +1508,52 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         }
     }
 
-    func testChangingMetadataClearsOldImagesAndUsesTheNewLocalFavoriteIdentity() async throws {
-        let server = FilmUIKitPlaybackServer(), media = FilmUIKitPlaybackMedia()
+    func testBrowsingMetadataKeepsTheSameWorkElementsAndFavoriteIdentity() async throws {
+        var initial = try FilmUIKitPlaybackFixture.snapshot().filmRequiredObject()
+        var work = try initial.filmValue("workInfo").filmRequiredObject()
+        work["metadata"] = .object(["poster_path": .string("https://artwork.example.invalid/poster.png"),
+            "images": .object(["logos": .array([.object(["file_path": .string("https://artwork.example.invalid/logo.png")])])])])
+        initial["workInfo"] = .object(work)
+        let server = FilmUIKitPlaybackServer(.object(initial)), media = FilmUIKitPlaybackMedia()
         let model = makeModel(server, media)
-        await model.open()?.value
-        await server.awaitObservation()
+        await model.open()?.value; await server.awaitObservation()
         let suite = "FilmPlaybackUIKitTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let original = FilmItem(sourceID: "tmdb", id: "19", title: "星海航线", kind: .tv,
-            posterURL: URL(string: "https://artwork.example.invalid/poster.png"), businessID: "tmdb:tv:19",
-            playbackTarget: .init(id: "tmdb:tv:19", kind: .tv, title: "星海航线", metadataProvider: .tmdb, metadataID: "19"))
-        let logo = URL(string: "https://artwork.example.invalid/logo.png")!
+            businessID: "tmdb:tv:19", playbackTarget: .init(id: "tmdb:tv:19", kind: .tv,
+                title: "星海航线", metadataProvider: .tmdb, metadataID: "19"))
         let library = FilmLibrary(defaults: defaults)
         XCTAssertTrue(try library.toggle(original))
         let data = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).image { context in
             UIColor.red.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
         }.pngData())
         let images = ArtworkImages(maximumBytes: 1_024 * 1_024) { _ in data }
-        let page = FilmDetailViewController(detail: .init(item: original, logoURL: logo, summary: "原资料"),
-            library: library, images: images, themeProvider: FilmPlaybackUIKitTheme(), model: model)
+        let page = FilmDetailViewController(detail: .init(item: original), library: library, images: images,
+            themeProvider: FilmPlaybackUIKitTheme(), model: model)
         let window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor {
-            ["film.detail.hero", "film.detail.logo"].allSatisfy {
-                (self.view($0, page.view) as? ArtworkView)?.image != nil
-            }
-        }
-        let episodeImages = descendants(page.view).compactMap { $0 as? FilmEpisodeButton }
-            .flatMap { descendants($0).compactMap { $0 as? ArtworkView } }
-        try await waitFor { episodeImages.count == 2 && episodeImages.allSatisfy { $0.image != nil } }
+        let hero = try XCTUnwrap(view("film.detail.hero", page.view) as? ArtworkView)
+        let logo = try XCTUnwrap(view("film.detail.logo", page.view) as? ArtworkView)
+        try await waitFor { hero.image != nil && logo.image != nil }
+        let title = try XCTUnwrap(view("film.detail.title", page.view))
+        let before = page.detail
         let favorite = try button("film.detail.favorite", page.view)
-        XCTAssertEqual(favorite.configuration?.title, "已收藏")
         var changed = try FilmUIKitPlaybackFixture.snapshot(10, provider: .douban).filmRequiredObject()
-        changed["metadata"] = .null
-        var target = try XCTUnwrap(changed["target"]?.filmObject)
-        target["metadataId"] = .number(0)
-        changed["target"] = .object(target)
-        try await server.publish(.object(changed))
-        await settle()
-        XCTAssertTrue(descendants(page.view).compactMap { $0 as? ArtworkView }.filter {
-            !sequence(first: $0 as UIView, next: { $0.superview }).contains(where: \.isHidden)
-        }.allSatisfy { $0.image == nil })
-        XCTAssertEqual(favorite.configuration?.title, "收藏")
-        XCTAssertEqual(try XCTUnwrap(view("film.detail.title", page.view) as? UILabel).text, "星海航线")
+        changed["metadata"] = .object(["title": .string("浏览资料"), "poster_path": .null])
+        changed["workInfo"] = .object(work)
+        try await server.publish(.object(changed)); await settle()
+        XCTAssertEqual(page.detail, before)
+        XCTAssertTrue(view("film.detail.title", page.view) === title)
+        XCTAssertTrue(view("film.detail.hero", page.view) === hero)
+        XCTAssertTrue(view("film.detail.logo", page.view) === logo)
+        XCTAssertNotNil(hero.image); XCTAssertNotNil(logo.image)
+        XCTAssertEqual(favorite.configuration?.title, "已收藏")
+        XCTAssertEqual(page.detail.item.identity, original.identity)
         favorite.sendActions(for: .touchUpInside)
-        XCTAssertEqual(page.detail.item.sourceID, "douban")
-        XCTAssertEqual(page.detail.item.id, "0")
-        XCTAssertTrue(library.contains(page.detail.item))
-        XCTAssertTrue(library.contains(original), "Switching metadata must not rewrite the existing favorite")
+        XCTAssertFalse(library.contains(original))
+        XCTAssertTrue(library.favorites.isEmpty)
     }
 
     func testAutoPrepareUIEditsADraftAndOnlySuccessfulSavePublishesPreferences() async throws {
@@ -2367,6 +2370,13 @@ final class FilmPlaybackUIKitTests: XCTestCase {
                     page.view.window?.windowScene?.interfaceOrientation.isLandscape == true &&
                     page.view.bounds.width > page.view.bounds.height)
         }
+        if page is FilmPlayerViewController, let window = page.view.window, let scene = window.windowScene {
+            window.frame = scene.coordinateSpace.bounds
+            window.layoutIfNeeded(); page.view.layoutIfNeeded()
+            try await waitFor("The landscape fixture uses the actual scene bounds rather than a preceding compact window") {
+                window.bounds.size == scene.coordinateSpace.bounds.size && page.view.bounds.size == window.bounds.size
+            }
+        }
     }
     private func waitForActualPage(_ page: PageViewController) async throws {
         try await waitFor("The page is visible in the real active key window") {
@@ -2456,36 +2466,48 @@ final class FilmPlaybackUIKitTests: XCTestCase {
                 .coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.4)).tap()
         }
     }
-    private func tapVideo(in page: FilmPlayerViewController) async throws {
+    private func tapVideo(in page: FilmPlayerViewController, file: StaticString = #filePath, line: UInt = #line) async throws {
         let video = try XCTUnwrap(view("film.player.video", page.view))
         let window = try XCTUnwrap(video.window)
         let identifier = try XCTUnwrap(Bundle.main.bundleIdentifier)
         let app = XCUIApplication(bundleIdentifier: identifier)
         var offset = CGVector.zero
-        try await waitFor("The real XCUI video geometry has an uncovered, gesture-safe tap point") {
-            page.view.layoutIfNeeded()
-            let element = app.otherElements["film.player.video"]
-            let frame = element.frame
-            guard element.exists, frame.width > 0, frame.height > 0,
-                  abs(frame.width / frame.height - video.bounds.width / video.bounds.height) < 0.01 else { return false }
-            let inset = max(20, max(video.safeAreaInsets.left, video.safeAreaInsets.right))
-            for x in [CGFloat(0.2), 0.5, 0.8] {
-                for y in [CGFloat(0.4), 0.3, 0.5, 0.6, 0.7, 0.2, 0.8] {
-                    let point = CGPoint(x: video.bounds.width * x, y: video.bounds.height * y)
-                    guard point.x > inset, point.x < video.bounds.width - inset,
-                          point.y > 20, point.y < video.bounds.height - 20,
-                          let hit = window.hitTest(video.convert(point, to: window), with: nil),
-                          hit === video || hit.isDescendant(of: video) else { continue }
-                    var ancestor: UIView? = hit
-                    while let current = ancestor, current !== video, !(current is UIControl) {
-                        ancestor = current.superview
+        do {
+            try await waitFor("The real XCUI video geometry has an uncovered, gesture-safe tap point", file: file, line: line) {
+                page.view.layoutIfNeeded()
+                let element = app.otherElements["film.player.video"]
+                let frame = element.frame
+                guard element.exists, frame.width > 0, frame.height > 0,
+                      abs(frame.width / frame.height - video.bounds.width / video.bounds.height) < 0.01 else { return false }
+                let inset = max(20, max(video.safeAreaInsets.left, video.safeAreaInsets.right))
+                for x in [CGFloat(0.2), 0.5, 0.8] {
+                    for y in [CGFloat(0.4), 0.3, 0.5, 0.6, 0.7, 0.2, 0.8] {
+                        let point = CGPoint(x: video.bounds.width * x, y: video.bounds.height * y)
+                        guard point.x > inset, point.x < video.bounds.width - inset,
+                              point.y > 20, point.y < video.bounds.height - 20,
+                              let hit = window.hitTest(video.convert(point, to: window), with: nil),
+                              hit === video || hit.isDescendant(of: video) else { continue }
+                        var ancestor: UIView? = hit
+                        while let current = ancestor, current !== video, !(current is UIControl) {
+                            ancestor = current.superview
+                        }
+                        guard ancestor === video else { continue }
+                        offset = CGVector(dx: x, dy: y)
+                        return true
                     }
-                    guard ancestor === video else { continue }
-                    offset = CGVector(dx: x, dy: y)
-                    return true
                 }
+                return false
             }
-            return false
+        } catch {
+            let element = app.otherElements["film.player.video"]
+            let center = window.hitTest(video.convert(CGPoint(x: video.bounds.midX, y: video.bounds.midY), to: window), with: nil)
+            attachWindow(window, name: "film-video-safe-tap-failure")
+            XCTFail("Video bounds=\(video.bounds), frame=\(video.frame), safeArea=\(video.safeAreaInsets), " +
+                "XCUI exists=\(element.exists), frame=\(element.frame), centerHit=\(String(describing: center)), " +
+                "window=\(window.bounds), sceneBounds=\(String(describing: window.windowScene?.coordinateSpace.bounds)), " +
+                "screenBounds=\(window.screen.bounds), scene=\(String(describing: window.windowScene?.interfaceOrientation))",
+                file: file, line: line)
+            throw error
         }
         try await runnerAction { app in
             app.otherElements["film.player.video"].coordinate(withNormalizedOffset: offset).tap()
@@ -2529,8 +2551,11 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             let to = app.cells.containing(.staticText, identifier: destination).firstMatch
             XCTAssertTrue(from.waitForExistence(timeout: 3)); XCTAssertTrue(to.waitForExistence(timeout: 3))
             XCTAssertTrue(from.isHittable); XCTAssertTrue(to.isHittable)
-            from.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5))
-                .press(forDuration: 0.5, thenDragTo: to.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)))
+            let handle = from.buttons.firstMatch
+            XCTAssertTrue(handle.waitForExistence(timeout: 3), from.debugDescription)
+            XCTAssertTrue(handle.isHittable, handle.debugDescription)
+            handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                .press(forDuration: 0.5, thenDragTo: to.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35)))
         }
     }
 }

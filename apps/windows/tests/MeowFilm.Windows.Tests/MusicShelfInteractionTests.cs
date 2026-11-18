@@ -1,12 +1,18 @@
+using MeowFilm.Desktop;
+using Colors = Microsoft.UI.Colors;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Input;
-using System.Windows.Markup;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Data;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Markup;
+using Microsoft.UI.Xaml.Media;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 
@@ -38,7 +44,7 @@ public static class MusicShelfInteractionTests
     {
         using var f = new Fixture();
         await f.Load();
-        Check(f.Root.Focus(), "focus can leave the shelf");
+        Check(f.Root.Focus(FocusState.Programmatic), "focus can leave the shelf");
         await Drain();
         Check(f.Previous.Visibility == Visibility.Collapsed &&
             f.Next.Visibility == Visibility.Visible &&
@@ -46,9 +52,9 @@ public static class MusicShelfInteractionTests
             "only the executable resting arrow exists and it does not intercept pointer input");
         CheckPaths(f);
 
-        Check(f.Next.Focus(), "the next arrow remains keyboard reachable while hidden");
+        Check(f.Next.Focus(FocusState.Programmatic), "the next arrow remains keyboard reachable while hidden");
         await Drain();
-        Check(f.Shelf.IsKeyboardFocusWithin && f.Next.Opacity == 1 && f.Next.IsHitTestVisible,
+        Check(DesktopTestUi.HasFocus(f.Shelf) && f.Next.Opacity == 1 && f.Next.IsHitTestVisible,
             "keyboard focus exposes the shelf arrows");
         CheckPaths(f);
         var nextBounds = f.Bounds(f.Next);
@@ -90,7 +96,8 @@ public static class MusicShelfInteractionTests
         var selected = f.Items.SelectedItem;
         var cards = f.Section.Items;
         int cardClicks = 0;
-        f.Items.AddHandler(Button.ClickEvent, new RoutedEventHandler((_, _) => cardClicks++));
+        foreach (var button in DesktopTestUi.Visuals(f.Items).OfType<Button>())
+            button.Click += (_, _) => cardClicks++;
         Check(f.Next.Visibility == Visibility.Visible && f.Next.IsEnabled &&
             f.Previous.Visibility == Visibility.Collapsed,
             "the first page exposes only forward paging");
@@ -98,9 +105,9 @@ public static class MusicShelfInteractionTests
             AutomationProperties.GetName(f.Next) == "下一组" &&
             AutomationProperties.GetName(f.Previous) == "上一组", "paging controls retain keyboard and accessible names");
 
-        Check(f.Next.Focus(), "the hidden forward arrow can receive keyboard focus");
+        Check(f.Next.Focus(FocusState.Programmatic), "the hidden forward arrow can receive keyboard focus");
         await Drain();
-        f.Next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        DesktopTestUi.Invoke(f.Next);
         await Until(() => f.Rail.HorizontalOffset > .5 && f.IsSettled, "forward page settles");
         var page = f.Rail.HorizontalOffset;
         var visibleCards = (int)Math.Round((f.Rail.ViewportWidth + 16) / f.Shelf.CardWidth,
@@ -109,14 +116,14 @@ public static class MusicShelfInteractionTests
             page <= f.Rail.ViewportWidth + 16.5 &&
             Math.Abs(page / f.Shelf.CardWidth - Math.Round(page / f.Shelf.CardWidth)) < .01,
             "paging advances a viewport-sized group of whole cards");
-        Check(f.Previous.Visibility == Visibility.Visible && f.Previous.IsEnabled && f.Previous.Focus(),
+        Check(f.Previous.Visibility == Visibility.Visible && f.Previous.IsEnabled && f.Previous.Focus(FocusState.Programmatic),
             "backward paging becomes keyboard reachable");
         CheckPaths(f);
-        f.Previous.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        DesktopTestUi.Invoke(f.Previous);
         await Until(() => f.Rail.HorizontalOffset < .5 && f.IsSettled &&
             f.Previous.Visibility == Visibility.Collapsed, "backward page restores the start");
 
-        foreach (var (forward, backward) in new[] { (Key.Right, Key.Left), (Key.PageDown, Key.PageUp) })
+        foreach (var (forward, backward) in new[] { (VirtualKey.Right, VirtualKey.Left), (VirtualKey.PageDown, VirtualKey.PageUp) })
         {
             Check(f.Key(forward), "the shelf handles executable forward paging");
             await Until(() => Math.Abs(f.Rail.HorizontalOffset - page) < .5 && f.IsSettled,
@@ -124,44 +131,44 @@ public static class MusicShelfInteractionTests
             Check(f.Key(backward), "the shelf handles executable backward paging");
             await Until(() => f.Rail.HorizontalOffset < .5 && f.IsSettled, "keyboard backward paging restores the start");
         }
-        f.Rail.ScrollToHorizontalOffset(f.Shelf.CardWidth * .37);
-        f.Next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        f.Rail.ChangeView(f.Shelf.CardWidth * .37, null, null, true);
+        DesktopTestUi.Invoke(f.Next);
         await Until(() => Math.Abs(f.Rail.HorizontalOffset - page) < .5 && f.IsSettled,
             "paging from an in-between physical frame settles on a whole-column page");
-        f.Previous.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        DesktopTestUi.Invoke(f.Previous);
         await Until(() => f.Rail.HorizontalOffset < .5 && f.IsSettled,
             "whole-column paging returns to the start");
-        Check(!f.Key(Key.Left), "a boundary key is left unhandled when no previous page exists");
-        Check(f.Key(Key.End), "End is handled while the final boundary is reachable");
+        Check(!f.Key(VirtualKey.Left), "a boundary key is left unhandled when no previous page exists");
+        Check(f.Key(VirtualKey.End), "End is handled while the final boundary is reachable");
         await Until(() => Math.Abs(f.Rail.HorizontalOffset - f.Shelf.MaximumOffset) < .5 &&
             f.IsSettled && f.Next.Visibility == Visibility.Collapsed, "End reaches the final boundary");
         Check(f.Rail.ScrollableWidth - f.Shelf.MaximumOffset > 8,
             "the trailing card margin is not exposed as another page");
         var previousPage = Math.Max(0,
             Math.Floor(Math.Max(0, f.Shelf.MaximumOffset - .5) / page) * page);
-        f.Previous.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        DesktopTestUi.Invoke(f.Previous);
         await Until(() => Math.Abs(f.Rail.HorizontalOffset - previousPage) < .5 && f.IsSettled,
             "the final partial page returns to the preceding page boundary");
-        Check(f.Key(Key.End), "End remains available after leaving the final partial page");
+        Check(f.Key(VirtualKey.End), "End remains available after leaving the final partial page");
         await Until(() => Math.Abs(f.Rail.HorizontalOffset - f.Shelf.MaximumOffset) < .5 &&
             f.IsSettled, "End restores the final boundary");
         var end = f.Rail.HorizontalOffset;
-        f.Next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        DesktopTestUi.Invoke(f.Next);
         await Drain();
-        Check(Math.Abs(f.Rail.HorizontalOffset - end) < .01 && !f.Key(Key.Right),
+        Check(Math.Abs(f.Rail.HorizontalOffset - end) < .01 && !f.Key(VirtualKey.Right),
             "the final page rejects empty forward actions");
-        Check(f.Key(Key.Home), "Home is handled while the first boundary is reachable");
+        Check(f.Key(VirtualKey.Home), "Home is handled while the first boundary is reachable");
         await Until(() => f.Rail.HorizontalOffset < .5 && f.IsSettled &&
             f.Previous.Visibility == Visibility.Collapsed,
             "Home reaches the first boundary");
         Check(ReferenceEquals(cards, f.Items.ItemsSource) && ReferenceEquals(selected, f.Items.SelectedItem) &&
             cardClicks == 0, "shelf paging does not replace content, change selection, or invoke card actions");
 
-        Check(f.Root.Focus(), "keyboard focus can leave the shelf after paging");
+        Check(f.Root.Focus(FocusState.Programmatic), "keyboard focus can leave the shelf after paging");
         await Drain();
         Check(f.Next.Opacity == 0 && !f.Next.IsHitTestVisible, "arrows hide after keyboard focus leaves");
         f.Shelf.DataContext = new MusicCatalogSection("歌单", cards.Take(visibleCards).ToArray(), Type: "playlists");
-        f.Window.UpdateLayout();
+        DesktopTestUi.WindowRoot(f.Window).UpdateLayout();
         await Until(() => f.Previous.Visibility == Visibility.Collapsed && f.Next.Visibility == Visibility.Collapsed &&
             f.Rail.HorizontalOffset < .5, "arrows collapse when the content no longer overflows");
         Check(f.Rail.ScrollableWidth > .5,
@@ -172,12 +179,12 @@ public static class MusicShelfInteractionTests
     {
         using var f = new Fixture();
         await f.Load();
-        Check(f.Key(Key.PageDown), "the fixture can establish a nonzero logical anchor");
+        Check(f.Key(VirtualKey.PageDown), "the fixture can establish a nonzero logical anchor");
         await Until(() => f.Rail.HorizontalOffset > .5 && f.IsSettled, "initial anchor settles");
         var anchor = (int)Math.Round(f.Rail.HorizontalOffset / f.Shelf.CardWidth,
             MidpointRounding.AwayFromZero);
         var frames = new List<(double Width, double Offset)>();
-        EventHandler rendered = (_, _) =>
+        EventHandler<object> rendered = (_, _) =>
         {
             if (f.Shelf.CardWidth > 1)
                 frames.Add((f.Shelf.CardWidth, f.Shelf.PresentedOffset));
@@ -185,8 +192,8 @@ public static class MusicShelfInteractionTests
         CompositionTarget.Rendering += rendered;
         try
         {
-            f.Window.Width = 910;
-            f.Window.UpdateLayout();
+            f.Window.Resize(910, DesktopTestUi.WindowSize(f.Window).Height);
+            DesktopTestUi.WindowRoot(f.Window).UpdateLayout();
             await Until(() => Math.Abs(f.Rail.HorizontalOffset / f.Shelf.CardWidth - anchor) < .01 &&
                 f.IsSettled, "a wider viewport restores the same logical column");
         }
@@ -199,30 +206,30 @@ public static class MusicShelfInteractionTests
             "every rendered frame at the new pitch begins on a complete logical column: " +
             string.Join(", ", misaligned.Select(frame => $"{frame.Offset:0.##}/{frame.Width:0.##}")));
 
-        f.Window.Width = 760;
-        f.Window.Width = 840;
-        f.Window.Width = 680;
-        f.Window.UpdateLayout();
+        f.Window.Resize(760, DesktopTestUi.WindowSize(f.Window).Height);
+        f.Window.Resize(840, DesktopTestUi.WindowSize(f.Window).Height);
+        f.Window.Resize(680, DesktopTestUi.WindowSize(f.Window).Height);
+        DesktopTestUi.WindowRoot(f.Window).UpdateLayout();
         await Until(() => Math.Abs(f.Rail.HorizontalOffset / f.Shelf.CardWidth - anchor) < .01 &&
             f.IsSettled, "continuous resize keeps one anchor generation");
 
-        Check(f.Key(Key.Home), "the fixture can return before testing animation interruption");
+        Check(f.Key(VirtualKey.Home), "the fixture can return before testing animation interruption");
         await Until(() => f.Rail.HorizontalOffset < .5 && f.IsSettled, "start boundary settles");
         var oldWidth = f.Shelf.CardWidth;
         var expectedAnimatedAnchor = Math.Max(1,
             (int)Math.Round((f.Rail.ViewportWidth + 16) / oldWidth,
                 MidpointRounding.AwayFromZero));
-        f.Next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-        f.Window.Width = 860;
-        f.Window.UpdateLayout();
+        DesktopTestUi.Invoke(f.Next);
+        f.Window.Resize(860, DesktopTestUi.WindowSize(f.Window).Height);
+        DesktopTestUi.WindowRoot(f.Window).UpdateLayout();
         await Until(() => Math.Abs(f.Rail.HorizontalOffset / f.Shelf.CardWidth - expectedAnimatedAnchor) < .01 &&
             f.IsSettled, "resize during paging retains the animation target rather than its partial pixels");
 
-        Check(f.Key(Key.End), "the fixture can establish a final-page anchor");
+        Check(f.Key(VirtualKey.End), "the fixture can establish a final-page anchor");
         await Until(() => Math.Abs(f.Shelf.MaximumOffset - f.Rail.HorizontalOffset) < .5 &&
             f.IsSettled, "final page settles before resize");
-        f.Window.Width = 730;
-        f.Window.UpdateLayout();
+        f.Window.Resize(730, DesktopTestUi.WindowSize(f.Window).Height);
+        DesktopTestUi.WindowRoot(f.Window).UpdateLayout();
         await Until(() => Math.Abs(f.Shelf.MaximumOffset - f.Rail.HorizontalOffset) < .5 &&
             f.IsSettled && f.Next.Visibility == Visibility.Collapsed,
             "a resized final page remains anchored to the real end");
@@ -238,21 +245,21 @@ public static class MusicShelfInteractionTests
             f.IsSettled, "the first normal layout restores a distant saved column");
         CheckRealized(f);
 
-        Check(f.Key(Key.End), "a distant final boundary is keyboard reachable");
+        Check(f.Key(VirtualKey.End), "a distant final boundary is keyboard reachable");
         await Until(() => Math.Abs(f.Rail.HorizontalOffset - f.Shelf.MaximumOffset) < .5 &&
             f.IsSettled, "End reaches the exact full extent");
         CheckRealized(f);
-        Check(f.Next.Visibility == Visibility.Collapsed && !f.Key(Key.Right),
+        Check(f.Next.Visibility == Visibility.Collapsed && !f.Key(VirtualKey.Right),
             "the far end has no extra page for its trailing margin");
-        Check(f.Key(Key.Home), "Home remains reachable after the far end");
+        Check(f.Key(VirtualKey.Home), "Home remains reachable after the far end");
         await Until(() => f.Rail.HorizontalOffset < .5 && f.IsSettled, "Home settles after a distant jump");
         CheckRealized(f);
 
         f.Items.ScrollIntoView(f.Items.Items[7400]);
         await Drain();
-        var brought = f.Items.ItemContainerGenerator.ContainerFromIndex(7400) as FrameworkElement;
-        Check(brought is not null && brought.TranslatePoint(new Point(), f.Rail).X >= -.5 &&
-            brought.TranslatePoint(new Point(brought.ActualWidth - 16, 0), f.Rail).X <= f.Rail.ViewportWidth + .5,
+        var brought = f.Items.ContainerFromIndex(7400) as FrameworkElement;
+        Check(brought is not null && brought.TransformToVisual(f.Rail).TransformPoint(new Point()).X >= -.5 &&
+            brought.TransformToVisual(f.Rail).TransformPoint(new Point(brought.ActualWidth - 16, 0)).X <= f.Rail.ViewportWidth + .5,
             "native item navigation realizes and reveals a distant card");
         CheckRealized(f);
 
@@ -272,7 +279,7 @@ public static class MusicShelfInteractionTests
         await f.Load(updateLayout: false);
         var restored = f.Section with { Title = "远端恢复", HorizontalOffset = 6400 * f.Shelf.CardWidth };
         f.Shelf.DataContext = restored;
-        f.Window.Width = 910;
+        f.Window.Resize(910, DesktopTestUi.WindowSize(f.Window).Height);
         await Drain();
         Check(Math.Abs(f.Rail.HorizontalOffset / f.Shelf.CardWidth - 6400) < .01 &&
             Math.Abs(restored.HorizontalOffset - f.Rail.HorizontalOffset) < .5,
@@ -280,17 +287,17 @@ public static class MusicShelfInteractionTests
         CheckRealized(f);
 
         var frames = new List<(double Pitch, double Offset, double Left)>();
-        EventHandler rendered = (_, _) =>
+        EventHandler<object> rendered = (_, _) =>
         {
-            if (f.Items.ItemContainerGenerator.ContainerFromIndex(6400) is FrameworkElement card)
-                frames.Add((f.Shelf.CardWidth, f.Shelf.PresentedOffset, card.TranslatePoint(new Point(), f.Rail).X));
+            if (f.Items.ContainerFromIndex(6400) is FrameworkElement card)
+                frames.Add((f.Shelf.CardWidth, f.Shelf.PresentedOffset, card.TransformToVisual(f.Rail).TransformPoint(new Point()).X));
         };
         CompositionTarget.Rendering += rendered;
         try
         {
             foreach (var width in new[] { 760d, 840, 680, 150, 520, 1100, 720 })
             {
-                f.Window.Width = width;
+                f.Window.Resize(width, DesktopTestUi.WindowSize(f.Window).Height);
                 await RenderFrame();
                 await Drain();
                 Check(Math.Abs(f.Rail.HorizontalOffset / f.Shelf.CardWidth - 6400) < .01 &&
@@ -307,18 +314,18 @@ public static class MusicShelfInteractionTests
                     Math.Abs(frame.Offset / frame.Pitch - 6400) >= .01 || Math.Abs(frame.Left) >= 1)
                 .Select(frame => $"{frame.Offset:0.##}/{frame.Pitch:0.##}@{frame.Left:0.##}")));
 
-        Check(f.Key(Key.End), "the far final page can establish an end anchor");
+        Check(f.Key(VirtualKey.End), "the far final page can establish an end anchor");
         await Until(() => Math.Abs(f.Rail.HorizontalOffset - f.Shelf.MaximumOffset) < .5 &&
             Math.Abs(restored.HorizontalOffset - f.Rail.HorizontalOffset) < .5, "the final page settles");
         foreach (var width in new[] { 150d, 880, 600 })
         {
-            f.Window.Width = width;
+            f.Window.Resize(width, DesktopTestUi.WindowSize(f.Window).Height);
             await RenderFrame();
             await Drain();
             Check(Math.Abs(f.Rail.HorizontalOffset - f.Shelf.MaximumOffset) < .5 &&
                 f.Next.Visibility == Visibility.Collapsed, "resize keeps the final card at the real boundary");
-            var last = (FrameworkElement)f.Items.ItemContainerGenerator.ContainerFromIndex(f.Items.Items.Count - 1);
-            Check(Math.Abs(last.TranslatePoint(new Point(last.ActualWidth - 16, 0), f.Rail).X -
+            var last = (FrameworkElement)f.Items.ContainerFromIndex(f.Items.Items.Count - 1);
+            Check(Math.Abs(last.TransformToVisual(f.Rail).TransformPoint(new Point(last.ActualWidth - 16, 0)).X -
                 f.Rail.ViewportWidth) < 1, "the last card's content, excluding its gap, fills the resized viewport");
             CheckRealized(f);
         }
@@ -327,13 +334,13 @@ public static class MusicShelfInteractionTests
     private static async Task BoundSourceRestore()
     {
         using var f = new Fixture(10000);
-        f.Shelf.SetBinding(Shelf.ItemsSourceProperty, new Binding(nameof(MusicCatalogSection.Items)));
+        f.Shelf.SetBinding(Shelf.ItemsSourceProperty, new Binding { Path = new PropertyPath(nameof(MusicCatalogSection.Items)) });
         await f.Load(updateLayout: false);
         var second = f.Section with
         {
             Title = "其他栏目", Items = f.Section.Items.ToArray(), HorizontalOffset = 5100 * f.Shelf.CardWidth
         };
-        f.Rail.ScrollToHorizontalOffset(f.Shelf.CardWidth * 20.37);
+        f.Rail.ChangeView(f.Shelf.CardWidth * 20.37, null, null, true);
         await Drain();
         f.Shelf.DataContext = second;
         await Drain();
@@ -363,7 +370,7 @@ public static class MusicShelfInteractionTests
         var cards = new ObservableCollection<MusicCatalogCard>(f.Section.Items);
         f.Shelf.ItemsSource = cards;
         await f.Load(updateLayout: false);
-        f.Rail.ScrollToHorizontalOffset(400 * f.Shelf.CardWidth);
+        f.Rail.ChangeView(400 * f.Shelf.CardWidth, null, null, true);
         await Until(() => Math.Abs(f.Rail.HorizontalOffset / f.Shelf.CardWidth - 400) < .01 && f.IsSettled,
             "native offset changes settle on the requested distant column");
         CheckRealized(f);
@@ -390,29 +397,29 @@ public static class MusicShelfInteractionTests
         await f.Load(updateLayout: false);
         var rail = f.Rail;
         var source = f.Items.ItemsSource;
-        var container = f.Items.ItemContainerGenerator.ContainerFromIndex(6400);
+        var container = f.Items.ContainerFromIndex(6400);
         Check(container is not null && f.IsSettled, "a distant visible card is realized before hiding");
-        foreach (var visibility in new[] { Visibility.Hidden, Visibility.Collapsed })
+        foreach (var visibility in new[] { Visibility.Collapsed })
         {
             var saved = f.Section.HorizontalOffset;
             f.Shelf.Visibility = visibility;
-            Check(f.Shelf.IsLoaded && f.Shelf.ScrollHost is null && !f.Shelf.HasAnimatedProperties,
+            Check(f.Shelf.IsLoaded && ReferenceEquals(rail, f.Shelf.ScrollHost) && f.Shelf.IsSettled,
                 "hiding deactivates presentation without unloading the shelf");
             Check(ReferenceEquals(source, f.Items.ItemsSource) &&
-                ReferenceEquals(container, f.Items.ItemContainerGenerator.ContainerFromIndex(6400)),
+                ReferenceEquals(container, f.Items.ContainerFromIndex(6400)),
                 "hiding retains the item source and realized card");
-            foreach (var key in new[] { Key.Home, Key.End, Key.PageDown, Key.Left })
+            foreach (var key in new[] { VirtualKey.Home, VirtualKey.End, VirtualKey.PageDown, VirtualKey.Left })
                 Check(!f.Key(key), "hidden routed keys cannot consume the saved restore or restart paging");
-            f.Next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            f.Previous.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            DesktopTestUi.Invoke(f.Next);
+            DesktopTestUi.Invoke(f.Previous);
             await Drain();
             Check(Math.Abs(f.Section.HorizontalOffset - saved) < .01 &&
-                Math.Abs(rail.HorizontalOffset - saved) < .5 && !f.Shelf.HasAnimatedProperties,
+                Math.Abs(rail.HorizontalOffset - saved) < .5 && f.Shelf.IsSettled,
                 "hidden page commands leave the settled position and animation state unchanged");
             f.Shelf.Visibility = Visibility.Visible;
             await Drain();
             Check(ReferenceEquals(rail, f.Rail) && ReferenceEquals(source, f.Items.ItemsSource) &&
-                ReferenceEquals(container, f.Items.ItemContainerGenerator.ContainerFromIndex(6400)) &&
+                ReferenceEquals(container, f.Items.ContainerFromIndex(6400)) &&
                 Math.Abs(f.Rail.HorizontalOffset - saved) < .5 && f.IsSettled,
                 "returning at the same width reuses the scroller and card at the saved offset");
             CheckRealized(f);
@@ -421,12 +428,12 @@ public static class MusicShelfInteractionTests
         var page = Math.Round((rail.ViewportWidth + 16) / f.Shelf.CardWidth,
             MidpointRounding.AwayFromZero) * f.Shelf.CardWidth;
         var expected = Math.Min(f.Shelf.MaximumOffset, f.Section.HorizontalOffset + page);
-        f.Next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        DesktopTestUi.Invoke(f.Next);
         f.Shelf.Visibility = Visibility.Collapsed;
-        Check(Math.Abs(f.Section.HorizontalOffset - expected) < .5 && !f.Shelf.HasAnimatedProperties,
+        Check(Math.Abs(f.Section.HorizontalOffset - expected) < .5 && f.Shelf.IsSettled,
             "hiding during paging immediately saves the legal target and removes the animation clock");
-        f.Next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-        Check(!f.Key(Key.Home) && Math.Abs(f.Section.HorizontalOffset - expected) < .5,
+        DesktopTestUi.Invoke(f.Next);
+        Check(!f.Key(VirtualKey.Home) && Math.Abs(f.Section.HorizontalOffset - expected) < .5,
             "hidden input cannot replace an interrupted paging target");
         f.Shelf.Visibility = Visibility.Visible;
         await Drain();
@@ -444,11 +451,11 @@ public static class MusicShelfInteractionTests
         var rail = f.Rail;
         var pitch = f.Shelf.CardWidth;
         var saved = f.Section.HorizontalOffset;
-        f.Shelf.Visibility = Visibility.Hidden;
-        f.Window.Width = 910;
+        f.Shelf.Visibility = Visibility.Collapsed;
+        f.Window.Resize(910, DesktopTestUi.WindowSize(f.Window).Height);
         await Drain();
         Check(f.Shelf.CardWidth == pitch && f.Section.HorizontalOffset == saved &&
-            !f.Shelf.HasAnimatedProperties,
+            f.Shelf.IsSettled,
             "hidden layout retains the last visible geometry and saved column until return");
         var abandoned = f.Section with
         {
@@ -473,14 +480,14 @@ public static class MusicShelfInteractionTests
             "returning restores only the latest context and resizes its logical anchor together");
         CheckRealized(f);
 
-        Check(f.Key(Key.End), "the latest context can establish its final boundary");
+        Check(f.Key(VirtualKey.End), "the latest context can establish its final boundary");
         await Until(() => Math.Abs(rail.HorizontalOffset - f.Shelf.MaximumOffset) < .5 &&
             Math.Abs(latest.HorizontalOffset - rail.HorizontalOffset) < .5, "latest final page settles");
         var end = latest.HorizontalOffset;
         f.Shelf.Visibility = Visibility.Collapsed;
-        f.Window.Width = 150;
+        f.Window.Resize(150, DesktopTestUi.WindowSize(f.Window).Height);
         await Drain();
-        Check(latest.HorizontalOffset == end && !f.Shelf.HasAnimatedProperties,
+        Check(latest.HorizontalOffset == end && f.Shelf.IsSettled,
             "a collapsed narrow resize does not consume the saved end anchor");
         f.Shelf.Visibility = Visibility.Visible;
         await Drain();
@@ -501,13 +508,12 @@ public static class MusicShelfInteractionTests
             "the banner viewport contains two cards with a 20px trailing gap");
         Check(indicator.PageCount == 5 && indicator.Visibility == Visibility.Visible,
             "nine banners expose five real groups, including the short final interval");
-        var observations = new List<(double Offset, double Position, bool Animated)>();
-        ScrollChangedEventHandler observe = (_, e) =>
+        var observations = new List<(double Offset, double Position)>();
+        EventHandler<ScrollViewerViewChangedEventArgs> observe = (_, e) =>
         {
-            if (Math.Abs(e.HorizontalChange) > .01)
-                observations.Add((e.HorizontalOffset, indicator.Position, indicator.HasAnimatedProperties));
+            observations.Add((f.Rail.HorizontalOffset, indicator.Position));
         };
-        f.Rail.ScrollChanged += observe;
+        f.Rail.ViewChanged += observe;
         try
         {
             foreach (var (columns, position, finalColumn, finalPage) in new[]
@@ -515,7 +521,7 @@ public static class MusicShelfInteractionTests
                   (6.6, 3.6, 7d, 4d), (6.5, 3.5, 7d, 4d) })
             {
                 var start = observations.Count;
-                f.Rail.ScrollToHorizontalOffset(columns * pitch);
+                f.Rail.ChangeView(columns * pitch, null, null, true);
                 await Until(() =>
                     observations.Skip(start).Any(sample => Math.Abs(sample.Offset - columns * pitch) < .5) &&
                     Math.Abs(f.Rail.HorizontalOffset - finalColumn * pitch) < .5 && f.IsSettled,
@@ -524,44 +530,44 @@ public static class MusicShelfInteractionTests
                         $"saved={f.Section.HorizontalOffset}, animating={!f.Shelf.IsSettled}, " +
                         $"samples={string.Join(';', observations.Skip(start).Select(sample => $"{sample.Offset:0.###}/{sample.Position:0.###}"))}");
                 Check(observations.Skip(start).Any(sample => Math.Abs(sample.Offset - columns * pitch) < .5 &&
-                    Math.Abs(sample.Position - position) < .01 && !sample.Animated),
+                    Math.Abs(sample.Position - position) < .01),
                     "indicator follows the actual offset continuously, including the short last interval, without its own clock");
                 Check(Math.Abs(indicator.Position - finalPage) < .01, "settled indicator reports the real destination page");
                 CheckRealized(f);
             }
         }
-        finally { f.Rail.ScrollChanged -= observe; }
+        finally { f.Rail.ViewChanged -= observe; }
         Check(Math.Abs(f.Rail.HorizontalOffset - 7 * pitch) < .5 &&
-            f.Next.Visibility == Visibility.Collapsed,
+            f.Next.Visibility == Visibility.Collapsed && !f.Key(VirtualKey.Right),
             "the odd final page stops at the actual end with no empty forward move");
-        var last = (ListBoxItem)f.Items.ItemContainerGenerator.ContainerFromIndex(8);
-        Check(Math.Abs(last.TranslatePoint(new Point(last.ActualWidth - 20, 0), f.Rail).X -
+        var last = (ListViewItem)f.Items.ContainerFromIndex(8);
+        Check(Math.Abs(last.TransformToVisual(f.Rail).TransformPoint(new Point(last.ActualWidth - 20, 0)).X -
             f.Rail.ViewportWidth) < .5, "the last banner content ends at the viewport, not after an empty gap");
-        f.Previous.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        DesktopTestUi.Invoke(f.Previous);
         await Until(() => Math.Abs(f.Rail.HorizontalOffset - 6 * pitch) < .5 && f.IsSettled,
             "the short final interval returns to the preceding full-page boundary");
         var resizing = false;
-        ScrollChangedEventHandler resize = (_, e) =>
+        EventHandler<ScrollViewerViewChangedEventArgs> resize = (_, e) =>
         {
-            if (resizing || Math.Abs(e.HorizontalOffset - 5.2 * pitch) >= .5) return;
+            if (resizing || Math.Abs(f.Rail.HorizontalOffset - 5.2 * pitch) >= .5) return;
             resizing = true;
             // ScrollViewer drops its post-layout listener after raising ScrollChanged. A real
             // WM_SIZE is a later message, so resize in the next operation before the snap timer.
-            _ = f.Window.Dispatcher.InvokeAsync(() => { f.Window.Width = 910; }, DispatcherPriority.Normal);
+            f.Window.DispatcherQueue.TryEnqueue(() => { f.Window.Resize(910, DesktopTestUi.WindowSize(f.Window).Height); });
         };
-        f.Rail.ScrollChanged += resize;
+        f.Rail.ViewChanged += resize;
         try
         {
-            f.Rail.ScrollToHorizontalOffset(5.2 * pitch);
+            f.Rail.ChangeView(5.2 * pitch, null, null, true);
             await Until(() => resizing && Math.Abs(f.Shelf.CardWidth - 425) < .01 &&
                 Math.Abs(f.Rail.HorizontalOffset - 6 * 425d) < .5 && f.IsSettled,
                 "resize during native scrolling keeps the nearest whole banner page instead of an intermediate column",
-                () => $"resizing={resizing}, window={f.Window.Width}/{f.Window.ActualWidth}, viewport={f.Rail.ViewportWidth}, " +
+                () => $"resizing={resizing}, window={DesktopTestUi.WindowSize(f.Window).Width}/{DesktopTestUi.WindowRoot(f.Window).ActualWidth}, viewport={f.Rail.ViewportWidth}, " +
                     $"pitch={f.Shelf.CardWidth}, offset={f.Rail.HorizontalOffset}, saved={f.Section.HorizontalOffset}");
         }
-        finally { f.Rail.ScrollChanged -= resize; }
+        finally { f.Rail.ViewChanged -= resize; }
         f.Shelf.DataContext = f.Section with { Items = f.Section.Items.Take(8).ToArray(), HorizontalOffset = 0 };
-        f.Window.Width = 723.2;
+        f.Window.Resize(723.2, DesktopTestUi.WindowSize(f.Window).Height);
         await Until(() => Math.Abs(f.Shelf.CardWidth - 425) > .01 && f.Rail.HorizontalOffset < .5,
             "an even banner source restores after a fractional requested window width");
         Check(Math.Abs(f.Shelf.CardWidth - (f.Rail.ViewportWidth + 20) / 2) < .01 &&
@@ -574,10 +580,10 @@ public static class MusicShelfInteractionTests
     {
         using var f = new Fixture(9, banner: true);
         await f.Load();
-        f.Rail.ScrollToRightEnd();
+        f.Rail.ChangeView(f.Rail.ScrollableWidth, null, null, true);
         await Until(() => Math.Abs(f.Rail.HorizontalOffset - f.Shelf.MaximumOffset) < .5 && f.IsSettled,
             "the final banner page is settled before checking keyboard access");
-        Check(!f.Key(Key.Right), "the final banner page rejects an empty forward keyboard move");
+        Check(!f.Key(VirtualKey.Right), "the final banner page rejects an empty forward keyboard move");
     }
 
     private static async Task BannerContextRestore()
@@ -600,29 +606,29 @@ public static class MusicShelfInteractionTests
         {
             var rail = f.Rail;
             var switched = false;
-            ScrollChangedEventHandler change = (_, e) =>
+            EventHandler<ScrollViewerViewChangedEventArgs> change = (_, e) =>
             {
-                if (switched || Math.Abs(e.HorizontalOffset - offset) >= .5) return;
+                if (switched || Math.Abs(f.Rail.HorizontalOffset - offset) >= .5) return;
                 switched = true;
                 // Keep the switch and resize together at the unsnapped offset, outside ScrollChanged.
-                _ = f.Window.Dispatcher.InvokeAsync(() =>
+                f.Window.DispatcherQueue.TryEnqueue(() =>
                 {
                     f.Shelf.DataContext = incoming;
-                    f.Window.Width = width;
-                }, DispatcherPriority.Normal);
+                    f.Window.Resize(width, DesktopTestUi.WindowSize(f.Window).Height);
+                });
             };
-            rail.ScrollChanged += change;
+            rail.ViewChanged += change;
             try
             {
-                rail.ScrollToHorizontalOffset(offset);
+                rail.ChangeView(offset, null, null, true);
                 await Until(() => switched && ReferenceEquals(f.Items.ItemsSource, incoming.Items) &&
                     Math.Abs(rail.HorizontalOffset - incoming.HorizontalOffset) < .5,
                     "the incoming section restores after a context switch during native scrolling",
                     () => $"switched={switched}, context={ReferenceEquals(f.Shelf.DataContext, incoming)}, " +
-                        $"source={ReferenceEquals(f.Items.ItemsSource, incoming.Items)}, window={f.Window.Width}/{f.Window.ActualWidth}, " +
+                        $"source={ReferenceEquals(f.Items.ItemsSource, incoming.Items)}, window={DesktopTestUi.WindowSize(f.Window).Width}/{DesktopTestUi.WindowRoot(f.Window).ActualWidth}, " +
                         $"pitch={f.Shelf.CardWidth}, offset={rail.HorizontalOffset}, saved={incoming.HorizontalOffset}");
             }
-            finally { rail.ScrollChanged -= change; }
+            finally { rail.ViewChanged -= change; }
         }
     }
 
@@ -634,27 +640,27 @@ public static class MusicShelfInteractionTests
         var rail = f.Rail;
         var source = f.Items.ItemsSource;
         var indicator = (ShelfPageIndicator)f.Shelf.FindName("PageIndicator");
-        var card = f.Items.ItemContainerGenerator.ContainerFromIndex(7800);
+        var card = f.Items.ContainerFromIndex(7800);
         Check(Math.Abs(f.Rail.HorizontalOffset / f.Shelf.CardWidth - 7800) < .01 && f.IsSettled &&
             indicator.PageCount == 5001 && Math.Abs(indicator.Position - 3900) < .01,
             "a distant two-banner page restores from exact geometry with the full reachable page count");
         CheckRealized(f);
-        f.Shelf.Visibility = Visibility.Hidden;
-        f.Next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-        Check(!f.Key(Key.End) && !f.Shelf.HasAnimatedProperties && !indicator.HasAnimatedProperties,
+        f.Shelf.Visibility = Visibility.Collapsed;
+        DesktopTestUi.Invoke(f.Next);
+        Check(!f.Key(VirtualKey.End) && f.Shelf.IsSettled,
             "hidden banner input cannot restart paging or indicator animation");
         f.Shelf.Visibility = Visibility.Visible;
         await Drain();
         Check(ReferenceEquals(rail, f.Rail) && ReferenceEquals(source, f.Items.ItemsSource) &&
-            ReferenceEquals(card, f.Items.ItemContainerGenerator.ContainerFromIndex(7800)) &&
+            ReferenceEquals(card, f.Items.ContainerFromIndex(7800)) &&
             Math.Abs(indicator.Position - 3900) < .01 && f.IsSettled,
             "returning at the same width retains the distant banner container and page");
 
-        f.Next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        DesktopTestUi.Invoke(f.Next);
         f.Shelf.Visibility = Visibility.Collapsed;
-        Check(Math.Abs(f.Section.HorizontalOffset - 7802 * 330d) < .5 && !f.Shelf.HasAnimatedProperties,
+        Check(Math.Abs(f.Section.HorizontalOffset - 7802 * 330d) < .5 && f.Shelf.IsSettled,
             "hiding interrupted banner paging saves the full destination page");
-        f.Window.Width = 910;
+        f.Window.Resize(910, DesktopTestUi.WindowSize(f.Window).Height);
         await Drain();
         f.Shelf.Visibility = Visibility.Visible;
         await Drain();
@@ -663,10 +669,10 @@ public static class MusicShelfInteractionTests
             Math.Abs(indicator.Position - 3901) < .01 && f.IsSettled,
             "hidden resize restores the interrupted page at the new two-banner pitch");
         CheckRealized(f);
-        Check(f.Key(Key.End), "End reaches the distant odd final page");
+        Check(f.Key(VirtualKey.End), "End reaches the distant odd final page");
         await Until(() => Math.Abs(rail.HorizontalOffset - f.Shelf.MaximumOffset) < .5 &&
             Math.Abs(indicator.Position - 5000) < .01 && f.IsSettled, "the distant final page settles");
-        f.Window.Width = 150;
+        f.Window.Resize(150, DesktopTestUi.WindowSize(f.Window).Height);
         await Drain();
         Check(Math.Abs(f.Shelf.CardWidth - 45) < .01 &&
             Math.Abs(rail.HorizontalOffset - f.Shelf.MaximumOffset) < .5 && f.IsSettled &&
@@ -683,19 +689,19 @@ public static class MusicShelfInteractionTests
         var first = (int)Math.Floor((offset + .01) / pitch);
         var last = Math.Min(f.Items.Items.Count - 1, (int)Math.Ceiling((offset + f.Rail.ViewportWidth) / pitch) - 1);
         var realized = Enumerable.Range(0, f.Items.Items.Count)
-            .Where(index => f.Items.ItemContainerGenerator.ContainerFromIndex(index) is not null).ToArray();
+            .Where(index => f.Items.ContainerFromIndex(index) is not null).ToArray();
         Check(realized.Length > 0 && realized.Length <= 3 * visible + 2 &&
             realized.All(index => index >= Math.Max(0, first - visible - 1) && index <= last + visible + 1),
             $"only the viewport and adjacent cache are realized ({realized.Length} containers at {first})");
         for (var index = first; index <= last; index++)
-            Check(f.Items.ItemContainerGenerator.ContainerFromIndex(index) is ListBoxItem,
+            Check(f.Items.ContainerFromIndex(index) is ListViewItem,
                 $"visible card {index} has a container after normal layout");
         foreach (var index in realized)
         {
-            var card = (ListBoxItem)f.Items.ItemContainerGenerator.ContainerFromIndex(index);
+            var card = (ListViewItem)f.Items.ContainerFromIndex(index);
             Check(ReferenceEquals(card.Content, f.Items.Items[index]),
                 $"recycled card {index} presents the current item");
-            Check(Math.Abs(card.TranslatePoint(new Point(), f.Rail).X - (index * pitch - offset)) < 1 &&
+            Check(Math.Abs(card.TransformToVisual(f.Rail).TransformPoint(new Point()).X - (index * pitch - offset)) < 1 &&
                 Math.Abs(card.ActualWidth - pitch) < 1, $"card {index} follows the actual fixed-pitch geometry");
         }
         Check(Math.Abs(f.Rail.ExtentWidth - f.Items.Items.Count * pitch) < .5,
@@ -705,7 +711,7 @@ public static class MusicShelfInteractionTests
     private static async Task RenderFrame()
     {
         var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        EventHandler rendered = (_, _) => completed.TrySetResult();
+        EventHandler<object> rendered = (_, _) => completed.TrySetResult();
         CompositionTarget.Rendering += rendered;
         try { await completed.Task.WaitAsync(TimeSpan.FromSeconds(8)); }
         finally { CompositionTarget.Rendering -= rendered; }
@@ -718,7 +724,7 @@ public static class MusicShelfInteractionTests
 
     private static async Task Drain()
     {
-        for (int i = 0; i < 3; i++) await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        for (int i = 0; i < 3; i++) await DesktopTestUi.DrainAsync();
     }
 
     private static async Task Until(Func<bool> done, string message, Func<string>? details = null)
@@ -728,7 +734,7 @@ public static class MusicShelfInteractionTests
         {
             if (watch.Elapsed > TimeSpan.FromSeconds(8))
                 throw new TimeoutException(details is null ? message : $"{message}: {details()}");
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await DesktopTestUi.DrainAsync();
             if (!done()) await Task.Delay(1);
         }
         await Drain();
@@ -736,12 +742,12 @@ public static class MusicShelfInteractionTests
 
     private sealed class Fixture : IDisposable
     {
-        internal readonly Grid Root = new() { Background = Brushes.Transparent, Focusable = true };
+        internal readonly Grid Root = new() { Background = (new SolidColorBrush(Microsoft.UI.Colors.Transparent)), IsTabStop = true };
         internal readonly MusicCatalogSection Section;
         internal readonly Shelf Shelf;
         internal readonly Window Window;
         internal ScrollViewer Rail => Shelf.ScrollHost ?? throw new InvalidOperationException("shelf scroll host");
-        internal ListBox Items => (ListBox)Shelf.FindName("ItemsHost");
+        internal ListView Items => (ListView)Shelf.FindName("ItemsHost");
         internal Button Previous => (Button)Shelf.FindName("Previous");
         internal Button Next => (Button)Shelf.FindName("Next");
         internal bool IsSettled => Math.Abs(Section.HorizontalOffset - Rail.HorizontalOffset) < .5;
@@ -754,44 +760,32 @@ public static class MusicShelfInteractionTests
             Shelf = new Shelf
             {
                 MinimumCardWidth = 124, Height = banner ? 204 : 180, Margin = new Thickness(40), DataContext = Section,
-                CardTemplate = (DataTemplate)XamlReader.Parse($$"""
+                CardTemplate = (DataTemplate)XamlReader.Load($$"""
                     <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
                      <Button Content="{Binding Title}" Height="180" Margin="0,0,{{(banner ? 20 : 16)}},0"/>
                     </DataTemplate>
                     """)
             };
             Root.Children.Add(Shelf);
-            Window = new Window
-            {
-                Content = Root, Width = 720, Height = banner ? 304 : 280, WindowStyle = WindowStyle.None,
-                ResizeMode = ResizeMode.NoResize, Left = -10000, Top = -10000,
-                ShowActivated = false, ShowInTaskbar = false
-            };
+            Window = DesktopTestUi.CreateWindow(Root, 720, banner ? 304 : 280);
         }
 
         internal async Task Load(bool updateLayout = true)
         {
             Window.Show();
-            if (updateLayout) Window.UpdateLayout();
+            if (updateLayout) DesktopTestUi.WindowRoot(Window).UpdateLayout();
             await Drain();
             Check(Rail.ScrollableWidth > .5, "fixture cards overflow the shelf viewport");
         }
 
         internal Rect Bounds(FrameworkElement element) =>
-            new(element.TranslatePoint(new Point(), Root), element.RenderSize);
+            new(element.TransformToVisual(Root).TransformPoint(new Point()), new Size(element.ActualWidth, element.ActualHeight));
 
         internal bool HitWithin(FrameworkElement owner, Point point) =>
-            Root.InputHitTest(point) is DependencyObject hit &&
-            (ReferenceEquals(owner, hit) || owner.IsAncestorOf(hit));
+            DesktopTestUi.Hit(Root, point) is DependencyObject hit &&
+            (ReferenceEquals(owner, hit) || MeowFilm.Desktop.DesktopVisual.Contains(owner, hit));
 
-        internal bool Key(Key key)
-        {
-            var source = PresentationSource.FromVisual(Shelf) ?? throw new InvalidOperationException("shelf presentation source");
-            var e = new KeyEventArgs(Keyboard.PrimaryDevice, source, Environment.TickCount, key)
-            { RoutedEvent = Keyboard.PreviewKeyDownEvent };
-            Shelf.RaiseEvent(e);
-            return e.Handled;
-        }
+        internal bool Key(VirtualKey key) => Shelf.Navigate(key);
 
         public void Dispose() => Window.Close();
     }

@@ -8,7 +8,7 @@ namespace MeowFilm.Windows.Tests;
 public static class FilmPlayerModelTests
 {
     private static TestCase Test(string name, Func<Task> run) =>
-        new("film-player-model: " + name, () => MusicQualityConsumerTests.Sta(run));
+        new("film-player-model: " + name, () => TestUiHost.InvokeAsync(run));
 
     public static IEnumerable<TestCase> Cases()
     {

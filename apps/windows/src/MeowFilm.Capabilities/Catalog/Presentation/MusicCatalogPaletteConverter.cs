@@ -1,30 +1,19 @@
-using System.Globalization;
-using System.Windows.Data;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using Microsoft.UI;
+using Microsoft.UI.Xaml.Media;
+using Windows.UI;
 
 namespace MeowFilm.Capabilities;
 
-public sealed class MusicCatalogPaletteConverter : IValueConverter, IMultiValueConverter
+internal static class MusicEntryTitlePaletteConverter
 {
-    public object Convert(object value, Type type, object parameter, CultureInfo culture) =>
-        MusicEntryPalette.Sample(value as BitmapSource);
-    public object Convert(object[] values, Type type, object parameter, CultureInfo culture) =>
-        MusicEntryPalette.Sample(values.ElementAtOrDefault(0) as BitmapSource, values.ElementAtOrDefault(1) is true);
-    public object[] ConvertBack(object value, Type[] types, object parameter, CultureInfo culture) => throw new NotSupportedException();
-    public object ConvertBack(object value, Type type, object parameter, CultureInfo culture) => throw new NotSupportedException();
-}
-
-public sealed class MusicEntryTitlePaletteConverter : IMultiValueConverter
-{
-    public object Convert(object[] values, Type type, object parameter, CultureInfo culture)
+    internal static Brush Create(bool hasDecoration, Brush? decorationBrush, Brush? coverBrush)
     {
-        var cover = values.Length > 2 && values[2] is SolidColorBrush brush ? brush.Color : Colors.DimGray;
+        var cover = coverBrush is SolidColorBrush brush ? brush.Color : Colors.DimGray;
         var source = cover;
-        if (values.Length > 1 && values[0] is true && values[1] is SolidColorBrush decoration)
+        if (hasDecoration && decorationBrush is SolidColorBrush decoration)
         {
             double a = decoration.Color.A / 255d;
-            source = Color.FromRgb((byte)(decoration.Color.R * a + cover.R * (1 - a)),
+            source = Color.FromArgb(255, (byte)(decoration.Color.R * a + cover.R * (1 - a)),
                 (byte)(decoration.Color.G * a + cover.G * (1 - a)), (byte)(decoration.Color.B * a + cover.B * (1 - a)));
         }
         var tone = MusicEntryPalette.TitleShade(source);
@@ -32,19 +21,10 @@ public sealed class MusicEntryTitlePaletteConverter : IMultiValueConverter
         var shade = new LinearGradientBrush
         {
             StartPoint = new(0, 0), EndPoint = new(0, 1),
-            GradientStops = [new(Color.FromArgb(strength, tone.R, tone.G, tone.B), 0),
-                new(Color.FromArgb(strength, tone.R, tone.G, tone.B), .45),
-                new(Color.FromArgb(0, tone.R, tone.G, tone.B), 1)]
+            GradientStops = [new GradientStop { Color = Color.FromArgb(strength, tone.R, tone.G, tone.B), Offset = 0 },
+                new GradientStop { Color = Color.FromArgb(strength, tone.R, tone.G, tone.B), Offset = .45 },
+                new GradientStop { Color = Color.FromArgb(0, tone.R, tone.G, tone.B), Offset = 1 }]
         };
-        shade.Freeze(); return shade;
+        return shade;
     }
-    public object[] ConvertBack(object value, Type[] types, object parameter, CultureInfo culture) => throw new NotSupportedException();
-}
-
-public sealed class MusicPlayingSongConverter : System.Windows.Data.IMultiValueConverter
-{
-    public object Convert(object[] values, Type targetType, object parameter, System.Globalization.CultureInfo culture) =>
-        values.Length == 2 && values[0] is string id && id.Length > 0 && values[1] is string current && id == current;
-    public object[] ConvertBack(object value, Type[] targetTypes, object parameter, System.Globalization.CultureInfo culture) =>
-        throw new NotSupportedException();
 }

@@ -397,25 +397,5 @@ public static class MusicQualityConsumerTests
         public Task DiscardHandoffAsync() { prepared = null; return Task.CompletedTask; }
     }
     internal static async Task Sta(Func<Task> body)
-    {
-        var done = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var stopped = QualityFixture.Gate();
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(dispatcher));
-            dispatcher.BeginInvoke(async () =>
-            {
-                Exception? error = null;
-                try { await body(); }
-                catch (Exception e) { error = e; }
-                finally { done.TrySetResult(error); dispatcher.BeginInvokeShutdown(DispatcherPriority.Background); }
-            });
-            try { Dispatcher.Run(); } finally { stopped.TrySetResult(); }
-        }) { IsBackground = true, Name = "quality-consumer" };
-        thread.SetApartmentState(ApartmentState.STA); thread.Start();
-        var failure = await done.Task.WaitAsync(TimeSpan.FromSeconds(60));
-        await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
-    }
+    { await TestUiHost.InvokeAsync(body); }
 }

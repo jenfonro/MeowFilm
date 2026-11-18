@@ -1,5 +1,5 @@
 using System.ComponentModel;
-using System.Windows;
+using Microsoft.UI.Xaml;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.App;
@@ -7,14 +7,14 @@ namespace MeowFilm.App;
 /// <summary>Owns window media attachments and their settings subscription, including partial startup cleanup.</summary>
 internal sealed class AppMediaWindowAttachment : IAsyncDisposable
 {
-    private readonly Window window;
+    private readonly MeowFilm.Desktop.DesktopWindow window;
     private readonly IDesktopMediaControlSettings settings;
     private IAsyncDisposable? systemMedia, shortcuts;
     private Action<bool>? setSystemEnabled;
     private bool stopped;
     private Task? disposing;
 
-    internal AppMediaWindowAttachment(Window window, IDesktopMediaControlSettings settings)
+    internal AppMediaWindowAttachment(MeowFilm.Desktop.DesktopWindow window, IDesktopMediaControlSettings settings)
     {
         window.Dispatcher.VerifyAccess();
         this.window = window; this.settings = settings;
@@ -42,7 +42,7 @@ internal sealed class AppMediaWindowAttachment : IAsyncDisposable
 
     private void UpdateSystemMedia() => setSystemEnabled?.Invoke(settings.IsAvailable && settings.Preferences.SystemMediaEnabled);
 
-    private void Closed(object? sender, EventArgs args) => Stop();
+    private void Closed(object? sender, WindowEventArgs args) => Stop();
 
     private void Stop()
     {

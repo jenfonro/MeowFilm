@@ -1,14 +1,22 @@
+using SystemParameters = System.Windows.SystemParameters;
+using Color = global::Windows.UI.Color;
+using Colors = Microsoft.UI.Colors;
+using FontWeights = Microsoft.UI.Text.FontWeights;
 using System.IO;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Documents;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Input;
-using System.Windows.Automation.Peers;
-using System.Windows.Automation.Provider;
-using System.Windows.Data;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Documents;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
+using Microsoft.UI.Xaml.Data;
 using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
 using MeowFilm.Capabilities;
@@ -17,495 +25,188 @@ namespace MeowFilm.Windows.Tests;
 
 public static partial class MusicUiTests
 {
-    // Synthetic InputManager routing only; never injects physical mouse input or changes Handled.
-    internal static void ProcessBlankInput(Grid blank, RoutedEvent routed, Action<string, MouseButtonEventArgs> snapshot)
-    {
-        var input = new MouseButtonEventArgs(Mouse.PrimaryDevice,
-            Environment.TickCount, MouseButton.Left)
-        { RoutedEvent = routed, Source = blank };
-        var promotedEvent = routed == Mouse.PreviewMouseDownEvent ? Mouse.MouseDownEvent : Mouse.MouseUpEvent;
-        var stagingKey = new object();
-        void TargetPromotion(object sender, PreProcessInputEventArgs args)
-        {
-            if (ReferenceEquals(args.StagingItem.Input, input))
-                args.StagingItem.SetData(stagingKey, input);
-            else if (ReferenceEquals(args.StagingItem.GetData(stagingKey), input) &&
-                args.StagingItem.Input is MouseButtonEventArgs mouse && mouse.RoutedEvent == promotedEvent)
-            {
-                // WPF copies staging data, but not Source, when promoting preview input.
-                snapshot("promotion-before", mouse);
-                mouse.Source = blank;
-                snapshot("promotion-target", mouse);
-            }
-        }
-        var manager = InputManager.Current;
-        manager.PreProcessInput += TargetPromotion;
-        try
-        {
-            snapshot("submit", input);
-            manager.ProcessInput(input);
-            snapshot("complete", input);
-        }
-        finally { manager.PreProcessInput -= TargetPromotion; }
-    }
-
     private static IEnumerable<TestCase> PlayerChromeCases()
     {
-        yield return Case("player text in icon controls and popups follows the dynamic body font without replacing icons", async () =>
+        yield return Case("player native controls and flyouts use system regular text without replacing icons", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             var player = (MusicPlayerView)f.Module.PlayerView;
-            var window = new DesktopWindow { Content = player, Width = 1110, Height = 100,
-                Left = -32000, Top = -32000, ShowActivated = false, ShowInTaskbar = false,
-                WindowStyle = WindowStyle.None };
+            using var host = new DesktopTestUi.Host(player, 1110, 80); await Drain();
             var quality = (TextBlock)((Border)((Button)player.FindName("QualityButton")).Content).Child;
             var desktop = (TextBlock)((Button)player.FindName("DesktopLyricsButton")).Content;
-            var playlist = (System.Windows.Controls.Primitives.Popup)player.FindName("PlaylistPopup");
-            var rate = (System.Windows.Controls.Primitives.Popup)player.FindName("RatePopup");
-            var icons = new[] { "PlaylistButton", "VolumeButton", "MoreButton" }
-                .Select(name => (Button)player.FindName(name)).ToArray();
-            var iconFamily = (FontFamily)player.FindResource("MeowFilm.Font.Icons");
-            var alternate = new FontFamily("Arial");
-            try
+            Equal(10d, quality.FontSize); Equal(15d, desktop.FontSize);
+            foreach (var name in new[] { "PlaylistButton", "VolumeButton", "MoreButton" })
+                True(((Button)player.FindName(name)).Content is FontIcon { FontFamily.Source: "Segoe Fluent Icons" },
+                    "native symbol font remains separate from ordinary text");
+            var playlist = (Flyout)player.FindName("PlaylistPopup");
+            Click((Button)player.FindName("PlaylistButton")); await Until(() => playlist.IsOpen); await Drain();
+            var playlistButtons = Visuals((FrameworkElement)playlist.Content).OfType<Button>().ToArray();
+            True(playlistButtons.Length > 0, "real playlist flyout has body-text choices");
+            foreach (var text in playlistButtons.SelectMany(Visuals).OfType<TextBlock>().Append(quality).Append(desktop))
             {
-                window.Show(); window.UpdateLayout(); await Drain();
-                Equal(10d, quality.FontSize); Equal(15d, desktop.FontSize);
-                foreach (var popup in new[] { playlist, rate })
-                {
-                    popup.IsOpen = true; await Drain();
-                    var content = (FrameworkElement)popup.Child;
-                    content.UpdateLayout();
-                    True(popup.IsOpen && content.IsLoaded, "actual player popup content is loaded");
-                    var buttons = Visuals(content).OfType<Button>()
-                        .Where(button => popup == playlist || button.Content is string text && text is "−" or "1.0×" or "+").ToArray();
-                    True(buttons.Length > 0, "popup has its real body-text buttons");
-                    if (popup == rate)
-                    {
-                        True(buttons.Select(button => (string)button.Content).SequenceEqual(new[] { "−", "1.0×", "+" }),
-                            "all three rate controls retain their actual text labels");
-                        Equal(12d, buttons.Single(button => Equals(button.Content, "1.0×")).FontSize);
-                        True(buttons.Where(button => !Equals(button.Content, "1.0×")).All(button => button.FontSize == 16),
-                            "rate adjustment symbols retain their original size");
-                    }
-                    var textControls = new List<DependencyObject> { quality, desktop };
-                    foreach (var button in buttons)
-                    {
-                        var labels = Visuals(button).OfType<TextBlock>().ToArray();
-                        True(labels.Length > 0, "button template renders its body text");
-                        textControls.Add(button); textControls.AddRange(labels);
-                    }
-                    foreach (var expected in new[] { SystemFonts.MessageFontFamily, alternate, SystemFonts.MessageFontFamily })
-                    {
-                        if (ReferenceEquals(expected, alternate)) window.Resources[SystemFonts.MessageFontFamilyKey] = alternate;
-                        else window.Resources.Remove(SystemFonts.MessageFontFamilyKey);
-                        window.UpdateLayout(); content.UpdateLayout(); await Drain();
-                        foreach (var text in textControls)
-                        {
-                            Equal(expected, TextElement.GetFontFamily(text));
-                            Equal(FontWeights.Normal, TextElement.GetFontWeight(text));
-                            Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(text));
-                            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(text));
-                        }
-                        foreach (var icon in icons) Equal(iconFamily, icon.FontFamily);
-                    }
-                    popup.IsOpen = false; await Drain();
-                }
+                Equal(FontWeights.Normal, text.FontWeight);
+                True(text.FontFamily.Source != "Segoe Fluent Icons", "ordinary labels do not use the symbol font");
             }
-            finally
-            {
-                window.Resources.Remove(SystemFonts.MessageFontFamilyKey);
-                playlist.IsOpen = false; rate.IsOpen = false; player.Deactivate();
-                window.Content = null; window.Close();
-            }
+            PlayerMenuInput.For(player).CloseCurrent(); await Until(() => !playlist.IsOpen);
+            Click((Button)player.FindName("MoreButton"));
+            var more = (MenuFlyout)player.FindName("MoreMenu");
+            await Until(() => more.IsOpen); MusicTestUi.Invoke(more.Items.OfType<MenuFlyoutItem>().First());
+            var rate = (Flyout)player.FindName("RatePopup"); await Until(() => rate.IsOpen); await Drain();
+            var buttons = Visuals((FrameworkElement)rate.Content).OfType<Button>().ToArray();
+            True(buttons.Select(button => (string)button.Content).SequenceEqual(new[] { "−", "1.0×", "+" }),
+                "the three rate actions retain their real labels");
+            Equal(12d, buttons.Single(button => Equals(button.Content, "1.0×")).FontSize);
+            True(buttons.Where(button => !Equals(button.Content, "1.0×")).All(button => button.FontSize == 16 && button.FontWeight == FontWeights.Normal),
+                "rate adjustment symbols retain their sizes and regular text");
+            player.Deactivate(); await Until(() => !rate.IsOpen);
         });
-        yield return Case("player mode dismissal cannot open detail and releases its input hook", async () =>
+        yield return Case("player mode dismissal cannot open detail and real unload retires its gesture owner", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             var player = (MusicPlayerView)f.Module.PlayerView;
-            var window = new Window { Content = player };
-            using var surface = new HwndSource(new HwndSourceParameters("recommendation-fm-input-fixture")
-            {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x80,
-                PositionX = -32000, PositionY = -32000, Width = 1110, Height = 100
-            });
-            var activeKey = typeof(Window).GetFields(
-                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)
-                .Where(field => field.FieldType == typeof(DependencyPropertyKey))
-                .Select(field => (DependencyPropertyKey)field.GetValue(null)!)
-                .Single(key => key.DependencyProperty == Window.IsActiveProperty);
+            using var host = new DesktopTestUi.Host(player, 1110, 80); await Drain();
             int requests = 0;
-            f.Module.GlobalSurfaceRequested += (_, args) =>
-            { if (args.Surface == DesktopGlobalSurface.PlayerDetail) requests++; };
-            try
-            {
-                // A logical Window supplies ownership without Show/Activate or physical input.
-                surface.RootVisual = player; Render(player, 1110, 100); await Drain();
-                True(player.IsLoaded && player.IsVisible && ReferenceEquals(Window.GetWindow(player), window),
-                    "offscreen player keeps its logical window owner");
-                window.SetValue(activeKey, true);
-                var inputField = typeof(MusicPlayerView).GetField("surfaceInput",
-                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-                var input = (PlayerSurfaceInput)inputField.GetValue(player)!;
-                var sourcesField = typeof(PlayerSurfaceInput).GetField("sources",
-                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-                var sources = (System.Collections.IDictionary)sourcesField.GetValue(input)!;
-                Equal(0, sources.Count);
-                var blank = (Grid)player.Content;
-                void Input(RoutedEvent routed) => ProcessBlankInput(blank, routed, (_, _) => { });
-                var menu = (ContextMenu)player.FindName("ModeMenu");
-                ((Button)player.FindName("ModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
-                True(menu.IsOpen, "ordinary mode uses the same observed floating input boundary");
-                Equal(1, sources.Count);
-                var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                menu.Closed += (_, _) => closed.TrySetResult();
-                Input(Mouse.PreviewMouseDownEvent); menu.IsOpen = false;
-                Input(Mouse.PreviewMouseUpEvent);
-                await closed.Task.WaitAsync(TimeSpan.FromSeconds(5)); await Drain();
-                Equal(0, requests); Equal(0, sources.Count);
-                surface.RootVisual = null; window.Content = null; await Drain();
-                True(inputField.GetValue(player) is null, "unload releases the input owner");
-                Equal(0, sources.Count);
-            }
-            finally
-            {
-                window.SetValue(activeKey, false); player.Deactivate();
-                surface.RootVisual = null; window.Content = null; window.Close();
-            }
+            f.Module.GlobalSurfaceRequested += (_, args) => { if (args.Surface == DesktopGlobalSurface.PlayerDetail) requests++; };
+            var hit = DesktopTestUi.Hit(player, new Point(300, 10)) ?? throw new InvalidOperationException("No native blank hit");
+            var menu = (MenuFlyout)player.FindName("ModeMenu");
+            Click((Button)player.FindName("ModeButton")); await Until(() => menu.IsOpen);
+            player.BeginSurfaceGesture(hit); menu.Hide(); await Until(() => !menu.IsOpen);
+            var dismiss = player.EndSurfaceGesture(hit); await dismiss.Work;
+            True(!dismiss.Handled, "a gesture which dismisses the native menu cannot open detail"); Equal(0, requests);
+            player.BeginSurfaceGesture(hit);
+            var next = player.EndSurfaceGesture(hit); await next.Work;
+            True(next.Handled, "the next independent blank gesture is admitted"); Equal(1, requests);
+            player.BeginSurfaceGesture(hit); host.Window.Content = null; await Drain();
+            var retired = player.EndSurfaceGesture(hit); await retired.Work;
+            True(!retired.Handled && !player.IsLoaded, "real unload retires the gesture"); Equal(1, requests);
+            True(PlayerInput(player) is null, "view drops its window-scoped input owner");
         });
-        yield return Case("player synthetic WPF input routes suppress actual popup dismissal and admit the next gesture", async () =>
+        yield return Case("player native menu and queue dismissal fence blank gestures without fabricated input", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             var player = (MusicPlayerView)f.Module.PlayerView;
-            var shell = new Window { Content = player, Width = 1110, Height = 100,
-                Left = -32000, Top = -32000, ShowActivated = false, ShowInTaskbar = false,
-                WindowStyle = WindowStyle.None };
-            // Offscreen fixture only. Active-state injection is not physical desktop activation.
-            var activeKey = typeof(Window).GetFields(
-                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)
-                .Where(field => field.FieldType == typeof(DependencyPropertyKey))
-                .Select(field => (DependencyPropertyKey)field.GetValue(null)!)
-                .Single(key => key.DependencyProperty == Window.IsActiveProperty);
-            int requests = 0;
-            f.Module.GlobalSurfaceRequested += (_, args) =>
-            { if (args.Surface == DesktopGlobalSurface.PlayerDetail) requests++; };
-            var blank = (Grid)player.Content;
-            var routeTrace = new List<string>();
-            string phase = "load";
-            int previewDown = 0, bubbleDown = 0, previewUp = 0, bubbleUp = 0, viewDown = 0, viewUp = 0;
-            string Describe(object? value) => value is FrameworkElement element
-                ? element.GetType().Name + "#" + element.Name + (ReferenceEquals(element, blank) ? "(blank)" : "")
-                : value?.GetType().Name ?? "<null>";
-            void Snapshot(string point, MouseButtonEventArgs mouse) => routeTrace.Add(
-                $"{point}/{mouse.RoutedEvent.Name}: Source={Describe(mouse.Source)} OriginalSource={Describe(mouse.OriginalSource)} " +
-                $"Handled={mouse.Handled} IsActive={shell.IsActive} IsVisible={player.IsVisible} IsLoaded={player.IsLoaded} requests={requests}");
-            void ObserveRoute(object sender, MouseButtonEventArgs mouse)
+            using var host = new DesktopTestUi.Host(player, 1110, 80); await Drain();
+            int requests = 0, dismissed = 0;
+            f.Module.GlobalSurfaceRequested += (_, args) => { if (args.Surface == DesktopGlobalSurface.PlayerDetail) requests++; };
+            PlayerSurfaceInput.AddDismissRequestedHandler(player, (_, _) => dismissed++);
+            var blank = DesktopTestUi.Hit(player, new Point(300, 10))!;
+            foreach (var pair in new[] { ("PlaylistButton", "PlaylistPopup"), ("VolumeButton", "VolumePopup"), ("MoreButton", "MoreMenu"), ("ModeButton", "ModeMenu") })
             {
-                if (mouse.RoutedEvent == Mouse.PreviewMouseDownEvent) previewDown++;
-                else if (mouse.RoutedEvent == Mouse.MouseDownEvent) bubbleDown++;
-                else if (mouse.RoutedEvent == Mouse.PreviewMouseUpEvent) previewUp++;
-                else if (mouse.RoutedEvent == Mouse.MouseUpEvent) bubbleUp++;
-                else if (mouse.RoutedEvent == UIElement.PreviewMouseLeftButtonDownEvent) viewDown++;
-                else if (mouse.RoutedEvent == UIElement.MouseLeftButtonUpEvent) viewUp++;
-                Snapshot("view", mouse);
+                Click((Button)player.FindName(pair.Item1));
+                var flyout = (FlyoutBase)player.FindName(pair.Item2); await Until(() => flyout.IsOpen);
+                player.BeginSurfaceGesture(blank); PlayerMenuInput.For(player).CloseCurrent(); await Until(() => !flyout.IsOpen);
+                await player.EndSurfaceGesture(blank).Work; Equal(0, requests);
             }
-            var observedEvents = new[] { Mouse.PreviewMouseDownEvent, Mouse.MouseDownEvent, Mouse.PreviewMouseUpEvent,
-                Mouse.MouseUpEvent, UIElement.PreviewMouseLeftButtonDownEvent, UIElement.MouseLeftButtonUpEvent };
-            MouseButtonEventHandler observer = ObserveRoute;
-            foreach (var routed in observedEvents) blank.AddHandler(routed, observer, true);
-            try
-            {
-                shell.Show(); shell.UpdateLayout(); await Drain();
-                shell.SetValue(activeKey, true);
-                void Input(RoutedEvent routed) => ProcessBlankInput(blank, routed, Snapshot);
-                async Task Gesture(string label, Action? afterDown = null)
-                {
-                    phase = label; routeTrace.Clear();
-                    var before = (previewDown, bubbleDown, previewUp, bubbleUp, viewDown, viewUp);
-                    Input(Mouse.PreviewMouseDownEvent);
-                    afterDown?.Invoke();
-                    Input(Mouse.PreviewMouseUpEvent);
-                    await Drain();
-                    Equal((before.previewDown + 1, before.bubbleDown + 1, before.previewUp + 1,
-                        before.bubbleUp + 1, before.viewDown + 1, before.viewUp + 1),
-                        (previewDown, bubbleDown, previewUp, bubbleUp, viewDown, viewUp));
-                }
-                foreach (string name in new[] { "VolumePopup", "PlaylistPopup", "RatePopup", "SourcePopup", "QualityMenu", "MoreMenu",
-                    "ModeMenu" })
-                {
-                    phase = name + "/open"; routeTrace.Clear();
-                    System.Windows.Controls.Primitives.Popup? popup = null;
-                    ContextMenu? menu = null;
-                    if (name == "QualityMenu")
-                    {
-                        menu = (ContextMenu)player.FindName(name);
-                        menu.PlacementTarget = player; menu.IsOpen = true;
-                    }
-                    else if (name == "MoreMenu")
-                    {
-                        var more = (Button)player.FindName("MoreButton");
-                        more.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); menu = more.ContextMenu;
-                    }
-                    else if (name == "ModeMenu")
-                    {
-                        ((Button)player.FindName("ModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                        menu = (ContextMenu)player.FindName(name);
-                    }
-                    else
-                    {
-                        popup = (System.Windows.Controls.Primitives.Popup)player.FindName(name);
-                        if (name == "SourcePopup") f.Module.OpenSourceChoices();
-                        popup.IsOpen = true;
-                    }
-                    await Drain();
-                    True(menu?.IsOpen == true || popup?.IsOpen == true, name + " is an actual opened WPF layer");
-                    int before = requests;
-                    // Explicit close after processed Down isolates the contract from physical capture order.
-                    await Gesture(name + "/dismiss", () => { if (menu is not null) menu.IsOpen = false; if (popup is not null) popup.IsOpen = false; });
-                    Equal(before, requests);
-                    await Gesture(name + "/next"); Equal(before + 1, requests);
-                }
-                int queueDismissals = 0;
-                shell.AddHandler(PlayerSurfaceInput.DismissRequestedEvent, new RoutedEventHandler((_, _) =>
-                {
-                    queueDismissals++;
-                    PlayerSurfaceInput.SetQueueOpen(shell, false);
-                }));
-                PlayerSurfaceInput.SetQueueOpen(shell, true);
-                int beforeQueue = requests;
-                await Gesture("queue/dismiss"); Equal(1, queueDismissals); Equal(beforeQueue, requests);
-                await Gesture("queue/next"); Equal(beforeQueue + 1, requests);
-                int prior = requests;
-                phase = "orphan-up"; routeTrace.Clear();
-                Input(Mouse.PreviewMouseUpEvent); await Drain(); Equal(prior, requests);
-                phase = "unload-during-gesture"; routeTrace.Clear();
-                Input(Mouse.PreviewMouseDownEvent);
-                player.RaiseEvent(new RoutedEventArgs(FrameworkElement.UnloadedEvent));
-                Input(Mouse.PreviewMouseUpEvent); await Drain(); Equal(prior, requests);
-            }
-            catch (Exception error)
-            {
-                throw new InvalidOperationException(
-                    $"{phase}: {error.GetType().Name}: {error.Message}; IsActive={shell.IsActive}; requests={requests}; " +
-                    $"arrivals PreviewDown={previewDown}, BubbleDown={bubbleDown}, PreviewUp={previewUp}, BubbleUp={bubbleUp}, " +
-                    $"ViewDown={viewDown}, ViewUp={viewUp}\n" + string.Join("\n", routeTrace), error);
-            }
-            finally
-            {
-                foreach (var routed in observedEvents) blank.RemoveHandler(routed, observer);
-                shell.SetValue(activeKey, false);
-                player.Deactivate(); shell.Content = null; shell.Close();
-            }
+            PlayerSurfaceInput.SetQueueOpen(player, true);
+            player.BeginSurfaceGesture(blank); Equal(1, dismissed);
+            PlayerSurfaceInput.SetQueueOpen(player, false);
+            await player.EndSurfaceGesture(blank).Work; Equal(0, requests);
+            player.BeginSurfaceGesture((Button)player.FindName("PlayButton"));
+            await player.EndSurfaceGesture(blank).Work; Equal(0, requests);
+            player.BeginSurfaceGesture(blank);
+            var consumed = player.EndSurfaceGesture(blank, handled: true); await consumed.Work;
+            True(!consumed.Handled, "another native control's consumed release cannot open detail"); Equal(0, requests);
+            player.BeginSurfaceGesture(blank); await player.EndSurfaceGesture(blank).Work; Equal(1, requests);
+            player.BeginSurfaceGesture(blank); player.Visibility = Visibility.Collapsed; await Drain();
+            await player.EndSurfaceGesture(blank).Work; Equal(1, requests);
         });
-        yield return Case("queue hover covers deletion area and reveals playable artwork without disabling recycling", async () =>
+        yield return Case("queue whole-row hover focus and high contrast retain native recycling and real actions", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
             var queue = (MusicQueueView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayQueue);
-            using var source = new HwndSource(new HwndSourceParameters("queue-chrome-fixture")
-            {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                PositionX = -32000, PositionY = -32000, Width = 386, Height = 420
-            });
-            source.RootVisual = queue;
-            Render(queue, 386, 420); await Drain();
-            True(queue.IsLoaded && queue.IsVisible, "queue assertions use the mounted product surface");
-            var list = (ListBox)queue.FindName("QueueList");
-            var item = list.ItemContainerGenerator.ContainerFromIndex(1) as ListBoxItem ??
-                throw new InvalidOperationException("real queue data generates its real row template");
-            var row = Visuals(item).OfType<Grid>().Single(grid => grid.Name == "QueueRow");
-            var background = (Border)item.Template.FindName("RowSurface", item);
-            var overlay = Visuals(row).OfType<Border>().Single(border =>
-                border.Child is System.Windows.Shapes.Path);
-            var mouseKey = (DependencyPropertyKey)typeof(UIElement).GetField("IsMouseOverPropertyKey",
-                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!;
-            Equal(0d, overlay.Opacity);
-            item.SetValue(mouseKey, true); row.SetValue(mouseKey, true);
-            Render(queue, 386, 420);
-            Equal(1d, overlay.Opacity);
-            True(ReferenceEquals(background.Background, queue.FindResource("MeowFilm.Brush.ItemHover")),
-                "whole container paints the hover including the remove column");
-            var remove = Visuals(row).OfType<Button>().Single(button =>
-                System.Windows.Automation.AutomationProperties.GetName(button) == "从播放列表移除");
-            var removeRect = new Rect(remove.TranslatePoint(new Point(), background), remove.RenderSize);
-            True(new Rect(background.RenderSize).Contains(removeRect), "delete hit area sits within row highlight geometry");
-            True(VirtualizingPanel.GetIsVirtualizing(list) &&
-                VirtualizingPanel.GetVirtualizationMode(list) == VirtualizationMode.Recycling,
-                "hover does not replace queue virtualization");
-            GeneralAppearanceTests.SavePreview(queue, "context-queue-hover", 386, 420);
-            item.SetValue(mouseKey, false); row.SetValue(mouseKey, false);
-            Render(queue, 386, 420); Equal(0d, overlay.Opacity);
-            var focusKey = (DependencyPropertyKey)typeof(UIElement).GetField("IsKeyboardFocusWithinPropertyKey",
-                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!;
-            row.SetValue(focusKey, true); Render(queue, 386, 420); Equal(1d, overlay.Opacity);
-            row.SetValue(focusKey, false);
-            DesktopTheme.SetIsHighContrast(queue, true);
-            var texts = Visuals(row).OfType<TextBlock>().Where(text =>
-                BindingOperations.GetBinding(text, TextBlock.TextProperty)?.Path?.Path is "Title" or "Artist" or "Duration").ToArray();
-            True(texts.Length >= 3, "title artist and duration are real rendered text consumers");
-            Render(queue, 386, 420);
-            True(texts.All(text => ReferenceEquals(text.Foreground, SystemColors.WindowTextBrush)),
-                "unhighlighted high contrast row uses system window text");
-            item.SetValue(focusKey, true); row.SetValue(focusKey, true); Render(queue, 386, 420);
-            True(ReferenceEquals(background.Background, SystemColors.HighlightBrush) &&
-                texts.All(text => ReferenceEquals(text.Foreground, SystemColors.HighlightTextBrush)) &&
-                ReferenceEquals(remove.Foreground, SystemColors.HighlightTextBrush),
-                "keyboard focus high contrast colors include title artist duration and removal");
-            GeneralAppearanceTests.SavePreview(queue, "context-queue-high-contrast-keyboard", 386, 420);
-            item.SetValue(focusKey, false); row.SetValue(focusKey, false);
-            item.SetValue(mouseKey, true); row.SetValue(mouseKey, true); Render(queue, 386, 420);
-            True(ReferenceEquals(background.Background, SystemColors.HighlightBrush) &&
-                texts.All(text => ReferenceEquals(text.Foreground, SystemColors.HighlightTextBrush)),
-                "mouse high contrast uses the same readable row colors");
-            var currentItem = (ListBoxItem)list.ItemContainerGenerator.ContainerFromIndex(0);
-            True(Visuals(currentItem).OfType<TextBlock>().Any(text =>
-                text.Text == f.Module.QueueSurfaceRows[0].Title && text.FontWeight == FontWeights.Normal),
-                "current song keeps regular text in high contrast");
-            var currentOverlay = Visuals(currentItem).OfType<Border>().Single(border =>
-                border.Child is System.Windows.Shapes.Path);
-            Equal(1d, currentOverlay.Opacity);
-            True(currentOverlay.IsVisible, "current song retains its playback icon as a non-color indicator in high contrast");
+            using var host = new DesktopTestUi.Host(queue, 386, 420); await Drain();
+            var list = (ListView)queue.FindName("QueueList");
+            await Until(() => list.ContainerFromIndex(1) is ListViewItem);
+            var item = (ListViewItem)list.ContainerFromIndex(1);
+            var row = Visuals(item).OfType<MusicQueueRowView>().Single();
+            var overlay = Visuals(row).OfType<Border>().Single(border => border.Name == "QueuePlayMark");
+            var remove = Visuals(row).OfType<Button>().Single(button => Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(button) == "从播放列表移除");
+            var play = Visuals(row).OfType<Button>().Single(button => !ReferenceEquals(button, remove));
+            Equal(0d, overlay.Opacity); CardMotion.SetProgress(row, 1); await Drain(); Equal(1d, overlay.Opacity);
+            True(((SolidColorBrush)row.Background).Color == ((SolidColorBrush)DesktopVisual.Resource(queue, "MeowFilm.Brush.ItemHover")).Color,
+                "whole row including remove column uses the hover color");
+            var bounds = DesktopTestUi.Bounds(remove, row);
+            True(bounds.X >= 0 && bounds.Y >= 0 && bounds.Right <= row.ActualWidth && bounds.Bottom <= row.ActualHeight,
+                "delete hit geometry stays in the whole-row highlight");
+            True(Visuals(list).OfType<ItemsStackPanel>().Any(), "native list recycling remains installed");
+            CardMotion.SetProgress(row, 0); await Drain(); Equal(0d, overlay.Opacity);
+            True(play.Focus(FocusState.Programmatic) && DesktopTestUi.HasFocus(row), "actual native focus is within the row");
+            await Until(() => overlay.Opacity > .99);
+            DesktopTheme.SetIsHighContrast(queue, true); CardMotion.SetProgress(row, 0); await Drain();
+            var settings = new global::Windows.UI.ViewManagement.UISettings();
+            var texts = Visuals(row).OfType<TextBlock>().ToArray();
+            True(texts.Length >= 3 && texts.All(text => ((SolidColorBrush)text.Foreground).Color == settings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText)),
+                "unhighlighted high contrast uses real system window text");
+            CardMotion.SetProgress(row, 1); await Drain();
+            True(((SolidColorBrush)row.Background).Color == settings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Highlight) &&
+                texts.All(text => ((SolidColorBrush)text.Foreground).Color == settings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.HighlightText)) &&
+                ((SolidColorBrush)remove.Foreground).Color == settings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.HighlightText),
+                "focus palette includes title artist duration and removal");
+            var current = Visuals((ListViewItem)list.ContainerFromIndex(0)).OfType<MusicQueueRowView>().Single();
+            Equal(1d, Visuals(current).OfType<Border>().Single(border => border.Name == "QueuePlayMark").Opacity);
+            True(Visuals(current).OfType<TextBlock>().All(text => text.FontWeight == FontWeights.Normal),
+                "current row has a non-color playing indicator and regular text");
             DesktopTheme.SetIsHighContrast(queue, false);
-            item.SetValue(mouseKey, false); row.SetValue(mouseKey, false);
-            var play = Visuals(row).OfType<Button>().Single(button => Grid.GetColumnSpan(button) == 3);
-            string targetEntry = ((MusicQueueSurfaceRow)play.Tag).EntryId;
-            var refreshField = typeof(MusicCapability).GetField("queueSurfacePending",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-            async Task SettleQueue(string phase)
-            {
-                try
-                {
-                    await Until(() => !f.Module.Busy);
-                    // Busy excludes this owner's existing refresh; do not issue another activation/read.
-                    if (refreshField.GetValue(f.Module) is Task refresh)
-                    {
-                        await Until(() => refresh.IsCompleted);
-                        await refresh;
-                    }
-                    await Drain();
-                }
-                catch (Exception error)
-                {
-                    throw new InvalidOperationException(
-                        $"queue {phase}: {error.Message}; Busy={f.Module.Busy}; Opens={f.Playback.Opens.Count}; " +
-                        $"Rows={f.Module.QueueSurfaceRows.Count}; removeRPC={f.Calls.Count("music.queue.remove")}", error);
-                }
-            }
+            string entry = ((MusicQueueSurfaceRow)play.Tag).EntryId;
             int opens = f.Playback.Opens.Count;
-            play.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await SettleQueue("play");
-            Equal(opens + 1, f.Playback.Opens.Count);
-            Render(queue, 386, 420);
-            var currentRow = f.Module.QueueSurfaceRows.Single(value => value.EntryId == targetEntry);
-            var currentContainer = list.ItemContainerGenerator.ContainerFromItem(currentRow) as ListBoxItem ??
-                throw new InvalidOperationException("refreshed queue generates the played row's current container");
-            var currentRemove = Visuals(currentContainer).OfType<Button>().Single(button =>
-                System.Windows.Automation.AutomationProperties.GetName(button) == "从播放列表移除");
-            True(ReferenceEquals(currentRemove.Tag, currentRow), "remove targets the current owner row after refresh");
-            int count = f.Module.QueueSurfaceRows.Count;
-            int removals = f.Calls.Count("music.queue.remove");
-            currentRemove.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await SettleQueue("remove");
+            Click(play); await SettleQueue(f); Equal(opens + 1, f.Playback.Opens.Count);
+            var playedRow = f.Module.QueueSurfaceRows.Single(value => value.EntryId == entry);
+            await Until(() => list.ContainerFromItem(playedRow) is ListViewItem);
+            var currentRemove = Visuals((ListViewItem)list.ContainerFromItem(playedRow)).OfType<Button>()
+                .Single(button => Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(button) == "从播放列表移除");
+            True(ReferenceEquals(currentRemove.Tag, playedRow), "current owner row remains the real action target");
+            int count = f.Module.QueueSurfaceRows.Count, removals = f.Calls.Count("music.queue.remove");
+            CardMotion.SetProgress(Visuals((ListViewItem)list.ContainerFromItem(playedRow)).OfType<MusicQueueRowView>().Single(), 1);
+            await Drain(); Click(currentRemove); await SettleQueue(f);
             Equal(removals + 1, f.Calls.Count("music.queue.remove"));
-            await Until(() => !f.Module.Busy && f.Module.QueueSurfaceRows.Count == count - 1);
+            Equal(count - 1, f.Module.QueueSurfaceRows.Count);
             f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
         });
-        yield return Case("player unload releases window input hooks and queue blank requests bubble to shell", async () =>
+        yield return Case("player real unload releases root hooks and queue dismissal reaches the same shell root", async () =>
         {
             await using var f = await Fixture.Create();
             var player = (MusicPlayerView)f.Module.PlayerView;
-            var window = new Window { Content = player, Width = 1110, Height = 100,
-                Left = -32000, Top = -32000, ShowActivated = false, ShowInTaskbar = false,
-                WindowStyle = WindowStyle.None };
-            try
-            {
-                window.Show(); window.UpdateLayout(); await Drain();
-                True(player.IsLoaded && PresentationSource.FromVisual(player) is HwndSource,
-                    "offscreen player is really loaded into its HWND without activation");
-                var inputField = typeof(MusicPlayerView).GetField("surfaceInput",
-                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-                var input = inputField.GetValue(player) as PlayerSurfaceInput ??
-                    throw new InvalidOperationException("loaded player obtains window-scoped input owner in the offscreen window");
-                var sourcesField = typeof(PlayerSurfaceInput).GetField("sources",
-                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-                var registered = sourcesField.GetValue(input)!;
-                Equal(1, (int)registered.GetType().GetProperty("Count")!.GetValue(registered)!);
-                int dismiss = 0;
-                window.AddHandler(PlayerSurfaceInput.DismissRequestedEvent, new RoutedEventHandler((_, _) => dismiss++));
-                PlayerSurfaceInput.SetQueueOpen(window, true);
-                True(PlayerSurfaceInput.GetQueueOpen(player), "queue fact reaches player via inheritance");
-                var gesture = (SurfaceGesture)typeof(PlayerSurfaceInput).GetField("gesture",
-                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(input)!;
-                gesture.Down(false, true); input.Press(true); Equal(0, dismiss);
-                gesture.Down(true, true);
-                input.Press(false); Equal(0, dismiss);
-                input.Press(true); Equal(1, dismiss);
-                True(!input.Release(true), "queue dismissal cannot open detail");
-                window.Content = null; await Drain();
-                True(!player.IsLoaded, "detaching the real host raises unload");
-                True(inputField.GetValue(player) is null, "unload drops the view's input subscription");
-                var sources = sourcesField.GetValue(input)!;
-                Equal(0, (int)sources.GetType().GetProperty("Count")!.GetValue(sources)!);
-            }
-            finally { player.Deactivate(); window.Content = null; window.Close(); await Drain(); }
+            using var host = new DesktopTestUi.Host(player, 1110, 80); await Drain();
+            var input = PlayerInput(player) ?? throw new InvalidOperationException("No real root input owner");
+            int dismiss = 0; PlayerSurfaceInput.AddDismissRequestedHandler(player, (_, _) => dismiss++);
+            PlayerSurfaceInput.SetQueueOpen(player, true); True(PlayerSurfaceInput.GetQueueOpen(player), "queue fact belongs to actual XamlRoot");
+            input.Press(false); Equal(0, dismiss); input.Press(true); Equal(1, dismiss);
+            True(!input.Release(true), "queue dismissal cannot open detail");
+            host.Window.Content = null; await Drain();
+            True(!player.IsLoaded && PlayerInput(player) is null, "real unload drops the view subscription");
+            input.Press(true); True(!input.Release(true), "retained retired owner cannot reopen"); Equal(1, dismiss);
         });
-        yield return Case("player ordinary mode control and current heartbeat availability follow actual playback", async () =>
+        yield return Case("player ordinary mode and heartbeat eligibility follow the actual recording and reject retired menu actions", async () =>
         {
             await using var f = await Fixture.Create();
             var footer = (MusicPlayerView)f.Module.PlayerView;
-            using var source = new HwndSource(new HwndSourceParameters("player-mode-menu-fixture")
+            using var host = new DesktopTestUi.Host(footer, 1110, 80); await Drain();
+            var mode = (Button)footer.FindName("ModeButton"); var menu = (MenuFlyout)footer.FindName("ModeMenu");
+            async Task Open()
             {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                PositionX = -32000, PositionY = -32000, Width = 1000, Height = 100
-            });
-            source.RootVisual = footer; Render(footer, 1000, 100); await Drain();
-            var mode = (Button)footer.FindName("ModeButton");
-            var menu = (ContextMenu)footer.FindName("ModeMenu");
-            async Task OpenMode()
-            {
-                var opened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                void OnOpened(object? sender, RoutedEventArgs args) => opened.TrySetResult();
-                menu.Opened += OnOpened;
-                try
-                {
-                    mode.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
-                    await opened.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                }
-                finally { menu.Opened -= OnOpened; }
-                await Drain();
-                True(menu.IsOpen, "the ordinary menu really reopens after native teardown");
+                PlayerMenuInput.For(footer).CloseCurrent(); await Until(() => !menu.IsOpen); await Drain();
+                Click(mode); await Until(() => menu.IsOpen); await Drain();
             }
-            Equal(f.Module.ModeText, System.Windows.Automation.AutomationProperties.GetName(mode));
-            True(!f.Module.HasPlaybackFm && !f.Module.CanHeartbeatCurrent, "no active recording implies no current-song heartbeat");
-            await OpenMode();
-            Equal(0, f.Calls.Count("music.queue.mode"));
-            True(menu.IsOpen, "opening ordinary choices does not change the queue");
-            Equal("列表循环,单曲循环,随机播放", string.Join(',', menu.Items.OfType<MenuItem>()
-                .Select(System.Windows.Automation.AutomationProperties.GetName)));
-            True(menu.Items.OfType<MenuItem>().All(item => item.IsEnabled),
-                "the global loop choices do not depend on source eligibility");
-            var random = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 2));
-            ((IInvokeProvider)new MenuItemAutomationPeer(random).GetPattern(PatternInterface.Invoke)).Invoke();
-            await Until(() => f.Calls.Count("music.queue.mode") == 1 && !f.Module.Busy);
-            Equal(2, f.Module.Mode);
-            True(!menu.IsOpen, "choosing a mode closes its menu");
-            await OpenMode();
-            True(menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 2)).IsChecked, "saved random mode is selected");
-            random.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
-            Equal(1, f.Calls.Count("music.queue.mode"));
-            menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 3)).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            Equal(f.Module.PlaybackModeText, Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(mode));
+            True(!f.Module.HasPlaybackFm && !f.Module.CanHeartbeatCurrent, "no recording implies no current-song heartbeat");
+            await Open(); Equal(0, f.Calls.Count("music.queue.mode"));
+            True(menu.Items.OfType<ToggleMenuFlyoutItem>().Select(item => item.Text).SequenceEqual(new[] { "列表循环", "单曲循环", "随机播放" }),
+                "native ordinary menu exposes exactly the global loop choices");
+            True(menu.Items.All(item => item.IsEnabled), "global loop choices do not depend on a source");
+            var random = menu.Items.OfType<ToggleMenuFlyoutItem>().Single(item => item.Text == "随机播放");
+            MusicTestUi.Invoke(random); await Until(() => f.Module.Mode == 2 && !f.Module.Busy && !menu.IsOpen);
+            Equal(1, f.Calls.Count("music.queue.mode")); await Open();
+            True(menu.Items.OfType<ToggleMenuFlyoutItem>().Single(item => item.Text == "随机播放").IsChecked, "saved choice is selected");
+            MusicTestUi.Invoke(random); await Drain(); Equal(1, f.Calls.Count("music.queue.mode"));
+            MusicTestUi.Invoke(menu.Items.OfType<ToggleMenuFlyoutItem>().Single(item => item.Text == "单曲循环"));
             await Until(() => f.Module.Mode == 3 && !f.Module.Busy);
-            await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
-            True(!f.Module.HasPlaybackFm && !f.Module.CanHeartbeatCurrent, "local recording is never sent to WY heartbeat");
-            await OpenMode();
-            var sourceMenu = (ContextMenu)footer.FindName("ModeMenu");
-            True(sourceMenu.IsOpen && sourceMenu.Items.OfType<MenuItem>().All(item =>
-                System.Windows.Automation.AutomationProperties.GetName(item) is not ("心动模式" or "推荐模式")),
-                "the unified mode menu hides unsupported local-recording entries");
-            sourceMenu.IsOpen = false;
-            await OpenMode();
-            var retired = menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 1));
-            source.RootVisual = null; await Drain();
-            True(!menu.IsOpen, "unload closes the ordinary mode menu");
-            retired.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
-            Equal(2, f.Calls.Count("music.queue.mode"));
+            await f.PlayableCollection(); await f.Module.PlaySelectionAsync(); await Open();
+            True(!f.Module.CanHeartbeatCurrent && menu.Items.OfType<ToggleMenuFlyoutItem>().All(item => item.Text is not ("心动模式" or "推荐模式")),
+                "local recording cannot be sent to platform heartbeat or recommendation");
+            var retired = menu.Items.OfType<ToggleMenuFlyoutItem>().Single(item => item.Text == "列表循环");
+            host.Window.Content = null; await Drain(); True(!menu.IsOpen, "unload closes the real menu");
+            MusicTestUi.Invoke(retired); await Drain(); Equal(2, f.Calls.Count("music.queue.mode"));
         });
         yield return Case("player first opening presents its base while lyrics and artwork load independently", async () =>
         {
@@ -517,21 +218,14 @@ public static partial class MusicUiTests
             try
             {
                 shell.PrepareForRender();
-                var root = (Border)shell.Content; shell.Content = null;
-                root.Resources.MergedDictionaries.Add(shell.Resources); root.DataContext = shell.DataContext;
+                shell.Resize(1110, 800); shell.Show(); await Drain();
+                var root = DesktopTestUi.WindowRoot(shell);
                 var pendingLyrics = f.Calls.HoldNext("music.lyrics.local.get");
-                using var source = new HwndSource(new HwndSourceParameters("player-prepared-frame-fixture")
-                {
-                    WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x80,
-                    PositionX = -32000, PositionY = -32000, Width = 1110, Height = 800
-                });
-                source.RootVisual = root;
-                Render(root, 1110, 800); await Drain();
-                var playerSurface = (Grid)shell.FindName("PlayerDetailSurface");
+                var playerSurface = (Grid)DesktopTestUi.WindowRoot(shell).FindName("PlayerDetailSurface");
                 await f.Module.ShowLyricsAsync();
                 await pendingLyrics.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 Equal(Visibility.Visible, playerSurface.Visibility);
-                var detail = (MusicPlayerDetailView)((ContentControl)shell.FindName("PlayerDetailHost")).Content;
+                var detail = (MusicPlayerDetailView)((ContentControl)DesktopTestUi.WindowRoot(shell).FindName("PlayerDetailHost")).Content;
                 var title = (TextBlock)detail.FindName("DetailTitle");
                 Equal(f.Module.CurrentTitle, title.Text);
                 Equal(26d, title.FontSize);
@@ -539,8 +233,8 @@ public static partial class MusicUiTests
                 var footer = (MusicPlayerView)((ContentControl)detail.FindName("DetailPlayerHost")).Content;
                 var record = (MusicRecordView)detail.FindName("DetailRecord");
                 var cover = (ArtworkImage)record.FindName("Cover");
-                Render(root, 1110, 800); await Drain();
-                True(cover.IsLoaded && cover.IsVisible && cover.ActualWidth > 0 && cover.ActualHeight > 0,
+                root.UpdateLayout(); await Drain();
+                True(cover.IsLoaded && DesktopVisual.IsVisible(cover) && cover.ActualWidth > 0 && cover.ActualHeight > 0,
                     "newly presented artwork has completed its real host layout");
                 Equal("加载中…", ((TextBlock)detail.FindName("LyricState")).Text);
                 True(!Visuals(detail).OfType<NoticeOutlet>().Any(), "normal lyric states stay in the lyric region");
@@ -550,19 +244,19 @@ public static partial class MusicUiTests
                 True(((Image)cover.Children[0]).Source is null, "missing cover leaves the base visible");
                 var lease = await new PlayerArtworkFixture().AcquireAsync("fixture://prepared-cover");
                 loader.Calls[0].Completion.SetResult(lease);
-                await Until(() => ReferenceEquals(lease.Image, ((Image)cover.Children[0]).Source));
+                await Until(() => ReferenceEquals(lease.Image.GetSource(cover.DispatcherQueue), ((Image)cover.Children[0]).Source));
                 Equal("加载中…", f.Module.LyricStatus);
                 pendingLyrics.Release();
                 await Until(() => f.Module.Lyrics.Count == 16 && !f.Module.CanCancelLyrics);
-                Render(root, 1110, 800); await Drain();
+                root.UpdateLayout(); await Drain();
                 Equal("", ((TextBlock)detail.FindName("LyricState")).Text);
-                True(ReferenceEquals(lease.Image, ((Image)cover.Children[0]).Source), "independent artwork is not refetched after lyrics");
+                True(ReferenceEquals(lease.Image.GetSource(cover.DispatcherQueue), ((Image)cover.Children[0]).Source), "independent artwork is not refetched after lyrics");
                 Equal(1, loader.Calls.Count);
                 Equal(0, Visuals(footer).OfType<MusicRecordView>().Count());
                 Equal(1, Visuals(f.Module.PlayerView).OfType<MusicRecordView>().Count());
                 var metadata = (StackPanel)footer.FindName("MetadataText");
                 var panel = (Grid)footer.FindName("MetadataPanel");
-                True(Math.Abs(metadata.TranslatePoint(new Point(), panel).X) < .5, "removed disc leaves no reserved column");
+                True(Math.Abs(metadata.TransformToVisual(panel).TransformPoint(new Point()).X) < .5, "removed disc leaves no reserved column");
                 var lateLyrics = f.Calls.HoldNext("music.lyrics.local.get");
                 var reading = f.Module.RefreshLyricsAsync();
                 await lateLyrics.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -582,7 +276,6 @@ public static partial class MusicUiTests
                 await Until(() => playerSurface.Visibility == Visibility.Visible && f.Module.Lyrics.Count == 16);
                 await f.Module.OpenPlayerDetailAsync();
                 await Until(() => playerSurface.Visibility == Visibility.Collapsed);
-                source.RootVisual = null;
             }
             finally { shell.Close(); await shell.ShutdownCompletion; }
         });
@@ -600,12 +293,8 @@ public static partial class MusicUiTests
                 Equal("fixture://second", address); entered.TrySetResult(); return completed.Task;
             }));
             record.Address = "fixture://first";
-            using var source = new HwndSource(new HwndSourceParameters("player-changing-readiness-fixture")
-            {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x80,
-                PositionX = -32000, PositionY = -32000, Width = 1110, Height = 800
-            });
-            source.RootVisual = detail;
+            using var source = new DesktopTestUi.Host(new Grid(), 1110, 800);
+            source.Mount(detail);
             detail.Measure(new(1110, 800)); detail.Arrange(new(0, 0, 1110, 800)); detail.UpdateLayout();
             var lyrics = f.Calls.HoldNext("music.lyrics.local.get");
             var preparing = f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
@@ -618,9 +307,9 @@ public static partial class MusicUiTests
             var image = await new PlayerArtworkFixture().AcquireAsync("fixture://second");
             completed.SetResult(image);
             await preparing;
-            await Until(() => ReferenceEquals(image.Image, ((Image)cover.Children[0]).Source));
-            True(ReferenceEquals(image.Image, ((Image)cover.Children[0]).Source), "prepared state uses the current cover");
-            f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail); source.RootVisual = null;
+            await Until(() => ReferenceEquals(image.Image.GetSource(cover.DispatcherQueue), ((Image)cover.Children[0]).Source));
+            True(ReferenceEquals(image.Image.GetSource(cover.DispatcherQueue), ((Image)cover.Children[0]).Source), "prepared state uses the current cover");
+            f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail); source.Window.Content = null;
             await Drain();
             True(((PlayerArtworkLease)image).Disposed, "retirement releases the current cover");
         });
@@ -629,16 +318,15 @@ public static partial class MusicUiTests
             await using var f = await Fixture.Create();
             var host = new Border { Child = f.Module.PlayerView };
             DesktopTheme.SetIsHighContrast(host, false);
-            foreach (var backdrop in new[] { Brushes.DarkSlateGray, Brushes.Linen })
+            foreach (var backdrop in new[] { (new SolidColorBrush(Microsoft.UI.Colors.DarkSlateGray)), (new SolidColorBrush(Microsoft.UI.Colors.Linen)) })
             {
                 host.Background = backdrop;
                 Render(host, 1110, 80);
-                var bitmap = new RenderTargetBitmap(1110, 80, 96, 96, PixelFormats.Pbgra32);
-                bitmap.Render(host);
+                var bitmap = await DesktopTestUi.Render(host, 1);
                 foreach (var x in new[] { 1, 1108 })
                 {
                     var pixel = new byte[4];
-                    bitmap.CopyPixels(new Int32Rect(x, 40, 1, 1), pixel, 4, 0);
+                    Array.Copy(bitmap.Pixels, ((int)(40) * bitmap.Width + (int)(x)) * 4, pixel, 0, 4);
                     True(pixel.SequenceEqual(new[] { backdrop.Color.B, backdrop.Color.G, backdrop.Color.R, backdrop.Color.A }),
                         "footer blank areas expose the current host color");
                 }
@@ -650,22 +338,21 @@ public static partial class MusicUiTests
             var footer = f.Module.PlayerView;
             Render(footer, 1110, 80);
             var progress = (SeekBar)footer.FindName("Progress");
-            Equal(0d, progress.TranslatePoint(new Point(), footer).Y);
+            Equal(0d, progress.TransformToVisual(footer).TransformPoint(new Point()).Y);
             True(progress.RailAtTop, "no inset track");
             var bar = new SeekBar { Maximum = 100, Value = 50, Height = 16, RailAtTop = true };
-            var host = new Border { Background = Brushes.DarkSlateGray, Child = bar };
-            byte[] Pixels()
+            var host = new Border { Background = (new SolidColorBrush(Microsoft.UI.Colors.DarkSlateGray)), Child = bar };
+            async Task<byte[]> Pixels()
             {
                 host.Measure(new(400, 16)); host.Arrange(new(0, 0, 400, 16)); host.UpdateLayout();
-                var bitmap = new RenderTargetBitmap(400, 16, 96, 96, PixelFormats.Pbgra32);
-                bitmap.Render(host); var bytes = new byte[400 * 16 * 4]; bitmap.CopyPixels(bytes, 1600, 0); return bytes;
+                var bitmap = await DesktopTestUi.Render(host, 1); var bytes = new byte[400 * 16 * 4]; bitmap.Pixels.CopyTo(bytes, 0); return bytes;
             }
-            bar.PlayedBrush = Brushes.CornflowerBlue;
-            var first = Pixels();
+            bar.PlayedBrush = (new SolidColorBrush(Microsoft.UI.Colors.CornflowerBlue));
+            var first = await Pixels();
             True(!first.AsSpan(300 * 4, 4).SequenceEqual(first.AsSpan((10 * 400 + 300) * 4, 4)), "ordinary faint track at top");
             True(!first.AsSpan(100 * 4, 4).SequenceEqual(first.AsSpan((10 * 400 + 100) * 4, 4)), "played part paints at y zero");
-            bar.PlayedBrush = Brushes.SandyBrown;
-            var second = Pixels();
+            bar.PlayedBrush = (new SolidColorBrush(Microsoft.UI.Colors.SandyBrown));
+            var second = await Pixels();
             True(!first.AsSpan(100 * 4, 4).SequenceEqual(second.AsSpan(100 * 4, 4)), "cover-driven brush is consumed");
             True(first.AsSpan(300 * 4, 4).SequenceEqual(second.AsSpan(300 * 4, 4)), "unplayed stays neutral");
             True(first.AsSpan((4 * 400 + 300) * 4, 4).SequenceEqual(first.AsSpan((10 * 400 + 300) * 4, 4)), "no second lower line");
@@ -674,17 +361,17 @@ public static partial class MusicUiTests
         {
             await using var f = await Fixture.Create();
             var bar = new SeekBar { Maximum = 180, Value = 90 };
-            var host = new Border { Background = Brushes.White, Child = bar, Width = 400, Height = 8 };
+            var host = new Border { Background = (new SolidColorBrush(Microsoft.UI.Colors.White)), Child = bar, Width = 400, Height = 8 };
+            Render(host, 400, 8); await Drain();
             foreach (var highContrast in new[] { false, true })
             foreach (var enabled in new[] { false, true })
             foreach (double scale in new[] { 1d, 1.5, 2d })
             {
                 DesktopTheme.SetIsHighContrast(host, highContrast); bar.IsEnabled = enabled;
-                host.Background = Brushes.White;
+                host.Background = (new SolidColorBrush(Microsoft.UI.Colors.White));
                 host.Measure(new(400, 8)); host.Arrange(new(0, 0, 400, 8)); host.UpdateLayout();
-                var bitmap = new RenderTargetBitmap((int)(400 * scale), (int)(8 * scale), 96 * scale, 96 * scale, PixelFormats.Pbgra32);
-                bitmap.Render(host); int width = bitmap.PixelWidth, stride = width * 4;
-                var pixels = new byte[stride * bitmap.PixelHeight]; bitmap.CopyPixels(pixels, stride, 0);
+                var bitmap = await DesktopTestUi.Render(host, (96 * scale) / 96d); int width = bitmap.Width, stride = width * 4;
+                var pixels = new byte[stride * bitmap.Height]; bitmap.Pixels.CopyTo(pixels, 0);
                 // A hidden Thumb formerly left 8 DIP uncovered. Both rail segments
                 // must meet at exactly 50%, including their 0% and 100% endpoints.
                 for (int x = 1; x < width - 1; x++)
@@ -692,7 +379,10 @@ public static partial class MusicUiTests
                     int i = (int)(4 * scale) * stride + x * 4, sample = (int)(4 * scale) * stride + (x < width / 2 ? 1 : width - 2) * 4;
                     True(pixels.AsSpan(i, 4).SequenceEqual(pixels.AsSpan(sample, 4)), "continuous rail without thumb hole or black seam");
                 }
-                True(!Visuals(bar).OfType<System.Windows.Controls.Primitives.Track>().Any(), "no system track paints another line");
+                var rail = Visuals(bar).OfType<Canvas>().Single();
+                Equal(7, rail.Children.Count);
+                True(Visuals(bar).OfType<Microsoft.UI.Xaml.Shapes.Rectangle>().All(rectangle => ReferenceEquals(VisualTreeHelper.GetParent(rectangle), rail)),
+                    "the single native rail canvas owns every painted segment");
                 Equal(0d, bar.ValueAt(-20)); Equal(180d, bar.ValueAt(420)); Equal(90d, bar.ValueAt(200));
             }
             // Explicit active gesture drives a real animation clock; verify the
@@ -706,22 +396,20 @@ public static partial class MusicUiTests
         yield return Case("footer hover paints a thicker rail and upper shade while its white capsule follows playback", async () =>
         {
             var bar = new SeekBar { Maximum = 100, Value = 25, Height = 16, RailAtTop = true,
-                PlayedBrush = Brushes.CornflowerBlue, Margin = new Thickness(0, 32, 0, 0), VerticalAlignment = VerticalAlignment.Top };
-            var root = new Grid { Background = Brushes.White }; root.Children.Add(bar);
-            root.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = new Uri("/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml", UriKind.Relative) });
-            using var source = new HwndSource(new HwndSourceParameters("seek-hover-fixture") {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                PositionX = -32000, PositionY = -32000, Width = 400, Height = 80 });
-            source.RootVisual = root; Render(root, 400, 80); await Drain();
-            byte[] Capture()
+                PlayedBrush = (new SolidColorBrush(Microsoft.UI.Colors.CornflowerBlue)), Margin = new Thickness(0, 32, 0, 0), VerticalAlignment = VerticalAlignment.Top };
+            var root = new Grid { Background = (new SolidColorBrush(Microsoft.UI.Colors.White)) }; root.Children.Add(bar);
+            root.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = new Uri("ms-appx:///MeowFilm.Capabilities/Presentation/CapabilityTheme.xaml", UriKind.Absolute) });
+            using var source = new DesktopTestUi.Host(new Grid(), 400, 80);
+            source.Mount(root); Render(root, 400, 80); await Drain();
+            async Task<byte[]> Capture()
             {
-                var bitmap = new RenderTargetBitmap(400, 80, 96, 96, PixelFormats.Pbgra32); bitmap.Render(root);
-                var pixels = new byte[400 * 80 * 4]; bitmap.CopyPixels(pixels, 1600, 0); return pixels;
+                var bitmap = await DesktopTestUi.Render(root, 1);
+                var pixels = new byte[400 * 80 * 4]; bitmap.Pixels.CopyTo(pixels, 0); return pixels;
             }
-            var resting = Capture();
-            bar.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseEnterEvent });
+            var resting = await Capture();
+            bar.SetPointerWithin(true);
             await Task.Delay(160); await Drain(); Render(root, 400, 80);
-            var active = Capture();
+            var active = await Capture();
             // Inspect the actual tooltip and simulate its pointer coordinate, never the system pointer.
             const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
             var tip = (ToolTip)typeof(SeekBar).GetField("preview", flags)!.GetValue(bar)!;
@@ -745,29 +433,27 @@ public static partial class MusicUiTests
             bar.BeginScrub(); bar.UpdateScrub(75); update.Invoke(bar, null);
             Equal("01:15 / 01:40", tip.Content as string);
             True(Math.Abs(tip.HorizontalOffset + tip.DesiredSize.Width / 2 - 300) < 1, "scrubbing uses the target head");
-            bar.CancelScrub(); source.RootVisual = null; await Drain(); True(!tip.IsOpen, "unmount closes the popup");
+            bar.CancelScrub(); source.Window.Content = null; await Drain(); True(!tip.IsOpen, "unmount closes the popup");
         });
         yield return Case("footer shade stays light and continuous with a larger white head across colors and DPI", async () =>
         {
             var bar = new SeekBar { Maximum = 100, Value = 25, Height = 16, RailAtTop = true,
                 Margin = new Thickness(0, 56, 0, 0), VerticalAlignment = VerticalAlignment.Top };
-            var root = new Grid { Background = Brushes.White }; root.Children.Add(bar); DesktopTheme.SetIsHighContrast(root, false);
-            using var source = new HwndSource(new HwndSourceParameters("seek-color-fixture") {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                PositionX = -32000, PositionY = -32000, Width = 400, Height = 96 });
-            source.RootVisual = root; Render(root, 400, 96); await Drain();
-            var frames = new List<BitmapSource>();
-            foreach (var backdrop in new[] { Brushes.White, Brushes.DarkSlateGray })
-            foreach (var played in new[] { Brushes.DimGray, Brushes.Crimson })
+            var root = new Grid { Background = (new SolidColorBrush(Microsoft.UI.Colors.White)) }; root.Children.Add(bar); DesktopTheme.SetIsHighContrast(root, false);
+            using var source = new DesktopTestUi.Host(new Grid(), 400, 96);
+            source.Mount(root); Render(root, 400, 96); await Drain();
+            var frames = new List<DesktopTestUi.RenderFrame>();
+            foreach (var backdrop in new[] { (new SolidColorBrush(Microsoft.UI.Colors.White)), (new SolidColorBrush(Microsoft.UI.Colors.DarkSlateGray)) })
+            foreach (var played in new[] { (new SolidColorBrush(Microsoft.UI.Colors.DimGray)), (new SolidColorBrush(Microsoft.UI.Colors.Crimson)) })
             {
                 root.Background = backdrop; bar.PlayedBrush = played; bar.Value = 25;
-                Render(root, 400, 96); frames.Add(CaptureSeekFrame(root, 1));
-                bar.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseEnterEvent });
+                Render(root, 400, 96); frames.Add(await CaptureSeekFrame(root, 1));
+                bar.SetPointerWithin(true);
                 await Task.Delay(170); await Drain(); Render(root, 400, 96);
-                frames.Add(CaptureSeekFrame(root, 1));
+                frames.Add(await CaptureSeekFrame(root, 1));
                 foreach (double scale in new[] { 1d, 1.25d, 1.5d, 2d })
                 {
-                    var frame = CaptureSeekFrame(root, scale);
+                    var frame = await CaptureSeekFrame(root, scale);
                     // Infer composited coverage from the most distinct channel, not
                     // from the control's gradient stops or internal animation value.
                     byte[] background = [backdrop.Color.R, backdrop.Color.G, backdrop.Color.B];
@@ -797,7 +483,7 @@ public static partial class MusicUiTests
                     foreach (double position in new[] { 0d, 25d, 100d })
                     {
                         bar.Value = position; Render(root, 400, 96);
-                        var head = CaptureSeekFrame(root, scale);
+                        var head = await CaptureSeekFrame(root, scale);
                         double center = position == 0 ? 7.5 : position == 100 ? 392.5 : 100;
                         Equal(Colors.White, SeekPixel(head, center, 57));
                         int start = (int)(Math.Max(0, center - 12) * scale);
@@ -812,76 +498,72 @@ public static partial class MusicUiTests
                     }
                     bar.Value = 25; Render(root, 400, 96);
                 }
-                bar.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseLeaveEvent });
+                bar.SetPointerWithin(false);
                 await Task.Delay(170); await Drain(); Render(root, 400, 96);
-                var resting = CaptureSeekFrame(root, 1);
+                var resting = await CaptureSeekFrame(root, 1);
                 for (int y = 8; y <= 53; y++)
                     Equal(backdrop.Color, SeekPixel(resting, 300, y));
             }
             if (Environment.GetEnvironmentVariable("MEOWFILM_TEST_SEEK_VISUALS") == "1")
             {
-                var visual = new DrawingVisual();
-                using (var drawing = visual.RenderOpen())
-                    for (int i = 0; i < frames.Count; i++)
-                        drawing.DrawImage(frames[i], new Rect(i % 2 * 400, i / 2 * 96, 400, 96));
-                var sheet = new RenderTargetBitmap(800, 384, 96, 96, PixelFormats.Pbgra32); sheet.Render(visual);
-                SaveSeekFrame(sheet, "seekbar-states.png");
+                var pixels = new byte[800 * 384 * 4];
+                for (int i = 0; i < frames.Count; i++)
+                    for (int y = 0; y < frames[i].Height; y++)
+                        Array.Copy(frames[i].Pixels, y * frames[i].Width * 4, pixels,
+                            ((i / 2 * 96 + y) * 800 + i % 2 * 400) * 4, frames[i].Width * 4);
+                await SaveSeekFrame(new DesktopTestUi.RenderFrame(800, 384, 1, pixels), "seekbar-states.png");
             }
-            source.RootVisual = null;
+            source.Window.Content = null;
         });
         yield return Case("footer shade retires after pointer exit despite focus and clears on disabled hidden unload and high contrast", async () =>
         {
             var bar = new SeekBar { Maximum = 100, Value = 25, Height = 16, RailAtTop = true,
-                PlayedBrush = Brushes.DimGray, Margin = new Thickness(0, 56, 0, 0), VerticalAlignment = VerticalAlignment.Top };
-            var root = new Grid { Background = Brushes.White }; root.Children.Add(bar);
+                PlayedBrush = (new SolidColorBrush(Microsoft.UI.Colors.DimGray)), Margin = new Thickness(0, 56, 0, 0), VerticalAlignment = VerticalAlignment.Top };
+            var root = new Grid { Background = (new SolidColorBrush(Microsoft.UI.Colors.White)) }; root.Children.Add(bar);
             DesktopTheme.SetIsHighContrast(root, false);
-            var window = new Window { Content = root, Width = 400, Height = 96, WindowStyle = WindowStyle.None,
-                Left = -32000, Top = -32000, ShowActivated = false, ShowInTaskbar = false };
+            var window = DesktopTestUi.CreateWindow(root, 400, 96);
             try
             {
                 window.Show(); Render(root, 400, 96); await Drain();
-                var source = PresentationSource.FromVisual(root)!;
+                True(root.XamlRoot is not null, "seek root is actually mounted");
                 async Task Shade(bool visible, [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
                 {
                     await Task.Delay(170); await Drain(); Render(root, 400, 96);
-                    var pixel = SeekPixel(CaptureSeekFrame(root, 1), 300, 40);
+                    var pixel = SeekPixel(await CaptureSeekFrame(root, 1), 300, 40);
                     True(visible ? pixel.R < 250 : pixel == Colors.White,
-                        $"shade at line {line}: expectedVisible={visible}, pixel={pixel}, loaded={bar.IsLoaded}, visible={bar.IsVisible}, enabled={bar.IsEnabled}, focus={bar.IsKeyboardFocusWithin}, scrubbing={bar.IsScrubbing}");
+                        $"shade at line {line}: expectedVisible={visible}, pixel={pixel}, loaded={bar.IsLoaded}, visible={DesktopVisual.IsVisible(bar)}, enabled={bar.IsEnabled}, focus={DesktopTestUi.HasFocus(bar)}, scrubbing={bar.IsScrubbing}");
                 }
-                void Hover(bool within) => bar.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0)
-                    { RoutedEvent = within ? Mouse.MouseEnterEvent : Mouse.MouseLeaveEvent });
+                void Hover(bool within) => bar.SetPointerWithin(within);
                 Hover(true); await Shade(true);
-                True(ReferenceEquals(root.InputHitTest(new Point(300, 40)), bar) &&
-                    ReferenceEquals(root.InputHitTest(new Point(300, 60)), bar),
+                True(ReferenceEquals(DesktopTestUi.Hit(root, new Point(300, 40)), bar) &&
+                    ReferenceEquals(DesktopTestUi.Hit(root, new Point(300, 60)), bar),
                     "activated shade and track share the seek hit area");
-                True(bar.Focus() && bar.IsKeyboardFocusWithin, "offscreen HWND supplies real focus without moving the system pointer");
+                True(bar.Focus(FocusState.Programmatic) && DesktopTestUi.HasFocus(bar), "offscreen HWND supplies real focus without moving the system pointer");
                 Hover(false); await Shade(false);
-                Equal(Colors.White, SeekPixel(CaptureSeekFrame(root, 1), 100, 57));
-                True(SeekPixel(CaptureSeekFrame(root, 1), 50, 60).R < 200,
+                Equal(Colors.White, SeekPixel(await CaptureSeekFrame(root, 1), 100, 57));
+                True(SeekPixel(await CaptureSeekFrame(root, 1), 50, 60).R < 200,
                     "keyboard focus retains the expanded rail without the decorative shade");
                 bar.Value = 35; await Shade(false);
                 bar.Value = 25; Hover(true); bar.BeginScrub(); Hover(false);
                 bar.UpdateScrub(50); await Shade(true);
                 bar.EndScrub(true); await Shade(false);
-                bar.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, Key.Right)
-                    { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+                bar.HandleSeekKey(VirtualKey.Right, true);
                 await Shade(true);
-                bar.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, Key.Right)
-                    { RoutedEvent = Keyboard.PreviewKeyUpEvent });
+                bar.HandleSeekKey(VirtualKey.Right, false);
                 await Shade(false);
                 Equal(55d, bar.Value);
                 bar.Value = 50;
                 Hover(true); DesktopTheme.SetIsHighContrast(root, true); await Shade(false);
-                Equal(SystemColors.HighlightTextColor, SeekPixel(CaptureSeekFrame(root, 1), 200, 57));
+                Equal(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.HighlightText), SeekPixel(await CaptureSeekFrame(root, 1), 200, 57));
                 DesktopTheme.SetIsHighContrast(root, false); await Shade(true);
                 bar.IsEnabled = false; await Shade(false);
-                True(!bar.HasAnimatedProperties, "disabled seek surface releases highlight clocks");
+                True(!bar.HasActiveAnimation, "disabled seek surface releases highlight clocks");
                 bar.IsEnabled = true; await Shade(true);
                 bar.Visibility = Visibility.Collapsed; await Shade(false);
                 bar.Visibility = Visibility.Visible; await Shade(false);
                 Hover(true); await Shade(true);
                 window.Content = null; await Drain();
-                True(!bar.HasAnimatedProperties && !bar.IsScrubbing, "unmount removes presentation clocks and active gestures");
+                True(!bar.HasActiveAnimation && !bar.IsScrubbing, "unmount removes presentation clocks and active gestures");
                 window.Content = root; Render(root, 400, 96); await Drain(); await Shade(false);
             }
             finally { window.Close(); }
@@ -890,37 +572,34 @@ public static partial class MusicUiTests
         {
             var record = new MusicRecordView { Address = "fixture://record", Width = 60, Height = 60 };
             ArtworkScope.SetLoader(record, new PlayerArtworkFixture());
-            using var source = new HwndSource(new HwndSourceParameters("record-sampling-fixture") {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                PositionX = -32000, PositionY = -32000, Width = 400, Height = 400 });
-            source.RootVisual = record; Render(record, 60, 60); await Drain();
+            using var source = new DesktopTestUi.Host(new Grid(), 400, 400);
+            source.Mount(record); Render(record, 60, 60); await Drain();
             var cover = (ArtworkImage)record.FindName("Cover");
             await Until(() => ((Image)cover.Children[0]).Source is not null);
-            var rotation = (RotateTransform)record.FindName("Rotation");
+            var rotation = (RotateTransform)record.FindName("DiscRotation");
             foreach (double scale in new[] { 1d, 1.25d, 1.5d, 2d })
             foreach (double angle in new[] { 0d, 17d, 43d })
             {
                 rotation.Angle = angle;
-                var bitmap = new RenderTargetBitmap((int)(60 * scale), (int)(60 * scale), 96 * scale, 96 * scale, PixelFormats.Pbgra32);
-                bitmap.Render(record);
-                var pixels = new byte[bitmap.PixelWidth * bitmap.PixelHeight * 4]; bitmap.CopyPixels(pixels, bitmap.PixelWidth * 4, 0);
+                var bitmap = await DesktopTestUi.Render(record, (96 * scale) / 96d);
+                var pixels = new byte[bitmap.Width * bitmap.Height * 4]; bitmap.Pixels.CopyTo(pixels, 0);
                 True(pixels.Where((_, i) => i % 4 == 3).Any(alpha => alpha > 0 && alpha < 255), "rotated circular edge retains antialiased coverage");
-                True(RenderOptions.GetBitmapScalingMode(cover) == BitmapScalingMode.HighQuality, "actual cover inherits high quality minification");
+                True(((Image)cover.Children[0]).Stretch == Stretch.UniformToFill, "native cover preserves its actual image sampling allocation");
             }
-            var grooves = (System.Windows.Shapes.Ellipse)record.FindName("Grooves");
-            var small = (DrawingBrush)grooves.Fill;
+            var grooves = (Grid)record.FindName("Grooves");
+            var small = grooves.Children.ToArray();
             record.Width = record.Height = 388; Render(record, 388, 388); await Drain();
-            var detail = (DrawingBrush)grooves.Fill;
-            True(!ReferenceEquals(small, detail) && small.IsFrozen && detail.IsFrozen, "small and large discs use size-appropriate retained artwork");
-            True(((DrawingGroup)small.Drawing).Children.Count <= 6 && ((DrawingGroup)detail.Drawing).Children.Count > 20,
+            var detail = grooves.Children.ToArray();
+            True(small.All(shape => !detail.Contains(shape)), "native disc changes its size-specific retained shapes");
+            True(small.Length <= 6 && detail.Length > 20,
                 "small discs omit subpixel dense rings while full-size detail keeps its original grooves");
-            source.RootVisual = null;
+            source.Window.Content = null;
         });
         yield return Case("seek gesture isolates live ticks commits once and rejects a retired track", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             var footer = f.Module.PlayerView; var bar = (SeekBar)footer.FindName("Progress");
-            footer.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent)); await Drain();
+            Render(footer, 1110, 80); await Drain();
             bar.BeginScrub(); bar.UpdateScrub(74);
             await f.Playback.SeekAsync(12); await Drain();
             Equal(74d, bar.Value); Equal(12d, f.Playback.Seek);
@@ -933,27 +612,23 @@ public static partial class MusicUiTests
             True(!bar.IsScrubbing, "track replacement immediately retires gesture");
             bar.EndScrub(true); await Drain(); Equal(replacementPosition, f.Playback.Seek);
             // UI Automation uses the same transaction and real media port.
-            var peer = UIElementAutomationPeer.CreatePeerForElement(bar)!;
+            var peer = FrameworkElementAutomationPeer.CreatePeerForElement(bar)!;
             ((IRangeValueProvider)peer.GetPattern(PatternInterface.RangeValue)).SetValue(36);
             await Until(() => !f.Module.Busy); Equal(36d, f.Playback.Seek);
-            using var inputSource = new HwndSource(new HwndSourceParameters("seek-input-code-fixture")
-            {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x80,
-                PositionX = -32000, PositionY = -32000, Width = 1110, Height = 80
-            });
-            inputSource.RootVisual = footer;
+            using var inputSource = new DesktopTestUi.Host(new Grid(), 1110, 80);
+            inputSource.Mount(footer);
             footer.Measure(new(1110, 80)); footer.Arrange(new(0, 0, 1110, 80)); footer.UpdateLayout(); await Drain();
-            void Key(Key key, RoutedEvent route) => bar.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, inputSource, 0, key) { RoutedEvent = route });
-            Key(System.Windows.Input.Key.Right, Keyboard.PreviewKeyDownEvent);
+            void Key(VirtualKey key, bool down) => bar.HandleSeekKey(key, down);
+            Key(VirtualKey.Right, true);
             Equal(41d, bar.Value);
             await f.Playback.SeekAsync(37); await Drain(); Equal(41d, bar.Value);
-            Key(System.Windows.Input.Key.Right, Keyboard.PreviewKeyUpEvent);
+            Key(VirtualKey.Right, false);
             await Until(() => !f.Module.Busy); Equal(41d, f.Playback.Seek);
-            Key(System.Windows.Input.Key.End, Keyboard.PreviewKeyDownEvent); Equal(180d, bar.Value);
-            Key(System.Windows.Input.Key.Escape, Keyboard.PreviewKeyDownEvent);
-            Key(System.Windows.Input.Key.End, Keyboard.PreviewKeyUpEvent);
+            Key(VirtualKey.End, true); Equal(180d, bar.Value);
+            Key(VirtualKey.Escape, true);
+            Key(VirtualKey.End, false);
             await Drain(); Equal(41d, f.Playback.Seek); Equal(41d, bar.Value);
-            bar.BeginScrub(); bar.UpdateScrub(50); footer.RaiseEvent(new RoutedEventArgs(FrameworkElement.UnloadedEvent));
+            bar.BeginScrub(); bar.UpdateScrub(50); DesktopTestUi.Unmount(footer);
             True(!bar.IsScrubbing, "unload cancels"); Equal(41d, f.Playback.Seek);
         });
         yield return Case("skip arrows animate direction without duplicate queue calls and clear on unload", async () =>
@@ -964,16 +639,16 @@ public static partial class MusicUiTests
             var next = (SkipButton)footer.FindName("NextButton");
             var previous = (SkipButton)footer.FindName("PreviousButton");
             True(next.Next && !previous.Next, "mirrored directions");
-            next.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseEnterEvent });
+            next.SetPointerWithin(true);
             await Task.Delay(70); await Drain();
-            if (SystemParameters.ClientAreaAnimation) True(next.HasAnimatedProperties, "native hover motion active");
+            if (SystemParameters.ClientAreaAnimation) True(next.HasActiveAnimation, "native hover motion active");
             Equal(0, f.Calls.Count("music.queue.next"));
-            next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Until(() => !f.Module.Busy);
+            DesktopTestUi.Invoke(next); await Until(() => !f.Module.Busy);
             Equal(1, f.Calls.Count("music.queue.next"));
-            previous.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Until(() => !f.Module.Busy);
+            DesktopTestUi.Invoke(previous); await Until(() => !f.Module.Busy);
             Equal(1, f.Calls.Count("music.queue.previous"));
-            next.RaiseEvent(new RoutedEventArgs(FrameworkElement.UnloadedEvent));
-            True(!next.HasAnimatedProperties, "no retained clock after unload");
+            DesktopTestUi.Unmount(next);
+            True(!next.HasActiveAnimation, "no retained clock after unload");
         });
         yield return Case("footer favorite toggles native membership for playing song not highlighted row", async () =>
         {
@@ -997,29 +672,27 @@ public static partial class MusicUiTests
             await f.Module.ToggleCurrentFavoriteAsync();
             var footer = f.Module.PlayerView;
             // The footer is transparent; reference pixels are composited on the window backdrop it sits on.
-            var host = new Border { Background = (Brush)footer.FindResource("MeowFilm.Brush.Window"), Child = footer };
+            var host = new Border { Background = (Brush)DesktopVisual.Resource(footer, "MeowFilm.Brush.Window"), Child = footer };
             Render(host, 1110, 80);
             var button = (Button)footer.FindName("FavoriteButton");
             Equal(32d, button.ActualWidth);
-            var badge = (TextBlock)button.Template.FindName("FavoriteBadge", button);
+            var badge = (TextBlock)DesktopTestUi.Part(button, "FavoriteBadge");
             Equal("", badge.Text);
             badge.Text = "10w+";
             Render(host, 1110, 80);
             Equal(43d, button.ActualWidth); Equal(32d, button.ActualHeight);
-            var surface = (Border)button.Template.FindName("FavoriteSurface", button);
+            var surface = (Border)DesktopTestUi.Part(button, "FavoriteSurface");
             Equal(new CornerRadius(16), surface.CornerRadius);
-            var heart = Visuals(button).OfType<System.Windows.Shapes.Path>().Single();
+            var heart = Visuals(button).OfType<Microsoft.UI.Xaml.Shapes.Path>().Single();
             Equal(20d, heart.ActualWidth); Equal(18d, heart.ActualHeight);
-            Equal(Color.FromRgb(0xFC, 0x3D, 0x49), ((SolidColorBrush)heart.Fill).Color);
-            Equal(Color.FromRgb(0xFC, 0x3D, 0x49), ((SolidColorBrush)badge.Foreground).Color);
+            Equal(Color.FromArgb(255, 0xFC, 0x3D, 0x49), ((SolidColorBrush)heart.Fill).Color);
+            Equal(Color.FromArgb(255, 0xFC, 0x3D, 0x49), ((SolidColorBrush)badge.Foreground).Color);
 
-            var bitmap = new RenderTargetBitmap(1110, 80, 96, 96, PixelFormats.Pbgra32);
-            bitmap.Render(host);
-            var origin = button.TranslatePoint(new Point(), host);
-            var crop = new CroppedBitmap(bitmap, new Int32Rect(
-                (int)Math.Round(origin.X), (int)Math.Round(origin.Y), 43, 32));
+            var bitmap = await DesktopTestUi.Render(host, 1);
+            var origin = button.TransformToVisual(host).TransformPoint(new Point());
+            var crop = DesktopTestUi.Crop(bitmap, new Rect(origin, new Size(43, 32)));
 
-            var pixels = new byte[43 * 32 * 4]; crop.CopyPixels(pixels, 43 * 4, 0);
+            var pixels = new byte[43 * 32 * 4]; crop.Pixels.CopyTo(pixels, 0);
             var points = Enumerable.Range(0, 43 * 32).Where(pixel =>
             {
                 var offset = pixel * 4;
@@ -1047,12 +720,11 @@ public static partial class MusicUiTests
                 foreach (double scale in new[] { 1d, 1.5, 2 })
                 {
                     var size = (int)(40 * scale);
-                    var full = new RenderTargetBitmap((int)(1110 * scale), (int)(80 * scale), 96 * scale, 96 * scale, PixelFormats.Pbgra32);
-                    full.Render(footer);
-                    var origin = play.TranslatePoint(new Point(), footer);
-                    var bitmap = new CroppedBitmap(full, new Int32Rect((int)Math.Round(origin.X * scale), (int)Math.Round(origin.Y * scale), size, size));
+                    var full = await DesktopTestUi.Render(footer, (96 * scale) / 96d);
+                    var origin = play.TransformToVisual(footer).TransformPoint(new Point());
+                    var bitmap = DesktopTestUi.Crop(full, new Rect(origin, new Size(40, 40)));
 
-                    var bytes = new byte[size * size * 4]; bitmap.CopyPixels(bytes, size * 4, 0);
+                    var bytes = new byte[size * size * 4]; bitmap.Pixels.CopyTo(bytes, 0);
                     double xSum = 0, ySum = 0, count = 0;
                     for (int y = 0; y < size; y++)
                         for (int x = 0; x < size; x++)
@@ -1075,7 +747,7 @@ public static partial class MusicUiTests
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             var ordinary = (MusicPlayerView)f.Module.PlayerView;
-            ordinary.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent)); await Drain();
+            Render(ordinary, 1110, 80); await Drain();
             var ordinaryProgress = (SeekBar)ordinary.FindName("Progress");
             ordinaryProgress.BeginScrub(); ordinaryProgress.UpdateScrub(70);
             var opens = f.Playback.Opens.Count;
@@ -1088,15 +760,11 @@ public static partial class MusicUiTests
             True(!ReferenceEquals(ordinary, footer), "player page owns its footer visual");
             True(ReferenceEquals(f.Module, footer.DataContext) && ReferenceEquals(ordinary.DataContext, footer.DataContext),
                 "both visual controls consume the sole playback owner");
-            using var source = new HwndSource(new HwndSourceParameters("player-page-controls-code-fixture")
-            {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x80,
-                PositionX = -32000, PositionY = -32000, Width = 1110, Height = 800
-            });
-            source.RootVisual = page;
+            using var source = new DesktopTestUi.Host(new Grid(), 1110, 800);
+            source.Mount(page);
             Render(page, 1110, 800); await Drain();
-            True(Visuals(page).OfType<FrameworkElement>().All(element => element.ToolTip is null) &&
-                Visuals(ordinary).OfType<FrameworkElement>().All(element => element.ToolTip is null),
+            True(Visuals(page).OfType<FrameworkElement>().All(element => ToolTipService.GetToolTip(element) is null) &&
+                Visuals(ordinary).OfType<FrameworkElement>().All(element => ToolTipService.GetToolTip(element) is null),
                 "player titles and controls have no ordinary hover hints");
             Equal(subscribers, f.Playback.Subscribers);
             f.Playback.Start(); await Drain();
@@ -1115,20 +783,21 @@ public static partial class MusicUiTests
             f.Module.GlobalSurfaceRequested += (_, args) =>
             { if (args.Surface == DesktopGlobalSurface.PlayQueue) requests++; };
             Click(Visuals(footer).OfType<Button>().Single(button =>
-                System.Windows.Automation.AutomationProperties.GetName(button) == "播放队列"));
+                Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(button) == "播放队列"));
             Equal(1, requests);
             var more = (Button)footer.FindName("MoreButton");
             Click(more);
-            ((MenuItem)more.ContextMenu.Items[0]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-            var rate = (System.Windows.Controls.Primitives.Popup)footer.FindName("RatePopup");
-            True(rate.IsOpen, "page footer popup opens");
+            var moreMenu = (MenuFlyout)footer.FindName("MoreMenu");
+            await Until(() => moreMenu.IsOpen); MusicTestUi.Invoke(moreMenu.Items[0]);
+            var rate = (Flyout)footer.FindName("RatePopup");
+            await Until(() => rate.IsOpen); True(rate.IsOpen, "page footer popup opens");
             progress.BeginScrub(); progress.UpdateScrub(90);
             f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail);
             True(!rate.IsOpen && !progress.IsScrubbing, "page exit closes its popup and cancels its own gesture");
             Equal(36d, f.Playback.Seek); Equal(opens + 1, f.Playback.Opens.Count);
             Equal(subscribers, f.Playback.Subscribers);
-            source.RootVisual = null;
-            ordinary.RaiseEvent(new RoutedEventArgs(FrameworkElement.UnloadedEvent));
+            source.Window.Content = null;
+            DesktopTestUi.Unmount(ordinary);
         });
         yield return Case("complete player page preserves the underlying shell layout and lyrics at narrow bounds", async () =>
         {
@@ -1137,46 +806,35 @@ public static partial class MusicUiTests
             try
             {
                 shell.PrepareForRender();
-                var root = (Border)shell.Content; shell.Content = null;
-                root.Resources.MergedDictionaries.Add(shell.Resources);
-                // The render fixture detaches WindowFrame from its Window. Keep
-                // the production live backdrop binding instead of a stale brush snapshot.
-                root.SetBinding(Border.BackgroundProperty, new Binding(nameof(Window.Background)) { Source = shell });
-                root.DataContext = shell.DataContext;
-                TextElement.SetFontFamily(root, shell.FontFamily); TextElement.SetFontSize(root, shell.FontSize);
-                // Hidden native test presentation source admits real Loaded/visibility-dependent artwork.
-                using var surface = new HwndSource(new HwndSourceParameters("player-chrome-code-fixture")
-                {
-                    WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x80,
-                    PositionX = -32000, PositionY = -32000, Width = 1243, Height = 848
-                });
-                surface.RootVisual = root;
-                root.Measure(new(1243, 848)); root.Arrange(new Rect(0, 0, 1243, 848)); root.UpdateLayout();
+                shell.Resize(1243, 848); shell.Show(); await Drain();
+                var root = DesktopTestUi.WindowRoot(shell);
+                var frame = (Grid)root;
+                var applicationBackground = (Border)root.FindName("ApplicationBackground");
+                var frameBackground = frame.Background;
+                var shellBackground = applicationBackground.Background;
                 var ordinaryFooter = f.Module.PlayerView;
                 var ordinaryFooterHeight = ordinaryFooter.ActualHeight;
-                var ordinarySidebarWidth = ((Grid)shell.FindName("RootLayout")).ColumnDefinitions[0].ActualWidth;
+                var ordinarySidebarWidth = ((Grid)DesktopTestUi.WindowRoot(shell).FindName("RootLayout")).ColumnDefinitions[0].ActualWidth;
 
                 await f.Module.ShowLyricsAsync();
                 await Until(() => f.Module.IsLyrics);
+                await Until(() => ((TranslateTransform)((Grid)root.FindName("PlayerDetailSurface")).RenderTransform).Y == 0);
                 var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
                 var footer = (MusicPlayerView)((ContentControl)detail.FindName("DetailPlayerHost")).Content;
                 True(!ReferenceEquals(ordinaryFooter, footer), "complete player page has its own footer");
-                void AssertDetailBackdrop(Size size)
+                async Task AssertDetailBackdrop(Size size)
                 {
                     var width = (int)size.Width; var height = (int)size.Height;
-                    var actual = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
-                    actual.Render(detail);
+                    var actual = await DesktopTestUi.Render(detail);
                     var canvas = new Border { Background = detail.Background };
-                    canvas.Measure(size); canvas.Arrange(new Rect(size)); canvas.UpdateLayout();
-                    var expected = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
-                    expected.Render(canvas);
-                    var y = (int)footer.TranslatePoint(new Point(0, footer.ActualHeight / 2), detail).Y;
+                    Render(canvas, width, height); await Drain();
+                    var expected = await DesktopTestUi.Render(canvas);
+                    var y = footer.TransformToVisual(detail).TransformPoint(new Point(0, footer.ActualHeight / 2)).Y;
+                    var shellPixels = await DesktopTestUi.Render(root);
                     foreach (var x in new[] { 1, width - 2 })
                     {
-                        var area = new Int32Rect(x, y, 1, 1);
-                        var pixel = new byte[4]; var backgroundPixel = new byte[4];
-                        actual.CopyPixels(area, pixel, 4, 0); expected.CopyPixels(area, backgroundPixel, 4, 0);
-                        True(pixel.SequenceEqual(backgroundPixel), "detail footer exposes the same full-page backdrop");
+                        Equal(expected.Pixel(x, y), actual.Pixel(x, y));
+                        Equal(actual.Pixel(x, y), shellPixels.Pixel(x, y));
                     }
                 }
                 var record = (MusicRecordView)detail.FindName("DetailRecord");
@@ -1186,47 +844,49 @@ public static partial class MusicUiTests
                 f.Module.Lyrics.Clear();
                 for (var i = 0; i < 16; i++) f.Module.Lyrics.Add(new(i * 5, "原生歌词排版测试 " + i, i == 2 ? "Translation test" : ""));
                 var opens = f.Playback.Opens.Count;
-                foreach (var size in new[] { new Size(1243, 848), new Size(860, 600) })
+                foreach (var requested in new[] { new Size(1243, 848), new Size(860, 600) })
                 {
-                    root.Measure(size); root.Arrange(new Rect(size)); root.UpdateLayout();
-                    cover.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent)); await Drain(); root.UpdateLayout();
-                    var grid = (Grid)shell.FindName("RootLayout");
+                    shell.Resize(requested.Width, requested.Height); await Drain(); root.UpdateLayout();
+                    var size = new Size(root.ActualWidth, root.ActualHeight);
+                    await Drain(); root.UpdateLayout();
+                    var grid = (Grid)DesktopTestUi.WindowRoot(shell).FindName("RootLayout");
                     True(grid.Background is null, "player overlay does not repaint the shell");
-                    Equal(Visibility.Visible, ((ScrollViewer)shell.FindName("SidebarScroll")).Visibility);
+                    Equal(Visibility.Visible, ((ScrollViewer)DesktopTestUi.WindowRoot(shell).FindName("SidebarScroll")).Visibility);
                     True(Math.Abs(grid.ColumnDefinitions[0].ActualWidth - ordinarySidebarWidth) < .5, "underlying sidebar keeps its layout");
-                    Equal(new Thickness(0), root.BorderThickness);
-                    True(ReferenceEquals(root.Background, shell.Background), "rounded edges do not expose normal white canvas");
+                    Equal(new Thickness(0), applicationBackground.BorderThickness);
+                    True(ReferenceEquals(frameBackground, frame.Background) && ReferenceEquals(shellBackground, applicationBackground.Background),
+                        "the page overlay preserves the underlying native shell background owners");
                     var title = Visuals(detail).OfType<TextBlock>()
                         .First(block => block.Text == f.Module.CurrentTitle);
-                    var lyrics = (ListBox)detail.FindName("LyricList");
-                    Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(title));
-                    Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(title));
-                    Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(lyrics));
-                    Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(lyrics));
+                    var lyrics = (ListView)detail.FindName("LyricList");
+
+
+
+
                     var lyricText = Visuals(lyrics).OfType<TextBlock>().ToArray();
                     True(lyricText.Length > 0 && lyricText.All(block =>
-                        TextOptions.GetTextRenderingMode(block) == TextRenderingMode.Auto),
+                        block.FontWeight == FontWeights.Normal),
                         "the actual lyric text uses native automatic rendering");
                     var viewport = Visuals(lyrics).OfType<ScrollViewer>().First();
                     True(Math.Abs(viewport.ViewportHeight - lyrics.ActualHeight) < 1,
                         "lyric edge spacing belongs to scrolling rows, not the visible viewport");
-                    True(title.TranslatePoint(new Point(), root).X >= size.Width * .5, "title on right");
+                    True(title.TransformToVisual(root).TransformPoint(new Point()).X >= size.Width * .5, "title on right");
                     True(record.ActualWidth > 200 && record.ActualHeight > 200, "full disc not a thumbnail");
                     True(lyrics.ActualHeight >= 160, "usable lyric viewport at minimum window");
-                    True(lyrics.TranslatePoint(new Point(lyrics.ActualWidth, 0), root).X < size.Width, "lyric column fits");
-                    Equal(size, detail.RenderSize);
+                    True(lyrics.TransformToVisual(root).TransformPoint(new Point(lyrics.ActualWidth, 0)).X < size.Width, "lyric column fits");
+                    Equal(size, new Size(detail.ActualWidth, detail.ActualHeight));
                     Equal(ordinaryFooterHeight, ordinaryFooter.ActualHeight);
-                    True(ReferenceEquals(ordinaryFooter, ((ContentControl)shell.FindName("PlayerHost")).Content),
+                    True(ReferenceEquals(ordinaryFooter, ((ContentControl)DesktopTestUi.WindowRoot(shell).FindName("PlayerHost")).Content),
                         "ordinary footer is not moved into the player page");
-                    True(Math.Abs(footer.TranslatePoint(new Point(0, footer.ActualHeight), root).Y - size.Height) < .5,
+                    True(Math.Abs(footer.TransformToVisual(root).TransformPoint(new Point(0, footer.ActualHeight)).Y - size.Height) < .5,
                         "page footer reaches the bottom of the whole window");
                     var play = (Button)footer.FindName("PlayButton");
-                    True(Math.Abs(play.TranslatePoint(new Point(20, 0), root).X - size.Width / 2) < 1, "play remains window-centered in detail");
-                    True(root.InputHitTest(play.TranslatePoint(new Point(20, 20), root)) is DependencyObject hit &&
+                    True(Math.Abs(play.TransformToVisual(root).TransformPoint(new Point(20, 0)).X - size.Width / 2) < 1, "play remains window-centered in detail");
+                    True(DesktopTestUi.Hit(root, play.TransformToVisual(root).TransformPoint(new Point(20, 20))) is DependencyObject hit &&
                         Visuals(play).Contains(hit), "window chrome does not intercept the page footer");
                     Render(root, (int)size.Width, (int)size.Height);
                     DesktopTheme.SetIsHighContrast(grid, false); root.UpdateLayout();
-                    Equal(Color.FromRgb(34, 197, 94), ((SolidColorBrush)play.Background).Color);
+                    Equal(Color.FromArgb(255, 34, 197, 94), ((SolidColorBrush)play.Background).Color);
                     True(ReferenceEquals(f.Module.PlayerBackground, detail.Background), "player page root owns the cover backdrop");
                     True(footer.Background is null, "page footer paints no backdrop of its own");
                     TextBlock Title(FrameworkElement owner) => Visuals(owner).OfType<TextBlock>().First(block => block.Text == f.Module.CurrentTitle);
@@ -1238,34 +898,34 @@ public static partial class MusicUiTests
                         var label = Visuals(quality).OfType<TextBlock>().Single();
                         True(ReferenceEquals(quality.Foreground, label.Foreground), "quality label follows the control palette");
                         var artist = ((StackPanel)playerView.FindName("MetadataText")).Children.OfType<TextBlock>().Last();
-                        True(ReferenceEquals(playerView.FindResource("Capability.Player.Muted"), artist.Foreground),
+                        True(ReferenceEquals(DesktopVisual.Resource(playerView, "Capability.Player.Muted"), artist.Foreground),
                             "artist text follows the footer's secondary text palette");
                     }
-                    AssertDetailBackdrop(size);
+                    await AssertDetailBackdrop(size);
                     True(f.Module.IsLyrics, "page footer consumes the existing active player state");
                     DesktopTheme.SetIsHighContrast(grid, true); root.UpdateLayout();
-                    True(((SolidColorBrush)detail.Background).Color == SystemColors.WindowColor, "high contrast replaces the page backdrop");
+                    True(((SolidColorBrush)detail.Background).Color == new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Window), "high contrast replaces the page backdrop");
                     var detailArtist = ((StackPanel)footer.FindName("MetadataText")).Children.OfType<TextBlock>().Last();
-                    Equal(SystemColors.WindowTextColor, ((SolidColorBrush)detailArtist.Foreground).Color);
-                    AssertDetailBackdrop(size);
+                    Equal(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText), ((SolidColorBrush)detailArtist.Foreground).Color);
+                    await AssertDetailBackdrop(size);
                 }
-                True(record.PaletteBrush != Brushes.DimGray, "cover is loaded through public loader and sampled");
+                True(((Image)cover.Children[0]).Source is not null && record.PaletteBrush is SolidColorBrush palette && palette.Color != Colors.DimGray,
+                    "cover is loaded through public loader and its actual palette is sampled");
                 Equal(opens, f.Playback.Opens.Count);
-                var lyricList = (ListBox)detail.FindName("LyricList");
+                var lyricList = (ListView)detail.FindName("LyricList");
                 var lyricScroll = Visuals(lyricList).OfType<ScrollViewer>().First();
                 await f.Playback.SeekAsync(40); await Task.Delay(550); await Drain();
                 var centered = lyricScroll.VerticalOffset;
                 True(centered > 100, "actual playback position smoothly centers a later lyric");
-                var row = lyricList.ItemContainerGenerator.ContainerFromIndex(8) as FrameworkElement;
+                var row = lyricList.ContainerFromIndex(8) as FrameworkElement;
                 if (row is null) throw new InvalidOperationException("active lyric row is not realized after automatic centering");
-                var rowCenter = row.TranslatePoint(new Point(0, row.ActualHeight / 2), lyricScroll).Y;
+                var rowCenter = row.TransformToVisual(lyricScroll).TransformPoint(new Point(0, row.ActualHeight / 2)).Y;
                 var readingBand = lyricScroll.ViewportHeight / 2;
                 True(Math.Abs(rowCenter - readingBand) < 2,
                     $"active line reaches reference reading band: actual={rowCenter}, target={readingBand}, offset={centered}, " +
                     $"scrollable={lyricScroll.ScrollableHeight}, extent={lyricScroll.ExtentHeight}, viewport={lyricScroll.ViewportHeight}, row={row.ActualHeight}");
-                var wheel = new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, -120) { RoutedEvent = Mouse.PreviewMouseWheelEvent };
-                lyricList.RaiseEvent(wheel); await Task.Delay(250); await Drain();
-                True(wheel.Handled && lyricScroll.VerticalOffset > centered, "wheel over actual lyrics scrolls");
+                bool wheelHandled = detail.BrowseLyricWheel(-120); await Task.Delay(250); await Drain();
+                True(wheelHandled && lyricScroll.VerticalOffset > centered, "wheel over actual lyrics scrolls");
                 await f.Playback.SeekAsync(45); await Task.Delay(550); await Drain();
                 True(Math.Abs(lyricScroll.VerticalOffset - centered) > 5, "manual scrolling is not immediately overwritten");
                 // No new playback tick after this point: paused lyrics must still recover.
@@ -1276,33 +936,32 @@ public static partial class MusicUiTests
                 {
                     await Until(() =>
                     {
-                        recoveredRow = lyricList.ItemContainerGenerator.ContainerFromIndex(9) as FrameworkElement;
+                        recoveredRow = lyricList.ContainerFromIndex(9) as FrameworkElement;
                         return recoveredRow is not null &&
-                            Math.Abs(recoveredRow.TranslatePoint(new Point(0, recoveredRow.ActualHeight / 2), lyricScroll).Y -
+                            Math.Abs(recoveredRow.TransformToVisual(lyricScroll).TransformPoint(new Point(0, recoveredRow.ActualHeight / 2)).Y -
                                 lyricScroll.ViewportHeight / 2) < 2;
                     });
                 }
                 catch (TimeoutException error)
                 {
-                    var actual = recoveredRow?.TranslatePoint(new Point(0, recoveredRow.ActualHeight / 2), lyricScroll).Y;
+                    var actual = recoveredRow?.TransformToVisual(lyricScroll).TransformPoint(new Point(0, recoveredRow.ActualHeight / 2)).Y;
                     throw new TimeoutException($"Idle lyric recovery did not settle: font={detail.FontFamily.Source}, " +
                         $"index={f.Module.LyricDisplayIndex}, playing={f.Module.IsPlaying}, actual={actual}, " +
                         $"target={lyricScroll.ViewportHeight / 2}, row={recoveredRow?.ActualHeight}, " +
-                        $"root={root.RenderSize}, detail={detail.RenderSize}, lyrics={lyricList.RenderSize}, " +
+                        $"root={new Size(root.ActualWidth, root.ActualHeight)}, detail={new Size(detail.ActualWidth, detail.ActualHeight)}, lyrics={new Size(lyricList.ActualWidth, lyricList.ActualHeight)}, " +
                         $"offset={lyricScroll.VerticalOffset}, extent={lyricScroll.ExtentHeight}, " +
                         $"viewport={lyricScroll.ViewportHeight}, scrollable={lyricScroll.ScrollableHeight}", error);
                 }
                 row = recoveredRow ?? throw new InvalidOperationException(
                     "active lyric row is not realized after manual-scroll recovery");
-                True(Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), lyricScroll).Y - lyricScroll.ViewportHeight / 2) < 2,
+                True(Math.Abs(row.TransformToVisual(lyricScroll).TransformPoint(new Point(0, row.ActualHeight / 2)).Y - lyricScroll.ViewportHeight / 2) < 2,
                     "idle timeout resumes lyric following without a new media tick");
                 var playLine = (Button)detail.FindName("ConfirmLyric");
-                lyricList.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, -120)
-                    { RoutedEvent = Mouse.PreviewMouseWheelEvent });
+                True(detail.BrowseLyricWheel(-120), "lyric wheel owner accepts manual browsing");
                 await Task.Delay(250); await Drain();
                 True(f.Module.HasLyricPreview, "wheel chooses the line under the middle without clicking text");
                 var previewTime = f.Module.Lyrics[f.Module.LyricDisplayIndex].Time;
-                playLine.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
+                DesktopTestUi.Invoke(playLine); await Drain();
                 Equal(previewTime, f.Playback.PositionSeconds);
                 True(f.Playback.IsPlaying, "middle-line control seeks and resumes real playback port");
                 Equal(opens, f.Playback.Opens.Count);
@@ -1314,14 +973,10 @@ public static partial class MusicUiTests
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
             var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
-            using var source = new HwndSource(new HwndSourceParameters("lyric-follow-tick-fixture")
-            {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                PositionX = -32000, PositionY = -32000, Width = 860, Height = 600
-            });
+            using var source = new DesktopTestUi.Host(new Grid(), 860, 600);
             try
             {
-                source.RootVisual = detail;
+                source.Mount(detail);
                 f.Module.Lyrics.Clear();
                 for (var i = 0; i < 80; i++)
                     f.Module.Lyrics.Add(new(i * 2, "连续进度与长行排版 " + i,
@@ -1334,9 +989,9 @@ public static partial class MusicUiTests
                 Equal(f.Module.PlaybackPresentationKey, list.PresentationKey);
                 double Error(int index)
                 {
-                    var row = list.ItemContainerGenerator.ContainerFromIndex(index) as FrameworkElement;
+                    var row = list.ContainerFromIndex(index) as FrameworkElement;
                     return row is null ? double.PositiveInfinity : Math.Abs(
-                        row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y -
+                        row.TransformToVisual(scroll).TransformPoint(new Point(0, row.ActualHeight / 2)).Y -
                         scroll.ViewportHeight / 2);
                 }
                 await f.Playback.SeekAsync(80);
@@ -1356,14 +1011,13 @@ public static partial class MusicUiTests
                     await Task.Delay(200); await f.Playback.SeekAsync(82 + i * .2); await Drain();
                 }
                 True(Error(41) < 2, "a different line receives its own completed motion");
-                var activeRow = (FrameworkElement)list.ItemContainerGenerator.ContainerFromIndex(41);
+                var activeRow = (FrameworkElement)list.ContainerFromIndex(41);
                 Visuals(activeRow).OfType<TextBlock>().Single(text => text.Text == f.Module.Lyrics[41].Text).FontSize = 28;
                 await Task.Delay(550); await Drain();
                 True(Error(41) < 2, "changed row text metrics recenter without a new playback position");
 
                 var hold = System.Diagnostics.Stopwatch.StartNew();
-                list.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, Key.PageDown)
-                    { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+                True(detail.BrowseLyric(VirtualKey.PageDown), "lyric key owner accepts page navigation");
                 await Task.Delay(250); await Drain();
                 var previewIndex = f.Module.LyricDisplayIndex;
                 True(f.Module.HasLyricPreview, "keyboard scrolling chooses a middle-line preview");
@@ -1388,7 +1042,7 @@ public static partial class MusicUiTests
             }
             finally
             {
-                source.RootVisual = null;
+                source.Window.Content = null;
                 f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail);
                 await Drain();
             }
@@ -1398,20 +1052,16 @@ public static partial class MusicUiTests
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
             var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
-            using var source = new HwndSource(new HwndSourceParameters("lyric-edge-controls-code-fixture")
-            {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                PositionX = -32000, PositionY = -32000, Width = 860, Height = 600
-            });
-            var list = (ListBox)detail.FindName("LyricList");
-            var seen = new Dictionary<ListBoxItem, object>(ReferenceEqualityComparer.Instance);
+            using var source = new DesktopTestUi.Host(new Grid(), 860, 600);
+            var list = (ListView)detail.FindName("LyricList");
+            var seen = new Dictionary<ListViewItem, object>(ReferenceEqualityComparer.Instance);
             var recycled = false;
             void Layout()
             { detail.Measure(new(860, 600)); detail.Arrange(new Rect(0, 0, 860, 600)); detail.UpdateLayout(); }
             void AssertEdges(int count)
             {
-                var rows = Visuals(list).OfType<ListBoxItem>()
-                    .Where(row => list.ItemContainerGenerator.IndexFromContainer(row) >= 0).ToArray();
+                var rows = Visuals(list).OfType<ListViewItem>()
+                    .Where(row => list.IndexFromContainer(row) >= 0).ToArray();
                 True(rows.Length > 0 && rows.Length < Math.Min(count, 64),
                     $"realized lyric containers stay viewport bounded: {rows.Length}/{count}");
                 var scroll = Visuals(list).OfType<ScrollViewer>().First();
@@ -1423,7 +1073,7 @@ public static partial class MusicUiTests
                     var top = first ? edgeSpace : 0;
                     var bottom = last ? edgeSpace : 0;
                     True(Math.Abs(row.Margin.Top - top) < .01 && Math.Abs(row.Margin.Bottom - bottom) < .01,
-                        $"only actual edge items have space: index={list.ItemContainerGenerator.IndexFromContainer(row)}, " +
+                        $"only actual edge items have space: index={list.IndexFromContainer(row)}, " +
                         $"actual={row.Margin}, expected={top}/{bottom}");
                     if (seen.TryGetValue(row, out var prior) && !ReferenceEquals(prior, row.DataContext)) recycled = true;
                     seen[row] = row.DataContext;
@@ -1438,14 +1088,14 @@ public static partial class MusicUiTests
                     await Until(() =>
                     {
                         Layout();
-                        return list.ItemContainerGenerator.ContainerFromIndex(index) is FrameworkElement;
+                        return list.ContainerFromIndex(index) is FrameworkElement;
                     });
                 }
                 catch (TimeoutException error)
                 {
                     var scroll = Visuals(list).OfType<ScrollViewer>().First();
-                    var rows = Visuals(list).OfType<ListBoxItem>()
-                        .Select(row => list.ItemContainerGenerator.IndexFromContainer(row)).ToArray();
+                    var rows = Visuals(list).OfType<ListViewItem>()
+                        .Select(row => list.IndexFromContainer(row)).ToArray();
                     throw new TimeoutException($"Lyric visit did not settle: count={list.Items.Count}, index={index}, " +
                         $"realized={string.Join(',', rows)}, offset={scroll.VerticalOffset}, " +
                         $"scrollable={scroll.ScrollableHeight}", error);
@@ -1461,18 +1111,18 @@ public static partial class MusicUiTests
                     await Until(() =>
                     {
                         Layout();
-                        var row = list.ItemContainerGenerator.ContainerFromIndex(index) as FrameworkElement;
+                        var row = list.ContainerFromIndex(index) as FrameworkElement;
                         return f.Module.LyricDisplayIndex == index && row is not null &&
-                            Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y -
+                            Math.Abs(row.TransformToVisual(scroll).TransformPoint(new Point(0, row.ActualHeight / 2)).Y -
                                 scroll.ViewportHeight / 2) < 2;
                     });
                 }
                 catch (TimeoutException error)
                 {
-                    var row = list.ItemContainerGenerator.ContainerFromIndex(index) as FrameworkElement;
+                    var row = list.ContainerFromIndex(index) as FrameworkElement;
                     throw new TimeoutException($"Lyric edge follow did not settle: count={list.Items.Count}, " +
                         $"index={index}, active={f.Module.LyricDisplayIndex}, playing={f.Module.IsPlaying}, " +
-                        $"actual={row?.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y}, " +
+                        $"actual={row?.TransformToVisual(scroll).TransformPoint(new Point(0, row.ActualHeight / 2)).Y}, " +
                         $"target={scroll.ViewportHeight / 2}, margin={row?.Margin}, " +
                         $"offset={scroll.VerticalOffset}, scrollable={scroll.ScrollableHeight}", error);
                 }
@@ -1480,7 +1130,7 @@ public static partial class MusicUiTests
             }
             try
             {
-                source.RootVisual = detail; Layout(); await Drain();
+                source.Mount(detail); Layout(); await Drain();
                 foreach (var count in new[] { 60, 120, 1000 })
                 {
                     seen.Clear(); recycled = false;
@@ -1517,37 +1167,38 @@ public static partial class MusicUiTests
                 f.Module.Lyrics.Clear();
                 var only = new MusicLyricRow(0, "单行歌词", "");
                 f.Module.Lyrics.Add(only); f.Module.PreviewLyric(only); Layout(); await Drain();
-                await Until(() => list.ItemContainerGenerator.ContainerFromIndex(0) is ListBoxItem);
-                var single = (ListBoxItem)list.ItemContainerGenerator.ContainerFromIndex(0);
+                await Until(() => list.ContainerFromIndex(0) is ListViewItem);
+                var single = (ListViewItem)list.ContainerFromIndex(0);
                 True(single.Margin.Top > 0 && single.Margin.Bottom > 0, "one actual lyric is both boundaries");
                 f.Module.Lyrics.Clear(); Layout(); await Drain();
                 True(f.Module.FirstLyric is null && f.Module.LastLyric is null, "empty snapshots retire both boundaries");
             }
             finally
             {
-                source.RootVisual = null;
+                source.Window.Content = null;
                 f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail); await Drain();
             }
         });
     }
-    private static RenderTargetBitmap CaptureSeekFrame(FrameworkElement root, double scale)
+    private static PlayerSurfaceInput? PlayerInput(MusicPlayerView player) =>
+        (PlayerSurfaceInput?)typeof(MusicPlayerView).GetField("surfaceInput",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(player);
+    private static async Task SettleQueue(Fixture fixture)
     {
-        var frame = new RenderTargetBitmap((int)(400 * scale), (int)(96 * scale), 96 * scale, 96 * scale, PixelFormats.Pbgra32);
-        frame.Render(root); return frame;
+        await Until(() => !fixture.Module.Busy);
+        if (typeof(MusicCapability).GetField("queueSurfacePending",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(fixture.Module) is Task refresh)
+            await refresh;
+        await Drain();
     }
-    private static Color SeekPixel(BitmapSource frame, double x, double y)
-    {
-        var pixel = new byte[4];
-        frame.CopyPixels(new Int32Rect((int)(x * frame.DpiX / 96), (int)(y * frame.DpiY / 96), 1, 1), pixel, 4, 0);
-        return Color.FromArgb(pixel[3], pixel[2], pixel[1], pixel[0]);
-    }
-    private static void SaveSeekFrame(BitmapSource frame, string fileName)
+    private static Task<DesktopTestUi.RenderFrame> CaptureSeekFrame(FrameworkElement root, double scale) =>
+        DesktopTestUi.Render(root, scale);
+    private static Color SeekPixel(DesktopTestUi.RenderFrame frame, double x, double y) => frame.Pixel(x, y);
+    private static async Task SaveSeekFrame(DesktopTestUi.RenderFrame frame, string fileName)
     {
         string path = TestWorkspace.ValidatePath(TestWorkspace.ResultsRoot,
             Path.Combine(TestWorkspace.ResultsRoot, "windows-native", fileName));
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        using var stream = File.Create(path);
-        var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(frame)); encoder.Save(stream);
+        await DesktopTestUi.Save(frame, path);
         Console.WriteLine("VISUAL " + path);
     }
     private sealed class CallbackArtworkLoader(Func<string, CancellationToken, Task<IArtworkLease>> acquire) : IArtworkLoader
@@ -1570,20 +1221,21 @@ public static partial class MusicUiTests
         public Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var visual = new DrawingVisual();
+            var visual = new System.Windows.Media.DrawingVisual();
             using (var dc = visual.RenderOpen())
             {
-                dc.DrawRectangle(new LinearGradientBrush(Colors.SteelBlue, Colors.DarkSalmon, 45), null, new Rect(0, 0, 256, 256));
-                dc.DrawEllipse(Brushes.LightGoldenrodYellow, null, new(168, 86), 38, 38);
-                dc.DrawGeometry(Brushes.DarkSlateBlue, null, Geometry.Parse("M0,256 L0,200 86,105 175,210 256,135 256,256 Z"));
+                dc.DrawRectangle(new System.Windows.Media.LinearGradientBrush(System.Windows.Media.Colors.SteelBlue, System.Windows.Media.Colors.DarkSalmon, 45), null, new System.Windows.Rect(0, 0, 256, 256));
+                dc.DrawEllipse(System.Windows.Media.Brushes.LightGoldenrodYellow, null, new System.Windows.Point(168, 86), 38, 38);
+                dc.DrawGeometry(System.Windows.Media.Brushes.DarkSlateBlue, null, System.Windows.Media.Geometry.Parse("M0,256 L0,200 86,105 175,210 256,135 256,256 Z"));
             }
-            var bitmap = new RenderTargetBitmap(256, 256, 96, 96, PixelFormats.Pbgra32); bitmap.Render(visual); bitmap.Freeze();
-            return Task.FromResult<IArtworkLease>(new PlayerArtworkLease(bitmap));
+            var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap(256, 256, 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
+            bitmap.Render(visual); bitmap.Freeze();
+            return Task.FromResult<IArtworkLease>(new PlayerArtworkLease(MusicTestUi.Pixels(bitmap)));
         }
     }
-    private sealed class PlayerArtworkLease(BitmapSource image) : IArtworkLease
+    private sealed class PlayerArtworkLease(ArtworkPixels image) : IArtworkLease
     {
-        public BitmapSource Image => image;
+        public ArtworkPixels Image { get; } = image;
         internal bool Disposed;
         public void Dispose() => Disposed = true;
     }

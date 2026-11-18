@@ -1,10 +1,13 @@
-using System.Windows;
-using System.Windows.Automation.Peers;
-using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
-using System.Windows.Threading;
+using FontWeights = Microsoft.UI.Text.FontWeights;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.UI.Text;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Data;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
+using Microsoft.UI.Xaml.Markup;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 
@@ -26,7 +29,7 @@ public static class MusicLyricAnimationTests
             await Task.Delay(240); await Drain();
             Equal(1d, f.List.Position);
             if (AnimationEnabled)
-                Check(word.WordProgress > initial + .015, "WPF advances highlight without another media position");
+                Check(word.WordProgress > initial + .015, "the compositor advances highlight without another media position");
             else Near(initial, word.WordProgress, .001, "reduced animation keeps the last real sample");
             Equal(size, word.DesiredSize);
             f.List.Position = 1.4;
@@ -34,7 +37,7 @@ public static class MusicLyricAnimationTests
             await Drain();
             Near(1.4 / 8, word.WordProgress, .001, "pause uses the actual media position");
             Check(!Animated(word), "pause removes the word clock");
-            word.Foreground = Brushes.LightGray; await Drain();
+            word.Foreground = MusicVisuals.Brush("#D3D3D3"); await Drain();
             Check(glyphs.SequenceEqual(Glyphs(word)), "position and color changes reuse the native glyph geometry");
             var paused = word.WordProgress;
             await Task.Delay(240); await Drain();
@@ -57,7 +60,7 @@ public static class MusicLyricAnimationTests
             f.List.Position = 7.2;
             await Drain();
             Near(.9, word.WordProgress, .001, "forward seek preserves pause");
-            Equal("连续高亮", UIElementAutomationPeer.CreatePeerForElement(word)!.GetName());
+            Equal("连续高亮", FrameworkElementAutomationPeer.CreatePeerForElement(word)!.GetName());
         });
         yield return Case("unknown rate identity changes hidden and unloaded words retire their clocks", async () =>
         {
@@ -90,7 +93,7 @@ public static class MusicLyricAnimationTests
             f.List.PlaybackRate = 1;
             f.List.Position = 1;
             await Drain();
-            f.List.Visibility = Visibility.Hidden;
+            f.List.Visibility = Visibility.Collapsed;
             await Drain();
             var hidden = word.WordProgress;
             await Task.Delay(180); await Drain();
@@ -211,7 +214,7 @@ public static class MusicLyricAnimationTests
             {
                 Near(word.Word!.Time == 0 ? 1 : word.Word.Time == .1 ? .65 : 0,
                     word.WordProgress, .001, "the final paused sample reaches each word in a row");
-                word.Foreground = Brushes.LightGray;
+                word.Foreground = MusicVisuals.Brush("#D3D3D3");
             }
             await Drain();
             foreach (var (word, shape) in shapes)
@@ -245,11 +248,11 @@ public static class MusicLyricAnimationTests
             var lines = MultiwordLines();
             using var f = Fixture.WithLines(lines, position: 1);
             await f.Ready();
-            var firstRows = Visuals(f.List).OfType<ListBoxItem>().ToArray();
+            var firstRows = Visuals(f.List).OfType<ListViewItem>().ToArray();
             Check(firstRows.Length > 0 && firstRows.Length < 64, "multiword rows remain virtualized");
             f.List.ScrollIntoView(lines[^1]);
             await Drain();
-            var lastRows = Visuals(f.List).OfType<ListBoxItem>().ToArray();
+            var lastRows = Visuals(f.List).OfType<ListViewItem>().ToArray();
             Check(lastRows.Length > 0 && lastRows.Length < 64, "scrolling retains a bounded row cache");
             Check(lastRows.Any(firstRows.Contains), "multiword row containers are actually recycled");
             foreach (var word in f.Words)
@@ -259,9 +262,9 @@ public static class MusicLyricAnimationTests
             await Drain();
             var beforeReflow = f.Words.Where(f.Visible).ToHashSet();
             var rowHeight = lastRows.Max(row => row.ActualHeight);
-            f.Window.Width = 210;
+            f.Window.Resize(210, 220);
             await Drain();
-            Check(Visuals(f.List).OfType<ListBoxItem>().Any(row => row.ActualHeight > rowHeight),
+            Check(Visuals(f.List).OfType<ListViewItem>().Any(row => row.ActualHeight > rowHeight),
                 "the real wrap panel reflows multiword rows");
             Check(f.Words.Where(f.Visible).Any(beforeReflow.Contains), "reflow preserves realized word controls");
             foreach (var word in f.Words.Where(f.Visible))
@@ -273,7 +276,7 @@ public static class MusicLyricAnimationTests
             foreach (var word in f.Words)
                 Equal(AnimationEnabled && f.Visible(word) && word.Word!.Time == .1, Animated(word));
             var hidden = f.Words.First(word => f.Visible(word) && word.Word!.Time == .1);
-            hidden.Visibility = Visibility.Hidden;
+            hidden.Visibility = Visibility.Collapsed;
             Check(!Animated(hidden), "hiding an individual word immediately retires its clock");
             await Drain();
             Check(!Animated(hidden), "viewport refresh leaves a hidden word stopped");
@@ -299,69 +302,30 @@ public static class MusicLyricAnimationTests
             foreach (var word in f.Words)
                 Check(!Animated(word) || f.Visible(word), "reload leaves cached pages stopped");
         });
-        yield return Case("compositor motion retains swept clocks and retires them on completion or cancellation", async () =>
+        yield return Case("compositor scrolling keeps active clocks viewport bounded and cancellation settles", async () =>
         {
             using var f = Fixture.WithLines(MultiwordLines(), position: 1);
             await f.Ready();
-            var start = f.Words.Where(word => f.Visible(word) && word.Word!.Time == .1)
-                .Select(word => word.Word!).ToHashSet<MusicLyricWord>(ReferenceEqualityComparer.Instance);
             var scroll = Visuals(f.List).OfType<ScrollViewer>().First();
-            var offset = scroll.VerticalOffset;
-            scroll.ScrollToVerticalOffset(offset + scroll.ViewportHeight * .75);
-            f.Window.UpdateLayout(); await Drain();
-            var end = f.Words.Where(word => f.Visible(word) && word.Word!.Time == .1)
-                .Select(word => word.Word!).ToHashSet<MusicLyricWord>(ReferenceEqualityComparer.Instance);
-            Check(start.Any(source => !end.Contains(source)) && end.Any(source => !start.Contains(source)),
-                "the native offset changes actual visible rows");
-            var swept = start.Concat(end).ToHashSet<MusicLyricWord>(ReferenceEqualityComparer.Instance);
-            Check(swept.All(source => f.Words.Any(word => ReferenceEquals(word.Word, source))),
-                "one cache page realizes the source words from both viewport endpoints");
-            var presenter = Visuals(f.List).OfType<ItemsPresenter>().First();
-            var from = scroll.VerticalOffset - offset;
-            var translation = new TranslateTransform(0, from);
-            presenter.RenderTransform = translation;
-            f.List.BeginPresentationMotion(translation, from);
-            await Drain();
-            foreach (var word in f.Words)
-                Equal(AnimationEnabled && swept.Contains(word.Word!), Animated(word));
-            translation.Y = 0;
-            translation.BeginAnimation(TranslateTransform.YProperty,
-                new DoubleAnimation(from, 0, TimeSpan.FromMilliseconds(420)) { FillBehavior = FillBehavior.Stop });
-            await Task.Delay(120);
-            // A real layout pass during motion must keep both endpoints, even though
-            // TransformToAncestor now includes an intermediate presentation offset.
-            f.List.InvalidateArrange();
-            f.List.Position = 1.2;
-            f.List.PlaybackRate = 2;
-            await Drain();
-            foreach (var word in f.Words)
-                Equal(AnimationEnabled && swept.Contains(word.Word!), Animated(word));
-            await Task.Delay(360); await Drain();
-            translation.BeginAnimation(TranslateTransform.YProperty, null);
-            translation.Y = 0;
-            f.List.EndPresentationMotion(translation);
-            await Drain();
+            var before = f.Words.Where(f.Visible).Select(word => word.Word).ToHashSet();
+            var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            double target = scroll.VerticalOffset + scroll.ViewportHeight * .75;
+            MusicLyricScroll.Move(scroll, target, () => completed.TrySetResult());
+            await completed.Task.WaitAsync(TimeSpan.FromSeconds(5)); await Drain();
+            Near(target, scroll.VerticalOffset, .5, "native scrolling reaches the requested offset");
+            Check(f.Words.Where(f.Visible).Any(word => !before.Contains(word.Word)), "actual visible rows change");
             foreach (var word in f.Words)
                 Equal(AnimationEnabled && f.Visible(word) && word.Word!.Time == .1, Animated(word));
-            Equal(1.2, f.List.Position);
-            scroll.ScrollToVerticalOffset(offset);
-            f.Window.UpdateLayout(); await Drain();
-            var reverse = -from;
-            translation.Y = reverse;
-            f.List.BeginPresentationMotion(translation, reverse);
+            f.List.Position = 1.2; f.List.PlaybackRate = 2; await Drain();
+            bool cancelledCompleted = false;
+            MusicLyricScroll.Move(scroll, 0, () => cancelledCompleted = true);
+            MusicLyricScroll.Stop(scroll);
             await Drain();
+            double stopped = scroll.VerticalOffset; await Task.Delay(550); await Drain();
+            Check(!cancelledCompleted, "cancelled scrolling cannot complete an obsolete preview");
+            Near(stopped, scroll.VerticalOffset, .5, "cancellation stops physical movement");
             foreach (var word in f.Words)
-                Equal(AnimationEnabled && swept.Contains(word.Word!), Animated(word));
-            translation.Y = 0;
-            translation.BeginAnimation(TranslateTransform.YProperty,
-                new DoubleAnimation(reverse, 0, TimeSpan.FromMilliseconds(420)));
-            await Task.Delay(120);
-            translation.BeginAnimation(TranslateTransform.YProperty, null);
-            translation.Y = 0;
-            f.List.EndPresentationMotion(translation);
-            await Drain();
-            foreach (var word in f.Words)
-                Equal(AnimationEnabled && f.Visible(word) && word.Word!.Time == .1, Animated(word));
+                Check(!Animated(word) || f.Visible(word), "no hidden words keep animation clocks after cancellation");
             Equal(1.2, f.List.Position);
         });
         yield return Case("recycled rows keep viewport bounded animation and newly visible words use the current sample", async () =>
@@ -370,13 +334,13 @@ public static class MusicLyricAnimationTests
             using var f = new Fixture(lyrics, position: 1);
             await f.Ready();
             var first = f.Words.First();
-            var initialRows = Visuals(f.List).OfType<ListBoxItem>().ToArray();
+            var initialRows = Visuals(f.List).OfType<ListViewItem>().ToArray();
             Check(initialRows.Length > 0 && initialRows.Length < 64, "real virtualization bounds containers");
             foreach (var word in f.Words)
                 Check(!Animated(word) || f.Visible(word), "cached offscreen rows have no word clock");
             f.List.ScrollIntoView(lyrics[^1]);
             await Drain();
-            var rows = Visuals(f.List).OfType<ListBoxItem>().ToArray();
+            var rows = Visuals(f.List).OfType<ListViewItem>().ToArray();
             Check(rows.Length > 0 && rows.Length < 64, "visiting the last row keeps virtualization enabled");
             Check(rows.Any(row => initialRows.Contains(row)), "actual containers are recycled");
             foreach (var word in f.Words)
@@ -404,46 +368,46 @@ public static class MusicLyricAnimationTests
             Check(word.DesiredSize.Width > small.Width && word.DesiredSize.Height > small.Height,
                 "font and direction changes invalidate text metrics");
             Near(.2, word.WordProgress, .001, "reformatting preserves the sampled progress");
-            Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(word));
-            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(word));
-            Equal("中文🙂 e\u0301 العربية", UIElementAutomationPeer.CreatePeerForElement(word)!.GetName());
+            Check(Glyphs(word).All(text => text.FontWeight == FontWeights.Normal && text.FlowDirection == FlowDirection.RightToLeft),
+                "native text keeps regular weight and the current direction");
+            Equal("中文🙂 e\u0301 العربية", FrameworkElementAutomationPeer.CreatePeerForElement(word)!.GetName());
         });
         yield return Case("repeated center requests share completion and cancellation retires pending settlement", async () =>
         {
             using var f = Fixture.WithLines(MultiwordLines(), position: 1);
             await f.Ready();
             var scroll = Visuals(f.List).OfType<ScrollViewer>().First();
-            var presenter = Visuals(f.List).OfType<ItemsPresenter>().First();
-            var translation = new TranslateTransform();
-            presenter.RenderTransform = translation;
             var completions = 0;
             void Settled() => completions++;
-            MusicLyricScroll.Move(scroll, 1500, translation, f.List, Settled);
-            await Task.Delay(200);
-            MusicLyricScroll.Move(scroll, 1500, translation, f.List, Settled);
-            await Task.Delay(200);
-            MusicLyricScroll.Move(scroll, 1500, translation, f.List, Settled);
-            await Task.Delay(150); await Drain();
-            Equal(AnimationEnabled ? 1 : 3, completions);
-            Near(1500, scroll.VerticalOffset, .5, "same target completes from its original start under 200ms requests");
+            MusicLyricScroll.Move(scroll, 1500, Settled);
+            MusicLyricScroll.Move(scroll, 1500, Settled);
+            MusicLyricScroll.Move(scroll, 1500, Settled);
+            var deadline = System.Diagnostics.Stopwatch.StartNew();
+            while (completions == 0)
+            {
+                if (deadline.Elapsed > TimeSpan.FromSeconds(5)) throw new TimeoutException("Native lyric scroll did not settle.");
+                await Task.Delay(10); await Drain();
+            }
+            Equal(1, completions);
+            Near(1500, scroll.VerticalOffset, .5, "same in-flight target completes once instead of restarting");
             var completed = completions;
-            MusicLyricScroll.Move(scroll, 300, translation, f.List, Settled);
+            MusicLyricScroll.Move(scroll, 300, Settled);
             MusicLyricScroll.Stop(scroll);
             await Task.Delay(550); await Drain();
             Equal(completed, completions);
-            Near(0, translation.Y, .001, "cancellation retires the presentation transform");
-            Check(!translation.HasAnimatedProperties, "cancellation removes the automatic clock");
+            double stopped = scroll.VerticalOffset; await Task.Delay(150); await Drain();
+            Near(stopped, scroll.VerticalOffset, .5, "cancellation removes the native scrolling motion");
         });
     }
 
-    private static bool AnimationEnabled => SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast;
+    private static bool AnimationEnabled => MusicVisuals.Animate;
     private static TestCase Case(string name, Func<Task> run) =>
         new("music-lyric-animation: " + name, () => MusicQualityConsumerTests.Sta(run));
 
     private sealed class Fixture : IDisposable
     {
         internal MusicLyricList List { get; }
-        internal Window Window { get; }
+        internal DesktopWindow Window { get; }
         internal IEnumerable<MusicLyricWordView> Words => Visuals(List).OfType<MusicLyricWordView>();
 
         internal Fixture(MusicLyricWord[] words, double position) : this(words, WordTemplate(), position) { }
@@ -451,26 +415,8 @@ public static class MusicLyricAnimationTests
         internal static Fixture WithLines(MusicLyricWord[][] lines, double position) =>
             new(lines, LineTemplate(), position);
 
-        private static DataTemplate WordTemplate()
-        {
-            var factory = new FrameworkElementFactory(typeof(MusicLyricWordView));
-            factory.SetBinding(MusicLyricWordView.WordProperty, new Binding());
-            factory.SetValue(Control.FontSizeProperty, 20d);
-            factory.SetValue(Control.FontWeightProperty, FontWeights.Normal);
-            factory.SetValue(Control.ForegroundProperty, Brushes.Gray);
-            factory.SetValue(MusicLyricWordView.HighlightProperty, Brushes.White);
-            return new DataTemplate { VisualTree = factory };
-        }
-
-        private static DataTemplate LineTemplate()
-        {
-            var factory = new FrameworkElementFactory(typeof(ItemsControl));
-            factory.SetBinding(ItemsControl.ItemsSourceProperty, new Binding());
-            factory.SetValue(ItemsControl.ItemTemplateProperty, WordTemplate());
-            factory.SetValue(ItemsControl.ItemsPanelProperty,
-                new ItemsPanelTemplate(new FrameworkElementFactory(typeof(WrapPanel))));
-            return new DataTemplate { VisualTree = factory };
-        }
+        private static DataTemplate WordTemplate() => MusicTestUi.Template("<local:MusicLyricWordView Word='{Binding}' FontSize='20' FontWeight='Normal' Foreground='Gray' Highlight='White'/>");
+        private static DataTemplate LineTemplate() => MusicTestUi.Template("<ItemsControl ItemsSource='{Binding}'><ItemsControl.ItemsPanel><ItemsPanelTemplate><local:MusicWrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel><ItemsControl.ItemTemplate><DataTemplate><local:MusicLyricWordView Word='{Binding}' FontSize='20' FontWeight='Normal' Foreground='Gray' Highlight='White'/></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>");
 
         private Fixture(System.Collections.IEnumerable items, DataTemplate template, double position)
         {
@@ -478,34 +424,26 @@ public static class MusicLyricAnimationTests
             {
                 ItemsSource = items, ItemTemplate = template, HorizontalContentAlignment = HorizontalAlignment.Stretch,
                 Position = position, IsPlaying = true, PlaybackRate = 1, PresentationKey = "occurrence:1",
-                Background = Brushes.Black, BorderThickness = new Thickness(0), Padding = new Thickness(0)
+                Background = MusicVisuals.Brush("#000000"), BorderThickness = new Thickness(0), Padding = new Thickness(0)
             };
-            TextOptions.SetTextFormattingMode(List, TextFormattingMode.Display);
-            TextOptions.SetTextRenderingMode(List, TextRenderingMode.Auto);
-            ScrollViewer.SetCanContentScroll(List, true);
+            List.ItemsPanel = (ItemsPanelTemplate)XamlReader.Load("<ItemsPanelTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'><ItemsStackPanel CacheLength='1'/></ItemsPanelTemplate>");
             ScrollViewer.SetHorizontalScrollBarVisibility(List, ScrollBarVisibility.Disabled);
-            VirtualizingPanel.SetIsVirtualizing(List, true);
-            VirtualizingPanel.SetVirtualizationMode(List, VirtualizationMode.Recycling);
-            VirtualizingPanel.SetScrollUnit(List, ScrollUnit.Pixel);
-            VirtualizingPanel.SetCacheLength(List, new VirtualizationCacheLength(1));
-            VirtualizingPanel.SetCacheLengthUnit(List, VirtualizationCacheLengthUnit.Page);
-            Window = new Window
-            {
-                Content = List, Width = 420, Height = 220, ShowInTaskbar = false,
-                WindowStyle = WindowStyle.None, Left = -32000, Top = -32000
-            };
-            Window.Show();
+            Window = new DesktopWindow { Content = List }; Window.AttachRoot(); Window.Resize(420, 220); Window.Activate();
         }
 
         internal async Task Ready()
         {
-            Window.UpdateLayout(); await Drain();
-            Check(List.IsLoaded && List.IsVisible && Words.Any(), "native HWND realizes lyric words");
+            List.UpdateLayout(); await Drain();
+            Check(List.IsLoaded && List.Visibility == Visibility.Visible && Words.Any(), "native HWND realizes lyric words");
         }
 
-        internal bool Visible(MusicLyricWordView word) => word.IsVisible && word.IsArrangeValid &&
-            word.RenderSize.Width > 0 && word.RenderSize.Height > 0 && List.IsAncestorOf(word) &&
-            word.TransformToAncestor(List).TransformBounds(new Rect(word.RenderSize)).IntersectsWith(new Rect(List.RenderSize));
+        internal bool Visible(MusicLyricWordView word)
+        {
+            if (word.Visibility != Visibility.Visible || word.ActualWidth <= 0 || word.ActualHeight <= 0 || !MusicVisuals.IsWithin(word, List)) return false;
+            var bounds = word.TransformToVisual(List).TransformBounds(new Rect(0, 0, word.ActualWidth, word.ActualHeight));
+            bounds.Intersect(new Rect(0, 0, List.ActualWidth, List.ActualHeight));
+            return !bounds.IsEmpty;
+        }
 
         public void Dispose() => Window.Close();
     }
@@ -516,24 +454,9 @@ public static class MusicLyricAnimationTests
             new("随后 e\u0301 ", 6.1, 6), new("العربية ", 12.1, 6)
         }).ToArray();
 
-    private static bool Animated(MusicLyricWordView word)
-    {
-        static bool HasClock(DrawingGroup group) => group.ClipGeometry?.HasAnimatedProperties == true ||
-            group.Children.OfType<DrawingGroup>().Any(HasClock);
-        return VisualTreeHelper.GetDrawing(word) is { } drawing && HasClock(drawing);
-    }
-
-    private static IEnumerable<GlyphRun> Glyphs(MusicLyricWordView word)
-    {
-        static IEnumerable<GlyphRun> Runs(Drawing drawing)
-        {
-            if (drawing is GlyphRunDrawing glyph) yield return glyph.GlyphRun;
-            if (drawing is DrawingGroup group)
-                foreach (var child in group.Children)
-                    foreach (var run in Runs(child)) yield return run;
-        }
-        return VisualTreeHelper.GetDrawing(word) is { } drawing ? Runs(drawing) : [];
-    }
+    private static bool Animated(MusicLyricWordView word) => word.IsHighlightAnimating;
+    private static IEnumerable<TextBlock> Glyphs(MusicLyricWordView word) =>
+        Visuals(word).OfType<TextBlock>().Where(text => text.Visibility == Visibility.Visible && text.Text.Length > 0);
 
     private static IEnumerable<DependencyObject> Visuals(DependencyObject root)
     {
@@ -542,10 +465,7 @@ public static class MusicLyricAnimationTests
             foreach (var child in Visuals(VisualTreeHelper.GetChild(root, i))) yield return child;
     }
 
-    private static async Task Drain()
-    {
-        for (var i = 0; i < 3; i++) await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-    }
+    private static Task Drain() => MusicTestUi.Drain();
     private static void Check(bool value, string message)
     { if (!value) throw new InvalidOperationException(message); }
     private static void Equal<T>(T expected, T actual)

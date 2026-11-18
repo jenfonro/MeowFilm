@@ -985,3 +985,27 @@ the still-unverified final binary/distribution legally or technically accepted.
   decoder for replacement-rule image import; no camera or network decoder.
 - The NuGet package declares Apache-2.0; upstream `COPYING` contains the same
   license. License text: `Apache-2.0.txt`, already in the Windows license manifest.
+
+## Microsoft Windows App SDK (Windows)
+
+- NuGet `Microsoft.WindowsAppSDK` 1.8.260921001, with exact transitive versions
+  and package hashes recorded in the Windows `packages.lock.json` files.
+- The Windows presentation uses WinUI 3 and a page-owned `SwapChainPanel`.
+  Decoding, playback state and native resource retirement remain application
+  responsibilities; no upstream player controls are incorporated.
+- `WindowsAppSDK-LICENSE.txt` and `WindowsAppSDK-NOTICE.txt` are the unmodified
+  license and notice supplied by that NuGet package. They are included in the
+  Windows license manifest. The SDK's redistribution terms apply to the files
+  placed with the application by its NuGet build targets; this notice does not
+  independently certify the final distribution.
+
+## Microsoft Win2D (Windows)
+
+- NuGet `Microsoft.Graphics.Win2D` 1.4.0 (`Win2d.githash.txt`:
+  `57e06e2c24703526f500035129251d063881a44d`), from
+  [microsoft/Win2D](https://github.com/microsoft/Win2D), locked in
+  `MeowFilm.Desktop` and downstream Windows `packages.lock.json` files.
+- Copyright (c) Microsoft Corporation. Used by `SidebarBackdrop` for compositor
+  `GaussianBlurEffect` over the dedicated shell background visual surface.
+- License text: `Win2D-MIT.txt` (upstream `LICENSE.txt`), included in the
+  Windows license manifest.

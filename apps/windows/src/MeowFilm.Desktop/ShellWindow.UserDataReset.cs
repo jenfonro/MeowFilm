@@ -1,20 +1,22 @@
-using System.Windows;
-using System.Windows.Input;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Input;
+using Windows.System;
 
 namespace MeowFilm.Desktop;
 
 public sealed partial class ShellWindow
 {
     private readonly Func<Task>? _resetUserData;
-    private IInputElement? _resetFocus;
+    private DependencyObject? _resetFocus;
     private bool _userDataResetStarted, _userDataResetBusy;
 
     private void ConfirmUserDataReset()
     {
         if (_resetUserData is null || _isClosing || _isClosed || _sessionEnding ||
             _closeChoiceQueued || CloseDialog.IsOpen || ResetDialog.IsOpen) return;
-        _resetFocus = Keyboard.FocusedElement;
-        RootLayout.IsEnabled = NotificationOverlay.IsEnabled = false;
+        _resetFocus = DesktopVisual.Focused(Root);
+        RootInteractionGate.IsEnabled = NotificationInteractionGate.IsEnabled = false;
         ResetDialog.Open();
     }
 
@@ -22,10 +24,10 @@ public sealed partial class ShellWindow
     {
         if (_userDataResetStarted || !ResetDialog.IsOpen || _isClosing || _sessionEnding) return;
         ResetDialog.Visibility = Visibility.Collapsed;
-        RootLayout.IsEnabled = NotificationOverlay.IsEnabled = true;
+        RootInteractionGate.IsEnabled = NotificationInteractionGate.IsEnabled = true;
         var focus = _resetFocus;
         _resetFocus = null;
-        if (focus is UIElement { IsEnabled: true, IsVisible: true } target) target.Focus();
+        if (focus is Control { IsEnabled: true, Visibility: Visibility.Visible } target) target.Focus(FocusState.Programmatic);
     }
 
     private async void OnUserDataResetConfirmed()
@@ -72,7 +74,7 @@ public sealed partial class ShellWindow
     private void ShowUserDataResetFailure(string message)
     {
         if (_isClosed || _sessionEnding) return;
-        RootLayout.IsEnabled = NotificationOverlay.IsEnabled = false;
+        RootInteractionGate.IsEnabled = NotificationInteractionGate.IsEnabled = false;
         _state.SetShutdownConfirmation(false);
         ResetDialog.ShowFailure(message);
     }

@@ -1,12 +1,12 @@
+using Microsoft.UI.Xaml;
 using System.ComponentModel;
-using System.Windows.Controls;
 using MeowFilm.Media;
 
 namespace MeowFilm.Capabilities;
 
 internal interface IFilmNativeMedia : INotifyPropertyChanged
 {
-    ContentControl? View { get; }
+    FrameworkElement? View { get; }
     NativePlaybackScope? Scope { get; }
     string? Identity { get; }
     bool HasOutput { get; }
@@ -33,7 +33,7 @@ internal interface IFilmNativeMedia : INotifyPropertyChanged
 /// <summary>Movie-only adapter; source sessions and credentials retain their existing owners.</summary>
 internal sealed class FilmNativeMedia(FilmPlayback native) : IFilmNativeMedia
 {
-    public ContentControl View => native.VideoView;
+    public FrameworkElement View => native.VideoView;
     public string? Identity => native.Identity;
     public NativePlaybackScope? Scope => native.Scope;
     public bool HasOutput => native.HasOutput;

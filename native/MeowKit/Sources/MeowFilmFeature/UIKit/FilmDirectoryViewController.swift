@@ -57,9 +57,9 @@ final class FilmDirectoryViewController: FilmSettingsListController, FilmPlaybac
                 })
             }
         } else { displayedError = nil }
-        let reading = ownsSelection && selected?.browsing.error != nil
-        let directory = reading ? nil : model.loadedDirectory(sourceID: sourceID, lineID: lineID,
-            metadataSourceID: metadataSourceID, season: season)
+        let directory = ownsSelection && selected?.browsing.error != nil ? nil :
+            model.loadedDirectory(sourceID: sourceID, lineID: lineID,
+                                  metadataSourceID: metadataSourceID, season: season)
         guard let browsing = directory?.browsing else {
             let loading = model.presentation?.browsing.loading == true
             let state = failure != nil ? "加载失败" : loading ? "加载中" : "无可用视频源"

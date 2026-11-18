@@ -1,12 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
-    <UseWPF>true</UseWPF>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWinUI>true</UseWinUI>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="Film/Rules/FilmRuleDefaults.json" LogicalName="MeowFilm.FilmRuleDefaults.json" />
-    <Resource Include="Accounts/Presentation/Assets/*.png" />
-    <Resource Include="Film/Presentation/Assets/*.jpg" />
+    <Content Include="Accounts/Presentation/Assets/*.png" />
+    <Content Include="Film/Presentation/Assets/*.jpg" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="[10.0.15]" />
@@ -17,5 +17,16 @@
     <ProjectReference Include="../MeowFilm.Platform/MeowFilm.Platform.csproj" />
     <ProjectReference Include="../MeowFilm.Media/MeowFilm.Media.csproj" />
     <ProjectReference Include="../MeowFilm.Audio/MeowFilm.Audio.csproj" />
+  </ItemGroup>
+  <PropertyGroup>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSdkUndockedRegFreeWinRTInitialize>false</WindowsAppSdkUndockedRegFreeWinRTInitialize>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="[1.8.260921001]" />
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
   </ItemGroup>
 </Project>

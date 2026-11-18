@@ -34,7 +34,12 @@ try {
     $Exit = Invoke-WindowsLoggedTool -Executable $WindowsDotnet -WorkingDirectory $WindowsAppRoot `
         -Arguments @('build', $Project, '--configuration', 'Release', '--no-restore', '--nologo', '-nodeReuse:false') -Log (Join-Path $Run 'build.log')
     if ($Exit -ne 0) { $Result.status = 'failed'; $Result['exitCode'] = $Exit; exit $Exit }
-    $TestAssembly = Join-Path $Project 'bin\Release\net10.0-windows10.0.19041.0\MeowFilm.Windows.Tests.dll'
+    $TargetLog = Join-Path $Run 'target-path.log'
+    $Exit = Invoke-WindowsLoggedTool -Executable $WindowsDotnet -WorkingDirectory $WindowsAppRoot `
+        -Arguments @('msbuild', (Join-Path $Project 'MeowFilm.Windows.Tests.csproj'), '-nologo', '-p:Configuration=Release', '-getProperty:TargetPath') -Log $TargetLog
+    if ($Exit -ne 0) { $Result.status = 'failed'; $Result['exitCode'] = $Exit; exit $Exit }
+    $TestAssembly = Assert-WindowsPath -Owner $Project -Path (Get-Content -LiteralPath $TargetLog -Raw).Trim()
+    if (-not (Test-Path -LiteralPath $TestAssembly -PathType Leaf)) { throw 'Native test assembly is missing.' }
     $Exit = Invoke-WindowsLoggedTool -Executable $WindowsDotnet -Arguments (@($TestAssembly) + $Arguments) -Log (Join-Path $Run 'native.log')
     $Result['exitCode'] = $Exit
     if ($Exit -ne 0) { $Result.status = 'failed'; exit $Exit }

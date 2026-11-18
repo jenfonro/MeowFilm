@@ -1,5 +1,6 @@
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -7,15 +8,34 @@ namespace MeowFilm.Capabilities;
 public partial class SearchResultsView : UserControl, IDesktopHeaderSource
 {
     private readonly SearchResultsPage page;
-    internal ScrollViewer FilmScroll { get; }
+    internal ScrollViewer? FilmScroll => MusicVisuals.Descendant<ScrollViewer>(FilmItems);
     internal SearchResultsView(SearchResultsPage page)
     {
         this.page = page;
         InitializeComponent();
         DataContext = page;
-        FilmItems.ApplyTemplate();
-        FilmScroll = (ScrollViewer)FilmItems.Template.FindName("PART_ScrollViewer", FilmItems);
-        RegisterName(nameof(FilmScroll), FilmScroll);
+        Loaded += (_, _) => SizeFilmCards();
+    }
+    private void Film_SizeChanged(object sender, SizeChangedEventArgs e) => SizeFilmCards();
+    private void Film_ContainerChanging(ListViewBase sender, ContainerContentChangingEventArgs e)
+    {
+        if (!e.InRecycleQueue) e.RegisterUpdateCallback((_, _) => SizeFilmCards());
+    }
+    private void SizeFilmCards()
+    {
+        if (FilmItems.ItemsPanelRoot is not ItemsWrapGrid panel || FilmItems.ActualWidth <= 0) return;
+        var (_, pitch) = Shelf.MeasureCards(FilmItems.ActualWidth, 180, 36);
+        double width = Math.Max(0, pitch - 36);
+        panel.ItemWidth = pitch;
+        // Measure realized native cards; do not create a second image/visual tree for sizing.
+        double height = 0;
+        for (int i = 0; i < panel.Children.Count; i++)
+        {
+            if (MusicVisuals.Descendant<FilmCard>(panel.Children[i]) is not { } card) continue;
+            card.Measure(new Size(width, double.PositiveInfinity));
+            height = Math.Max(height, card.DesiredSize.Height + 36);
+        }
+        if (height > 0 && panel.ItemHeight != height) panel.ItemHeight = height;
     }
     public DesktopHeaderContribution Header => new("") { SearchTargetId = page.SelectedTarget, SearchContextId = page.SelectedTab };
     public event EventHandler? HeaderChanged;
@@ -37,7 +57,7 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
         HeaderChanged?.Invoke(this, EventArgs.Empty);
     }
     private FrameworkElement? novelLayout;
-    private WrapPanel? novelBooks, novelStatus;
+    private MusicWrapPanel? novelBooks, novelStatus;
     private TextBlock? novelState;
     private Button? novelMore, novelCancel;
     private NovelBook[] shownNovelBooks = [];
@@ -46,7 +66,7 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
         if (page.SelectedTab != "novel" || page.Novel is not { } module) return;
         if (novelLayout is null)
         {
-            var layout = new StackPanel(); novelStatus = new WrapPanel(); novelBooks = new WrapPanel(); novelState = NovelUi.Text("", muted: true);
+            var layout = new StackPanel(); novelStatus = new MusicWrapPanel(); novelBooks = new MusicWrapPanel(); novelState = NovelUi.Text("", muted: true);
             novelMore = NovelUi.Button("加载更多", () => _ = page.LoadMoreNovelAsync());
             novelCancel = NovelUi.Button("取消", module.Search.Cancel);
             layout.Children.Add(novelStatus); layout.Children.Add(novelBooks); layout.Children.Add(novelState);

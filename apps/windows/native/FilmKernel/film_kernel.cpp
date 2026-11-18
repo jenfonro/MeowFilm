@@ -727,11 +727,11 @@ struct Owner {
 std::once_flag logging;
 void no_log(void *, int, const char *, va_list) { }
 
-int prepare(Owner &owner, double position, void *hwnd)
+int prepare(Owner &owner, double position, void *display_window)
 {
     if (!std::isfinite(position) || position < 0) return MFK_INVALID_REQUEST;
     owner.renderer = std::make_unique<FilmRenderer>();
-    int result = owner.renderer->open(hwnd);
+    int result = owner.renderer->open(display_window);
     if (result != MFK_OK) return result;
     owner.format = avformat_alloc_context();
     if (!owner.format) return MFK_OPEN_FAILED;
@@ -890,37 +890,56 @@ int MFK_CALL mfk_create(const mfk_callbacks *callbacks, const char *uri, int for
         *result = owner.release(); return MFK_OK;
     } catch (...) { return MFK_OPEN_FAILED; }
 }
-int MFK_CALL mfk_prepare(void *opaque, double position, void *hwnd)
+int MFK_CALL mfk_prepare(void *opaque, double position, void *display_window)
 {
     if (!opaque) return MFK_INVALID_REQUEST;
     auto &owner = *static_cast<Owner *>(opaque);
     const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     int result;
-    try { result = prepare(owner, position, hwnd); }
+    try { result = prepare(owner, position, display_window); }
     catch (...) { result = MFK_OPEN_FAILED; }
     if (SUCCEEDED(apartment)) CoUninitialize();
     if (result != MFK_OK && result != MFK_CANCELLED) owner.fail(result);
     return result;
 }
-int MFK_CALL mfk_attach(void *opaque, void *hwnd)
+int MFK_CALL mfk_attach(void *opaque, const mfk_surface *surface, void **swapchain)
 {
+    if (!swapchain) return MFK_INVALID_REQUEST;
+    *swapchain = nullptr;
     if (!opaque) return MFK_INVALID_REQUEST;
+    auto &owner = *static_cast<Owner *>(opaque);
+    try {
+        std::lock_guard lock(owner.output_gate);
+        if (!owner.renderer) return MFK_RENDER_FAILED;
+        int result = owner.renderer->attach(surface, swapchain);
+        // Detach releases the target even when draining reports device loss.
+        if (!surface || result == MFK_OK) owner.target_attached = surface != nullptr;
+        return result;
+    } catch (...) { return MFK_RENDER_FAILED; }
+}
+int MFK_CALL mfk_surface_update(void *opaque, const mfk_surface *surface)
+{
+    if (!opaque || !surface) return MFK_INVALID_REQUEST;
     auto &owner = *static_cast<Owner *>(opaque);
     try {
         Frame frame, enhancement; double position; uint64_t generation;
         {
             std::lock_guard lock(owner.gate);
-            if (owner.retained) frame.reset(av_frame_clone(owner.retained.get()));
-            if (owner.retained_enhancement)
+            // Playing owners repaint on their presenter thread. Paused owners
+            // need their retained frame after resize, reveal or UI remount.
+            if (owner.paused && owner.retained) frame.reset(av_frame_clone(owner.retained.get()));
+            if (frame && owner.retained_enhancement)
                 enhancement.reset(av_frame_clone(owner.retained_enhancement.get()));
+            if ((owner.paused && owner.retained && !frame) ||
+                (frame && owner.retained_enhancement && !enhancement))
+                return MFK_DECODE_FAILED;
             position = owner.position;
             generation = owner.output_generation.load();
         }
         std::lock_guard lock(owner.output_gate);
-        if (!owner.renderer) return MFK_RENDER_FAILED;
-        int result = owner.renderer->attach(hwnd);
-        if (result == MFK_OK) owner.target_attached = hwnd != nullptr;
-        if (result == MFK_OK && owner.target_attached && frame && generation == owner.output_generation.load())
+        if (!owner.renderer || !owner.target_attached) return MFK_RENDER_FAILED;
+        int result = owner.renderer->surface_update(*surface);
+        if (result == MFK_OK && frame && owner.paused && generation == owner.output_generation.load())
             result = owner.renderer->present(frame.get(), enhancement.get(), owner.aspect, position);
         return result;
     } catch (...) { return MFK_RENDER_FAILED; }
@@ -940,9 +959,13 @@ int MFK_CALL mfk_start(void *opaque, int paused)
         {
             std::lock_guard output_lock(owner.output_gate);
             if (!owner.target_attached) return MFK_RENDER_FAILED;
+            const auto submitted = owner.renderer->submitted_pictures();
             int result = owner.renderer->present(first.base.get(), first.enhancement.get(),
                                                   owner.aspect, first.pts);
             if (result != MFK_OK) return result;
+            // A hidden or zero-sized surface accepts updates without Present.
+            // Do not start audio/workers or commit without the real first frame.
+            if (owner.renderer->submitted_pictures() == submitted) return MFK_RENDER_FAILED;
         }
         owner.committed = true; owner.paused = paused != 0;
         owner.state = owner.paused ? MFK_PAUSED : MFK_PLAYING;

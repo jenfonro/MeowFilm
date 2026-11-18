@@ -1,27 +1,24 @@
 using System.Collections.Specialized;
 using System.ComponentModel;
-using System.Globalization;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Data;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Data;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
 public partial class MusicSourcesSettingsView : UserControl
 {
-    private sealed class NotConverter : IValueConverter
-    {
-        public object Convert(object value, Type targetType, object parameter, CultureInfo culture) => value is not true;
-        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => value is not true;
-    }
-    public static readonly IValueConverter Not = new NotConverter();
     public static readonly DependencyProperty CompactColumnsProperty = DependencyProperty.Register(
         nameof(CompactColumns), typeof(bool), typeof(MusicSourcesSettingsView), new PropertyMetadata(false));
     public bool CompactColumns { get => (bool)GetValue(CompactColumnsProperty); private set => SetValue(CompactColumnsProperty, value); }
     private bool initialized;
     private bool rowsPending;
+    private bool networkShowing, editShowing;
+    private Task networkPresentation = Task.CompletedTask, editPresentation = Task.CompletedTask;
     private MusicCapability? activeOwner;
     private MusicCapability? rowsOwner;
     private MusicSourceRow? editing;
@@ -29,7 +26,7 @@ public partial class MusicSourcesSettingsView : UserControl
     private long networkSession;
     private long networkTransferSession;
     private MusicCapability? Module => DataContext as MusicCapability;
-    private bool Active => initialized && IsLoaded && IsVisible && IsEnabled && Module is not null;
+    private bool Active => initialized && IsLoaded && DesktopVisual.IsVisible(this) && IsEnabled && Module is not null;
     private bool Ready => Active && Module is { CanEdit: true };
 
     public MusicSourcesSettingsView()
@@ -37,6 +34,8 @@ public partial class MusicSourcesSettingsView : UserControl
         InitializeComponent();
         initialized = true;
         BindRows();
+        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => UpdateActivation());
+        LayoutUpdated += (_, _) => { if (Active != (activeOwner is not null)) UpdateActivation(); };
         IsEnabledChanged += (_, _) => { if (!IsEnabled) { CloseEdit(); CloseNetwork(); } };
         SourceList.SelectionChanged += () =>
         {
@@ -54,7 +53,6 @@ public partial class MusicSourcesSettingsView : UserControl
         CloseEdit();
         CloseNetwork();
     }
-    private void View_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e) => UpdateActivation();
 
     private void UpdateActivation()
     {
@@ -82,13 +80,13 @@ public partial class MusicSourcesSettingsView : UserControl
     {
         if (rowsPending) return;
         rowsPending = true;
-        Dispatcher.BeginInvoke(new Action(() => { rowsPending = false; RenderRows(); }));
+        DispatcherQueue.TryEnqueue(() => { rowsPending = false; RenderRows(); });
     }
 
     private void RenderRows()
     {
         var rows = Module?.Sources.Select(row => new ManagementRow(row.Key, row.Name, "", row.Enabled,
-            () => OpenEdit(row), enabled => _ = Module!.SetSourceEnabledAsync(row, enabled), new ContextMenu(),
+            () => OpenEdit(row), enabled => _ = Module!.SetSourceEnabledAsync(row, enabled), new MenuFlyout(),
             Cells: () => SourceCells(row))).ToArray() ?? [];
         SourceList.SetRows(rows, rows.Length, rows.Select(row => row.Id), "");
     }
@@ -97,7 +95,7 @@ public partial class MusicSourcesSettingsView : UserControl
         new[] { "Source.Enabled", "Source.Name", "Source.Type", "Source.Health", "Source.Platforms", "Source.Actions" }
             .Select(key =>
             {
-                var cell = (FrameworkElement)((DataTemplate)FindResource(key)).LoadContent();
+                var cell = (FrameworkElement)((DataTemplate)DesktopVisual.Resource(this, key)).LoadContent();
                 cell.DataContext = row;
                 return cell;
             }).ToArray();
@@ -107,9 +105,9 @@ public partial class MusicSourcesSettingsView : UserControl
         new("状态", new(100)), new("平台", new(CompactColumns ? 0 : 332)), new("操作", new(224))
     ]);
 
-    private void View_DataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
+    private void View_DataContextChanged(FrameworkElement sender, DataContextChangedEventArgs e)
     {
-        if (initialized) NetworkAddress.Clear();
+        if (initialized) NetworkAddress.Text = "";
         BindRows();
         UpdateActivation();
     }
@@ -123,15 +121,15 @@ public partial class MusicSourcesSettingsView : UserControl
         SetColumns();
     }
 
-    private bool Current(FrameworkElement element, MusicSourceRow row) =>
-        Active && element.IsLoaded && element.IsVisible && element.IsEnabled &&
+    private bool Current(Control element, MusicSourceRow row) =>
+        Active && element.IsLoaded && DesktopVisual.IsVisible(element) && element.IsEnabled &&
         ReferenceEquals(element.DataContext, row) && Module!.Sources.Contains(row);
 
     private async void SourceEnabled_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not CheckBox { DataContext: MusicSourceRow row } box || Module is not { } module) return;
         if (Current(box, row)) await module.SetSourceEnabledAsync(row, box.IsChecked == true);
-        box.GetBindingExpression(ToggleButton.IsCheckedProperty)?.UpdateTarget();
+        box.IsChecked = row.Enabled;
     }
     private void Check_Click(object sender, RoutedEventArgs e)
     {
@@ -160,18 +158,20 @@ public partial class MusicSourcesSettingsView : UserControl
     {
         if (Ready) _ = Module!.ImportSourceAsync();
     }
-    private void ImportNetwork_Click(object sender, RoutedEventArgs e)
+    private async void ImportNetwork_Click(object sender, RoutedEventArgs e)
     {
         if (!Ready || Module is not { CanEditScripts: true }) return;
         CloseEdit();
+        await editPresentation;
+        if (!Ready || networkShowing) return;
         networkSession++;
-        NetworkPopup.PlacementTarget = this;
-        NetworkPopup.IsOpen = true;
-        NetworkAddress.Focus();
+        networkShowing = true;
+        try { networkPresentation = DialogPlacement.ShowAsync(this, NetworkPopup); await networkPresentation; }
+        finally { networkShowing = false; }
     }
     private async void Download_Click(object sender, RoutedEventArgs e)
     {
-        if (!Ready || !NetworkPopup.IsOpen || Module is not { CanEditScripts: true } owner) return;
+        if (!Ready || !networkShowing || Module is not { CanEditScripts: true } owner) return;
         long session = ++networkSession;
         networkTransferOwner = owner;
         networkTransferSession = session;
@@ -180,14 +180,14 @@ public partial class MusicSourcesSettingsView : UserControl
         PropertyChangedEventHandler cancelRetired = (_, args) =>
         {
             if (args.PropertyName == nameof(MusicCapability.CanCancelSourceTransfer) &&
-                (session != networkSession || !NetworkPopup.IsOpen || !Active || !ReferenceEquals(Module, owner)))
+                (session != networkSession || !networkShowing || !Active || !ReferenceEquals(Module, owner)))
                 owner.CancelSourceTransfer();
         };
         owner.PropertyChanged += cancelRetired;
         try
         {
             await owner.ImportSourceFromUrlAsync(NetworkAddress.Text);
-            if (session == networkSession && NetworkPopup.IsOpen && Active &&
+            if (session == networkSession && networkShowing && Active &&
                 ReferenceEquals(Module, owner) && owner.Status.Length == 0)
                 CloseNetwork();
         }
@@ -198,7 +198,7 @@ public partial class MusicSourcesSettingsView : UserControl
         }
     }
     private void NetworkCancel_Click(object sender, RoutedEventArgs e) => CloseNetwork();
-    private void NetworkPopup_Closed(object sender, EventArgs e)
+    private void NetworkPopup_Closed(ContentDialog sender, ContentDialogClosedEventArgs e)
     {
         networkSession++;
         networkTransferOwner?.CancelSourceTransfer();
@@ -206,7 +206,10 @@ public partial class MusicSourcesSettingsView : UserControl
     private void CloseNetwork()
     {
         if (!initialized) return;
-        NetworkPopup.IsOpen = false;
+        networkSession++;
+        networkTransferOwner?.CancelSourceTransfer();
+        networkShowing = false;
+        NetworkPopup.Hide();
     }
 
     /// <summary>Edits management facts only: the display name and a network source's address.</summary>
@@ -220,6 +223,8 @@ public partial class MusicSourcesSettingsView : UserControl
         if (!Ready || !row.IsScript || !Module!.Sources.Contains(row)) return;
         CloseNetwork();
         CloseEdit();
+        await Task.WhenAll(networkPresentation, editPresentation);
+        if (!Ready || !Module!.Sources.Contains(row)) return;
         editing = row;
         EditName.Text = row.Name;
         EditAddress.Text = "";
@@ -227,16 +232,29 @@ public partial class MusicSourcesSettingsView : UserControl
         EditAddressPanel.Visibility = network ? Visibility.Visible : Visibility.Collapsed;
         EditAddress.IsEnabled = !network;
         EditRollback.IsEnabled = row.RollbackAvailable;
-        EditPopup.PlacementTarget = this;
-        EditPopup.IsOpen = true;
-        EditName.Focus();
+        editShowing = true;
+        editPresentation = ShowEdit();
         if (!network) return;
         var address = await Module!.ReadSourceAddressAsync(row);
-        if (!ReferenceEquals(editing, row) || !EditPopup.IsOpen) return;
+        if (!ReferenceEquals(editing, row) || !editShowing) return;
         if (address is null) { CloseEdit(); return; }
         EditAddress.Text = address;
         EditAddress.IsEnabled = true;
     }
+    private async Task ShowEdit()
+    {
+        try { await DialogPlacement.ShowAsync(this, EditPopup); }
+        finally { editShowing = false; editing = null; }
+    }
+    private void SourceEnabled_Loaded(object sender, RoutedEventArgs args)
+    {
+        if (sender is CheckBox { DataContext: MusicSourceRow row } box)
+            box.SetBinding(IsEnabledProperty, new Binding { Source = Module,
+                Path = new PropertyPath(row.IsBuiltIn ? nameof(MusicCapability.CanEditOfficialSources) : nameof(MusicCapability.CanEditScripts)), Mode = BindingMode.OneWay });
+    }
+    private void CompactPlatforms_Loaded(object sender, RoutedEventArgs args) =>
+        ((FrameworkElement)sender).SetBinding(VisibilityProperty, new Binding { Source = this,
+            Path = new PropertyPath(nameof(CompactColumns)), Converter = (IValueConverter)DesktopVisual.Resource(this, "MeowFilm.BoolToVisibility"), Mode = BindingMode.OneWay });
     private void EditName_TextChanged(object sender, TextChangedEventArgs e) =>
         EditSave.IsEnabled = EditName.Text.Trim().Length > 0;
     private void EditSave_Click(object sender, RoutedEventArgs e)
@@ -257,6 +275,6 @@ public partial class MusicSourcesSettingsView : UserControl
     private void CloseEdit()
     {
         editing = null;
-        if (initialized) EditPopup.IsOpen = false;
+        if (initialized) { editShowing = false; EditPopup.Hide(); }
     }
 }

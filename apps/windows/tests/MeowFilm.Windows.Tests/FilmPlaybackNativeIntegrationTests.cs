@@ -2,9 +2,12 @@ using System.Text.Json;
 using System.IO;
 using MeowFilm.AppHost;
 using MeowFilm.Platform.Storage;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
+using MeowFilm.Desktop;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
@@ -14,11 +17,11 @@ using static MeowFilm.Windows.Tests.FilmPlaybackNativeFixture;
 namespace MeowFilm.Windows.Tests;
 
 // Selected independently; these require the actual packaged aggregate, Cat
-// Worker, film decode/render kernel and WPF video surface. No external network source.
+// Worker, film decode/render kernel and page-owned composition surface. No external network source.
 public static class FilmPlaybackNativeIntegrationTests
 {
     private static TestCase Case(string name, Func<Task> body) =>
-        new("film-native-integration: " + name, () => MusicQualityConsumerTests.Sta(body));
+        new("film-native-integration: " + name, () => TestUiHost.InvokeAsync(body));
 
     public static IEnumerable<TestCase> Cases()
     {
@@ -51,10 +54,10 @@ public static class FilmPlaybackNativeIntegrationTests
         Check((await f.CallsAsync()).Length == 0 && (await f.HistoryAsync()).Length == 0,
             "a non-auto browse session starts without Cat search/detail/play or history");
         int beforeMenu = f.Traffic.BusinessCalls;
-        var picker = f.Element<ComboBox>("SourcePicker");
+        var picker = f.Element<FilmSourcePicker>("SourcePicker");
         picker.IsDropDownOpen = true;
         await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-        Check(picker.IsDropDownOpen, "the actual WPF source dropdown opened");
+        Check(picker.IsDropDownOpen, "the actual WinUI source dropdown opened");
         picker.IsDropDownOpen = false;
         await f.SnapshotAsync(owner.Id); // Real endpoint barriers, not a guessed sleep.
         int menuCommands = f.Traffic.BusinessCalls - beforeMenu;
@@ -62,15 +65,15 @@ public static class FilmPlaybackNativeIntegrationTests
             "opening the source menu dispatches no Film command or Cat operation");
 
         picker.ApplyTemplate();
-        var popup = picker.Template.FindName("PART_Popup", picker) as Popup ??
+        var popup = picker.SourcePopup ??
             throw new InvalidOperationException("Missing source picker template popup");
-        var more = picker.Template.FindName("SearchMoreSourcesButton", picker) as Button ??
+        var more = picker.SearchMoreSourcesButton ??
             throw new InvalidOperationException("Missing source picker template search-more button");
         picker.IsDropDownOpen = true;
         await Until(() => picker.IsDropDownOpen && popup.IsOpen &&
-            more.IsLoaded && more.IsVisible && more.IsEnabled,
+            more.IsLoaded && DesktopVisual.IsVisible(more) && more.IsEnabled,
             "the real source popup exposes its loaded visible enabled search-more button");
-        more.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        ((IInvokeProvider)new ButtonAutomationPeer(more).GetPattern(PatternInterface.Invoke)).Invoke();
         await Until(() => !picker.IsDropDownOpen && !popup.IsOpen,
             "the actual search-more action closes its source popup");
         await Until(async () =>

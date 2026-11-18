@@ -1,14 +1,15 @@
 <UserControl x:Class="MeowFilm.Capabilities.PanAccountsView"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
- xmlns:local="clr-namespace:MeowFilm.Capabilities"
- xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
- Foreground="{DynamicResource MeowFilm.Brush.Text}">
+ xmlns:local="using:MeowFilm.Capabilities"
+ xmlns:desktop="using:MeowFilm.Desktop"
+ Foreground="{ThemeResource MeowFilm.Brush.Text}">
  <UserControl.Resources>
   <ResourceDictionary>
    <ResourceDictionary.MergedDictionaries>
-    <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/AccountSettingsTheme.xaml"/>
+    <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Presentation/AccountSettingsTheme.xaml"/>
    </ResourceDictionary.MergedDictionaries>
+   <local:AccountAccessibleNameConverter x:Key="Account.AccessibleName"/>
   </ResourceDictionary>
  </UserControl.Resources>
  <Grid x:Name="Root" Margin="0,12,0,0">
@@ -19,7 +20,7 @@
            AutomationProperties.Name="重新读取网盘账号"/>
   </StackPanel>
   <ScrollViewer x:Name="TableScroll" Grid.Row="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
-                Style="{StaticResource MeowFilm.SettingsScrollViewer}" CanContentScroll="False"
+                Style="{StaticResource MeowFilm.SettingsScrollViewer}"
                 AutomationProperties.Name="网盘账号表">
    <Grid x:Name="AccountTable" MinWidth="448" Width="{Binding ViewportWidth,ElementName=TableScroll}" VerticalAlignment="Top">
     <Grid.RowDefinitions><RowDefinition Height="30"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -30,7 +31,7 @@
      <TextBlock Grid.Column="2" Text="操作" Style="{StaticResource Account.Header}" HorizontalAlignment="Center"/>
     </Grid>
     <Border Grid.Row="1" Style="{StaticResource Settings.ListSurface}">
-     <ItemsControl x:Name="AccountRows" ItemsSource="{Binding Rows}" AlternationCount="2147483647">
+     <ItemsControl x:Name="AccountRows" ItemsSource="{Binding Rows}">
       <ItemsControl.ItemTemplate><DataTemplate>
        <Border Style="{StaticResource Account.Row}">
         <Grid x:Name="AccountCells">
@@ -41,34 +42,20 @@
                      Visibility="{Binding HasSnapshot,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
           <ProgressBar Height="3" Width="48" IsIndeterminate="True" HorizontalAlignment="Left"
                        Visibility="{Binding IsBusy,Converter={StaticResource MeowFilm.BoolToVisibility}}"
-                       VerticalAlignment="Bottom" Margin="0,0,0,14" AutomationProperties.Name="{Binding Name,StringFormat={}{0}正在处理}"/>
+                       VerticalAlignment="Bottom" Margin="0,0,0,14" AutomationProperties.Name="{Binding Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=正在处理}"/>
          </Grid>
          <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-          <Button Content="{Binding LoginText}" Click="Login_Click"
-                  IsEnabled="{Binding CanLogin}" AutomationProperties.Name="{Binding Name,StringFormat={}{0}登录}">
-           <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Settings.PrimaryButton}">
-            <Style.Triggers>
-             <DataTrigger Binding="{Binding Status}" Value="signedIn"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
-             <DataTrigger Binding="{Binding HasSnapshot}" Value="False"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
-            </Style.Triggers>
-           </Style></Button.Style>
+          <Button Content="{Binding LoginText}" Click="Login_Click" Style="{StaticResource Settings.PrimaryButton}" Visibility="{Binding ShowLogin,Converter={StaticResource MeowFilm.BoolToVisibility}}"
+                  IsEnabled="{Binding CanLogin}" AutomationProperties.Name="{Binding Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=登录}">
+
           </Button>
-          <Button Content="编辑" Click="EditCredentials_Click" IsEnabled="{Binding CanEdit}"
-                  AutomationProperties.Name="{Binding Name,StringFormat={}{0}编辑凭据}">
-           <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Settings.QuietButton}">
-            <Setter Property="Visibility" Value="Collapsed"/>
-            <Style.Triggers><DataTrigger Binding="{Binding Status}" Value="signedIn"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
-           </Style></Button.Style>
+          <Button Content="编辑" Click="EditCredentials_Click" Style="{StaticResource Settings.QuietButton}" Visibility="{Binding ShowEdit,Converter={StaticResource MeowFilm.BoolToVisibility}}" IsEnabled="{Binding CanEdit}"
+                  AutomationProperties.Name="{Binding Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=编辑凭据}">
+
           </Button>
-          <Button Content="退出登录" Click="Logout_Click" Margin="8,0,0,0" IsEnabled="{Binding CanLogout}"
-                  AutomationProperties.Name="{Binding Name,StringFormat={}{0}退出登录}">
-           <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Settings.QuietButton}">
-            <Setter Property="Visibility" Value="Collapsed"/>
-            <Style.Triggers>
-             <DataTrigger Binding="{Binding Status}" Value="signedIn"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
-             <DataTrigger Binding="{Binding Status}" Value="expired"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
-            </Style.Triggers>
-           </Style></Button.Style>
+          <Button Content="退出登录" Click="Logout_Click" Style="{StaticResource Settings.QuietButton}" Visibility="{Binding ShowLogout,Converter={StaticResource MeowFilm.BoolToVisibility}}" Margin="8,0,0,0" IsEnabled="{Binding CanLogout}"
+                  AutomationProperties.Name="{Binding Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=退出登录}">
+
           </Button>
          </StackPanel>
         </Grid>
@@ -79,24 +66,24 @@
    </Grid>
   </ScrollViewer>
   <desktop:NoticeOutlet Message="{Binding Notice}"/>
-  <Popup x:Name="LoginPopup" PlacementTarget="{Binding ElementName=Root}" desktop:DialogPlacement.Centered="True"
-         StaysOpen="False" AllowsTransparency="True" Opened="LoginPopup_Opened" Closed="LoginPopup_Closed" DataContext="{Binding}">
+  <ContentDialog x:Name="LoginPopup"
+         Opened="LoginPopup_Opened" Closed="LoginPopup_Closed" DataContext="{Binding}">
    <local:AccountLoginSurface x:Name="LoginSurface" Title="{Binding LoginTitle}"
           Style="{StaticResource Account.LoginSurface}" CloseRequested="CloseLogin_Click">
     <StackPanel>
-     <Border x:Name="MethodBar" Background="{DynamicResource Settings.Brush.Active}" CornerRadius="6" Padding="2" Margin="0,0,0,16"
+     <Border x:Name="MethodBar" Background="{ThemeResource Settings.Brush.Active}" CornerRadius="6" Padding="2" Margin="0,0,0,16"
              Visibility="{Binding LoginRow.SupportsQr,Converter={StaticResource MeowFilm.BoolToVisibility}}">
-      <UniformGrid Columns="2" IsEnabled="{Binding CanChangeMethod}">
+      <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
        <Button x:Name="QrModeButton" Content="二维码登录" Style="{StaticResource Login.Segment}" Click="QrMode_Click"
-               Tag="{Binding Visibility,ElementName=QrPanel}"/>
-       <Button x:Name="ManualModeButton" Content="手动填写 Cookie" Style="{StaticResource Login.Segment}" Click="ManualMode_Click"
-               Tag="{Binding Visibility,ElementName=ManualPanel}"/>
-      </UniformGrid>
+               IsEnabled="{Binding CanChangeMethod}" Tag="{Binding Visibility,ElementName=QrPanel}"/>
+       <Button Grid.Column="1" x:Name="ManualModeButton" Content="手动填写 Cookie" Style="{StaticResource Login.Segment}" Click="ManualMode_Click"
+               IsEnabled="{Binding CanChangeMethod}" Tag="{Binding Visibility,ElementName=ManualPanel}"/>
+      </Grid>
      </Border>
      <StackPanel x:Name="QrPanel" HorizontalAlignment="Center">
       <Border Style="{StaticResource Account.QrFrame}">
        <Grid>
-        <Image Source="{Binding QrImage}" Stretch="Uniform" RenderOptions.BitmapScalingMode="NearestNeighbor"
+        <Image Source="{Binding QrImage}" Stretch="Uniform"
                AutomationProperties.Name="{Binding QrAccessibleName}"/>
         <ProgressBar Height="3" IsIndeterminate="True" VerticalAlignment="Center"
                      Visibility="{Binding LoginBusy,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
@@ -108,7 +95,7 @@
                  HorizontalAlignment="Center" Margin="0,8,0,0" AutomationProperties.LiveSetting="Polite"/>
      </StackPanel>
      <StackPanel x:Name="ManualPanel" Visibility="Collapsed">
-      <StackPanel x:Name="CredentialInputs" IsEnabled="{Binding CanSave}"/>
+      <StackPanel x:Name="CredentialInputs"/>
       <Button x:Name="SaveCredentials" Content="保存" Style="{StaticResource Settings.PrimaryButton}" Click="Save_Click"
               IsEnabled="{Binding CanSave}" HorizontalAlignment="Right" Margin="0,4,0,0" AutomationProperties.Name="保存网盘凭据"/>
       <ProgressBar Height="3" IsIndeterminate="True" Margin="0,12,0,0"
@@ -116,11 +103,11 @@
      </StackPanel>
     </StackPanel>
    </local:AccountLoginSurface>
-  </Popup>
-  <Popup x:Name="LogoutPopup" desktop:DialogPlacement.Centered="True" StaysOpen="False" AllowsTransparency="True"
+  </ContentDialog>
+  <ContentDialog x:Name="LogoutPopup"
          Opened="LogoutPopup_Opened" Closed="LogoutPopup_Closed">
    <Border Width="216" Padding="16" Style="{StaticResource Settings.PopupSurface}">
-    <StackPanel KeyboardNavigation.TabNavigation="Cycle">
+    <StackPanel TabFocusNavigation="Cycle">
      <TextBlock Text="退出此账号？" Margin="0,0,0,14"/>
      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
       <Button x:Name="CancelLogout" Content="取消" Click="CancelLogout_Click" MinWidth="64" Style="{StaticResource Settings.QuietButton}"/>
@@ -129,6 +116,6 @@
      </StackPanel>
     </StackPanel>
    </Border>
-  </Popup>
+  </ContentDialog>
  </Grid>
 </UserControl>

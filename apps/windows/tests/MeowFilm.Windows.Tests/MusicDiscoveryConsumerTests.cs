@@ -1,11 +1,17 @@
+using MeowFilm.Desktop;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Search;
@@ -192,10 +198,10 @@ public static partial class MusicUiTests
         {
             await using var f = await DiscoveryScene.Create(); await f.Policy(); await f.Open();
             var view = (FrameworkElement)f.Module.View;
-            var host = new Border { Background = (System.Windows.Media.Brush)view.FindResource("MeowFilm.Brush.Window"), Child = view };
+            var host = new Border { Background = (Brush)DesktopVisual.Resource(view, "MeowFilm.Brush.Window"), Child = view };
             Render(host, 900, 760);
             var discovery = Visuals(view).OfType<MusicDiscoveryView>().Single();
-            True(discovery.IsVisible || discovery.Visibility == Visibility.Visible, "discovery is the selected control");
+            True(DesktopVisual.IsVisible(discovery) || discovery.Visibility == Visibility.Visible, "discovery is the selected control");
             True(!Visuals(view).OfType<MusicCatalogView>().Any(),
                 "discovery owns the content body; inactive catalog is unmounted");
             var button = Visuals(discovery).OfType<Button>().First(b => b.Tag is MusicDiscoveryKeyword word && word.Text == "热搜1");
@@ -210,7 +216,7 @@ public static partial class MusicUiTests
             view.Measure(new Size(900, 380)); view.Arrange(new Rect(0, 0, 900, 380)); view.UpdateLayout(); await Drain();
             var control = Visuals(view).OfType<MusicDiscoveryView>().Single();
             var scroll = Visuals(control).OfType<ScrollViewer>().Single();
-            scroll.ScrollToVerticalOffset(150); await Drain();
+            scroll.ChangeView(null, 150, null, true); await Drain();
             double offset = scroll.VerticalOffset; True(offset > 20, "real scrollable discovery");
             await f.Module.NavigateAsync("favorites", default); await f.Open(); await Drain();
             True(Math.Abs(scroll.VerticalOffset - offset) < 1, "back restores original offset, not cleared-content clamp");

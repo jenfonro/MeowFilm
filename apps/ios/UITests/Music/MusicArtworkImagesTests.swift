@@ -240,7 +240,7 @@ final class MusicArtworkImagesTests: XCTestCase {
     func testArtworkSlotsCoverByteReadDecodeAndStoreIncludingSuppliedBytes() async throws {
         let cache = ArtworkPresentationFixture(), data = png(), supplied = png(.blue)
         let network = ArtworkFlightNetwork(data)
-        let images = ArtworkImages(maximumBytes: MusicArtworkHTTP.maximumBytes, byteCache: cache) {
+        let images = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024, byteCache: cache) {
             await network.read($0)
         }
         let urls = (0..<6).map { URL(string: "https://artwork-cdn.invalid/slots/\($0).png")! }
@@ -374,7 +374,7 @@ final class MusicArtworkImagesTests: XCTestCase {
 
     func testLastArtworkCancellationKeepsSlotUntilUncooperativeReadReturns() async throws {
         let cache = ArtworkPresentationFixture(), network = ArtworkFlightNetwork(png())
-        let images = ArtworkImages(maximumBytes: MusicArtworkHTTP.maximumBytes, byteCache: cache) {
+        let images = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024, byteCache: cache) {
             await network.read($0)
         }
         let urls = (0..<5).map { URL(string: "https://artwork-cdn.invalid/cancel/\($0).png")! }
@@ -415,7 +415,7 @@ final class MusicArtworkImagesTests: XCTestCase {
 
     func testArtworkCloseSettlesQueuedDemandAndWaitsForUncooperativePhysicalReads() async {
         let cache = ArtworkPresentationFixture(), network = ArtworkFlightNetwork(png())
-        let images = ArtworkImages(maximumBytes: MusicArtworkHTTP.maximumBytes, byteCache: cache) {
+        let images = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024, byteCache: cache) {
             await network.read($0)
         }
         let urls = (0..<6).map { URL(string: "https://artwork-cdn.invalid/close/\($0).png")! }
@@ -451,7 +451,7 @@ final class MusicArtworkImagesTests: XCTestCase {
         for replaceCache in [false, true] {
             let cache = ArtworkPresentationFixture(), freshCache = replaceCache ? ArtworkPresentationFixture() : cache
             let network = ArtworkFlightNetwork(png())
-            let images = ArtworkImages(maximumBytes: MusicArtworkHTTP.maximumBytes, byteCache: cache) {
+            let images = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024, byteCache: cache) {
                 await network.read($0)
             }
             let urls = (0..<5).map { URL(string: "https://artwork-cdn.invalid/revision/\($0).png")! }

@@ -1,105 +1,49 @@
-using System.ComponentModel;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
+using Windows.UI.ViewManagement;
 
 namespace MeowFilm.Desktop;
 
-public sealed class LoadingSkeleton : Border
+public sealed class LoadingSkeleton : Grid
 {
-    public static readonly DependencyProperty IsActiveProperty = DependencyProperty.Register(
-        nameof(IsActive), typeof(bool), typeof(LoadingSkeleton),
-        new PropertyMetadata(true, (value, _) => ((LoadingSkeleton)value).Refresh()));
-
-    private static readonly DependencyProperty ToneProperty = DependencyProperty.Register(
-        "Tone", typeof(Brush), typeof(LoadingSkeleton),
-        new PropertyMetadata(Brushes.Gray, (value, _) => ((LoadingSkeleton)value).RefreshColors()));
-
-    private readonly TranslateTransform sweep = new();
-    private readonly LinearGradientBrush gradient = new()
-    {
-        StartPoint = new(0, .5), EndPoint = new(1, .5), SpreadMethod = GradientSpreadMethod.Reflect
-    };
-    private bool listening;
-    internal bool IsSweeping => sweep.HasAnimatedProperties;
-
+    public static readonly DependencyProperty IsActiveProperty = DependencyProperty.Register(nameof(IsActive), typeof(bool), typeof(LoadingSkeleton), new PropertyMetadata(true, (owner, _) => ((LoadingSkeleton)owner).Refresh()));
+    private readonly UISettings settings = new();
+    private readonly AccessibilitySettings accessibility = new();
+    private Storyboard? animation;
+    private IDisposable? visibility;
+    private bool observing;
+    internal bool IsSweeping => animation is not null;
+    public bool IsActive { get => (bool)GetValue(IsActiveProperty); set => SetValue(IsActiveProperty, value); }
     public LoadingSkeleton()
     {
         IsHitTestVisible = false;
-        Focusable = false;
-        gradient.GradientStops.Add(new(Colors.Transparent, 0));
-        gradient.GradientStops.Add(new(Colors.Transparent, .5));
-        gradient.GradientStops.Add(new(Colors.Transparent, 1));
-        gradient.RelativeTransform = sweep;
-        Background = gradient;
-        SetResourceReference(ToneProperty, "MeowFilm.Brush.Text");
-        Loaded += (_, _) => Refresh();
-        Unloaded += (_, _) => Stop();
-        IsVisibleChanged += (_, _) => Refresh();
-        RefreshColors();
-    }
-
-    public bool IsActive
-    {
-        get => (bool)GetValue(IsActiveProperty);
-        set => SetValue(IsActiveProperty, value);
-    }
-
-    protected override void OnPropertyChanged(DependencyPropertyChangedEventArgs e)
-    {
-        base.OnPropertyChanged(e);
-        if (e.Property == DesktopTheme.IsHighContrastProperty) Refresh();
-    }
-
-    private void RefreshColors()
-    {
-        if (gradient.GradientStops.Count == 0) return;
-        Color tone = (GetValue(ToneProperty) as SolidColorBrush)?.Color ?? Colors.Gray;
-        bool contrast = SystemParameters.HighContrast || DesktopTheme.GetIsHighContrast(this);
-        if (contrast) tone = SystemColors.WindowTextColor;
-        gradient.GradientStops[0].Color = Color.FromArgb(contrast ? (byte)80 : (byte)10, tone.R, tone.G, tone.B);
-        gradient.GradientStops[1].Color = Color.FromArgb(contrast ? (byte)80 : (byte)20, tone.R, tone.G, tone.B);
-        gradient.GradientStops[2].Color = gradient.GradientStops[0].Color;
-    }
-
-    private void Refresh()
-    {
-        if (!IsLoaded || !IsVisible || !IsActive) { Stop(); return; }
-        if (!listening)
+        this.UseResource(BackgroundProperty, "MeowFilm.Brush.Text");
+        Loaded += (_, _) =>
         {
-            SystemParameters.StaticPropertyChanged += OnSystemChanged;
-            listening = true;
-        }
-        RefreshColors();
-        UpdateAnimation(SystemParameters.ClientAreaAnimation,
-            SystemParameters.HighContrast || DesktopTheme.GetIsHighContrast(this));
+            settings.AnimationsEnabledChanged += MotionChanged; settings.ColorValuesChanged += ContrastChanged; observing = true;
+            visibility = DesktopVisual.ObserveVisibility(this, _ => Refresh());
+        };
+        Unloaded += (_, _) =>
+        {
+            visibility?.Dispose(); visibility = null; Stop();
+            if (!observing) return;
+            observing = false; settings.AnimationsEnabledChanged -= MotionChanged; settings.ColorValuesChanged -= ContrastChanged;
+        };
     }
-
-    // Kept separate so system preference transitions can be verified without changing OS settings.
+    private void MotionChanged(UISettings sender, object args) => DispatcherQueue.TryEnqueue(Refresh);
+    private void ContrastChanged(UISettings sender, object args) => DispatcherQueue.TryEnqueue(Refresh);
+    private void Refresh() => UpdateAnimation(settings.AnimationsEnabled, accessibility.HighContrast);
     internal void UpdateAnimation(bool animationsEnabled, bool highContrast)
     {
-        bool run = IsLoaded && IsVisible && IsActive && animationsEnabled && !highContrast;
+        bool run = IsLoaded && DesktopVisual.IsVisible(this) && IsActive && animationsEnabled && !highContrast;
         if (run == IsSweeping) return;
-        sweep.BeginAnimation(TranslateTransform.XProperty, run
-            ? new DoubleAnimation(-1, 1, TimeSpan.FromSeconds(1.2)) { RepeatBehavior = RepeatBehavior.Forever }
-            : null);
+        Stop();
+        if (!run) { Opacity = highContrast ? .3 : .08; return; }
+        var pulse = new DoubleAnimation { From = .06, To = .12, Duration = new Duration(TimeSpan.FromSeconds(.6)), AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever };
+        Storyboard.SetTarget(pulse, this); Storyboard.SetTargetProperty(pulse, "Opacity");
+        animation = new Storyboard(); animation.Children.Add(pulse); animation.Begin();
     }
-
-    private void OnSystemChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName is nameof(SystemParameters.ClientAreaAnimation) or nameof(SystemParameters.HighContrast))
-        {
-            if (Dispatcher.CheckAccess()) Refresh();
-            else _ = Dispatcher.BeginInvoke(new Action(Refresh));
-        }
-    }
-
-    private void Stop()
-    {
-        sweep.BeginAnimation(TranslateTransform.XProperty, null);
-        if (!listening) return;
-        SystemParameters.StaticPropertyChanged -= OnSystemChanged;
-        listening = false;
-    }
+    private void Stop() { animation?.Stop(); animation = null; }
 }

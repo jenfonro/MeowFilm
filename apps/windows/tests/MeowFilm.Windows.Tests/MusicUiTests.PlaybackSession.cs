@@ -1,11 +1,16 @@
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Automation.Peers;
-using System.Windows.Automation.Provider;
-using System.Windows.Controls;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using Colors = Microsoft.UI.Colors;
+using Color = global::Windows.UI.Color;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 
@@ -29,11 +34,7 @@ public static partial class MusicUiTests
             await using var f = await Fixture.Create();
             var footer = (MusicPlayerView)f.Module.PlayerView;
             var detailFooter = new MusicPlayerView(f.Module, showArtwork: false);
-            using var surface = new HwndSource(new HwndSourceParameters("playback-session-chrome")
-            {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                PositionX = -32000, PositionY = -32000, Width = 1260, Height = 100
-            });
+            using var surface = new DesktopTestUi.Host(new Grid(), 1260, 100);
             try
             {
                 foreach (bool ordinary in new[] { false, true })
@@ -41,17 +42,17 @@ public static partial class MusicUiTests
                     if (ordinary) { await f.PlayableCollection(); await f.Module.PlaySelectionAsync(); }
                     foreach (var view in new[] { footer, detailFooter })
                     {
-                        surface.RootVisual = view; await Drain();
+                        surface.Mount(view); await Drain();
                         var button = (Button)view.FindName("ModeButton");
                         var icon = (MusicPlaybackIcon)button.Content;
                         var transport = (StackPanel)view.FindName("TransportPanel");
                         True(transport.Children.OfType<Button>().Select(child => AutomationProperties.GetName(child))
                             .Take(5).SequenceEqual(new[] { f.Module.PlaybackModeText, "上一首", "播放或暂停", "下一首", "播放队列" }),
                             "one mode entry precedes the transport and queue controls");
-                        True(button.IsVisible && button.IsEnabled && button.IsTabStop,
+                        True(DesktopVisual.IsVisible(button) && button.IsEnabled && button.IsTabStop,
                             "empty and ordinary queues keep an accessible mode entry");
                         Equal("repeat", icon.Key);
-                        Equal(SystemFonts.MessageFontFamily.Source, view.FontFamily.Source);
+                        Equal(new FontFamily("XamlAutoFontFamily").Source, view.FontFamily.Source);
                         foreach (int width in new[] { 860, 1260 })
                         foreach (bool contrast in new[] { false, true })
                         {
@@ -61,75 +62,67 @@ public static partial class MusicUiTests
                             True(ReferenceEquals(button.Foreground, icon.Foreground),
                                 "native vector consumes its button theme foreground");
                             if (contrast)
-                                Equal(SystemColors.WindowTextBrush.Color, ((SolidColorBrush)icon.Foreground).Color);
+                                Equal(new SolidColorBrush(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText)).Color, ((SolidColorBrush)icon.Foreground).Color);
                         }
                         DesktopTheme.SetIsHighContrast(view, false);
                         ((IInvokeProvider)new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke)).Invoke();
                         await Drain();
-                        var menu = (ContextMenu)view.FindName("ModeMenu");
-                        True(menu.IsOpen && menu.Items.OfType<MenuItem>().All(item => item.Items.Count == 0),
+                        var menu = (MenuFlyout)view.FindName("ModeMenu");
+                        True(menu.IsOpen && !menu.Items.OfType<MenuFlyoutSubItem>().Any(),
                             "native left-click path opens one flat menu");
-                        True(ReferenceEquals(menu.Style, view.FindResource("MeowFilm.ContextMenu")), "shared native menu chrome");
-                        True(menu.Items.OfType<MenuItem>().All(item => ReferenceEquals(item.Template,
-                            ((Style)view.FindResource("MeowFilm.MenuItem")).Setters.OfType<Setter>()
-                            .Single(setter => setter.Property == Control.TemplateProperty).Value)), "mode items retain the shared template");
+                        True(ReferenceEquals(menu.MenuFlyoutPresenterStyle, DesktopVisual.Resource(view, "MeowFilm.ContextMenu")), "shared native menu chrome");
+                        True(menu.Items.OfType<ToggleMenuFlyoutItem>().All(item => item.Template is not null && item.FontWeight.Weight == 400),
+                            "mode items retain their native template and regular typography");
                         var reopened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                        void OnReopened(object? sender, RoutedEventArgs args) => reopened.TrySetResult();
+                        void OnReopened(object? sender, object args) => reopened.TrySetResult();
                         menu.Opened += OnReopened;
                         try
                         {
-                            // Do not wait for the old native HWND to finish closing: the real context request
-                            // must survive that transition without being mistaken for a left-click toggle.
-                            menu.IsOpen = false;
-                            var request = RaiseSongMenu(button);
-                            True(request.Handled, "the native context request is owned by the mode entry");
+                            menu.Hide();
+                            PlayerMenuInput.For(view).Show(button);
                             await reopened.Task.WaitAsync(TimeSpan.FromSeconds(5)); await Drain();
-                            True(menu.IsOpen, "native context request opens the same mode menu");
-                            var items = menu.Items.OfType<MenuItem>().ToArray();
-                            True(RaiseSongMenu(button).Handled && menu.IsOpen &&
-                                items.SequenceEqual(menu.Items.OfType<MenuItem>()),
-                                "a repeated context request shows the existing menu rather than toggling it or rebuilding actions");
+                            True(menu.IsOpen && PlayerMenuInput.For(view).IsCurrent(button),
+                                "the context-show owner reopens the same mode menu after real retirement");
+                            var items = menu.Items.OfType<ToggleMenuFlyoutItem>().ToArray();
+                            PlayerMenuInput.For(view).Show(button); await Drain();
+                            True(menu.IsOpen && items.SequenceEqual(menu.Items.OfType<ToggleMenuFlyoutItem>()),
+                                "a repeated context-show retains the open actions without toggling or rebuilding");
                         }
                         finally { menu.Opened -= OnReopened; }
-                        Equal("列表循环,单曲循环,随机播放", string.Join(',', menu.Items.OfType<MenuItem>().Select(AutomationProperties.GetName)));
-                        True(menu.Items.OfType<MenuItem>().All(item => item.IsEnabled), "ordinary modes do not require a native source identity");
-                        GeneralAppearanceTests.SavePreview(view, ordinary ? "playback-footer-ordinary" : "playback-footer-empty", 1260, 100);
-                        menu.IsOpen = false;
+                        Equal("列表循环,单曲循环,随机播放", string.Join(',', menu.Items.OfType<ToggleMenuFlyoutItem>().Select(AutomationProperties.GetName)));
+                        True(menu.Items.OfType<ToggleMenuFlyoutItem>().All(item => item.IsEnabled), "ordinary modes do not require a native source identity");
+                        await GeneralAppearanceTests.SavePreview(view, ordinary ? "playback-footer-ordinary" : "playback-footer-empty", 1260, 100);
+                        menu.Hide();
                     }
                 }
             }
             finally
             {
-                footer.Deactivate(); detailFooter.Deactivate(); surface.RootVisual = null;
+                footer.Deactivate(); detailFooter.Deactivate(); surface.Window.Content = null;
             }
         });
-        yield return Case("playback glyphs render rounded loop infinity and recommendation across DPI", () =>
+        yield return Case("playback glyphs render rounded loop infinity and recommendation across DPI", async () =>
         {
-            byte[] Paint(string key, double scale)
+            async Task<byte[]> Paint(string key, double scale)
             {
-                var icon = new MusicPlaybackIcon { Key = key, Width = 24, Height = 24, Foreground = Brushes.White };
-                icon.Measure(new(24, 24)); icon.Arrange(new(0, 0, 24, 24)); icon.UpdateLayout();
-                int size = (int)(24 * scale);
-                var frame = new RenderTargetBitmap(size, size, 96 * scale, 96 * scale, PixelFormats.Pbgra32);
-                frame.Render(icon);
-                var pixels = new byte[size * size * 4]; frame.CopyPixels(pixels, size * 4, 0);
-                return pixels;
+                var icon = new MusicPlaybackIcon { Key = key, Width = 24, Height = 24, Foreground = (new SolidColorBrush(Microsoft.UI.Colors.White)) };
+                using var host = new DesktopTestUi.Host(icon, 24, 24); await Drain();
+                return (await DesktopTestUi.Render(icon, scale)).Pixels;
             }
             foreach (double scale in new[] { 1d, 1.5, 2 })
             {
                 int size = (int)(24 * scale);
-                var active = Paint("fm", scale);
+                var active = await Paint("fm", scale);
                 int Ink(byte[] pixels, Rect region) => Enumerable.Range(0, size * size).Count(pixel =>
                     pixels[pixel * 4 + 3] > 32 &&
                     region.Contains(new Point((pixel % size + .5) / scale, (pixel / size + .5) / scale)));
                 foreach (var lobe in new[] { new Rect(2, 8, 8, 8), new Rect(14, 8, 8, 8) })
                     True(Ink(active, lobe) > 15 * scale * scale, "infinity paints both recognizable loops");
-                var loop = Paint("repeat", scale);
+                var loop = await Paint("repeat", scale);
                 True(Ink(loop, new(2, 3, 20, 20)) > 70 * scale * scale, "rounded loop occupies a full-height circular silhouette");
                 True(Ink(loop, new(7, 20, 10, 3)) > 4 * scale * scale, "loop is no longer vertically compressed");
-                True(Ink(Paint("sparkles", scale), new(0, 0, 24, 24)) > 35 * scale * scale, "recommendation has native sparkles ink");
+                True(Ink(await Paint("sparkles", scale), new(0, 0, 24, 24)) > 35 * scale * scale, "recommendation has native sparkles ink");
             }
-            return Task.CompletedTask;
         });
     }
 }

@@ -1,7 +1,12 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Color = Windows.UI.Color;
+using Colors = Microsoft.UI.Colors;
+using Windows.UI.Text;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Windows.System;
 using System.Text.Json;
 using MeowFilm.Capabilities;
 using MeowFilm.AppHost;
@@ -336,7 +341,7 @@ public static partial class MusicUiTests
             var source = (MusicHomeSourceSettingsView)module.HomeSourceSettingsView;
             var picker = (ComboBox)source.FindName("CatalogSourcePicker");
             var retry = (Button)source.FindName("CatalogSourceRetry");
-            True(source.IsLoaded && source.IsVisible && sourceTab.IsChecked == true,
+            True(source.IsLoaded && DesktopVisual.IsVisible(source) && sourceTab.IsChecked == true,
                 "source recovery prerequisite: the real General source page owns the first pending read");
             Equal(1, calls.Count(get));
             True(!module.CanEditCatalogSource && !picker.IsEnabled,
@@ -362,13 +367,13 @@ public static partial class MusicUiTests
             await lifecycle.CancelShutdownPreparationAsync().WaitAsync(TimeSpan.FromSeconds(8));
             await Drain();
             True(!acceptedRetiredValue, "a cancelled first-read reply must never publish its retired kg value");
-            True(source.IsVisible && sourceTab.IsChecked == true,
+            True(DesktopVisual.IsVisible(source) && sourceTab.IsChecked == true,
                 "recovery must retain the current page without a visibility or navigation workaround");
             Equal(2, calls.Count(get));
             if (failRecoveryRead)
             {
                 True(!module.CanEditCatalogSource && !picker.IsEnabled && module.CanReadCatalogSource &&
-                    module.HasCatalogSourceError && retry.IsVisible && retry.IsEnabled,
+                    module.HasCatalogSourceError && DesktopVisual.IsVisible(retry) && retry.IsEnabled,
                     "a failed fresh read must leave shutdown cancellation successful and the current page retryable");
             }
             else
@@ -376,10 +381,10 @@ public static partial class MusicUiTests
                 True(module.CanEditCatalogSource,
                     "shutdown cancellation must automatically restore the unloaded source with a fresh read");
             }
-            await Until(() => module.CanEditCatalogSource || (retry.IsVisible && retry.IsEnabled));
+            await Until(() => module.CanEditCatalogSource || (DesktopVisual.IsVisible(retry) && retry.IsEnabled));
             if (!module.CanEditCatalogSource)
             {
-                retry.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                FilmUiTest.Click(retry);
                 await Until(() => module.CanEditCatalogSource);
             }
             True(calls.Count(get) >= 2 && picker.IsEnabled && Equals(picker.SelectedValue, "wy") &&
@@ -403,7 +408,7 @@ public static partial class MusicUiTests
             await lifecycle.CancelShutdownPreparationAsync().WaitAsync(TimeSpan.FromSeconds(8));
             await Drain();
             Equal(reads, calls.Count(get));
-            True(source.IsVisible && sourceTab.IsChecked == true && picker.IsEnabled &&
+            True(DesktopVisual.IsVisible(source) && sourceTab.IsChecked == true && picker.IsEnabled &&
                 Equals(picker.SelectedValue, "wy") && module.CatalogSourceStatus.Length == 0,
                 "an already loaded source must remain usable on the current page without extra I/O");
             True(!acceptedRetiredValue, "later shutdown cancellation must not publish the retired kg value");
@@ -449,37 +454,34 @@ public static partial class MusicUiTests
             await Drain(); await Until(() => f.Module.CanEditQuality);
             ReplicaAnchors(view)[2].IsChecked = true;
             var priority = (SettingsPriorityList)view.FindName("QualityPriorities");
-            priority.BringIntoView(); await Drain(); view.UpdateLayout();
-            var list = (ListBox)priority.FindName("PriorityItems");
+            priority.StartBringIntoView(); await Drain(); view.UpdateLayout();
+            var list = (ListView)priority.FindName("PriorityItems");
             True(list.Items.Count >= 5, "E2 fixture needs a nonboundary row with two downward destinations");
             var item = (MusicQualityRow)list.Items[1];
-            var row = (ListBoxItem)list.ItemContainerGenerator.ContainerFromItem(item);
+            var row = (ListViewItem)list.ContainerFromItem(item);
             var handle = Visuals(row).OfType<Thumb>().Single();
-            handle.BringIntoView(); await Drain();
-            mount.Window.Focus();
-            handle.Focus();
+            handle.StartBringIntoView(); await Drain();
+            mount.Window.Activate();
+            handle.Focus(FocusState.Programmatic);
 
-            IInputElement CurrentTarget(RoutedCommand command)
+            Thumb CurrentTarget(int direction)
             {
-                var focused = Keyboard.FocusedElement;
+                var focused = DesktopVisual.Focused(view);
                 True(focused is Thumb thumb && ReferenceEquals(thumb.DataContext, item),
                     "E2 current keyboard focus must remain on the same quality row's handle");
-                True(command.CanExecute(null, focused), "E2 command must be enabled at the actual current focus");
-                return focused!;
+                True(priority.CanMove((Thumb)focused!, direction), "E2 command must be enabled at the actual current focus");
+                return (Thumb)focused!;
             }
-            True(ReferenceEquals(Keyboard.FocusedElement, handle),
-                "E2 ENVIRONMENT PRECONDITION: the real handle must own Keyboard.FocusedElement; no simulated focus is allowed");
-            True(handle.InputBindings.OfType<KeyBinding>().Any(binding =>
-                binding.Key == Key.Down && binding.Modifiers == ModifierKeys.Alt &&
-                ReferenceEquals(binding.Command, ComponentCommands.MoveDown)),
-                "E2 downward command is the handle's Alt+Down binding");
+            True(ReferenceEquals(DesktopVisual.Focused(view), handle),
+                "E2 ENVIRONMENT PRECONDITION: the real handle must own DesktopVisual.Focused(view); no simulated focus is allowed");
+            True(priority.CanMove(handle, 1), "E2 current handle admits the downward operation");
             int saves = f.Calls.Count(method);
             for (int move = 1; move <= 2; move++)
             {
                 var held = f.Calls.HoldNext(method);
                 try
                 {
-                    ComponentCommands.MoveDown.Execute(null, CurrentTarget(ComponentCommands.MoveDown));
+                    priority.ProcessKey(CurrentTarget(1), VirtualKey.Down, VirtualKeyModifiers.Menu);
                     await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(8));
                     await Drain();
                     True(f.Module.Busy && !f.Module.CanEditQuality, "E2 held receipt keeps save admission closed");
@@ -489,7 +491,7 @@ public static partial class MusicUiTests
                 finally { held.Release(); }
                 await Until(() => f.Module.CanEditQuality);
                 Equal(1 + move, list.Items.IndexOf(item));
-                _ = CurrentTarget(ComponentCommands.MoveDown);
+                _ = CurrentTarget(1);
             }
             Equal(saves + 2, f.Calls.Count(method));
 
@@ -497,23 +499,23 @@ public static partial class MusicUiTests
             try
             {
                 // Move upward so this phase stays away from the lower boundary.
-                ComponentCommands.MoveUp.Execute(null, CurrentTarget(ComponentCommands.MoveUp));
+                priority.ProcessKey(CurrentTarget(-1), VirtualKey.Up, VirtualKeyModifiers.Menu);
                 await leaving.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(8));
                 await Drain();
                 view.Visibility = Visibility.Collapsed;
                 destination.Visibility = Visibility.Visible;
-                destination.Focus(); await Drain();
-                True(ReferenceEquals(Keyboard.FocusedElement, destination),
+                destination.Focus(FocusState.Programmatic); await Drain();
+                True(ReferenceEquals(DesktopVisual.Focused(view), destination),
                     "E2 ENVIRONMENT PRECONDITION: the visible destination must own real keyboard focus");
-                True(!priority.IsKeyboardFocusWithin && !priority.IsVisible, "E2 the original page has lost focus and visibility");
-                True(!ComponentCommands.MoveDown.CanExecute(null, handle), "E2 a retired handle cannot admit another move");
-                ComponentCommands.MoveDown.Execute(null, handle);
+                True(!DesktopVisual.ContainsFocus(priority) && !DesktopVisual.IsVisible(priority), "E2 the original page has lost focus and visibility");
+                True(!priority.CanMove(handle, 1), "E2 a retired handle cannot admit another move");
+                priority.RequestMove(handle, 1);
                 Equal(saves + 3, f.Calls.Count(method));
             }
             finally { leaving.Release(); }
             await Until(() => !f.Module.Busy);
             await Drain();
-            True(ReferenceEquals(Keyboard.FocusedElement, destination) && !priority.IsKeyboardFocusWithin,
+            True(ReferenceEquals(DesktopVisual.Focused(view), destination) && !DesktopVisual.ContainsFocus(priority),
                 "E2 settling a retired page's save must not reclaim focus from the destination");
             Equal(saves + 3, f.Calls.Count(method));
         }
@@ -524,23 +526,24 @@ public static partial class MusicUiTests
         }
     }
 
-    private static Thumb SequenceHandle(ListBox list, object item) =>
-        Visuals((ListBoxItem)list.ItemContainerGenerator.ContainerFromItem(item)).OfType<Thumb>().Single();
+    private static Thumb SequenceHandle(ListView list, object item) =>
+        Visuals((ListViewItem)list.ContainerFromItem(item)).OfType<Thumb>().Single();
 
-    private static void SequenceFocus(UIElement target, string stage)
+    private static void SequenceFocus(FrameworkElement target, string stage)
     {
-        target.Focus();
-        True(ReferenceEquals(Keyboard.FocusedElement, target),
-            $"E2 ENVIRONMENT PRECONDITION: {stage} must acquire real keyboard focus");
+        target.Focus(FocusState.Programmatic);
+        True(ReferenceEquals(DesktopVisual.Focused(target), target),
+            $"E2 ENVIRONMENT PRECONDITION: {stage} must acquire real native focus");
     }
 
-    private static void SequenceMove(object item, RoutedCommand command)
+    private static void SequenceMove(SettingsPriorityList priority, object item, int direction)
     {
-        var focused = Keyboard.FocusedElement;
+        var focused = DesktopVisual.Focused(priority);
         True(focused is Thumb thumb && ReferenceEquals(thumb.DataContext, item),
-            "E2 move must originate from current keyboard focus on the same item object");
-        True(command.CanExecute(null, focused), "E2 current focused handle must admit the move");
-        command.Execute(null, focused);
+            "E2 move must originate from current native focus on the same item object");
+        True(priority.CanMove((Thumb)focused!, direction), "E2 current focused handle must admit the move");
+        True(priority.ProcessKey((Thumb)focused!, direction > 0 ? VirtualKey.Down : VirtualKey.Up, VirtualKeyModifiers.Menu),
+            "E2 production key adapter handles the admitted semantic action");
     }
 
     private static async Task SettingsSixListSequence()
@@ -564,15 +567,15 @@ public static partial class MusicUiTests
             {
                 ReplicaAnchors(view)[anchor].IsChecked = true;
                 var priority = (SettingsPriorityList)view.FindName(name);
-                priority.BringIntoView(); await Drain(); view.UpdateLayout();
+                priority.StartBringIntoView(); await Drain(); view.UpdateLayout();
                 await Until(() => priority.CanEdit);
-                var list = (ListBox)priority.FindName("PriorityItems");
+                var list = (ListView)priority.FindName("PriorityItems");
                 True(list.Items.Count >= 3, "E2 each shared list supplies a nonboundary source");
                 // Capture each consumer's current object, including the shared metadata collection.
                 var original = list.Items.Cast<object>().ToArray();
                 var item = original[1];
                 var handle = SequenceHandle(list, item);
-                handle.BringIntoView(); await Drain(); mount.Window.Focus();
+                handle.StartBringIntoView(); await Drain(); mount.Window.Activate();
                 SequenceFocus(handle, name + "-initial");
                 int saves = f.Calls.Count(method);
                 // Down then up supports short lists while requiring both commands to follow the same row.
@@ -581,7 +584,7 @@ public static partial class MusicUiTests
                     var held = f.Calls.HoldNext(method);
                     try
                     {
-                        SequenceMove(item, step == 0 ? ComponentCommands.MoveDown : ComponentCommands.MoveUp);
+                        SequenceMove(priority, item, step == 0 ? 1 : -1);
                         await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(8)); await Drain();
                         True(f.Module.Busy && !priority.CanEdit && !list.IsEnabled,
                             "E2 all shared lists retain actual disabling during accepted writes");
@@ -590,9 +593,9 @@ public static partial class MusicUiTests
                     finally { held.Release(); }
                     await Until(() => !f.Module.Busy && priority.CanEdit);
                     var current = SequenceHandle(list, item);
-                    True(ReferenceEquals(Keyboard.FocusedElement, current) && ReferenceEquals(current.DataContext, item),
+                    True(ReferenceEquals(DesktopVisual.Focused(view), current) && ReferenceEquals(current.DataContext, item),
                         $"E2 {name} step {step}: settlement restores the current handle without test refocusing;" +
-                        $" focused={Keyboard.FocusedElement?.GetType().Name}; currentIsOriginal={ReferenceEquals(current, handle)};" +
+                        $" focused={DesktopVisual.Focused(view)?.GetType().Name}; currentIsOriginal={ReferenceEquals(current, handle)};" +
                         $" originalLoaded={handle.IsLoaded}; currentLoaded={current.IsLoaded}; enabled={list.IsEnabled}");
                     Equal(step == 0 ? 2 : 1, list.Items.IndexOf(item));
                 }
@@ -617,48 +620,48 @@ public static partial class MusicUiTests
             await Drain(); await Until(() => f.Module.CanEditQuality);
             ReplicaAnchors(view)[2].IsChecked = true;
             var priority = (SettingsPriorityList)view.FindName("QualityPriorities");
-            priority.BringIntoView(); await Drain(); view.UpdateLayout();
-            var list = (ListBox)priority.FindName("PriorityItems");
+            priority.StartBringIntoView(); await Drain(); view.UpdateLayout();
+            var list = (ListView)priority.FindName("PriorityItems");
             var item = list.Items[1];
             var handle = SequenceHandle(list, item);
-            handle.BringIntoView(); await Drain(); mount.Window.Focus();
+            handle.StartBringIntoView(); await Drain(); mount.Window.Activate();
             SequenceFocus(handle, transition + "-initial");
             int saves = f.Calls.Count(method);
             var held = f.Calls.HoldNext(method);
             try
             {
-                SequenceMove(item, ComponentCommands.MoveDown);
+                SequenceMove(priority, item, 1);
                 await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(8)); await Drain();
                 True(!list.IsEnabled && f.Module.Busy, "E2 retirement starts during a physically disabled pending save");
                 if (transition == "focus-away-and-back")
                 {
                     var anchor = ReplicaAnchors(view)[2];
-                    True(anchor.IsVisible && anchor.IsEnabled, "E2 same-page destination is an editable visible settings control");
+                    True(DesktopVisual.IsVisible(anchor) && anchor.IsEnabled, "E2 same-page destination is an editable visible settings control");
                     SequenceFocus(anchor, transition + "-away");
                 }
                 else if (transition == "hide-and-return")
                 {
                     view.Visibility = Visibility.Collapsed; await Drain();
-                    True(!view.IsVisible, "E2 original page really hides");
+                    True(!DesktopVisual.IsVisible(view), "E2 original page really hides");
                     view.Visibility = Visibility.Visible; await Drain();
-                    True(view.IsVisible, "E2 original page really returns");
+                    True(DesktopVisual.IsVisible(view), "E2 original page really returns");
                 }
                 else
                 {
                     pages.Children.Remove(view); await Drain();
                     True(!view.IsLoaded, "E2 original view really unloads");
                     pages.Children.Add(view); await Drain();
-                    True(view.IsLoaded && view.IsVisible, "E2 same original view really remounts");
+                    True(view.IsLoaded && DesktopVisual.IsVisible(view), "E2 same original view really remounts");
                 }
                 // Returning to the parent must not revive the retired request.
-                priority.BringIntoView(); await Drain();
+                priority.StartBringIntoView(); await Drain();
                 SequenceFocus(priority, transition + "-parent-return");
                 Equal(saves + 1, f.Calls.Count(method));
             }
             finally { held.Release(); }
             await Until(() => !f.Module.Busy && priority.CanEdit);
             await Drain();
-            True(ReferenceEquals(Keyboard.FocusedElement, priority),
+            True(ReferenceEquals(DesktopVisual.Focused(view), priority),
                 "E2 a retired request must not restore the handle even after focus returns to its parent");
             Equal(saves + 1, f.Calls.Count(method));
         }
@@ -675,13 +678,13 @@ public static partial class MusicUiTests
         priority.MoveRequested += (_, _) => requests++; // Synchronous rejection: no owner work is admitted.
         using var mount = new ReplicaMount(priority);
         await Drain(); priority.UpdateLayout();
-        var list = (ListBox)priority.FindName("PriorityItems");
+        var list = (ListView)priority.FindName("PriorityItems");
         var handle = SequenceHandle(list, rows[1]);
-        mount.Window.Focus(); SequenceFocus(handle, "no-op-initial");
+        mount.Window.Activate(); SequenceFocus(handle, "no-op-initial");
         int saves = f.Calls.Count("music.quality.settings.save");
-        SequenceMove(rows[1], ComponentCommands.MoveDown);
+        SequenceMove(priority, rows[1], 1);
         await Drain();
-        True(ReferenceEquals(Keyboard.FocusedElement, handle), "E2 synchronous no-op must return focus to the original handle");
+        True(ReferenceEquals(DesktopVisual.Focused(priority), handle), "E2 synchronous no-op must return focus to the original handle");
         True(list.IsEnabled && priority.CanEdit, "E2 no-op does not manufacture a busy transition");
         Equal(1, requests);
         True(list.Items.Cast<object>().SequenceEqual(rows), "E2 rejected move does not change row order");

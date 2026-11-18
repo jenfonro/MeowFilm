@@ -2,12 +2,12 @@ using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Film.Rules;
@@ -34,7 +34,7 @@ public static class FilmMetadataRuntimeTests
         yield return Case("artwork shutdown physically drains the real Node upstream", ArtworkShutdown);
     }
     private static TestCase Case(string name, Func<Task> action) =>
-        new("film-tmdb-runtime: " + name, () => MusicQualityConsumerTests.Sta(action));
+        new("film-tmdb-runtime: " + name, () => TestUiHost.InvokeAsync(action));
     private static void Check(bool value, string message) => SearchFixture.Check(value, message);
     private static byte[] Json(object value) => JsonSerializer.SerializeToUtf8Bytes(value);
     private static object Payload(string type = "tv") => new
@@ -198,14 +198,14 @@ public static class FilmMetadataRuntimeTests
             await exchange.ReplyAsync(RuntimeImageTests.Png, contentType: "image/png");
         }
         using var lease = await pixels;
-        Check(lease.Image.IsFrozen && lease.Image.PixelWidth > 0 && lease.Image.PixelHeight > 0, "the actual native decoder returns detached pixels");
+        Check(lease.Image.PixelWidth > 0 && lease.Image.PixelHeight > 0, "the actual native decoder returns detached pixels");
         var image = new ArtworkImage { Address = searchPoster, Width = 180, Height = 240 };
-        var root = new Grid { Width = 300, Height = 300, Background = Brushes.White };
+        var root = new Grid { Width = 300, Height = 300, Background = new SolidColorBrush(Microsoft.UI.Colors.White) };
         ArtworkScope.SetLoader(root, artwork); root.Children.Add(image);
         using (var surface = Mount(root))
         {
             await SearchFixture.Until(() => ((Image)image.Children[0]).Source is not null);
-            Capture(root, "tmdb-artwork.png");
+            await NativeDesktopCapture.SaveAsync(root, "tmdb-artwork");
         }
         await first.Metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["imageBase"] = images.BaseUrl + "/pictures" });
         await first.WaitSettingsAsync("tmdb");
@@ -296,7 +296,7 @@ public static class FilmMetadataRuntimeTests
         }
         using var recovered = await retry;
         using var cached = await artwork.AcquireAsync(Poster);
-        Check(recovered.Image.IsFrozen && ReferenceEquals(recovered.Image, cached.Image) && !upstream.HasConnection,
+        Check(ReferenceEquals(recovered.Image, cached.Image) && !upstream.HasConnection,
             "the exact stable reference succeeds on explicit retry and only the complete pixels enter cache");
     }
 
@@ -364,11 +364,11 @@ public static class FilmMetadataRuntimeTests
                 var apiBase = (TextBox)view.FindName("MetadataApiBase");
                 Check(token.Text == "synthetic.access.token" && AutomationProperties.GetName(token) == "TMDB API TOKEN",
                     "the actual settings form exposes one editable plain token");
-                Capture(view, "tmdb-settings-wide.png");
-                view.Width = 420; Layout(view);
+                await NativeDesktopCapture.SaveAsync(view, "tmdb-settings-wide");
+                view.Width = 420; surface.Window.Resize(440, 700); Layout(view);
                 Check(apiBase.ActualWidth > 100 && apiBase.ActualWidth < 420 && token.ActualWidth > 80 &&
                     token.ActualWidth < 420, "native fields retain usable widths inside the narrow settings viewport");
-                Capture(view, "tmdb-settings-narrow.png");
+                await NativeDesktopCapture.SaveAsync(view, "tmdb-settings-narrow");
                 await SaveView(view);
                 await host.WaitSettingsAsync("tmdb");
                 await Credentials(host, upstream, "初始保留", expectedToken: "synthetic.access.token");
@@ -406,7 +406,7 @@ public static class FilmMetadataRuntimeTests
             }
             finally
             {
-                surface.RootVisual = null;
+                surface.Window.Content = null;
                 await view.PreparePlaybackSettingsShutdownAsync();
             }
         }
@@ -440,7 +440,7 @@ public static class FilmMetadataRuntimeTests
     }
     private static async Task SaveView(FilmSettingsView view)
     {
-        ((Button)view.FindName("MetadataSave")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        FilmUiTest.Click((Button)view.FindName("MetadataSave"));
         await SearchFixture.Until(() => !view.MetadataBusy);
     }
     private static async Task Cancellation()
@@ -791,26 +791,6 @@ public static class FilmMetadataRuntimeTests
     }
     private static void Layout(FrameworkElement view)
     { view.Measure(new Size(view.Width, view.Height)); view.Arrange(new Rect(0, 0, view.Width, view.Height)); view.UpdateLayout(); }
-    private static HwndSource Mount(FrameworkElement view)
-    {
-        view.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = new Uri("/MeowFilm.Desktop;component/Theme.xaml", UriKind.Relative) });
-        var surface = new HwndSource(new HwndSourceParameters("tmdb-native-offscreen")
-        {
-            WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-            PositionX = -32000, PositionY = -32000, Width = (int)view.Width, Height = (int)view.Height
-        });
-        surface.RootVisual = view; Layout(view); return surface;
-    }
-    private static void Capture(FrameworkElement view, string name)
-    {
-        Layout(view);
-        var bitmap = new RenderTargetBitmap((int)view.Width, (int)view.Height, 96, 96, PixelFormats.Pbgra32);
-        bitmap.Render(view);
-        var png = new PngBitmapEncoder(); png.Frames.Add(BitmapFrame.Create(bitmap));
-        string path = TestWorkspace.DataPath("film-search", name);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        using (var output = File.Create(path)) png.Save(output);
-        Check(new FileInfo(path).Length < 700_000, "native preview must remain below the user image-read boundary");
-        Console.WriteLine("TMDB_PREVIEW " + path);
-    }
+    private static DesktopTestUi.Host Mount(FrameworkElement view) =>
+        new(view, (int)view.Width, (int)view.Height);
 }

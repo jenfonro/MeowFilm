@@ -1,8 +1,6 @@
 using System.Collections.ObjectModel;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Input;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Desktop;
 
@@ -16,7 +14,7 @@ internal sealed class ModuleSession(IDesktopModule module)
     public string ActiveSearchKey { get; set; } = "default";
     public Dictionary<string, string> SearchDrafts { get; } = new(StringComparer.Ordinal);
     public Destination? Current { get; set; }
-    public IInputElement? ContentFocus { get; set; }
+    public DependencyObject? ContentFocus { get; set; }
     public ObservableCollection<NavigationItem>? Navigation { get; set; }
     public Grid Surface { get; } = new() { Visibility = Visibility.Collapsed, DataContext = module };
     public ContentControl MainHost { get; } = CreateHost(module);
@@ -27,7 +25,6 @@ internal sealed class ModuleSession(IDesktopModule module)
         DataContext = owner,
         HorizontalContentAlignment = HorizontalAlignment.Stretch,
         VerticalContentAlignment = VerticalAlignment.Stretch,
-        Focusable = false,
         IsTabStop = false
     };
 }

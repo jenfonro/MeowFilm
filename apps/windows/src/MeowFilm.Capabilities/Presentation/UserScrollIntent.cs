@@ -1,59 +1,46 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Threading;
+using System.Runtime.CompilerServices;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 
 namespace MeowFilm.Capabilities;
 
-internal sealed class UserScrollIntent(Dispatcher dispatcher)
+internal sealed class UserScrollIntent
 {
-    private long generation;
-
+    private sealed class Gesture { internal bool Moved; }
+    private readonly ConditionalWeakTable<ScrollViewer, Gesture> gestures = new();
+    private Gesture? activeGesture;
     public bool Active { get; private set; }
-
-    public bool Accepts(Visual owner)
+    public bool Accepts(FrameworkElement owner, bool intermediate)
     {
-        if (Active) return true;
-        if (Mouse.Captured is not Thumb thumb) return false;
-        var scrollBar = OwningScrollBar(thumb);
-        return scrollBar?.Orientation == Orientation.Vertical && owner.IsAncestorOf(scrollBar);
+        bool accepts = Active && owner.IsLoaded && owner.Visibility == Visibility.Visible;
+        if (!intermediate) Clear();
+        return accepts;
     }
-
-    public void ObserveScroll(ScrollViewer owner, ScrollEventArgs args)
+    public void Attach(ScrollViewer scroll)
     {
-        if (!owner.IsVisible || args.OriginalSource is not ScrollBar { IsVisible: true, Orientation: Orientation.Vertical } bar ||
-            !ReferenceEquals(bar.TemplatedParent, owner)) return;
-        if (args.ScrollEventType == ScrollEventType.EndScroll) { Clear(); return; }
-        Set(args.ScrollEventType is ScrollEventType.SmallIncrement or ScrollEventType.LargeIncrement or ScrollEventType.Last ||
-            args.ScrollEventType is ScrollEventType.ThumbTrack or ScrollEventType.ThumbPosition && args.NewValue > owner.VerticalOffset);
-    }
-
-    public void Set(bool active)
-    {
-        var current = ++generation;
-        Active = active && !dispatcher.HasShutdownStarted;
-        if (!Active) return;
-        _ = dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, new Action(() =>
+        if (gestures.TryGetValue(scroll, out _)) return;
+        var gesture = new Gesture(); gestures.Add(scroll, gesture);
+        scroll.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, e) =>
         {
-            if (current == generation) Active = false;
-        }));
-    }
-
-    public void Clear()
-    {
-        generation++;
-        Active = false;
-    }
-
-    private static ScrollBar? OwningScrollBar(DependencyObject? child)
-    {
-        while (child is not null)
+            bool scrollbar = false;
+            for (DependencyObject? node = e.OriginalSource as DependencyObject; node is not null && !ReferenceEquals(node, scroll); node = VisualTreeHelper.GetParent(node))
+                if (node is ScrollBar) { scrollbar = true; break; }
+            if (!scrollbar && e.Pointer.PointerDeviceType == Microsoft.UI.Input.PointerDeviceType.Mouse) return;
+            gesture.Moved = false; activeGesture = gesture; Active = false;
+        }), true);
+        scroll.ViewChanging += (_, e) =>
         {
-            if (child is ScrollBar scrollBar) return scrollBar;
-            child = VisualTreeHelper.GetParent(child);
-        }
-        return null;
+            if (!ReferenceEquals(activeGesture, gesture) || e.NextView.VerticalOffset == scroll.VerticalOffset) return;
+            gesture.Moved = true;
+            Active = e.NextView.VerticalOffset > scroll.VerticalOffset;
+        };
+        scroll.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler((_, _) => { if (!gesture.Moved) Clear(); }), true);
+        scroll.PointerCanceled += (_, _) => Clear();
+        scroll.Unloaded += (_, _) => Clear();
     }
+    public void Set(bool active) { activeGesture = null; Active = active; }
+    public void Clear() { activeGesture = null; Active = false; }
 }

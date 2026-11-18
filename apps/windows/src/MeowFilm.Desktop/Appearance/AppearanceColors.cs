@@ -1,7 +1,9 @@
 using System.Globalization;
-using System.Windows;
-using System.Windows.Media;
-using System.Windows.Data;
+using Windows.UI;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Data;
 
 namespace MeowFilm.Desktop;
 
@@ -12,8 +14,7 @@ public static class AppearanceColors
     private static readonly double[] Offsets = [0, .24, .58, 1];
     private static readonly double[] Tint = [.18, .12, .06, .025];
     public static Brush DefaultBackground { get; } = Background(DefaultColor);
-    // Theme.xaml is merged by independent views and detached popup roots. Sharing these
-    // brushes keeps the application's appearance consistent across those dictionaries.
+    // Independent view dictionaries share the mutable palette on their UI thread.
     [ThreadStatic] private static PaletteColor? floatingSurface;
     [ThreadStatic] private static PaletteColor? itemHover;
     [ThreadStatic] private static PaletteColor? itemSelected;
@@ -39,22 +40,13 @@ public static class AppearanceColors
     {
         if (!TryParse(value, out var color)) throw new ArgumentException("Invalid color.", nameof(value));
         byte Mix(byte channel) => (byte)Math.Round(neutral * (1 - amount) + channel * amount);
-        return Color.FromRgb(Mix(color.R), Mix(color.G), Mix(color.B));
+        return Color.FromArgb(255, Mix(color.R), Mix(color.G), Mix(color.B));
     }
 
-    private sealed class PaletteColor : DependencyObject
+    private sealed class PaletteColor(Color color)
     {
-        public static readonly DependencyProperty ColorProperty =
-            DependencyProperty.Register(nameof(Color), typeof(Color), typeof(PaletteColor));
-        public Color Color { get => (Color)GetValue(ColorProperty); set => SetValue(ColorProperty, value); }
-        public SolidColorBrush Brush { get; } = new();
-        public PaletteColor(Color color)
-        {
-            Color = color;
-            // A live binding prevents WPF from freezing the brush when styles/resources seal.
-            BindingOperations.SetBinding(Brush, SolidColorBrush.ColorProperty,
-                new Binding(nameof(Color)) { Source = this, Mode = BindingMode.OneWay });
-        }
+        public SolidColorBrush Brush { get; } = new(color);
+        public Color Color { get => Brush.Color; set => Brush.Color = value; }
     }
 
     public static bool TryParse(string? value, out Color color)
@@ -63,7 +55,7 @@ public static class AppearanceColors
         if (value is not { Length: 7 } || value[0] != '#' ||
             !uint.TryParse(value.AsSpan(1), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out uint rgb))
             return false;
-        color = Color.FromRgb((byte)(rgb >> 16), (byte)(rgb >> 8), (byte)rgb);
+        color = Color.FromArgb(255, (byte)(rgb >> 16), (byte)(rgb >> 8), (byte)rgb);
         return true;
     }
 
@@ -81,10 +73,9 @@ public static class AppearanceColors
             // existing layers rather than laying a saturated color over the page.
             byte Channel(byte source, byte picked, byte baseline) =>
                 (byte)Math.Clamp(Math.Round(source + (picked - baseline) * Tint[i]), 0, 255);
-            brush.GradientStops.Add(new(Color.FromRgb(Channel(stop.R, chosen.R, original.R),
-                Channel(stop.G, chosen.G, original.G), Channel(stop.B, chosen.B, original.B)), Offsets[i]));
+            brush.GradientStops.Add(new GradientStop { Color = Color.FromArgb(255, Channel(stop.R, chosen.R, original.R),
+                Channel(stop.G, chosen.G, original.G), Channel(stop.B, chosen.B, original.B)), Offset = Offsets[i] });
         }
-        brush.Freeze();
         return brush;
     }
 
@@ -96,7 +87,7 @@ public static class AppearanceColors
             < 60 => (c, x, 0d), < 120 => (x, c, 0d), < 180 => (0d, c, x),
             < 240 => (0d, x, c), < 300 => (x, 0d, c), _ => (c, 0d, x)
         };
-        return Color.FromRgb((byte)Math.Round((r + m) * 255),
+        return Color.FromArgb(255, (byte)Math.Round((r + m) * 255),
             (byte)Math.Round((g + m) * 255), (byte)Math.Round((b + m) * 255));
     }
 
@@ -107,5 +98,17 @@ public static class AppearanceColors
         double h = delta == 0 ? 0 : max == r ? 60 * ((g - b) / delta % 6) :
             max == g ? 60 * ((b - r) / delta + 2) : 60 * ((r - g) / delta + 4);
         return ((h + 360) % 360, max == 0 ? 0 : delta / max, max);
+    }
+}
+
+public sealed class AppearanceResources : ResourceDictionary
+{
+    public AppearanceResources()
+    {
+        this["MeowFilm.Brush.AppBackground"] = AppearanceColors.DefaultBackground;
+        this["MeowFilm.Brush.FloatingSurface"] = AppearanceColors.FloatingSurface;
+        this["MeowFilm.Brush.ItemHover"] = AppearanceColors.ItemHover;
+        this["MeowFilm.Brush.ItemSelected"] = AppearanceColors.ItemSelected;
+        this["MeowFilm.Brush.InputSurface"] = AppearanceColors.InputSurface;
     }
 }

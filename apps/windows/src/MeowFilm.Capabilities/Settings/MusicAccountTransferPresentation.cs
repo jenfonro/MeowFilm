@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 using System.IO;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Automation;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Automation;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Desktop;
-using Microsoft.Win32;
+using Microsoft.Windows.Storage.Pickers;
 
 namespace MeowFilm.Capabilities;
 
@@ -55,7 +57,7 @@ public sealed partial class MusicCapability
                 var source = (IMusicAccountTransferSource)application;
                 if (import)
                 {
-                    string? path = dialogs is IMusicAccountTransferDialogs picker ? picker.SelectAccountImportPath() : PickImport();
+                    string? path = dialogs is IMusicAccountTransferDialogs picker ? picker.SelectAccountImportPath() : await CapabilityFilePicker.OpenAsync(SettingsView, "导入账号", ".json");
                     if (path is null) return;
                     token.ThrowIfCancellationRequested();
                     MusicAccountTransferPlan plan;
@@ -66,7 +68,7 @@ public sealed partial class MusicCapability
                     {
                         token.ThrowIfCancellationRequested();
                         var policy = plan.Conflicts.Count == 0 ? MusicAccountTransferPolicy.Overwrite :
-                            dialogs is IMusicAccountTransferDialogs chooser ? chooser.ChooseAccountTransferPolicy(plan.Conflicts) : ChooseTransferPolicy(plan.Conflicts, token);
+                            dialogs is IMusicAccountTransferDialogs chooser ? chooser.ChooseAccountTransferPolicy(plan.Conflicts) : await ChooseTransferPolicy(plan.Conflicts, token);
                         token.ThrowIfCancellationRequested();
                         if (policy == MusicAccountTransferPolicy.Cancel) return;
                         var summary = await source.ImportAccountTransferAsync(plan, policy, token);
@@ -89,7 +91,7 @@ public sealed partial class MusicCapability
                     using var file = await source.ExportAccountTransferAsync(token);
                     token.ThrowIfCancellationRequested();
                     if (file is null) { accountStatus = "没有可导出的账号"; return; }
-                    string? path = dialogs is IMusicAccountTransferDialogs picker ? picker.SelectAccountExportPath() : PickExport();
+                    string? path = dialogs is IMusicAccountTransferDialogs picker ? picker.SelectAccountExportPath() : await CapabilityFilePicker.SaveAsync(SettingsView, "导出账号", "meowfilm-music-accounts.json", ".json");
                     if (path is null) return;
                     token.ThrowIfCancellationRequested();
                     using (var output = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 16384, FileOptions.Asynchronous))
@@ -117,38 +119,39 @@ public sealed partial class MusicCapability
         "STORAGE_CONFLICT" or "STALE_SESSION" => "账号已变更", "CANCELLED" or "CLOSED" => "已取消",
         _ => AccountError(new MusicOperationException(code))
     };
-    private static string? PickImport()
+    private async Task<MusicAccountTransferPolicy> ChooseTransferPolicy(IReadOnlyList<MusicAccountTransferConflict> conflicts, CancellationToken token)
     {
-        var dialog = new OpenFileDialog { Title = "导入账号", Filter = "JSON 文件|*.json", Multiselect = false, CheckFileExists = true };
-        return dialog.ShowDialog() == true ? dialog.FileName : null;
-    }
-    private static string? PickExport()
-    {
-        var dialog = new SaveFileDialog { Title = "导出账号", Filter = "JSON 文件|*.json", FileName = "meowfilm-music-accounts.json",
-            DefaultExt = ".json", AddExtension = true, CheckPathExists = true, OverwritePrompt = true };
-        return dialog.ShowDialog() == true ? dialog.FileName : null;
-    }
-    private static MusicAccountTransferPolicy ChooseTransferPolicy(IReadOnlyList<MusicAccountTransferConflict> conflicts, CancellationToken token)
-    {
-        var choice = MusicAccountTransferPolicy.Cancel;
-        var dialog = new DesktopWindow { Title = "导入账号", SizeToContent = SizeToContent.WidthAndHeight, ResizeMode = ResizeMode.NoResize,
-            WindowStartupLocation = WindowStartupLocation.CenterOwner, Owner = Application.Current?.MainWindow,
-            ShowInTaskbar = false };
-        var panel = new StackPanel { Margin = new Thickness(20), MinWidth = 320 };
-        panel.Children.Add(new TextBlock { Text = "已有账号：" + string.Join("、", conflicts.Select(item => TransferPlatform(item.Platform))),
-            TextWrapping = TextWrapping.Wrap, MaxWidth = 480, Margin = new Thickness(0, 0, 0, 16) });
-        var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
-        foreach (var (label, policy) in new[] { ("跳过", MusicAccountTransferPolicy.Skip), ("覆盖", MusicAccountTransferPolicy.Overwrite), ("取消", MusicAccountTransferPolicy.Cancel) })
+        var dialog = new ContentDialog
         {
-            var button = new Button { Content = label, Padding = new Thickness(16, 6, 16, 6), Margin = new Thickness(6, 0, 0, 0),
-                IsCancel = policy == MusicAccountTransferPolicy.Cancel };
-            AutomationProperties.SetName(button, label);
-            button.Click += (_, _) => { choice = policy; dialog.Close(); };
-            buttons.Children.Add(button);
-        }
-        panel.Children.Add(buttons); dialog.Content = panel;
-        using var cancellation = token.Register(() => _ = dialog.Dispatcher.InvokeAsync(dialog.Close));
-        if (!token.IsCancellationRequested) dialog.ShowDialog();
-        return choice;
+            Title = "导入账号",
+            Content = new TextBlock { Text = "已有账号：" + string.Join("、", conflicts.Select(item => TransferPlatform(item.Platform))), TextWrapping = TextWrapping.Wrap },
+            PrimaryButtonText = "覆盖", SecondaryButtonText = "跳过", CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Close
+        };
+        using var cancellation = token.Register(() => SettingsView.DispatcherQueue.TryEnqueue(dialog.Hide));
+        token.ThrowIfCancellationRequested();
+        var choice = await DialogPlacement.ShowAsync(SettingsView, dialog);
+        token.ThrowIfCancellationRequested();
+        return choice switch { ContentDialogResult.Primary => MusicAccountTransferPolicy.Overwrite,
+            ContentDialogResult.Secondary => MusicAccountTransferPolicy.Skip, _ => MusicAccountTransferPolicy.Cancel };
+    }
+}
+
+internal static class CapabilityFilePicker
+{
+    internal static async Task<string?> OpenAsync(FrameworkElement owner, string action, params string[] extensions)
+    {
+        var window = DesktopWindow.GetWindow(owner) ?? throw new InvalidOperationException("FILE_PICKER_OWNER_NOT_ATTACHED");
+        var picker = new FileOpenPicker(window.AppWindow.Id) { CommitButtonText = action };
+        foreach (string extension in extensions) picker.FileTypeFilter.Add(extension);
+        return (await picker.PickSingleFileAsync())?.Path;
+    }
+    internal static async Task<string?> SaveAsync(FrameworkElement owner, string action, string name, string extension)
+    {
+        var window = DesktopWindow.GetWindow(owner) ?? throw new InvalidOperationException("FILE_PICKER_OWNER_NOT_ATTACHED");
+        var picker = new FileSavePicker(window.AppWindow.Id)
+        { CommitButtonText = action, SuggestedFileName = name, DefaultFileExtension = extension };
+        picker.FileTypeChoices.Add(extension, new List<string> { extension });
+        return (await picker.PickSaveFileAsync())?.Path;
     }
 }

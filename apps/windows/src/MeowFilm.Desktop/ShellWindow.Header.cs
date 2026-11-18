@@ -1,4 +1,4 @@
-using System.Windows;
+using Microsoft.UI.Xaml;
 
 namespace MeowFilm.Desktop;
 
@@ -18,13 +18,6 @@ public sealed partial class ShellWindow
             SearchDivider.Visibility = Visibility.Visible;
             SearchBox.Padding = new(100, 4, 52, 4);
         }
-        // Construct navigation in the window's namescope, then mount that same tree
-        // in the component. UserControl XAML cannot register its children's names
-        // in the containing window's compile-time namescope.
-        ((System.Windows.Controls.Panel)SearchChrome.Parent).Children.Remove(SearchChrome);
-        ((System.Windows.Controls.Panel)SearchInput.Parent).Children.Remove(SearchInput);
-        PageHeaderHost.Navigation = SearchChrome;
-        PageHeaderHost.Center = SearchInput;
         PageHeaderHost.ContributionChanged += (_, _) =>
         {
             if (!_isClosing && _current is { } current && PageHeaderHost.Contribution is { } contribution)
@@ -88,7 +81,7 @@ public sealed partial class ShellWindow
         SearchInput.Visibility = searchAvailable ? Visibility.Visible : Visibility.Collapsed;
         SearchBox.IsEnabled = SearchTargetPicker.IsEnabled = searchAvailable;
         var title = string.IsNullOrWhiteSpace(contribution.Title) ? current.Module.Title : contribution.Title;
-        System.Windows.Automation.AutomationProperties.SetName(ContentDeck, title);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ContentDeck, title);
         Title = string.IsNullOrWhiteSpace(title) ? "meowfilm" : $"meowfilm · {title}";
     }
 

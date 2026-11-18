@@ -1,8 +1,7 @@
 using System.ComponentModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Media;
 
@@ -14,6 +13,11 @@ namespace MeowFilm.Capabilities;
 /// </summary>
 internal sealed class FilmPlaybackSession : IAsyncDisposable
 {
+    private readonly record struct PageMediaState(FilmPlaybackPage? Page, FrameworkElement? View, string? Identity,
+        bool HasOutput, bool OwnsNativeMedia, bool IsPlaying, bool Buffering,
+        double Position, double Duration, double Rate, string? Aspect, int Volume);
+    private readonly record struct PublishedMediaState(string? Identity, string Title,
+        bool HasOutput, bool IsPlaying, double Position, double Duration);
     private sealed class Input(FilmMediaReceipt receipt, FilmCandidateItem candidate, FilmPlaybackTarget target, string contentKind, JsonElement source,
         CancellationTokenSource lifetime, CancellationTokenSource publication, CancellationToken runtimeRevoked)
     {
@@ -62,9 +66,12 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     private bool closed, progressDirty, presenting;
     private int playbackCommands;
     private TaskCompletionSource? playbackAdmission;
-    private Window? retainedWindow;
+    private MeowFilm.Desktop.DesktopWindow? retainedWindow;
     private Task? progress;
     private Exception? releaseFailure;
+    private PageMediaState? pageMediaState;
+    private PublishedMediaState? publishedMediaState;
+    internal string ExecutionError { get; private set; } = "";
     private double rate = 1;
     private string? aspect;
     private TaskCompletionSource browseChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -112,7 +119,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     }
 
     internal event EventHandler<string>? OperationFailed;
-    internal ContentControl? MediaView => media.View;
+    internal FrameworkElement? MediaView => media.View;
     internal bool IsPlaying => HasOutput && !MediaPaused;
     internal bool IsBuffering => HasOutput && media.Buffering;
     internal bool HasOutput => current is { Retiring: false, TerminalReported: false } input &&
@@ -141,8 +148,46 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     internal event EventHandler? MediaStateChanged;
     private void NotifyMedia()
     {
-        page?.NotifyMedia();
+        var nextPage = new PageMediaState(page, MediaView, MediaIdentity, page?.HasOutput == true,
+            page?.OwnsNativeMedia == true, page?.IsPlaying == true, page?.PlayerBuffering == true,
+            page?.Position ?? 0, page?.Duration ?? 0, Rate, Aspect, Volume);
+        if (nextPage != pageMediaState)
+        {
+            var previous = pageMediaState;
+            pageMediaState = nextPage;
+            if (previous is not { } old || !ReferenceEquals(old.Page, nextPage.Page)) page?.NotifyMedia();
+            else
+            {
+                if (!ReferenceEquals(old.View, nextPage.View)) page?.NotifyMedia(nameof(FilmPlaybackPage.MediaView));
+                if (old.Identity != nextPage.Identity) page?.NotifyMedia(nameof(FilmPlaybackPage.MediaIdentity));
+                if (old.HasOutput != nextPage.HasOutput)
+                    page?.NotifyMedia(nameof(FilmPlaybackPage.HasOutput), nameof(FilmPlaybackPage.NoOutput), nameof(FilmPlaybackPage.CanSeek));
+                if (old.OwnsNativeMedia != nextPage.OwnsNativeMedia)
+                    page?.NotifyMedia(nameof(FilmPlaybackPage.OwnsNativeMedia));
+                if (old.IsPlaying != nextPage.IsPlaying)
+                    page?.NotifyMedia(nameof(FilmPlaybackPage.IsPlaying), nameof(FilmPlaybackPage.PlayLabel));
+                if (old.Position != nextPage.Position)
+                    page?.NotifyMedia(nameof(FilmPlaybackPage.Position), nameof(FilmPlaybackPage.ProgressLabel));
+                if (old.Duration != nextPage.Duration)
+                    page?.NotifyMedia(nameof(FilmPlaybackPage.Duration), nameof(FilmPlaybackPage.CanSeek), nameof(FilmPlaybackPage.ProgressLabel));
+                if (old.Rate != nextPage.Rate) page?.NotifyMedia(nameof(FilmPlaybackPage.PlaybackRate));
+                if (old.Aspect != nextPage.Aspect) page?.NotifyMedia(nameof(FilmPlaybackPage.PlaybackAspect));
+                if (old.Volume != nextPage.Volume) page?.NotifyMedia(nameof(FilmPlaybackPage.Volume));
+                if (old.HasOutput != nextPage.HasOutput || old.IsPlaying != nextPage.IsPlaying || old.Buffering != nextPage.Buffering)
+                    page?.NotifyMedia(nameof(FilmPlaybackPage.PlayerBuffering), nameof(FilmPlaybackPage.PlayerStatusVisible),
+                        nameof(FilmPlaybackPage.PlayerStatusText), nameof(FilmPlaybackPage.StatusText));
+            }
+        }
+        var next = new PublishedMediaState(MediaIdentity, MediaTitle, HasOutput, IsPlaying, Position, Duration);
+        if (next == publishedMediaState) return;
+        publishedMediaState = next;
         MediaStateChanged?.Invoke(this, EventArgs.Empty);
+    }
+    private void SetExecutionError(string code)
+    {
+        if (ExecutionError == code) return;
+        ExecutionError = code;
+        page?.NotifyExecutionError();
     }
     internal void RequirePage(FilmPlaybackPage value)
     {
@@ -152,7 +197,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     internal bool IsOpeningPage(FilmPlaybackPage value) =>
         opening is not null && openRequest is { } request && ReferenceEquals(request.Page, value);
     internal FilmPlaybackSnapshot? SnapshotFor(FilmPlaybackPage value) => IsCurrentPage(value) ? snapshot : null;
-    internal void RetainOwner(FilmPlaybackPage value, Window? owner)
+    internal void RetainOwner(FilmPlaybackPage value, MeowFilm.Desktop.DesktopWindow? owner)
     {
         if (!ReferenceEquals(page, value)) return;
         if (owner is not null) RequirePage(value);
@@ -321,13 +366,27 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
         var latest = new FilmPlaybackSnapshot(await client.CallAsync("session.snapshot", new { sessionId = state.SessionId.ToString() }));
         if (generation != ownerGeneration || closing is not null) throw new FilmPlaybackException("STALE_SESSION");
         Apply(latest, scheduleMedia: false);
-        if (current is { Started: false, Retiring: false, TerminalReported: false } input && HasOutput &&
-            latest.AttemptId == input.Receipt.AttemptId && !FilmJson.Bool(latest.Attempt, "prepareOnly"))
+        if (current is { Started: false, Retiring: false, TerminalReported: false } input && HasOutput)
         {
-            var confirmed = await client.CommandAsync(state.SessionId, "media.started", new { attemptId = input.Receipt.AttemptId });
-            input.Started = true;
+            if (latest.CurrentId == input.Receipt.AttemptId) { input.Started = true; QueueProgress(); }
+            else if (latest.AttemptId == input.Receipt.AttemptId && !FilmJson.Bool(latest.Attempt, "prepareOnly"))
+            {
+                var confirmed = await client.CommandAsync(state.SessionId, "media.started", new { attemptId = input.Receipt.AttemptId });
+                input.Started = true;
+                if (generation != ownerGeneration) throw new FilmPlaybackException("STALE_SESSION");
+                latest = new(confirmed);
+                Apply(latest); QueueProgress();
+            }
+        }
+        if (ExecutionError.Length > 0)
+        {
+            // Only explicit recovery verifies both the accepted occurrence and physical drain.
+            await nativeWork.WaitAsync();
+            nativeWork.Release();
             if (generation != ownerGeneration) throw new FilmPlaybackException("STALE_SESSION");
-            Apply(new(confirmed)); QueueProgress();
+            if (releaseFailure is { } failure) throw failure;
+            if (current is { Started: true, Retiring: false, TerminalReported: false } accepted &&
+                HasOutput && latest.CurrentId == accepted.Receipt.AttemptId) SetExecutionError("");
         }
         StartObserving();
     }
@@ -347,6 +406,8 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     {
         if (rpc is null || snapshot is null || closed || closing is not null)
             return Task.FromException(new FilmPlaybackException("STALE_SESSION"));
+        if (ExecutionError.Length > 0 && ChangesPlayback(action) && action != "stop")
+            return Task.FromException(new FilmPlaybackException(ExecutionError));
         long ticket = intentGeneration;
         if (ChangesPlayback(action))
         {
@@ -485,7 +546,9 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
             // A cancelled pending prepare still owns native work until its discard/release settles.
             await nativeWork.WaitAsync();
             nativeWork.Release();
+            stopFailure ??= releaseFailure;
             if (stopFailure is not null) throw stopFailure;
+            if (generation == ownerGeneration) SetExecutionError("");
         }
     }
 
@@ -513,6 +576,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
         string previousError = snapshot is { } old ? DisplayError(old) : "";
         snapshot = next;
         page?.Apply(next);
+        page?.SetConnectionError("");
         WakeBrowsing();
         if (error.Length > 0 && error != previousError)
             OperationFailed?.Invoke(this, error);
@@ -528,7 +592,8 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
             // The authoritative owner explicitly dropped the accepted resource (scope/stop).
             RevokeMedia(cancelPending: false);
         }
-        if (!scheduleMedia || playbackCommands != 0 || id.Length == 0 || FilmJson.Bool(next.Attempt, "prepareOnly") ||
+        if (!scheduleMedia || ExecutionError.Length > 0 || releaseFailure is not null ||
+            playbackCommands != 0 || id.Length == 0 || FilmJson.Bool(next.Attempt, "prepareOnly") ||
             id == revokedPublicationId || id == processingId || id == current?.Receipt.AttemptId) return;
         processingId = id;
         pendingPublication = CancellationTokenSource.CreateLinkedTokenSource(connection!.Revoked);
@@ -627,7 +692,8 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
                     try { await started; } catch { /* Original sanitized failure is reported below. */ }
                 // Publication succeeded but drain/report failed. Do not falsely label the new media
                 // a failed candidate or start another chain over an unknown native release outcome.
-                page?.SetConnectionError(Code(error));
+                if (Code(error) == PlaybackError.ReleaseFailed) releaseFailure ??= error;
+                SetExecutionError(Code(error));
                 OperationFailed?.Invoke(this, "播放状态提交失败");
             }
             else if (!publication.IsCancellationRequested && generation == ownerGeneration && ticket == intentGeneration &&
@@ -667,7 +733,11 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
             finally
             {
                 if (processingId == id) processingId = "";
-                if (releaseError is not null) releaseFailure ??= releaseError;
+                if (releaseError is not null)
+                {
+                    releaseFailure ??= releaseError;
+                    if (generation == ownerGeneration) SetExecutionError(Code(releaseError));
+                }
                 if (entered) nativeWork.Release();
             }
             if (releaseError is not null) throw releaseError;
@@ -1034,6 +1104,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
                     observation?.Dispose(); observation = null; observing = null;
                     NotifyMedia();
                     if (failure is not null) throw failure;
+                    SetExecutionError("");
                 }
                 finally { control.Release(); }
             }

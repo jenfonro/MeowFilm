@@ -1,159 +1,59 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
-using System.Windows.Threading;
+using System.Runtime.CompilerServices;
+using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Capabilities;
 
-// One animation clock per viewer, replaced on seek/manual scrolling, never a
-// media clock or polling loop. Manual browsing uses physical offsets for middle-line
-// hit testing; automatic following arranges once and animates only the presentation.
+// ScrollViewer owns physical offsets and compositor scrolling. Completion comes
+// from its final ViewChanged event, not a guessed animation duration.
 internal static class MusicLyricScroll
 {
     private sealed class Motion
     {
         internal double? Target;
-        internal long Epoch;
-        internal bool Moving;
-        internal bool Manual;
-        internal TranslateTransform? Presentation;
-        internal MusicLyricList? List;
         internal Action? Settled;
+        internal bool Moving;
+        internal long Epoch;
     }
-
-    // Virtualized reflow can shrink the range while the manual destination is still in flight.
-    internal static double ManualTarget(ScrollViewer viewer) =>
-        State(viewer) is { Moving: true, Manual: true, Target: { } target }
-            ? Math.Clamp(target, 0, viewer.ScrollableHeight) : PresentedOffset(viewer);
-
-    private static double PresentedOffset(ScrollViewer viewer) =>
-        viewer.VerticalOffset - (State(viewer).Presentation?.Y ?? 0);
-
-    private static readonly DependencyProperty MotionProperty = DependencyProperty.RegisterAttached(
-        "Motion", typeof(Motion), typeof(MusicLyricScroll));
-    private static readonly DependencyProperty OffsetProperty = DependencyProperty.RegisterAttached(
-        "Offset", typeof(double), typeof(MusicLyricScroll),
-        new PropertyMetadata(0d, (owner, args) => ((ScrollViewer)owner).ScrollToVerticalOffset((double)args.NewValue)));
-
-    private static Motion State(ScrollViewer viewer)
+    private static readonly ConditionalWeakTable<ScrollViewer, Motion> Motions = new();
+    private static Motion State(ScrollViewer viewer) => Motions.GetValue(viewer, owner =>
     {
-        if (viewer.GetValue(MotionProperty) is Motion state) return state;
-        state = new Motion();
-        viewer.SetValue(MotionProperty, state);
+        var state = new Motion();
+        owner.ViewChanged += (_, args) =>
+        {
+            if (args.IsIntermediate || !state.Moving || state.Target is not { } target ||
+                Math.Abs(owner.VerticalOffset - Math.Clamp(target, 0, owner.ScrollableHeight)) >= .5) return;
+            state.Moving = false; state.Target = null;
+            var settled = state.Settled; state.Settled = null; settled?.Invoke();
+        };
         return state;
-    }
-
+    });
+    internal static double ManualTarget(ScrollViewer viewer) => State(viewer).Target ?? viewer.VerticalOffset;
     internal static void Stop(ScrollViewer viewer)
     {
-        var state = State(viewer);
-        state.Epoch++;
-        state.Target = null;
-        state.Moving = false;
-        state.Settled = null;
-        var offset = PresentedOffset(viewer);
-        if (state.Presentation is { } presentation)
-        {
-            presentation.BeginAnimation(TranslateTransform.YProperty, null);
-            presentation.Y = 0;
-            state.Presentation = null;
-            state.List?.EndPresentationMotion(presentation);
-            state.List = null;
-        }
-        viewer.BeginAnimation(OffsetProperty, null);
-        viewer.SetValue(OffsetProperty, offset);
+        var state = State(viewer); state.Epoch++; state.Moving = false; state.Target = null; state.Settled = null;
+        viewer.ChangeView(null, viewer.VerticalOffset, null, disableAnimation: true);
     }
-
-    internal static void Move(ScrollViewer viewer, double target, TranslateTransform presentation,
-        MusicLyricList list, Action? settled = null) => MoveCore(viewer, target, presentation, list, settled);
-
-    internal static void MoveManual(ScrollViewer viewer, double target, Action? settled = null) =>
-        MoveCore(viewer, target, null, null, settled);
-
-    private static void MoveCore(ScrollViewer viewer, double target, TranslateTransform? presentation,
-        MusicLyricList? list, Action? settled)
+    internal static void Move(ScrollViewer viewer, double target, Action? settled = null) => MoveCore(viewer, target, settled);
+    internal static void MoveManual(ScrollViewer viewer, double target, Action? settled = null) => MoveCore(viewer, target, settled);
+    private static void MoveCore(ScrollViewer viewer, double target, Action? settled)
     {
         target = Math.Clamp(target, 0, viewer.ScrollableHeight);
         var state = State(viewer);
-        if (state.Target == target)
-        {
-            state.Settled = settled;
-            if (!state.Moving) QueueSettled(viewer, state);
-            return;
-        }
-        var from = PresentedOffset(viewer);
+        if (state.Moving && state.Target is { } existing && Math.Abs(existing - target) < .5)
+        { state.Settled = settled; return; }
         Stop(viewer);
-        state.Target = target;
-        state.Manual = presentation is null;
-        state.Settled = settled;
-        viewer.SetValue(OffsetProperty, target);
-        if (!SystemParameters.ClientAreaAnimation || SystemParameters.HighContrast || Math.Abs(from - target) < .5)
-        {
-            viewer.UpdateLayout();
-            QueueSettled(viewer, state);
-            return;
-        }
-        state.Moving = true;
+        state.Target = target; state.Settled = settled; state.Moving = true;
         var epoch = state.Epoch;
-        if (presentation is not null)
-        {
-            // The list caches one page on each side. No intermediate off-screen
-            // rows need to be created just to animate a distant seek/return.
-            viewer.UpdateLayout();
-            var shift = Math.Clamp(viewer.VerticalOffset - from, -viewer.ViewportHeight, viewer.ViewportHeight);
-            state.Presentation = presentation;
-            state.List = list;
-            list?.BeginPresentationMotion(presentation, shift);
-            var translation = new DoubleAnimation(shift, 0, TimeSpan.FromMilliseconds(420))
-            {
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-                FillBehavior = FillBehavior.Stop
-            };
-            translation.Completed += (_, _) =>
+        if (Math.Abs(viewer.VerticalOffset - target) < .5 || !viewer.ChangeView(null, target, null, !MusicVisuals.CanAnimate(viewer)))
+            viewer.DispatcherQueue.TryEnqueue(() =>
             {
                 if (epoch != state.Epoch) return;
-                state.Moving = false;
-                presentation.BeginAnimation(TranslateTransform.YProperty, null);
-                state.Presentation = null;
-                state.List?.EndPresentationMotion(presentation);
-                state.List = null;
-                QueueSettled(viewer, state);
-            };
-            presentation.BeginAnimation(TranslateTransform.YProperty, translation, HandoffBehavior.SnapshotAndReplace);
-            return;
-        }
-        var animation = new DoubleAnimation(from, target, TimeSpan.FromMilliseconds(180))
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-            FillBehavior = FillBehavior.Stop
-        };
-        animation.Completed += (_, _) =>
-        {
-            if (epoch != state.Epoch) return;
-            state.Moving = false;
-            viewer.BeginAnimation(OffsetProperty, null);
-            QueueSettled(viewer, state);
-        };
-        viewer.BeginAnimation(OffsetProperty, animation, HandoffBehavior.SnapshotAndReplace);
+                state.Moving = false; state.Target = null;
+                var callback = state.Settled; state.Settled = null; callback?.Invoke();
+            });
     }
-
     internal static void Settle(ScrollViewer viewer, double target)
     {
-        target = Math.Clamp(target, 0, viewer.ScrollableHeight);
-        Stop(viewer);
-        viewer.SetValue(OffsetProperty, target);
-    }
-
-    private static void QueueSettled(ScrollViewer viewer, Motion state)
-    {
-        if (state.Settled is null) return;
-        var epoch = state.Epoch;
-        viewer.Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(() =>
-        {
-            if (epoch != state.Epoch) return;
-            var settled = state.Settled;
-            state.Settled = null;
-            settled?.Invoke();
-        }));
+        Stop(viewer); viewer.ChangeView(null, Math.Clamp(target, 0, viewer.ScrollableHeight), null, true);
     }
 }

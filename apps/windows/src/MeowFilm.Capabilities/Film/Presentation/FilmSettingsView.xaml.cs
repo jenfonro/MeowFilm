@@ -1,9 +1,11 @@
+using Windows.System;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Input;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
@@ -21,7 +23,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     private bool initialized, observingSources;
     private long activation;
     private Func<Task>? popupAction;
-    private FrameworkElement? popupAnchor;
+    private Control? popupAnchor;
 
     public FilmSettingsView(FilmRuleService rules, FilmSourceService sources, FilmMetadataService? metadata = null)
         : this(rules, sources, sources.Storage, null, () => null, metadata) { }
@@ -50,12 +52,13 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         }
         ConfigureSourceLists();
         initialized = true;
+        _ = new FilmPresentationVisibility(this, _ => View_VisibilityChanged());
     }
 
     public DesktopHeaderContribution Header => new("设置", SearchVisible: false, SearchEnabled: false);
     public event EventHandler? HeaderChanged { add { } remove { } }
     public event PropertyChangedEventHandler? PropertyChanged;
-    private bool Active => initialized && IsLoaded && IsVisible;
+    private bool Active => initialized && IsLoaded && MeowFilm.Desktop.DesktopVisual.IsVisible(this);
     private void Changed([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new(name));
     private void Notify(string message) => Notices.Message = message;
 
@@ -71,10 +74,10 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         if (observingSources) { sources.Changed -= Sources_Changed; observingSources = false; }
     }
 
-    private async void View_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+    private async void View_VisibilityChanged()
     {
         if (!initialized) return;
-        if (!IsVisible) Deactivate();
+        if (!MeowFilm.Desktop.DesktopVisual.IsVisible(this)) Deactivate();
         else if (IsLoaded) await ActivateCurrentAsync();
     }
 
@@ -145,25 +148,25 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         MetadataPage.Visibility = key == "metadata" ? Visibility.Visible : Visibility.Collapsed;
         PanPage.Visibility = key == "pan" ? Visibility.Visible : Visibility.Collapsed;
         BusinessPage.Visibility = key is "rules" or "cats" or "videos" or "metadata" or "pan" ? Visibility.Collapsed : Visibility.Visible;
-        anchor.Focus(); anchor.BringIntoView();
+        anchor.Focus(FocusState.Programmatic); anchor.StartBringIntoView();
         await ActivateCurrentAsync();
     }
 
-    private void Section_KeyDown(object sender, KeyEventArgs e)
+    private void Section_KeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (sender is RadioButton current && NavigateSection(current, e.Key)) e.Handled = true;
     }
-    internal bool NavigateSection(RadioButton current, Key key)
+    internal bool NavigateSection(RadioButton current, VirtualKey key)
     {
-        if (key is not (Key.Home or Key.End or Key.Left or Key.Right)) return false;
+        if (key is not (VirtualKey.Home or VirtualKey.End or VirtualKey.Left or VirtualKey.Right)) return false;
         var anchors = SettingsNavigation.Children.OfType<RadioButton>()
             .Concat(BusinessNavigation.Children.OfType<RadioButton>())
-            .Where(anchor => anchor.IsVisible).ToArray();
+            .Where(anchor => MeowFilm.Desktop.DesktopVisual.IsVisible(anchor)).ToArray();
         int index = Array.IndexOf(anchors, current);
         if (index < 0) return false;
-        int next = key switch { Key.Home => 0, Key.End => anchors.Length - 1,
-            Key.Left => (index + anchors.Length - 1) % anchors.Length, _ => (index + 1) % anchors.Length };
-        anchors[next].IsChecked = true; anchors[next].Focus(); anchors[next].BringIntoView();
+        int next = key switch { VirtualKey.Home => 0, VirtualKey.End => anchors.Length - 1,
+            VirtualKey.Left => (index + anchors.Length - 1) % anchors.Length, _ => (index + 1) % anchors.Length };
+        anchors[next].IsChecked = true; anchors[next].Focus(FocusState.Programmatic); anchors[next].StartBringIntoView();
         return true;
     }
 
@@ -182,7 +185,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         if (!Active) return;
         ClosePopup();
         long ticket = activation;
-        popupAnchor = anchor;
+        popupAnchor = anchor as Control;
         popupAction = () => Active && ticket == activation ? execute() : Task.CompletedTask;
         PopupTitle.Text = title;
         PopupMessage.Text = message;
@@ -202,6 +205,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         AutomationProperties.SetName(PopupCancel, title + "：取消");
         AutomationProperties.SetName(PopupSurface, title);
         UpdatePopupSize();
+        ActionPopup.XamlRoot = XamlRoot;
         ActionPopup.IsOpen = true;
     }
 
@@ -209,6 +213,12 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     {
         PopupSurface.Width = Math.Min(400, Math.Max(240, ActualWidth - 32));
         PopupScroller.MaxHeight = Math.Max(100, ActualHeight - 64);
+        if (XamlRoot is { } root)
+        {
+            ActionPopup.HorizontalOffset = Math.Max(0, (root.Size.Width - PopupSurface.Width) / 2);
+            PopupSurface.Measure(new Size(PopupSurface.Width, PopupScroller.MaxHeight));
+            ActionPopup.VerticalOffset = Math.Max(0, (root.Size.Height - PopupSurface.DesiredSize.Height) / 2);
+        }
     }
 
     private string? catFilePath, originalCatType;
@@ -221,16 +231,16 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         CatUrlField.Visibility = local ? Visibility.Collapsed : Visibility.Visible;
         CatFileField.Visibility = local ? Visibility.Visible : Visibility.Collapsed;
     }
-    private void CatFile_Click(object sender, RoutedEventArgs e)
+    private async void CatFile_Click(object sender, RoutedEventArgs e)
     {
         if (!Active || !ActionPopup.IsOpen) return;
-        ActionPopup.StaysOpen = true;
+        ActionPopup.IsLightDismissEnabled = false;
         try
         {
-            string? path = PickLocalScripts(Window.GetWindow(this), false, "选择猫源文件").FirstOrDefault();
+            string? path = (await PickLocalScriptsAsync("选择猫源文件")).FirstOrDefault();
             if (path is not null && Active && ActionPopup.IsOpen) SelectCatFile(path);
         }
-        finally { ActionPopup.StaysOpen = false; }
+        finally { ActionPopup.IsLightDismissEnabled = true; }
     }
     internal void SelectCatFile(string path)
     {
@@ -247,27 +257,27 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         popupAction = null;
     }
 
-    private void ActionPopup_Opened(object? sender, EventArgs e)
+    private void ActionPopup_Opened(object? sender, object e)
     {
-        if (PopupFields.Visibility == Visibility.Visible) { CatNameBox.Focus(); CatNameBox.SelectAll(); }
-        else if (PopupCancel.Visibility == Visibility.Visible) PopupCancel.Focus();
-        else PopupAccept.Focus();
+        if (PopupFields.Visibility == Visibility.Visible) { CatNameBox.Focus(FocusState.Programmatic); CatNameBox.SelectAll(); }
+        else if (PopupCancel.Visibility == Visibility.Visible) PopupCancel.Focus(FocusState.Programmatic);
+        else PopupAccept.Focus(FocusState.Programmatic);
     }
 
-    private void ActionPopup_Closed(object? sender, EventArgs e)
+    private void ActionPopup_Closed(object? sender, object e)
     {
         popupAction = null;
         var anchor = popupAnchor;
         popupAnchor = null;
-        if (Active && anchor is { IsVisible: true, IsEnabled: true }) anchor.Focus();
+        if (Active && anchor is { Visibility: Visibility.Visible, IsEnabled: true }) anchor.Focus(FocusState.Programmatic);
     }
 
-    private void ActionPopup_KeyDown(object sender, KeyEventArgs e)
+    private void ActionPopup_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key == Key.Escape) { ClosePopup(); e.Handled = true; }
-        else if (e.Key == Key.Enter && PopupFields.Visibility == Visibility.Visible)
+        if (e.Key == VirtualKey.Escape) { ClosePopup(); e.Handled = true; }
+        else if (e.Key == VirtualKey.Enter && PopupFields.Visibility == Visibility.Visible)
         {
-            e.Handled = true;
+
             PopupAccept_Click(PopupAccept, new());
         }
     }
@@ -281,15 +291,15 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         {
             if (string.IsNullOrWhiteSpace(CatNameBox.Text))
             {
-                Notify("请输入猫源名称"); CatNameBox.Focus(); return;
+                Notify("请输入猫源名称"); CatNameBox.Focus(FocusState.Programmatic); return;
             }
             if (CatInputType == "local" && catFilePath is null && originalCatType != "local")
             {
-                Notify("请选择猫源文件"); CatFileButton.Focus(); return;
+                Notify("请选择猫源文件"); CatFileButton.Focus(FocusState.Programmatic); return;
             }
             if (CatUrlField.Visibility == Visibility.Visible && string.IsNullOrWhiteSpace(CatUrlBox.Text))
             {
-                Notify("请输入网络 URL"); CatUrlBox.Focus(); return;
+                Notify("请输入网络 URL"); CatUrlBox.Focus(FocusState.Programmatic); return;
             }
         }
         ClosePopup();

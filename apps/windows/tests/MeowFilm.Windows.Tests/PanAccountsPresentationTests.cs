@@ -1,12 +1,15 @@
 using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Media;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
+using Color = Windows.UI.Color;
+using Colors = Microsoft.UI.Colors;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Core.Runtime;
@@ -28,7 +31,7 @@ public static class PanAccountsPresentationTests
         yield return Case("film settings exposes the real pan owner and retires it on section exit", Entry);
     }
     private static TestCase Case(string name, Func<Task> run) =>
-        new("pan-accounts-ui: " + name, () => MusicQualityConsumerTests.Sta(run));
+        new("pan-accounts-ui: " + name, () => TestUiHost.InvokeAsync(run));
     private static async Task CorruptRows()
     {
         await using var scene = await Scene.Create(runtime => runtime.SetDocument("""
@@ -38,7 +41,7 @@ public static class PanAccountsPresentationTests
         var broken = scene.Model.Rows[0];
         var healthy = scene.Model.Rows.Single(row => row.Provider == "tianyi");
         Check(Visuals(scene.View).OfType<TextBlock>().Any(text => ReferenceEquals(text.DataContext, broken) &&
-            text.IsVisible && text.Text == "凭据损坏") && !Action(scene.View, broken, "登录").IsEnabled,
+            DesktopVisual.IsVisible(text) && text.Text == "凭据损坏") && !Action(scene.View, broken, "登录").IsEnabled,
             "the existing status column shows an explicit item error, not signed-out or retained success");
         Check(Action(scene.View, healthy, "编辑").IsEnabled && Action(scene.View, healthy, "退出登录").IsEnabled &&
             !scene.Model.LoadFailed && scene.Notices.Count == 0 && scene.Runtime.Calls.Count == 0 &&
@@ -75,27 +78,27 @@ public static class PanAccountsPresentationTests
         {
             DesktopTheme.SetIsHighContrast(scene.View, contrast); await Drain();
             var surface = Visuals(scene.View).OfType<Border>().First(border =>
-                ReferenceEquals(border.Style, scene.View.FindResource("Settings.ListSurface")));
-            if (contrast) Check(((SolidColorBrush)surface.Background).Color == SystemColors.WindowColor, "high contrast reaches the reused table surface");
+                ReferenceEquals(border.Style, DesktopVisual.Resource(scene.View, "Settings.ListSurface")));
+            if (contrast) Check(((SolidColorBrush)surface.Background).Color == new global::Windows.UI.ViewManagement.UISettings().GetColorValue(global::Windows.UI.ViewManagement.UIColorType.Background), "high contrast reaches the reused table surface");
         }
-        GeneralAppearanceTests.SavePreview(scene.View, "pan-accounts-wide", 900, 620);
-        scene.Window.Width = 390; scene.Window.Height = 440; await Drain();
+        await GeneralAppearanceTests.SavePreview(scene.View, "pan-accounts-wide", 900, 620);
+        scene.Window.Resize(390, 440); await Drain();
         var scroll = (ScrollViewer)scene.View.FindName("TableScroll");
         Check(scroll.ViewportWidth < ((Grid)scene.View.FindName("AccountTable")).ActualWidth &&
             scroll.ScrollableWidth > 0 && scene.View.ActualWidth <= 390, "narrow width scrolls inside the table without dropping columns");
-        GeneralAppearanceTests.SavePreview(scene.View, "pan-accounts-narrow", 374, 400);
-        Check(scene.BindingErrors.ToString().Length == 0, "table paths and template bindings resolve without WPF errors");
+        await GeneralAppearanceTests.SavePreview(scene.View, "pan-accounts-narrow", 374, 400);
+        Check(scene.BindingErrors.ToString().Length == 0, "table paths and template bindings resolve without WinUI errors");
     }
     private static async Task Manual()
     {
         await using var scene = await Scene.Create();
         var row = scene.Model.Rows.Single(row => row.Provider == "tianyi");
         Click(Action(scene.View, row, "登录")); await Drain();
-        var popup = (Popup)scene.View.FindName("LoginPopup");
+        var popup = (ContentDialog)scene.View.FindName("LoginPopup");
         var frame = (AccountLoginSurface)scene.View.FindName("LoginSurface");
         var fields = (StackPanel)scene.View.FindName("CredentialInputs");
-        Check(popup.IsOpen && !scene.Model.QrMode && frame.Title == row.Name &&
-            ReferenceEquals(frame.Style, scene.View.FindResource("Account.LoginSurface")), "manual button reaches the real shared login surface");
+        Check(IsOpen(scene.View, popup) && !scene.Model.QrMode && frame.Title == row.Name &&
+            ReferenceEquals(frame.Style, DesktopVisual.Resource(scene.View, "Account.LoginSurface")), "manual button reaches the real shared login surface");
         Check(fields.Children.OfType<PasswordBox>().Select(box => ((PanCredentialField)box.Tag).Id).SequenceEqual(["cookie", "password"]) &&
             fields.Children.OfType<TextBox>().Single().Tag is PanCredentialField { Id: "username" }, "secrets use PasswordBox; username is a normal input");
         foreach (var input in fields.Children.OfType<PasswordBox>()) Check(input.Password.Length == 0 && input.MaxLength == 0, "old secrets are never read back and no credential length limit is added");
@@ -107,7 +110,7 @@ public static class PanAccountsPresentationTests
             return Task.FromResult(scene.Runtime.Commit(bytes, expected));
         };
         Click((Button)scene.View.FindName("SaveCredentials"));
-        await Until(() => !row.IsBusy && !popup.IsOpen);
+        await Until(() => !row.IsBusy && !IsOpen(scene.View, popup));
         var saved = scene.Runtime.Saved.GetProperty("accounts").GetProperty("tianyi").GetProperty("credentials");
         Check(saved.EnumerateObject().Select(field => field.Name).SequenceEqual(["username", "password"]) &&
             saved.GetProperty("password").GetString() == "  synthetic password  " && row.Status == "signedIn" &&
@@ -123,9 +126,9 @@ public static class PanAccountsPresentationTests
         });
         Click(Action(scene.View, scene.Model.Rows[0], "登录"));
         await Until(() => scene.Model.QrImage is not null);
-        var popup = (Popup)scene.View.FindName("LoginPopup");
+        var popup = (ContentDialog)scene.View.FindName("LoginPopup");
         var frame = (AccountLoginSurface)scene.View.FindName("LoginSurface");
-        Check(popup.IsOpen && Visuals(frame).OfType<Image>().Single().Source == scene.Model.QrImage, "image challenge binds actual detached pixels");
+        Check(IsOpen(scene.View, popup) && Visuals(frame).OfType<Image>().Single().Source == scene.Model.QrImage, "image challenge binds actual detached pixels");
         Click((Button)scene.View.FindName("ManualModeButton"));
         await Until(() => !scene.Model.QrMode && scene.Runtime.Cancelled.Count == 1);
         var fields = (StackPanel)scene.View.FindName("CredentialInputs");
@@ -141,7 +144,7 @@ public static class PanAccountsPresentationTests
         var close = Visuals(frame).OfType<Button>().Single(button => AutomationProperties.GetName(button) == "关闭登录");
         Check(close.IsEnabled, "shared close remains usable in high contrast");
         Click(close);
-        await Until(() => !popup.IsOpen && scene.Runtime.Cancelled.Count == 3);
+        await Until(() => !IsOpen(scene.View, popup) && scene.Runtime.Cancelled.Count == 3);
         Check(!scene.Model.LoginOpen && scene.Model.QrImage is null, "shared chrome close cleans up login");
         Check(scene.BindingErrors.ToString().Length == 0, "QR image mode and shared popup bindings resolve");
     }
@@ -154,7 +157,7 @@ public static class PanAccountsPresentationTests
             await Until(() => scene.Model.QrImage is not null);
             int before = scene.Runtime.Cancelled.Count;
             if (action == 0) scene.View.Visibility = Visibility.Collapsed;
-            else if (action == 1) scene.Window.WindowState = WindowState.Minimized;
+            else if (action == 1) scene.Window.WindowState = DesktopWindowState.Minimized;
             else if (action == 2) scene.Window.Content = null;
             else
             {
@@ -162,9 +165,9 @@ public static class PanAccountsPresentationTests
                 scene.View.DataContext = new PanAccounts(replacement, replacement);
             }
             await Until(() => !scene.Model.LoginOpen && scene.Runtime.Cancelled.Count == before + 1);
-            Check(!((Popup)scene.View.FindName("LoginPopup")).IsOpen, "surface retirement closes the actual popup");
+            Check(!IsOpen(scene.View, (ContentDialog)scene.View.FindName("LoginPopup")), "surface retirement closes the actual popup");
             if (action == 0) scene.View.Visibility = Visibility.Visible;
-            else if (action == 1) scene.Window.WindowState = WindowState.Normal;
+            else if (action == 1) scene.Window.WindowState = DesktopWindowState.Normal;
             else if (action == 2) scene.Window.Content = scene.View;
             else
             {
@@ -181,12 +184,13 @@ public static class PanAccountsPresentationTests
         await using var scene = await Scene.Create(runtime => runtime.Account("baidu", 1, "signedIn", "cookie"));
         var row = scene.Model.Rows[0];
         Click(Action(scene.View, row, "退出登录")); await Drain();
-        var popup = (Popup)scene.View.FindName("LogoutPopup");
-        Check(popup.IsOpen, "logout requires the same confirmation interaction as music accounts");
+        var popup = (ContentDialog)scene.View.FindName("LogoutPopup");
+        Check(IsOpen(scene.View, popup), "logout requires the same confirmation interaction as music accounts");
         Click((Button)scene.View.FindName("CancelLogout"));
-        Check(!popup.IsOpen && row.Revision == 1, "cancel does not clear credentials");
+        await Until(() => !IsOpen(scene.View, popup));
+        Check(!IsOpen(scene.View, popup) && row.Revision == 1, "cancel does not clear credentials");
         Click(Action(scene.View, row, "退出登录")); await Drain();
-        Click(Visuals(popup.Child).OfType<Button>().Single(button => Equals(button.Content, "确定")));
+        Click(Visuals((DependencyObject)popup.Content).OfType<Button>().Single(button => Equals(button.Content, "确定")));
         await Until(() => !row.IsBusy && row.Revision == 2);
         Check(row.Status == "signedOut" && !row.Configured &&
             scene.Runtime.Writes.Count == 1 && scene.Runtime.Calls.Count == 0, "confirm binds exactly one native revision-advancing clear");
@@ -197,7 +201,7 @@ public static class PanAccountsPresentationTests
         Click(Action(scene.View, row, "退出登录")); await Drain();
         scene.Runtime.Account("baidu", 4, "expired", "cookie");
         await scene.Model.ReloadAsync(); await Drain();
-        Check(!popup.IsOpen && popup.PlacementTarget is null, "confirmation for an older revision is retired");
+        Check(!IsOpen(scene.View, popup) && FilmUiTest.Field<Button?>(scene.View, "logoutAnchor") is null, "confirmation for an older revision is retired");
     }
     private static async Task Entry()
     {
@@ -218,13 +222,13 @@ public static class PanAccountsPresentationTests
             var pan = (PanAccountsView)view.FindName("PanPage");
             var model = (PanAccounts)pan.DataContext;
             await Until(() => model.Rows.Count == 5 && !model.IsLoading);
-            Check(pan.IsVisible && !((Grid)view.FindName("BusinessPage")).IsVisible &&
+            Check(DesktopVisual.IsVisible(pan) && !DesktopVisual.IsVisible((Grid)view.FindName("BusinessPage")) &&
                 runtime.Calls.All(call => !call.Method.StartsWith("pan.")), "film settings reads pan settings without its existing runtime");
             Click(Action(pan, model.Rows[0], "登录"));
             await Until(() => model.QrImage is not null);
             navigation.Children.OfType<RadioButton>().Single(button => Equals(button.Tag, "rules")).IsChecked = true;
             await Until(() => runtime.Cancelled.Count == 1 && !model.LoginOpen);
-            Check(!((Popup)pan.FindName("LoginPopup")).IsOpen && store.Writes == 0, "leaving the settings category cancels QR and creates no second credential store");
+            Check(!IsOpen(pan, (ContentDialog)pan.FindName("LoginPopup")) && store.Writes == 0, "leaving the settings category cancels QR and creates no second credential store");
         }
         finally
         {
@@ -233,15 +237,15 @@ public static class PanAccountsPresentationTests
         }
     }
     private static string[] VisibleActions(DependencyObject view, PanAccountRow row) =>
-        Visuals(view).OfType<Button>().Where(button => ReferenceEquals(button.DataContext, row) && button.IsVisible)
+        Visuals(view).OfType<Button>().Where(button => ReferenceEquals(button.DataContext, row) && DesktopVisual.IsVisible(button))
             .Select(button => (string)button.Content).ToArray();
     private static Button Action(DependencyObject view, PanAccountRow row, string content) =>
         Visuals(view).OfType<Button>().Single(button => ReferenceEquals(button.DataContext, row) &&
-            button.IsVisible && Equals(button.Content, content));
+            DesktopVisual.IsVisible(button) && Equals(button.Content, content));
     private static void Click(Button button)
     {
         Check(button.IsEnabled, "action must be enabled");
-        button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        DesktopTestUi.Invoke(button);
     }
     private static IEnumerable<DependencyObject> Visuals(DependencyObject root)
     {
@@ -251,7 +255,7 @@ public static class PanAccountsPresentationTests
     }
     private static async Task Drain()
     {
-        for (int i = 0; i < 5; i++) await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        for (int i = 0; i < 5; i++) await DesktopTestUi.DrainAsync();
     }
     private static async Task Until(Func<bool> ready)
     {
@@ -263,11 +267,9 @@ public static class PanAccountsPresentationTests
         }
         await Drain();
     }
-    private static Window TestWindow(FrameworkElement content) => new()
-    {
-        Content = content, Width = 900, Height = 680, Left = -10000, Top = -10000,
-        ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None
-    };
+    private static bool IsOpen(FrameworkElement view, ContentDialog dialog) =>
+        view.XamlRoot is not null && FilmUiTest.Dialogs(view).Contains(dialog);
+    private static Window TestWindow(FrameworkElement content) => FilmUiTest.Window(content, 900, 680);
     private sealed class Scene : IAsyncDisposable
     {
         internal readonly PanAccountFixture Runtime = new();
@@ -276,22 +278,18 @@ public static class PanAccountsPresentationTests
         internal readonly Window Window;
         internal readonly List<string> Notices = [];
         internal readonly StringWriter BindingErrors = new();
-        private readonly TextWriterTraceListener listener;
-        private readonly SourceLevels previous;
+        private readonly bool previous;
+        private void BindingFailed(object? sender, BindingFailedEventArgs args) => BindingErrors.WriteLine(args.Message);
         private Scene(Action<PanAccountFixture>? configure)
         {
             configure?.Invoke(Runtime);
             Model = new(Runtime, Runtime);
             View = new() { DataContext = Model };
             Window = TestWindow(View);
-            Window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, args) =>
-            {
-                if (args.Message.Length > 0) Notices.Add(args.Message);
-            }));
-            listener = new(BindingErrors);
-            previous = PresentationTraceSources.DataBindingSource.Switch.Level;
-            PresentationTraceSources.DataBindingSource.Switch.Level = SourceLevels.Error;
-            PresentationTraceSources.DataBindingSource.Listeners.Add(listener);
+            NoticeOutlet.SetReceiver(View, args => { if (args.Message.Length > 0) Notices.Add(args.Message); });
+            previous = Application.Current.DebugSettings.IsBindingTracingEnabled;
+            Application.Current.DebugSettings.IsBindingTracingEnabled = true;
+            Application.Current.DebugSettings.BindingFailed += BindingFailed;
         }
         internal static async Task<Scene> Create(Action<PanAccountFixture>? configure = null)
         {
@@ -308,9 +306,9 @@ public static class PanAccountsPresentationTests
         {
             Window.Content = null; Window.Close(); await Drain();
             await Model.DisposeAsync();
-            PresentationTraceSources.DataBindingSource.Listeners.Remove(listener);
-            PresentationTraceSources.DataBindingSource.Switch.Level = previous;
-            listener.Dispose(); BindingErrors.Dispose();
+            Application.Current.DebugSettings.BindingFailed -= BindingFailed;
+            Application.Current.DebugSettings.IsBindingTracingEnabled = previous;
+            BindingErrors.Dispose();
         }
     }
 }

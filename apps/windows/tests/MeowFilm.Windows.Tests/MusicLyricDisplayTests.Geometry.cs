@@ -1,12 +1,20 @@
+using Colors = Microsoft.UI.Colors;
+using FontWeights = Microsoft.UI.Text.FontWeights;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Windows.UI;
+using global::Windows.UI.Text;
+using Microsoft.UI;
+using Microsoft.UI.Windowing;
+using Microsoft.UI.Xaml.Controls;
+
+using Microsoft.UI.Xaml.Media;
+
+
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.PlaybackCache;
@@ -27,17 +35,16 @@ public static partial class MusicLyricDisplayTests
         await using var f = await Fixture.Create();
         await f.Module.ActivateGlobalSurfaceAsync(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail, default);
         var view = new MusicPlayerDetailView(f.Module);
-        var window = new DesktopWindow { Content = view, Width = 1200, Height = 850,
-            Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false };
+        var window = LyricWindow(view);
         try
         {
-            window.Show(); window.UpdateLayout();
-            var list = (ListBox)view.FindName("LyricList");
+            window.Activate(); await MusicTestUi.Drain(); DesktopTestUi.WindowRoot(window).UpdateLayout();
+            var list = (MusicLyricList)view.FindName("LyricList");
             var viewport = (FrameworkElement)view.FindName("LyricViewport");
             var frame = (Border)view.FindName("LyricPreviewFrame");
             ScrollViewer Scroll() => LyricVisuals(list).OfType<ScrollViewer>().First();
-            double Gap(int index) => list.ItemContainerGenerator.ContainerFromIndex(index) is FrameworkElement row
-                ? Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), Scroll()).Y - Scroll().ViewportHeight / 2)
+            double Gap(int index) => list.ContainerFromIndex(index) is FrameworkElement row
+                ? Math.Abs(row.TransformToVisual(Scroll()).TransformPoint(new Point(0, row.ActualHeight / 2)).Y - Scroll().ViewportHeight / 2)
                 : double.PositiveInfinity;
             async Task Settle(Func<bool> done)
             {
@@ -45,24 +52,23 @@ public static partial class MusicLyricDisplayTests
                 while (!done())
                 {
                     if (started.Elapsed > TimeSpan.FromSeconds(3)) throw new InvalidOperationException("Lyric alignment did not settle");
-                    await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+                    await MusicTestUi.Drain();
                     await Task.Delay(15);
                 }
             }
             await Settle(() => Gap(0) < 1);
-            Check(f.Module.ActiveLyricIndex < 0 && list.SelectedIndex < 0, "prelude centers without singing early");
+            Check(f.Module.ActiveLyricIndex < 0 && f.Module.LyricDisplayIndex < 0, "prelude centers without singing early");
             Check(Scroll().VerticalOffset < 1, "first row fits at the very top of the scrollable range");
-            window.Width = 1000; window.Height = 740; window.UpdateLayout();
+            window.Resize(1000, 740); view.Width = 1000; view.Height = 740; DesktopTestUi.WindowRoot(window).UpdateLayout();
             await Settle(() => Gap(0) < 1);
-            viewport.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(window)!, 0, Key.End)
-                { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+            Check(view.BrowseLyric(VirtualKey.End), "the End command is accepted by the mounted lyric view");
             Check(f.Module.HasLyricPreview && frame.Visibility == Visibility.Visible, "the rounded frame appears on first input");
             await Settle(() => Gap(f.Module.Lyrics.Count - 1) < 1);
             Check(frame.CornerRadius.TopLeft > 0 && frame.BorderThickness.Top > 0 && frame.BorderThickness.Left > 0);
-            var selected = (FrameworkElement)list.ItemContainerGenerator.ContainerFromIndex(f.Module.LyricDisplayIndex);
+            var selected = (FrameworkElement)list.ContainerFromIndex(f.Module.LyricDisplayIndex);
             Check(Math.Abs(frame.ActualHeight - selected.ActualHeight) < 1, "frame contains the original row and translation");
             Equal(0, f.Playback.Seeks);
-            window.Visibility = Visibility.Hidden;
+            window.Hide(); await MusicTestUi.Drain();
             Check(!f.Module.HasLyricPreview, "hiding cannot leave a preview with no resume timer");
         }
         finally { window.Close(); f.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail); }
@@ -83,8 +89,8 @@ public static partial class MusicLyricDisplayTests
         var window = LyricWindow(view);
         try
         {
-            window.Show();
-            var list = (ListBox)view.FindName("LyricList");
+            window.Activate(); await MusicTestUi.Drain();
+            var list = (MusicLyricList)view.FindName("LyricList");
             var viewport = (FrameworkElement)view.FindName("LyricViewport");
             var title = (TextBlock)view.FindName("DetailTitle");
             var action = (Button)view.FindName("ConfirmLyric");
@@ -95,44 +101,44 @@ public static partial class MusicLyricDisplayTests
             foreach (var size in new[] { new Size(1000, 740), new Size(1298, 848), new Size(1440, 900) })
             {
                 f.Module.CancelLyricPreview();
-                window.Width = view.Width = size.Width; window.Height = view.Height = size.Height; window.UpdateLayout();
+                window.Resize(size.Width, size.Height); view.Width = size.Width; view.Height = size.Height; DesktopTestUi.WindowRoot(window).UpdateLayout();
                 Equal(size.Width, view.ActualWidth); Equal(size.Height, view.ActualHeight);
                 await WaitForLyric(() => CenterGap(list, scroll, 0) < 1);
-                var row = (FrameworkElement)list.ItemContainerGenerator.ContainerFromIndex(0);
+                var row = (FrameworkElement)list.ContainerFromIndex(0);
                 var text = LyricVisuals(row).OfType<TextBlock>().Single(t => t.Text == f.Module.Lyrics[0].Text);
-                double before = text.TranslatePoint(new Point(), view).X;
-                Check(Math.Abs(before - title.TranslatePoint(new Point(), view).X) < 1,
+                double before = text.TransformToVisual(view).TransformPoint(new Point()).X;
+                Check(Math.Abs(before - title.TransformToVisual(view).TransformPoint(new Point()).X) < 1,
                     "title and lyric text share one left edge");
-                var disc = record.TransformToAncestor(view).TransformBounds(new Rect(record.RenderSize));
-                Check(disc.Width <= 390 && disc.Left >= 0 && disc.Right < title.TranslatePoint(new Point(), view).X,
+                var disc = DesktopTestUi.Bounds(record, view);
+                Check(disc.Width <= 390 && disc.Left >= 0 && disc.Right < title.TransformToVisual(view).TransformPoint(new Point()).X,
                     "the smaller record stays inside its own column");
                 if (size.Width >= 1298) Check(disc.Width >= 360, "desktop record retains the reference scale");
-                Check(title.TranslatePoint(new Point(), view).Y is >= 100 and <= 115,
+                Check(title.TransformToVisual(view).TransformPoint(new Point()).Y is >= 100 and <= 115,
                     "the title leaves the reference's top breathing room");
-                var lyrics = viewport.TransformToAncestor(view).TransformBounds(new Rect(viewport.RenderSize));
-                var timing = rail.TransformToAncestor(view).TransformBounds(new Rect(rail.RenderSize));
+                var lyrics = DesktopTestUi.Bounds(viewport, view);
+                var timing = DesktopTestUi.Bounds(rail, view);
                 Check(timing.Left >= lyrics.Right + 10 && timing.Right <= view.ActualWidth &&
                     timing.Top >= lyrics.Top && timing.Bottom <= lyrics.Bottom,
                     "the timing controls remain beside the lyric viewport without clipping or covering its text");
-                BrowseLyricKey(viewport, window, Key.Home);
-                window.UpdateLayout();
-                await WaitForLyric(() => frame.IsVisible && action.ActualHeight > 0 && CenterGap(list, scroll, 0) < 1);
-                Check(Math.Abs(before - text.TranslatePoint(new Point(), view).X) < 1,
+                Check(view.BrowseLyric(VirtualKey.Home), "Home browse command");
+                DesktopTestUi.WindowRoot(window).UpdateLayout();
+                await WaitForLyric(() => DesktopVisual.IsVisible(frame) && action.ActualHeight > 0 && CenterGap(list, scroll, 0) < 1);
+                Check(Math.Abs(before - text.TransformToVisual(view).TransformPoint(new Point()).X) < 1,
                     "showing the capsule does not move the original lyric or translation");
-                var capsule = action.TransformToAncestor(view).TransformBounds(new Rect(action.RenderSize));
+                var capsule = DesktopTestUi.Bounds(action, view);
                 Check(capsule.Height is >= 20 and <= 26 && capsule.Width < 76 &&
                     capsule.Right + 3 < before, "one small capsule fits beside, not over, the lyric");
-                var pieces = LyricVisuals(action).OfType<TextBlock>().ToArray();
-                Equal(2, pieces.Length); Equal("00:02", pieces[1].Text);
-                Check(pieces[0].TranslatePoint(new Point(), action).X < pieces[1].TranslatePoint(new Point(), action).X,
+                var icon = LyricVisuals(action).OfType<FontIcon>().Single();
+                var time = LyricVisuals(action).OfType<TextBlock>().Single(text => text.Text == "00:02");
+                Check(icon.TransformToVisual(action).TransformPoint(new Point()).X < time.TransformToVisual(action).TransformPoint(new Point()).X,
                     "play icon precedes the time within one button");
                 Equal(1, LyricVisuals(frame).OfType<Button>().Count());
                 Check(LyricVisuals(action).OfType<Border>().First().CornerRadius.TopLeft >= capsule.Height / 2,
                     "the action has fully rounded ends");
                 Equal(0, f.Playback.Seeks);
-                SaveLyricFrame(view, $"player-detail-{size.Width:0}x{size.Height:0}.png");
+                await SaveLyricFrame(view, $"player-detail-{size.Width:0}x{size.Height:0}.png");
             }
-            action.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            DesktopTestUi.Invoke(action);
             await WaitForLyric(() => !f.Module.HasLyricPreview);
             Equal(1, f.Playback.Seeks); Equal(1, f.Playback.Resumes);
             Equal(2d, f.Playback.PositionSeconds); Equal(1, f.Playback.Opens);
@@ -152,70 +158,78 @@ public static partial class MusicLyricDisplayTests
         var window = LyricWindow(view);
         try
         {
-            window.Show();
-            var list = (ListBox)view.FindName("LyricList");
+            window.Activate(); await MusicTestUi.Drain();
+            var list = (MusicLyricList)view.FindName("LyricList");
             var viewport = (FrameworkElement)view.FindName("LyricViewport");
             var fade = (Grid)view.FindName("LyricFadeViewport");
-            var edge = (SidebarBackdrop)view.FindName("LyricEdgeFade");
+            var edge = (MusicArtworkFade)view.FindName("LyricEdgeFade");
             var backdrop = (Border)view.FindName("PageBackdrop");
             var scroll = LyricVisuals(list).OfType<ScrollViewer>().First();
-            Check(fade.OpacityMask is null,
-                "the lyric text layer is not composited through a whole-viewport opacity mask");
+            Check(ReferenceEquals(list.Parent, fade) && !ReferenceEquals(edge.Source, list),
+                "lyric text stays directly in XAML, outside the sampled background surface");
             var text = LyricVisuals(list).OfType<TextBlock>().ToArray();
-            Check(text.Length > 0 && text.All(block =>
-                TextOptions.GetTextRenderingMode(block) == TextRenderingMode.Auto),
-                "detail lyric glyphs use native automatic rendering");
+            Check(text.Length > 0 && text.All(block => block.FontWeight.Weight == FontWeights.Normal.Weight),
+                "detail lyric glyphs use native regular TextBlocks");
             Check(ReferenceEquals(edge.Source, backdrop), "the edge fade projects the page's own cover backdrop");
-            Check(ReferenceEquals(backdrop.Background, view.Background),
-                "the projected backdrop is the same PlayerBackground brush as the page");
-            var edgeMask = (LinearGradientBrush)edge.OpacityMask;
-            Check(edgeMask.GradientStops.Select(stop => (stop.Color, stop.Offset)).SequenceEqual(
-                new[] { (Colors.Black, 0d), (Colors.Transparent, .10d),
-                    (Colors.Transparent, .90d), (Colors.Black, 1d) }),
+            Check(ReferenceEquals(backdrop.Background, f.Module.PlayerBackground),
+                "the projected backdrop is the page's actual PlayerBackground brush");
+            var edgeMask = edge.Mask ?? throw new InvalidOperationException("Native fade mask was not attached");
+            Check(edgeMask.ColorStops.Select(stop => (stop.Color.A, Math.Round((double)stop.Offset, 2))).SequenceEqual(
+                new[] { ((byte)255, 0d), ((byte)0, .10d),
+                    ((byte)0, .90d), ((byte)255, 1d) }),
                 "only the upper and lower edges fade; the central eighty percent stays clear");
             foreach (var size in new[] { new Size(1298, 848), new Size(1000, 740) })
-            foreach (var key in new[] { Key.Home, Key.End, Key.PageUp })
+            foreach (var key in new[] { VirtualKey.Home, VirtualKey.End, VirtualKey.PageUp })
             {
-                window.Width = view.Width = size.Width; window.Height = view.Height = size.Height; window.UpdateLayout();
+                window.Resize(size.Width, size.Height); view.Width = size.Width; view.Height = size.Height; DesktopTestUi.WindowRoot(window).UpdateLayout();
                 Equal(size.Width, view.ActualWidth); Equal(size.Height, view.ActualHeight);
-                await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+                await MusicTestUi.Drain();
                 await WaitForLyric(() => CenterGap(list, scroll, Math.Max(0, f.Module.LyricDisplayIndex)) < 1);
                 int previous = f.Module.LyricDisplayIndex;
-                BrowseLyricKey(viewport, window, key);
+                Check(view.BrowseLyric(key), "browse command");
                 await WaitForLyric(() => f.Module.HasLyricPreview && (key switch
                 {
-                    Key.Home => f.Module.LyricDisplayIndex == 0,
-                    Key.End => f.Module.LyricDisplayIndex == f.Module.Lyrics.Count - 1,
+                    VirtualKey.Home => f.Module.LyricDisplayIndex == 0,
+                    VirtualKey.End => f.Module.LyricDisplayIndex == f.Module.Lyrics.Count - 1,
                     _ => f.Module.LyricDisplayIndex >= 0 && f.Module.LyricDisplayIndex < previous
                 }) && CenterGap(list, scroll, f.Module.LyricDisplayIndex) < 1);
-                await Dispatcher.Yield(DispatcherPriority.Render);
+                await MusicTestUi.Drain();
                 Console.WriteLine($"LYRIC {size} {key}: row={f.Module.LyricDisplayIndex}, centerGap={CenterGap(list, scroll, f.Module.LyricDisplayIndex):F2}");
-                var visible = CaptureLyricFrame(fade);
+                var visible = await NativeDesktopCapture.CaptureAsync(fade);
                 var edgeOpacity = edge.Opacity;
-                RenderTargetBitmap clear;
-                try { edge.Opacity = 0; clear = CaptureLyricFrame(fade); }
+                NativeDesktopCapture.Capture clear;
+                try { edge.Opacity = 0; clear = await NativeDesktopCapture.CaptureAsync(fade); }
                 finally { edge.Opacity = edgeOpacity; }
-                var central = new Int32Rect(0, (int)(visible.PixelHeight * .15), visible.PixelWidth,
-                    (int)(visible.PixelHeight * .7));
-                long withEdge = LyricAlpha(visible, central), withoutEdge = LyricAlpha(clear, central);
-                Check(withoutEdge > 1000 && Math.Abs(withEdge - withoutEdge) <= withoutEdge * .005,
-                    "the edge backdrop does not alter central lyric text");
-                var row = list.ItemContainerGenerator.ContainerFromIndex(f.Module.LyricDisplayIndex) as ListBoxItem;
-                Check(row is not null && row.Opacity == 1,
-                    "active lyric rows are not weakened through whole-row opacity compositing");
-                var edgeFrame = CaptureLyricFrame(edge);
-                byte Alpha(double y)
+                long difference = 0, content = 0;
+                for (int y = (int)(visible.Height * .15); y < visible.Height * .85; y++)
+                for (int x = 0; x < visible.Width; x++)
+                for (int c = 0; c < 3; c++)
                 {
-                    var pixel = new byte[4];
-                    edgeFrame.CopyPixels(new Int32Rect(edgeFrame.PixelWidth / 2,
-                        (int)(edgeFrame.PixelHeight * y), 1, 1), pixel, 4, 0);
-                    return pixel[3];
+                    int at = (y * visible.Width + x) * 4 + c;
+                    difference += Math.Abs(visible.Pixels[at] - clear.Pixels[at]); content += clear.Pixels[at];
                 }
-                Check(Alpha(.05) is > 90 and < 170 && Alpha(.95) is > 90 and < 170,
-                    "the upper and lower edge fades remain visible");
-                foreach (double y in new[] { .15, .3, .5, .7, .85 }) Equal((byte)0, Alpha(y));
+                Check(content > 1000 && difference <= content * .005,
+                    "the native edge backdrop leaves central lyric pixels unchanged");
+                var row = list.ContainerFromIndex(f.Module.LyricDisplayIndex) as ListViewItem;
+                Check(row is not null && row.Opacity == 1, "active lyric rows do not use whole-row fading");
+                var originalBackdrop = backdrop.Background;
+                var originalBackground = fade.Background;
+                double originalLyrics = list.Opacity;
+                try
+                {
+                    // An opaque white source over black lets desktop RGB measure the actual
+                    // compositor mask, without relying on RenderTargetBitmap's child-visual support.
+                    backdrop.Background = new SolidColorBrush(Colors.White);
+                    fade.Background = new SolidColorBrush(Colors.Black); list.Opacity = 0;
+                    var edgeFrame = await NativeDesktopCapture.CaptureAsync(fade);
+                    byte Coverage(double y) => edgeFrame.Pixels[((int)(edgeFrame.Height * y) * edgeFrame.Width + edgeFrame.Width / 2) * 4];
+                    Check(Coverage(.05) is > 90 and < 170 && Coverage(.95) is > 90 and < 170,
+                        "the upper and lower compositor fades have half coverage at five percent");
+                    foreach (double y in new[] { .15, .3, .5, .7, .85 }) Check(Coverage(y) <= 2, "central mask stays transparent");
+                }
+                finally { backdrop.Background = originalBackdrop; fade.Background = originalBackground; list.Opacity = originalLyrics; }
                 Equal(0, f.Playback.Seeks);
-                if (size.Width == 1298) SaveLyricFrame(view, $"player-lyrics-{key}.png");
+                if (size.Width == 1298) await SaveLyricFrame(view, $"player-lyrics-{key}.png");
             }
         }
         finally { window.Close(); f.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail); }
@@ -232,20 +246,20 @@ public static partial class MusicLyricDisplayTests
         var window = LyricWindow(view);
         void Typography(FrameworkElement text, double size)
         {
-            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(text));
-            Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(text));
-            Equal(SystemFonts.MessageFontFamily, (FontFamily)text.GetValue(TextBlock.FontFamilyProperty));
-            Equal(FontWeights.Normal, (FontWeight)text.GetValue(TextBlock.FontWeightProperty));
-            Equal(size, (double)text.GetValue(TextBlock.FontSizeProperty));
+            var font = text is TextBlock block ? block.FontFamily : ((Control)text).FontFamily;
+            var weight = text is TextBlock label ? label.FontWeight : ((Control)text).FontWeight;
+            double actualSize = text is TextBlock run ? run.FontSize : ((Control)text).FontSize;
+            Equal(new FontFamily("XamlAutoFontFamily").Source, font.Source);
+            Equal(FontWeights.Normal.Weight, weight.Weight); Equal(size, actualSize);
         }
         try
         {
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            window.Show(); window.UpdateLayout();
+            window.Activate(); await MusicTestUi.Drain(); DesktopTestUi.WindowRoot(window).UpdateLayout();
             var state = (TextBlock)view.FindName("LyricState");
             Equal("加载中…", state.Text);
             Typography(state, 20);
-            Check(state.IsVisible, "the real loading text is mounted");
+            Check(DesktopVisual.IsVisible(state), "the real loading text is mounted");
             release.TrySetResult();
             await activation;
             var queue = Ok(await f.Application.ExecuteAsync("music.queue.get"));
@@ -254,26 +268,26 @@ public static partial class MusicLyricDisplayTests
             f.Module.Lyrics[0] = new(1, "And disappear inside", "然后隐去", "ran hou yin qu");
             f.Module.Lyrics[1] = new(20, "逐字歌词", "逐字译文", "zhu zi ge ci",
                 [new("逐字", 20, 2), new("歌词", 22, 2)]);
-            var list = (ListBox)view.FindName("LyricList");
+            var list = (MusicLyricList)view.FindName("LyricList");
             foreach (var position in new[] { 0d, 21d, 23d, 1d })
             {
                 f.Playback.Position = position;
                 int selected = position < 1 ? -1 : position < 20 ? 0 : 1;
-                await WaitForLyric(() => list.SelectedIndex == selected &&
-                    list.ItemContainerGenerator.ContainerFromIndex(0) is ListBoxItem &&
+                await WaitForLyric(() => f.Module.LyricDisplayIndex == selected &&
+                    list.ContainerFromIndex(0) is ListViewItem &&
                     LyricVisuals(list).OfType<MusicLyricWordView>().Count() == 2);
-                window.UpdateLayout();
-                await Dispatcher.Yield(DispatcherPriority.Render);
+                DesktopTestUi.WindowRoot(window).UpdateLayout();
+                await MusicTestUi.Drain();
                 var plain = LyricVisuals(list).OfType<TextBlock>()
                     .Single(text => text.Text == "And disappear inside");
-                Check(plain.IsVisible, "ordinary lyrics retain their native text control");
+                Check(DesktopVisual.IsVisible(plain), "ordinary lyrics retain their native text control");
                 Typography(plain, 20);
-                Equal(selected == 0 ? Color.FromRgb(235, 234, 237) : Color.FromRgb(139, 137, 140),
+                Equal(selected == 0 ? Color.FromArgb(255, 235, 234, 237) : Color.FromArgb(255, 139, 137, 140),
                     ((SolidColorBrush)plain.Foreground).Color);
                 foreach (var content in new[] { "然后隐去", "ran hou yin qu", "逐字译文", "zhu zi ge ci" })
                 {
                     var optional = LyricVisuals(list).OfType<TextBlock>().Single(text => text.Text == content);
-                    Check(optional.IsVisible, "translation and romanization are actually presented");
+                    Check(DesktopVisual.IsVisible(optional), "translation and romanization are actually presented");
                     Typography(optional, 14);
                 }
                 var words = LyricVisuals(list).OfType<MusicLyricWordView>().ToArray();
@@ -281,33 +295,33 @@ public static partial class MusicLyricDisplayTests
                 {
                     Typography(word, 20);
                     Check(word.Stroke is null, "full player words do not acquire desktop outlines");
-                    Equal(selected == 1 ? Color.FromRgb(244, 243, 246) : Color.FromRgb(146, 143, 144),
-                        ((SolidColorBrush)word.Highlight).Color);
+                    Equal<Color?>(selected == 1 ? Color.FromArgb(255, 244, 243, 246) : Color.FromArgb(255, 146, 143, 144),
+                        (word.Highlight as SolidColorBrush)?.Color);
                     Equal(Math.Clamp((position - word.Word!.Time) / word.Word.Duration, 0, 1), word.WordProgress);
                 }
             }
             await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation);
-            window.UpdateLayout();
+            DesktopTestUi.WindowRoot(window).UpdateLayout();
             Check(LyricVisuals(list).OfType<TextBlock>().Where(text => text.Name == "LyricTranslation")
                 .All(text => text.Visibility == Visibility.Collapsed), "the normal translation toggle still hides translations");
             await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation);
             DesktopTheme.SetIsHighContrast(view, true);
-            window.UpdateLayout();
+            DesktopTestUi.WindowRoot(window).UpdateLayout();
             foreach (var text in LyricVisuals(list).OfType<TextBlock>())
                 Typography(text, text.Name == "LyricTranslation" || text.Text is "ran hou yin qu" or "zhu zi ge ci" ? 14 : 20);
             foreach (var word in LyricVisuals(list).OfType<MusicLyricWordView>()) Typography(word, 20);
             var title = (TextBlock)view.FindName("DetailTitle");
-            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(title));
+            Typography(title, 28);
             var footer = (MusicPlayerView)((ContentControl)view.FindName("DetailPlayerHost")).Content;
             var footerText = LyricVisuals(footer).OfType<TextBlock>().ToArray();
-            Check(footerText.Length > 0 && footerText.All(text =>
-                TextOptions.GetTextRenderingMode(text) == TextRenderingMode.Auto), "the footer keeps native automatic rendering");
+            Check(footerText.Length > 0 && footerText.All(text => text.FontWeight.Weight == FontWeights.Normal.Weight),
+                "the footer retains native regular text");
             var delay = (Button)view.FindName("DelayLyricButton");
-            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(LyricVisuals(delay).OfType<TextBlock>().Single()));
+            Typography(LyricVisuals(delay).OfType<TextBlock>().Single(text => text.Text == "5"), 10);
             f.Peer.Block = null;
             await f.Module.SetMetadataEnabledAsync(
                 f.Module.MetadataPlatforms.Single(row => row.Platform == "wy"), false);
-            window.UpdateLayout();
+            DesktopTestUi.WindowRoot(window).UpdateLayout();
             Equal(0, f.Module.Lyrics.Count);
             Equal("暂无歌词", state.Text);
             Typography(state, 20);
@@ -322,25 +336,17 @@ public static partial class MusicLyricDisplayTests
         }
     }
 
-    private static Window LyricWindow(FrameworkElement view)
+    private static DesktopWindow LyricWindow(FrameworkElement view)
     {
-        // An unclipped canvas keeps component layout independent of the host
-        // display's native window size.
         view.Width = 1298; view.Height = 848;
-        var host = new Canvas();
-        host.Children.Add(view);
-        return new DesktopWindow()
-        {
-            Content = host, Width = 1298, Height = 848, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize,
-            Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false
-        };
+        var host = new Canvas(); host.Children.Add(view);
+        var window = DesktopTestUi.CreateWindow(host, 1440, 800); window.AttachRoot();
+        ((OverlappedPresenter)window.AppWindow.Presenter).SetBorderAndTitleBar(false, false);
+        window.Resize(1298, 848); return window;
     }
-    private static void BrowseLyricKey(FrameworkElement viewport, Window window, Key key) =>
-        viewport.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(window)!, 0, key)
-            { RoutedEvent = Keyboard.PreviewKeyDownEvent });
-    private static double CenterGap(ListBox list, ScrollViewer scroll, int index) =>
-        list.ItemContainerGenerator.ContainerFromIndex(index) is FrameworkElement row
-            ? Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y - scroll.ViewportHeight / 2)
+    private static double CenterGap(MusicLyricList list, ScrollViewer scroll, int index) =>
+        list.ContainerFromIndex(index) is FrameworkElement row
+            ? Math.Abs(row.TransformToVisual(scroll).TransformPoint(new Point(0, row.ActualHeight / 2)).Y - scroll.ViewportHeight / 2)
             : double.PositiveInfinity;
     private static async Task WaitForLyric(Func<bool> done)
     {
@@ -348,34 +354,12 @@ public static partial class MusicLyricDisplayTests
         while (!done())
         {
             if (started.Elapsed > TimeSpan.FromSeconds(3)) throw new InvalidOperationException("Lyric presentation did not settle");
-            await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+            await MusicTestUi.Drain();
             await Task.Delay(15);
         }
     }
-    private static RenderTargetBitmap CaptureLyricFrame(FrameworkElement element)
-    {
-        var image = new RenderTargetBitmap((int)Math.Ceiling(element.ActualWidth),
-            (int)Math.Ceiling(element.ActualHeight), 96, 96, PixelFormats.Pbgra32);
-        image.Render(element); return image;
-    }
-    private static long LyricAlpha(BitmapSource image, Int32Rect area)
-    {
-        int stride = area.Width * 4;
-        var pixels = new byte[stride * area.Height];
-        image.CopyPixels(area, pixels, stride, 0);
-        long sum = 0;
-        for (int i = 3; i < pixels.Length; i += 4) sum += pixels[i];
-        return sum;
-    }
-    private static void SaveLyricFrame(FrameworkElement element, string name)
-    {
-        string path = TestWorkspace.ValidatePath(TestWorkspace.ResultsRoot,
-            Path.Combine(TestWorkspace.ResultsRoot, "windows-native", name));
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(CaptureLyricFrame(element)));
-        using var file = File.Create(path); encoder.Save(file);
-        Console.WriteLine("VISUAL " + path);
-    }
+    private static Task SaveLyricFrame(FrameworkElement element, string name) =>
+        NativeDesktopCapture.SaveAsync(element, Path.GetFileNameWithoutExtension(name));
 
     private static async Task VerifyMultiplePresentations()
     {

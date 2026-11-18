@@ -1,9 +1,12 @@
+using MeowFilm.Desktop;
 using System.Globalization;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
@@ -16,6 +19,8 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     private string searchAdvancedKind = "songs";
     private bool updatingNavigation;
     private long exclusionRequest;
+    private bool active, exclusionShowing, advancedShowing;
+    private double scrollOffset;
 
     public MusicSettingsView(MusicCapability module)
     {
@@ -26,21 +31,20 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         sections = [AccountsSection, SearchSection, QualitySection, MetadataSection];
         Loaded += View_Loaded;
         Unloaded += View_Unloaded;
-        AccountTransferButton.IsVisibleChanged += async (_, e) =>
+        AccountTransferButton.RegisterPropertyChangedCallback(VisibilityProperty, async (_, _) =>
         {
-            if (e.NewValue is false)
+            if (!DesktopVisual.IsVisible(AccountTransferButton))
             {
-                AccountTransferButton.ContextMenu.IsOpen = false;
+                AccountTransferButton.Flyout.Hide();
                 await module.RetireAccountTransferAsync();
             }
-        };
-        ExclusionAddButton.IsVisibleChanged += (_, e) => { if (e.NewValue is false) RetireExclusionPopup(); };
+        });
+        ExclusionAddButton.RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
+        { if (!DesktopVisual.IsVisible(ExclusionAddButton)) RetireExclusionPopup(); });
         ExclusionAddButton.Unloaded += (_, _) => RetireExclusionPopup();
-        IsVisibleChanged += async (_, _) =>
-        {
-            if (!IsVisible) { AccountTransferButton.ContextMenu.IsOpen = false; AccountsPanel.CloseTransientPopups(); SearchAdvancedPopup.IsOpen = false; }
-            if (IsLoaded) await UpdateActivation();
-        };
+        RegisterPropertyChangedCallback(VisibilityProperty, async (_, _) => await VisibilityChanged());
+        LayoutUpdated += async (_, _) =>
+        { if (active != (IsLoaded && DesktopVisual.IsVisible(this))) await VisibilityChanged(); };
     }
 
     public MeowFilm.Desktop.DesktopHeaderContribution Header => new("设置", SearchVisible: false, SearchEnabled: false);
@@ -53,17 +57,30 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     }
     private async void View_Unloaded(object sender, RoutedEventArgs e)
     {
-        AccountTransferButton.ContextMenu.IsOpen = false;
+        active = false;
+        RetireExclusionPopup();
+        AccountTransferButton.Flyout.Hide();
         AccountsPanel.CloseTransientPopups();
-        SearchAdvancedPopup.IsOpen = false;
+        SearchAdvancedPopup.Hide();
         await module.DeactivateSettingsAsync();
     }
-    private Task UpdateActivation() => IsLoaded && IsVisible
-        ? module.ActivateSettingsAsync() : module.DeactivateSettingsAsync();
+    private Task UpdateActivation()
+    {
+        active = IsLoaded && DesktopVisual.IsVisible(this);
+        return active ? module.ActivateSettingsAsync() : module.DeactivateSettingsAsync();
+    }
+    private async Task VisibilityChanged()
+    {
+        if (!DesktopVisual.IsVisible(this))
+        {
+            AccountTransferButton.Flyout.Hide(); AccountsPanel.CloseTransientPopups();
+            SearchAdvancedPopup.Hide(); RetireExclusionPopup();
+        }
+        await UpdateActivation();
+    }
     private void AccountTransfer_Click(object sender, RoutedEventArgs e)
     {
-        AccountTransferButton.ContextMenu.PlacementTarget = AccountTransferButton;
-        AccountTransferButton.ContextMenu.IsOpen = true;
+        AccountTransferButton.Flyout.ShowAt(AccountTransferButton);
     }
     private async void AccountImport_Click(object sender, RoutedEventArgs e) => await module.ImportAccountsFileAsync();
     private async void AccountExport_Click(object sender, RoutedEventArgs e) => await module.ExportAccountsFileAsync();
@@ -81,67 +98,68 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     }
     private void Section_Checked(object sender, RoutedEventArgs e)
     {
-        if (!IsInitialized || updatingNavigation || sender is not RadioButton { Tag: string key } anchor) return;
+        if (sections is null || updatingNavigation || sender is not RadioButton { Tag: string key } anchor) return;
         AccountsPanel.CloseTransientPopups();
         bool sources = key == "sources";
         SettingsScroller.Visibility = sources ? Visibility.Collapsed : Visibility.Visible;
         SourcesPage.Visibility = sources ? Visibility.Visible : Visibility.Collapsed;
-        anchor.Focus(); anchor.BringIntoView();
-        if (sources) return;
+        anchor.Focus(FocusState.Programmatic); anchor.StartBringIntoView();
+        if (sources) { RetireExclusionPopup(); SearchAdvancedPopup.Hide(); return; }
         SettingsScroller.UpdateLayout(); UpdateLayoutMetrics();
-        if (FindName(key) is Border section) SettingsScroller.ScrollToVerticalOffset(section.TranslatePoint(new Point(), SectionsStack).Y);
+        if (FindName(key) is Border section) SettingsScroller.ChangeView(null, section.TransformToVisual(SectionsStack).TransformPoint(new Point()).Y, null, true);
     }
-    private void Anchor_KeyDown(object sender, KeyEventArgs e)
+    internal bool NavigateAnchor(RadioButton current, VirtualKey key)
     {
-        if (sender is not RadioButton current || e.Key is not (Key.Home or Key.End or Key.Left or Key.Right)) return;
         int index = Array.IndexOf(anchors, current);
-        int next = e.Key switch { Key.Home => 0, Key.End => anchors.Length - 1, Key.Left => (index + anchors.Length - 1) % anchors.Length, _ => (index + 1) % anchors.Length };
-        anchors[next].IsChecked = true; Section_Checked(anchors[next], new()); e.Handled = true;
+        if (index < 0 || !IsLoaded || !DesktopVisual.IsVisible(this) || key is not (VirtualKey.Home or VirtualKey.End or VirtualKey.Left or VirtualKey.Right)) return false;
+        int next = key switch { VirtualKey.Home => 0, VirtualKey.End => anchors.Length - 1,
+            VirtualKey.Left => (index + anchors.Length - 1) % anchors.Length, _ => (index + 1) % anchors.Length };
+        anchors[next].IsChecked = true; Section_Checked(anchors[next], new()); return true;
     }
-    private void Settings_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    private void Anchor_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (!ReferenceEquals(e.OriginalSource, SettingsScroller) || sections is null || SettingsScroller.Visibility != Visibility.Visible) return;
-        if (e.VerticalChange != 0) AccountsPanel.CloseTransientPopups();
-        if (e.ViewportHeightChange != 0 || e.ViewportWidthChange != 0 || e.ExtentHeightChange != 0) UpdateLayoutMetrics();
+        if (sender is RadioButton current) e.Handled = NavigateAnchor(current, e.Key);
+    }
+    private void Settings_ViewportChanged(object sender, SizeChangedEventArgs e) => UpdateLayoutMetrics();
+    private void Settings_ViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
+    {
+        if (sections is null || SettingsScroller.Visibility != Visibility.Visible) return;
+        if (scrollOffset != SettingsScroller.VerticalOffset) AccountsPanel.CloseTransientPopups();
+        scrollOffset = SettingsScroller.VerticalOffset;
+        UpdateLayoutMetrics();
         int selected = 0;
         for (int index = 0; index < sections.Length; index++)
-            if (sections[index].TranslatePoint(new Point(), SectionsStack).Y <= SettingsScroller.VerticalOffset + 1) selected = index;
+            if (sections[index].TransformToVisual(SectionsStack).TransformPoint(new Point()).Y <= SettingsScroller.VerticalOffset + 1) selected = index;
         updatingNavigation = true;
-        try { anchors[selected].IsChecked = true; anchors[selected].BringIntoView(); }
+        try { anchors[selected].IsChecked = true; anchors[selected].StartBringIntoView(); }
         finally { updatingNavigation = false; }
-    }
-    private void Settings_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
-    {
-        if (e.Delta == 0 || !SettingsScroller.IsVisible) return;
-        for (DependencyObject? current = e.OriginalSource as DependencyObject; current is not null;
-             current = current is Visual ? VisualTreeHelper.GetParent(current) : LogicalTreeHelper.GetParent(current))
-            if (current is ComboBox { IsDropDownOpen: true } || ReferenceEquals(current, ExclusionList)) return;
-        double distance = SystemParameters.WheelScrollLines < 0 ? SettingsScroller.ViewportHeight :
-            SystemParameters.WheelScrollLines * 16d;
-        SettingsScroller.ScrollToVerticalOffset(SettingsScroller.VerticalOffset - e.Delta / 120d * distance);
-        e.Handled = true;
     }
     private async void ExclusionAdd_Click(object sender, RoutedEventArgs e)
     {
         long request = ++exclusionRequest;
         ExclusionSong.SelectedItem = ExclusionProvider.SelectedItem = ExclusionPlatform.SelectedItem = null;
         await module.PrepareSourceExclusionFormAsync();
-        if (request == exclusionRequest && ExclusionAddButton.IsLoaded && ExclusionAddButton.IsVisible)
-        { ExclusionPopup.IsOpen = true; ExclusionSong.Focus(); }
+        if (request == exclusionRequest && ExclusionAddButton.IsLoaded && DesktopVisual.IsVisible(ExclusionAddButton))
+        {
+            if (exclusionShowing) return;
+            exclusionShowing = true;
+            try { await DialogPlacement.ShowAsync(this, ExclusionPopup); }
+            finally { exclusionShowing = false; }
+        }
     }
     private void RetireExclusionPopup()
     {
         exclusionRequest++;
-        ExclusionPopup.IsOpen = false;
+        ExclusionPopup.Hide();
     }
-    private void ExclusionCancel_Click(object sender, RoutedEventArgs e) => ExclusionPopup.IsOpen = false;
+    private void ExclusionCancel_Click(object sender, RoutedEventArgs e) => ExclusionPopup.Hide();
     private async void ExclusionConfirm_Click(object sender, RoutedEventArgs e)
     {
         var song = ExclusionSong.SelectedItem as MusicExclusionOption;
         var provider = ExclusionProvider.SelectedItem as MusicExclusionOption;
         var platform = ExclusionPlatform.SelectedItem as MusicExclusionOption;
         if (song is null || provider is null || platform is null) return;
-        ExclusionPopup.IsOpen = false;
+        ExclusionPopup.Hide();
         await module.AddSourceExclusionAsync(song, provider, platform);
     }
     private async void ExclusionRestore_Click(object sender, RoutedEventArgs e)
@@ -150,14 +168,16 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     }
     private async void SearchHistoryClear_Click(object sender, RoutedEventArgs e) => await module.ClearSearchHistoryAsync();
     private MusicSearchKindSettings SearchAdvancedSettings => searchAdvancedKind == "songs" ? module.SongSearch : module.PlaylistSearch;
-    private void SearchAdvanced_Click(object sender, RoutedEventArgs e)
+    private async void SearchAdvanced_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: string kind } button) return;
-        SearchAdvancedPopup.IsOpen = false;
+        SearchAdvancedPopup.Hide();
         searchAdvancedKind = kind;
         ShowSearchAdvanced();
-        SearchAdvancedPopup.PlacementTarget = button;
-        SearchAdvancedPopup.IsOpen = true;
+        if (advancedShowing) return;
+        advancedShowing = true;
+        try { await DialogPlacement.ShowAsync(this, SearchAdvancedPopup); }
+        finally { advancedShowing = false; }
     }
     private void ShowSearchAdvanced(bool keepEditing = false)
     {
@@ -165,24 +185,24 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         foreach (var (box, value) in new[] { (SearchPagesBox, settings.Pages),
             (SearchConcurrencyBox, settings.Concurrency), (SearchCacheBox, settings.CacheMinutes) })
             // Do not overwrite the field the user has moved on to edit.
-            if (!keepEditing || !box.IsKeyboardFocusWithin) box.Text = value.ToString(CultureInfo.InvariantCulture);
+            if (!keepEditing || !DesktopVisual.ContainsFocus(box)) box.Text = value.ToString(CultureInfo.InvariantCulture);
     }
-    private void SearchAdvancedPopup_Opened(object? sender, EventArgs e) { SearchPagesBox.Focus(); SearchPagesBox.SelectAll(); }
-    private async void SearchAdvancedPopup_Closed(object? sender, EventArgs e)
+    private void SearchAdvancedPopup_Opened(ContentDialog sender, ContentDialogOpenedEventArgs e) { SearchPagesBox.Focus(FocusState.Programmatic); SearchPagesBox.SelectAll(); }
+    private async void SearchAdvancedPopup_Closed(ContentDialog sender, ContentDialogClosedEventArgs e)
     {
-        SearchAdvancedPopup.PlacementTarget = null;
+        advancedShowing = false;
         await CommitSearchAdvancedAsync();
     }
-    private async void SearchAdvancedBox_LostFocus(object sender, KeyboardFocusChangedEventArgs e) => await CommitSearchAdvancedAsync();
-    private async void SearchAdvancedPopup_KeyDown(object sender, KeyEventArgs e)
+    private async void SearchAdvancedBox_LostFocus(object sender, RoutedEventArgs e) => await CommitSearchAdvancedAsync();
+    private async void SearchAdvancedPopup_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key == Key.Escape)
+        if (e.Key == VirtualKey.Escape)
         {
             // Discard unsaved edits.
             ShowSearchAdvanced();
-            SearchAdvancedPopup.IsOpen = false; e.Handled = true;
+            SearchAdvancedPopup.Hide(); e.Handled = true;
         }
-        else if (e.Key == Key.Enter) { e.Handled = true; await CommitSearchAdvancedAsync(); ShowSearchAdvanced(); }
+        else if (e.Key == VirtualKey.Enter) { e.Handled = true; await CommitSearchAdvancedAsync(); ShowSearchAdvanced(); }
     }
     /// <summary>Saves valid input immediately; invalid input reverts to the saved value.</summary>
     private async Task CommitSearchAdvancedAsync()

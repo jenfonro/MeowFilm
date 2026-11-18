@@ -1,9 +1,13 @@
 using System.ComponentModel;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
 using System.Windows.Threading;
 using MeowFilm.App;
 using MeowFilm.AppHost;
@@ -36,8 +40,8 @@ public static class FilmTrayPlaybackTests
     private static TestCase Test(string name, Func<Task> body) =>
         new("film-tray: " + name, () => MusicQualityConsumerTests.Sta(body));
     private static TaskCompletionSource Gate() => new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private static async Task Pump() => await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-    private static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+    private static async Task Pump() => await DesktopTestUi.DrainAsync();
+    private static void Click(Button button) => DesktopTestUi.Invoke(button);
 
     private static async Task SystemMediaStartupFailure()
     {
@@ -185,7 +189,7 @@ public static class FilmTrayPlaybackTests
         scene.Backend.Request(SystemPlaybackCommand.Seek, 93);
         await Until(() => scene.Backend.Last?.PositionSeconds == 93);
         scene.Tray.ShowWindow();
-        await Until(() => scene.Shell.IsVisible && scene.Film.View.IsVisible);
+        await Until(() => scene.Shell.IsVisible && DesktopVisual.IsVisible(scene.Film.View));
         Check(!scene.Shell.IsHiddenToTray && scene.Rig.Native.Scope == scope && scene.Rig.Native.Commits == 1 &&
             scene.Rig.Runtime.Calls.Count(call => call.Method == "film.session.open") == 1 &&
             scene.Started == 1 && scene.Backend.Disabled == 0 && scene.Backend.Disposals == 0,
@@ -238,12 +242,13 @@ public static class FilmTrayPlaybackTests
             view.UpdateLayout();
             var frame = (Grid)view.FindName("PlayerFrame");
             var button = (Button)view.FindName("PipButton");
-            Check(button.IsVisible && button.IsEnabled, "PiP is an available control on the actual playback page");
+            Check(DesktopVisual.IsVisible(button) && button.IsEnabled, "PiP is an available control on the actual playback page");
             Click(button);
-            var pip = scene.Shell.OwnedWindows.Cast<Window>().Single();
-            Check(scene.Rig.Session.CanRetainMedia && frame.IsDescendantOf(pip), "PiP owns the existing native host");
+            var pip = DesktopWindow.GetWindow(frame) ?? throw new InvalidOperationException("PiP window is not attached");
+            Check(!ReferenceEquals(pip, scene.Shell) && scene.Rig.Session.CanRetainMedia &&
+                DesktopVisual.Contains(pip.Root, frame), "PiP owns the existing native host");
             scene.Leave(otherModule: true);
-            await Until(() => !scene.Film.View.IsVisible);
+            await Until(() => !DesktopVisual.IsVisible(scene.Film.View));
             Check(scene.Rig.Session.HasOutput && scene.Rig.Session.HasSession && pip.IsVisible &&
                 scene.Rig.Native.Stops == 0, "ordinary module leave retains the explicit visible PiP owner");
             scene.Rig.Native.Stopping = async () => { entered.TrySetResult(); await finish.Task; };
@@ -254,7 +259,7 @@ public static class FilmTrayPlaybackTests
             finish.TrySetResult();
             await scene.WaitClosed();
             Check(scene.Shell.ShutdownSucceeded && scene.Shell.CleanupCompleted && scene.Rig.Native.Stops == 1 &&
-                !pip.IsVisible && scene.Rig.Runtime.Released.Contains("tray-output") && scene.Backend.Disposals == 1,
+                !DesktopTestUi.WindowIsVisible(pip) && scene.Rig.Runtime.Released.Contains("tray-output") && scene.Backend.Disposals == 1,
                 "explicit exit drains the same PiP output and receipt before closing owned windows");
         }
         finally { finish.TrySetResult(); }
@@ -489,11 +494,9 @@ public static class FilmTrayPlaybackTests
                 TimeProvider.System, appearance: null, preferences, (_, show, exit, _) =>
                 {
                     Tray.ShowWindow = show; Tray.ExitApplication = exit; return Tray;
-                }, mediaControls: mediaControls)
-            {
-                WindowStartupLocation = WindowStartupLocation.Manual, Left = -10000, Top = -10000,
-                ShowActivated = false, ShowInTaskbar = false
-            };
+                }, mediaControls: mediaControls);
+            DesktopTestUi.MoveWindow(Shell, 20, 20);
+            Shell.AppWindow.IsShownInSwitchers = false;
             Shell.Closed += (_, _) => closed.TrySetResult();
             Port = new(Rig.Native);
             Attachment = new(Shell, mediaControls);
@@ -519,11 +522,11 @@ public static class FilmTrayPlaybackTests
             {
                 scene.Shell.Show();
                 await Until(() => scene.Film.Sections.Any(section => section.Items.Count > 0) &&
-                    scene.Film.View.IsVisible && scene.ShellElement<TextBlock>("StatusText").Text.Length == 0);
+                    DesktopVisual.IsVisible(scene.Film.View) && scene.ShellElement<TextBlock>("StatusText").Text.Length == 0);
                 var item = Card();
                 await scene.Film.OpenPlaybackAsync(item, item.PlaybackContext!);
                 await Until(() => scene.Film.IsPlayback && scene.Film.Playback is not null && scene.Rig.Session.HasSession &&
-                    ((FilmView)scene.Film.View).FindName("PlaybackView") is FilmPlaybackView { IsVisible: true } &&
+                    ((FilmView)scene.Film.View).FindName("PlaybackView") is FilmPlaybackView view && DesktopVisual.IsVisible(view) &&
                     scene.ShellElement<TextBlock>("StatusText").Text.Length == 0);
                 return scene;
             }
@@ -542,7 +545,7 @@ public static class FilmTrayPlaybackTests
             Music.Publish();
         }
         internal T ShellElement<T>(string name) where T : FrameworkElement =>
-            Shell.FindName(name) as T ?? throw new InvalidOperationException("Missing shell element: " + name);
+            DesktopTestUi.WindowRoot(Shell).FindName(name) as T ?? throw new InvalidOperationException("Missing shell element: " + name);
         internal T DialogElement<T>(string name) where T : FrameworkElement =>
             Dialog.FindName(name) as T ?? throw new InvalidOperationException("Missing dialog element: " + name);
         internal async Task OpenChoice()
@@ -558,7 +561,7 @@ public static class FilmTrayPlaybackTests
         }
         internal void Leave(bool otherModule)
         {
-            var list = ShellElement<ListBox>("ModuleNavigationList");
+            var list = ShellElement<ListView>("ModuleNavigationList");
             list.SelectedItem = list.Items.OfType<ModuleSession>().Single(session =>
                 session.Module.Id == (otherModule ? "other" : "film"));
         }

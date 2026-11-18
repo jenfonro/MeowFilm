@@ -1,13 +1,14 @@
 using System.IO;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using System.Runtime.InteropServices.WindowsRuntime;
+using SkiaSharp;
+using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities;
 
 internal static class PanQrImage
 {
-    internal static BitmapSource Create(string type, string value)
+    internal static WriteableBitmap Create(string type, string value)
     {
         if (type == "url") return QrCodeImage.Create(value);
         if (type != "image" || !value.StartsWith("data:image/", StringComparison.Ordinal))
@@ -17,16 +18,12 @@ internal static class PanQrImage
         byte[] bytes = Convert.FromBase64String(value[(separator + 8)..]);
         try
         {
-            using var stream = new MemoryStream(bytes, writable: false);
-            var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
-            var frame = decoder.Frames[0];
-            var converted = new FormatConvertedBitmap(frame, PixelFormats.Bgra32, null, 0);
-            int stride = checked(frame.PixelWidth * 4);
-            byte[] pixels = new byte[checked(stride * frame.PixelHeight)];
-            converted.CopyPixels(pixels, stride, 0);
-            var image = BitmapSource.Create(frame.PixelWidth, frame.PixelHeight, 96, 96,
-                PixelFormats.Bgra32, null, pixels, stride);
-            image.Freeze();
+            using var decoded = SKBitmap.Decode(bytes);
+            if (decoded is null) throw new BridgeException("INVALID_RESPONSE");
+            using var pixels = decoded.Copy(SKColorType.Bgra8888);
+            var image = new WriteableBitmap(pixels.Width, pixels.Height);
+            using (var output = image.PixelBuffer.AsStream()) output.Write(pixels.Bytes);
+            image.Invalidate();
             return image;
         }
         finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); }

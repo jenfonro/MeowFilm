@@ -1,25 +1,32 @@
-using System.Windows;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Documents;
+using Microsoft.UI.Xaml.Media;
 
 namespace MeowFilm.Desktop;
 
-/// <summary>Installs the shared typography defaults before the first application window exists.</summary>
 public static class DesktopTypography
 {
-    private static readonly Uri Source =
-        new("/MeowFilm.Desktop;component/Typography.xaml", UriKind.Relative);
-
+    private static readonly Uri Source = new("ms-appx:///MeowFilm.Desktop/Theme.xaml");
     public static void Install(Application application)
     {
         ArgumentNullException.ThrowIfNull(application);
+        if (!application.Resources.MergedDictionaries.OfType<Microsoft.UI.Xaml.Controls.XamlControlsResources>().Any())
+            application.Resources.MergedDictionaries.Insert(0, new Microsoft.UI.Xaml.Controls.XamlControlsResources());
         EnsureInstalled(application.Resources);
     }
-
     internal static void EnsureInstalled(ResourceDictionary resources)
     {
-        ArgumentNullException.ThrowIfNull(resources);
-        var dictionaries = resources.MergedDictionaries;
-        if (dictionaries.Any(dictionary => dictionary.Source is { } source &&
-            source.OriginalString == Source.OriginalString)) return;
-        dictionaries.Add(new ResourceDictionary { Source = Source });
+        if (!resources.MergedDictionaries.Any(dictionary => dictionary.Source == Source))
+            resources.MergedDictionaries.Add(new ResourceDictionary { Source = Source });
+    }
+    internal static void Apply(FrameworkElement root)
+    {
+        if (root is Control control)
+        {
+            control.FontFamily = new FontFamily("XamlAutoFontFamily");
+            control.FontSize = 14;
+            control.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
+        }
     }
 }

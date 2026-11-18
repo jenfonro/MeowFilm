@@ -1,20 +1,20 @@
+using Colors = Microsoft.UI.Colors;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Runtime.ExceptionServices;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Documents;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.UI;
+using Windows.System;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Windows.Tests;
 
-// Each case owns an STA dispatcher and test-only modules. No product Main, real runtime or native input.
+// Cases share TestUiHost's WinUI thread and own test-only modules. No product Main, real runtime or native input.
 public static partial class DesktopTests
 {
     public static IEnumerable<TestCase> Cases()
@@ -60,11 +60,11 @@ public static partial class DesktopTests
             await using var f = new Fixture([a,b]); await f.LoadAsync(); await f.NavigateAsync(a, "two");
             var before = a.Calls.Count;
             Click(f.Element<Button>("SettingsButton")); await DrainAsync();
-            True(!LogicalDescendants(f.Element<Border>("WindowFrame")).OfType<ComboBox>()
+            True(!LogicalDescendants(f.Element<Grid>("WindowFrame")).OfType<ComboBox>()
                 .Any(box => AutomationProperties.GetName(box) == "设置类别"), "settings has no app/module switcher");
             Equal(Visibility.Visible, Host(a.SettingsView).Visibility, "current app settings visible");
             Equal(Visibility.Collapsed, Host(a.View).Visibility, "main view is retained but hidden while settings is active");
-            True(LogicalTreeHelper.GetParent(b.SettingsView) is null, "another owner cannot mount settings");
+            True(ParentOf(b.SettingsView) is null, "another owner cannot mount settings");
             Equal(0, b.InitializeCount + b.Calls.Count, "settings does not initialize another owner");
             Click(f.Back); await DrainAsync();
             Same(a, f.SelectedOwner, "original content restored"); Equal("two", f.SelectedRoute, "same route");
@@ -82,12 +82,12 @@ public static partial class DesktopTests
                 "global player route leaves another capability");
 
             await f.NavigateAsync(b, "two");
-            f.Element<ListBox>("PublicNavigationList").SelectedItem = page;
+            DesktopTestUi.Select(f.Element<ListView>("PublicNavigationList"), page);
             await UntilAsync(() => page.Activations == 1, "ordinary public page");
             a.Request("three", fromPlayer: true);
             await UntilAsync(() => f.SelectedOwner == a && f.SelectedRoute == "three" && f.Status == "",
                 "global player route leaves an ordinary public page");
-            True(LogicalTreeHelper.GetParent(page.View) is null, "player navigation retires the public page");
+            True(ParentOf(page.View) is null, "player navigation retires the public page");
 
             await f.NavigateAsync(b, "two");
             Click(f.Element<Button>("SettingsButton")); await DrainAsync();
@@ -106,13 +106,13 @@ public static partial class DesktopTests
             var module = new ProbeModule("domain"); var hidden = new ProbePage("scripts") { ShowInSidebar = false };
             var downloads = new ProbePage("downloads");
             await using var f = new Fixture([module], pages: [downloads, hidden]); await f.LoadAsync();
-            Equal(1, f.Element<ListBox>("PublicNavigationList").Items.Count, "only sidebar pages");
+            Equal(1, f.Element<ListView>("PublicNavigationList").Items.Count, "only sidebar pages");
             Click(f.Element<Button>("SettingsButton")); await DrainAsync();
             Equal(Visibility.Collapsed, f.Element<Grid>("SearchInput").Visibility,
                 "settings hide the retained global search");
             False(f.Search.IsEnabled, "settings disable search submission");
             var before = module.Calls.Count;
-            f.Search.Text = "blocked"; RaiseKey(f.Search, Key.Enter, ModifierKeys.None, false); await DrainAsync();
+            f.Search.Text = "blocked"; f.Shell.TrySubmitSearch(VirtualKeyModifiers.None, false); await DrainAsync();
             Equal(before, module.Calls.Count, "settings cannot submit global search");
             var actions = f.HeaderElement<ItemsControl>("HeaderActions");
             Equal(1, actions.Items.Count, "settings-only page is exposed by the one header");
@@ -126,7 +126,7 @@ public static partial class DesktopTests
             Equal(Visibility.Collapsed, f.Element<Grid>("SearchInput").Visibility,
                 "settings-owned public pages also hide search");
             False(f.Search.IsEnabled, "settings-owned public pages cannot submit search");
-            RaiseKey(f.Search, Key.Enter, ModifierKeys.None, false); await DrainAsync();
+            f.Shell.TrySubmitSearch(VirtualKeyModifiers.None, false); await DrainAsync();
             Equal(before, module.Calls.Count, "settings-owned public page cannot target the search owner");
             Click(f.Back); await DrainAsync();
             Equal("设置", AutomationProperties.GetName(f.Element<Grid>("ContentDeck")),
@@ -153,7 +153,7 @@ public static partial class DesktopTests
             await f.LoadAsync();
             var player = Host(module.PlayerView!); var view = Host(module.View);
             ((TextBox)module.View).Text = "retained-edit";
-            f.Element<ListBox>("PublicNavigationList").SelectedItem = page;
+            DesktopTestUi.Select(f.Element<ListView>("PublicNavigationList"), page);
             await UntilAsync(() => page.Activations == 1 && f.Status == "", "public activation");
 
             Equal(Visibility.Collapsed, ((FrameworkElement)view.Parent).Visibility, "capability surface hidden");
@@ -168,8 +168,8 @@ public static partial class DesktopTests
             Same(view, Host(module.View), "same view"); Same(player, Host(module.PlayerView!), "same player");
             Equal("retained-edit", ((TextBox)module.View).Text, "state retained");
             True(f.Search.IsEnabled, "domain search restored");
-            True(LogicalTreeHelper.GetParent(page.View) is null, "ordinary public view is unmounted on exit");
-            f.Element<ListBox>("PublicNavigationList").SelectedItem = page; await DrainAsync();
+            True(ParentOf(page.View) is null, "ordinary public view is unmounted on exit");
+            DesktopTestUi.Select(f.Element<ListView>("PublicNavigationList"), page); await DrainAsync();
             Equal(2, page.Activations, "second explicit activation"); Equal(2, f.Element<Grid>("ContentDeck").Children.Count, "view mounted only once");
         });
         yield return Case("one shell header retires stale page contributions and actions", async () =>
@@ -177,9 +177,9 @@ public static partial class DesktopTests
             var module = new ProbeModule("domain");
             var first = new HeaderProbePage("first"); var second = new HeaderProbePage("second");
             await using var f = new Fixture([module], pages: [first, second]); await f.LoadAsync();
-            f.Element<ListBox>("PublicNavigationList").SelectedItem = first;
+            DesktopTestUi.Select(f.Element<ListView>("PublicNavigationList"), first);
             await UntilAsync(() => AutomationProperties.GetName(f.Element<Grid>("ContentDeck")) == "first", "first header");
-            Equal(1, LogicalDescendants(f.Element<Border>("WindowFrame")).OfType<DesktopPageHeader>().Count(),
+            Equal(1, LogicalDescendants(f.Element<Grid>("WindowFrame")).OfType<DesktopPageHeader>().Count(),
                 "one shared contribution host");
             var stale = f.HeaderElement<ItemsControl>("HeaderActions").Items.Cast<DesktopHeaderActionItem>().Single();
             first.Publish("first-updated");
@@ -190,7 +190,7 @@ public static partial class DesktopTests
             Equal(0, first.Executions, "replaced action wrapper cannot execute");
             InvokeHeaderAction(f.Shell, refreshed);
             await UntilAsync(() => first.Executions == 1, "current action executes");
-            f.Element<ListBox>("PublicNavigationList").SelectedItem = second;
+            DesktopTestUi.Select(f.Element<ListView>("PublicNavigationList"), second);
             await UntilAsync(() => AutomationProperties.GetName(f.Element<Grid>("ContentDeck")) == "second", "second header");
             first.Publish("stale-title");
             InvokeHeaderAction(f.Shell, refreshed);
@@ -206,11 +206,11 @@ public static partial class DesktopTests
             var module = new NavigationProbe("domain"); var page = new ProbePage("shared");
             await using var f = new Fixture([module], pages: [page]); await f.LoadAsync();
             module.Request("three");
-            f.Element<ListBox>("PublicNavigationList").SelectedItem = page;
+            DesktopTestUi.Select(f.Element<ListView>("PublicNavigationList"), page);
             module.Request("two"); await DrainAsync();
-            Equal(1, module.Calls.Count, "late domain navigation ignored"); Same(page, f.Element<ListBox>("PublicNavigationList").SelectedItem, "public page retains ownership");
+            Equal(1, module.Calls.Count, "late domain navigation ignored"); Same(page, f.Element<ListView>("PublicNavigationList").SelectedItem, "public page retains ownership");
             await f.NavigateAsync(module, "two");
-            True(f.Element<ListBox>("PublicNavigationList").SelectedItem is null, "explicit sidebar leaves public page");
+            True(f.Element<ListView>("PublicNavigationList").SelectedItem is null, "explicit sidebar leaves public page");
             Equal("route:two", module.Calls[^1], "explicit route honored");
         });
         yield return Case("public activation cancellation fences late results and serializes reactivation", async () =>
@@ -218,10 +218,10 @@ public static partial class DesktopTests
             var module = new ProbeModule("domain"); using var pending = new HeldOperation(false);
             var page = new ProbePage("shared") { Activate = pending.RunAsync };
             await using var f = new Fixture([module], pages: [page]); await f.LoadAsync();
-            f.Element<ListBox>("PublicNavigationList").SelectedItem = page; await pending.Started.Task;
+            DesktopTestUi.Select(f.Element<ListView>("PublicNavigationList"), page); await pending.Started.Task;
             Click(f.Back); await DrainAsync();
             True(pending.Token.IsCancellationRequested, "leaving cancels page");
-            f.Element<ListBox>("PublicNavigationList").SelectedItem = page; await DrainAsync();
+            DesktopTestUi.Select(f.Element<ListView>("PublicNavigationList"), page); await DrainAsync();
             Equal(1, page.Activations, "old real call holds page lease");
             pending.Release(); await UntilAsync(() => page.Activations == 2 && f.Status == "", "replacement activation");
             Equal(1, page.MaximumActive, "no overlapping activation");
@@ -231,14 +231,14 @@ public static partial class DesktopTests
         {
             var module = new ProbeModule("domain"); var page = new ProbePage("shared") { Activate = _ => Task.FromException(new Exception("private-page-detail")) };
             await using var f = new Fixture([module], pages: [page]); await f.LoadAsync();
-            f.Element<ListBox>("PublicNavigationList").SelectedItem = page; await UntilAsync(() => f.Status == "暂时无法完成操作", "failure");
+            DesktopTestUi.Select(f.Element<ListView>("PublicNavigationList"), page); await UntilAsync(() => f.Status == "暂时无法完成操作", "failure");
             False(f.Status.Contains("private", StringComparison.Ordinal), "sanitized");
             page.Activate = _ => Task.CompletedTask; Click(f.Button("重试")); await UntilAsync(() => page.Activations == 2 && f.Status == "", "retry");
-            f.Search.Text = "test"; RaiseKey(f.Search, Key.Enter, ModifierKeys.None, false);
+            f.Search.Text = "test"; f.Shell.TrySubmitSearch(VirtualKeyModifiers.None, false);
             await UntilAsync(() => module.Calls.Contains("search:test") && f.Status == "", "global search");
-            True(LogicalTreeHelper.GetParent(page.View) is null, "global search retires the public page");
+            True(ParentOf(page.View) is null, "global search retires the public page");
             Click(f.Element<Button>("SettingsButton")); await DrainAsync();
-            True(f.Element<ListBox>("PublicNavigationList").SelectedItem is null, "settings leaves public page");
+            True(f.Element<ListView>("PublicNavigationList").SelectedItem is null, "settings leaves public page");
             Equal(Visibility.Visible, Host(module.SettingsView).Visibility, "current domain settings");
         });
         yield return Case("forced cleanup failure retains shell and explicit retry waits for actual success", async () =>
@@ -313,7 +313,7 @@ public static partial class DesktopTests
             Equal(1, f.Element<Grid>("ContentDeck").Children.Count, "only selected module mounted");
             Same(mainHost, Host(first.View), "idempotent main host");
             Same(playerHost, Host(first.PlayerView!), "idempotent player host");
-            True(LogicalTreeHelper.GetParent(first.SettingsView) is null, "inactive settings view is not mounted");
+            True(ParentOf(first.SettingsView) is null, "inactive settings view is not mounted");
 
             Equal(Visibility.Collapsed, f.HeaderElement<StackPanel>("TrailingHeader").Visibility,
                 "header chrome collapses when the page contributes no slot or actions");
@@ -329,16 +329,16 @@ public static partial class DesktopTests
             await f.SwitchAsync(b);
             Same(b.PlayerView, host.Content, "current player replaces host content");
             Same(host, Host(b.PlayerView!), "replacement uses same host");
-            True(LogicalTreeHelper.GetParent(a.PlayerView!) is null, "old player is detached, not hidden in another host");
+            True(ParentOf(a.PlayerView!) is null, "old player is detached, not hidden in another host");
             Same(aMainHost, Host(a.View), "inactive capability retains its main host");
             Equal(Visibility.Collapsed, Surface(a.View).Visibility, "inactive capability is hidden");
             Equal(2, f.Element<Grid>("ContentDeck").Children.Count, "both visited capability surfaces remain mounted");
-            Equal(1, LogicalDescendants(f.Element<Border>("WindowFrame")).OfType<ContentControl>().Count(x => x.Name == "PlayerHost"),
+            Equal(1, LogicalDescendants(f.Element<Grid>("WindowFrame")).OfType<ContentControl>().Count(x => x.Name == "PlayerHost"),
                 "only one player host exists");
             await f.SwitchAsync(a);
             Same(a.PlayerView, host.Content, "original player instance restores");
             Same(aMainHost, Host(a.View), "capability owner retains the original view and host");
-            True(LogicalTreeHelper.GetParent(b.PlayerView!) is null, "second player detached after switch");
+            True(ParentOf(b.PlayerView!) is null, "second player detached after switch");
         });
         yield return Case("global player owner can replace or withdraw its view while another capability is current", async () =>
         {
@@ -350,14 +350,14 @@ public static partial class DesktopTests
             var replacement = new Border
             {
                 Height = 64,
-                Background = Brushes.DarkOliveGreen,
+                Background = new SolidColorBrush(Colors.DarkOliveGreen),
                 Child = new TextBlock { Text = "replacement-player" }
             };
             owner.ReplacePlayer(replacement);
             await DrainAsync();
             Same(replacement, f.Element<ContentControl>("PlayerHost").Content,
                 "the retained owner refreshes its supplied player");
-            True(LogicalTreeHelper.GetParent(original) is null, "the replaced player is detached");
+            True(ParentOf(original) is null, "the replaced player is detached");
             Equal(Visibility.Visible, f.Element<Border>("PlayerFrame").Visibility,
                 "the replacement remains visible on the playerless capability");
             owner.ReplacePlayer(null);
@@ -371,7 +371,7 @@ public static partial class DesktopTests
         {
             var a = new ProbeModule("probe-a"); var b = new ProbeModule("probe-b");
             await using var f = new Fixture([a, b]); await f.LoadAsync();
-            f.Shell.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent)); await DrainAsync();
+            f.Shell.Activate(); await DrainAsync();
             Equal(1, a.InitializeCount, "duplicate Loaded must not initialize twice");
             Equal(0, b.InitializeCount, "unselected module dormant");
             Equal("route:one", a.Calls.Single(), "default route is supplied first item");
@@ -406,7 +406,7 @@ public static partial class DesktopTests
             Click(f.Element<Button>("SettingsButton")); await DrainAsync();
             Equal(Visibility.Visible, Host(viewing.SettingsView).Visibility, "current capability settings shown");
             Equal(Visibility.Collapsed, Host(viewing.View).Visibility, "main view remains mounted and hidden behind settings");
-            True(LogicalTreeHelper.GetParent(playing.SettingsView) is null, "other player's settings not selected");
+            True(ParentOf(playing.SettingsView) is null, "other player's settings not selected");
             Equal(Visibility.Collapsed, f.Element<Border>("PlayerFrame").Visibility,
                 "settings hide the retained player");
             Same(playing.PlayerView, f.Element<ContentControl>("PlayerHost").Content,
@@ -436,7 +436,7 @@ public static partial class DesktopTests
         yield return Case("search trims input restores query history and ignores whitespace", async () =>
         {
             var a = new ProbeModule("search-probe"); await using var f = new Fixture([a]); await f.LoadAsync();
-            f.Search.Text = "   "; RaiseKey(f.Search, Key.Enter, ModifierKeys.None, false); await DrainAsync();
+            f.Search.Text = "   "; f.Shell.TrySubmitSearch(VirtualKeyModifiers.None, false); await DrainAsync();
             Equal(1, a.Calls.Count, "whitespace must not search");
             await f.SearchAsync(" first "); await f.SearchAsync("second");
             True(f.SelectedRoute is null, "search is not a fake sidebar route");
@@ -489,13 +489,13 @@ public static partial class DesktopTests
             Equal(Visibility.Visible, Host(music.View).Visibility, "search owner becomes the current presentation");
             Click(f.Back); await UntilAsync(() => f.SelectedOwner == film && f.SelectedRoute == "one", "return to film");
 
-            f.Element<ListBox>("PublicNavigationList").SelectedItem = page;
+            DesktopTestUi.Select(f.Element<ListView>("PublicNavigationList"), page);
             await UntilAsync(() => page.Activations == 1 && f.Status == "", "ordinary public page");
             Equal(Visibility.Visible, f.Element<Grid>("SearchInput").Visibility,
                 "ordinary public page keeps the same global search");
             await f.SearchAsync("from-public");
             Equal("search:from-public", music.Calls[^1], "public page search enters the retained owner");
-            True(LogicalTreeHelper.GetParent(page.View) is null, "search retires the public page");
+            True(ParentOf(page.View) is null, "search retires the public page");
             Click(f.Back); await UntilAsync(() => f.SelectedOwner == film && f.SelectedRoute == "one",
                 "return to the page behind public content");
         });
@@ -525,7 +525,7 @@ public static partial class DesktopTests
             a.ReplaceNavigation(new(a.Navigation.Select(item => item with { Title = item.Title + "-updated" })));
             await DrainAsync();
             Equal("added", f.SelectedRoute, "new item instance restores by exact route");
-            Same(a.Navigation[^1], ((ShellNavigationEntry)f.Element<ListBox>("CollectionNavigationList").SelectedItem).Item, "selection refers to new collection item");
+            Same(a.Navigation[^1], ((ShellNavigationEntry)f.Element<ListView>("CollectionNavigationList").SelectedItem).Item, "selection refers to new collection item");
             Equal(before, a.Calls.Count, "replacement is not navigation intent");
             a.Navigation.RemoveAt(a.Navigation.Count - 1); await DrainAsync();
             True(f.SelectedRoute is null, "removed item no longer selected");
@@ -569,7 +569,7 @@ public static partial class DesktopTests
             Same(surface, Surface(a.View), "hidden surface retains identity");
             Equal(Visibility.Collapsed, surface.Visibility, "hidden surface cannot receive input");
             Equal(0, unvisited.InitializeCount + unvisited.Calls.Count, "unvisited owner has zero business calls");
-            True(LogicalTreeHelper.GetParent(unvisited.View) is null, "unvisited view is not mounted");
+            True(ParentOf(unvisited.View) is null, "unvisited view is not mounted");
             Equal(2, f.Element<Grid>("ContentDeck").Children.Count, "only visited surfaces are mounted");
             Click(f.Back); await UntilAsync(() => a.Calls.Count == before + 1 && f.Status == "", "search restoration");
             Sequence(["route:one", "search:retained-query", "restore-search:retained-query"], a.Calls,
@@ -590,7 +590,7 @@ public static partial class DesktopTests
             using var pending = new HeldOperation(true);
             a.RestoreHook = (_, token) => pending.RunAsync(token);
             Click(f.Back); await pending.Started.Task;
-            Click(f.Button("取消当前操作")); await UntilAsync(() => a.ActiveCalls == 0, "restore cancellation unwinds");
+            True(f.Shell.TryExecuteShortcut(VirtualKey.Escape, VirtualKeyModifiers.None), "active request admits cancellation"); await UntilAsync(() => a.ActiveCalls == 0, "restore cancellation unwinds");
             True(pending.Token.IsCancellationRequested, "restore receives shell cancellation");
             Equal("two", f.SelectedRoute, "cancelled restore cannot commit history");
             True(f.Back.IsEnabled, "previous location remains available");
@@ -656,7 +656,7 @@ public static partial class DesktopTests
             await f.LoadAsync(); f.Search.Text = "root-draft"; f.Select(a, "slow"); await old.Started.Task;
             await DrainAsync();
             Equal(Visibility.Collapsed, f.Element<Border>("StatusPanel").Visibility, "loading does not occupy the content viewport");
-            Click(f.Button("取消当前操作")); await UntilAsync(() => f.Status == "已取消", "cancel status");
+            True(f.Shell.TryExecuteShortcut(VirtualKey.Escape, VirtualKeyModifiers.None), "active request admits cancellation"); await UntilAsync(() => f.Status == "已取消", "cancel status");
             True(old.Token.IsCancellationRequested, "cancel propagates token");
             Equal("root-draft", f.Search.Text, "cancel restores the committed route draft");
             old.Release(); await UntilAsync(() => a.ActiveCalls == 0, "cancelled task released"); await DrainAsync();
@@ -697,8 +697,8 @@ public static partial class DesktopTests
         {
             var a = new ProbeModule("initialization-probe"); await using var f = new Fixture([a]); using var first = new HeldOperation(true);
             a.InitializeHook = token => a.InitializeCount == 1 ? first.RunAsync(token) : Task.CompletedTask;
-            f.Shell.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent)); await first.Started.Task;
-            Click(f.Button("取消当前操作")); await UntilAsync(() => a.ActiveCalls == 0, "initialization cancellation unwinds");
+            f.Shell.Activate(); await first.Started.Task;
+            True(f.Shell.TryExecuteShortcut(VirtualKey.Escape, VirtualKeyModifiers.None), "active request admits cancellation"); await UntilAsync(() => a.ActiveCalls == 0, "initialization cancellation unwinds");
             await f.NavigateAsync(a, "two");
             Equal(2, a.InitializeCount, "failed initialization may retry");
             Sequence(["route:two"], a.Calls, "cancelled initialization cannot execute default navigation");
@@ -725,32 +725,32 @@ public static partial class DesktopTests
             Equal(2, f.Element<Grid>("ContentDeck").Children.Count, "visited capability surfaces remain mounted");
             Equal(1, a.InitializeCount, "no reinitialize");
         });
-        foreach (var shortcut in new[] { Key.F, Key.K })
-        yield return Case("Ctrl " + shortcut + " routed keyboard event selects search without native input", async () =>
+        foreach (var shortcut in new[] { VirtualKey.F, VirtualKey.K })
+        yield return Case("Ctrl " + shortcut + " shortcut admission selects search without simulated input", async () =>
         {
             await using var f = new Fixture([new ProbeModule("keyboard-find")]);
             f.Shell.PrepareForRender(); f.Search.Text = "test-search-text"; f.Search.Select(2, 0);
-            var key = RaiseKey(f.Shell, shortcut, ModifierKeys.Control, true);
-            True(key.Handled, "Ctrl+" + shortcut + " must be handled");
+            var handled = f.Shell.TryExecuteShortcut(shortcut, VirtualKeyModifiers.Control);
+            True(handled, "Ctrl+" + shortcut + " must be handled");
             Equal(f.Search.Text.Length, f.Search.SelectionLength, "Ctrl+" + shortcut + " selects all");
             Equal(0, f.Probes[0].InitializeCount, "focus command is not a business request");
-            False(RaiseKey(f.Shell, shortcut, ModifierKeys.Control | ModifierKeys.Shift, true).Handled, "unassigned modifiers left alone");
+            False(f.Shell.TryExecuteShortcut(shortcut, VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift), "unassigned modifiers left alone");
         });
         yield return Case("Alt Left routes back while system chords remain unhandled", async () =>
         {
             var a = new ProbeModule("keyboard-back"); await using var f = new Fixture([a]); await f.LoadAsync(); await f.NavigateAsync(a, "two");
-            True(RaiseKey(f.Shell, Key.Left, ModifierKeys.Alt, true).Handled, "Alt+Left handled");
+            True(f.Shell.TryExecuteShortcut(VirtualKey.Left, VirtualKeyModifiers.Menu), "Alt+Left handled");
             await UntilAsync(() => f.SelectedRoute == "one", "Alt+Left used real history");
-            False(RaiseKey(f.Shell, Key.F4, ModifierKeys.Alt, true).Handled, "Alt+F4 left to system");
-            False(RaiseKey(f.Shell, Key.Space, ModifierKeys.Alt, true).Handled, "Alt+Space left to system menu");
+            False(f.Shell.TryExecuteShortcut(VirtualKey.F4, VirtualKeyModifiers.Menu), "Alt+F4 left to system");
+            False(f.Shell.TryExecuteShortcut(VirtualKey.Space, VirtualKeyModifiers.Menu), "Alt+Space left to system menu");
         });
-        yield return Case("search Enter honors originating device modifiers and IME", async () =>
+        yield return Case("search submission admission honors modifiers and composition", async () =>
         {
             var a = new ProbeModule("keyboard-enter"); await using var f = new Fixture([a]); await f.LoadAsync(); f.Search.Text = "key-query";
-            False(RaiseKey(f.Search, Key.Enter, ModifierKeys.Control, false).Handled, "Ctrl+Enter is not plain Enter");
-            False(RaiseKey(f.Search, Key.ImeProcessed, ModifierKeys.None, false).Handled, "IME must not submit");
+            False(f.Shell.TrySubmitSearch(VirtualKeyModifiers.Control, false), "Ctrl+Enter is not plain Enter");
+            False(f.Shell.TrySubmitSearch(VirtualKeyModifiers.None, true), "IME must not submit");
             await DrainAsync(); Equal(1, a.Calls.Count, "modified/composing keys did not search");
-            True(RaiseKey(f.Search, Key.Enter, ModifierKeys.None, false).Handled, "plain Enter submitted");
+            True(f.Shell.TrySubmitSearch(VirtualKeyModifiers.None, false), "plain Enter submitted");
             await UntilAsync(() => a.Calls.Contains("search:key-query"), "Enter routed");
             Equal(1, a.Calls.Count(call => call.StartsWith("search:", StringComparison.Ordinal)), "one search only");
         });
@@ -778,7 +778,7 @@ public static partial class DesktopTests
             await f.LoadAsync(); f.Select(a, "slow"); await work.Started.Task;
             f.Shell.Close(); f.Shell.Close(); await shutdown.Started.Task; await DrainAsync();
             True(observedCancellation, "cancel occurs before owner cleanup"); False(f.Closed.Task.IsCompleted, "wait within budget");
-            False(f.Element<Button>("CloseButton").IsEnabled, "repeat close button disabled"); Equal(1, f.ShutdownCalls, "one callback only");
+            f.Shell.Close(); Equal(1, f.ShutdownCalls, "native repeated close owns one callback only");
             shutdown.Release(); await f.WaitClosedAsync(); True(f.Shell.ShutdownSucceeded, "cooperative cleanup succeeds");
             Equal(1, a.DisposeCount, "owner disposal once");
         });
@@ -891,17 +891,17 @@ public static partial class DesktopTests
             False(f.Closed.Task.IsCompleted, "initial wait not bypassed by hidden button");
             f.Clock.Advance(TimeSpan.FromSeconds(5)); await UntilAsync(() => f.Status == "关闭超时", "confirmation");
             var calls = a.Calls.Count; a.Request("two"); f.Select(a, "three"); Click(f.Element<Button>("SettingsButton"));
-            Click(f.Button("取消当前操作")); Click(f.Button("关闭状态")); await DrainAsync();
+            True(f.Shell.TryExecuteShortcut(VirtualKey.Escape, VirtualKeyModifiers.None), "active request admits cancellation"); Click(f.Button("关闭状态")); await DrainAsync();
             Equal(calls, a.Calls.Count, "frozen shell cannot resume partially disposed domain");
             Equal("关闭超时", f.Status, "unrelated actions cannot erase shutdown risk");
-            False(f.Element<Button>("ForceExitButton").IsDefault, "force is not an implicit Enter default");
-            False(RaiseKey(f.Shell, Key.F, ModifierKeys.Control, true).Handled, "search shortcut blocked during shutdown");
+            False(f.Shell.TryExecuteShortcut(VirtualKey.Enter, VirtualKeyModifiers.None), "force is not an implicit Enter default");
+            False(f.Shell.TryExecuteShortcut(VirtualKey.F, VirtualKeyModifiers.Control), "search shortcut blocked during shutdown");
             Click(f.Element<Button>("ForceExitButton")); await f.WaitClosedAsync();
         });
         yield return Case("Closing veto does not begin shutdown until close allowed", async () =>
         {
             await using var f = new Fixture([new ProbeModule("close-veto")]); f.Shell.PrepareForRender();
-            CancelEventHandler veto = (_, e) => e.Cancel = true;
+            EventHandler<CancelEventArgs> veto = (_, e) => e.Cancel = true;
             f.Shell.Closing += veto;
             try
             {
@@ -921,63 +921,31 @@ public static partial class DesktopTests
                 await pending.RunAsync(token);
             };
             await using var f = new Fixture([a]); await f.LoadAsync(); f.Select(a, "slow"); await pending.Started.Task;
-            Click(f.Button("取消当前操作")); await UntilAsync(() => a.ActiveCalls == 0, "cancellation unwinds despite registration failure");
+            True(f.Shell.TryExecuteShortcut(VirtualKey.Escape, VirtualKeyModifiers.None), "active request admits cancellation"); await UntilAsync(() => a.ActiveCalls == 0, "cancellation unwinds despite registration failure");
             Equal("已取消", f.Status, "finite cancellation status"); await f.NavigateAsync(a, "two");
             Equal("two", f.SelectedRoute, "subsequent request works"); Equal(1, a.MaximumConcurrentCalls, "lease not released early");
         });
         foreach (var size in new[] { new Size(1180, 800), new Size(860, 600) })
-            yield return Case($"offscreen content layout and nonempty pixels {size.Width}x{size.Height}", () => RenderContentAsync(size));
+            yield return Case($"loaded content layout and nonempty pixels {size.Width}x{size.Height}", () => RenderContentAsync(size));
         yield return Case("module accent scoped and removed on domain switch", async () =>
         {
-            var a = new ProbeModule("accent-a"); var b = new ProbeModule("accent-b"); var accent = new SolidColorBrush(Color.FromRgb(20, 90, 65));
+            var a = new ProbeModule("accent-a"); var b = new ProbeModule("accent-b"); var accent = new SolidColorBrush(Color.FromArgb(255, 20, 90, 65));
             a.View.Resources["MeowFilm.Brush.Accent"] = accent;
             await using var f = new Fixture([a, b]); await f.LoadAsync(); var root = f.Element<Grid>("RootLayout");
             Same(accent, root.Resources["MeowFilm.Brush.Accent"], "selected-domain override"); await f.SwitchAsync(b);
-            False(root.Resources.Contains("MeowFilm.Brush.Accent"), "old accent does not leak");
+            False(root.Resources.ContainsKey("MeowFilm.Brush.Accent"), "old accent does not leak");
             foreach (var key in new[] { "MeowFilm.Button", "MeowFilm.TextBox", "MeowFilm.Heading", "MeowFilm.Surface" })
-                True(f.Shell.TryFindResource(key) is Style, "reusable style: " + key);
+                True(DesktopVisual.Resource(f.Shell.Root, key) is Style, "reusable style: " + key);
         });
     }
 
     private static TestCase Case(string name, Func<Task> body, TimeSpan? timeout = null) =>
         new("desktop: " + name, () => OnStaAsync(body, timeout));
-    private static async Task OnStaAsync(Func<Task> body, TimeSpan? timeout)
-    {
-        var result = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Dispatcher? owner = null;
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher; Volatile.Write(ref owner, dispatcher);
-            SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(dispatcher));
-            var unhandled = new List<Exception>();
-            dispatcher.UnhandledException += (_, e) => { unhandled.Add(e.Exception); e.Handled = true; };
-            async Task RunAsync()
-            {
-                Exception? failure = null;
-                try
-                {
-                    await body(); await DrainAsync();
-                    if (unhandled.Count > 0) throw new AggregateException("Unhandled dispatcher exception", unhandled);
-                }
-                catch (Exception error) { failure = error; }
-                finally { result.TrySetResult(failure); dispatcher.BeginInvokeShutdown(DispatcherPriority.Background); }
-            }
-            dispatcher.BeginInvoke(new Action(() => _ = RunAsync()));
-            try { Dispatcher.Run(); }
-            catch (Exception error) { result.TrySetResult(error); }
-            finally { stopped.TrySetResult(); }
-        }) { IsBackground = true, Name = "meowfilm-desktop-code-test" };
-        thread.SetApartmentState(ApartmentState.STA); thread.Start();
-        Exception? failure;
-        try { failure = await result.Task.WaitAsync(timeout ?? TimeSpan.FromSeconds(8)); }
-        catch { Volatile.Read(ref owner)?.BeginInvokeShutdown(DispatcherPriority.Send); throw; }
-        await stopped.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
-    }
+    private static Task OnStaAsync(Func<Task> body, TimeSpan? timeout) =>
+        TestUiHost.InvokeAsync(body).WaitAsync(timeout ?? TimeSpan.FromSeconds(15));
     private static async Task DrainAsync()
     {
-        for (var i = 0; i < 3; i++) await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await DesktopTestUi.DrainAsync();
     }
     private static async Task UntilAsync(Func<bool> predicate, string label)
     {
@@ -985,75 +953,45 @@ public static partial class DesktopTests
         while (!predicate())
         {
             if (watch.Elapsed > TimeSpan.FromSeconds(2)) throw new InvalidOperationException("Timed out: " + label);
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await DesktopTestUi.DrainAsync();
             if (!predicate()) await Task.Delay(1); // Continuation safety wait, not policy time advancement.
         }
         await DrainAsync();
     }
-    private static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent, button));
+    private static void Click(Button button) => DesktopTestUi.Invoke(button);
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<DesktopHeaderActionItem, Button> headerButtons = new();
     private static void InvokeHeaderAction(ShellWindow shell, DesktopHeaderActionItem item)
     {
-        var button = new Button { Tag = item };
-        typeof(DesktopPageHeader).GetMethod("OnActionClick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-            .Invoke(shell.FindName("PageHeaderHost"), [button, new RoutedEventArgs(Button.ClickEvent)]);
+        DesktopTestUi.WindowRoot(shell).UpdateLayout();
+        var button = headerButtons.GetValue(item, value => ChromeVisuals(DesktopTestUi.WindowRoot(shell)).OfType<Button>()
+            .Single(candidate => ReferenceEquals(candidate.Tag, value)));
+        Click(button);
     }
-    private static ContentControl Host(FrameworkElement view) => LogicalTreeHelper.GetParent(view) as ContentControl
-        ?? throw new InvalidOperationException("Expected retained ContentControl host");
+    private static DependencyObject? ParentOf(DependencyObject view) =>
+        (view as FrameworkElement)?.Parent ?? VisualTreeHelper.GetParent(view);
+    private static ContentControl Host(FrameworkElement view)
+    {
+        for (var node = ParentOf(view); node is not null; node = ParentOf(node))
+            if (node is ContentControl host && ReferenceEquals(host.Content, view)) return host;
+        throw new InvalidOperationException("Expected retained ContentControl host");
+    }
     private static FrameworkElement Surface(FrameworkElement view) => (FrameworkElement)Host(view).Parent;
-    private static IEnumerable<DependencyObject> LogicalDescendants(DependencyObject root)
-    {
-        yield return root;
-        foreach (var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>())
-            foreach (var descendant in LogicalDescendants(child)) yield return descendant;
-    }
-    private static KeyEventArgs RaiseKey(UIElement target, Key key, ModifierKeys modifiers, bool preview)
-    {
-        var device = new ProbeKeyboard(modifiers); Equal(modifiers, device.Modifiers, "explicit test keyboard modifiers");
-        var args = new KeyEventArgs(device, new ProbePresentationSource(), 0, key)
-        { RoutedEvent = preview ? Keyboard.PreviewKeyDownEvent : Keyboard.KeyDownEvent };
-        target.RaiseEvent(args); return args;
-    }
-    private sealed class ProbeKeyboard(ModifierKeys modifiers) : KeyboardDevice(InputManager.Current)
-    {
-        protected override KeyStates GetKeyStatesFromSystem(Key key) => key switch
-        {
-            Key.LeftCtrl when modifiers.HasFlag(ModifierKeys.Control) => KeyStates.Down,
-            Key.LeftAlt when modifiers.HasFlag(ModifierKeys.Alt) => KeyStates.Down,
-            Key.LeftShift when modifiers.HasFlag(ModifierKeys.Shift) => KeyStates.Down,
-            Key.LWin when modifiers.HasFlag(ModifierKeys.Windows) => KeyStates.Down,
-            _ => KeyStates.None
-        };
-    }
-    private sealed class ProbePresentationSource : PresentationSource
-    {
-        public override Visual RootVisual { get; set; } = new DrawingVisual();
-        public override bool IsDisposed => false;
-        protected override CompositionTarget GetCompositionTargetCore() => null!;
-    }
+    private static IEnumerable<DependencyObject> LogicalDescendants(DependencyObject root) => DesktopTestUi.Visuals(root);
     private static async Task RenderContentAsync(Size size)
     {
-        var a = new ProbeModule("layout-probe"); await using var f = new Fixture([a]); f.Shell.PrepareForRender();
-        var root = (Border)f.Shell.Content; var background = f.Shell.Background;
-        // Actual shell content; no Show/HWND/product startup. Explicitly retain inherited values when detaching.
-        f.Shell.Content = null; root.Resources.MergedDictionaries.Add(f.Shell.Resources); root.DataContext = f.Shell.DataContext;
-        root.Background = background; TextElement.SetForeground(root, f.Shell.Foreground);
-        TextElement.SetFontFamily(root, f.Shell.FontFamily); TextElement.SetFontSize(root, f.Shell.FontSize);
-        TextOptions.SetTextFormattingMode(root, TextOptions.GetTextFormattingMode(f.Shell));
-        TextOptions.SetTextRenderingMode(root, TextOptions.GetTextRenderingMode(f.Shell));
-        root.UseLayoutRounding = f.Shell.UseLayoutRounding; root.SnapsToDevicePixels = f.Shell.SnapsToDevicePixels;
-        DesktopTheme.SetIsHighContrast(root, DesktopTheme.GetIsHighContrast(f.Shell));
-        root.Measure(size); root.Arrange(new Rect(size)); root.UpdateLayout();
+        var a = new ProbeModule("layout-probe"); await using var f = new Fixture([a]);
+        f.Shell.Resize(size.Width, size.Height); await f.LoadAsync();
+        var root = f.Shell.Root; root.UpdateLayout();
         var content = f.Element<Grid>("ContentDeck"); var player = f.Element<Border>("PlayerFrame");
-        var contentTop = content.TranslatePoint(new Point(), root); var playerTop = player.TranslatePoint(new Point(), root);
+        var contentBounds = DesktopTestUi.Bounds(content, root); var playerBounds = DesktopTestUi.Bounds(player, root);
         True(content.ActualWidth > 400 && content.ActualHeight > 200, "usable main viewport");
         True(player.ActualHeight >= 64, "player measured into own row");
-        True(contentTop.Y + content.ActualHeight <= playerTop.Y + 0.5, "player must not cover content");
+        True(contentBounds.Bottom <= playerBounds.Top + .5, "player must not cover content");
         Equal(216d, f.Element<Grid>("RootLayout").ColumnDefinitions[0].ActualWidth, "sidebar width");
-        var bitmap = new RenderTargetBitmap((int)size.Width, (int)size.Height, 96, 96, PixelFormats.Pbgra32); bitmap.Render(root);
-        var pixels = new byte[(int)size.Width * (int)size.Height * 4]; bitmap.CopyPixels(pixels, (int)size.Width * 4, 0);
+        var pixels = await DesktopTestUi.Pixels(root);
         var opaque = 0; for (var index = 3; index < pixels.Length; index += 4) if (pixels[index] > 240) opaque++;
-        True(opaque > size.Width * size.Height * 0.8, "nonempty rendered pixels, not just file existence");
-        Equal(0, a.InitializeCount, "render did not initialize"); Equal(0, a.Calls.Count, "render did not invoke business");
+        True(opaque > pixels.Length / 4 * .8, "nonempty rendered pixels, not just file existence");
+        Equal(1, a.InitializeCount, "loaded shell initialized once"); Equal(1, a.Calls.Count, "layout does not repeat business calls");
     }
 
     private sealed class Fixture : IAsyncDisposable
@@ -1065,17 +1003,17 @@ public static partial class DesktopTests
         public int ClosedCount { get; private set; }
         public int ShutdownCalls { get; private set; }
         public int ForceCalls { get; private set; }
-        public ListBox Modules => Element<ListBox>("ModuleNavigationList");
-        public ListBox Navigation => Element<ListBox>("NavigationList");
+        public ListView Modules => Element<ListView>("ModuleNavigationList");
+        public ListView Navigation => Element<ListView>("NavigationList");
         public TextBox Search => Element<TextBox>("SearchBox");
         public Button Back => Element<Button>("BackButton");
         public Button Forward => Element<Button>("ForwardButton");
         public string Status => Element<TextBlock>("StatusText").Text;
         public string? SelectedRoute => (Navigation.SelectedItem as ShellNavigationEntry)?.Route ??
-            (Element<ListBox>("CollectionNavigationList").SelectedItem as ShellNavigationEntry)?.Route ??
+            (Element<ListView>("CollectionNavigationList").SelectedItem as ShellNavigationEntry)?.Route ??
             (Modules.SelectedItem as ModuleSession)?.Module.Navigation[0].Route;
         public ProbeModule? SelectedOwner => ((Navigation.SelectedItem as ShellNavigationEntry) ??
-            (Element<ListBox>("CollectionNavigationList").SelectedItem as ShellNavigationEntry))?.Owner.Module as ProbeModule ??
+            (Element<ListView>("CollectionNavigationList").SelectedItem as ShellNavigationEntry))?.Owner.Module as ProbeModule ??
             (Modules.SelectedItem as ModuleSession)?.Module as ProbeModule;
         public Fixture(ProbeModule[] modules, Func<Fixture, Task>? shutdown = null, IReadOnlyList<IDesktopPage>? pages = null,
             Func<Fixture, Task>? force = null, Func<Fixture, Task>? cancel = null)
@@ -1090,34 +1028,41 @@ public static partial class DesktopTests
                 cancel is null ? null : () => cancel(this), Clock);
             Shell.Closed += (_, _) => { ClosedCount++; Closed.TrySetResult(); };
         }
-        public T Element<T>(string name) where T : FrameworkElement => Shell.FindName(name) as T
+        public T Element<T>(string name) where T : FrameworkElement => DesktopTestUi.WindowRoot(Shell).FindName(name) as T
             ?? throw new InvalidOperationException("Missing shell element: " + name);
-        public T HeaderElement<T>(string name) where T : FrameworkElement =>
-            Element<DesktopPageHeader>("PageHeaderHost").FindName(name) as T
-            ?? throw new InvalidOperationException("Missing header element: " + name);
-        public Button Button(string name) => LogicalDescendants(Shell.Content as DependencyObject ?? Element<Border>("WindowFrame"))
+        public T HeaderElement<T>(string name) where T : FrameworkElement
+        {
+            var header = Element<DesktopPageHeader>("PageHeaderHost");
+            DesktopTestUi.WindowRoot(Shell).UpdateLayout();
+            foreach (var button in ChromeVisuals(header).OfType<Button>())
+                if (button.Tag is DesktopHeaderActionItem item) headerButtons.GetValue(item, _ => button);
+            return header.FindName(name) as T ?? throw new InvalidOperationException("Missing header element: " + name);
+        }
+        public Button Button(string name) => LogicalDescendants(Shell.Content as DependencyObject ?? Element<Grid>("WindowFrame"))
             .OfType<Button>().Single(button => AutomationProperties.GetName(button) == name);
         public async Task LoadAsync()
         {
-            Shell.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent));
+            Shell.Activate();
+            await UntilAsync(() => DesktopTestUi.WindowRoot(Shell).IsLoaded, "WinUI shell loaded");
+            DesktopTestUi.WindowRoot(Shell).UpdateLayout();
             await UntilAsync(() => SelectedOwner == Probes[0] && SelectedRoute == "one" && Status == "", "default route loaded");
         }
         public void Select(ProbeModule module, string route)
         {
             if (route == module.Navigation[0].Route)
             {
-                Modules.SelectedItem = Modules.Items.OfType<ModuleSession>().Single(session => ReferenceEquals(session.Module, module));
+                DesktopTestUi.Select(Modules, Modules.Items.OfType<ModuleSession>().Single(session => ReferenceEquals(session.Module, module)));
                 return;
             }
             var item = module.Navigation.Single(item => item.Route == route);
-            var list = item.Group is null ? Navigation : Element<ListBox>("CollectionNavigationList");
-            list.SelectedItem = list.Items.OfType<ShellNavigationEntry>().Single(entry => ReferenceEquals(entry.Owner.Module, module) && entry.Route == route);
+            var list = item.Group is null ? Navigation : Element<ListView>("CollectionNavigationList");
+            DesktopTestUi.Select(list, list.Items.OfType<ShellNavigationEntry>().Single(entry => ReferenceEquals(entry.Owner.Module, module) && entry.Route == route));
         }
         public async Task NavigateAsync(ProbeModule module, string route)
         {
             if (route != module.Navigation[0].Route &&
                 !Navigation.Items.OfType<ShellNavigationEntry>()
-                    .Concat(Element<ListBox>("CollectionNavigationList").Items.OfType<ShellNavigationEntry>())
+                    .Concat(Element<ListView>("CollectionNavigationList").Items.OfType<ShellNavigationEntry>())
                     .Any(entry => ReferenceEquals(entry.Owner.Module, module)))
                 await SwitchAsync(module);
             Select(module, route);
@@ -1132,7 +1077,7 @@ public static partial class DesktopTests
         public async Task SearchAsync(string query)
         {
             var before = Probes.Sum(probe => probe.Calls.Count(call => call.StartsWith("search:", StringComparison.Ordinal)));
-            Search.Text = query; RaiseKey(Search, Key.Enter, ModifierKeys.None, false);
+            Search.Text = query; Shell.TrySubmitSearch(VirtualKeyModifiers.None, false);
             await UntilAsync(() => Status == "" && Search.Text == query.Trim() &&
                 Probes.Sum(probe => probe.Calls.Count(call => call.StartsWith("search:", StringComparison.Ordinal))) == before + 1,
                 "search completion");
@@ -1228,7 +1173,7 @@ public static partial class DesktopTests
             VerticalAlignment = VerticalAlignment.Top;
             MinHeight = 80;
         }
-        public DesktopHeaderContribution Header =>
+        public new DesktopHeaderContribution Header =>
             new("", SearchVisible: false, SearchEnabled: false);
         public event EventHandler? HeaderChanged { add { } remove { } }
     }
@@ -1264,7 +1209,7 @@ public static partial class DesktopTests
                 ? new TextBox { Text = "test-view", VerticalAlignment = VerticalAlignment.Top, MinHeight = 80 }
                 : new SearchlessProbeView());
             SettingsView = new TextBox { Text = "test-settings", VerticalAlignment = VerticalAlignment.Top, MinHeight = 80 };
-            playerView = hasPlayer ? new Border { Height = 64, Background = Brushes.DarkSlateGray, Child = new TextBlock { Text = "test-player" } } : null;
+            playerView = hasPlayer ? new Border { Height = 64, Background = new SolidColorBrush(Colors.DarkSlateGray), Child = new TextBlock { Text = "test-player" } } : null;
         }
         public Task InitializeAsync(CancellationToken cancellationToken)
         {
@@ -1282,7 +1227,7 @@ public static partial class DesktopTests
         }
         public Task SearchAsync(string query, CancellationToken cancellationToken)
         {
-            View.Dispatcher.VerifyAccess(); cancellationToken.ThrowIfCancellationRequested();
+            True(View.DispatcherQueue.HasThreadAccess, "UI owner thread"); cancellationToken.ThrowIfCancellationRequested();
             Calls.Add("search:" + query);
             CurrentLocation = NextSearchLocation ?? "search:" + query;
             return Task.CompletedTask;
@@ -1292,12 +1237,12 @@ public static partial class DesktopTests
         public int CaptureCount { get; private set; }
         public string CaptureNavigationLocation()
         {
-            View.Dispatcher.VerifyAccess(); CaptureCount++;
+            True(View.DispatcherQueue.HasThreadAccess, "UI owner thread"); CaptureCount++;
             return CurrentLocation;
         }
         public Task RestoreNavigationAsync(string location, CancellationToken cancellationToken)
         {
-            View.Dispatcher.VerifyAccess(); cancellationToken.ThrowIfCancellationRequested();
+            True(View.DispatcherQueue.HasThreadAccess, "UI owner thread"); cancellationToken.ThrowIfCancellationRequested();
             Calls.Add("restore-" + location);
             return ExecuteAsync(async () =>
             {
@@ -1309,7 +1254,7 @@ public static partial class DesktopTests
         public Func<string, CancellationToken, Task>? RestoreHook { get; set; }
         private async Task ExecuteAsync(Func<Task> action)
         {
-            View.Dispatcher.VerifyAccess(); ActiveCalls++; MaximumConcurrentCalls = Math.Max(ActiveCalls, MaximumConcurrentCalls);
+            True(View.DispatcherQueue.HasThreadAccess, "UI owner thread"); ActiveCalls++; MaximumConcurrentCalls = Math.Max(ActiveCalls, MaximumConcurrentCalls);
             try { await action(); }
             finally { ActiveCalls--; }
         }

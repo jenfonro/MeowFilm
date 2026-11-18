@@ -224,13 +224,13 @@ for (const [specifier, error] of [
   });
 }
 
-test('resolves WPF pack references and rejects missing resources', t => {
+test('resolves WinUI resource references and rejects missing resources', t => {
   const f = fixture(t);
   f.write('apps/windows/src/MeowFilm.Desktop/Page.xaml',
-    '<ResourceDictionary Source="/MeowFilm.Desktop;component/Theme.xaml"/>');
+    '<ResourceDictionary Source="ms-appx:///MeowFilm.Desktop/Theme.xaml"/>');
   assert.equal(verifyAppStructure(f.source).resourceReferences, 1);
   f.write('apps/windows/src/MeowFilm.Desktop/Page.xaml',
-    '<ResourceDictionary Source="/MeowFilm.Desktop;component/Missing.xaml"/>');
+    '<ResourceDictionary Source="ms-appx:///MeowFilm.Desktop/Missing.xaml"/>');
   assert.throws(() => verifyAppStructure(f.source), /missing\/unsafe XAML resource/);
 });
 

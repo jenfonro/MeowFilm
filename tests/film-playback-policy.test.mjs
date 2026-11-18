@@ -15,7 +15,7 @@ const sorted = (items, options) => [...items].sort((a, b) => compareCandidates(a
 test('E36 default preferences contain only supported pan families and are independent copies', () => {
   const expected = { ruleOrder: ['quality', 'pan', 'keyword'],
     panOrder: ['yidong', 'tianyi', 'quark', 'uc', 'baidu'], keywords: [],
-    siteCleanKeywords: ['直播', '体育', '短剧', '听书', '舞曲', '哔哩'], iosAutoPrepare: true };
+    siteCleanKeywords: ['直播', '体育', '短剧', '听书', '舞曲', '哔哩'], iosAutoPrepare: true, metadataViewProvider: 'tmdb' };
   assert.deepEqual(defaultPreferences(), expected);
   const changed = defaultPreferences();
   changed.ruleOrder.reverse();
@@ -30,17 +30,19 @@ test('E36 normalized preferences keep empty keyword groups and complete a partia
   const before = structuredClone(value);
   const result = normalizePreferences(value);
   assert.deepEqual(result, { ...value, keywords: ['DDP', 'H.265'],
-    panOrder: ['baidu', 'quark', 'yidong', 'tianyi', 'uc'] });
+    panOrder: ['baidu', 'quark', 'yidong', 'tianyi', 'uc'], metadataViewProvider: 'tmdb' });
   assert.deepEqual(value, before);
   assert.deepEqual(normalizePreferences({ keywords: [], siteCleanKeywords: [] }).keywords, []);
   assert.deepEqual(normalizePreferences(), defaultPreferences());
+  assert.equal(normalizePreferences({ metadataViewProvider: 'douban' }).metadataViewProvider, 'douban');
 });
 
 test('E36 malformed preferences fail with a closed code and without echoing input', () => {
   for (const value of [null, [], 'secret', { ruleOrder: ['quality'] },
     { ruleOrder: ['quality', 'pan', 'pan'] }, { panOrder: ['115'] }, { panOrder: ['139'] },
     { panOrder: ['quark', 'quark'] }, { keywords: ['DDP', 'ddp'] }, { keywords: [''] },
-    { keywords: [1] }, { iosAutoPrepare: 1 }]) {
+    { keywords: [1] }, { iosAutoPrepare: 1 }, { metadataViewProvider: null },
+    { metadataViewProvider: 'source' }, { metadataViewProvider: 'TMDB' }]) {
     assert.throws(() => normalizePreferences(value), error =>
       error.code === 'INVALID_PREFERENCES' && error.message === 'Invalid film playback preferences');
   }

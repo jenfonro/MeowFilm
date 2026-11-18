@@ -1,8 +1,9 @@
 using System.ComponentModel;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using System.Windows.Threading;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities;
@@ -78,7 +79,7 @@ public static class MusicAccountUiTests
                         await runtime.ListArrived.Task.WaitAsync(TimeSpan.FromSeconds(3));
                     var prepare = module.PrepareShutdownAsync();
                     await runtime.ListArrived.Task.WaitAsync(TimeSpan.FromSeconds(3));
-                    await Dispatcher.Yield(DispatcherPriority.Background);
+                    await MusicTestUi.Drain();
                     Check(!cancel.IsCompleted && !prepare.IsCompleted);
                     runtime.ListReply.TrySetResult(Application.Accounts());
                     await Task.WhenAll(import, cancel, observation, prepare);
@@ -149,22 +150,7 @@ public static class MusicAccountUiTests
             foreach (var child in Visuals(VisualTreeHelper.GetChild(root, i))) yield return child;
     }
     private static async Task Sta(Func<Task> body)
-    {
-        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            _ = dispatcher.InvokeAsync(async () =>
-            {
-                try { await body(); completed.TrySetResult(); }
-                catch (Exception error) { completed.TrySetException(error); }
-                finally { dispatcher.BeginInvokeShutdown(DispatcherPriority.Background); }
-            });
-            Dispatcher.Run();
-        }) { IsBackground = true };
-        thread.SetApartmentState(ApartmentState.STA); thread.Start();
-        await completed.Task.WaitAsync(TimeSpan.FromSeconds(20)); Check(thread.Join(3000));
-    }
+    { await TestUiHost.InvokeAsync(body); }
     private sealed class Application : MusicApplicationTestDouble
     {
         public bool HoldImport, UnknownImport, InvalidList, HoldList;

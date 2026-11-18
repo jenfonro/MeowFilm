@@ -60,6 +60,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     private let loadingIndicator = UIActivityIndicatorView(style: .medium)
     private let sourceRow = UIStackView(), episodeList = UIStackView()
     private var displayedSnapshot: FilmPlaybackSnapshot?
+    private var displayedAggregateProvider: FilmMetadataProvider?
     private var playbackActivationRequested = false
     private let presentationOwner = UUID()
     private var summaryExpanded = false
@@ -522,13 +523,10 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         let busy = model.opening || model.playbackStatus.busy
         if busy { loadingIndicator.startAnimating() } else { loadingIndicator.stopAnimating() }
         playbackState.text = model.playbackStatus.title
-        let metadataChanged = displayedSnapshot?.workInfo != snapshot.workInfo ||
-            displayedSnapshot?.metadata != snapshot.metadata ||
+        let metadataChanged = displayedSnapshot == nil || displayedSnapshot?.workInfo != snapshot.workInfo
+        let directoryMetadataChanged = displayedSnapshot?.metadata != snapshot.metadata ||
             displayedSnapshot?.metadataCache != snapshot.metadataCache ||
             displayedSnapshot?.metadataSupplement != snapshot.metadataSupplement ||
-            displayedSnapshot?.target.metadataProvider != snapshot.target.metadataProvider ||
-            displayedSnapshot?.target.kind != snapshot.target.kind ||
-            displayedSnapshot?.target.value["metadataId"] != snapshot.target.value["metadataId"] ||
             displayedSnapshot?.metadataSourceID != snapshot.metadataSourceID ||
             displayedSnapshot?.metadataSources != snapshot.metadataSources
         if metadataChanged {
@@ -540,12 +538,12 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         if displayedSnapshot?.sources != snapshot.sources || displayedSnapshot?.browsing != snapshot.browsing ||
             displayedSnapshot?.searchComplete != snapshot.searchComplete ||
             displayedSnapshot?.entryResolution != snapshot.entryResolution ||
-            displayedSnapshot?.metadataSources != snapshot.metadataSources || metadataChanged {
+            displayedAggregateProvider != model.aggregateSourceProvider || directoryMetadataChanged {
             renderSourceMenus(snapshot)
         }
         if displayedSnapshot?.episodes != snapshot.episodes || displayedSnapshot?.browsing != snapshot.browsing ||
             displayedSnapshot?.sources != snapshot.sources || displayedSnapshot?.entryResolution != snapshot.entryResolution ||
-            displayedSnapshot?.candidates != snapshot.candidates || metadataChanged {
+            displayedSnapshot?.candidates != snapshot.candidates || directoryMetadataChanged {
             renderRuntimeEpisodes()
         }
         updateEpisodeAvailability()
@@ -558,6 +556,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         ])
         renderEpisodeMenu()
         displayedSnapshot = snapshot
+        displayedAggregateProvider = model.aggregateSourceProvider
         presentPlaybackError()
         applyTheme()
     }
@@ -635,8 +634,8 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         }
         var actions: [UIMenuElement] = snapshot.metadataSources.map { row in
             UIAction(title: "\(row.provider.title) · \(row.title)",
-                     state: snapshot.browsing.sourceID == nil && row.id == snapshot.metadataSourceID ? .on : .off) { [weak model] _ in
-                model?.browseMetadata(row.id)
+                     state: model?.aggregateSourceProvider == row.provider ? .on : .off) { [weak model] _ in
+                model?.browseAggregate(row.provider)
             }
         }
         actions += snapshot.sources.map { row in
@@ -661,17 +660,17 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         if let sourceID = snapshot.browsing.sourceID {
             selectedTitle = snapshot.sources.first { $0.id == sourceID }.map { "\($0.source.name) · \($0.title)" }
         } else {
-            selectedTitle = snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }
+            selectedTitle = snapshot.metadataSources.first { $0.provider == model?.aggregateSourceProvider }
                 .map { "\($0.provider.title) · \($0.title)" }
         }
-        let waiting = snapshot.browsing.loading || snapshot.stage == "loading" || snapshot.entryResolution == "loading"
+        let waiting = snapshot.browsing.loading || snapshot.entryResolution == "loading"
         let emptyTitle = waiting ? "加载中..." :
             snapshot.browsing.error != nil || snapshot.entryResolution == "error" ? "加载失败" : "无可用视频源"
         sourceButton.setTitle(selectedTitle ?? emptyTitle, for: .normal)
         sourceButton.accessibilityValue = selectedTitle ?? emptyTitle
         sourceButton.isEnabled = !snapshot.metadataSources.isEmpty || !snapshot.sources.isEmpty
         lineButton.isHidden = snapshot.browsing.sourceID == nil && snapshot.entryResolution != "loading" &&
-            snapshot.stage != "loading"
+            !snapshot.browsing.loading
         lineButton.setTitle(snapshot.browsing.lines.first { $0.id == snapshot.browsing.lineID }?.label ??
             emptyTitle, for: .normal)
         lineButton.isEnabled = !snapshot.browsing.lines.isEmpty
@@ -685,8 +684,10 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     private func renderRuntimeEpisodes() {
         guard let snapshot = model?.presentation else { return }
         let browsing = snapshot.browsing
+        let manualSearch = snapshot.entryResolution == "unmatched" && snapshot.error != "SOURCE_NOT_FOUND" &&
+            browsing.sourceID == nil && snapshot.sources.isEmpty
         let metadataKind = snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }?.kind
-        let seasons = detail.seasons
+        let seasons = FilmPlaybackPresentation.seasons(snapshot)
         let number = browsing.season ?? snapshot.target.position.season ?? snapshot.episodes.first?.position.season
         let season = seasons.first { $0.number == number }
         let seasonTitle = season?.title ??
@@ -694,12 +695,11 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         let metadataActions: [UIMenuElement] = snapshot.metadataSources.map { row in
             UIAction(title: "\(row.provider.title) · \(row.title)",
                      state: row.id == snapshot.metadataSourceID ? .on : .off) { [weak model] _ in
-                model?.browseMetadata(row.id, keepSource: true)
+                model?.browseMetadata(row.id)
             }
         }
         seasonButton.setTitle(seasonTitle, for: .normal)
-        seasonButton.isUserInteractionEnabled = seasons.count > 1 ||
-            (browsing.sourceID != nil && snapshot.metadataSources.count > 1)
+        seasonButton.isUserInteractionEnabled = seasons.count > 1 || snapshot.metadataSources.count > 1
         seasonButton.accessibilityTraits = seasonButton.isUserInteractionEnabled ? [.header, .button] : .header
         let seasonActions: [UIMenuElement] = seasons.compactMap { season in
             guard let number = season.number else { return nil }
@@ -708,15 +708,19 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
             }
         }
         var choices = seasonActions
-        if browsing.sourceID != nil, !metadataActions.isEmpty {
-            choices.insert(UIMenu(title: "分季资料", children: metadataActions), at: 0)
+        if !metadataActions.isEmpty {
+            choices.insert(UIMenu(title: "资料视图", children: metadataActions), at: 0)
         }
         seasonButton.menu = UIMenu(title: "季度", children: choices)
         if snapshot.entryResolution == "loading" { showEpisodeState("加载中"); return }
-        if snapshot.entryResolution == "error" { showEpisodeState(nil); return }
-        if browsing.loading || snapshot.stage == "loading" { showEpisodeState("加载中"); return }
-        if browsing.error != nil { showEpisodeState(nil); return }
-        if model?.directoryHasNoVideoSource == true { showEpisodeState("无可用视频源"); return }
+        if snapshot.entryResolution == "error" { showEpisodeState("加载失败"); return }
+        if browsing.loading { showEpisodeState("加载中"); return }
+        if browsing.error != nil { showEpisodeState("加载失败"); return }
+        if model?.directoryHasNoVideoSource == true {
+            showEpisodeState("无可用视频源")
+            searchButton.isHidden = !manualSearch
+            return
+        }
         let key = EpisodeDirectoryKey(
             source: snapshot.sources.first { $0.id == browsing.sourceID }?.businessID ?? browsing.sourceID,
             line: browsing.lineID,
@@ -772,8 +776,6 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         }
         applyEpisodeViews(next, directory: key)
         if episodeViews.isEmpty {
-            let manualSearch = snapshot.entryResolution == "unmatched" && snapshot.error != "SOURCE_NOT_FOUND" &&
-                browsing.sourceID == nil && snapshot.sources.isEmpty
             showEpisodeState(manualSearch || !snapshot.sources.isEmpty ? nil :
                 "无可用视频源")
             searchButton.isHidden = !manualSearch
@@ -838,7 +840,8 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     }
 
     private func episodeArtwork(season: Int?) -> URL? {
-        detail.seasons.first { $0.number == season }?.posterURL ?? detail.item.posterURL ?? detail.item.largePosterURL
+        model?.presentation.flatMap { FilmPlaybackPresentation.seasons($0).first { $0.number == season }?.posterURL } ??
+            detail.item.posterURL ?? detail.item.largePosterURL
     }
 
     private func displayedEpisode(position: FilmEpisodePosition, id: String, name: String,
@@ -972,7 +975,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         summary.textColor = UIColor(detail.summary.isEmpty ? theme.muted : theme.ink)
         play.configuration?.baseBackgroundColor = UIColor(theme.accent)
         play.configuration?.baseForegroundColor = UIColor(theme.onAccent)
-        seasonButton.setTitleColor(UIColor(detail.seasons.count > 1 ? theme.accent : theme.ink), for: .normal)
+        seasonButton.setTitleColor(UIColor(seasonButton.isUserInteractionEnabled ? theme.accent : theme.ink), for: .normal)
         playbackState.textColor = UIColor(theme.muted)
         episodeState.textColor = UIColor(theme.muted)
         summaryButton.setTitleColor(UIColor(theme.accent), for: .normal)

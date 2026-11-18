@@ -1,15 +1,23 @@
+using SystemParameters = System.Windows.SystemParameters;
+using Colors = Microsoft.UI.Colors;
+using Color = global::Windows.UI.Color;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.IO.Pipes;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Markup;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 
@@ -38,7 +46,7 @@ public static partial class MusicUiTests
                 var requestedOpen = f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 settings.Release();
                 await Task.WhenAll(canceledOpen, requestedOpen);
-                await Until(() => f.Module.DesktopLyricsWindow is { IsVisible: true });
+                await Until(() => f.Module.DesktopLyricsWindow is { AppWindow.IsVisible: true });
                 True(f.Module.IsDesktopLyricsOpen, "the later toggle opens after the shared settings read settles");
             }, withCurrent: false));
 
@@ -63,76 +71,75 @@ public static partial class MusicUiTests
                 var window = f.Module.DesktopLyricsWindow!;
                 await Drain();
                 window.RefreshHover(new(-100000, -100000));
-                var toolbar = (StackPanel)window.FindName("Toolbar");
-                var backdrop = (Border)window.FindName("HoverSurface");
-                True(window.AllowsTransparency && ((SolidColorBrush)window.Background).Color.A == 0 &&
+                var toolbar = (StackPanel)DesktopTestUi.WindowRoot(window).FindName("Toolbar");
+                var backdrop = (Border)DesktopTestUi.WindowRoot(window).FindName("HoverSurface");
+                True(window.SystemBackdrop is LyricsTransparentBackdrop && ((SolidColorBrush)((Border)window.Content).Background).Color.A == 0 &&
                     backdrop.Visibility == Visibility.Collapsed && toolbar.Visibility == Visibility.Collapsed,
                     "ordinary lyrics have no opaque or almost-transparent rectangle");
-                Equal((byte)0, DesktopAlpha(window, 4, 4));
+                Equal((byte)0, await DesktopAlpha(window, 4, 4));
                 True(window.IsPointerObserverRunning, "only a visible unlocked window observes its transparent bounds");
                 StopDesktopPointerObservation(window);
                 DesktopHover(window);
                 await Drain();
-                window.UpdateLayout();
+                DesktopTestUi.WindowRoot(window).UpdateLayout();
                 Equal(Visibility.Visible, toolbar.Visibility);
-                True(DesktopAlpha(window, 4, 4) > 0, "hover paints the actual surface");
-                GeneralAppearanceTests.SavePreview((FrameworkElement)window.Content, "desktop-lyrics-hover",
-                    (int)window.ActualWidth, (int)window.ActualHeight);
-                var toolbarBounds = new Rect(toolbar.TranslatePoint(new(), window), toolbar.RenderSize);
-                True(Math.Abs(toolbarBounds.Left + toolbarBounds.Width / 2 - window.ActualWidth / 2) <= 1,
-                    $"the complete toolbar is horizontally centered; toolbar={toolbarBounds}, window={window.ActualWidth}x{window.ActualHeight}");
-                True(window.MinWidth >= toolbar.DesiredSize.Width,
-                    $"the hidden toolbar's full desired width remains available: minimum={window.MinWidth}, toolbar={toolbar.DesiredSize.Width}");
-                window.Width = window.MinWidth;
-                window.Height = window.MinHeight;
-                await Until(() => Math.Abs(window.ActualWidth - window.MinWidth) <= 1 &&
-                    Math.Abs(window.ActualHeight - window.MinHeight) <= 1);
-                window.UpdateLayout();
-                var minimumToolbarBounds = new Rect(toolbar.TranslatePoint(new(), window), toolbar.RenderSize);
-                True(minimumToolbarBounds.Left >= 0 && minimumToolbarBounds.Right <= window.ActualWidth &&
+                True(await DesktopAlpha(window, 4, 4) > 0, "hover paints the actual surface");
+                await GeneralAppearanceTests.SavePreview((FrameworkElement)window.Content, "desktop-lyrics-hover",
+                    (int)DesktopTestUi.WindowRoot(window).ActualWidth, (int)DesktopTestUi.WindowRoot(window).ActualHeight);
+                var toolbarBounds = new Rect(toolbar.TransformToVisual(DesktopTestUi.WindowRoot(window)).TransformPoint(new()), new Size(toolbar.ActualWidth, toolbar.ActualHeight));
+                True(Math.Abs(toolbarBounds.Left + toolbarBounds.Width / 2 - DesktopTestUi.WindowRoot(window).ActualWidth / 2) <= 1,
+                    $"the complete toolbar is horizontally centered; toolbar={toolbarBounds}, window={DesktopTestUi.WindowRoot(window).ActualWidth}x{DesktopTestUi.WindowRoot(window).ActualHeight}");
+                True(DesktopTestUi.WindowMinimumSize(window).Width >= toolbar.DesiredSize.Width,
+                    $"the hidden toolbar's full desired width remains available: minimum={DesktopTestUi.WindowMinimumSize(window).Width}, toolbar={toolbar.DesiredSize.Width}");
+                DesktopTestUi.ResizeWindow(window, DesktopTestUi.WindowMinimumSize(window).Width, DesktopTestUi.WindowSize(window).Height);
+                DesktopTestUi.ResizeWindow(window, DesktopTestUi.WindowSize(window).Width, DesktopTestUi.WindowMinimumSize(window).Height);
+                await Until(() => Math.Abs(DesktopTestUi.WindowRoot(window).ActualWidth - DesktopTestUi.WindowMinimumSize(window).Width) <= 1 &&
+                    Math.Abs(DesktopTestUi.WindowRoot(window).ActualHeight - DesktopTestUi.WindowMinimumSize(window).Height) <= 1);
+                DesktopTestUi.WindowRoot(window).UpdateLayout();
+                var minimumToolbarBounds = new Rect(toolbar.TransformToVisual(DesktopTestUi.WindowRoot(window)).TransformPoint(new()), new Size(toolbar.ActualWidth, toolbar.ActualHeight));
+                True(minimumToolbarBounds.Left >= 0 && minimumToolbarBounds.Right <= DesktopTestUi.WindowRoot(window).ActualWidth &&
                     toolbar.Children.OfType<Button>().All(button =>
                     {
-                        var bounds = new Rect(button.TranslatePoint(new(), window), button.RenderSize);
-                        return bounds.Left >= 0 && bounds.Right <= window.ActualWidth;
+                        var bounds = new Rect(button.TransformToVisual(DesktopTestUi.WindowRoot(window)).TransformPoint(new()), new Size(button.ActualWidth, button.ActualHeight));
+                        return bounds.Left >= 0 && bounds.Right <= DesktopTestUi.WindowRoot(window).ActualWidth;
                     }),
-                    $"the toolbar and all buttons remain inside the minimum window width: toolbar={minimumToolbarBounds}, window={window.ActualWidth}");
-                var minimumLine = (MusicDesktopLyricLineView)window.FindName("TopLine");
-                var minimumLineBounds = new Rect(minimumLine.TranslatePoint(new(), window), minimumLine.RenderSize);
+                    $"the toolbar and all buttons remain inside the minimum window width: toolbar={minimumToolbarBounds}, window={DesktopTestUi.WindowRoot(window).ActualWidth}");
+                var minimumLine = (MusicDesktopLyricLineView)DesktopTestUi.WindowRoot(window).FindName("TopLine");
+                var minimumLineBounds = new Rect(minimumLine.TransformToVisual(DesktopTestUi.WindowRoot(window)).TransformPoint(new()), new Size(minimumLine.ActualWidth, minimumLine.ActualHeight));
                 var minimumTranslation = (FrameworkElement)minimumLine.FindName("TranslationFrame");
-                var minimumTranslationBounds = minimumTranslation.TransformToAncestor(window)
-                    .TransformBounds(new Rect(minimumTranslation.RenderSize));
-                True(minimumLineBounds.Top >= 44 && minimumLineBounds.Bottom <= window.ActualHeight - 12 &&
-                    minimumTranslation.IsVisible && minimumTranslationBounds.Bottom <= window.ActualHeight - 12,
+                var minimumTranslationBounds = minimumTranslation.TransformToVisual(DesktopTestUi.WindowRoot(window))
+                    .TransformBounds(new Rect(new Point(), new Size(minimumTranslation.ActualWidth, minimumTranslation.ActualHeight)));
+                True(minimumLineBounds.Top >= 44 && minimumLineBounds.Bottom <= DesktopTestUi.WindowRoot(window).ActualHeight - 12 &&
+                    DesktopVisual.IsVisible(minimumTranslation) && minimumTranslationBounds.Bottom <= DesktopTestUi.WindowRoot(window).ActualHeight - 12,
                     $"the complete translated lyric fits at the minimum height: line={minimumLineBounds}, translation={minimumTranslationBounds}");
-                GeneralAppearanceTests.SavePreview((FrameworkElement)window.Content, "desktop-lyrics-minimum",
-                    (int)window.ActualWidth, (int)window.ActualHeight);
+                await GeneralAppearanceTests.SavePreview((FrameworkElement)window.Content, "desktop-lyrics-minimum",
+                    (int)DesktopTestUi.WindowRoot(window).ActualWidth, (int)DesktopTestUi.WindowRoot(window).ActualHeight);
                 var controls = toolbar.Children.OfType<Button>().Select(button => button.Name).ToArray();
                 True(controls.SequenceEqual(new[] { "ActivateButton", "DelayButton", "AdvanceButton",
                     "PreviousButton", "PlaybackButton", "NextButton", "SettingsButton", "LockButton", "CloseButton" }),
                     "toolbar follows the confirmed action order");
-                await AssertLyricTimingIconAsync((Button)window.FindName("DelayButton"), expectCircle: false);
-                await AssertLyricTimingIconAsync((Button)window.FindName("AdvanceButton"), expectCircle: false);
+                await AssertLyricTimingIconAsync((Button)DesktopTestUi.WindowRoot(window).FindName("DelayButton"), expectCircle: false);
+                await AssertLyricTimingIconAsync((Button)DesktopTestUi.WindowRoot(window).FindName("AdvanceButton"), expectCircle: false);
                 double audio = f.Module.PositionSeconds;
-                Click((Button)window.FindName("DelayButton"));
+                Click((Button)DesktopTestUi.WindowRoot(window).FindName("DelayButton"));
                 Equal(.5d, f.Module.LyricOffsetSeconds);
-                Click((Button)window.FindName("AdvanceButton"));
+                Click((Button)DesktopTestUi.WindowRoot(window).FindName("AdvanceButton"));
                 Equal(0d, f.Module.LyricOffsetSeconds);
                 Equal(audio, f.Module.PositionSeconds);
-                Click((Button)window.FindName("SettingsButton"));
+                Click((Button)DesktopTestUi.WindowRoot(window).FindName("SettingsButton"));
                 await Drain();
                 var menu = DesktopOpenMenu(window);
-                True(ReferenceEquals(menu.Style, window.FindResource("MeowFilm.ContextMenu")),
+                True(ReferenceEquals(menu.MenuFlyoutPresenterStyle, DesktopVisual.Resource(DesktopTestUi.WindowRoot(window), "MeowFilm.ContextMenu")),
                     "desktop settings use the shared context menu style");
-                foreach (var item in menu.Items.OfType<MenuItem>())
-                    True(ReferenceEquals(item.Style, window.FindResource("MeowFilm.MenuItem")),
-                        "desktop settings use shared menu item templates");
+                foreach (var item in menu.Items)
+                    Equal(Microsoft.UI.Text.FontWeights.Normal, item.FontWeight);
                 window.RefreshHover(new(-100000, -100000));
                 Equal(Visibility.Visible, toolbar.Visibility);
-                menu.IsOpen = false;
+                menu.Hide();
                 await Drain();
                 window.RefreshHover(new(-100000, -100000));
                 Equal(Visibility.Collapsed, toolbar.Visibility);
-                window.Hide();
+                window.AppWindow.Hide();
                 True(!window.IsPointerObserverRunning, "hidden lyrics release the pointer observer");
                 window.Show(); await Drain();
                 True(window.IsPointerObserverRunning, "visible lyrics resume their observer");
@@ -143,62 +150,62 @@ public static partial class MusicUiTests
             {
                 await SaveDesktopLyricFixture(f);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
-                var singleHeight = f.Module.DesktopLyricsWindow!.ActualHeight;
-                var initialBottom = f.Module.DesktopLyricsWindow.Top + singleHeight;
+                var singleHeight = DesktopTestUi.WindowRoot(f.Module.DesktopLyricsWindow!).ActualHeight;
+                var initialBottom = DesktopTestUi.WindowPosition(f.Module.DesktopLyricsWindow!).Y + singleHeight;
                 await f.Module.SetDesktopLyricLayoutAsync("double");
                 var window = f.Module.DesktopLyricsWindow!;
                 await Drain();
-                await Until(() => window.ActualHeight > singleHeight && window.ActualHeight == window.Height);
-                window.UpdateLayout();
-                Equal(initialBottom, window.Top + window.ActualHeight);
-                double doubleHeight = window.ActualHeight;
-                var top = (MusicDesktopLyricLineView)window.FindName("TopLine");
-                var bottom = (MusicDesktopLyricLineView)window.FindName("BottomLine");
+                await Until(() => DesktopTestUi.WindowRoot(window).ActualHeight > singleHeight && DesktopTestUi.WindowRoot(window).ActualHeight == DesktopTestUi.WindowSize(window).Height);
+                DesktopTestUi.WindowRoot(window).UpdateLayout();
+                Equal(initialBottom, DesktopTestUi.WindowPosition(window).Y + DesktopTestUi.WindowRoot(window).ActualHeight);
+                double doubleHeight = DesktopTestUi.WindowRoot(window).ActualHeight;
+                var top = (MusicDesktopLyricLineView)DesktopTestUi.WindowRoot(window).FindName("TopLine");
+                var bottom = (MusicDesktopLyricLineView)DesktopTestUi.WindowRoot(window).FindName("BottomLine");
                 True(ReferenceEquals(top.Row, f.Module.Lyrics[0]) && ReferenceEquals(bottom.Row, f.Module.Lyrics[1]),
                     "two tracks reference source rows instead of copying or replacing lyrics");
                 Equal(HorizontalAlignment.Left, top.HorizontalContentAlignment);
                 Equal(HorizontalAlignment.Right, bottom.HorizontalContentAlignment);
-                True(((FrameworkElement)top.FindName("TranslationFrame")).IsVisible &&
-                    ((FrameworkElement)bottom.FindName("TranslationFrame")).IsVisible, "each original owns its own translation");
+                True(DesktopVisual.IsVisible(((FrameworkElement)top.FindName("TranslationFrame"))) &&
+                    DesktopVisual.IsVisible(((FrameworkElement)bottom.FindName("TranslationFrame"))), "each original owns its own translation");
                 var firstSource = f.Module.Lyrics[0];
                 var secondSource = f.Module.Lyrics[1];
                 f.Module.Lyrics[1] = secondSource with { Translation = "" };
                 await Drain();
-                Equal(224d, window.MinHeight);
+                Equal(224d, DesktopTestUi.WindowMinimumSize(window).Height);
                 f.Module.Lyrics[0] = firstSource with { Translation = "" };
                 await Drain();
-                Equal(180d, window.MinHeight);
+                Equal(180d, DesktopTestUi.WindowMinimumSize(window).Height);
                 f.Module.Lyrics[1] = secondSource;
                 await Drain();
-                Equal(240d, window.MinHeight);
+                Equal(240d, DesktopTestUi.WindowMinimumSize(window).Height);
                 f.Module.Lyrics[0] = firstSource;
                 await Drain();
-                Equal(240d, window.MinHeight);
-                Equal(doubleHeight, window.ActualHeight);
-                var bottomY = bottom.TranslatePoint(new(), window).Y;
+                Equal(240d, DesktopTestUi.WindowMinimumSize(window).Height);
+                Equal(doubleHeight, DesktopTestUi.WindowRoot(window).ActualHeight);
+                var bottomY = bottom.TransformToVisual(DesktopTestUi.WindowRoot(window)).TransformPoint(new()).Y;
                 foreach (var line in new[] { top, bottom })
                 {
-                    var bounds = new Rect(line.TranslatePoint(new(), window), line.RenderSize);
-                    True(bounds.Top >= 44 && bounds.Bottom <= window.ActualHeight,
+                    var bounds = new Rect(line.TransformToVisual(DesktopTestUi.WindowRoot(window)).TransformPoint(new()), new Size(line.ActualWidth, line.ActualHeight));
+                    True(bounds.Top >= 44 && bounds.Bottom <= DesktopTestUi.WindowRoot(window).ActualHeight,
                         "both originals and translations fit below the toolbar without clipping");
                     var translated = (FrameworkElement)line.FindName("TranslationFrame");
-                    var translationBounds = translated.TransformToAncestor(window).TransformBounds(new Rect(translated.RenderSize));
-                    True(translationBounds.Bottom <= bounds.Bottom && translationBounds.Bottom <= window.ActualHeight - 12,
-                        $"source translations fit their fixed track: row={bounds}, translation={translationBounds}, window={window.ActualHeight}");
+                    var translationBounds = translated.TransformToVisual(DesktopTestUi.WindowRoot(window)).TransformBounds(new Rect(new Point(), new Size(translated.ActualWidth, translated.ActualHeight)));
+                    True(translationBounds.Bottom <= bounds.Bottom && translationBounds.Bottom <= DesktopTestUi.WindowRoot(window).ActualHeight - 12,
+                        $"source translations fit their fixed track: row={bounds}, translation={translationBounds}, window={DesktopTestUi.WindowRoot(window).ActualHeight}");
                 }
-                GeneralAppearanceTests.SavePreview((FrameworkElement)window.Content, "desktop-lyrics-double-translated",
-                    (int)window.ActualWidth, (int)window.ActualHeight);
+                await GeneralAppearanceTests.SavePreview((FrameworkElement)window.Content, "desktop-lyrics-double-translated",
+                    (int)DesktopTestUi.WindowRoot(window).ActualWidth, (int)DesktopTestUi.WindowRoot(window).ActualHeight);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation); await Drain();
-                True(!((FrameworkElement)top.FindName("TranslationFrame")).IsVisible &&
-                    !((FrameworkElement)bottom.FindName("TranslationFrame")).IsVisible, "the shared switch hides both translations");
+                True(!DesktopVisual.IsVisible(((FrameworkElement)top.FindName("TranslationFrame"))) &&
+                    !DesktopVisual.IsVisible(((FrameworkElement)bottom.FindName("TranslationFrame"))), "the shared switch hides both translations");
                 f.Playback.Tick(6); await Drain();
                 True(top.Row is null && ReferenceEquals(bottom.Row, f.Module.Lyrics[1]),
                     "the final odd track stays bottom-right and no lyric is fabricated beyond the end");
-                Equal(bottomY, bottom.TranslatePoint(new(), window).Y);
-                Equal(Visibility.Collapsed, ((FrameworkElement)window.FindName("Status")).Visibility);
+                Equal(bottomY, bottom.TransformToVisual(DesktopTestUi.WindowRoot(window)).TransformPoint(new()).Y);
+                Equal(Visibility.Collapsed, ((FrameworkElement)DesktopTestUi.WindowRoot(window).FindName("Status")).Visibility);
                 await f.Module.SetDesktopLyricLayoutAsync("single"); await Drain();
-                Equal(doubleHeight, window.ActualHeight);
-                True(ReferenceEquals(top.Row, f.Module.Lyrics[1]) && !bottom.IsVisible,
+                Equal(doubleHeight, DesktopTestUi.WindowRoot(window).ActualHeight);
+                True(ReferenceEquals(top.Row, f.Module.Lyrics[1]) && !DesktopVisual.IsVisible(bottom),
                     "single mode presents the active original, not its translation or a pending track");
                 f.Module.PreviewLyric(f.Module.Lyrics[0]);
                 True(ReferenceEquals(top.Row, f.Module.Lyrics[1]), "desktop tracks do not follow the full player's preview");
@@ -212,22 +219,17 @@ public static partial class MusicUiTests
                     Width = 700, Height = 100, HorizontalContentAlignment = HorizontalAlignment.Center,
                     Row = new(0, "当前原文", "当前译文"), ShowTranslation = true
                 };
-                var host = new Window
-                {
-                    Content = line, Width = 760, Height = 160, Left = -32000, Top = -32000,
-                    WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize,
-                    ShowActivated = false, ShowInTaskbar = false
-                };
+                var host = DesktopTestUi.CreateWindow(line, 760, 160);
                 try
                 {
                     host.Show(); await Drain(); line.UpdateLayout();
                     static void CheckVisibleBlock(MusicDesktopLyricLineView target, int count)
                     {
-                        var boxes = Visuals(target).OfType<Viewbox>().Where(box => box.IsVisible).ToArray();
+                        var boxes = Visuals(target).OfType<Viewbox>().Where(box => DesktopVisual.IsVisible(box)).ToArray();
                         Equal(count, boxes.Length);
                         Rect block = Rect.Empty;
                         foreach (var box in boxes)
-                            block.Union(new Rect(box.TranslatePoint(new(), target), box.RenderSize));
+                            block.Union(new Rect(box.TransformToVisual(target).TransformPoint(new()), new Size(box.ActualWidth, box.ActualHeight)));
                         True(Math.Abs(block.Top + block.Height / 2 - target.ActualHeight / 2) <= 1,
                             "visible source text is vertically centered without a reserved translation row");
                         True(Math.Abs(block.Left + block.Width / 2 - target.ActualWidth / 2) <= 1,
@@ -241,7 +243,7 @@ public static partial class MusicUiTests
                     line.Row = line.Row! with { Translation = "" };
                     await Drain(); line.UpdateLayout();
                     CheckVisibleBlock(line, 1);
-                    True(!((FrameworkElement)line.FindName("TranslationFrame")).IsVisible,
+                    True(!DesktopVisual.IsVisible(((FrameworkElement)line.FindName("TranslationFrame"))),
                         "an enabled translation setting without source text creates no empty row");
                 }
                 finally { host.Close(); await Drain(); }
@@ -252,13 +254,13 @@ public static partial class MusicUiTests
             var row = new MusicDesktopLyricLineView
             {
                 Row = new(0, "普通原文 e\u0301 العربية 🙂", "源译文"),
-                Normal = Brushes.LightPink, Highlight = Brushes.Gold
+                Normal = (new SolidColorBrush(Microsoft.UI.Colors.LightPink)), Highlight = (new SolidColorBrush(Microsoft.UI.Colors.Gold))
             };
             var list = new MusicLyricList
             {
                 Position = 1, IsPlaying = false, PlaybackRate = 1,
                 PresentationKey = "desktop-render-fixture", Width = 700, Height = 160,
-                Background = Brushes.Transparent, BorderThickness = new(0),
+                Background = (new SolidColorBrush(Microsoft.UI.Colors.Transparent)), BorderThickness = new(0),
                 Template = DesktopPresenterTemplate()
             };
             list.Items.Add(row);
@@ -267,9 +269,9 @@ public static partial class MusicUiTests
             {
                 host.Content = list; host.Show(); await Drain(); list.UpdateLayout();
                 var plain = (MusicDesktopLyricTextView)row.FindName("PlainText");
-                True(plain.IsVisible && !((ItemsControl)row.FindName("Words")).IsVisible,
+                True(DesktopVisual.IsVisible(plain) && !DesktopVisual.IsVisible(((ItemsControl)row.FindName("Words"))),
                     "line-timed lyrics stay ordinary-colored and have no synthetic karaoke view");
-                Equal(Brushes.LightPink, plain.Foreground);
+                Equal(Colors.LightPink, ((SolidColorBrush)plain.Foreground).Color);
                 row.Row = new(0, "真实逐字", "源译文", Words: [new("真实", 0, 2), new("逐字", 2, 2)]);
                 await Drain(); list.UpdateLayout(); await Drain();
                 var words = Visuals(row).OfType<MusicLyricWordView>().ToArray();
@@ -277,24 +279,26 @@ public static partial class MusicUiTests
                 Equal(.5, words[0].WordProgress); Equal(0d, words[1].WordProgress);
                 True(words.All(word => Equals(word.Foreground, row.Normal) && Equals(word.Highlight, row.Highlight) &&
                     word.Stroke is not null && word.StrokeThickness > 0), "normal highlight and outline remain separate roles");
-                var glyphs = DesktopGlyphs(words[0]).ToArray();
-                row.Highlight = Brushes.LightBlue; row.Normal = Brushes.White;
+                await words[0].Outline.RenderWork;
+                var glyphs = words[0].Outline.Coverage;
+                True(glyphs is { Length: > 0 }, "native hinted outline coverage was actually rasterized");
+                row.Highlight = (new SolidColorBrush(Microsoft.UI.Colors.LightBlue)); row.Normal = (new SolidColorBrush(Microsoft.UI.Colors.White));
                 await Drain();
                 Equal(.5, words[0].WordProgress);
-                True(glyphs.SequenceEqual(DesktopGlyphs(words[0])), "changing colors retains the native glyph cache and progress");
+                True(ReferenceEquals(glyphs, words[0].Outline.Coverage), "changing colors retains the native glyph cache and progress");
                 list.Position = 3; await Drain();
                 Equal(1d, words[0].WordProgress); Equal(.5, words[1].WordProgress);
-                GeneralAppearanceTests.SavePreview(row, "desktop-lyrics-real-words", 700, 120);
+                await GeneralAppearanceTests.SavePreview(row, "desktop-lyrics-real-words", 700, 120);
                 row.Row = new(0, new string('长', 100), "long source translation");
                 row.Width = 660;
                 await Drain(); list.UpdateLayout();
-                True(row.ActualWidth <= 700 && plain.IsVisible && !Visuals(row).OfType<MusicLyricWordView>().Any(),
+                True(row.ActualWidth <= 700 && DesktopVisual.IsVisible(plain) && !Visuals(row).OfType<MusicLyricWordView>().Any(),
                     "long ordinary lines scale without fake words or a stale highlighted layer");
-                GeneralAppearanceTests.SavePreview(row, "desktop-lyrics-long-ordinary", 700, 120);
+                await GeneralAppearanceTests.SavePreview(row, "desktop-lyrics-long-ordinary", 700, 120);
                 DesktopTheme.SetIsHighContrast(row, true);
                 Render(row, 700, 120); await Drain();
-                var ink = DesktopGlyphLayers(plain).Select(glyph => ((SolidColorBrush)glyph.ForegroundBrush).Color).ToArray();
-                True(ink.Length > 0 && ink.All(color => color == SystemColors.WindowTextColor),
+                var ink = Visuals(plain).OfType<TextBlock>().Select(text => ((SolidColorBrush)text.Foreground).Color).ToArray();
+                True(ink.Length > 0 && ink.All(color => color == new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText)),
                     "ordinary desktop text paints the system high-contrast ink rather than the saved pink or highlight");
             }
             finally { host.Close(); await Drain(); }
@@ -308,33 +312,30 @@ public static partial class MusicUiTests
                 var window = f.Module.DesktopLyricsWindow!;
                 string original = f.Module.DesktopLyricNormalColor;
                 var editor = new MusicDesktopLyricColorWindow(f.Module, "normal")
-                { Owner = window, ShowActivated = false, Left = -32000, Top = -32000, WindowStartupLocation = WindowStartupLocation.Manual };
-                editor.Show(); await Drain();
-                var selection = (ColorSelection)editor.FindName("Selection");
-                var choices = (ComboBox)selection.FindName("Choices");
-                choices.SelectedValue = "#FFFFFF"; await Drain();
+                { XamlRoot = DesktopTestUi.WindowRoot(window).XamlRoot };
+                var showing = editor.ShowAsync().AsTask();
+                await Until(() => MusicTestUi.IsDialogOpen(editor)); await Drain();
+                var selection = (Microsoft.UI.Xaml.Controls.ColorPicker)editor.FindName("Selection");
+                selection.Color = Colors.White; await Drain();
                 Equal(original, f.Module.DesktopLyricNormalColor);
-                editor.Close(); await Drain();
+                Click(Visuals(editor).OfType<Button>().Single(button => Equals(button.Content, "取消")));
+                Equal(ContentDialogResult.None, await showing); await Drain();
                 Equal(original, f.Module.DesktopLyricNormalColor);
-                True(!window.OwnedWindows.OfType<MusicDesktopLyricColorWindow>().Any(), "cancel releases its owned focusable HWND");
+                True(!MusicTestUi.IsDialogOpen(editor), "cancel releases the same-root native color dialog");
                 editor = new(f.Module, "normal")
-                { Owner = window, ShowActivated = false, Left = -32000, Top = -32000, WindowStartupLocation = WindowStartupLocation.Manual };
-                editor.Show(); await Drain();
-                selection = (ColorSelection)editor.FindName("Selection");
-                choices = (ComboBox)selection.FindName("Choices");
-                choices.SelectedValue = "custom"; await Drain();
-                var picker = (ColorPicker)selection.FindName("Custom");
-                var hex = (TextBox)picker.FindName("SavedHex");
-                hex.Text = "#123456";
-                // Exercise the shared picker's commit event without injecting global keyboard input.
-                typeof(ColorPicker).GetMethod("CommitHex", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(picker, null);
+                { XamlRoot = DesktopTestUi.WindowRoot(window).XamlRoot };
+                showing = editor.ShowAsync().AsTask();
+                await Until(() => MusicTestUi.IsDialogOpen(editor)); await Drain();
+                selection = (Microsoft.UI.Xaml.Controls.ColorPicker)editor.FindName("Selection");
+                selection.Color = Color.FromArgb(255, 0x12, 0x34, 0x56);
                 Equal(original, f.Module.DesktopLyricNormalColor);
-                Click((Button)editor.FindName("SaveButton"));
-                await Until(() => !editor.IsVisible);
+                Click(Visuals(editor).OfType<Button>().Single(button => Equals(button.Content, "确定")));
+                Equal(ContentDialogResult.Primary, await showing);
+                True(!MusicTestUi.IsDialogOpen(editor), "successful save retires the native dialog");
                 Equal("#123456", f.Module.DesktopLyricNormalColor);
                 await Drain();
-                Equal(Color.FromRgb(0x12, 0x34, 0x56),
-                    ((SolidColorBrush)((MusicDesktopLyricLineView)window.FindName("TopLine")).Normal).Color);
+                Equal(Color.FromArgb(255, 0x12, 0x34, 0x56),
+                    ((SolidColorBrush)((MusicDesktopLyricLineView)DesktopTestUi.WindowRoot(window).FindName("TopLine")).Normal).Color);
             }));
 
         yield return Case("desktop lock uses a separate recoverable HWND and closes every native resource", () =>
@@ -343,45 +344,46 @@ public static partial class MusicUiTests
                 await SaveDesktopLyricFixture(f);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 var window = f.Module.DesktopLyricsWindow!; await Drain();
-                var hwnd = new WindowInteropHelper(window).Handle;
+                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
                 var style = DesktopInteractionNative.GetWindowLongPtr(hwnd, -20);
-                True((style & 0x08080080) == 0x08080080 && (style & 0x20) == 0,
-                    "the ordinary WPF HWND is layered noactivate and toolwindow, not click-through");
+                True((style & 0x08000080) == 0x08000080 && (style & 0x20) == 0,
+                    "the transparent native HWND is noactivate and toolwindow, not click-through");
                 DesktopHover(window);
                 await Drain();
-                window.UpdateLayout();
-                var lockButton = (Button)window.FindName("LockButton");
-                var lockStart = lockButton.PointToScreen(new());
-                var lockEnd = lockButton.PointToScreen(new(lockButton.ActualWidth, lockButton.ActualHeight));
+                DesktopTestUi.WindowRoot(window).UpdateLayout();
+                var lockButton = (Button)DesktopTestUi.WindowRoot(window).FindName("LockButton");
+                var lockStart = NativeDesktopCapture.ScreenPoint(lockButton, new());
+                var lockEnd = NativeDesktopCapture.ScreenPoint(lockButton, new(lockButton.ActualWidth, lockButton.ActualHeight));
                 window.SetLocked(true); await Drain();
                 var unlock = window.UnlockWindow!;
                 window.ApplyHighContrast(true); await Drain();
-                True(DesktopTheme.GetIsHighContrast(window) && DesktopTheme.GetIsHighContrast(unlock) &&
+                True(DesktopTheme.GetIsHighContrast(DesktopTestUi.WindowRoot(window)) &&
                     DesktopTheme.GetIsHighContrast((Button)unlock.Content),
                     "runtime high contrast reaches both independent roots and their controls");
-                Equal(SystemColors.WindowTextBrush, ((Button)unlock.Content).Foreground);
+                Equal(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText),
+                    ((SolidColorBrush)((Button)unlock.Content).Foreground).Color);
                 window.ApplyHighContrast(false); await Drain();
-                nint unlockHandle = new WindowInteropHelper(unlock).Handle;
+                nint unlockHandle = WinRT.Interop.WindowNative.GetWindowHandle(unlock);
                 True(unlockHandle != 0 && unlockHandle != hwnd && DesktopInteractionNative.IsWindow(unlockHandle),
                     "unlock is a real independent top-level HWND");
                 True((DesktopInteractionNative.GetWindowLongPtr(hwnd, -20) & 0x20) != 0 &&
                     (DesktopInteractionNative.GetWindowLongPtr(unlockHandle, -20) & 0x20) == 0,
                     "only the lyric HWND becomes click-through; style checks alone are not cross-process input evidence");
-                True(!window.IsPointerObserverRunning && ((FrameworkElement)window.FindName("Toolbar")).Visibility == Visibility.Collapsed,
+                True(!window.IsPointerObserverRunning && ((FrameworkElement)DesktopTestUi.WindowRoot(window).FindName("Toolbar")).Visibility == Visibility.Collapsed,
                     "locked lyrics stop observing hover and retire the normal toolbar");
-                True(unlock.IsVisible, "the independent unlock entry remains visible while locked");
-                GeneralAppearanceTests.SavePreview((FrameworkElement)window.Content, "desktop-lyrics-locked",
-                    (int)window.ActualWidth, (int)window.ActualHeight);
-                GeneralAppearanceTests.SavePreview((FrameworkElement)unlock.Content, "desktop-lyrics-unlock",
-                    (int)unlock.ActualWidth, (int)unlock.ActualHeight);
+                True(DesktopTestUi.WindowIsVisible(unlock), "the independent unlock entry remains visible while locked");
+                await GeneralAppearanceTests.SavePreview((FrameworkElement)window.Content, "desktop-lyrics-locked",
+                    (int)DesktopTestUi.WindowRoot(window).ActualWidth, (int)DesktopTestUi.WindowRoot(window).ActualHeight);
+                await GeneralAppearanceTests.SavePreview((FrameworkElement)unlock.Content, "desktop-lyrics-unlock",
+                    (int)DesktopTestUi.WindowRoot(unlock).ActualWidth, (int)DesktopTestUi.WindowRoot(unlock).ActualHeight);
                 Equal((nint)3, DesktopInteractionNative.SendMessage(unlockHandle, 0x21, 0, 0));
                 var state = window.CapturePresentationState();
                 Equal(true, state.IsLocked);
-                var windowOrigin = window.PointToScreen(new());
-                window.Left += 18; window.Top += 21; await Drain();
-                var anchor = (FrameworkElement)window.FindName("UnlockAnchor");
-                var point = anchor.PointToScreen(new());
-                var movedOrigin = window.PointToScreen(new());
+                var windowOrigin = NativeDesktopCapture.ScreenPoint(DesktopTestUi.WindowRoot(window), new());
+                DesktopTestUi.MoveWindow(window, DesktopTestUi.WindowPosition(window).X + (18), DesktopTestUi.WindowPosition(window).Y); DesktopTestUi.MoveWindow(window, DesktopTestUi.WindowPosition(window).X, DesktopTestUi.WindowPosition(window).Y + (21)); await Drain();
+                var anchor = (FrameworkElement)DesktopTestUi.WindowRoot(window).FindName("UnlockAnchor");
+                var point = NativeDesktopCapture.ScreenPoint(anchor, new());
+                var movedOrigin = NativeDesktopCapture.ScreenPoint(DesktopTestUi.WindowRoot(window), new());
                 double movedX = movedOrigin.X - windowOrigin.X;
                 double movedY = movedOrigin.Y - windowOrigin.Y;
                 True(MusicDesktopLyricsNative.GetWindowRect(unlockHandle, out var unlockBounds) &&
@@ -396,10 +398,10 @@ public static partial class MusicUiTests
                 True(!window.IsLyricsLocked && window.UnlockWindow is null && !DesktopInteractionNative.IsWindow(unlockHandle),
                     "the independent unlock action restores normal operation and releases its HWND");
                 window.SetLocked(true); await Drain();
-                unlockHandle = new WindowInteropHelper(window.UnlockWindow!).Handle;
+                unlockHandle = WinRT.Interop.WindowNative.GetWindowHandle(window.UnlockWindow!);
                 window.Close(); await Drain();
                 True(!DesktopInteractionNative.IsWindow(hwnd) && !DesktopInteractionNative.IsWindow(unlockHandle) &&
-                    !window.IsPointerObserverRunning && window.DataContext is null, "close releases both HWNDs and the observer");
+                    !window.IsPointerObserverRunning && DesktopTestUi.WindowRoot(window).DataContext is null, "close releases both HWNDs and the observer");
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics); await Drain();
                 True(!f.Module.DesktopLyricsWindow!.IsLyricsLocked, "ordinary reopen does not persist locked state");
             }));
@@ -410,7 +412,7 @@ public static partial class MusicUiTests
                 await SaveDesktopLyricFixture(f);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 var window = f.Module.DesktopLyricsWindow!;
-                var handle = new WindowInteropHelper(window).Handle;
+                var handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
                 var style = DesktopInteractionNative.GetWindowLongPtr(handle, -16);
                 True((style & 0x00040000) != 0, "the real lyrics HWND retains the native resize frame");
                 True(MusicDesktopLyricsNative.GetWindowRect(handle, out var bounds), "the resize target has native bounds");
@@ -442,7 +444,7 @@ public static partial class MusicUiTests
                 True(f.Module.DesktopLyricGeometry is null,
                     "a cancelled resize does not commit an intermediate window position or size");
                 await f.Module.SetDesktopLyricLayoutAsync("double"); await Drain();
-                Equal(240d, window.ActualHeight);
+                Equal(240d, DesktopTestUi.WindowRoot(window).ActualHeight);
                 nint infoAddress = Marshal.AllocHGlobal(Marshal.SizeOf<DesktopInteractionNative.MinMaxInfo>());
                 try
                 {
@@ -450,15 +452,15 @@ public static partial class MusicUiTests
                     DesktopInteractionNative.SendMessage(handle, 0x0024, 0, infoAddress);
                     var limits = Marshal.PtrToStructure<DesktopInteractionNative.MinMaxInfo>(infoAddress);
                     uint dpi = MusicDesktopLyricsNative.GetDpiForWindow(handle);
-                    True(dpi > 0 && limits.MinTrackSize.X == Math.Ceiling(window.MinWidth * dpi / 96d) &&
-                        limits.MinTrackSize.Y == Math.Ceiling(window.MinHeight * dpi / 96d),
+                    True(dpi > 0 && limits.MinTrackSize.X == Math.Ceiling(DesktopTestUi.WindowMinimumSize(window).Width * dpi / 96d) &&
+                        limits.MinTrackSize.Y == Math.Ceiling(DesktopTestUi.WindowMinimumSize(window).Height * dpi / 96d),
                         $"native resizing enforces complete toolbar and double translated rows: {limits.MinTrackSize.X}x{limits.MinTrackSize.Y}");
                 }
                 finally { Marshal.FreeHGlobal(infoAddress); }
                 await f.Module.SetDesktopLyricLayoutAsync("single"); await Drain();
-                Equal(240d, window.ActualHeight);
+                Equal(240d, DesktopTestUi.WindowRoot(window).ActualHeight);
 
-                double oldWidth = window.ActualWidth, oldHeight = window.ActualHeight;
+                double oldWidth = DesktopTestUi.WindowRoot(window).ActualWidth, oldHeight = DesktopTestUi.WindowRoot(window).ActualHeight;
                 True(MusicDesktopLyricsNative.GetWindowRect(handle, out var resizeBounds),
                     "current native bounds reflect the content minimum before the next resize");
                 DesktopInteractionNative.SendMessage(handle, 0x0231, 0, 0);
@@ -467,16 +469,16 @@ public static partial class MusicUiTests
                     "the owned window accepts a native width and height change");
                 await Drain();
                 DesktopInteractionNative.SendMessage(handle, 0x0232, 0, 0);
-                True(window.ActualWidth > oldWidth + 50 && window.ActualHeight > oldHeight + 25,
-                    "the native size change reaches WPF in both dimensions");
-                double resizedHeight = window.ActualHeight;
+                True(DesktopTestUi.WindowRoot(window).ActualWidth > oldWidth + 50 && DesktopTestUi.WindowRoot(window).ActualHeight > oldHeight + 25,
+                    "the native size change reaches the actual WinUI root in both dimensions");
+                double resizedHeight = DesktopTestUi.WindowRoot(window).ActualHeight;
                 await f.Module.SetDesktopLyricLayoutAsync("double"); await Drain();
-                Equal(resizedHeight, window.ActualHeight);
+                Equal(resizedHeight, DesktopTestUi.WindowRoot(window).ActualHeight);
                 window.SetLocked(true); await Drain();
                 True((DesktopInteractionNative.GetWindowLongPtr(handle, -20) & 0x20) != 0,
                     "resizing does not weaken locked click-through");
                 window.SetLocked(false); await Drain();
-                Equal(resizedHeight, window.ActualHeight);
+                Equal(resizedHeight, DesktopTestUi.WindowRoot(window).ActualHeight);
 
                 True(MusicDesktopLyricsNative.GetWindowRect(handle, out var beforeMove),
                     "the window has bounds before the move-only persistence check");
@@ -506,8 +508,8 @@ public static partial class MusicUiTests
                 True(Math.Abs(savedGeometry.X - reopenedGeometry.X) < 1 &&
                     Math.Abs(savedGeometry.Y - reopenedGeometry.Y) < 1,
                     "the same display restores the saved logical offset");
-                Equal(savedGeometry.Width, reopened.Width);
-                Equal(savedGeometry.Height, reopened.Height);
+                Equal(savedGeometry.Width, DesktopTestUi.WindowSize(reopened).Width);
+                Equal(savedGeometry.Height, DesktopTestUi.WindowSize(reopened).Height);
                 True(!reopened.IsLyricsLocked, "ordinary reopen retains size and placement but resets the lock");
             }));
 
@@ -519,7 +521,7 @@ public static partial class MusicUiTests
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 await f.Module.EnsureDesktopLyricSettingsAsync();
                 var window = f.Module.DesktopLyricsWindow!;
-                var handle = new WindowInteropHelper(window).Handle;
+                var handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
                 var monitor = MusicDesktopLyricsNative.MonitorForWindow(handle);
                 True(monitor.Primary && MusicDesktopLyricsNative.GetWindowRect(handle, out var bounds) &&
                     bounds.Left >= monitor.WorkLeft && bounds.Top >= monitor.WorkTop &&
@@ -534,25 +536,26 @@ public static partial class MusicUiTests
                 await SaveDesktopLyricFixture(f, translated: false);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 var closing = f.Module.DesktopLyricsWindow!;
-                closing.Left += 37;
-                closing.Top += 19;
+                DesktopTestUi.MoveWindow(closing, DesktopTestUi.WindowPosition(closing).X + (37), DesktopTestUi.WindowPosition(closing).Y);
+                DesktopTestUi.MoveWindow(closing, DesktopTestUi.WindowPosition(closing).X, DesktopTestUi.WindowPosition(closing).Y + (19));
                 var desiredGeometry = closing.CapturePresentationState().Geometry!.Value;
 
                 var save = f.Calls.HoldNext("music.lyrics.desktop.settings.save");
                 var close = f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 await save.Arrived.Task;
                 True(closing.IsClosePending, "the first toggle begins its final asynchronous geometry save");
-                True(!closing.IsEnabled, "the closing window cannot move after its final geometry has been captured");
+                True(!DesktopTestUi.WindowIsEnabled(closing) && !DesktopTestUi.WindowRoot(closing).IsHitTestVisible,
+                    "the closing window cannot move after its final geometry has been captured");
                 True(!close.IsCompleted && !f.Module.IsDesktopLyricsOpen && !f.Module.NeedsLyrics,
                     "closing waits for the accepted write after retiring its lyric consumer");
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 save.Release();
                 await close;
-                await Until(() => f.Module.DesktopLyricsWindow is { IsVisible: true } current &&
+                await Until(() => f.Module.DesktopLyricsWindow is { AppWindow.IsVisible: true } current &&
                     !ReferenceEquals(current, closing));
 
                 Equal(desiredGeometry, f.Module.DesktopLyricGeometry!.Value);
-                True(!closing.IsVisible, "the previous HWND closes before the requested replacement appears");
+                True(!DesktopTestUi.WindowIsVisible(closing), "the previous HWND closes before the requested replacement appears");
             }));
 
         yield return Case("shutdown cancellation cannot revive desktop lyrics already waiting to close", () =>
@@ -561,7 +564,7 @@ public static partial class MusicUiTests
                 await SaveDesktopLyricFixture(f, translated: false);
                 await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
                 var window = f.Module.DesktopLyricsWindow!;
-                window.Left += 31;
+                DesktopTestUi.MoveWindow(window, DesktopTestUi.WindowPosition(window).X + (31), DesktopTestUi.WindowPosition(window).Y);
                 var geometry = window.CapturePresentationState().Geometry!.Value;
                 var save = f.Calls.HoldNext("music.lyrics.desktop.settings.save");
                 var close = f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
@@ -572,7 +575,7 @@ public static partial class MusicUiTests
                 save.Release();
                 await Task.WhenAll(close, shutdown);
                 await f.Module.CancelShutdownPreparationAsync();
-                True(!f.Module.IsDesktopLyricsOpen && !window.IsVisible,
+                True(!f.Module.IsDesktopLyricsOpen && !DesktopTestUi.WindowIsVisible(window),
                     "cancelling shutdown does not restore a window whose close was already accepted");
                 Equal(geometry, f.Module.DesktopLyricGeometry!.Value);
             }));
@@ -583,59 +586,33 @@ public static partial class MusicUiTests
                 : OnSta(() => WithDesktopLyrics(DesktopCrossProcessHits)));
     }
 
-    private static byte DesktopAlpha(MusicDesktopLyricsWindow window, int x, int y)
+    private static async Task<byte> DesktopAlpha(MusicDesktopLyricsWindow window, int x, int y)
     {
-        var bitmap = DesktopBitmap((FrameworkElement)window.Content);
-        var pixel = new byte[4];
-        bitmap.CopyPixels(new Int32Rect(x, y, 1, 1), pixel, 4, 0);
-        return pixel[3];
-    }
-
-    private static RenderTargetBitmap DesktopBitmap(FrameworkElement content)
-    {
-        content.UpdateLayout();
-        var bitmap = new RenderTargetBitmap((int)Math.Ceiling(content.ActualWidth),
-            (int)Math.Ceiling(content.ActualHeight), 96, 96, PixelFormats.Pbgra32);
-        bitmap.Render(content);
-        return bitmap;
+        var frame = await DesktopTestUi.Render((FrameworkElement)window.Content);
+        return frame.Pixel(x, y).A;
     }
 
     private static void DesktopHover(MusicDesktopLyricsWindow window)
     {
-        True(MusicDesktopLyricsNative.GetWindowRect(new WindowInteropHelper(window).Handle, out var rect), "native lyric bounds exist");
+        True(MusicDesktopLyricsNative.GetWindowRect(WinRT.Interop.WindowNative.GetWindowHandle(window), out var rect), "native lyric bounds exist");
         window.RefreshHover(new(rect.Left + 2, rect.Top + 2));
     }
 
     private static void StopDesktopPointerObservation(MusicDesktopLyricsWindow window) =>
-        ((System.Windows.Threading.DispatcherTimer)typeof(MusicDesktopLyricsWindow)
+        ((Microsoft.UI.Dispatching.DispatcherQueueTimer)typeof(MusicDesktopLyricsWindow)
             .GetField("pointerObserver", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(window)!).Stop();
 
-    private static ContextMenu DesktopOpenMenu(MusicDesktopLyricsWindow window) =>
-        (ContextMenu)typeof(MusicDesktopLyricsWindow).GetField("settingsMenu", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(window)!;
+    private static MenuFlyout DesktopOpenMenu(MusicDesktopLyricsWindow window) =>
+        (MenuFlyout)typeof(MusicDesktopLyricsWindow).GetField("settingsMenu", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(window)!;
 
     private static ControlTemplate DesktopPresenterTemplate()
     {
         const string xaml = """
             <ControlTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-                xmlns:l="clr-namespace:MeowFilm.Capabilities;assembly=MeowFilm.Capabilities" TargetType="{x:Type l:MusicLyricList}"
+                xmlns:l="using:MeowFilm.Capabilities" TargetType="l:MusicLyricList"
                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"><ItemsPresenter/></ControlTemplate>
             """;
-        return (ControlTemplate)System.Windows.Markup.XamlReader.Parse(xaml);
-    }
-
-    private static IEnumerable<GlyphRun> DesktopGlyphs(Visual view) => DesktopGlyphLayers(view).Select(glyph => glyph.GlyphRun);
-
-    private static IEnumerable<GlyphRunDrawing> DesktopGlyphLayers(Visual view)
-    {
-        var drawing = VisualTreeHelper.GetDrawing(view);
-        return drawing is null ? [] : Glyphs(drawing);
-        static IEnumerable<GlyphRunDrawing> Glyphs(Drawing value)
-        {
-            if (value is GlyphRunDrawing glyph) yield return glyph;
-            if (value is DrawingGroup group)
-                foreach (var child in group.Children)
-                    foreach (var item in Glyphs(child)) yield return item;
-        }
+        return (ControlTemplate)XamlReader.Load(xaml);
     }
 
     private static async Task DesktopCrossProcessHits(Fixture f, Window _)
@@ -643,8 +620,8 @@ public static partial class MusicUiTests
         await SaveDesktopLyricFixture(f);
         await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
         var window = f.Module.DesktopLyricsWindow!;
-        window.Left = SystemParameters.WorkArea.Left + 20;
-        window.Top = SystemParameters.WorkArea.Bottom - window.Height - 20;
+        DesktopTestUi.MoveWindow(window, SystemParameters.WorkArea.Left + 20, DesktopTestUi.WindowPosition(window).Y);
+        DesktopTestUi.MoveWindow(window, DesktopTestUi.WindowPosition(window).X, SystemParameters.WorkArea.Bottom - DesktopTestUi.WindowSize(window).Height - 20);
         await Drain();
         StopDesktopPointerObservation(window);
         string pipeName = "meowfilm-lyric-hit-" + Guid.NewGuid().ToString("N");
@@ -665,18 +642,18 @@ public static partial class MusicUiTests
             using var reader = new StreamReader(pipe, leaveOpen: true);
             using var writer = new StreamWriter(pipe, leaveOpen: true) { AutoFlush = true };
             nint lower = (nint)long.Parse((await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)))!, CultureInfo.InvariantCulture);
-            True(MusicDesktopLyricsNative.GetWindowRect(new WindowInteropHelper(window).Handle, out var rect), "lyrics have OS bounds");
+            True(MusicDesktopLyricsNative.GetWindowRect(WinRT.Interop.WindowNative.GetWindowHandle(window), out var rect), "lyrics have OS bounds");
             await writer.WriteLineAsync(FormattableString.Invariant($"place {rect.Left - 10} {rect.Top - 10} {rect.Right - rect.Left + 20} {rect.Bottom - rect.Top + 20}"));
             Equal("placed", await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)));
-            var hwnd = new WindowInteropHelper(window).Handle;
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
             DesktopInteractionNative.GetWindowThreadProcessId(lower, out uint pid);
             True(pid == child.Id && pid != Environment.ProcessId, "the target HWND belongs to the separate controlled process");
             True(DesktopInteractionNative.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x13),
                 "place our lyric HWND above our child without activating either");
             window.RefreshHover(new(-100000, -100000)); await Drain();
             DesktopInteractionNative.DwmFlush();
-            var glyph = DesktopOpaqueLyricPoint(window);
-            var blank = window.PointToScreen(new(8, window.ActualHeight - 8));
+            var glyph = await DesktopOpaqueLyricPoint(window);
+            var blank = NativeDesktopCapture.ScreenPoint(DesktopTestUi.WindowRoot(window), new(8, DesktopTestUi.WindowRoot(window).ActualHeight - 8));
             await DesktopHit(glyph, hwnd);
             await DesktopHit(blank, lower);
             DesktopHover(window); await Drain(); DesktopInteractionNative.DwmFlush();
@@ -685,14 +662,14 @@ public static partial class MusicUiTests
             await DesktopHit(glyph, lower);
             await DesktopHit(blank, lower);
             var unlock = window.UnlockWindow!;
-            var unlockHandle = new WindowInteropHelper(unlock).Handle;
-            var unlockPoint = unlock.PointToScreen(new(16, 16));
+            var unlockHandle = WinRT.Interop.WindowNative.GetWindowHandle(unlock);
+            var unlockPoint = NativeDesktopCapture.ScreenPoint(DesktopTestUi.WindowRoot(unlock), new(16, 16));
             await DesktopHit(unlockPoint, unlockHandle);
-            var local = DesktopPoint(glyph);
-            True(DesktopInteractionNative.ScreenToClient(lower, ref local), "convert the observed target's own coordinates");
-            nint packed = (nint)((local.Y << 16) | (local.X & 0xffff));
-            DesktopInteractionNative.SendMessage(lower, 0x201, 1, packed);
-            DesktopInteractionNative.SendMessage(lower, 0x202, 0, packed);
+            var target = System.Windows.Automation.AutomationElement.FromHandle(lower).FindFirst(
+                System.Windows.Automation.TreeScope.Element | System.Windows.Automation.TreeScope.Descendants,
+                new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.AutomationIdProperty, "ControlledLyricHitTarget"))
+                ?? throw new InvalidOperationException("Separate-process native target is not exposed to automation");
+            ((System.Windows.Automation.InvokePattern)target.GetCurrentPattern(System.Windows.Automation.InvokePattern.Pattern)).Invoke();
             await writer.WriteLineAsync("count");
             Equal("1", await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)));
             Click((Button)unlock.Content); StopDesktopPointerObservation(window);
@@ -702,7 +679,7 @@ public static partial class MusicUiTests
             Equal("closed", await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)));
             await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
             Equal(0, child.ExitCode);
-            Console.WriteLine("DESKTOP_LYRICS_OS_HIT_TEST other-process glyph+blank -> lower HWND; independent unlock -> unlock HWND; directed message count=1; no global input or foreground activation");
+            Console.WriteLine("DESKTOP_LYRICS_OS_HIT_TEST other-process glyph+blank -> lower HWND; independent unlock -> unlock HWND; UI Automation action count=1; no keyboard or pointer input");
         }
         finally
         {
@@ -715,7 +692,7 @@ public static partial class MusicUiTests
 
     private static async Task DesktopHit(Point point, nint expected)
     {
-        // WPF's layered surface reaches the OS on its compositor frame, not on a dispatcher drain.
+        // Observe the actual native compositor frame, not just a dispatcher drain.
         var watch = Stopwatch.StartNew();
         nint actual;
         do
@@ -728,20 +705,20 @@ public static partial class MusicUiTests
         throw new InvalidOperationException($"Desktop OS hit at {point}: expected HWND 0x{expected:X}, actual 0x{actual:X}");
     }
 
-    private static Point DesktopOpaqueLyricPoint(MusicDesktopLyricsWindow window)
+    private static async Task<Point> DesktopOpaqueLyricPoint(MusicDesktopLyricsWindow window)
     {
         var content = (FrameworkElement)window.Content;
-        var bitmap = DesktopBitmap(content);
-        int stride = bitmap.PixelWidth * 4;
-        var pixels = new byte[stride * bitmap.PixelHeight]; bitmap.CopyPixels(pixels, stride, 0);
-        for (int y = 48; y < bitmap.PixelHeight - 12; y++)
-            for (int x = 22; x < bitmap.PixelWidth - 22; x++)
+        var bitmap = await DesktopTestUi.Render(content);
+        int stride = bitmap.Width * 4;
+        var pixels = bitmap.Pixels;
+        for (int y = 48; y < bitmap.Height - 12; y++)
+            for (int x = 22; x < bitmap.Width - 22; x++)
             {
                 bool insideInk = true;
                 for (int dy = -1; dy <= 1 && insideInk; dy++)
                     for (int dx = -1; dx <= 1; dx++)
                         if (pixels[(y + dy) * stride + (x + dx) * 4 + 3] < 220) { insideInk = false; break; }
-                if (insideInk) return content.PointToScreen(new(x + .5, y + .5));
+                if (insideInk) return NativeDesktopCapture.ScreenPoint(content, new((x + .5) / bitmap.Scale, (y + .5) / bitmap.Scale));
             }
         throw new InvalidOperationException("No actual rendered lyric glyph was found");
     }
@@ -755,23 +732,17 @@ public static partial class MusicUiTests
         await pipe.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(10));
         using var reader = new StreamReader(pipe, leaveOpen: true);
         using var writer = new StreamWriter(pipe, leaveOpen: true) { AutoFlush = true };
-        var target = new Window
-        {
-            Width = 800, Height = 300, Left = -32000, Top = -32000, WindowStyle = WindowStyle.None,
-            ResizeMode = ResizeMode.NoResize, ShowActivated = false, ShowInTaskbar = false, Topmost = true,
-            Background = Brushes.White, Title = "meowfilm controlled lyric hit target"
-        };
-        target.Show();
-        var hwnd = new WindowInteropHelper(target).Handle;
-        var source = HwndSource.FromHwnd(hwnd)!;
         int clicks = 0;
-        nint Hook(nint handle, int message, nint wParam, nint lParam, ref bool handled)
-        {
-            if (message == 0x21) { handled = true; return 3; }
-            if (message == 0x202) clicks++;
-            return 0;
-        }
-        source.AddHook(Hook);
+        var button = new Button { Content = "controlled lyric hit target", Background = new SolidColorBrush(Colors.White) };
+        AutomationProperties.SetAutomationId(button, "ControlledLyricHitTarget");
+        button.Click += (_, _) => clicks++;
+        var target = DesktopTestUi.CreateWindow(button, 800, 300);
+        target.Title = "meowfilm controlled lyric hit target";
+        target.AppWindow.IsShownInSwitchers = false;
+        if (target.AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
+        { presenter.SetBorderAndTitleBar(false, false); presenter.IsResizable = false; presenter.IsAlwaysOnTop = true; }
+        target.AppWindow.Move(new(-32000, -32000)); target.AppWindow.Show(false);
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(target);
         try
         {
             await writer.WriteLineAsync(hwnd.ToInt64().ToString(CultureInfo.InvariantCulture));
@@ -786,12 +757,12 @@ public static partial class MusicUiTests
                     await Drain(); DesktopInteractionNative.DwmFlush();
                     await writer.WriteLineAsync("placed");
                 }
-                else if (command == "count") await writer.WriteLineAsync(clicks.ToString(CultureInfo.InvariantCulture));
+                else if (command == "count") { await Drain(); await writer.WriteLineAsync(clicks.ToString(CultureInfo.InvariantCulture)); }
                 else if (command == "close") { await writer.WriteLineAsync("closed"); return; }
                 else throw new InvalidOperationException("Unknown hit-test command");
             }
         }
-        finally { if (!source.IsDisposed) source.RemoveHook(Hook); target.Close(); }
+        finally { target.Close(); }
     }
 
     private static class DesktopInteractionNative
@@ -810,9 +781,6 @@ public static partial class MusicUiTests
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool IsWindow(nint hwnd);
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        internal static extern bool ScreenToClient(nint hwnd, ref NativePoint point);
         [DllImport("user32.dll")]
         internal static extern uint GetWindowThreadProcessId(nint hwnd, out uint process);
         [DllImport("user32.dll", EntryPoint = "SendMessageW")]

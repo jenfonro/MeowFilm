@@ -7,7 +7,8 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Windows;
+using Microsoft.UI.Xaml;
+using Windows.Graphics;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
@@ -56,9 +57,9 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
         Native.Ended += (_, _) => NativeEnded++;
         Window = new()
         {
-            Content = View, Width = 1120, Height = 820, Left = 40, Top = 40,
-            ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None
+            Content = View, Title = "Meowfilm film integration validation"
         };
+        Window.AppWindow.MoveAndResize(new RectInt32(40, 40, 1120, 820));
     }
 
     internal static async Task<FilmPlaybackNativeFixture> CreateAsync(bool headers = false,
@@ -113,8 +114,8 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
                 siteId = site, generation = fixture.Generation,
                 name = FilmJson.Text(sites.Single(row => FilmJson.Text(row, "key") == site), "name")
             })).ToArray();
-            fixture.Window.Show();
-            await Until(() => fixture.View.IsLoaded, "loaded real WPF playback consumer");
+            fixture.Window.Activate();
+            await TestUiHost.LoadedAsync(fixture.View);
             Observe("fixture", new
             {
                 generation = fixture.Generation, sites = sites.Length, headers, reports,

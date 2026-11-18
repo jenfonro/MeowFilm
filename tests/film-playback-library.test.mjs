@@ -44,7 +44,7 @@ const empty = () => ({
 
 test('native preferences stay in their sole settings owner while repeated business writes and reopen preserve library facts', t => {
   const dataRoot = area(t), path = join(dataRoot, 'film-playback', 'library.json');
-  let preferences = { ...defaultPreferences(), keywords: ['native-first'] };
+  let preferences = { ...defaultPreferences(), keywords: ['native-first'], metadataViewProvider: 'douban' };
   const owner = createPlaybackLibrary({ dataRoot, nativePreferences: () => preferences });
   t.after(() => owner.close());
   owner.update(draft => { draft.history.push(history()); });
@@ -59,6 +59,7 @@ test('native preferences stay in their sole settings owner while repeated busine
   assert.deepEqual(restarted.read().history, [history()]);
   assert.deepEqual(restarted.read().manual, [manual()]);
   assert.deepEqual(restarted.read().preferences.keywords, ['native-latest']);
+  assert.equal(restarted.read().preferences.metadataViewProvider, 'douban');
 });
 
 test('E31/E36: initial document takes defaults only from policy and exposes an immutable snapshot', t => {
@@ -94,6 +95,7 @@ test('E05/E19/E30/E31/E36: all five new local sections persist on close/reopen w
   preferences.keywords = ['DDP', 'H.265'];
   preferences.siteCleanKeywords = [];
   preferences.iosAutoPrepare = false;
+  preferences.metadataViewProvider = 'douban';
   const state = owner.update(draft => {
     draft.preferences = preferences;
     draft.history.push(history());
@@ -108,6 +110,7 @@ test('E05/E19/E30/E31/E36: all five new local sections persist on close/reopen w
   assert.deepEqual(restarted.read().preferences.keywords, ['DDP', 'H.265']);
   assert.deepEqual(restarted.read().preferences.siteCleanKeywords, []);
   assert.equal(restarted.read().preferences.iosAutoPrepare, false);
+  assert.equal(restarted.read().preferences.metadataViewProvider, 'douban');
   assert.deepEqual(restarted.read().previewTargets, ['tmdb:tv:42']);
 });
 

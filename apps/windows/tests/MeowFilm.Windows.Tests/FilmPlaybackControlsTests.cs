@@ -1,15 +1,20 @@
+using FontWeights = Microsoft.UI.Text.FontWeights;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI;
+using Windows.UI.Text;
+using MeowFilm.Desktop;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
-using MeowFilm.Desktop;
 using MeowFilm.Media;
 using static MeowFilm.Windows.Tests.FilmPlaybackFixture;
 
@@ -18,7 +23,7 @@ namespace MeowFilm.Windows.Tests;
 public static class FilmPlaybackControlsTests
 {
     private static TestCase Test(string name, Func<Task> run) =>
-        new("film-playback-controls: " + name, () => MusicQualityConsumerTests.Sta(run));
+        new("film-playback-controls: " + name, () => TestUiHost.InvokeAsync(run));
     public static IEnumerable<TestCase> Cases()
     {
         yield return Test("source menu continuation keeps exact browsing selection and admits one request while enabled", SourceSearchMore);
@@ -32,11 +37,9 @@ public static class FilmPlaybackControlsTests
             await scene.Play();
             Click(scene.Element<Button>("PlayButton")); await Until(() => scene.Rig.Native.Paused);
             var seek = scene.Element<Slider>("SeekSlider");
-            seek.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(seek)!, 0, Key.Right)
-            { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+            FilmUiTest.Call(scene.View, "Seek_Begin", seek, null);
             seek.Value = 89;
-            seek.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(seek)!, 0, Key.Right)
-            { RoutedEvent = Keyboard.PreviewKeyUpEvent });
+            await (Task)FilmUiTest.Call(scene.View, "CommitSeekAsync")!;
             await Until(() => scene.Rig.Native.Position == 89);
             scene.Element<ListBox>("RateBox").SelectedIndex = 4;
             scene.Element<ListBox>("AspectBox").SelectedIndex = 2;
@@ -55,19 +58,19 @@ public static class FilmPlaybackControlsTests
             var frame = scene.Element<Grid>("PlayerFrame"); var host = scene.Element<ContentControl>("VideoHost");
             var view = scene.Rig.Native.View;
             Click(scene.Element<Button>("FullscreenButton"));
-            var full = scene.Window.OwnedWindows.Cast<Window>().Single();
-            Check(ReferenceEquals(host.Content, view) && frame.IsDescendantOf(full) && scene.Rig.Native.Commits == 1,
+            var full = DesktopWindow.GetWindow(frame)!;
+            Check(ReferenceEquals(host.Content, view) && DesktopVisual.Contains(full.Root, frame) && scene.Rig.Native.Commits == 1,
                 "full screen moves the existing native surface rather than opening a new player");
             full.Close();
-            await Until(() => frame.IsDescendantOf(scene.View) && !full.IsVisible &&
-                !scene.Window.OwnedWindows.Cast<Window>().Contains(full));
+            await Until(() => DesktopVisual.Contains(scene.View, frame) && !FilmUiTest.Visible(full) &&
+                ReferenceEquals(DesktopWindow.GetWindow(frame), scene.Window));
             Click(scene.Element<Button>("PipButton"));
-            var pip = scene.Window.OwnedWindows.Cast<Window>().Single();
-            Check(ReferenceEquals(host.Content, view) && frame.IsDescendantOf(pip) && scene.Rig.Session.CanRetainMedia,
+            var pip = DesktopWindow.GetWindow(frame)!;
+            Check(ReferenceEquals(host.Content, view) && DesktopVisual.Contains(pip.Root, frame) && scene.Rig.Session.CanRetainMedia,
                 "the visible PiP window owns the same accepted output");
             await scene.Rig.Session.LeaveAsync(retainedOwner: true);
             scene.View.Visibility = Visibility.Collapsed;
-            Check(pip.IsVisible && scene.Rig.Session.HasOutput && scene.Rig.Session.HasSession,
+            Check(FilmUiTest.Visible(pip) && scene.Rig.Session.HasOutput && scene.Rig.Session.HasSession,
                 "leaving the ordinary page does not kill an explicitly retained PiP output");
             pip.Close();
             await Until(() => !scene.Rig.Session.HasSession);
@@ -101,15 +104,13 @@ public static class FilmPlaybackControlsTests
             int before = scene.Rig.Runtime.Calls.Count;
             var pan = scene.Element<Button>("PanButton"); Click(pan);
             Check(scene.Rig.Runtime.Calls.Count == before, "opening the pan menu does not request sources or start matching");
-            ((MenuItem)pan.ContextMenu.Items[2]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-            pan.ContextMenu.IsOpen = false;
+            FilmUiTest.Click(FilmUiTest.Field<MenuFlyout>(scene.View, "playerMenu").Items[2]);
             await Until(() => scene.Called("pan"));
             var selected = scene.Rig.Runtime.Calls.Last(call => FilmJson.Text(call.Parameters, "action") == "pan");
             Check(FilmJson.Text(selected.Parameters, "provider") == "quark", "pan selection is a standard provider, never a label guess");
             var quality = scene.Element<Button>("QualityButton"); before = scene.Rig.Runtime.Calls.Count; Click(quality);
             Check(scene.Rig.Runtime.Calls.Count == before, "quality menu opening is local presentation");
-            ((MenuItem)quality.ContextMenu.Items[0]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-            quality.ContextMenu.IsOpen = false;
+            FilmUiTest.Click(FilmUiTest.Field<MenuFlyout>(scene.View, "playerMenu").Items[0]);
             await Until(() => scene.Called("quality"));
             selected = scene.Rig.Runtime.Calls.Last(call => FilmJson.Text(call.Parameters, "action") == "quality");
             Check(FilmJson.Text(selected.Parameters, "quality") == "4k_hdr", "quality has an exact hard-constraint action");
@@ -133,11 +134,11 @@ public static class FilmPlaybackControlsTests
             {
                 await using var scene = await Scene.Create();
                 await scene.Play();
-                scene.Window.Width = 1900;
+                scene.Window.Resize(1900, 850);
                 scene.Element<Grid>("PlayerFrame").Width = 1200;
                 scene.View.UpdateLayout();
-                await Until(() => scene.Element<Button>("PanButton").IsVisible &&
-                    scene.Element<Button>("QualityButton").IsVisible && scene.Element<Button>("SwitchButton").IsVisible,
+                await Until(() => FilmUiTest.Visible(scene.Element<Button>("PanButton")) &&
+                    FilmUiTest.Visible(scene.Element<Button>("QualityButton")) && FilmUiTest.Visible(scene.Element<Button>("SwitchButton")),
                     () => $"source actions layout did not settle; frame={scene.Element<Grid>("PlayerFrame").ActualWidth}, row={scene.Element<Grid>("ControlsRow").ActualWidth}, pan={scene.Element<Button>("PanButton").Visibility}, quality={scene.Element<Button>("QualityButton").Visibility}, switch={scene.Element<Button>("SwitchButton").Visibility}, chrome={scene.Element<Grid>("PlayerChrome").Visibility}");
                 var scope = scene.Rig.Native.Scope;
                 JsonElement[] SourceCommands() => scene.Rig.Runtime.Calls
@@ -152,8 +153,7 @@ public static class FilmPlaybackControlsTests
                     });
                     Click(button);
                     if (index < 0) return;
-                    ((MenuItem)button.ContextMenu.Items[index]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-                    button.ContextMenu.IsOpen = false;
+                    FilmUiTest.Click(FilmUiTest.Field<MenuFlyout>(scene.View, "playerMenu").Items[index]);
                 }
                 scene.Rig.Runtime.Intercept = (method, input, _) =>
                 {
@@ -181,7 +181,7 @@ public static class FilmPlaybackControlsTests
                     "the initial UI source action sends its exact business action and selected constraint");
                 Choose(selection.Action, selection.Index);
                 Choose(selection.Action, selection.Index);
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                await FilmUiTest.Pump();
                 Check(SourceCommands().Length == 1,
                     "repeating the same server-pending action and value sends no additional business command");
 
@@ -214,7 +214,7 @@ public static class FilmPlaybackControlsTests
             await Until(() => scene.Rig.Page.PlayerBusy);
             int before = scene.Rig.Runtime.Calls.Count;
             Click(scene.Element<Button>("BlockButton"));
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await FilmUiTest.Pump();
             Check(scene.Rig.Runtime.Calls.Count == before && scene.Rig.Native.SettledIdentity == "controls" &&
                 scene.Rig.Native.Stops == 0, "loading ignores wrong-source input without writing, matching or stopping its donor");
             scene.Rig.Runtime.Change(root => root["stage"] = "playing");
@@ -306,7 +306,7 @@ public static class FilmPlaybackControlsTests
                     };
                     for (int click = 1; click <= 2; click++)
                     {
-                        await ToggleByKeyboardAsync(box);
+                        await ToggleAsync(box);
                         await Until(() => scene.Rig.Runtime.Calls.Count == before + click && scene.Notices.Count == 1,
                             () => $"{rejected.Action} rejection did not settle: accepted={accepted}, click={click}, " +
                                 $"calls={scene.Rig.Runtime.Calls.Count - before}, notices={scene.Notices.Count}, page={PageValue()}, checkbox={box.IsChecked}");
@@ -317,7 +317,7 @@ public static class FilmPlaybackControlsTests
                             $"sequence={sequence}->{scene.Rig.Runtime.Value.GetProperty("sequence").GetInt64()}");
                         Check(commands.Length == click && commands.All(call => FilmJson.Bool(call.Parameters, "enabled") == !accepted) &&
                             toggledValues.Count == click && toggledValues.All(value => value == !accepted),
-                            "real WPF Space input toggles before Click and the next click retries the same rejected intent");
+                            "native toggle automation toggles before Click and the next click retries the same rejected intent");
                         Check(PageValue() == accepted && box.IsChecked == accepted && scene.Notices[^1] == rejected.Message &&
                             scene.Rig.Runtime.Value.GetProperty("sequence").GetInt64() == sequence &&
                             scene.Rig.Runtime.Calls.Count == before + click && scene.Rig.Native.Commits == 0,
@@ -361,23 +361,22 @@ public static class FilmPlaybackControlsTests
             await Until(() => scene.Rig.Page.CurrentCandidateId == "directory-a" && scene.Rig.Native.SettledIdentity == "directory-output-a");
             int before = scene.Rig.Runtime.Calls.Count;
             Click(scene.Element<Button>("RawDirectory"));
-            var dialog = scene.Window.OwnedWindows.OfType<FilmDirectoryDialog>().Single();
+            var dialog = FilmUiTest.Dialogs(scene.View).OfType<FilmDirectoryDialog>().Single();
             await Until(() => dialog.IsLoaded);
-            var list = Visuals(dialog).OfType<ListBox>().Single();
+            var list = Visuals(dialog).OfType<ListView>().Single();
             var play = Visuals(dialog).OfType<Button>().Single(button => Equals(button.Content, "播放所选文件"));
             var back = Visuals(dialog).OfType<Button>().Single(button => Equals(button.Content, "返回上级"));
             void Enter(string name)
             {
                 list.SelectedItem = list.Items.Cast<FilmDirectoryRow>().Single(row => row.IsDirectory && row.Name == name);
-                list.RaiseEvent(new KeyEventArgs(new KeyboardProbe(), PresentationSource.FromVisual(list)!, 0, Key.Enter)
-                { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+                FilmUiTest.Call(dialog, "Enter");
             }
             void Current(string expected, string phase)
             {
                 list.UpdateLayout();
                 var rows = list.Items.Cast<FilmDirectoryRow>().ToArray();
                 var current = rows.Single(row => row.IsCurrent);
-                Check(dialog.IsVisible && current.CandidateId == expected && current.Label == "当前 · 同名文件" &&
+                Check(FilmUiTest.Visible(dialog) && current.CandidateId == expected && current.Label == "当前 · 同名文件" &&
                     rows.Select(row => row.Path).SequenceEqual(new[] { "/库/第二季/a.mp4", "/库/第二季/b.mp4" }) &&
                     Visuals(dialog).OfType<TextBlock>().Any(text => text.Text == "/库/第二季") &&
                     Visuals(list).OfType<TextBlock>().Count(text => text.Text == "当前 · 同名文件") == 1,
@@ -425,7 +424,7 @@ public static class FilmPlaybackControlsTests
                         call.Method is "film.session.snapshot" || call.Method.StartsWith("film.data.", StringComparison.Ordinal)),
                     "marker refresh and later traversal add no snapshot content or browse requests; only one explicit file selection was sent");
                 scene.Rig.Runtime.Change(root => root["browsing"]!["lineId"] = "0");
-                await Until(() => !dialog.IsVisible);
+                await Until(() => !FilmUiTest.Visible(dialog));
             }
             finally { prepare.TrySetResult(); }
         });
@@ -466,12 +465,12 @@ public static class FilmPlaybackControlsTests
                 {
                     var item = (FilmCandidateItem)button.Tag;
                     Check((AutomationProperties.GetItemStatus(button) == "当前") == (item.Id == expected) &&
-                        Visuals(button).OfType<TextBlock>().Any(text => text.Text == "当前" && text.IsVisible) == (item.Id == expected) &&
+                        Visuals(button).OfType<TextBlock>().Any(text => text.Text == "当前" && FilmUiTest.Visible(text)) == (item.Id == expected) &&
                         Visuals(button).OfType<TextBlock>().Single(text => text.Text == item.DisplayLabel).TextTrimming == TextTrimming.CharacterEllipsis,
                         "the live button's visible current badge and accessible status agree on exact identity without expanding its label");
                 }
                 Console.WriteLine($"WFR03 phase={phase} page={scene.Rig.Page.CurrentCandidateId} " +
-                    $"visual={((FilmCandidateItem)buttons.Single(button => Visuals(button).OfType<TextBlock>().Any(text => text.Text == "当前" && text.IsVisible)).Tag).Id} " +
+                    $"visual={((FilmCandidateItem)buttons.Single(button => Visuals(button).OfType<TextBlock>().Any(text => text.Text == "当前" && FilmUiTest.Visible(text))).Tag).Id} " +
                     $"accessible={((FilmCandidateItem)buttons.Single(button => AutomationProperties.GetItemStatus(button) == "当前").Tag).Id}");
             }
             Current("movie-a", "current-A");
@@ -510,8 +509,8 @@ public static class FilmPlaybackControlsTests
                 await Until(() => scene.Rig.Page.CurrentCandidateId == "movie-b" && scene.Rig.Native.SettledIdentity == "movie-output-b-2");
                 foreach (double width in new[] { 1150d, 780d })
                 {
-                    scene.Window.Width = width;
-                    await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                    scene.Window.Resize(width, 850);
+                    await FilmUiTest.Pump();
                     Current("movie-b", "started-B-" + width);
                 }
                 Check(scene.Rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == "select.target") == 2 &&
@@ -533,8 +532,8 @@ public static class FilmPlaybackControlsTests
             await Until(() => scene.Rig.Page.ShowMovieCandidates && scene.Rig.Page.Candidates.Count == 1);
             foreach (double width in new[] { 1150d, 780d })
             {
-                scene.Window.Width = width;
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                scene.Window.Resize(width, 850);
+                await FilmUiTest.Pump();
                 scene.View.UpdateLayout();
                 var choices = scene.Element<ItemsControl>("MovieCandidates");
                 var button = Visuals(choices).OfType<Button>().Single(candidate => candidate.Tag is FilmCandidateItem);
@@ -546,7 +545,7 @@ public static class FilmPlaybackControlsTests
                     label.TextWrapping == TextWrapping.NoWrap && label.TextTrimming == TextTrimming.CharacterEllipsis,
                     "wide and narrow movie rows constrain the real long label instead of expanding the content region");
             }
-            Check(!scene.Element<Button>("RawDirectory").IsVisible, "pure metadata has no original site directory");
+            Check(!FilmUiTest.Visible(scene.Element<Button>("RawDirectory")), "pure metadata has no original site directory");
             void Browse(bool content, string? error = null) => scene.Rig.Runtime.Change(root =>
             {
                 root["sources"] = JsonNode.Parse(FilmJson.Encode(new[] { new { id = "site-result", title = "真实站点" } }).GetRawText());
@@ -559,30 +558,30 @@ public static class FilmPlaybackControlsTests
             });
             Browse(content: false);
             await Until(() => scene.Rig.Page.SourceId == "site-result");
-            Check(!scene.Element<Button>("RawDirectory").IsVisible, "a site with no original content does not get a fake directory entry");
+            Check(!FilmUiTest.Visible(scene.Element<Button>("RawDirectory")), "a site with no original content does not get a fake directory entry");
             Browse(content: true);
-            await Until(() => scene.Element<Button>("RawDirectory").IsVisible);
+            await Until(() => FilmUiTest.Visible(scene.Element<Button>("RawDirectory")));
             Browse(content: true, error: "UPSTREAM_HTTP");
             await Until(() => scene.Rig.Page.ListError.Length > 0);
-            Check(!scene.Element<Button>("RawDirectory").IsVisible && scene.Rig.Page.Candidates.Count == 0 &&
+            Check(!FilmUiTest.Visible(scene.Element<Button>("RawDirectory")) && scene.Rig.Page.Candidates.Count == 0 &&
                 scene.Element<ComboBox>("SourcePicker").IsEnabled,
                 "a failed selected list hides stale content while source selection remains usable");
             Browse(content: true);
-            await Until(() => scene.Element<Button>("RawDirectory").IsVisible && scene.Rig.Page.ListError.Length == 0);
+            await Until(() => FilmUiTest.Visible(scene.Element<Button>("RawDirectory")) && scene.Rig.Page.ListError.Length == 0);
         });
         yield return Test("short-video wheel gestures drive next and previous while ordinary mode remains inert", async () =>
         {
             await using var scene = await Scene.Create();
             var gesture = scene.Element<Border>("ShortVideoGesture");
             int before = scene.Rig.Runtime.Calls.Count;
-            gesture.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, 120) { RoutedEvent = Mouse.PreviewMouseWheelEvent });
+            await (Task)FilmUiTest.Call(scene.View, "SwipeAsync", -80d)!;
             Check(scene.Rig.Runtime.Calls.Count == before, "ordinary mode never changes the target from a short-video gesture");
             scene.Rig.Runtime.Change(root => root["shortVideo"] = true);
-            await Until(() => scene.Rig.Page.ShortVideo && gesture.IsVisible);
-            gesture.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 1, 120) { RoutedEvent = Mouse.PreviewMouseWheelEvent });
+            await Until(() => scene.Rig.Page.ShortVideo && FilmUiTest.Visible(gesture));
+            await (Task)FilmUiTest.Call(scene.View, "SwipeAsync", -80d)!;
             await Until(() => scene.Called("next"));
             await Task.Delay(260); // Above the UI's 250 ms wheel-gesture coalescing window, not completion proof.
-            gesture.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 2, -120) { RoutedEvent = Mouse.PreviewMouseWheelEvent });
+            await (Task)FilmUiTest.Call(scene.View, "SwipeAsync", 80d)!;
             await Until(() => scene.Called("previous"));
             Check(scene.Rig.Native.Commits == 0, "target navigation alone does not claim actual native output or buffered media");
         });
@@ -690,12 +689,12 @@ public static class FilmPlaybackControlsTests
                     : Task.FromResult(scene.Rig.Runtime.Handle(method, input));
             Click(scene.Element<Button>("SwitchButton"));
             await scene.Rig.Page.CommandAsync("search.more");
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await FilmUiTest.Pump();
             Check(scene.Notices.Count == 2, "an explicitly cancelled control adds no failure notice");
             scene.Rig.Runtime.Intercept = null;
             Click(scene.Element<Button>("SwitchButton"));
             await scene.Rig.Page.CommandAsync("search.more");
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await FilmUiTest.Pump();
             Check(scene.Notices.Count == 2, "successful control acknowledgement adds no failure notice");
 
             var pending = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -713,7 +712,7 @@ public static class FilmPlaybackControlsTests
                 scene.View.DataContext = new FilmPlaybackPage(scene.Rig.Page.Item, scene.Rig.Page.Request, null, null);
                 pending.SetResult(FilmRuntimeProbe.Failure("AUTH_FAILED"));
                 await scene.Rig.Page.CommandAsync("search.more");
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                await FilmUiTest.Pump();
                 Check(scene.Notices.Count == 2, "a retired page's late classified error cannot notify its replacement");
             }
             finally { pending.TrySetResult(FilmRuntimeProbe.Failure("CANCELLED")); }
@@ -729,10 +728,9 @@ public static class FilmPlaybackControlsTests
         var source = scene.Element<ComboBox>("SourcePicker");
         void Waiting()
         {
-            source.ApplyTemplate(); scene.Window.UpdateLayout();
+            source.ApplyTemplate(); DesktopTestUi.WindowRoot(scene.Window).UpdateLayout();
             Check(!source.IsEnabled && source.SelectedItem is null && source.Items.Count == 0 &&
-                source.Template.FindName("SourceLoading", source) is TextBlock { Text: "加载中…", Visibility: Visibility.Visible } &&
-                source.Template.FindName("SourceSelection", source) is ContentPresenter { Visibility: Visibility.Collapsed } &&
+                source.PlaceholderText == "加载中…" &&
                 !scene.Element<Button>("PlayButton").IsEnabled,
                 "the real control shows a disabled loading label, never a fabricated selectable source or a blank selection");
         }
@@ -760,7 +758,7 @@ public static class FilmPlaybackControlsTests
                 PlaybackContext = new(target, Sources: [Candidate("scope").GetProperty("source")])
             });
             page = scene.Rig.Page; scene.View.DataContext = page;
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await FilmUiTest.Pump();
             Waiting();
             Check(page.StatusText == "上游服务请求失败" && !scene.Element<Button>("PlayButton").IsEnabled,
                 "source loading does not replace the real playback failure or enable empty player transport");
@@ -784,7 +782,7 @@ public static class FilmPlaybackControlsTests
         await Until(() => page!.SourceId == "same-name-text");
         Check(source.IsEnabled && source.Items.Count == 3 &&
             source.SelectedItem is FilmSelection { Id: "same-name-text", Label: "红果短剧 · 另一短剧" } &&
-            source.Template.FindName("SourceLoading", source) is TextBlock { Visibility: Visibility.Collapsed } &&
+            source.SelectedItem is not null &&
             scene.Rig.Runtime.Calls.Count == calls,
             "real same-name identities survive loading and the owner's exact selected row is shown without UI requests");
         scene.Rig.Runtime.Change(root => root["browsing"]!["sourceId"] = "same-name-number");
@@ -802,7 +800,7 @@ public static class FilmPlaybackControlsTests
         await using var scene = await Scene.Create();
         int initialCalls = scene.Rig.Runtime.Calls.Count;
         Click(scene.Element<Button>("PlayButton"));
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await FilmUiTest.Pump();
         Check(!scene.Element<Button>("PlayButton").IsEnabled && scene.Rig.Runtime.Calls.Count == initialCalls,
             "empty player transport cannot start a page selection");
         await scene.Play();
@@ -850,7 +848,7 @@ public static class FilmPlaybackControlsTests
             !scene.Rig.Native.Paused && scene.Rig.Page.ActiveTarget.Kind == "tv" &&
             scene.Rig.Page.SourceId == "selected-site", "page play keeps the formal target independent from the browsed directory");
         Click(hero); await Until(() => playCalls == 2);
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await FilmUiTest.Pump();
         Check(scene.Rig.Native.Commits == 1 && !scene.Rig.Native.Paused &&
             scene.Rig.Runtime.Calls.Count(call => call.Method == "film.session.attempt") == 1,
             "same-target page activation still reaches Node without reopening or pausing the accepted media");
@@ -870,10 +868,10 @@ public static class FilmPlaybackControlsTests
         var target = page.ActiveTarget;
         int before = scene.Rig.Runtime.Calls.Count;
         source.IsDropDownOpen = true;
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-        var popup = (Popup)source.Template.FindName("PART_Popup", source);
-        var more = (Button)source.Template.FindName("SearchMoreSourcesButton", source);
-        Check(popup.IsOpen && more.IsVisible && more.IsEnabled && more.IsDescendantOf(popup.Child) &&
+        await FilmUiTest.Pump();
+        var popup = VisualTreeHelper.GetOpenPopupsForXamlRoot(scene.View.XamlRoot).Single();
+        var more = ((FilmSourcePicker)source).SearchMoreSourcesButton!;
+        Check(popup.IsOpen && FilmUiTest.Visible(more) && more.IsEnabled && DesktopVisual.Contains(popup.Child, more) &&
             more.Content as string == "加载更多" && AutomationProperties.GetName(more) == "继续搜索未完成来源" &&
             source.Items.Cast<FilmSelection>().SequenceEqual(page.Sources) &&
             source.SelectedItem is FilmSelection selected && selected == page.SelectedSource &&
@@ -943,19 +941,19 @@ public static class FilmPlaybackControlsTests
         var page = scene.Rig.Page;
         var source = scene.Element<ComboBox>("SourcePicker");
         source.ApplyTemplate();
-        var more = (Button)source.Template.FindName("SearchMoreSourcesButton", source);
+        var more = ((FilmSourcePicker)source).SearchMoreSourcesButton!;
         scene.Rig.Runtime.Intercept = (method, input, _) => Task.FromResult(
             method == "film.session.command" && FilmJson.Text(input, "action") == "search.more"
                 ? FilmRuntimeProbe.Failure("UPSTREAM_ERROR") : scene.Rig.Runtime.Handle(method, input));
         source.IsDropDownOpen = true;
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await FilmUiTest.Pump();
         Click(more);
         await Until(() => scene.Notices.Count == 1 && more.IsEnabled && page.CanSearchMore);
         Check(scene.Notices.Single() == "上游服务请求失败",
             "a rejected source continuation uses the existing floating notice and releases its pending state");
         scene.Rig.Runtime.Intercept = null;
         source.IsDropDownOpen = true;
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await FilmUiTest.Pump();
         Click(more);
         await Until(() => scene.Rig.Runtime.Calls.Count(call => call.Method == "film.session.command" &&
             FilmJson.Text(call.Parameters, "action") == "search.more") == 2 && page.CanSearchMore);
@@ -965,7 +963,7 @@ public static class FilmPlaybackControlsTests
                 ? Task.FromException<JsonElement>(new OperationCanceledException())
                 : Task.FromResult(scene.Rig.Runtime.Handle(method, input));
         source.IsDropDownOpen = true;
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await FilmUiTest.Pump();
         Click(more);
         await Until(() => scene.Rig.Runtime.Calls.Count(call => call.Method == "film.session.command" &&
             FilmJson.Text(call.Parameters, "action") == "search.more") == 3 && page.CanSearchMore);
@@ -983,7 +981,7 @@ public static class FilmPlaybackControlsTests
         try
         {
             source.IsDropDownOpen = true;
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await FilmUiTest.Pump();
             Click(more);
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             scene.View.DataContext = new FilmPlaybackPage(page.Item, page.Request, null, null);
@@ -1000,37 +998,37 @@ public static class FilmPlaybackControlsTests
         BrowseSource(scene);
         await Until(() => scene.Rig.Page.HasSeasons && scene.Rig.Page.CanBrowseRaw);
         var page = scene.Rig.Page;
-        var toolbar = scene.Element<DockPanel>("EpisodeToolbar");
+        var toolbar = scene.Element<Grid>("EpisodeToolbar");
         var source = scene.Element<ComboBox>("SourcePicker");
         var pan = scene.Element<ComboBox>("LinePicker");
         var preview = Visuals(toolbar).OfType<CheckBox>().Single();
         var controls = new FrameworkElement[] { source, pan, preview, scene.Element<Button>("RawDirectory"),
-            scene.Element<Button>("HorizontalLayout"), scene.Element<Button>("ListLayout") };
+            scene.Element<ToggleButton>("HorizontalLayout"), scene.Element<ToggleButton>("ListLayout") };
         foreach (double width in new[] { 1150d, 780d })
         {
-            scene.Window.Width = width;
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            scene.Window.UpdateLayout();
-            double center = source.TranslatePoint(new(0, source.ActualHeight / 2), toolbar).Y;
+            scene.Window.Resize(width, 850);
+            await FilmUiTest.Pump();
+            DesktopTestUi.WindowRoot(scene.Window).UpdateLayout();
+            double center = source.TransformToVisual(toolbar).TransformPoint(new(0, source.ActualHeight / 2)).Y;
             foreach (var control in controls)
             {
-                var point = control.TranslatePoint(new(0, control.ActualHeight / 2), toolbar);
-                Check(control.IsVisible && control.ActualWidth > 0 && Math.Abs(point.Y - center) < 1 &&
+                var point = control.TransformToVisual(toolbar).TransformPoint(new(0, control.ActualHeight / 2));
+                Check(FilmUiTest.Visible(control) && control.ActualWidth > 0 && Math.Abs(point.Y - center) < 1 &&
                     point.X >= -.5 && point.X + control.ActualWidth <= toolbar.ActualWidth + .5,
                     $"{control.Name} stays visible on the source toolbar at width {width}");
             }
             var seasons = scene.Element<ItemsControl>("SeasonPicker");
-            Check(seasons.IsVisible && seasons.TranslatePoint(new(), scene.View).Y >=
-                toolbar.TranslatePoint(new(0, toolbar.ActualHeight), scene.View).Y &&
+            Check(FilmUiTest.Visible(seasons) && seasons.TransformToVisual(scene.View).TransformPoint(new()).Y >=
+                toolbar.TransformToVisual(scene.View).TransformPoint(new(0, toolbar.ActualHeight)).Y &&
                 source.SelectedItem is FilmSelection selected && selected == page.SelectedSource &&
                 pan.SelectedItem is FilmSelection line && line == page.SelectedLine,
                 "real seasons remain below the toolbar while both exact browsing selections stay visible");
             foreach (var picker in new[] { source, pan })
             {
                 picker.IsDropDownOpen = true;
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                var dropDown = (Border)picker.Template.FindName("DropDown", picker);
-                var popup = (Popup)picker.Template.FindName("PART_Popup", picker);
+                await FilmUiTest.Pump();
+                var popup = VisualTreeHelper.GetOpenPopupsForXamlRoot(scene.View.XamlRoot).Single();
+                var dropDown = (FrameworkElement)popup.Child;
                 Check(popup.IsOpen && Math.Abs(dropDown.ActualWidth - picker.ActualWidth) < 1 &&
                     ((TextBlock)((DataTemplate)picker.ItemTemplate).LoadContent()).TextTrimming == TextTrimming.CharacterEllipsis,
                     "both source popup surfaces are fixed to the control width with single-line truncated labels");
@@ -1042,12 +1040,12 @@ public static class FilmPlaybackControlsTests
                 picker.IsDropDownOpen = false;
             }
             int commands = scene.Rig.Runtime.Calls.Count;
-            Click(scene.Element<Button>("ListLayout"));
-            await Until(() => page.IsListLayout && !scene.Element<Shelf>("EpisodeShelf").IsVisible);
-            Check(source.IsVisible && pan.IsVisible && preview.IsVisible && scene.Element<Button>("RawDirectory").IsVisible,
+            Click(scene.Element<ToggleButton>("ListLayout"));
+            await Until(() => page.IsListLayout && !FilmUiTest.Visible(scene.Element<Shelf>("EpisodeShelf")));
+            Check(FilmUiTest.Visible(source) && FilmUiTest.Visible(pan) && FilmUiTest.Visible(preview) && FilmUiTest.Visible(scene.Element<Button>("RawDirectory")),
                 "list mode keeps source, pan, preview and the real directory entry in place");
-            Click(scene.Element<Button>("HorizontalLayout"));
-            await Until(() => page.IsHorizontalLayout && scene.Element<Shelf>("EpisodeShelf").IsVisible);
+            Click(scene.Element<ToggleButton>("HorizontalLayout"));
+            await Until(() => page.IsHorizontalLayout && FilmUiTest.Visible(scene.Element<Shelf>("EpisodeShelf")));
             Check(scene.Rig.Runtime.Calls.Count == commands,
                 "changing episode presentation never refreshes a directory or searches a source");
         }
@@ -1078,15 +1076,8 @@ public static class FilmPlaybackControlsTests
         internal readonly List<string> Notices = [];
         internal Scene()
         {
-            Window = new() { Content = View, Width = 1150, Height = 850, Left = -10000, Top = -10000,
-                ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None };
-            if (Environment.GetEnvironmentVariable("MEOWFILM_TEST_DESKTOP_EXPECTED_USER") is not null)
-            {
-                Window.Left = Window.Top = 40;
-                Window.Topmost = true;
-            }
-            Window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, args) =>
-            { if (args.Message.Length > 0) Notices.Add(args.Message); }));
+            Window = FilmUiTest.Window(View, 1150, 850);
+            NoticeOutlet.SetReceiver(DesktopTestUi.WindowRoot(Window), args => { if (args.Message.Length > 0) Notices.Add(args.Message); });
         }
         internal static async Task<Scene> Create()
         {
@@ -1107,41 +1098,23 @@ public static class FilmPlaybackControlsTests
         }
         internal bool Called(string action) => Rig.Runtime.Calls.Any(call =>
             call.Method == "film.session.command" && FilmJson.Text(call.Parameters, "action") == action);
-        internal T Element<T>(string name) where T : FrameworkElement => (T)View.FindName(name);
+        internal T Element<T>(string name) where T : FrameworkElement => FilmUiTest.Named<T>(View, name);
         public async ValueTask DisposeAsync()
         {
-            foreach (Window owned in Window.OwnedWindows.Cast<Window>().ToArray())
+            if (DesktopWindow.GetWindow(Element<Grid>("PlayerFrame")) is { } owned && !ReferenceEquals(owned, Window))
             {
                 owned.Close();
-                await Until(() => !owned.IsVisible && !Window.OwnedWindows.Cast<Window>().Contains(owned));
+                await Until(() => ReferenceEquals(DesktopWindow.GetWindow(Element<Grid>("PlayerFrame")), Window));
             }
             View.DataContext = null; Window.Content = null; Window.Close(); await Rig.DisposeAsync();
         }
     }
-    private static void Click(ButtonBase button) => button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
-    private static async Task ToggleByKeyboardAsync(CheckBox box)
+    private static void Click(ButtonBase button) => FilmUiTest.Click(button);
+    private static async Task ToggleAsync(CheckBox box)
     {
-        box.BringIntoView();
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-        // ButtonBase also consults the real mouse and modifiers for Space; the
-        // KeyboardProbe only supplies the routed key, not those desktop states.
-        await Until(() => Mouse.PrimaryDevice.LeftButton == MouseButtonState.Released &&
-            Keyboard.Modifiers == ModifierKeys.None && !box.IsMouseCaptured,
-            () => $"Keyboard input is not idle: mouse={Mouse.PrimaryDevice.LeftButton}, modifiers={Keyboard.Modifiers}, captured={box.IsMouseCaptured}");
-        var keyboard = new KeyboardProbe();
-        var source = PresentationSource.FromVisual(box)!;
-        var down = new KeyEventArgs(keyboard, source, Environment.TickCount, Key.Space) { RoutedEvent = Keyboard.KeyDownEvent };
-        box.RaiseEvent(down);
-        Check(down.Handled && box.IsPressed,
-            $"Space keydown must press the actual checkbox: handled={down.Handled}, pressed={box.IsPressed}, captured={box.IsMouseCaptured}, mouse={Mouse.PrimaryDevice.LeftButton}, modifiers={Keyboard.Modifiers}");
-        var up = new KeyEventArgs(keyboard, source, Environment.TickCount, Key.Space) { RoutedEvent = Keyboard.KeyUpEvent };
-        box.RaiseEvent(up);
-        Check(up.Handled && !box.IsPressed,
-            $"Space keyup must release the actual checkbox: handled={up.Handled}, pressed={box.IsPressed}, captured={box.IsMouseCaptured}, mouse={Mouse.PrimaryDevice.LeftButton}, modifiers={Keyboard.Modifiers}");
-    }
-    private sealed class KeyboardProbe() : KeyboardDevice(InputManager.Current)
-    {
-        protected override KeyStates GetKeyStatesFromSystem(Key key) => KeyStates.None;
+        box.StartBringIntoView();
+        await FilmUiTest.Pump();
+        FilmUiTest.Click(box);
     }
     private static async Task Until(Func<bool> condition, Func<string>? failure = null)
     {
@@ -1150,7 +1123,7 @@ public static class FilmPlaybackControlsTests
         {
             throw new InvalidOperationException(failure(), error);
         }
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await FilmUiTest.Pump();
     }
     private static IEnumerable<DependencyObject> Visuals(DependencyObject root)
     {

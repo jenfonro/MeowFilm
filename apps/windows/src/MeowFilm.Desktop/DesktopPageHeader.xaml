@@ -1,9 +1,7 @@
 <UserControl x:Class="MeowFilm.Desktop.DesktopPageHeader"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:local="clr-namespace:MeowFilm.Desktop"
-             xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
-             Focusable="False" IsTabStop="False"
+             xmlns:local="using:MeowFilm.Desktop" IsTabStop="False"
              HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
     <Grid>
         <Grid.ColumnDefinitions>
@@ -11,31 +9,26 @@
             <ColumnDefinition Width="*" />
             <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
-        <Grid VerticalAlignment="Center" HorizontalAlignment="Left" Margin="0,0,16,0"
-              shell:WindowChrome.IsHitTestVisibleInChrome="True">
+        <Grid VerticalAlignment="Center" HorizontalAlignment="Left" Margin="0,0,16,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <ContentControl Content="{Binding Navigation, RelativeSource={RelativeSource AncestorType=local:DesktopPageHeader}}"
-                            VerticalContentAlignment="Center" Focusable="False" IsTabStop="False" />
+            <ContentControl x:Name="NavigationSlot"
+                            VerticalContentAlignment="Center" IsTabStop="False" />
             <TextBlock x:Name="Heading" Grid.Column="1" Visibility="Collapsed"
-                       Style="{DynamicResource MeowFilm.Title}" VerticalAlignment="Center" Margin="8,0,20,0"
+                       Style="{ThemeResource MeowFilm.Title}" VerticalAlignment="Center" Margin="8,0,20,0"
                        AutomationProperties.HeadingLevel="Level1" />
             <ContentControl x:Name="LeadingSlot" Grid.Column="2" Visibility="Collapsed"
-                            VerticalContentAlignment="Center" Focusable="False" IsTabStop="False" />
+                            VerticalContentAlignment="Center" IsTabStop="False" />
         </Grid>
         <ContentControl x:Name="CenterSlot" Grid.Column="1"
-                        Content="{Binding Center, RelativeSource={RelativeSource AncestorType=local:DesktopPageHeader}}"
-                        HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center"
-                        Focusable="False" IsTabStop="False" Margin="12,0"
-                        shell:WindowChrome.IsHitTestVisibleInChrome="True"/>
+
+                        HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center" IsTabStop="False" Margin="12,0"/>
         <StackPanel x:Name="TrailingHeader" Grid.Column="2" Orientation="Horizontal" Visibility="Collapsed"
-                    HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0"
-                    shell:WindowChrome.IsHitTestVisibleInChrome="True">
-            <ContentControl x:Name="TrailingSlot" VerticalContentAlignment="Center" Margin="0,0,8,0"
-                            Focusable="False" IsTabStop="False" />
+                    HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0">
+            <ContentControl x:Name="TrailingSlot" VerticalContentAlignment="Center" Margin="0,0,8,0" IsTabStop="False" />
             <ItemsControl x:Name="HeaderActions">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate><StackPanel Orientation="Horizontal" /></ItemsPanelTemplate>
@@ -44,7 +37,7 @@
                     <DataTemplate>
                         <Button Content="{Binding Label}" Tag="{Binding}" Click="OnActionClick"
                                 IsEnabled="{Binding IsEnabled}" AutomationProperties.Name="{Binding AutomationName}"
-                                Style="{DynamicResource MeowFilm.HeaderAction}" />
+                                Style="{ThemeResource MeowFilm.HeaderAction}" />
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>

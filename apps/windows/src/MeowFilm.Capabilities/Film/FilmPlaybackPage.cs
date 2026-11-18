@@ -2,8 +2,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
 
 namespace MeowFilm.Capabilities;
 
@@ -13,9 +12,11 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     private sealed record DirectoryKey(string? Source, string Line, string? Metadata, int? Season);
     private readonly FilmPlaybackSession? session;
     private readonly FilmLibrary? library;
+    private readonly FilmPlaybackSettings? preferences;
     private readonly Dictionary<DirectoryKey, BrowsingSlice> directories = [];
     private long metadataRevision;
     private FilmPlaybackSnapshot? snapshot;
+    private FilmWorkInfo? workInfo;
     private bool isListLayout, overviewExpanded, favorite, favoriteBusy, searchMoreBusy;
     private string connectionError = "";
     private static readonly string[] MetadataProperties =
@@ -27,15 +28,19 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     [
         nameof(SourceId), nameof(LineId), nameof(Season), nameof(MetadataSourceId), nameof(SelectedSource),
         nameof(CanBrowseSources), nameof(SelectedLine), nameof(SelectedSeason), nameof(SelectedEpisode),
-        nameof(SeasonLabel), nameof(EpisodeCountLabel), nameof(Metadata), nameof(IsFavorite), nameof(CanFavorite),
+        nameof(SeasonLabel), nameof(EpisodeCountLabel), nameof(IsFavorite), nameof(CanFavorite),
         nameof(HasLines), nameof(ShowLinePicker), nameof(CanBrowseLines), nameof(SourcePlaceholder), nameof(LinePlaceholder), nameof(HasMetadataMappings), nameof(HasSeasons), nameof(HasImageEpisodes),
         nameof(ShowEpisodeCards), nameof(ShowEpisodeList), nameof(ShowMovieCandidates), nameof(CanBrowseRaw),
         nameof(EntryResolution), nameof(RequiresSourceSearch), nameof(CanStartSourceSearch), nameof(CanSearchMore),
         nameof(ListLoading), nameof(ListError), nameof(ShowListStatus), nameof(ListStatus), nameof(ListMessage),
-        nameof(ShowListMessage), nameof(CanPlay), nameof(CanSelectDirectory), nameof(CanRetryMedia), nameof(ShortVideo), nameof(PreviewEpisodes),
-        nameof(HasCurrent), nameof(CurrentLabel), nameof(CurrentCandidateId), nameof(ConnectionFailed),
-        nameof(PrefetchStatus), nameof(ReportFailed), nameof(ReportErrorMessage), nameof(MetadataAssociationFailed),
-        nameof(MetadataAssociationErrorMessage), nameof(PlayerPanLabel), nameof(PlayerQualityLabel),
+        nameof(ShowListMessage), nameof(CanPlay), nameof(CanSelectDirectory), nameof(CanRetryMedia), nameof(PreviewEpisodes),
+        nameof(ConnectionFailed), nameof(ExecutionFailed), nameof(NeedsRecovery), nameof(MetadataAssociationFailed),
+        nameof(MetadataAssociationErrorMessage)
+    ];
+    private static readonly string[] PlaybackProperties =
+    [
+        nameof(HasCurrent), nameof(CurrentLabel), nameof(CurrentCandidateId), nameof(ShortVideo),
+        nameof(PrefetchStatus), nameof(ReportFailed), nameof(ReportErrorMessage), nameof(PlayerPanLabel), nameof(PlayerQualityLabel),
         nameof(PlayerPanOptions), nameof(PlayerQualityOptions), nameof(ShowPlayerSwitchActions), nameof(SelectedPanOption),
         nameof(PlayerBusy), nameof(PlayerBuffering), nameof(PlayerStatusVisible), nameof(PlayerStatusText),
         nameof(PlayerStageProgress), nameof(StatusText)
@@ -45,13 +50,14 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
         nameof(HasOutput), nameof(NoOutput), nameof(OwnsNativeMedia), nameof(IsPlaying), nameof(PlayLabel),
         nameof(Position), nameof(Duration), nameof(CanSeek), nameof(PlaybackRate), nameof(PlaybackAspect),
         nameof(ProgressLabel), nameof(Volume), nameof(PlayerBuffering), nameof(PlayerStatusVisible),
-        nameof(PlayerStatusText), nameof(StatusText), nameof(MediaView)
+        nameof(PlayerStatusText), nameof(StatusText), nameof(MediaView), nameof(MediaIdentity)
     ];
 
     internal FilmPlaybackPage(FilmCardItem item, FilmPlaybackRequest request,
-        FilmPlaybackSession? session, FilmLibrary? library)
+        FilmPlaybackSession? session, FilmLibrary? library, FilmPlaybackSettings? preferences = null)
     {
         Item = item; Request = request; this.session = session; this.library = library;
+        this.preferences = preferences;
         NavigationIdentity = Guid.NewGuid().ToString("N");
         request.Target.Validate();
         request.ResumeTarget?.Validate();
@@ -76,6 +82,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     private bool searchReleased;
     internal void Release()
     {
+        metadataChoiceGeneration++;
         ReleaseDirectories();
         if (searchReleased || SearchContext is not { } context) return;
         searchReleased = true;
@@ -152,7 +159,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
             {
                 var request = Request with
                 {
-                    Target = EntryTarget, EntrySurface = EntrySurface, Metadata = Request.Metadata?.Clone(),
+                    Target = EntryTarget, EntrySurface = EntrySurface, Metadata = MetadataFor(EntryTarget),
                     ResumeTarget = snapshot is null ? Request.ResumeTarget : HasUnresolvedEntry ? null : target,
                     Browsing = browsing
                 };
@@ -165,54 +172,36 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
             }
             bool metadataSourceResume = target.Kind == "source" && EntryTarget.Kind is ("movie" or "tv") &&
                 EntryTarget.MetadataProvider == "tmdb";
-            var metadata = metadataSourceResume &&
-                (DisplayProvider != EntryTarget.MetadataProvider || DisplayMetadataId != EntryTarget.MetadataId)
-                ? Request.Metadata ?? default : DisplayMetadata;
+            var metadata = MetadataFor(metadataSourceResume ? EntryTarget : target);
             return Request with { Target = metadataSourceResume ? EntryTarget : target, EntrySurface = EntrySurface,
                 ResumeTarget = metadataSourceResume ||
                     snapshot is not null && (Request.SearchReference is not null || Request.ResumeTarget is not null)
                     ? target : Request.ResumeTarget,
-                Metadata = metadata.ValueKind == JsonValueKind.Object ? metadata.Clone() : null, Browsing = browsing };
+                Metadata = metadata, Browsing = browsing };
         }
     }
+    private JsonElement? MetadataFor(FilmPlaybackTarget target) =>
+        workInfo is { } work && work.Provider == target.MetadataProvider && work.MetadataId == target.MetadataId
+            ? work.Metadata.Clone()
+            : Request.Target.MetadataProvider == target.MetadataProvider && Request.Target.MetadataId == target.MetadataId
+                ? Request.Metadata?.Clone() : null;
     private JsonElement DisplayMetadata => display?.Metadata ?? Request.Metadata ?? default;
     private JsonElement DisplaySource => display?.Source ?? default;
     private string DisplayKind => display?.Kind ?? ActiveTarget.Kind;
-    private string? DisplayProvider => FilmJson.Text(DisplaySource, "provider") is { Length: > 0 } provider
-        ? provider : ActiveTarget.MetadataProvider;
-    private string? DisplayMetadataId => FilmJson.Text(DisplaySource, "metadataId") is { Length: > 0 } id
-        ? id : ActiveTarget.MetadataId;
-    private bool DisplaysOriginalIdentity => DisplayProvider == Request.Target.MetadataProvider &&
-        DisplayMetadataId == Request.Target.MetadataId;
-    private FilmMetadataSupplement? Supplement => DisplayProvider == "douban" ? display?.Supplement : null;
-    private JsonElement SupplementMetadata => Supplement?.Metadata ?? default;
-    private bool UseOriginalValue(string first, string second)
-    {
-        if (!DisplaysOriginalIdentity) return false;
-        var detail = FilmJson.Member(MetadataCache?.Components ?? default, "detail");
-        string state = FilmJson.Text(detail, "status");
-        if (FilmJson.Member(detail, "fetchedAt").ValueKind == JsonValueKind.Number || state is "ready" or "empty")
-            return false;
-        return state is "failed" or "missing" ||
-            FilmJson.Member(DisplayMetadata, first).ValueKind == JsonValueKind.Undefined &&
-            FilmJson.Member(DisplayMetadata, second).ValueKind == JsonValueKind.Undefined;
-    }
-    public string Title => FilmJson.Text(DisplayMetadata, "title") is { Length: > 0 } title ? title :
-        FilmJson.Text(DisplayMetadata, "name") is { Length: > 0 } name ? name : ActiveTarget.Title;
+    private JsonElement WorkMetadata => workInfo?.Metadata ?? default;
+    public string Title => workInfo?.Title ?? "";
     public string Poster
     {
         get
         {
-            var detail = DisplayMetadata;
+            var detail = WorkMetadata;
             string poster = FilmJson.Text(detail, "poster_path");
             if (poster.Length == 0) poster = FilmJson.Text(FilmJson.Member(detail, "pic"), "normal");
-            if (poster.Length == 0) poster = FilmJson.Text(SupplementMetadata, "poster_path");
-            return poster.Length > 0 ? poster : UseOriginalValue("poster_path", "pic") ? Item.Poster : "";
+            return poster;
         }
     }
-    public string Backdrop => FilmJson.Text(DisplayMetadata, "backdrop_path") is { Length: > 0 } backdrop ? backdrop :
-        FilmJson.Text(SupplementMetadata, "backdrop_path") is { Length: > 0 } supplement ? supplement : Poster;
-    public string Logo => LogoFrom(DisplayMetadata) is { Length: > 0 } logo ? logo : LogoFrom(SupplementMetadata);
+    public string Backdrop => FilmJson.Text(WorkMetadata, "backdrop_path") is { Length: > 0 } backdrop ? backdrop : Poster;
+    public string Logo => LogoFrom(WorkMetadata);
     private static string LogoFrom(JsonElement detail) => FilmJson.Text(detail, "logo_path") is { Length: > 0 } logo ? logo :
         FilmJson.Array(FilmJson.Member(detail, "images"), "logos")
             .Select(row => FilmJson.Text(row, "file_path")).FirstOrDefault(path => path.Length > 0) ?? "";
@@ -220,12 +209,12 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     {
         get
         {
-            var detail = DisplayMetadata;
+            var detail = WorkMetadata;
             var values = new List<string>();
             string year = FilmJson.Text(detail, "year");
             if (year.Length == 0)
             {
-                string date = FilmJson.Text(detail, DisplayKind == "movie" ? "release_date" : "first_air_date");
+                string date = FilmJson.Text(detail, workInfo?.Kind == "movie" ? "release_date" : "first_air_date");
                 if (date.Length >= 4) year = date[..4];
             }
             if (year.Length > 0) values.Add(year);
@@ -233,7 +222,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
             if (countries.Length == 0) countries = FilmJson.Names(FilmJson.Member(detail, "countries"));
             if (countries.Length > 0) values.Add(countries);
             if (FilmJson.Integer(detail, "runtime") is > 0 and var minutes) values.Add($"{minutes}分钟");
-            if (snapshot?.WorkInfo is { Kind: "tv" } work)
+            if (workInfo is { Kind: "tv" } work)
             {
                 string totals = work.SeasonCount is { } seasons ? $"共 {seasons} 季" : "";
                 if (work.EpisodeCount is { } episodes) totals += $" {episodes} 集";
@@ -242,39 +231,36 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
             return string.Join(" / ", values);
         }
     }
-    public string Genres => FilmJson.Names(FilmJson.Member(DisplayMetadata, "genres"));
-    public string Score => FilmJson.Text(DisplayMetadata, "vote_average") is { Length: > 0 } vote && vote != "0" ? vote :
-        FilmJson.Text(FilmJson.Member(DisplayMetadata, "rating"), "value") is { Length: > 0 } rating && rating != "0" ? rating :
-        UseOriginalValue("vote_average", "rating") ? Item.Score : "";
+    public string Genres => FilmJson.Names(FilmJson.Member(WorkMetadata, "genres"));
+    public string Score => FilmJson.Text(WorkMetadata, "vote_average") is { Length: > 0 } vote && vote != "0" ? vote :
+        FilmJson.Text(FilmJson.Member(WorkMetadata, "rating"), "value") is { Length: > 0 } rating && rating != "0" ? rating : "";
     public bool HasScore => Score.Length > 0 && Score != "0";
-    public string ScoreProvider => FilmJson.Member(DisplayMetadata, "vote_average").ValueKind == JsonValueKind.Number ? "TMDB" :
-        FilmJson.Member(DisplayMetadata, "rating").ValueKind == JsonValueKind.Object ? "豆瓣" :
-        DisplayProvider == "tmdb" ? "TMDB" : DisplayProvider == "douban" ? "豆瓣" : "";
+    public string ScoreProvider => workInfo?.Provider switch { "tmdb" => "TMDB", "douban" => "豆瓣", _ => "" };
     public string Directors
     {
         get
         {
-            var detail = DisplayMetadata;
+            var detail = WorkMetadata;
             string directors = FilmJson.Names(FilmJson.Member(detail, "directors"));
             if (directors.Length == 0) directors = CreditDirectors(detail);
-            return directors.Length > 0 ? directors : CreditDirectors(SupplementMetadata);
+            return directors;
         }
     }
     public string Cast
     {
         get
         {
-            var detail = DisplayMetadata;
+            var detail = WorkMetadata;
             string cast = FilmJson.Names(FilmJson.Member(FilmJson.Member(detail, "credits"), "cast"));
             if (cast.Length == 0) cast = FilmJson.Names(FilmJson.Member(detail, "actors"));
-            return cast.Length > 0 ? cast : FilmJson.Names(FilmJson.Member(FilmJson.Member(SupplementMetadata, "credits"), "cast"));
+            return cast;
         }
     }
     private static string CreditDirectors(JsonElement detail) => string.Join(" / ",
         FilmJson.Array(FilmJson.Member(detail, "credits"), "crew")
             .Where(value => FilmJson.Text(value, "job") == "Director")
             .Select(value => FilmJson.Text(value, "name")).Where(name => name.Length > 0).Distinct());
-    public string Overview => snapshot?.WorkInfo?.Summary ?? "";
+    public string Overview => workInfo?.Summary ?? "";
     public FilmEpisodeDirectory? EpisodeDirectory { get; private set; }
     public IReadOnlyList<FilmEpisodeItem> Episodes => EpisodeDirectory?.Episodes ?? [];
     public IReadOnlyList<FilmCandidateItem> Candidates => EpisodeDirectory?.Candidates ?? [];
@@ -288,7 +274,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     public int? Season => selection?.Season;
     public string? MetadataSourceId => selection?.Metadata;
     public FilmSelection? SelectedSource => SourceId is { } id ? Sources.FirstOrDefault(value => value.Id == id && value.MetadataSourceId is null) :
-        Sources.FirstOrDefault(value => value.MetadataSourceId == MetadataSourceId && value.MetadataSourceId is not null);
+        Sources.FirstOrDefault(value => value.Provider == aggregateProvider && value.MetadataSourceId is not null);
     public bool CanBrowseSources => HasExecution && Sources.Count > 0;
     public bool ShowLinePicker => SourceId is not null;
     public bool CanBrowseLines => HasExecution && Lines.Count > 0;
@@ -308,7 +294,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     public bool CanFavorite => library is not null && !favoriteBusy;
     public bool Applying { get; private set; }
     public bool HasLines => Lines.Count > 0;
-    public bool HasMetadataMappings => SourceId is not null && MetadataSources.Count > 1;
+    public bool HasMetadataMappings => MetadataSources.Count > 1;
     public bool HasSeasons => Seasons.Count > 1;
     public bool HasImageEpisodes => DisplayKind != "movie" && Episodes.Count > 0;
     public bool ShowEpisodeCards => !ShowListStatus && HasImageEpisodes && IsHorizontalLayout;
@@ -334,9 +320,10 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     public string ListStatus => ListError.Length > 0 ? ListError : ListLoading ? "加载中…" : "无可用视频源";
     public string ListMessage => ListStatus;
     public bool ShowListMessage => ShowListStatus && !RequiresSourceSearch;
-    public bool CanPlay => HasExecution && snapshot is not null && !RequiresSourceSearch &&
+    public bool CanPlay => HasExecution && !ExecutionFailed && snapshot is not null && !RequiresSourceSearch &&
         PlayerStage != "unavailable";
-    public bool CanSelectDirectory => HasExecution && !ShowListStatus && PlayerStage != "unavailable";
+    public bool CanSelectDirectory => HasExecution && !ExecutionFailed && !ShowListStatus &&
+        (Episodes.Any(item => item.CanSelect) || Candidates.Any(item => item.PlaybackTarget is not null));
     public bool CanRetryMedia => CanPlay && session?.SnapshotFor(this) is { } executing &&
         (executing.AttemptId.Length > 0 || executing.CurrentId.Length > 0 ||
             FilmJson.Text(executing.Raw, "stage") is "error" or "unavailable");
@@ -359,12 +346,13 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
         get => session?.Volume ?? 0;
         set { if (HasOutput) RequireSession().Volume = value; Changed(nameof(Volume)); }
     }
-    public ContentControl? MediaView => session?.MediaView;
+    public FrameworkElement? MediaView => session?.MediaView;
     public bool ShortVideo => FilmJson.Bool(snapshot?.Raw ?? default, "shortVideo");
     public bool PreviewEpisodes => FilmJson.Bool(snapshot?.Raw ?? default, "previewEpisodes");
     public bool HasCurrent => HasExecution && session?.SnapshotFor(this)?.CurrentId.Length > 0;
     public string CurrentLabel => HasExecution ? FilmJson.Text(FilmJson.Member(snapshot?.Current ?? default, "candidate"), "name") : "";
-    public string StatusText => connectionError.Length > 0 ? FilmPlaybackError.Message(connectionError, "连接失败") : PlayerStage switch
+    public string StatusText => ExecutionFailed ? FilmPlaybackError.Message(session!.ExecutionError, "播放状态提交失败") :
+        connectionError.Length > 0 ? FilmPlaybackError.Message(connectionError, "连接失败") : PlayerStage switch
     {
         "loading" => "加载中…", "searching" => "匹配中…", "resolving" => "取址中…",
         "prepared" => "已准备", "pending" => "准备播放…", "playing" => PlayerBuffering ? "缓冲中…" : HasOutput ? IsPlaying ? "播放中" : "已暂停" : "准备播放…",
@@ -372,6 +360,8 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
         "unavailable" => "无可用视频源", "ended" => "已结束", "stopped" => "已停止", _ => ""
     };
     public bool ConnectionFailed => connectionError.Length > 0;
+    public bool ExecutionFailed => session?.IsCurrentPage(this) == true && session.ExecutionError.Length > 0;
+    public bool NeedsRecovery => ConnectionFailed || ExecutionFailed;
     public string PrefetchStatus => !HasExecution ? "" : string.Join(" · ", FilmJson.Array(session?.SnapshotFor(this)?.Raw ?? default, "prefetch")
         .Select(value => FilmJson.Text(value, "state") switch
         {
@@ -392,10 +382,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
         {
             string previousIdentity = FavoriteTarget.Id;
             var previous = snapshot;
-            var previousMetadata = DisplayMetadata;
-            var previousSupplement = SupplementMetadata;
-            string? previousProvider = DisplayProvider;
-            string previousKind = DisplayKind;
+            var previousWork = workInfo;
             var previousEpisodes = Episodes;
             var previousCandidates = Candidates;
             var previousDirectory = EpisodeDirectory;
@@ -415,13 +402,37 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
                         unreadDirectories.UnionWith(directories.Keys.Where(key => key.Source == id));
                 }
             }
+            if (previous?.SessionId == value.SessionId &&
+                !FilmJson.Equal(FilmJson.Member(previous.Raw, "metadataSources"), FilmJson.Member(value.Raw, "metadataSources")))
+            {
+                var available = FilmJson.Array(value.Raw, "metadataSources").Select(row => FilmJson.Text(row, "id"))
+                    .ToHashSet(StringComparer.Ordinal);
+                foreach (var key in directories.Keys.Where(key => key.Metadata is not null && !available.Contains(key.Metadata)).ToArray())
+                {
+                    directories.Remove(key);
+                    unreadDirectories.Remove(key);
+                    rememberedSelections.Remove((key.Source, key.Metadata));
+                }
+                if (selection?.Metadata is { } selected && !available.Contains(selected))
+                {
+                    selectionLocked = false;
+                    browseRevision++;
+                    browseRead?.Cancel();
+                    browseRead = null;
+                    explicitRead = false;
+                    preservingRead = false;
+                }
+            }
             snapshot = value;
-            if (updateBrowsing) connectionError = "";
+            bool retainingWork = previous?.EntryTarget.Id == value.EntryTarget.Id && value.WorkInfo is null &&
+                (FilmJson.Text(value.Raw, "stage") is "loading" or "error" ||
+                    FilmJson.Text(value.Raw, "metadataError").Length > 0 || FilmJson.Bool(value.Browsing, "loading") ||
+                    FilmJson.Text(value.Browsing, "error").Length > 0);
+            if (!retainingWork) workInfo = value.WorkInfo;
             if (updateBrowsing) UpdateBrowsing(value);
             if (previousIdentity != FavoriteTarget.Id) favorite = false;
-            bool metadataChanged = previous is null || !FilmJson.Equal(previousMetadata, DisplayMetadata) ||
-                !FilmJson.Equal(previousSupplement, SupplementMetadata) || previousProvider != DisplayProvider ||
-                previousKind != DisplayKind;
+            bool metadataChanged = previous is null || (previousWork is { } work
+                ? !work.SameContent(workInfo) : workInfo is not null);
             if (previous is null || !FilmJson.Equal(FilmJson.Member(previous.Raw, "metadataSources"),
                 FilmJson.Member(value.Raw, "metadataSources")))
             {
@@ -438,6 +449,9 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
                 }).OfType<FilmSelection>().ToArray();
                 if (!MetadataSources.SequenceEqual(metadataSources))
                 { MetadataSources = metadataSources; Changed(nameof(MetadataSources)); }
+                if (!MetadataSources.Any(row => row.Provider == aggregateProvider))
+                    aggregateProvider = MetadataSources.FirstOrDefault(row => row.Provider == EntryTarget.MetadataProvider)?.Provider ??
+                        MetadataSources.FirstOrDefault()?.Provider;
             }
             var sourceRows = FilmJson.Array(value.Raw, "sources");
             if (previous is null || !FilmJson.Equal(FilmJson.Member(previous.Raw, "sources"),
@@ -483,11 +497,9 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
                 if (!Seasons.SequenceEqual(nextSeasons)) { Seasons = nextSeasons; Changed(nameof(Seasons)); }
             }
             EpisodeDirectory?.Select(this);
-            if (metadataChanged || !updateBrowsing)
+            if (metadataChanged)
             {
-                var recommendations = DisplayProvider is { } provider ? Similar(DisplayMetadata, provider, DisplayKind) : [];
-                if (recommendations.Count == 0 && Supplement is { } supplement)
-                    recommendations = Similar(supplement.Metadata, "tmdb", supplement.Kind);
+                var recommendations = workInfo is { } info ? Similar(info.Metadata, info.Provider, info.Kind) : [];
                 if (!Recommendations.Select(item => (item.Id, item.Title, item.Poster, item.Score)).SequenceEqual(
                     recommendations.Select(item => (item.Id, item.Title, item.Poster, item.Score))))
                 { Recommendations = recommendations; Changed(nameof(Recommendations)); }
@@ -496,14 +508,14 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
             if (!ReferenceEquals(previousDirectory, EpisodeDirectory)) Changed(nameof(EpisodeDirectory));
             if (!ReferenceEquals(previousEpisodes, Episodes)) Changed(nameof(Episodes));
             if (!ReferenceEquals(previousCandidates, Candidates)) Changed(nameof(Candidates));
-            if (previous?.WorkInfo != value.WorkInfo)
-            { Changed(nameof(Title)); Changed(nameof(Overview)); Changed(nameof(Metadata)); }
             foreach (string property in SnapshotProperties) Changed(property);
+            if (previous is null || new[] { "stage", "error", "attempt", "current", "target", "prefetch", "reportError", "constraint", "shortVideo" }
+                .Any(name => !FilmJson.Equal(FilmJson.Member(previous.Raw, name), FilmJson.Member(value.Raw, name))))
+                NotifyPlayback();
         }
         finally { Applying = false; }
     }
 
-    internal string ContentPoster => Poster.Length > 0 ? Poster : Item.Poster;
     internal void ReleaseDirectories()
     {
         browseRead?.Cancel();
@@ -541,9 +553,29 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
             FilmJson.Member(snapshot.AttemptId.Length > 0 ? snapshot.Attempt : snapshot.Current, "candidate"), "id");
         return item.Season == snapshot.Target.Season && item.Number == snapshot.Target.Episode;
     }
-    internal void NotifyMedia() { foreach (string property in MediaProperties) Changed(property); }
-    internal void ExecutionEnded() { browseRead?.Cancel(); foreach (string property in SnapshotProperties) Changed(property); NotifyMedia(); }
-    internal void SetConnectionError(string code) { connectionError = code; Changed(""); }
+    internal void NotifyMedia(params string[] properties)
+    { foreach (string property in properties.Length > 0 ? properties : MediaProperties) Changed(property); }
+    internal void ExecutionEnded()
+    {
+        metadataChoiceGeneration++;
+        browseRead?.Cancel();
+        foreach (string property in SnapshotProperties) Changed(property);
+        NotifyPlayback();
+        NotifyMedia();
+    }
+    internal void SetConnectionError(string code)
+    {
+        if (connectionError == code) return;
+        connectionError = code;
+        foreach (string property in SnapshotProperties) Changed(property);
+        NotifyPlayback();
+    }
+    private void NotifyPlayback() { foreach (string property in PlaybackProperties) Changed(property); }
+    internal void NotifyExecutionError()
+    {
+        foreach (string property in SnapshotProperties) Changed(property);
+        NotifyPlayback();
+    }
     internal void SetListLayout(bool value)
     {
         if (isListLayout == value) return;
@@ -583,7 +615,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
         if (session is null || !session.IsCurrentPage(this)) throw new FilmPlaybackException("STALE_SESSION");
         return session.ReconnectAsync();
     }
-    internal void RetainOwner(Window? owner) => session?.RetainOwner(this, owner);
+    internal void RetainOwner(MeowFilm.Desktop.DesktopWindow? owner) => session?.RetainOwner(this, owner);
     internal Task EndRetainedOwnerAsync() => session?.EndRetainedOwnerAsync(this) ?? Task.CompletedTask;
     internal Task SelectEpisodeAsync(FilmEpisodeItem item)
     {
@@ -616,7 +648,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
         var items = await library.ReadAsync();
         if (identity == FavoriteTarget.Id) RefreshFavorite(items);
     }
-    private FilmPlaybackTarget FavoriteTarget => IsDoubanEntry ? EntryTarget : ActiveTarget;
+    private FilmPlaybackTarget FavoriteTarget => EntryTarget;
     internal void RefreshFavorite(IReadOnlyList<FilmCardItem> items)
     {
         favorite = items.Any(item => item.PlaybackContext?.Target.Id == FavoriteTarget.Id);
@@ -630,8 +662,8 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
         {
             await library.SetFavoriteAsync(Item with
             {
-                Id = FavoriteTarget.Id, Title = Title, Poster = Poster, Score = Score,
-                SearchContext = null, PlaybackContext = CaptureRequest
+                Id = FavoriteTarget.Id, Title = workInfo?.Title ?? EntryTarget.Title, Poster = Poster, Score = Score,
+                SearchContext = null, PlaybackContext = CaptureRequest with { Target = FavoriteTarget }
             }, !favorite);
             await LoadFavoriteAsync();
         }

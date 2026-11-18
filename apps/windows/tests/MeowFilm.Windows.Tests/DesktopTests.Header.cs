@@ -1,14 +1,17 @@
+using Colors = Microsoft.UI.Colors;
 using System.Collections.Specialized;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Automation.Peers;
-using System.Windows.Automation.Provider;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Shell;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.UI;
+using Microsoft.UI.Text;
+using Windows.System;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Windows.Tests;
@@ -17,92 +20,56 @@ public static partial class DesktopTests
 {
     private static IEnumerable<TestCase> HeaderPresentationCases()
     {
-        yield return Case("search category shares one hit target and equal left-aligned menu without submitting", async () =>
+        yield return Case("search category is one accessible entry with an equal-width dropdown and no submission", async () =>
         {
-            var module = new ProbeModule("search-entry");
-            var page = new SearchEntryProbe(module);
+            var module = new ProbeModule("search-entry"); var page = new SearchEntryProbe(module);
             await using var f = new Fixture([module], pages: [page]); await f.LoadAsync();
-            var root = DetachChrome(f.Shell);
-            using var source = new HwndSource(new HwndSourceParameters("shell-search-category-fixture")
-            {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000088,
-                PositionX = 80, PositionY = 80, Width = 1110, Height = 800
-            });
-            source.RootVisual = root;
-            root.Measure(new(1110, 800)); root.Arrange(new Rect(0, 0, 1110, 800)); root.UpdateLayout();
-            await DrainAsync();
-            var picker = f.Element<ComboBox>("SearchTargetPicker");
-            var input = f.Search;
-            picker.SelectedValue = "music";
+            var picker = f.Element<ComboBox>("SearchTargetPicker"); var input = f.Search;
             input.Text = "  草稿  ";
-            picker.ApplyTemplate(); root.UpdateLayout();
-            var toggle = (ToggleButton)picker.Template.FindName("TargetToggle", picker);
-            var popup = (Popup)picker.Template.FindName("PART_Popup", picker);
-            var menu = (Border)picker.Template.FindName("DropDown", picker);
-            True(picker.Focusable && input.Focusable && picker.FocusVisualStyle is not null,
-                "native ComboBox and input preserve their keyboard focus semantics");
+            True(picker.IsTabStop && input.IsTabStop, "both controls retain keyboard focus");
             Equal("搜索目标", AutomationProperties.GetName(picker), "category accessible name");
-            var expansion = (IExpandCollapseProvider)UIElementAutomationPeer.CreatePeerForElement(picker)!
-                .GetPattern(PatternInterface.ExpandCollapse);
-            var toggleAction = (IToggleProvider)UIElementAutomationPeer.CreatePeerForElement(toggle)!
-                .GetPattern(PatternInterface.Toggle);
-            foreach (var width in new[] { 92d, 118d })
+            var entry = f.Element<Grid>("SearchInput");
+            True(!ChromeVisuals(entry).OfType<Button>().Any(button => AutomationProperties.GetName(button) == "搜索"),
+                "magnifier is not a second search action");
+            True(ChromeVisuals(entry).OfType<FontIcon>().Single().IsHitTestVisible == false,
+                "magnifier defers hit testing to the complete combo entry");
+            var expansion = DesktopTestUi.Expansion(picker);
+            foreach (double width in new[] { 92d, 118d })
             {
-                picker.Width = width; root.UpdateLayout(); await DrainAsync();
-                foreach (var x in new[] { 15d, width / 2, width - 8 })
-                {
-                    var hit = root.InputHitTest(picker.TranslatePoint(new Point(x, picker.ActualHeight / 2), root));
-                    True(hit is DependencyObject target && (ReferenceEquals(target, toggle) || toggle.IsAncestorOf(target)),
-                        "magnifier label and arrow route to the same actual toggle");
-                    toggleAction.Toggle(); await UntilAsync(() => popup.IsOpen && menu.IsLoaded, "category dropdown opens");
-                    menu.UpdateLayout(); await DrainAsync();
-                    Equal(ExpandCollapseState.Expanded, expansion.ExpandCollapseState, "native accessible expanded state");
-                    True(Math.Abs(menu.ActualWidth - picker.ActualWidth) < .01,
-                        "visible menu body tracks the whole entry ActualWidth");
-                    True(Math.Abs(menu.PointToScreen(new Point()).X - picker.PointToScreen(new Point()).X) <= 1,
-                        "visible menu body aligns with the whole entry left edge, not its label");
-                    Equal("  草稿  ", input.Text, "opening categories preserves unsubmitted input");
-                    Equal(0, page.Submissions.Count, "category clicks never submit search");
-                    await NativeDesktopCapture.SaveAsync(menu, $"search-category-{width}-{x}");
-                    expansion.Collapse(); await DrainAsync();
-                }
+                picker.Width = width; f.Shell.Root.UpdateLayout();
+                expansion.Expand(); await UntilAsync(() => picker.IsDropDownOpen, "native category opens");
+                var menu = VisualTreeHelper.GetOpenPopupsForXamlRoot(picker.XamlRoot).Single().Child as FrameworkElement;
+                True(menu is not null, "native popup is realized"); menu!.UpdateLayout();
+                True(Math.Abs(menu.ActualWidth - picker.ActualWidth) <= 1, "dropdown follows whole entry width");
+                True(Math.Abs(NativeDesktopCapture.ScreenPoint(menu, new Point()).X -
+                    NativeDesktopCapture.ScreenPoint(picker, new Point()).X) <= 1,
+                    "dropdown left edge aligns with the whole category entry");
+                var labels = ChromeVisuals(menu).OfType<TextBlock>().Where(text => text.Text.Contains("小说")).ToArray();
+                True(labels.Length > 0 && labels.All(text => text.TextWrapping == TextWrapping.NoWrap &&
+                    text.TextTrimming == TextTrimming.CharacterEllipsis), "long category labels remain single-line ellipsized");
+                Equal("  草稿  ", input.Text, "opening categories preserves the draft");
+                Equal(0, page.Submissions.Count, "expansion is not submission");
+                expansion.Collapse(); await DrainAsync();
             }
-            expansion.Expand(); await UntilAsync(() => menu.IsLoaded && popup.IsOpen, "long categories open");
-            var labels = ChromeVisuals(menu).OfType<TextBlock>().Where(text => text.Text.Contains("小说")).ToArray();
-            True(labels.Length > 0 && labels.All(text => text.TextWrapping == TextWrapping.NoWrap &&
-                text.TextTrimming == TextTrimming.CharacterEllipsis && text.ActualWidth < menu.ActualWidth),
-                "long categories remain constrained single-line ellipsized labels");
-            True(ChromeVisuals(menu).OfType<TextBlock>().All(text => text.FontWeight == FontWeights.Normal) &&
-                picker.FontWeight == FontWeights.Normal && input.FontWeight == FontWeights.Normal,
-                "category controls and menu keep regular system typography");
-            expansion.Collapse();
             Click(f.Button("设置")); await DrainAsync();
-            True(!input.IsEnabled && !picker.IsEnabled, "settings disables input and category entry together");
-            Equal(0, page.Submissions.Count, "category operations never submit");
-            source.RootVisual = null;
+            True(!input.IsEnabled && !picker.IsEnabled, "settings disables both search controls");
         });
-        yield return Case("search category draft submits only through plain Enter", async () =>
+        yield return Case("search submission admits only unmodified noncomposing Enter", async () =>
         {
-            var module = new ProbeModule("search-entry");
-            var page = new SearchEntryProbe(module);
+            var module = new ProbeModule("search-entry"); var page = new SearchEntryProbe(module);
             await using var f = new Fixture([module], pages: [page]); await f.LoadAsync();
-            var input = f.Search;
-            input.Text = "   ";
-            RaiseKey(input, Key.Enter, ModifierKeys.None, false); await DrainAsync();
-            Equal(0, page.Submissions.Count, "empty input cannot submit");
-            input.Text = "  草稿  ";
-            f.Element<ComboBox>("SearchTargetPicker").SelectedValue = "novel";
-            False(RaiseKey(input, Key.Enter, ModifierKeys.Control, false).Handled, "modified Enter does not submit");
-            False(RaiseKey(input, Key.ImeProcessed, ModifierKeys.None, false).Handled, "IME composition does not submit");
-            Equal(0, page.Submissions.Count, "keyboard composition preserves the draft");
-            True(RaiseKey(input, Key.Enter, ModifierKeys.None, false).Handled, "plain Enter submits the input");
-            await UntilAsync(() => page.Submissions.Count == 1 && f.Status == "", "search submission completes");
-            Equal(("草稿", "novel"), page.Submissions.Single(), "trimmed query retains the selected opaque target");
+            f.Search.Text = "   "; f.Shell.TrySubmitSearch(VirtualKeyModifiers.None, false); await DrainAsync();
+            Equal(0, page.Submissions.Count, "empty query cannot submit");
+            f.Search.Text = "  草稿  "; await DesktopTestUi.SelectAsync(f.Element<ComboBox>("SearchTargetPicker"), page.Targets[2]);
+            False(f.Shell.TrySubmitSearch(VirtualKeyModifiers.Control, false), "modified Enter does not submit");
+            False(f.Shell.TrySubmitSearch(VirtualKeyModifiers.None, true), "composition does not submit");
+            Equal(0, page.Submissions.Count, "composition preserves draft");
+            True(f.Shell.TrySubmitSearch(VirtualKeyModifiers.None, false), "plain Enter admitted");
+            await UntilAsync(() => page.Submissions.Count == 1 && f.Status == "", "search completed");
+            Equal(("草稿", "novel"), page.Submissions.Single(), "query trims without changing target");
             Click(f.Button("设置")); await DrainAsync();
-            True(!input.IsEnabled && !f.Element<ComboBox>("SearchTargetPicker").IsEnabled,
-                "settings disables input and category entry together");
-            RaiseKey(input, Key.Enter, ModifierKeys.None, false); await DrainAsync();
-            Equal(1, page.Submissions.Count, "disabled search cannot submit");
+            False(f.Shell.TrySubmitSearch(VirtualKeyModifiers.None, false), "disabled search rejects submission");
+            Equal(1, page.Submissions.Count, "settings cannot submit");
         });
         yield return Case("shared header composes different slot structures without a shell", async () =>
         {
@@ -124,53 +91,48 @@ public static partial class DesktopTests
             LayoutHeader(root, 620);
             await DrainAsync();
             var heading = (TextBlock)host.FindName("Heading");
-            Rect Bounds(FrameworkElement element) => new(element.TranslatePoint(new Point(), root), element.RenderSize);
+            Rect Bounds(FrameworkElement element) => DesktopTestUi.Bounds(element, root);
             Same(slot, ((ContentControl)host.FindName("LeadingSlot")).Content, "automatic slot follows the visible title");
             True(Bounds(slot).Left > Bounds(heading).Right && Bounds(heading).Left > Bounds(navigation).Right,
                 "the host measures navigation, heading and contributed structure in order");
             Same(center, ((ContentControl)host.FindName("CenterSlot")).Content, "center has its own retained slot");
             True(Bounds(center).Width > 0 && Bounds(center).Left >= Bounds(slot).Right,
                 "center uses the space remaining after the leading contribution");
-            Equal(new Size(120, 48), slot.RenderSize, "a multi-row slot retains its own structure");
+            Equal(new Size(120, 48), new Size(slot.ActualWidth, slot.ActualHeight), "a multi-row slot retains its own structure");
             Equal(24d, input.ActualHeight, "compact contributed input keeps its intended height");
             True(Bounds(input).Top >= Bounds((FrameworkElement)slot.Children[0]).Bottom,
                 "contributed rows do not overlap");
-            FocusManager.SetIsFocusScope(root, true);
-            FocusManager.SetFocusedElement(root, input);
-            var originalParent = LogicalTreeHelper.GetParent(slot);
+            input.Focus(FocusState.Programmatic);
+            var originalParent = ParentOf(slot);
             page.Publish(page.Header with { Title = "更新标题" });
             await DrainAsync(); LayoutHeader(root, 620);
-            Same(originalParent, LogicalTreeHelper.GetParent(slot), "same-slot refresh does not remount controls");
-            Same(input, FocusManager.GetFocusedElement(root), "same-slot refresh retains native logical focus");
+            Same(originalParent, ParentOf(slot), "same-slot refresh does not remount controls");
+            Same(input, DesktopVisual.Focused(root), "same-slot refresh retains native logical focus");
             Equal("slot draft", input.Text, "contributed editing state retained");
             var action = ChromeVisuals(host).OfType<Button>().Single();
-            True(action.Focusable && action.FocusVisualStyle is not null, "generated action retains keyboard focus chrome");
+            True(action.IsTabStop && action.UseSystemFocusVisuals, "generated action retains keyboard focus chrome");
             Equal("执行", AutomationProperties.GetName(action), "contributed accessible action name");
-            Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(action), "header action display metrics");
-            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(action), "header action automatic rendering");
+            Equal(FontWeights.Normal, action.FontWeight, "header action stays regular");
             Click(action); await DrainAsync(); Equal(1, executions, "real generated button executes its contribution");
 
             var toggle = new CheckBox { Content = "选项", Width = 88, Height = 36 };
             page.Publish(page.Header with { Slot = toggle, SlotPlacement = DesktopHeaderSlotPlacement.Trailing });
             await DrainAsync(); LayoutHeader(root, 620);
-            True(LogicalTreeHelper.GetParent(slot) is null, "replaced custom structure is released");
+            True(ParentOf(slot) is null, "replaced custom structure is released");
             Same(toggle, ((ContentControl)host.FindName("TrailingSlot")).Content, "page selects the trailing slot");
             True(Bounds(toggle).Left > Bounds(heading).Right, "trailing content follows the measured leading group");
             True(Bounds(center).Left >= Bounds(heading).Right && Bounds(center).Right <= Bounds(toggle).Left,
                 "moving the contribution to trailing preserves an independent center without overlap");
-            DesktopTheme.SetIsHighContrast(root, true); LayoutHeader(root, 620);
-            action = ChromeVisuals(host).OfType<Button>().Single();
-            Equal(SystemColors.HighlightTextColor, ((SolidColorBrush)action.Foreground).Color, "system action foreground");
-            Equal(SystemColors.HighlightColor, ((SolidColorBrush)action.Background).Color, "system action background");
+
             page.Publish(page.Header with { SlotPlacement = DesktopHeaderSlotPlacement.Leading });
             await DrainAsync(); LayoutHeader(root, 420);
             Same(toggle, ((ContentControl)host.FindName("LeadingSlot")).Content, "same control can move between slots");
-            True(toggle.TranslatePoint(new Point(), root).X < 420, "leading content responds to the host width");
+            True(toggle.TransformToVisual(root).TransformPoint(new Point()).X < 420, "leading content responds to the host width");
             Equal("retained navigation", navigation.Text, "page layout changes retain the supplied navigation");
             host.Retire();
             Equal(0, page.Subscribers, "explicit retirement releases the source");
-            True(LogicalTreeHelper.GetParent(toggle) is null, "explicit retirement releases the slot");
-            source.RootVisual = null;
+            True(ParentOf(toggle) is null, "explicit retirement releases the slot");
+
         });
         yield return Case("header retains action buttons and bindings while current enabled states change", async () =>
         {
@@ -195,7 +157,7 @@ public static partial class DesktopTests
             True(buttons[0].IsEnabled && !buttons[2].IsEnabled, "initial dynamic enabled states are bound");
             var collectionChanges = 0;
             NotifyCollectionChangedEventHandler changed = (_, _) => collectionChanges++;
-            ((INotifyCollectionChanged)items.Items).CollectionChanged += changed;
+            ((INotifyCollectionChanged)items.ItemsSource).CollectionChanged += changed;
             for (var index = 0; index < 32; index++)
             {
                 page.Publish(page.Header with { Title = "updated-" + index, Actions = [action, second] });
@@ -235,8 +197,8 @@ public static partial class DesktopTests
             Same(buttons[0], ChromeVisuals(host).OfType<Button>().First(), "operation completion retains the realized button");
             Same(tags[0], buttons[0].Tag, "operation completion retains the binding item");
             Equal(0, collectionChanges, "enabled changes and operation completion do not mutate the action collection");
-            ((INotifyCollectionChanged)items.Items).CollectionChanged -= changed;
-            host.Retire(); source.RootVisual = null;
+            ((INotifyCollectionChanged)items.ItemsSource).CollectionChanged -= changed;
+            host.Retire();
         });
         yield return Case("header action replacement reorder and removal reject old realized buttons", async () =>
         {
@@ -294,7 +256,7 @@ public static partial class DesktopTests
             Click(remaining); await DrainAsync();
             Equal(3, replacementExecutions, "last removed item cannot execute");
             Equal(0, executions, "original delegate was never admitted after replacement");
-            host.Retire(); source.RootVisual = null;
+            host.Retire();
         });
         yield return Case("header unload and retirement fence old realized buttons across remount", async () =>
         {
@@ -339,7 +301,7 @@ public static partial class DesktopTests
             Equal(1, executions, "buttons from both old generations remain rejected");
             Click(returned); await DrainAsync();
             Equal(2, executions, "current returned button executes the same action");
-            host.Retire(); source.RootVisual = null;
+            host.Retire();
         });
         yield return Case("shell header centers search in remaining content space and preserves contributions caption and search identity", async () =>
         {
@@ -350,17 +312,16 @@ public static partial class DesktopTests
                 Slot: slot, Actions: [new("action", "执行", _ => { executions++; return Task.CompletedTask; })]));
             await using var f = new Fixture([new ProbeModule("layout-domain")], pages: [page]);
             await f.LoadAsync();
-            f.Element<ListBox>("PublicNavigationList").SelectedItem = page;
+            DesktopTestUi.Select(f.Element<ListView>("PublicNavigationList"), page);
             await UntilAsync(() => f.Status == "" && f.Shell.Title.EndsWith("layout", StringComparison.Ordinal), "header page");
             var search = f.Search;
-            var root = DetachChrome(f.Shell);
-            using var source = HeaderSource(root);
+            var root = f.Shell.Root;
             foreach (var width in new[] { 1110d, 860d, 1440d })
             {
                 root.Width = width; root.Height = 800;
                 root.Measure(new(width, 800)); root.Arrange(new Rect(0, 0, width, 800)); root.UpdateLayout();
                 await DrainAsync();
-                Rect Bounds(FrameworkElement element) => new(element.TranslatePoint(new Point(), root), element.RenderSize);
+                Rect Bounds(FrameworkElement element) => DesktopTestUi.Bounds(element, root);
                 void Near(double expected, double actual, string label) =>
                     True(Math.Abs(expected - actual) <= 1, label + " (within layout rounding)");
                 var caption = f.Element<StackPanel>("CaptionBar");
@@ -387,16 +348,11 @@ public static partial class DesktopTests
                     "navigation search contribution action and caption never overlap at any supported width");
                 if (width == 1440) Near(430, Bounds(input).Width, "wide content reaches the design search width");
                 if (width == 860) True(Bounds(input).Width < 430, "narrow content shrinks the search before the caption");
-                Equal(5, caption.Children.OfType<Button>().Count(), "notification joins the four caption controls");
+                Equal(2, caption.Children.OfType<Button>().Count(), "notification and settings remain client controls");
                 foreach (var control in caption.Children.OfType<Button>()) Near(42, Bounds(control).Width, "caption button width");
-                Near(width - 222, Bounds(caption).Left, "five caption buttons occupy their measured width");
-                Near(width - 12, Bounds(caption).Right, "caption keeps its existing right inset");
-                Equal(64d, Bounds(f.Element<Grid>("ContentRegion")).Top, "content retains the compact top boundary");
-                foreach (var interactive in new FrameworkElement[] { search, f.Back, f.Forward, slot, button,
-                    f.Element<Button>("NotificationButton"), f.Element<Button>("MaximizeButton") })
-                    True(WindowChrome.GetIsHitTestVisibleInChrome(interactive), "controls retain client hit tests");
-                var hit = root.InputHitTest(new Point(Bounds(caption).Left - 2, 2));
-                True(hit is not null && !WindowChrome.GetIsHitTestVisibleInChrome(hit), "blank header space remains draggable");
+                True(Bounds(caption).Right <= root.ActualWidth - 138, "client controls leave native caption-button space");
+                Equal(64d, Bounds(f.Element<Grid>("ContentRegion")).Top, "compact content boundary");
+                True(f.Shell.ExtendsContentIntoTitleBar, "system caption integrates the content root");
                 Click(slot); Click(button); await DrainAsync();
             }
             Equal(6, executions, "contribution controls and generated actions remain executable across resize");
@@ -405,12 +361,12 @@ public static partial class DesktopTests
             Equal(Visibility.Collapsed, f.Element<Grid>("SearchInput").Visibility, "settings hide the retained search");
             var heading = f.HeaderElement<TextBlock>("Heading");
             Equal("设置", heading.Text, "the shared component presents the settings title");
-            True(heading.TranslatePoint(new Point(), root).X > f.Back.TranslatePoint(new Point(f.Back.ActualWidth, 0), root).X,
+            True(heading.TransformToVisual(root).TransformPoint(new Point()).X > f.Back.TransformToVisual(root).TransformPoint(new Point(f.Back.ActualWidth, 0)).X,
                 "settings heading remains beside back");
             Click(f.Back); await DrainAsync(); root.UpdateLayout();
             Same(search, f.Search, "leaving settings restores the same search");
             True(search.IsEnabled && f.Element<Grid>("SearchInput").Visibility == Visibility.Visible, "search is restored");
-            source.RootVisual = null;
+
         });
         yield return Case("header generation fences queued events and unfinished actions across a return", async () =>
         {
@@ -421,15 +377,15 @@ public static partial class DesktopTests
             var second = new HeaderContributionProbe("second", new("second"));
             await using var f = new Fixture([new ProbeModule("domain")], pages: [first, second]);
             await f.LoadAsync();
-            var navigation = f.Element<ListBox>("PublicNavigationList");
-            navigation.SelectedItem = first; await DrainAsync();
+            var navigation = f.Element<ListView>("PublicNavigationList");
+            DesktopTestUi.Select(navigation, first); await DrainAsync();
             var stale = f.HeaderElement<ItemsControl>("HeaderActions").Items.Cast<DesktopHeaderActionItem>().Single();
             InvokeHeaderAction(f.Shell, stale); await pending.Started.Task;
             first.Publish(first.Header with { Title = "updated" });
-            navigation.SelectedItem = second;
-            True(LogicalTreeHelper.GetParent(slot) is null, "leaving the source detaches its contributed tree");
+            DesktopTestUi.Select(navigation, second);
+            True(ParentOf(slot) is null, "leaving the source detaches its contributed tree");
             Equal(0, first.Subscribers, "leaving unsubscribes before another presentation");
-            navigation.SelectedItem = first;
+            DesktopTestUi.Select(navigation, first);
             var reads = first.Reads;
             await DrainAsync();
             Equal(reads, first.Reads, "a queued event from the previous generation cannot refresh a returned source");
@@ -469,7 +425,7 @@ public static partial class DesktopTests
             Equal(Visibility.Collapsed, surface.Visibility, "retained content is hidden");
             Equal(0, view.Subscribers, "hidden content does not retain header subscriptions");
             True(pending.Token.IsCancellationRequested, "hiding a retained module cancels its header action");
-            True(LogicalTreeHelper.GetParent(slot) is null, "hiding releases its header slot without unmounting the content");
+            True(ParentOf(slot) is null, "hiding releases its header slot without unmounting the content");
             view.Publish(contribution with { Title = "returned header" }); await DrainAsync();
             Equal("meowfilm · visible", f.Shell.Title, "hidden contributions cannot change the visible title");
 
@@ -515,7 +471,7 @@ public static partial class DesktopTests
             root.Child = null; await DrainAsync();
             Equal(0, page.Subscribers, "unloaded header stops source notifications");
             True(pending.Token.IsCancellationRequested, "unloaded header cancels the action");
-            True(LogicalTreeHelper.GetParent(slot) is null, "unload releases the contributed tree");
+            True(ParentOf(slot) is null, "unload releases the contributed tree");
             page.Publish(page.Header with { Title = "reloaded" });
             root.Child = host; LayoutHeader(root, 620); await DrainAsync();
             Equal(1, page.Subscribers, "reload restores only one subscription");
@@ -523,7 +479,7 @@ public static partial class DesktopTests
             Equal("persisted", slot.Text, "reload preserves page-owned slot state");
             pending.Fail(); await DrainAsync();
             Equal(0, failures, "unloaded operation cannot report a failure after reload");
-            host.Retire(); source.RootVisual = null;
+            host.Retire();
         });
         foreach (var boundary in new[] { "settings", "close", "abort" })
             yield return Case("header action cancellation at " + boundary, async () =>
@@ -534,7 +490,7 @@ public static partial class DesktopTests
                     Actions: [new("pending", "等待", pending.RunAsync)]));
                 await using var f = new Fixture([new ProbeModule("domain")], pages: [page]);
                 await f.LoadAsync();
-                f.Element<ListBox>("PublicNavigationList").SelectedItem = page; await DrainAsync();
+                DesktopTestUi.Select(f.Element<ListView>("PublicNavigationList"), page); await DrainAsync();
                 InvokeHeaderAction(f.Shell, f.HeaderElement<ItemsControl>("HeaderActions").Items.Cast<DesktopHeaderActionItem>().Single());
                 await pending.Started.Task;
                 if (boundary == "settings") { Click(f.Element<Button>("SettingsButton")); await DrainAsync(); }
@@ -542,33 +498,17 @@ public static partial class DesktopTests
                 else { await f.Shell.AbortAsync(); await f.WaitClosedAsync(); }
                 True(pending.Token.IsCancellationRequested, boundary + " cancels header work");
                 Equal(0, page.Subscribers, boundary + " removes header subscriptions");
-                True(LogicalTreeHelper.GetParent(slot) is null, boundary + " releases the slot");
+                True(ParentOf(slot) is null, boundary + " releases the slot");
                 var status = f.Status;
                 pending.Fail(); await DrainAsync();
                 Equal(status, f.Status, "late failure cannot overwrite " + boundary + " status");
             });
     }
 
-    private static Border HeaderRoot(DesktopPageHeader header)
-    {
-        var root = new Border { Child = header, Background = Brushes.White, UseLayoutRounding = true, SnapsToDevicePixels = true };
-        root.Resources.MergedDictionaries.Add(new ResourceDictionary
-        { Source = new Uri("/MeowFilm.Desktop;component/Theme.xaml", UriKind.Relative) });
-        TextOptions.SetTextFormattingMode(root, TextFormattingMode.Display);
-        TextOptions.SetTextRenderingMode(root, TextRenderingMode.Auto);
-        return root;
-    }
+    private static Border HeaderRoot(DesktopPageHeader header) => new()
+    { Child = header, Background = new SolidColorBrush(Colors.White), UseLayoutRounding = true };
 
-    private static HwndSource HeaderSource(FrameworkElement root)
-    {
-        var source = new HwndSource(new HwndSourceParameters("desktop-header-fixture")
-        {
-            WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-            PositionX = -32000, PositionY = -32000, Width = 1440, Height = 800
-        });
-        source.RootVisual = root;
-        return source;
-    }
+    private static DesktopTestUi.Host HeaderSource(FrameworkElement root) => new(root);
 
     private static void LayoutHeader(FrameworkElement root, double width)
     {
@@ -580,7 +520,7 @@ public static partial class DesktopTests
     {
         private EventHandler? changed;
         public int Subscribers { get; private set; }
-        public DesktopHeaderContribution Header => header;
+        public new DesktopHeaderContribution Header => header;
         public event EventHandler? HeaderChanged
         {
             add { changed += value; Subscribers++; }

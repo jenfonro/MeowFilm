@@ -911,7 +911,7 @@ public static class FilmPlaybackKernelTests
         {
             this.owners = owners;
             Kernel = new(owners);
-            Playback = new(Dispatcher.CurrentDispatcher, Kernel, acquireOutput);
+            Playback = new(Dispatcher.CurrentDispatcher, Kernel, acquireOutput, new SurfaceProbe());
         }
         internal Task Prepare(Owner owner, RuntimeMediaPlaybackIntent intent, CancellationToken token = default) =>
             Playback.PrepareAsync(intent, owner.Address, new NativeVideoInput(NativeVideoFormat.Progressive), owner.Lease, token);
@@ -929,12 +929,30 @@ public static class FilmPlaybackKernelTests
         }
     }
 
+    // Lifecycle tests replace the GPU binding only. Real composition is covered
+    // by the logged-in desktop integration cases, not this probe.
+    private sealed class SurfaceProbe : FilmVideoSurface
+    {
+        internal override nint DisplayWindow => 0;
+        internal override FilmKernelNative.Surface Describe() => new()
+        {
+            Size = (uint)Marshal.SizeOf<FilmKernelNative.Surface>(), Abi = FilmKernelNative.Abi,
+            DisplayWindow = 1, Width = 640, Height = 360, ScaleX = 1, ScaleY = 1, Visible = 1
+        };
+        internal override Task WaitForTargetAsync(CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+        internal override void BindSwapchain(nint value) { }
+    }
+
     private sealed class Owner
     {
         private readonly object gate = new();
         private FilmKernelNative.Snapshot snapshot = new()
         {
-            Size = (uint)Marshal.SizeOf<FilmKernelNative.Snapshot>(), Abi = 1, Duration = 600,
+            Size = (uint)Marshal.SizeOf<FilmKernelNative.Snapshot>(), Abi = FilmKernelNative.Abi, Duration = 600,
             Width = 1920, Height = 1080, Seekable = 1, AudioTrack = 2, SubtitleTrack = -1
         };
         internal readonly Uri Address;
@@ -1024,17 +1042,19 @@ public static class FilmPlaybackKernelTests
         }
         internal override int Prepare(IntPtr owner, double position, IntPtr target)
         {
-            Check(target != IntPtr.Zero, "prepare receives the actual parked picture target");
+            Check(target == IntPtr.Zero, "silent preparation does not require a mounted presentation target");
             var state = Record(owner, "prepare", position);
             state.PrepareGate?.Wait();
             state.Update(state: 1, position: position);
             return 0;
         }
-        internal override int Attach(IntPtr owner, IntPtr target)
+        internal override int Attach(IntPtr owner, FilmKernelNative.Surface? target, out IntPtr swapchain)
         {
-            Record(owner, target == IntPtr.Zero ? "detach" : "attach");
+            Record(owner, target is null ? "detach" : "attach");
+            swapchain = target is null ? IntPtr.Zero : owner;
             return 0;
         }
+        internal override int UpdateSurface(IntPtr owner, ref FilmKernelNative.Surface target) => 0;
         internal override int Start(IntPtr owner, int paused)
         {
             var value = Record(owner, "start", paused);

@@ -1,4 +1,8 @@
-using System.Windows;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities.Feedback;
 using MeowFilm.Desktop;
@@ -58,11 +62,7 @@ public static partial class MusicUiTests
                 {
                     tray.Exit = exit;
                     return tray;
-                })
-            {
-                WindowStartupLocation = WindowStartupLocation.Manual, Left = -10000, Top = -10000,
-                ShowActivated = false, ShowInTaskbar = false
-            };
+                });
             var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             shell.Closed += (_, _) => closed.TrySetResult();
             HeldReply? prepare = null;

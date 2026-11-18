@@ -1,6 +1,7 @@
-using System.Windows;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
+using Windows.UI;
 using System.Windows.Threading;
 using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
@@ -20,7 +21,7 @@ internal sealed class MusicPresentation
     private MusicPlayerView? player;
     private MusicPlayerDetailView? detail;
     private MusicQueueView? queue;
-    private Brush playerSample = Brushes.DimGray;
+    private Brush playerSample = MusicVisuals.Brush("#696969");
     private double scroll;
     private bool restorePending;
 
@@ -43,11 +44,11 @@ internal sealed class MusicPresentation
     internal MusicPlayerView Player => player ??= WithArtwork(new MusicPlayerView(module));
     internal MusicPlayerDetailView Detail => detail ??= WithArtwork(new MusicPlayerDetailView(module));
     internal MusicQueueView Queue => queue ??= WithArtwork(new MusicQueueView(module));
-    internal bool IsSettingsActive => settings is { IsLoaded: true, IsVisible: true };
-    internal bool IsPageActive => page is { IsLoaded: true, IsVisible: true };
+    internal bool IsSettingsActive => settings is { IsLoaded: true, Visibility: Visibility.Visible };
+    internal bool IsPageActive => page is { IsLoaded: true, Visibility: Visibility.Visible };
     internal DesktopNavigationGroupAction CreatePlaylistAction { get; }
-    internal Brush PlayerBackground { get; private set; } = MusicPlayerArtwork.Backdrop(Brushes.DimGray);
-    internal Brush PlayerProgress { get; private set; } = MusicPlayerArtwork.Progress(Brushes.DimGray);
+    internal Brush PlayerBackground { get; private set; } = MusicPlayerArtwork.Backdrop(MusicVisuals.Brush("#696969"));
+    internal Brush PlayerProgress { get; private set; } = MusicPlayerArtwork.Progress(MusicVisuals.Brush("#696969"));
 
     internal double CaptureScroll() => page?.CaptureScroll() ?? scroll;
     internal void RestoreScroll(double value)
@@ -69,29 +70,42 @@ internal sealed class MusicPresentation
     internal void DeactivatePlayer() => player?.Deactivate();
     internal void DeactivateDetail() => detail?.Deactivate();
     internal void ResetSearchPresentation() => page?.ResetSearchPresentation();
+    private Color[]? backdropColors;
+    private Storyboard? backdropAnimation;
 
     internal void RefreshAppearance(Brush sampled, bool animate = true)
     {
         playerSample = sampled;
         var palette = module.PlayerPalette(sampled);
-        var next = (GradientBrush)MusicPlayerArtwork.Backdrop(palette);
-        var prior = PlayerBackground as GradientBrush;
-        bool colorsChanged = prior is null || !prior.GradientStops
-            .Select(stop => (Color)stop.GetAnimationBaseValue(GradientStop.ColorProperty))
-            .SequenceEqual(next.GradientStops.Select(stop => stop.Color));
+        var next = (RadialGradientBrush)MusicPlayerArtwork.Backdrop(palette);
+        var prior = PlayerBackground as RadialGradientBrush;
+        var colors = next.GradientStops.Select(stop => stop.Color).ToArray();
+        bool colorsChanged = !(backdropColors ?? prior?.GradientStops.Select(stop => stop.Color).ToArray() ?? [])
+            .SequenceEqual(colors);
         if (colorsChanged)
         {
-            if (animate && (page?.IsVisible == true || player?.IsVisible == true || detail?.IsVisible == true) &&
-                SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast &&
-                prior is not null && prior.GradientStops.Count == next.GradientStops.Count)
-            {
-                next = next.Clone();
-                for (int i = 0; i < next.GradientStops.Count; i++)
-                    next.GradientStops[i].BeginAnimation(GradientStop.ColorProperty,
-                        new ColorAnimation(prior.GradientStops[i].Color, next.GradientStops[i].Color,
-                            TimeSpan.FromMilliseconds(300)) { FillBehavior = FillBehavior.Stop });
-            }
+            var visibleColors = prior?.GradientStops.Select(stop => stop.Color).ToArray();
+            backdropAnimation?.Stop(); backdropAnimation = null;
+            backdropColors = colors;
             PlayerBackground = next;
+            if (animate && (page is not null && DesktopVisual.IsVisible(page) ||
+                player is not null && DesktopVisual.IsVisible(player) || detail is not null && DesktopVisual.IsVisible(detail)) &&
+                MusicVisuals.Animate &&
+                visibleColors is not null && visibleColors.Length == colors.Length)
+            {
+                var storyboard = new Storyboard();
+                for (int i = 0; i < next.GradientStops.Count; i++)
+                {
+                    var animation = new ColorAnimation { From = visibleColors[i], To = colors[i],
+                        Duration = TimeSpan.FromMilliseconds(300), EnableDependentAnimation = true };
+                    Storyboard.SetTarget(animation, next.GradientStops[i]); Storyboard.SetTargetProperty(animation, "Color");
+                    storyboard.Children.Add(animation);
+                }
+                backdropAnimation = storyboard;
+                storyboard.Completed += (_, _) =>
+                { if (ReferenceEquals(backdropAnimation, storyboard)) backdropAnimation = null; };
+                storyboard.Begin();
+            }
         }
         PlayerProgress = MusicPlayerArtwork.Progress(palette);
         module.RefreshPlayerBackground();

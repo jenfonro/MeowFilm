@@ -1,22 +1,30 @@
+using FontWeights = Microsoft.UI.Text.FontWeights;
+using Windows.UI;
+using Windows.System;
+using global::Windows.UI.ViewManagement;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Security.Cryptography;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Automation.Peers;
-using System.Windows.Automation.Provider;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI;
+using global::Windows.UI.Text;
+using MeowFilm.Desktop;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
+
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Film.Rules;
 using MeowFilm.Core.Runtime;
-using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -39,7 +47,7 @@ public static class FilmSettingsUiTests
         yield return Case("cat add and type edits are draft-only until saved", CatTypeDraft);
         yield return Case("diagnostic states open the shared dialog without querying the runtime", DetectionDiagnostics);
         yield return Case("failed source operations restore switches and notify with retry", SourceFailure);
-        yield return Case("native navigation scrolling high contrast and WPF snapshots cover both window sizes", Layout);
+        yield return Case("native navigation scrolling contrast resources and WinUI snapshots cover both window sizes", Layout);
         yield return Case("empty source pages keep their actions and columns", Empty);
         yield return Case("data sources echo one token and cookie and save proxy options natively and independently", DataSources);
         yield return Case("site clean lives under matching and playback uses half-width shared order lists", PlaybackLayout);
@@ -48,7 +56,7 @@ public static class FilmSettingsUiTests
     }
 
     private static TestCase Case(string name, Func<Task> body) =>
-        new("film-settings-ui: " + name, () => MusicQualityConsumerTests.Sta(body));
+        new("film-settings-ui: " + name, () => TestUiHost.InvokeAsync(body));
     private static void Check(bool condition, string message)
     {
         if (!condition) throw new InvalidOperationException(message);
@@ -62,7 +70,7 @@ public static class FilmSettingsUiTests
             "saved rules expose their current sequence numbers");
         var addRule = (FrameworkElement)ruleEditor.FindName("NewPattern");
         var rulesList = (FrameworkElement)ruleEditor.FindName("RuleList");
-        Check(addRule.TranslatePoint(new Point(), ruleEditor).Y < rulesList.TranslatePoint(new Point(), ruleEditor).Y,
+        Check(addRule.TransformToVisual(ruleEditor).TransformPoint(new Point()).Y < rulesList.TransformToVisual(ruleEditor).TransformPoint(new Point()).Y,
             "new rule input precedes the saved rows");
         Check(scene.View.Header is { Title: "设置", SearchVisible: false, SearchEnabled: false, Slot: null },
             "film settings contributes content without category navigation");
@@ -128,20 +136,15 @@ public static class FilmSettingsUiTests
         Check(editor.Rows.Count == count - 1, "confirmed deletion saves the new full snapshot");
         scene.Editor("SearchEditor").Rows[0].Pattern = "search-unsaved";
         var restore = Button(scene.View, "恢复列表净化默认规则");
-        DesktopTheme.SetIsHighContrast(scene.View, true); scene.View.UpdateLayout();
+        using var contrast = new FilmUiTest.HighContrastResources(scene.View); scene.View.UpdateLayout();
         var restoreText = Visuals(restore).OfType<TextBlock>().Single();
-        Check(((SolidColorBrush)restore.Foreground).Color == SystemColors.WindowTextColor &&
-            ((SolidColorBrush)restoreText.Foreground).Color == SystemColors.WindowTextColor, "restore normal text uses system window foreground");
-        var hoverKey = (DependencyPropertyKey)typeof(UIElement).GetField("IsMouseOverPropertyKey",
-            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!;
-        restore.SetValue(hoverKey, true); scene.View.UpdateLayout();
-        Check(((SolidColorBrush)restore.Background).Color == SystemColors.HighlightColor &&
-            ((SolidColorBrush)restoreText.Foreground).Color == SystemColors.HighlightTextColor, "restore hovered text matches its system highlight background");
-        restore.SetValue(hoverKey, false);
+        Check(((SolidColorBrush)restore.Foreground).Color == FilmUiTest.ResourceColor(scene.View, "MeowFilm.Brush.Text") &&
+            ((SolidColorBrush)restoreText.Foreground).Color == FilmUiTest.ResourceColor(scene.View, "MeowFilm.Brush.Text"), "restore normal text uses system window foreground");
+        Check(VisualStateManager.GoToState(restore, "PointerOver", false), "restore retains a native pointer visual state");
+        Check(VisualStateManager.GoToState(restore, "Normal", false), "restore returns to its native resting state");
         restore.IsEnabled = false; scene.View.UpdateLayout();
-        Check(((SolidColorBrush)restore.Foreground).Color == SystemColors.GrayTextColor &&
-            ((SolidColorBrush)restoreText.Foreground).Color == SystemColors.GrayTextColor, "disabled restore text uses system gray foreground");
-        restore.ClearValue(UIElement.IsEnabledProperty);
+        Check(!restore.IsEnabled && restoreText.FontWeight == FontWeights.Normal, "disabled restore retains regular readable text");
+        restore.ClearValue(Control.IsEnabledProperty);
         Click(restore); await Drain();
         Check(scene.Element<Popup>("ActionPopup").IsOpen, "restore still requires confirmation");
         Click(scene.Element<Button>("PopupCancel")); await Drain();
@@ -247,8 +250,8 @@ public static class FilmSettingsUiTests
         scene.RulesRuntime.HoldProcess = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Click(Button(scene.View, "测试列表净化与集数匹配"));
         await Until(() => scene.RulesRuntime.ProcessEntered);
-        Check(scene.View.RulesBusy && !scene.Element<StackPanel>("RuleSections").IsEnabled, "busy rules remain legible but cannot mutate");
-        Capture(scene.View, "film-settings-rules-busy.png");
+        Check(scene.View.RulesBusy && !scene.Box("EpisodeInput").IsEnabled, "busy rules remain legible but cannot mutate");
+        await Capture(scene.View, "film-settings-rules-busy.png");
         await scene.Select("cats");
         scene.RulesRuntime.HoldProcess.SetResult();
         await Until(() => !scene.View.RulesBusy);
@@ -309,8 +312,8 @@ public static class FilmSettingsUiTests
     private static async Task PopupLifetime()
     {
         await using var scene = await Scene.Create(19);
-        scene.Window.Left = 80; scene.Window.Top = 60;
-        scene.Window.Width = 1100; scene.Window.Height = 430;
+        scene.Window.AppWindow.Move(new global::Windows.Graphics.PointInt32(80, 60));
+        scene.Window.Resize(1100, 430);
         await scene.Select("cats");
         var grid = scene.Element<ManagementList>("CatsList");
         var scroll = Visuals(grid).OfType<ScrollViewer>().First();
@@ -325,11 +328,11 @@ public static class FilmSettingsUiTests
         scene.Box("CatUrlBox").Text = "https://fixture.invalid/retained.js";
         double offset = scroll.VerticalOffset;
         Check(offset > 0, "the editor opens from the visible bottom row of an overflowing table");
-        scene.Window.Width = 1000;
-        scene.Window.UpdateLayout(); await Drain();
+        scene.Window.Resize(1000, 430);
+        DesktopTestUi.WindowRoot(scene.Window).UpdateLayout(); await Drain();
         AssertDraft();
-        scene.Window.Height = 820;
-        scene.Window.UpdateLayout(); await Drain();
+        scene.Window.Resize(1000, 820);
+        DesktopTestUi.WindowRoot(scene.Window).UpdateLayout(); await Drain();
         Check(scroll.VerticalOffset < offset, "height growth actually coerces the bottom table offset");
         AssertDraft();
         Check(scene.Store.Writes == edits &&
@@ -351,8 +354,8 @@ public static class FilmSettingsUiTests
         string original = scene.Editor("EpisodeCleanEditor").Rows[0].Pattern;
         int restores = scene.RulesRuntime.Notifications;
         Click(restore); await Drain();
-        scene.Window.Width = 1050; scene.Window.Height = 650;
-        scene.Window.UpdateLayout(); await Drain();
+        scene.Window.Resize(1050, 650);
+        DesktopTestUi.WindowRoot(scene.Window).UpdateLayout(); await Drain();
         AssertCentered();
         Click(scene.Element<Button>("PopupCancel")); await Drain();
         Check(!popup.IsOpen && scene.Editor("EpisodeCleanEditor").Rows[0].Pattern == original &&
@@ -392,9 +395,10 @@ public static class FilmSettingsUiTests
         {
             Check(popup.IsOpen, "a viewport change does not cancel the centered popup");
             var surface = scene.Element<Border>("PopupSurface");
-            var actual = surface.PointToScreen(new(surface.ActualWidth / 2, surface.ActualHeight / 2));
-            var expected = scene.View.PointToScreen(new(scene.View.ActualWidth / 2, scene.View.ActualHeight / 2));
-            Check((actual - expected).Length < 3, "the actual popup remains centered on window content");
+            var actual = surface.TransformToVisual(null).TransformPoint(new(surface.ActualWidth / 2, surface.ActualHeight / 2));
+            var expected = scene.View.TransformToVisual(null).TransformPoint(new(scene.View.ActualWidth / 2, scene.View.ActualHeight / 2));
+            Check(Math.Sqrt(Math.Pow(actual.X - expected.X, 2) + Math.Pow(actual.Y - expected.Y, 2)) < 3,
+                "the actual popup remains centered on window content");
         }
     }
 
@@ -413,7 +417,7 @@ public static class FilmSettingsUiTests
         Check(scene.Sources.Cats[0].Name == "已改名的猫源" &&
             scene.Sources.Cats[0].SourceUrl == "https://fixture.invalid/revised.js", "edit persists via the native management owner");
         var toggle = await Cell<CheckBox>(grid, first, 4);
-        toggle.SetCurrentValue(ToggleButton.IsCheckedProperty, false); Click(toggle); await Until(() => !scene.View.SourcesBusy);
+        Click(toggle); await Until(() => !scene.View.SourcesBusy);
         Check(!first.Enabled && !first.CanRestart &&
             !(await Cell<Button>(grid, first, 7, button => Equals(button.Content, "重启"))).IsEnabled,
             "disabled cats cannot restart");
@@ -422,7 +426,7 @@ public static class FilmSettingsUiTests
             "disabled cats also make their video detection unavailable");
         await scene.Select("cats");
         toggle = await Cell<CheckBox>(grid, first, 4);
-        toggle.SetCurrentValue(ToggleButton.IsCheckedProperty, true); Click(toggle); await Until(() => !scene.View.SourcesBusy);
+        Click(toggle); await Until(() => !scene.View.SourcesBusy);
         Click(await Cell<Button>(grid, first, 7, button => Equals(button.Content, "重启"))); await Until(() => !scene.View.SourcesBusy);
         Check(scene.Runtime.Calls.Count(call => call.Method == "cat.script.restart") == 1, "restart targets one installation");
         Click(await Cell<Button>(grid, first, 7, button => Equals(button.Content, "更新"))); await Until(() => !scene.View.SourcesBusy);
@@ -432,7 +436,7 @@ public static class FilmSettingsUiTests
         selected.IsChecked = true; Click(selected);
         Click(Button(scene.View, "删除选中猫源")); await Drain();
         Check(scene.Sources.Cats.Count == 2, "opening confirmation does not delete");
-        Capture(scene.Element<Border>("PopupSurface"), "film-settings-delete-confirmation.png");
+        await Capture(scene.Element<Border>("PopupSurface"), "film-settings-delete-confirmation.png");
         await scene.AcceptPopup();
         Check(scene.Sources.Cats.Count == 1 && scene.Sources.Videos.All(video => video.Key.InstallationId != first.Source.InstallationId),
             "bulk selection performs actual owner deletion and child cleanup");
@@ -445,8 +449,8 @@ public static class FilmSettingsUiTests
         var toolbar = (StackPanel)scene.Element<Grid>("VideosPage").Children[0];
         var actions = toolbar.Children.OfType<Button>().ToArray();
         Check(actions.Select(button => button.Content?.ToString()).SequenceEqual(["检测所选", "删除所选"]) &&
-            ReferenceEquals(actions[0].Style, scene.View.FindResource("Settings.PrimaryButton")) &&
-            ReferenceEquals(actions[1].Style, scene.View.FindResource("MeowFilm.ManagementDeleteSelected")),
+            ReferenceEquals(actions[0].Style, DesktopVisual.Resource(scene.View, "Settings.PrimaryButton")) &&
+            ReferenceEquals(actions[1].Style, DesktopVisual.Resource(scene.View, "MeowFilm.ManagementDeleteSelected")),
             "video toolbar detection uses the shared save style and deletion uses the ordinary outline style");
         var grid = scene.Element<ManagementList>("VideosList");
         Check(Headers(grid).SequenceEqual(["站源名称", "检测状态", "启用", "首页显示", "搜索启用", "操作"]),
@@ -455,7 +459,7 @@ public static class FilmSettingsUiTests
         foreach (int column in new[] { 3, 4, 5 })
         {
             var box = await Cell<CheckBox>(grid, first, column);
-            box.SetCurrentValue(ToggleButton.IsCheckedProperty, false); Click(box);
+            Click(box);
             await Until(() => !scene.View.SourcesBusy);
         }
         await SetAggregate(first);
@@ -478,9 +482,9 @@ public static class FilmSettingsUiTests
         {
             var more = await Cell<Button>(grid, row, 6, button => Equals(button.Content, "···"));
             Click(more); await Drain();
-            Check(more.ContextMenu!.IsOpen, "row more opens the real menu");
-            ((MenuItem)more.ContextMenu.Items[0]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-            more.ContextMenu.IsOpen = false;
+            var menu = (MenuFlyout)more.ContextFlyout;
+            Check(VisualTreeHelper.GetOpenPopupsForXamlRoot(scene.View.XamlRoot).Count > 0, "row more opens the real menu");
+            FilmUiTest.Click(menu.Items[0]); menu.Hide();
             await Until(() => !scene.View.SourcesBusy);
         }
     }
@@ -523,10 +527,10 @@ public static class FilmSettingsUiTests
             .SequenceEqual(["添加本地文件", "添加网络源", "删除所选"]) &&
             toolbar.Children.OfType<TextBlock>().Single().Text == "猫源管理",
             "cat title and exact action order share the public compact row");
-        Check(toolbar.Children.OfType<Button>().Last().Style == scene.View.FindResource("MeowFilm.ManagementDeleteSelected"),
+        Check(ReferenceEquals(toolbar.Children.OfType<Button>().Last().Style, DesktopVisual.Resource(scene.View, "MeowFilm.ManagementDeleteSelected")),
             "the top delete action uses the shared outline style, not the filled row delete pill");
         Check(toolbar.Children.OfType<Button>().Take(2).All(button =>
-                ReferenceEquals(button.Style, scene.View.FindResource("Settings.PrimaryButton"))),
+                ReferenceEquals(button.Style, DesktopVisual.Resource(scene.View, "Settings.PrimaryButton"))),
             "both cat import actions reuse the shared save button style");
         Click(Button(scene.View, "添加本地文件")); await Drain();
         Check(scene.Element<StackPanel>("CatFileField").Visibility == Visibility.Visible &&
@@ -541,8 +545,8 @@ public static class FilmSettingsUiTests
         await Drain();
         var type = scene.Element<ComboBox>("CatTypeBox");
         type.SelectedValue = "local"; await Drain();
-        Check(scene.Element<StackPanel>("CatTypeField").IsVisible &&
-            scene.Element<StackPanel>("CatFileField").IsVisible && !scene.Element<StackPanel>("CatUrlField").IsVisible &&
+        Check(FilmUiTest.Visible(scene.Element<StackPanel>("CatTypeField")) &&
+            FilmUiTest.Visible(scene.Element<StackPanel>("CatFileField")) && !FilmUiTest.Visible(scene.Element<StackPanel>("CatUrlField")) &&
             row.Source.SourceType == "network" && scene.Store.Writes == writes,
             "switching the edit type changes only draft controls");
         Click(scene.Element<Button>("PopupCancel")); await Drain();
@@ -581,7 +585,7 @@ public static class FilmSettingsUiTests
         row.Update(row.Source with { Detection = new("valid", 1730000000000, true,
             [new("category", "failed", "fixture partial category diagnostic"), new("play", "valid")]) }, true);
         await Drain();
-        Check(Equals(status.Content, "通过") && status.Focusable && status.Tone == ManagementStatusTone.Success,
+        Check(Equals(status.Content, "通过") && status.IsTabStop && status.Tone == ManagementStatusTone.Success,
             "overall success retains a focusable partial-diagnostic state");
         int calls = scene.Runtime.Calls.Count;
         Click(status); await Drain();
@@ -590,7 +594,7 @@ public static class FilmSettingsUiTests
             scene.Runtime.Calls.Count == calls, "status reads the published diagnostic into the shared dialog without RPC");
         await scene.AcceptPopup();
         row.SetDetecting(true); await Drain();
-        Check(Equals(status.Content, "检测中") && !status.Focusable && !row.HasDiagnostics && row.Diagnostics.Length == 0,
+        Check(Equals(status.Content, "检测中") && !status.IsTabStop && !row.HasDiagnostics && row.Diagnostics.Length == 0,
             "an active probe neither shows nor exposes an old error");
         Click(status); await Drain();
         Check(!scene.Element<Popup>("ActionPopup").IsOpen && scene.Runtime.Calls.Count == calls,
@@ -607,12 +611,12 @@ public static class FilmSettingsUiTests
         var row = scene.View.VideoRows[0];
         scene.Store.FailWrite = true;
         var box = await Cell<CheckBox>(grid, row, 4);
-        box.SetCurrentValue(ToggleButton.IsCheckedProperty, false); Click(box);
+        Click(box);
         await Until(() => !scene.View.SourcesBusy);
         Check(row.HomeVisible && box.IsChecked == true && scene.View.SourcesFailed,
             "failed save restores the actual owner state and exposes retry");
         Check(scene.Notices.Any(message => message.Contains("来源操作失败", StringComparison.Ordinal)), "source failure is a window notice");
-        Capture(scene.View, "film-settings-videos-failure.png");
+        await Capture(scene.View, "film-settings-videos-failure.png");
         scene.Store.FailWrite = false;
         Click(Button(scene.View, "重试视频源读取")); await Until(() => !scene.View.SourcesBusy);
         Check(!scene.View.SourcesFailed && scene.View.CanEditSources, "source retry recovers the page");
@@ -625,7 +629,7 @@ public static class FilmSettingsUiTests
         await using var scene = await Scene.Create(18);
         foreach (var size in new[] { (Width: 1248, Height: 820), (Width: 620, Height: 430) })
         {
-            scene.Window.Width = size.Width; scene.Window.Height = size.Height; await Drain(); scene.View.UpdateLayout();
+            scene.Window.Resize(size.Width, size.Height); await Drain(); scene.View.UpdateLayout();
             foreach (string page in new[] { "rules", "cats", "videos" })
             {
                 await scene.Select(page); scene.View.UpdateLayout();
@@ -639,31 +643,30 @@ public static class FilmSettingsUiTests
                     foreach (var section in sections)
                     {
                         var content = (StackPanel)section.Child;
-                        var header = (DockPanel)content.Children[0];
-                        var title = header.Children.OfType<TextBlock>().Single();
-                        var text = new FormattedText(title.Text, CultureInfo.CurrentCulture, title.FlowDirection,
-                            new Typeface(title.FontFamily, title.FontStyle, title.FontWeight, title.FontStretch),
-                            title.FontSize, title.Foreground, VisualTreeHelper.GetDpi(title).PixelsPerDip);
-                        Check(title.TextWrapping == TextWrapping.NoWrap && title.ActualWidth + .5 >= text.WidthIncludingTrailingWhitespace,
+                        var header = (Grid)content.Children[0];
+                        var title = Visuals(header).OfType<TextBlock>().First(text => text.Text.Length > 0 && text.FontSize >= 16);
+                        var probe = new TextBlock { Text = title.Text, FontFamily = title.FontFamily, FontSize = title.FontSize, FontWeight = title.FontWeight };
+                        probe.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                        Check(title.TextWrapping == TextWrapping.NoWrap && title.ActualWidth + .5 >= probe.DesiredSize.Width,
                             "section titles are complete on one line: " + title.Text);
                         var fields = (FrameworkElement)content.Children[1];
-                        var headingBounds = new Rect(header.TranslatePoint(new Point(), content), header.RenderSize);
-                        var contentBounds = new Rect(fields.TranslatePoint(new Point(), content), fields.RenderSize);
+                        var headingBounds = new Rect(header.TransformToVisual(content).TransformPoint(new Point()), new Size(header.ActualWidth, header.ActualHeight));
+                        var contentBounds = new Rect(fields.TransformToVisual(content).TransformPoint(new Point()), new Size(fields.ActualWidth, fields.ActualHeight));
                         Check(headingBounds.Bottom <= contentBounds.Top && contentBounds.Top - headingBounds.Bottom <= 9 &&
                             Math.Abs(headingBounds.Left - contentBounds.Left) < 1 && Math.Abs(contentBounds.Width - content.ActualWidth) < 1,
                             "every rule section has a compact top heading and full-width fields");
                     }
                     var savedRow = Visuals(scene.Editor("EpisodeCleanEditor")).OfType<Border>()
-                        .First(border => border.Style == scene.Editor("EpisodeCleanEditor").FindResource("Settings.RuleSurface"));
+                        .First(border => ReferenceEquals(border.Style, DesktopVisual.Resource(scene.Editor("EpisodeCleanEditor"), "Settings.RuleSurface")));
                     Check(savedRow.CornerRadius == new CornerRadius(10) && savedRow.BorderThickness == new Thickness(1) &&
                         ((SolidColorBrush)savedRow.BorderBrush).Color == Color.FromArgb(217, 203, 213, 225), "saved rules use the server row outline");
-                    Check(Button(scene.View, "恢复搜索列表净化默认规则").Style == scene.View.FindResource("Settings.DangerButton"),
+                    Check(ReferenceEquals(Button(scene.View, "恢复搜索列表净化默认规则").Style, DesktopVisual.Resource(scene.View, "Settings.DangerButton")),
                         "restore is styled as a destructive action and keeps its confirmation");
                 }
                 else
                 {
                     var grid = scene.Element<ManagementList>(page == "cats" ? "CatsList" : "VideosList");
-                    Check(!grid.ShowToolbar && !grid.ShowBulkActions && !Visuals(grid).OfType<DataGrid>().Any(),
+                    Check(!grid.ShowToolbar && !grid.ShowBulkActions && Visuals(grid).OfType<ListView>().Any(),
                         "source pages use the common card without unrequested search or bulk footer");
                     var scroll = Visuals(grid).OfType<ScrollViewer>().First();
                     var viewport = Visuals(scroll).OfType<ScrollContentPresenter>().First();
@@ -678,23 +681,23 @@ public static class FilmSettingsUiTests
                             "all fixed cells fit beside the flexible name column");
                         for (int i = 1; i < row.ColumnDefinitions.Count; i++)
                         {
-                            double headX = header.TranslatePoint(new(header.ColumnDefinitions.Take(i).Sum(column => column.ActualWidth), 0), grid).X;
-                            double rowX = row.TranslatePoint(new(row.ColumnDefinitions.Take(i).Sum(column => column.ActualWidth), 0), grid).X;
+                            double headX = header.TransformToVisual(grid).TransformPoint(new(header.ColumnDefinitions.Take(i).Sum(column => column.ActualWidth), 0)).X;
+                            double rowX = row.TransformToVisual(grid).TransformPoint(new(row.ColumnDefinitions.Take(i).Sum(column => column.ActualWidth), 0)).X;
                             Check(Math.Abs(headX - rowX) <= 1.1, "fixed header and row cells stay aligned through scrolling and recycling");
                         }
                     }
                 }
-                Capture(scene.View, $"film-settings-{page}-{size.Width}.png");
+                await Capture(scene.View, $"film-settings-{page}-{size.Width}.png");
             }
         }
         var nav = scene.Element<StackPanel>("SettingsNavigation").Children.OfType<RadioButton>().ToArray();
-        nav[2].Focus(); Check(scene.View.NavigateSection(nav[2], Key.Home), "Home section action is handled"); await Drain();
-        Check(nav[0].IsChecked == true && nav[0].IsKeyboardFocused, "Home navigates internal tabs and keeps real focus");
-        Check(scene.View.NavigateSection(nav[0], Key.Right), "arrow section action is handled"); await Drain();
-        Check(nav[1].IsChecked == true && nav[1].IsKeyboardFocused, "arrow navigation works");
-        DesktopTheme.SetIsHighContrast(scene.View, true); scene.View.UpdateLayout();
-        Check(scene.View.Background is SolidColorBrush brush && brush.Color == SystemColors.WindowColor, "high contrast uses system ground");
-        foreach (var control in Visuals(scene.View).OfType<Control>().Where(control => control.IsVisible &&
+        nav[2].Focus(FocusState.Programmatic); Check(scene.View.NavigateSection(nav[2], VirtualKey.Home), "Home section action is handled"); await Drain();
+        Check(nav[0].IsChecked == true && ReferenceEquals(DesktopVisual.Focused(scene.View), nav[0]), "Home navigates internal tabs and keeps real focus");
+        Check(scene.View.NavigateSection(nav[0], VirtualKey.Right), "arrow section action is handled"); await Drain();
+        Check(nav[1].IsChecked == true && ReferenceEquals(DesktopVisual.Focused(scene.View), nav[1]), "arrow navigation works");
+        using var contrast = new FilmUiTest.HighContrastResources(scene.View); scene.View.UpdateLayout();
+        Check(scene.View.Background is SolidColorBrush brush && brush.Color == FilmUiTest.ResourceColor(scene.View, "Film.SettingsGround"), "high contrast uses system ground");
+        foreach (var control in Visuals(scene.View).OfType<Control>().Where(control => FilmUiTest.Visible(control) &&
                      control is TextBox or CheckBox or RadioButton))
             Check(AutomationProperties.GetName(control).Length > 0, "visible inputs have accessible names");
     }
@@ -708,7 +711,7 @@ public static class FilmSettingsUiTests
             Check(Texts(scene.View).Contains(page == "cats" ? "暂无猫源" : "暂无视频源"), "real empty state is visible");
             Check(scene.View.CanEditSources && !scene.View.CanDeleteCats && !scene.View.CanDeleteVideos,
                 "empty pages allow import and disable selection actions");
-            Capture(scene.View, $"film-settings-{page}-empty.png");
+            await Capture(scene.View, $"film-settings-{page}-empty.png");
         }
     }
 
@@ -763,9 +766,9 @@ public static class FilmSettingsUiTests
             "a failed save keeps the draft and the prior native settings");
         foreach (var width in new[] { 1248, 620 })
         {
-            scene.Window.Width = width; await Drain(); scene.View.UpdateLayout();
+            scene.Window.Resize(width, 850); await Drain(); scene.View.UpdateLayout();
             Check(scene.Box("MetadataApiToken").ActualWidth > 200, "single-line fields remain usable in both window widths");
-            Capture(scene.View, $"film-settings-data-sources-{width}.png");
+            await Capture(scene.View, $"film-settings-data-sources-{width}.png");
         }
     }
 
@@ -775,7 +778,7 @@ public static class FilmSettingsUiTests
         var cleanHost = scene.Element<ContentControl>("SiteCleanHost");
         var playback = (FilmPlaybackSettingsView)cleanHost.Content;
         await Until(() => playback.Idle && ((TextBox)playback.FindName("CleanKeywords")).Text == "直播,预告");
-        Check(((Border)playback.FindName("CleanForm")).IsVisible, "matching includes its site-clean editor");
+        Check(FilmUiTest.Visible(((Border)playback.FindName("CleanForm"))), "matching includes its site-clean editor");
         HeadingSave(playback, "站点净化设置", "保存站点净化");
         ((TextBox)playback.FindName("CleanKeywords")).Text = " 广告,，直播, ";
         Click(Button(playback, "保存站点净化")); await Until(() => playback.Idle);
@@ -788,42 +791,42 @@ public static class FilmSettingsUiTests
             "only one settings consumer is reparented to the current area");
         var order = (SettingsPriorityList)playback.FindName("RuleOrder");
         playback.UpdateLayout();
-        Check(!order.ShowToggle && !Visuals(order).OfType<CheckBox>().Any(box => box.IsVisible) &&
+        Check(!order.ShowToggle && !Visuals(order).OfType<CheckBox>().Any(box => FilmUiTest.Visible(box)) &&
             order.ActualWidth > 150 && order.ActualWidth < playback.ActualWidth * .6,
             "film reuses the music order control without an enable flag or a full-width list");
         Check(playback.ManualGroups.Single().Rows.Single().DetailId == "0" &&
             playback.BlockGroups.Single().Rows.Single().Pan == "0", "both management lists retain typed source identity");
         HeadingSave(playback, "关键字匹配规则", "保存关键字匹配规则");
-        Check(Visuals(playback).OfType<Button>().Where(button => button.IsVisible).Count(button => Equals(button.Content, "保存")) == 1 &&
-            !Visuals(playback).OfType<Button>().Any(button => button.IsVisible && Equals(button.Content, "刷新")) &&
-            !Button(playback, "重新读取智能播放设置").IsVisible,
+        Check(Visuals(playback).OfType<Button>().Where(button => FilmUiTest.Visible(button)).Count(button => Equals(button.Content, "保存")) == 1 &&
+            !Visuals(playback).OfType<Button>().Any(button => FilmUiTest.Visible(button) && Equals(button.Content, "刷新")) &&
+            !FilmUiTest.Visible(Button(playback, "重新读取智能播放设置")),
             "the healthy page has one explicit keyword save and no refresh or order save");
         foreach (int width in new[] { 1248, 600 })
         {
-            scene.Window.Width = width; await Drain(); scene.View.UpdateLayout();
+            scene.Window.Resize(width, 850); await Drain(); scene.View.UpdateLayout();
             var pan = (SettingsPriorityList)playback.FindName("PanOrder");
-            var left = new Rect(order.TranslatePoint(new(), playback), order.RenderSize);
-            var right = new Rect(pan.TranslatePoint(new(), playback), pan.RenderSize);
+            var left = new Rect(order.TransformToVisual(playback).TransformPoint(new()), new Size(order.ActualWidth, order.ActualHeight));
+            var right = new Rect(pan.TransformToVisual(playback).TransformPoint(new()), new Size(pan.ActualWidth, pan.ActualHeight));
             Check(width == 1248 ? Math.Abs(left.Top - right.Top) < 1 && Math.Abs(left.Width - right.Width) <= 1 &&
                 Math.Abs(right.Left - left.Right - 24) <= 1 : right.Top >= left.Bottom && Math.Abs(left.Left - right.Left) < 1,
                 "the two ordering panels are equal columns on desktop and stack in a narrow window");
             foreach (var priority in new[] { order, pan })
             {
-                Check(!priority.ShowTitle && Visuals(playback).OfType<TextBlock>().Count(text => text.IsVisible && text.Text == priority.Title) == 1,
+                Check(!priority.ShowTitle && Visuals(playback).OfType<TextBlock>().Count(text => FilmUiTest.Visible(text) && text.Text == priority.Title) == 1,
                     "only the larger section heading is visible while the list keeps its accessible title");
-                var list = (ListBox)priority.FindName("PriorityItems");
+                var list = (ListView)priority.FindName("PriorityItems");
                 Check(AutomationProperties.GetName(list) == priority.Title, "hiding the duplicate caption does not remove the accessible name");
                 foreach (var item in list.Items)
                 {
-                    var row = (ListBoxItem)list.ItemContainerGenerator.ContainerFromItem(item);
+                    var row = (ListViewItem)list.ContainerFromItem(item);
                     var grip = Visuals(row).OfType<Thumb>().Single();
                     Check(row.ActualHeight == 52 && grip.ActualWidth == 36 && grip.ActualHeight == 36,
                         "film uses the same music row and drag handle dimensions");
                 }
             }
-            Capture(scene.View, $"film-settings-smart-playback-{width}.png");
+            await Capture(scene.View, $"film-settings-smart-playback-{width}.png");
         }
-        await scene.Select("rules"); await Until(() => playback.Idle && ((Border)playback.FindName("CleanForm")).IsVisible);
+        await scene.Select("rules"); await Until(() => playback.Idle && FilmUiTest.Visible(((Border)playback.FindName("CleanForm"))));
         Check(ReferenceEquals(cleanHost.Content, playback) && scene.Element<Grid>("BusinessPage").Children.Count == 0,
             "returning to matching cannot leave a second copy or a stale management form");
     }
@@ -851,45 +854,50 @@ public static class FilmSettingsUiTests
         await Until(() => playback.Idle && playback.ManualGroups.Count == 2);
         foreach (int width in new[] { 1248, 600 })
         {
-            scene.Window.Width = width; await Drain(); scene.View.UpdateLayout();
+            scene.Window.Resize(width, 850); await Drain(); scene.View.UpdateLayout();
             foreach (var (targetsName, rowsName, title) in new[]
             { ("ManualTargets", "ManualRows", "TMDB 数据"), ("BlockTargets", "BlockRows", "禁用数据") })
             {
-                var targets = (ListBox)playback.FindName(targetsName);
-                var grid = (DataGrid)playback.FindName(rowsName);
+                var targets = (ListView)playback.FindName(targetsName);
+                var grid = (ListView)playback.FindName(rowsName);
                 var right = (Grid)grid.Parent; var split = (Grid)right.Parent; var surface = (Border)split.Parent;
-                surface.BringIntoView(); await Drain(); playback.UpdateLayout();
+                surface.StartBringIntoView(); await Drain(); playback.UpdateLayout();
                 Check(surface.BorderThickness == new Thickness(1) && surface.BorderBrush is not null &&
                     surface.CornerRadius.TopLeft > 0 && ((Border)split.Children[0]).BorderThickness.Right == 1,
                     "each manager has a real shared surface and a separate sidebar boundary");
-                Check(Visuals(surface).OfType<TextBlock>().Any(text => text.IsVisible && text.Text == title) &&
-                    grid.HeadersVisibility == DataGridHeadersVisibility.Column && grid.GridLinesVisibility == DataGridGridLinesVisibility.Horizontal,
+                Check(Visuals(surface).OfType<TextBlock>().Any(text => FilmUiTest.Visible(text) && text.Text == title) &&
+                    grid.Header is Grid header && Visuals(header).OfType<TextBlock>().Any(text => text.Text == "站源"),
                     "target group and table column headers remain legible inside the frame");
                 targets.SelectedIndex = 0; playback.UpdateLayout();
-                var first = (ListBoxItem)targets.ItemContainerGenerator.ContainerFromIndex(0);
+                var first = (ListViewItem)targets.ContainerFromIndex(0);
                 var group = (FilmSettingGroup)targets.SelectedItem;
                 Check(Visuals(first).OfType<TextBlock>().Any(text => text.Text == group.Title) &&
                     Visuals(first).OfType<TextBlock>().Any(text => text.Text == group.Rows.Count.ToString(CultureInfo.InvariantCulture)),
                     "the selected target exposes its name and exact row count");
-                Check(first.IsSelected && ((SolidColorBrush)first.Background).Color ==
-                    ((SolidColorBrush)playback.FindResource("Settings.Brush.Selected")).Color, "the current group has a visible selected state");
+                Check(first.IsSelected && ((ISelectionItemProvider)new ListViewItemAutomationPeer(first)
+                    .GetPattern(PatternInterface.SelectionItem)).IsSelected, "the native target group exposes one actual selected state");
                 Check(grid.Items.Count == group.Rows.Count, "the selected group owns only its source rows");
                 var source = Visuals(grid).OfType<TextBlock>().First(text => text.Text == longSource);
-                Check(Equals(source.ToolTip, longSource), "truncated source values remain fully available");
+                Check(Equals(ToolTipService.GetToolTip(source), longSource), "truncated source values remain fully available");
                 var scroll = Visuals(grid).OfType<ScrollViewer>().First();
                 Check((width != 600 || scroll.ExtentWidth > scroll.ViewportWidth) &&
                     scroll.HorizontalScrollBarVisibility == ScrollBarVisibility.Auto && grid.ActualWidth < playback.ActualWidth &&
                     surface.ActualWidth <= playback.ActualWidth, "long tables scroll inside the frame rather than widening the page");
-                Capture(surface, $"film-settings-{targetsName}-{width}.png");
+                await Capture(surface, $"film-settings-{targetsName}-{width}.png");
                 targets.SelectedIndex = 1; playback.UpdateLayout();
                 Check(grid.Items.Count == 1 && ReferenceEquals(grid.Items[0], ((FilmSettingGroup)targets.SelectedItem).Rows[0]),
                     "switching groups replaces only the visible detail rows");
-                DesktopTheme.SetIsHighContrast(playback, true); playback.UpdateLayout();
-                var selected = (ListBoxItem)targets.ItemContainerGenerator.ContainerFromIndex(1);
-                Check(selected.Background == SystemColors.HighlightBrush && selected.Foreground == SystemColors.HighlightTextBrush &&
-                    surface.BorderBrush == SystemColors.WindowTextBrush && ((Border)split.Children[0]).BorderBrush == SystemColors.WindowTextBrush,
-                    "high contrast keeps selected groups and both boundaries distinct");
-                DesktopTheme.SetIsHighContrast(playback, false);
+                using (var contrast = new FilmUiTest.HighContrastResources(playback))
+                {
+                    playback.UpdateLayout();
+                    var selected = (ListViewItem)targets.ContainerFromIndex(1);
+                    var border = FilmUiTest.ResourceColor(playback, "MeowFilm.Brush.Border");
+                    Check(selected.IsSelected && ((ISelectionItemProvider)new ListViewItemAutomationPeer(selected)
+                            .GetPattern(PatternInterface.SelectionItem)).IsSelected &&
+                        surface.BorderBrush is SolidColorBrush frame && frame.Color == border &&
+                        ((Border)split.Children[0]).BorderBrush is SolidColorBrush divider && divider.Color == border,
+                        "high-contrast resources retain native group selection and both system-color boundaries");
+                }
             }
         }
         scene.Data.Library = FilmJson.Encode(new { manual = Array.Empty<object>(), blocks = Array.Empty<object>() });
@@ -897,21 +905,21 @@ public static class FilmSettingsUiTests
         await Until(() => playback.Idle && playback.ManualGroups.Count == 0);
         foreach (var (name, empty) in new[] { ("ManualRows", "暂无人工匹配源"), ("BlockRows", "暂无禁用片源") })
         {
-            var grid = (DataGrid)playback.FindName(name);
+            var grid = (ListView)playback.FindName(name);
             var right = (Grid)grid.Parent; var surface = (Border)((Grid)right.Parent).Parent;
-            Check(grid.Items.Count == 0 && grid.HeadersVisibility == DataGridHeadersVisibility.Column &&
-                surface.BorderThickness == new Thickness(1) && Visuals(right).OfType<TextBlock>().Any(text => text.IsVisible && text.Text == empty),
+            Check(grid.Items.Count == 0 && grid.Header is Grid &&
+                surface.BorderThickness == new Thickness(1) && Visuals(right).OfType<TextBlock>().Any(text => FilmUiTest.Visible(text) && text.Text == empty),
                 "empty collections keep the structural frame and table header with a clear empty state");
-            Capture(surface, $"film-settings-{name}-empty.png");
+            await Capture(surface, $"film-settings-{name}-empty.png");
         }
     }
 
     private static void HeadingSave(FrameworkElement root, string title, string action)
     {
-        var heading = Visuals(root).OfType<TextBlock>().Single(text => text.IsVisible && text.Text == title);
+        var heading = Visuals(root).OfType<TextBlock>().Single(text => FilmUiTest.Visible(text) && text.Text == title);
         var button = Button(root, action);
-        var a = new Rect(heading.TranslatePoint(new(), root), heading.RenderSize);
-        var b = new Rect(button.TranslatePoint(new(), root), button.RenderSize);
+        var a = new Rect(heading.TransformToVisual(root).TransformPoint(new()), new Size(heading.ActualWidth, heading.ActualHeight));
+        var b = new Rect(button.TransformToVisual(root).TransformPoint(new()), new Size(button.ActualWidth, button.ActualHeight));
         Check(b.Left >= a.Right && b.Left - a.Right <= 16 && Math.Abs((a.Top + a.Bottom) / 2 - (b.Top + b.Bottom) / 2) < 1,
             action + " is beside its heading instead of at the form footer");
     }
@@ -926,7 +934,7 @@ public static class FilmSettingsUiTests
         {
             int before = data.Calls.Count;
             Click(Visuals(cache).OfType<Button>().Single(button => Equals(button.Tag, tag)));
-            await Until(() => ((WrapPanel)cache.FindName("Actions")).IsEnabled);
+            await Until(() => ((ContentControl)cache.FindName("Actions")).IsEnabled);
             var calls = data.Calls.Skip(before).ToArray();
             Check(calls.Select(call => call.Method).All(method => method == "film.data.invalidate") &&
                 calls.Select(call => call.Input.GetProperty("domain").GetString()).SequenceEqual(domains),
@@ -938,7 +946,7 @@ public static class FilmSettingsUiTests
         {
             Click(Visuals(cache).OfType<Button>().Single(button => Equals(button.Tag, "both")));
             var drain = scene.Metadata!.PrepareShutdownAsync();
-            Check(!drain.IsCompleted && !((WrapPanel)cache.FindName("Actions")).IsEnabled &&
+            Check(!drain.IsCompleted && !((ContentControl)cache.FindName("Actions")).IsEnabled &&
                 !data.InvalidationToken.IsCancellationRequested, "the second admitted invalidation drains even after the first failed");
             gate.SetResult(); await drain; await Drain();
             Check(scene.Notices.Contains("缓存清理失败") && scene.Store.Read("film.tmdb.v1").GetProperty("settings").GetProperty("apiKey").GetString() == "synthetic-key" &&
@@ -970,12 +978,10 @@ public static class FilmSettingsUiTests
                 View = new(Rules, Sources, Store, new FilmPlaybackSettings(Data, Store), () => null, Metadata);
             }
             else View = new(Rules, Sources);
-            Window = new() { Content = View, Width = 1248, Height = 820, Left = 80, Top = 60,
-                WindowStyle = WindowStyle.None, ShowActivated = false, ShowInTaskbar = false };
-            Window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, args) =>
-            {
+            Window = FilmUiTest.Window(View, 1248, 820);
+            NoticeOutlet.SetReceiver(DesktopTestUi.WindowRoot(Window), args => {
                 if (args.Message.Length > 0) Notices.Add(args.Message);
-            }));
+            });
         }
         internal static async Task<Scene> Create(int cats = 2, bool dataSettings = false)
         {
@@ -1259,8 +1265,8 @@ public static class FilmSettingsUiTests
     }
     private static Button Button(DependencyObject root, string name) => Visuals(root).OfType<Button>().First(button =>
         AutomationProperties.GetName(button) == name || Equals(button.Content, name));
-    private static void Click(ButtonBase button) => button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
-    private static IEnumerable<string> Texts(DependencyObject root) => Visuals(root).OfType<TextBlock>().Where(text => text.IsVisible).Select(text => text.Text);
+    private static void Click(ButtonBase button) => FilmUiTest.Click(button);
+    private static IEnumerable<string> Texts(DependencyObject root) => Visuals(root).OfType<TextBlock>().Where(text => FilmUiTest.Visible(text)).Select(text => text.Text);
     private static IEnumerable<DependencyObject> Visuals(DependencyObject root)
     {
         yield return root;
@@ -1272,11 +1278,11 @@ public static class FilmSettingsUiTests
         .Children.OfType<TextBlock>().Select(text => text.Text);
     private static async Task<ManagementRowView> RowView(ManagementList management, FilmSettingsSourceRow row)
     {
-        var list = Visuals(management).OfType<ListBox>().Single();
+        var list = Visuals(management).OfType<ListView>().Single();
         string name = row switch { FilmSettingsCatRow cat => cat.Name, FilmSettingsVideoRow video => video.Name, _ => throw new InvalidOperationException() };
         var item = list.Items.Cast<ManagementRowState>().Single(state => state.Row.Title == name);
         list.ScrollIntoView(item); list.UpdateLayout(); await Drain();
-        return Visuals((ListBoxItem)list.ItemContainerGenerator.ContainerFromItem(item)).OfType<ManagementRowView>().Single();
+        return Visuals((ListViewItem)list.ContainerFromItem(item)).OfType<ManagementRowView>().Single();
     }
     private static async Task<T> Cell<T>(ManagementList list, FilmSettingsSourceRow row, int column, Func<T, bool>? predicate = null) where T : FrameworkElement
     {
@@ -1285,7 +1291,7 @@ public static class FilmSettingsUiTests
     }
     private static async Task Drain()
     {
-        for (int i = 0; i < 3; i++) await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        for (int i = 0; i < 3; i++) await FilmUiTest.Pump();
     }
     private static async Task Until(Func<bool> condition)
     {
@@ -1293,26 +1299,14 @@ public static class FilmSettingsUiTests
         while (!condition())
         {
             if (clock.Elapsed > TimeSpan.FromSeconds(8)) throw new TimeoutException("film settings UI did not settle");
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await FilmUiTest.Pump();
             if (!condition()) await Task.Delay(1);
         }
         await Drain();
     }
-    private static void Capture(FrameworkElement element, string name)
+    private static async Task Capture(FrameworkElement element, string name)
     {
-        if (Environment.GetEnvironmentVariable("MEOWFILM_SETTINGS_PREVIEW_ROOT") is not { Length: > 0 } root) return;
-        TestWorkspace.ValidatePath(TestWorkspace.DataRoot, root); Directory.CreateDirectory(root);
-        element.UpdateLayout();
-        var bitmap = new RenderTargetBitmap((int)Math.Ceiling(element.ActualWidth), (int)Math.Ceiling(element.ActualHeight),
-            96, 96, PixelFormats.Pbgra32);
-        var visual = new DrawingVisual();
-        using (var drawing = visual.RenderOpen())
-        {
-            drawing.DrawRectangle(SystemColors.WindowBrush, null, new Rect(element.RenderSize));
-            drawing.DrawRectangle(new VisualBrush(element), null, new Rect(element.RenderSize));
-        }
-        bitmap.Render(visual);
-        var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
-        using var output = File.Create(Path.Combine(root, name)); encoder.Save(output);
+        if (Environment.GetEnvironmentVariable("MEOWFILM_TEST_DESKTOP_EXPECTED_USER") is not null)
+            await NativeDesktopCapture.SaveAsync(element, name);
     }
 }

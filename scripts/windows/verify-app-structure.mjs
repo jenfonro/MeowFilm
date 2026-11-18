@@ -108,7 +108,7 @@ export function verifyAppStructure(directory = root) {
       if (className && [...text.matchAll(/\bx:Name="([^"]+)"/g)].some(match => match[1] === className))
         fail('XAML generated member conflicts with its class: ' + file);
       for (const match of text.matchAll(/<ResourceDictionary\b[^>]*\bSource="([^"]+)"/g)) {
-        const uri = match[1], pack = /^\/(MeowFilm\.[A-Za-z]+);component\/(.+)$/.exec(uri);
+        const uri = match[1], pack = /^ms-appx:\/\/\/(MeowFilm\.[A-Za-z]+)\/(.+)$/.exec(uri);
         const target = pack ? resolve(directory, 'apps/windows/src', pack[1], pack[2])
           : resolve(dirname(join(directory, file)), uri);
         if (!inside(join(directory, 'apps/windows'), target) || !existsSync(target) || !lstatSync(target).isFile() ||

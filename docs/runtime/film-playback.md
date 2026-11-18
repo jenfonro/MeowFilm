@@ -380,10 +380,11 @@ raw 保持准确单源／详情，不接受关联扩大。页面重进保当前�
   所有浏览仅更新展示，不改变正式 target、播放资料映射、pending/current、预取或自动策略，
   浏览加载／错误也不覆盖播放状态／错误。
 - `browse.metadata {metadataSourceId,keepSource?}` 只能选择已证明关联；
-  `keepSource:true` 保留当前站点／线路，只切分季资料。关联查询不阻塞主资料匹配。
+  `keepSource` 默认 true，保留当前站点／线路，只切分季资料；显式 false 返回纯资料目录，
+  显式 `sourceId`／`lineId` 优先于该默认。站点浏览不选择资料 provider，也不写偏好。
+  关联查询不阻塞主资料匹配。
   同一作品的豆瓣 subject 按已确认分季归入一个豆瓣选项，各季保留原 subject 身份。
-  只有季度坐标及每季集数都与 TMDB 相同时才隐藏冗余豆瓣选项；相同季度数但
-  豆瓣为整季总集数、TMDB 仍随播出增长时保留两套。可信 `doubanSeasons` 优先于
+  可靠豆瓣资料和选项不因季度坐标／集数与 TMDB 相同而删除。可信 `doubanSeasons` 优先于
   豆瓣原始 `seasons` 关联条目。季度划分相同时按季／集映射，否则只按可靠全局
   集号映射；已对应集复用真实 TMDB 集名、剧照、简介、时长及播出日期，未对应集
   保留豆瓣坐标与原生封面回退。映射不替换豆瓣身份／总集数，也不重排原始文件。
@@ -431,9 +432,21 @@ raw 保持准确单源／详情，不接受关联扩大。页面重进保当前�
 - 人工匹配连续三次 bootstrap detail/list 请求失败可自动停用；取消与解码失败不计。
   修改引用／季线索或停用在保存成功后撤销旧关联、prepared 与邻集预取；旧在途
   不能覆盖新记录的失败状态。已知人工分享列表同样参与相邻取址／媒体缓存。
-  设置包含三维规则顺序、盘序、关键词序、净化关键词及 `iosAutoPrepare`；
+  设置包含三维规则顺序、盘序、关键词序、净化关键词、`iosAutoPrepare` 及
+  `metadataViewProvider`（只接受 `tmdb`／`douban`，默认 `tmdb`）。
+  资料视图偏好由设置 owner 持久化，用户手选视图由原生写入该偏好；浏览命令本身不写设置。
+  新页面按偏好选择可用资料，仅有其一时临时使用该 provider，不覆盖偏好；
+  已明确选择／恢复的本页资料身份不被迟到关联查询改回默认。顶部作品资料不使用此偏好。
+  同值通知不重发状态；只改变显示偏好或 `iosAutoPrepare` 不重启在途取址、
+  不替换 pending/current、不重置预取，自动准备开关只用于后续自动入口。
   净化只限制元数据智能选源，不限制普通 `search.more`、来源选择或精确文件。
-  来源改名和规则修改都重核 prepared 与发现范围，不强停此前已开始的 current 媒体。
+  实际选路策略变化重核 prepared 与发现范围；来源改名仅在净化资格改变时触发重核，
+  其他改名只更新标签，不强停此前已开始的 current 媒体。
+  原生设置块通知与直接设置操作共用已观察的 provider 状态：
+  `pan.accounts` 仅撤销实际 revision 变化的网盘 provider，`cat.sources` 仅撤销
+  实际 generation／revision／执行状态变化或移除的 installation。未变化账号、来源的
+  目录、pending/current 和媒体 lease 保留；真实撤权仍同时作用于 data、播放、
+  搜索和受控媒体 owner，发布失效并等待资源排空，不以设置成功回执推测实际提交结果。
 
 ## 观察与媒体反馈
 
@@ -454,10 +467,13 @@ preferences、error、errorStage、reportError 和 prefetch；不含 URL、头�
 仍发送完整快照，sequence 语义不变；没有新增目录 revision 或差量协议。
 
 `metadata`／`metadataSourceId` 是当前浏览资料；`workInfo` 是独立作品投影，为 null 或
-`{provider,metadataId,kind,title,summary,seasonCount,episodeCount}`，provider 为 tmdb／douban，
+`{provider,metadataId,kind,title,summary,seasonCount,episodeCount,metadata}`，provider 为 tmdb／douban，
 kind 为 movie／tv。已有真实 TMDB 资料时固定优先，仅简介为空时使用可靠关联的豆瓣简介；
 无 TMDB 时使用可靠豆瓣资料，不采用站点简介。豆瓣多季总量只汇总已确认且不重复的季，
-没有真实总量时计数为 null，不从所选网盘文件数猜测。浏览站点、资料或季度不改变这一规则。
+没有真实总量时计数为 null，不从所选网盘文件数猜测。`workInfo.metadata` 提供所选作品的
+完整 catalog 资料（包括图文、评分、类型、演职员、推荐及其稳定业务身份），不是浏览切片；
+TMDB 空简介的可靠豆瓣填缺同步投影至该资料。收藏／页面入口身份仍使用 `entryTarget`，
+不因关联 provider 变化改成另一作品身份。浏览站点、资料或季度不改变这一规则。
 
 `browsing.episodes` 是具体站源按可靠季映射过滤的选集；首次加载失败或线路真实缺失时为空，
 已有有效展示的刷新失败不清空目录。错误由客户端

@@ -268,6 +268,7 @@ public struct FilmPlaybackPreferences: Equatable, Sendable {
     public var keywords: [String] { didSet { edited.insert("keywords") } }
     public var siteCleanKeywords: [String] { didSet { edited.insert("siteCleanKeywords") } }
     public var iosAutoPrepare: Bool { didSet { edited.insert("iosAutoPrepare") } }
+    public var metadataViewProvider: FilmMetadataProvider { didSet { edited.insert("metadataViewProvider") } }
     private var original: RuntimeObject?
     private var edited: Set<String> = []
 
@@ -276,9 +277,11 @@ public struct FilmPlaybackPreferences: Equatable, Sendable {
         siteCleanKeywords: ["直播", "体育", "短剧", "听书", "舞曲", "哔哩"], iosAutoPrepare: true)
 
     public init(ruleOrder: [FilmPreferenceDimension], panOrder: [FilmPanProvider],
-                keywords: [String], siteCleanKeywords: [String], iosAutoPrepare: Bool) {
+                keywords: [String], siteCleanKeywords: [String], iosAutoPrepare: Bool,
+                metadataViewProvider: FilmMetadataProvider = .tmdb) {
         self.ruleOrder = ruleOrder; self.panOrder = panOrder; self.keywords = keywords
         self.siteCleanKeywords = siteCleanKeywords; self.iosAutoPrepare = iosAutoPrepare
+        self.metadataViewProvider = metadataViewProvider
     }
 
     init(_ value: RuntimeValue) throws {
@@ -292,6 +295,12 @@ public struct FilmPlaybackPreferences: Equatable, Sendable {
         keywords = (fields["keywords"]?.filmArray ?? []).compactMap(\.filmText)
         siteCleanKeywords = (fields["siteCleanKeywords"]?.filmArray ?? []).compactMap(\.filmText)
         iosAutoPrepare = fields["iosAutoPrepare"] == .bool(true)
+        if let value = fields["metadataViewProvider"] {
+            guard let provider = value.filmText.flatMap(FilmMetadataProvider.init(rawValue:)) else {
+                throw FilmPlaybackError(code: "INVALID_PREFERENCES")
+            }
+            metadataViewProvider = provider
+        } else { metadataViewProvider = .tmdb }
         original = fields
     }
 
@@ -306,6 +315,7 @@ public struct FilmPlaybackPreferences: Equatable, Sendable {
             "keywords": .array(keywords.map(RuntimeValue.string)),
             "siteCleanKeywords": .array(siteCleanKeywords.map(RuntimeValue.string)),
             "iosAutoPrepare": .bool(iosAutoPrepare),
+            "metadataViewProvider": .string(metadataViewProvider.rawValue),
         ]
         var fields = RuntimeObject()
         for (key, value) in typed where original == nil || edited.contains(key) { fields[key] = value }
@@ -450,10 +460,11 @@ public struct FilmPlaybackBrowsing: Equatable, Sendable {
     public let files: [FilmPlaybackFile]
     public let originalFiles: [FilmPlaybackFile]
     init(sourceID: String?, lineID: FilmPlaybackIdentifier?, season: Int?,
-         lines: [FilmPlaybackLine], loading: Bool = true, error: String? = nil) {
+         lines: [FilmPlaybackLine], loading: Bool = true, refreshing: Bool = false,
+         error: String? = nil, files: [FilmPlaybackFile] = [], originalFiles: [FilmPlaybackFile] = []) {
         self.sourceID = sourceID; self.lineID = lineID; self.season = season
         self.lines = lines; self.loading = loading; self.error = error
-        refreshing = false; files = []; originalFiles = []
+        self.refreshing = refreshing; self.files = files; self.originalFiles = originalFiles
     }
     init(_ value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
@@ -551,6 +562,7 @@ public struct FilmPlaybackWorkInfo: Equatable, Sendable {
     public let summary: String
     public let seasonCount: Int?
     public let episodeCount: Int?
+    public let metadata: RuntimeObject
 
     init(_ value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
@@ -566,6 +578,7 @@ public struct FilmPlaybackWorkInfo: Equatable, Sendable {
             return count
         }
         seasonCount = try count("seasonCount"); episodeCount = try count("episodeCount")
+        metadata = try fields.filmValue("metadata").filmRequiredObject()
     }
 }
 
@@ -660,10 +673,6 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
             browsing.loading || browsing.error != nil || metadataError != nil {
             result.workInfo = previous.workInfo
         }
-        if entryResolution == "loading" || entryResolution == "error",
-           previous.entryResolution != "loading", previous.entryResolution != "error" {
-            result.entryResolution = previous.entryResolution
-        }
         if sources.isEmpty, stage == "loading" || error != nil { result.sources = previous.sources }
         if browsing.loading || browsing.error != nil,
            browsing.sourceID == previous.browsing.sourceID,
@@ -684,10 +693,17 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
         result.metadataCache = directory.metadataCache
         result.metadataSupplement = directory.metadataSupplement
         result.metadataSourceID = directory.key.metadata
-        result.metadataSources = directory.metadataSources
         result.episodes = directory.episodes
         result.candidates = directory.candidates
-        result.entryResolution = directory.entryResolution
+        return result
+    }
+
+    func refreshingDirectory(_ directory: FilmPlaybackDirectorySlice) -> Self {
+        var result = displaying(directory)
+        let browsing = directory.browsing
+        result.browsing = .init(sourceID: browsing.sourceID, lineID: browsing.lineID, season: browsing.season,
+            lines: browsing.lines, loading: false, refreshing: true,
+            files: browsing.files, originalFiles: browsing.originalFiles)
         return result
     }
 
@@ -700,7 +716,6 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
         }
         result.metadataSourceID = key.metadata
         result.episodes = []; result.candidates = []
-        result.entryResolution = nil
         return result
     }
 }

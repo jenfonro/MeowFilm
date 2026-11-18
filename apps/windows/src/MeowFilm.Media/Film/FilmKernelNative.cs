@@ -6,6 +6,16 @@ namespace MeowFilm.Media;
 
 internal static class FilmKernelNative
 {
+    internal const uint Abi = 2;
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct Surface
+    {
+        internal uint Size, Abi;
+        internal nint DisplayWindow;
+        internal int Width, Height;
+        internal float ScaleX, ScaleY;
+        internal int Visible;
+    }
     [StructLayout(LayoutKind.Sequential)]
     internal struct Callbacks
     {
@@ -50,7 +60,11 @@ internal static class FilmKernelNative
     private delegate int CreateCallback(ref Callbacks callbacks, [MarshalAs(UnmanagedType.LPUTF8Str)] string uri,
         int format, IntPtr keys, uint count, IntPtr defaultKey, out IntPtr owner);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate int TargetCallback(IntPtr owner, IntPtr target);
+    private delegate int TargetCallback(IntPtr owner, IntPtr target, out IntPtr swapchain);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int SurfaceTargetCallback(IntPtr owner, ref Surface target, out IntPtr swapchain);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate int SurfaceUpdateCallback(IntPtr owner, ref Surface target);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate int PrepareCallback(IntPtr owner, double position, IntPtr target);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -78,7 +92,9 @@ internal static class FilmKernelNative
     private static TrackReadCallback trackRead = null!;
     private static SelectTrackCallback selectTrack = null!;
     internal static PrepareCallback Prepare = null!;
-    internal static TargetCallback Attach = null!;
+    private static TargetCallback detach = null!;
+    private static SurfaceTargetCallback attach = null!;
+    internal static SurfaceUpdateCallback UpdateSurface = null!;
     internal static FlagCallback Start = null!, Pause = null!;
     internal static ValueCallback Seek = null!, Rate = null!, Volume = null!, Aspect = null!;
     internal static OwnerCallback Cancel = null!, Release = null!;
@@ -105,7 +121,9 @@ internal static class FilmKernelNative
                     throw new PlaybackException(PlaybackError.NativeUnavailable);
                 create = Export<CreateCallback>(module, "mfk_create");
                 Prepare = Export<PrepareCallback>(module, "mfk_prepare");
-                Attach = Export<TargetCallback>(module, "mfk_attach");
+                detach = Export<TargetCallback>(module, "mfk_attach");
+                attach = Export<SurfaceTargetCallback>(module, "mfk_attach");
+                UpdateSurface = Export<SurfaceUpdateCallback>(module, "mfk_surface_update");
                 Start = Export<FlagCallback>(module, "mfk_start");
                 Pause = Export<FlagCallback>(module, "mfk_pause");
                 Seek = Export<ValueCallback>(module, "mfk_seek");
@@ -154,11 +172,16 @@ internal static class FilmKernelNative
 
     internal static Snapshot Read(IntPtr owner)
     {
-        var value = new Snapshot { Size = (uint)Marshal.SizeOf<Snapshot>(), Abi = 1 };
+        var value = new Snapshot { Size = (uint)Marshal.SizeOf<Snapshot>(), Abi = Abi };
         Check(snapshot(owner, ref value));
-        if (value.Abi != 1 || value.Size != Marshal.SizeOf<Snapshot>())
+        if (value.Abi != Abi || value.Size != Marshal.SizeOf<Snapshot>())
             throw new PlaybackException(PlaybackError.NativeUnavailable);
         return value;
+    }
+    internal static int Attach(IntPtr owner, Surface? target, out IntPtr swapchain)
+    {
+        if (target is not { } value) return detach(owner, IntPtr.Zero, out swapchain);
+        return attach(owner, ref value, out swapchain);
     }
     internal static int TrackCount(IntPtr owner) => trackCount(owner);
     internal static Track ReadTrack(IntPtr owner, int ordinal)

@@ -1,11 +1,10 @@
 using System.Net.Http;
-using System.Windows.Media.Imaging;
 
 namespace MeowFilm.Desktop.Artwork;
 
 public interface IArtworkLease : IDisposable
 {
-    BitmapSource Image { get; }
+    ArtworkPixels Image { get; }
 }
 
 public interface IArtworkLoader
@@ -58,9 +57,9 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
         internal int Readers;
         internal readonly long Epoch = epoch, DiskEpoch = diskEpoch;
     }
-    private sealed class Entry(BitmapSource image, long cost, long epoch, DateTimeOffset? expiresAt)
+    private sealed class Entry(ArtworkPixels image, long cost, long epoch, DateTimeOffset? expiresAt)
     {
-        internal readonly BitmapSource Image = image;
+        internal readonly ArtworkPixels Image = image;
         internal readonly long Cost = cost;
         internal long Used;
         internal int Leases;
@@ -71,7 +70,7 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
     {
         private Entry? value = entry;
         private ArtworkService? service = owner;
-        public BitmapSource Image => Volatile.Read(ref value)?.Image ?? throw new ObjectDisposedException(nameof(Lease));
+        public ArtworkPixels Image => Volatile.Read(ref value)?.Image ?? throw new ObjectDisposedException(nameof(Lease));
         public void Dispose()
         {
             if (Interlocked.Exchange(ref value, null) is { } prior)
@@ -211,7 +210,7 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
         try
         {
             request.Token.ThrowIfCancellationRequested();
-            BitmapSource? image = null;
+            ArtworkPixels? image = null;
             DateTimeOffset? expiresAt = null;
             if (byteCache is not null)
             {
@@ -276,7 +275,7 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
             }
             request.Token.ThrowIfCancellationRequested();
             var decoded = image!;
-            long cost = checked(((long)decoded.PixelWidth * Math.Max(32, decoded.Format.BitsPerPixel) + 7) / 8 * decoded.PixelHeight);
+            long cost = decoded.Cost;
             lock (gate)
             {
                 CheckOpen(); request.Token.ThrowIfCancellationRequested();
@@ -309,7 +308,7 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
         finally { if (encoded is not null) System.Security.Cryptography.CryptographicOperations.ZeroMemory(encoded); }
     }
 
-    private static Task<BitmapSource> Decode(byte[] bytes, CancellationToken token)
+    private static Task<ArtworkPixels> Decode(byte[] bytes, CancellationToken token)
     {
         return Task.Run(() => ArtworkRaster.Decode(bytes), token);
     }

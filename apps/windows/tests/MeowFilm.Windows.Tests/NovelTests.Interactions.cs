@@ -1,12 +1,16 @@
 using System.IO;
 using System.Text;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
@@ -81,7 +85,7 @@ public static partial class NovelTests
     {
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await using var rules = new NovelRuleProgram(ruleRuntime);
-        var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(host);
+        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host));
         host.Show();
         try
         {
@@ -111,26 +115,26 @@ public static partial class NovelTests
             Check(selected.GetProperty("value").GetString() == server.BaseUrl + "/capture");
             var browser = NovelWebInteraction.ShowAsync(owner, rules, Json(new { mode = "browser", request = new { url = server.BaseUrl + "/redirect" } }), cancellation.Token);
             await Until(() => server.Requests.Any(r => r.Path == "/other"));
-            Check(!browser.IsCompleted); ClickPopup("完成");
+            Check(!browser.IsCompleted); ClickDialogAction(owner, "完成");
             var response = BridgeCodec.Value((await browser)!).GetProperty("value");
             Check(response.GetProperty("url").GetString()!.Contains("localhost") && response.GetProperty("statusCode").GetInt32() == 200 &&
                 response.GetProperty("data").GetString()!.Contains("dynamic fixture"));
             // A different source interaction gets a fresh browser storage partition.
             var next = NovelWebInteraction.ShowAsync(owner, rules, Json(new { mode = "verificationCode", request = new { url = server.BaseUrl + "/code" } }), cancellation.Token);
             await Until(() => server.Requests.Any(r => r.Path == "/code"));
-            await Until(() => PopupItems<TextBox>().Any(t => AutomationProperties.GetName(t) == "验证码"));
+            await Until(() => DialogItems<TextBox>(owner).Any(t => AutomationProperties.GetName(t) == "验证码"));
             Check(!next.IsCompleted && server.Requests.Single(r => r.Path == "/code").Cookie.Length == 0);
-            PopupItems<TextBox>().Single(t => AutomationProperties.GetName(t) == "验证码").Text = "synthetic-code";
-            ClickPopup("完成"); var code = Json((await next)!); Check(code.GetProperty("value").GetString() == "synthetic-code");
+            DialogItems<TextBox>(owner).Single(t => AutomationProperties.GetName(t) == "验证码").Text = "synthetic-code";
+            ClickDialogAction(owner, "完成"); var code = Json((await next)!); Check(code.GetProperty("value").GetString() == "synthetic-code");
             var login = NovelWebInteraction.ShowAsync(owner, rules, Json(new { mode = "login", request = new { url = server.BaseUrl + "/login" } }), cancellation.Token);
             await Until(() => server.Requests.Any(r => r.Path == "/login"));
-            Check(!login.IsCompleted); ClickPopup("完成"); await login;
+            Check(!login.IsCompleted); ClickDialogAction(owner, "完成"); await login;
             using var retire = new CancellationTokenSource();
             var closing = NovelWebInteraction.ShowAsync(owner, rules, Json(new { mode = "request", request = new { url = server.BaseUrl + "/hold" } }), retire.Token);
             await Until(() => server.Requests.Any(r => r.Path == "/hold"));
             Check(!closing.IsCompleted); retire.Cancel();
             try { await closing; throw new InvalidOperationException("Cancelled Web result returned"); } catch (OperationCanceledException) { }
-            Check(!PopupItems<Microsoft.Web.WebView2.Wpf.WebView2>().Any());
+            Check(!DialogItems<Microsoft.UI.Xaml.Controls.WebView2>(owner).Any());
         }
         finally { host.Close(); }
     }
@@ -138,7 +142,7 @@ public static partial class NovelTests
     {
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await using var rules = new NovelRuleProgram(ruleRuntime);
-        var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(host); host.Show();
+        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
         var runtime = new Runtime(); var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync();
         await using var server = new WebFixture();
         bool physicallyClosed = false; bool entered = false;
@@ -159,7 +163,7 @@ public static partial class NovelTests
             await Until(() => entered && server.Requests.Any(r => r.Path == "/hold"));
             await sources.UpdateAsync(sources.Sources[0], new { enabled = false });
             try { await pending; throw new InvalidOperationException("Retired browser result committed"); } catch (OperationCanceledException) { }
-            Check(physicallyClosed && !PopupItems<Microsoft.Web.WebView2.Wpf.WebView2>().Any());
+            Check(physicallyClosed && !DialogItems<Microsoft.UI.Xaml.Controls.WebView2>(owner).Any());
             Check(runtime.Calls.Where(c => c.Method == "source.runtime.web.respond").All(c =>
                 c.Payload.TryGetProperty("cancelled", out var cancelled) && cancelled.GetBoolean() && !c.Payload.TryGetProperty("result", out _)));
         }
@@ -294,59 +298,58 @@ public static partial class NovelTests
         var image = new NovelImage(sources, Book() with { CoverUrl = "https://a.invalid/cover.png" });
         var spacer = new Border { Height = 600 };
         var cards = new StackPanel(); cards.Children.Add(spacer); cards.Children.Add(image);
-        var scroll = new ScrollViewer { Content = cards, Width = 220, Height = 180, CanContentScroll = false,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
-        var host = GeneralAppearanceTests.Window(scroll); host.Width = 350; host.Height = 280;
+        var scroll = new ScrollViewer { Content = cards, Width = 220, Height = 180, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
+        var host = NovelTestUi.Window(scroll); DesktopTestUi.ResizeWindow(host, 350, DesktopTestUi.WindowSize(host).Height); DesktopTestUi.ResizeWindow(host, DesktopTestUi.WindowSize(host).Width, 280);
         try
         {
-            host.Show(); host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            Check(image.IsVisible && image.ActualWidth > 0 && image.ActualHeight > 0,
+            host.Show(); DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
+            Check(DesktopVisual.IsVisible(image) && image.ActualWidth > 0 && image.ActualHeight > 0,
                 "A cover without pixels lost its arranged viewport bounds.");
             Check(image.Source is null && runtime.ImageReads == 0 &&
                 !runtime.Calls.Any(call => call.Method == "source.runtime.library.image"),
                 "A clipped offscreen cover acquired a source image.");
-            spacer.Height = scroll.ViewportHeight; host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            spacer.Height = scroll.ViewportHeight; DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
             Check(image.Source is null && runtime.ImageReads == 0, "Touching the viewport edge created cover demand without visible pixels.");
-            spacer.Height = 600; host.UpdateLayout();
-            scroll.ScrollToEnd(); host.UpdateLayout(); await oldStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            spacer.Height = 600; DesktopTestUi.WindowRoot(host).UpdateLayout();
+            scroll.ChangeView(null, scroll.ScrollableHeight, null, true); DesktopTestUi.WindowRoot(host).UpdateLayout(); await oldStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Check(runtime.ImageReads == 1 && runtime.ImageReferences.Contains(oldReference!) && image.Source is null);
-            scroll.ScrollToTop(); host.UpdateLayout(); await oldCancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Check(image.IsVisible && image.Source is null && runtime.Released == 0 &&
+            scroll.ChangeView(null, 0, null, true); DesktopTestUi.WindowRoot(host).UpdateLayout(); await oldCancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(DesktopVisual.IsVisible(image) && image.Source is null && runtime.Released == 0 &&
                 runtime.ImageReferences.Contains(oldReference!), "Scrolling out did not cancel or prematurely acknowledged the held image read.");
-            scroll.ScrollToEnd(); host.UpdateLayout();
+            scroll.ChangeView(null, scroll.ScrollableHeight, null, true); DesktopTestUi.WindowRoot(host).UpdateLayout();
             await Until(() => runtime.ImageReads == 2 && image.Source is not null);
-            var current = image.Source as BitmapSource ?? throw new InvalidOperationException("Visible cover has no decoded bitmap.");
+            var current = image.Source as WriteableBitmap ?? throw new InvalidOperationException("Visible cover has no decoded bitmap.");
             Check(runtime.ImageReferences.Count == 2, "The new viewport request waited for a retired read.");
             oldPixels.TrySetResult(retiredPixels);
             await Until(() => runtime.Released == 1 && !runtime.ImageReferences.Contains(oldReference!));
             Check(ReferenceEquals(image.Source, current), "Late retired cover pixels replaced the current request.");
-            byte[] pixel = new byte[4]; current.CopyPixels(new Int32Rect(0, 0, 1, 1), pixel, 4, 0);
+            byte[] pixel = MusicTestUi.Pixels(current)[..4];
             Check(pixel[0] == 32 && pixel[3] == 255);
-            scroll.ScrollToTop(); host.UpdateLayout();
+            scroll.ChangeView(null, 0, null, true); DesktopTestUi.WindowRoot(host).UpdateLayout();
             await Until(() => image.Source is null && runtime.ImageReferences.Count == 0);
             Check(runtime.Released == 2);
-            scroll.ScrollToEnd(); host.UpdateLayout();
+            scroll.ChangeView(null, scroll.ScrollableHeight, null, true); DesktopTestUi.WindowRoot(host).UpdateLayout();
             await Until(() => runtime.ImageReads == 3 && image.Source is not null);
-            cards.Children.Remove(image); host.UpdateLayout();
+            cards.Children.Remove(image); DesktopTestUi.WindowRoot(host).UpdateLayout();
             await Until(() => image.Source is null && runtime.ImageReferences.Count == 0);
             Check(runtime.Released == 3 && runtime.Calls.Where(call => call.Method == "source.runtime.library.image")
                 .All(call => call.Payload.GetProperty("kind").GetString() == "cover" &&
                     call.Payload.GetProperty("installationId").GetString() == "a"));
-            var outer = new Canvas { Width = 220, Height = 100, ClipToBounds = true };
-            var inner = new Canvas { Width = 220, Height = 100, ClipToBounds = true };
+            var outer = new Canvas { Width = 220, Height = 100, Clip = new RectangleGeometry { Rect = new Rect(0, 0, 220, 100) } };
+            var inner = new Canvas { Width = 220, Height = 100, Clip = new RectangleGeometry { Rect = new Rect(0, 0, 220, 100) } };
             Canvas.SetTop(inner, 150); Canvas.SetTop(image, -100); inner.Children.Add(image); outer.Children.Add(inner);
-            host.Content = outer; host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            Check(image.IsVisible && image.Source is null && runtime.ImageReads == 3,
+            host.Content = outer; DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
+            Check(DesktopVisual.IsVisible(image) && image.Source is null && runtime.ImageReads == 3,
                 "Separate ancestor intersections created demand although their accumulated clip was empty.");
-            Canvas.SetTop(inner, 0); host.UpdateLayout(); await Until(() => runtime.ImageReads == 4 && image.Source is not null);
-            Canvas.SetTop(inner, 150); host.UpdateLayout(); await Until(() => image.Source is null && runtime.ImageReferences.Count == 0);
+            Canvas.SetTop(inner, 0); DesktopTestUi.WindowRoot(host).UpdateLayout(); await Until(() => runtime.ImageReads == 4 && image.Source is not null);
+            Canvas.SetTop(inner, 150); DesktopTestUi.WindowRoot(host).UpdateLayout(); await Until(() => image.Source is null && runtime.ImageReferences.Count == 0);
             Check(runtime.Released == 4);
 
-            Canvas.SetTop(inner, 0); host.UpdateLayout(); await Until(() => runtime.ImageReads == 5 && image.Source is not null);
+            Canvas.SetTop(inner, 0); DesktopTestUi.WindowRoot(host).UpdateLayout(); await Until(() => runtime.ImageReads == 5 && image.Source is not null);
             string visibleReference = runtime.ImageReferences.Single();
             await sources.PrepareShutdownAsync();
             await Until(() => image.Source is null && runtime.ImageReferences.Count == 0);
-            Check(runtime.Released == 5 && image.IsLoaded && image.IsVisible);
+            Check(runtime.Released == 5 && image.IsLoaded && DesktopVisual.IsVisible(image));
             sources.Resume();
             await Until(() => runtime.ImageReads == 6 && image.Source is not null);
             Check(runtime.ImageReferences.Count == 1 && !runtime.ImageReferences.Contains(visibleReference),
@@ -373,8 +376,8 @@ public static partial class NovelTests
             runtime.ReadImage = (_, _) => Task.FromResult(currentPixels);
             sources.Resume(); await Until(() => runtime.ImageReads == 8 && image.Source is not null);
             Check(runtime.ImageReferences.Count == 1 && !runtime.ImageReferences.Contains(shutdownReference!));
-            current = image.Source as BitmapSource ?? throw new InvalidOperationException("Resumed cover has no decoded bitmap.");
-            current.CopyPixels(new Int32Rect(0, 0, 1, 1), pixel, 4, 0);
+            current = image.Source as WriteableBitmap ?? throw new InvalidOperationException("Resumed cover has no decoded bitmap.");
+            pixel = MusicTestUi.Pixels(current)[..4];
             Check(pixel[0] == 32 && pixel[3] == 255, "A retired shutdown read replaced the resumed cover pixels.");
 
             await sources.PrepareShutdownAsync();
@@ -384,24 +387,24 @@ public static partial class NovelTests
             int imageCalls = runtime.Calls.Count(call => call.Method == "source.runtime.library.image");
             for (int i = 0; i < 4; i++)
             {
-                inner.InvalidateArrange(); outer.InvalidateMeasure(); host.UpdateLayout();
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                inner.InvalidateArrange(); outer.InvalidateMeasure(); DesktopTestUi.WindowRoot(host).UpdateLayout();
+                await DesktopTestUi.DrainAsync();
             }
             Check(image.Source is null && runtime.ImageReads == 9 &&
                 runtime.Calls.Count(call => call.Method == "source.runtime.library.image") == imageCalls,
                 "Ordinary layout retried a failed cover request without a new demand or explicit resume.");
 
             runtime.ReadImage = (_, _) => Task.FromResult(currentPixels);
-            image.Visibility = Visibility.Hidden; host.UpdateLayout();
+            image.Visibility = Visibility.Collapsed; DesktopTestUi.WindowRoot(host).UpdateLayout();
             await sources.PrepareShutdownAsync(); sources.Resume();
-            host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
             Check(image.Source is null && runtime.ImageReads == 9 && runtime.ImageReferences.Count == 0,
                 "Resume acquired a hidden cover.");
-            image.Visibility = Visibility.Visible; host.UpdateLayout(); await Until(() => runtime.ImageReads == 10 && image.Source is not null);
-            inner.Children.Remove(image); host.UpdateLayout();
+            image.Visibility = Visibility.Visible; DesktopTestUi.WindowRoot(host).UpdateLayout(); await Until(() => runtime.ImageReads == 10 && image.Source is not null);
+            inner.Children.Remove(image); DesktopTestUi.WindowRoot(host).UpdateLayout();
             await Until(() => !image.IsLoaded && image.Source is null && runtime.ImageReferences.Count == 0);
             await sources.PrepareShutdownAsync(); sources.Resume();
-            host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
             Check(runtime.ImageReads == 10 && runtime.Released == 10 && runtime.ImageReferences.Count == 0,
                 "Resume acquired an unloaded cover.");
         }
@@ -410,8 +413,8 @@ public static partial class NovelTests
         {
             byte[] pixels = [shade, shade, shade, 255, shade, shade, shade, 255,
                 shade, shade, shade, 255, shade, shade, shade, 255];
-            var bitmap = BitmapSource.Create(2, 2, 96, 96, PixelFormats.Bgra32, null, pixels, 8);
-            var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
+            var bitmap = System.Windows.Media.Imaging.BitmapSource.Create(2, 2, 96, 96, System.Windows.Media.PixelFormats.Bgra32, null, pixels, 8);
+            var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder(); encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
             using var output = new MemoryStream(); encoder.Save(output); return output.ToArray();
         }
     }
@@ -422,16 +425,16 @@ public static partial class NovelTests
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync(); await using var rules = new NovelRuleProgram(ruleRuntime);
         var session = new NovelBookSession(sources, library, rules, new("image", "key", Book())); await session.ContinueAsync();
-        var surface = new NovelReadingSurface(sources); var host = GeneralAppearanceTests.Window(surface); host.Show();
+        var surface = new NovelReadingSurface(sources); var host = NovelTestUi.Window(surface); host.Show();
         try
         {
-            surface.Present(session, new() { Mode = "scroll" }); host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            surface.Present(session, new() { Mode = "scroll" }); DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
             await runtime.ImageReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
             surface.Visibility = Visibility.Collapsed; await surface.DrainImagesAsync();
             Check(runtime.Released == 1 && runtime.ImageReferences.Count == 0);
-            runtime.ImageReadHold = null; surface.Visibility = Visibility.Visible; host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
-            await Until(() => runtime.ImageReads >= 2); await Dispatcher.Yield(DispatcherPriority.Render);
-            var anchor = surface.CaptureAnchor(); host.Width = 700; host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            runtime.ImageReadHold = null; surface.Visibility = Visibility.Visible; DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
+            await Until(() => runtime.ImageReads >= 2); await DesktopTestUi.DrainAsync();
+            var anchor = surface.CaptureAnchor(); DesktopTestUi.ResizeWindow(host, 700, DesktopTestUi.WindowSize(host).Height); DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
             Check(surface.CaptureAnchor().BlockIndex == anchor.BlockIndex && surface.CaptureAnchor().Utf16Offset == anchor.Utf16Offset);
             await surface.DrainImagesAsync(); Check(runtime.ImageReferences.Count == 0 && runtime.Released >= 2);
         }
@@ -445,43 +448,43 @@ public static partial class NovelTests
         await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
         await module.InitializeAsync(default); await module.ReceiveBookAsync(Book(), default); await module.Session!.ContinueAsync();
         await module.NavigateAsync(NovelCapability.ReaderRoute, default);
-        var host = GeneralAppearanceTests.Window(module.View); host.Show();
+        var host = NovelTestUi.Window(module.View); host.Show();
         try
         {
             await ClickPurchase("initial cancel"); var cancelledPopup = await Confirmation("initial cancel");
-            Check(PopupItems<TextBlock>().Any(t => t.Text.Contains("书源a") && t.Text.Contains("合成小说") && t.Text.Contains("第一章")));
-            Preview((FrameworkElement)cancelledPopup.Child, "novel-purchase-confirmation", 640, 320);
+            Check(DialogItems<TextBlock>(module.View).Any(t => t.Text.Contains("书源a") && t.Text.Contains("合成小说") && t.Text.Contains("第一章")));
+            await Preview((FrameworkElement)cancelledPopup.Panel, "novel-purchase-confirmation", 640, 320);
             var cancelledClosed = DialogClosed(cancelledPopup);
-            ClickPopup("取消"); await cancelledClosed.WaitAsync(TimeSpan.FromSeconds(5)); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            ClickDialogAction(module.View, "取消"); await cancelledClosed.WaitAsync(TimeSpan.FromSeconds(5)); await DesktopTestUi.DrainAsync();
             Check(!runtime.Calls.Any(c => IsAction(c, "payAction")));
             await ClickPurchase("navigation cancel"); var retiredPopup = await Confirmation("navigation cancel"); var retiredClosed = DialogClosed(retiredPopup);
-            await module.NavigateAsync(NovelCapability.BookRoute, default); await retiredClosed.WaitAsync(TimeSpan.FromSeconds(5)); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            Check(!PopupItems<Button>().Any(b => b.Content as string == "确认购买") && !runtime.Calls.Any(c => IsAction(c, "payAction")));
+            await module.NavigateAsync(NovelCapability.BookRoute, default); await retiredClosed.WaitAsync(TimeSpan.FromSeconds(5)); await DesktopTestUi.DrainAsync();
+            Check(!DialogItems<Button>(module.View).Any(b => b.Content as string == "确认购买") && !runtime.Calls.Any(c => IsAction(c, "payAction")));
             await module.NavigateAsync(NovelCapability.ReaderRoute, default);
             await ClickPurchase("return to reader"); var acceptedPopup = await Confirmation("return to reader"); var acceptedClosed = DialogClosed(acceptedPopup);
-            ClickPopup("确认购买"); await acceptedClosed.WaitAsync(TimeSpan.FromSeconds(5));
+            ClickDialogAction(module.View, "确认购买"); await acceptedClosed.WaitAsync(TimeSpan.FromSeconds(5));
             await Until(() => module.Session.Chapter?.IsPay == true);
             Check(runtime.Calls.Count(c => IsAction(c, "payAction")) == 1 && runtime.Calls.Count(c => IsAction(c, "content")) >= 2);
-            await Dispatcher.Yield(DispatcherPriority.Render);
-            Check(!Find<Button>(module.View).Single(b => b.Content as string == "购买本章").IsVisible);
-            Preview(module.View, "novel-reader-purchased", 1000, 700);
+            await DesktopTestUi.DrainAsync();
+            Check(!DesktopVisual.IsVisible(Find<Button>(module.View).Single(b => b.Content as string == "购买本章")));
+            await Preview(module.View, "novel-reader-purchased", 1000, 700);
         }
         finally { host.Close(); await module.PrepareShutdownAsync(); }
         async Task ClickPurchase(string stage)
         {
-            try { await Until(() => Find<Button>(module.View).Any(b => b.Content as string == "购买本章" && b.IsVisible)); }
+            try { await Until(() => Find<Button>(module.View).Any(b => b.Content as string == "购买本章" && DesktopVisual.IsVisible(b))); }
             catch (OperationCanceledException error) { throw new TimeoutException(stage + ": purchase button not visible on " + module.Route, error); }
-            var buttons = Find<Button>(module.View).Where(b => b.Content as string == "购买本章" && b.IsVisible).ToArray();
+            var buttons = Find<Button>(module.View).Where(b => b.Content as string == "购买本章" && DesktopVisual.IsVisible(b)).ToArray();
             Check(buttons.Length == 1, stage + ": expected one visible purchase button on " + module.Route);
-            buttons[0].RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            DesktopTestUi.Invoke(buttons[0]);
         }
-        async Task<Popup> Confirmation(string stage)
+        async Task<DialogSurface> Confirmation(string stage)
         {
-            try { await Until(() => PopupItems<Button>().Any(b => b.Content as string == "确认购买" && b.IsVisible)); }
+            try { await Until(() => DialogItems<Button>(module.View).Any(b => b.Content as string == "确认购买" && DesktopVisual.IsVisible(b))); }
             catch (OperationCanceledException error) { throw new TimeoutException(stage + ": purchase confirmation not visible", error); }
-            var buttons = PopupItems<Button>().Where(b => b.Content as string == "确认购买" && b.IsVisible).ToArray();
+            var buttons = DialogItems<Button>(module.View).Where(b => b.Content as string == "确认购买" && DesktopVisual.IsVisible(b)).ToArray();
             Check(buttons.Length == 1, stage + ": expected one current purchase confirmation.");
-            return DialogPopup(buttons[0]);
+            return ObserveDialog(buttons[0]);
         }
     }
     private static async Task Shell()
@@ -489,39 +492,40 @@ public static partial class NovelTests
         await using var store = new MemoryStore(); var sources = NovelTestSources.Create(new Runtime()); await sources.RefreshAsync();
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
-        var shell = new ShellWindow([module], [], () => module.PrepareShutdownAsync(), () => module.AbortAsync(), module.CancelShutdownPreparationAsync)
-        { Width = 1050, Height = 760, Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false };
+        var shell = new ShellWindow([module], [], () => module.PrepareShutdownAsync(), () => module.AbortAsync(), module.CancelShutdownPreparationAsync);
+        shell.Resize(1050, 760);
         try
         {
             shell.Show(); await Until(() => module.ExploreSource is not null && !module.LoadingDiscovery);
             await module.ReceiveBookAsync(Book(), default); module.Request(NovelCapability.BookRoute);
             await Until(() => module.Route == NovelCapability.BookRoute && module.Session!.Chapters.Count > 0);
             var retained = module.CaptureNavigationLocation(); await module.StartReadingAsync();
-            await Until(() => module.Route == NovelCapability.ReaderRoute && ((Grid)shell.FindName("RootLayout")).ColumnDefinitions[0].Width.Value == 0);
-            Check(((FrameworkElement)shell.FindName("PageHeaderHost")).Visibility == Visibility.Collapsed && ((FrameworkElement)shell.FindName("PlayerFrame")).Visibility == Visibility.Collapsed);
-            Preview((FrameworkElement)shell.Content, "novel-shell-reader", 1050, 760);
+            await Until(() => module.Route == NovelCapability.ReaderRoute && ((Grid)DesktopTestUi.WindowRoot(shell).FindName("RootLayout")).ColumnDefinitions[0].Width.Value == 0);
+            Check(((FrameworkElement)DesktopTestUi.WindowRoot(shell).FindName("PageHeaderHost")).Visibility == Visibility.Collapsed && ((FrameworkElement)DesktopTestUi.WindowRoot(shell).FindName("PlayerFrame")).Visibility == Visibility.Collapsed);
+            await Preview((FrameworkElement)shell.Content, "novel-shell-reader", 1050, 760);
             module.Request(NovelCapability.BookRoute);
-            await Until(() => module.Route == NovelCapability.BookRoute && ((Grid)shell.FindName("RootLayout")).ColumnDefinitions[0].Width.Value == 216);
-            Check(module.CaptureNavigationLocation() == retained && ((FrameworkElement)shell.FindName("PageHeaderHost")).Visibility == Visibility.Visible);
+            await Until(() => module.Route == NovelCapability.BookRoute && ((Grid)DesktopTestUi.WindowRoot(shell).FindName("RootLayout")).ColumnDefinitions[0].Width.Value == 216);
+            Check(module.CaptureNavigationLocation() == retained && ((FrameworkElement)DesktopTestUi.WindowRoot(shell).FindName("PageHeaderHost")).Visibility == Visibility.Visible);
         }
         finally { shell.Close(); await shell.ShutdownCompletion.WaitAsync(TimeSpan.FromSeconds(10)); }
     }
     private static bool IsAction((string Method, JsonElement Payload) call, string action) => call.Method == "source.runtime.library.invoke" && call.Payload.GetProperty("action").GetString() == action;
-    private static IEnumerable<T> PopupItems<T>() where T : DependencyObject => PresentationSource.CurrentSources.Cast<PresentationSource>()
-        .Where(s => s.RootVisual is not null).SelectMany(s => Find<T>(s.RootVisual)).Distinct();
-    private static void ClickPopup(string label) => PopupItems<Button>().Last(b => b.Content as string == label && b.IsVisible).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+    private static IEnumerable<T> DialogItems<T>(FrameworkElement owner) where T : DependencyObject =>
+        PlayerDialogHost.Find(owner) is { } host ? Find<T>(host) : [];
+    private static void ClickDialogAction(FrameworkElement owner, string label) => DesktopTestUi.Invoke(
+        DialogItems<Button>(owner).Last(b => b.Content as string == label && DesktopVisual.IsVisible(b)));
     private static async Task Until(Func<bool> condition)
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        while (!condition()) { await Dispatcher.Yield(DispatcherPriority.ApplicationIdle); await Task.Delay(20, deadline.Token); }
+        while (!condition()) { await DesktopTestUi.DrainAsync(); await Task.Delay(20, deadline.Token); }
     }
-    private static void Preview(FrameworkElement view, string name, int width, int height)
+    private static async Task Preview(FrameworkElement view, string name, int width, int height)
     {
         string? previous = Environment.GetEnvironmentVariable("MEOWFILM_SETTINGS_PREVIEW_ROOT");
         try
         {
             Environment.SetEnvironmentVariable("MEOWFILM_SETTINGS_PREVIEW_ROOT", previous ?? TestWorkspace.DataPath("novel-previews"));
-            GeneralAppearanceTests.SavePreview(view, name, width, height);
+            await GeneralAppearanceTests.SavePreview(view, name, width, height);
         }
         finally { Environment.SetEnvironmentVariable("MEOWFILM_SETTINGS_PREVIEW_ROOT", previous); }
     }

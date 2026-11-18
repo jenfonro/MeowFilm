@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
-using System.Windows;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
 
 namespace MeowFilm.Desktop;
 
@@ -16,13 +17,14 @@ internal readonly record struct ShellWindowStartupSize(
             screenPixelHeight * (600d / 1440) / scale);
     }
 
-    internal static void ApplyToPrimaryScreen(Window window, nint handle)
+    internal static void ApplyToPrimaryScreen(DesktopWindow window, nint handle)
     {
         var size = Calculate(GetSystemMetrics(0), GetSystemMetrics(1), GetDpiForWindow(handle));
         window.MinWidth = size.MinWidth;
         window.MinHeight = size.MinHeight;
-        window.Width = size.Width;
-        window.Height = size.Height;
+        window.Resize(size.Width, size.Height);
+        var area = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(window.AppWindow.Id, Microsoft.UI.Windowing.DisplayAreaFallback.Primary).WorkArea;
+        window.AppWindow.Move(new Windows.Graphics.PointInt32(area.X + (area.Width - window.AppWindow.Size.Width) / 2, area.Y + (area.Height - window.AppWindow.Size.Height) / 2));
     }
 
     [DllImport("user32.dll")]

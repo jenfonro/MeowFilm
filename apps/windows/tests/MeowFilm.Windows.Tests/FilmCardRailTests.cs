@@ -1,12 +1,20 @@
+using FontWeights = Microsoft.UI.Text.FontWeights;
+using Windows.UI;
+using Windows.System;
+using Windows.UI.ViewManagement;
 using System.Diagnostics;
 using System.IO;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
-using MeowFilm.Capabilities;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI;
+using Windows.UI.Text;
 using MeowFilm.Desktop;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
+
+using MeowFilm.Capabilities;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -15,11 +23,11 @@ public static class FilmCardRailTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return new("film-card-rails: home scales complete posters and restores aligned pages after resize and hiding",
-            () => MusicQualityConsumerTests.Sta(Home));
+            () => TestUiHost.InvokeAsync(Home));
         yield return new("film-card-rails: episodes scale complete cards and page beside the rail without business commands",
-            () => MusicQualityConsumerTests.Sta(Playback));
+            () => TestUiHost.InvokeAsync(Playback));
         yield return new("film-card-rails: native grids bound posters at width transitions and keep short rows small",
-            () => MusicQualityConsumerTests.Sta(Grid));
+            () => TestUiHost.InvokeAsync(Grid));
     }
 
     private static Task Grid()
@@ -32,7 +40,7 @@ public static class FilmCardRailTests
             grid.Measure(new(sample.Item1, double.PositiveInfinity));
             grid.Arrange(new Rect(0, 0, sample.Item1, grid.DesiredSize.Height));
             grid.UpdateLayout();
-            var row = grid.Children.Cast<FilmCard>().Where(card => card.TranslatePoint(new Point(), grid).Y < 1).ToArray();
+            var row = grid.Children.Cast<FilmCard>().Where(card => card.TransformToVisual(grid).TransformPoint(new Point()).Y < 1).ToArray();
             Check(row.Length == sample.Item2, "a grid adds another column only within the readable poster range");
             foreach (var card in grid.Children.Cast<FilmCard>())
             {
@@ -44,7 +52,7 @@ public static class FilmCardRailTests
                     "grid artwork preserves its ratio without clipping or exceeding its maximum, including a narrow single column");
             }
         }
-        grid.Children.RemoveRange(1, 11);
+        while (grid.Children.Count > 1) grid.Children.RemoveAt(grid.Children.Count - 1);
         grid.Measure(new(1440, double.PositiveInfinity));
         grid.Arrange(new Rect(0, 0, 1440, grid.DesiredSize.Height));
         Check(((FilmCard)grid.Children[0]).ActualWidth <= 176.5, "short data does not enlarge its last row");
@@ -67,13 +75,13 @@ public static class FilmCardRailTests
             var counts = new HashSet<int>();
             foreach (double width in new[] { 420d, 780d, 1150d, 1440d })
             {
-                window.Width = width;
-                window.UpdateLayout();
+                window.Resize(width, 850);
+                window.Root.UpdateLayout();
                 await Drain();
                 counts.Add(CheckCards<FilmCard>(shelf, card => (FrameworkElement)card.FindName("PosterFrame"), 176d / 264, 144, 176));
                 Check(Visuals(shelf).OfType<FilmCard>().Count() < 40,
                     "home realizes nearby cards rather than the complete source");
-                ((Button)shelf.FindName("Next")).Focus();
+                ((Button)shelf.FindName("Next")).Focus(FocusState.Programmatic);
                 await Drain();
                 await Snapshot(view, $"home-{width:0}");
             }
@@ -84,8 +92,8 @@ public static class FilmCardRailTests
             Check(Math.Abs(section.HorizontalOffset - shelf.PresentedOffset) < .5,
                 "the section owns the settled rail offset");
             view.Visibility = Visibility.Collapsed;
-            window.Width = 910;
-            window.UpdateLayout();
+            window.Resize(910, 850);
+            window.Root.UpdateLayout();
             view.Visibility = Visibility.Visible;
             await Drain();
             Check(Math.Abs(shelf.PresentedOffset / shelf.CardWidth - anchor) < .01,
@@ -114,27 +122,27 @@ public static class FilmCardRailTests
         var window = Mount(view);
         try
         {
-            var shelf = (Shelf)view.FindName("EpisodeShelf");
+            var shelf = FilmUiTest.Named<Shelf>(view, "EpisodeShelf");
             await Until(() => shelf.ScrollHost is { ViewportWidth: > 0 });
-            var toolbar = (DockPanel)view.FindName("EpisodeToolbar");
+            var toolbar = (Grid)view.FindName("EpisodeToolbar");
             int commands = rig.Runtime.Calls.Count;
             var selected = rig.Page.SelectedEpisode;
             var counts = new HashSet<int>();
             foreach (double width in new[] { 780d, 1150d, 1440d })
             {
-                window.Width = width;
-                window.UpdateLayout();
+                window.Resize(width, 850);
+                window.Root.UpdateLayout();
                 shelf.ScrollToIndex(0);
                 await Drain();
                 counts.Add(CheckCards<Button>(shelf, EpisodeFrame, 16d / 9, 240, 336,
                     button => button.Tag is FilmEpisodeItem));
                 var next = (Button)shelf.FindName("Next");
                 Check(next.ActualWidth == 48 && next.ActualHeight == 48 &&
-                    next.TranslatePoint(new Point(), view).Y >=
-                    toolbar.TranslatePoint(new Point(0, toolbar.ActualHeight), view).Y,
+                    next.TransformToVisual(view).TransformPoint(new Point()).Y >=
+                    toolbar.TransformToVisual(view).TransformPoint(new Point(0, toolbar.ActualHeight)).Y,
                     "the existing white round navigation lives beside the cards below the toolbar");
-                next.Focus();
-                shelf.BringIntoView();
+                next.Focus(FocusState.Programmatic);
+                shelf.StartBringIntoView();
                 await Drain();
                 await Snapshot(view, $"playback-{width:0}");
                 Click(shelf, "Next");
@@ -153,9 +161,9 @@ public static class FilmCardRailTests
                 "the short last page finishes with complete cards");
             double savedOffset = shelf.PresentedOffset;
             ClickView(view, "ListLayout");
-            await Until(() => rig.Page.IsListLayout && !shelf.IsVisible);
+            await Until(() => rig.Page.IsListLayout && !FilmUiTest.Visible(shelf));
             ClickView(view, "HorizontalLayout");
-            await Until(() => rig.Page.IsHorizontalLayout && shelf.IsVisible);
+            await Until(() => rig.Page.IsHorizontalLayout && FilmUiTest.Visible(shelf));
             await Drain();
             CheckCards<Button>(shelf, EpisodeFrame, 16d / 9, 240, 336, button => button.Tag is FilmEpisodeItem);
             Check(Math.Abs(shelf.PresentedOffset - savedOffset) < .5 && ReferenceEquals(selected, rig.Page.SelectedEpisode),
@@ -163,7 +171,7 @@ public static class FilmCardRailTests
             rig.Runtime.Change(root => root["episodes"] = new System.Text.Json.Nodes.JsonArray());
             await Until(() => rig.Page.Episodes.Count == 0);
             await Drain();
-            Check(!shelf.IsVisible, "empty episodes retire the card rail");
+            Check(!FilmUiTest.Visible(shelf), "empty episodes retire the card rail");
         }
         finally { view.DataContext = null; window.Content = null; window.Close(); }
     }
@@ -193,12 +201,10 @@ public static class FilmCardRailTests
                 "artwork stays between the readable minimum and the reference-image maximum");
             foreach (var text in Visuals(row.Card).OfType<TextBlock>())
             {
-                var transform = text.TransformToAncestor(rail);
-                Point origin = transform.Transform(new Point()), unit = transform.Transform(new Point(1, 1));
+                var transform = text.TransformToVisual(rail);
+                Point origin = transform.TransformPoint(new Point()), unit = transform.TransformPoint(new Point(1, 1));
                 Check(Math.Abs(unit.X - origin.X - 1) < .001 && Math.Abs(unit.Y - origin.Y - 1) < .001 &&
-                    text.FontFamily.Equals(SystemFonts.MessageFontFamily) && text.FontWeight == FontWeights.Normal &&
-                    TextOptions.GetTextFormattingMode(text) == TextFormattingMode.Display &&
-                    TextOptions.GetTextRenderingMode(text) == TextRenderingMode.Auto,
+                    text.FontFamily.Source == "XamlAutoFontFamily" && text.FontWeight == FontWeights.Normal,
                     "native card text keeps system typography without any viewport-dependent glyph scale");
             }
         }
@@ -211,33 +217,16 @@ public static class FilmCardRailTests
     private static bool BothArrowsHidden(Shelf shelf) =>
         new[] { "Previous", "Next" }.All(name => ((Button)shelf.FindName(name)).Visibility == Visibility.Collapsed);
     private static void Click(Shelf shelf, string name) => ClickButton((Button)shelf.FindName(name));
-    private static void ClickView(FilmPlaybackView view, string name) => ClickButton((Button)view.FindName(name));
-    private static void ClickButton(Button button) => button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-    private static Rect Bounds(FrameworkElement element, Visual ancestor) =>
-        element.TransformToAncestor(ancestor).TransformBounds(new Rect(element.RenderSize));
+    private static void ClickView(FilmPlaybackView view, string name) => FilmUiTest.Click(FilmUiTest.Named<Microsoft.UI.Xaml.Controls.Primitives.ToggleButton>(view, name));
+    private static void ClickButton(Button button) => FilmUiTest.Click(button);
+    private static Rect Bounds(FrameworkElement element, UIElement ancestor) =>
+        element.TransformToVisual(ancestor).TransformBounds(new Rect(0, 0, element.ActualWidth, element.ActualHeight));
     private static Window Mount(FrameworkElement view)
     {
-        var window = new DesktopWindow { Content = view, Width = 1150, Height = 850, Left = 24, Top = 24,
-            ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None,
-            Topmost = Environment.GetEnvironmentVariable("MEOWFILM_FILM_RAIL_PREVIEW_ROOT") is not null,
-            Background = Brushes.White, SizeToContent = SizeToContent.Manual };
-        window.Show();
-        window.UpdateLayout();
-        return window;
+        var window = FilmUiTest.Window(view); window.Show(); return window;
     }
     private static async Task Snapshot(FrameworkElement view, string name)
     {
-        if (Environment.GetEnvironmentVariable("MEOWFILM_FILM_RAIL_PREVIEW_ROOT") is not { } root) return;
-        TestWorkspace.ValidatePath(TestWorkspace.DataRoot, root);
-        Directory.CreateDirectory(root);
-        var window = Window.GetWindow(view);
-        var bitmap = new RenderTargetBitmap((int)Math.Ceiling(window.ActualWidth), (int)Math.Ceiling(window.ActualHeight),
-            96, 96, PixelFormats.Pbgra32);
-        bitmap.Render(window);
-        var encoder = new PngBitmapEncoder();
-        encoder.Frames.Add(BitmapFrame.Create(bitmap));
-        using var stream = File.Create(Path.Combine(root, name + ".png"));
-        encoder.Save(stream);
         if (Environment.GetEnvironmentVariable("MEOWFILM_TEST_DESKTOP_EXPECTED_USER") is not null)
             await NativeDesktopCapture.SaveAsync(view, name);
     }
@@ -249,7 +238,7 @@ public static class FilmCardRailTests
     }
     private static async Task Drain()
     {
-        for (int index = 0; index < 3; index++) await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        for (int index = 0; index < 3; index++) await FilmUiTest.Pump();
     }
     private static async Task Until(Func<bool> condition)
     {
@@ -257,7 +246,7 @@ public static class FilmCardRailTests
         while (!condition())
         {
             if (watch.Elapsed > TimeSpan.FromSeconds(8)) throw new TimeoutException("Film card rail state did not settle");
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await FilmUiTest.Pump();
             if (!condition()) await Task.Delay(1);
         }
         await Drain();

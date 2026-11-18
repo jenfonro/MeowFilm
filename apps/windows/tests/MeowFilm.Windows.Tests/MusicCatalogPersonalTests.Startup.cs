@@ -1,6 +1,9 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Interop;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Windows.Tests;
@@ -52,13 +55,12 @@ public static partial class MusicCatalogPersonalTests
         await using var f = await Fixture.Create(initialize: false);
         await f.Module.PrepareStartupAsync().WaitAsync(HomeGuard);
         var held = f.App.HoldNext("music.library.list", before: false);
-        var shell = new ShellWindow([f.Module], [], () => f.Module.DisposeAsync().AsTask(), f.Module.AbortAsync)
-        { ShowActivated = false, ShowInTaskbar = false };
+        var shell = new ShellWindow([f.Module], [], () => f.Module.DisposeAsync().AsTask(), f.Module.AbortAsync);
         var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         shell.Closed += (_, _) => closed.TrySetResult();
-        var status = (TextBlock)shell.FindName("StatusText");
-        var panel = (Border)shell.FindName("StatusPanel");
-        var navigation = (ListBox)shell.FindName("ModuleNavigationList");
+        var status = (TextBlock)DesktopTestUi.WindowRoot(shell).FindName("StatusText");
+        var panel = (Border)DesktopTestUi.WindowRoot(shell).FindName("StatusPanel");
+        var navigation = (ListView)DesktopTestUi.WindowRoot(shell).FindName("ModuleNavigationList");
         try
         {
             shell.Show();
@@ -67,11 +69,11 @@ public static partial class MusicCatalogPersonalTests
                 .WaitAsync(HomeGuard);
             await Drain();
             AssertStartupReadHeld(f, held);
-            status.GetBindingExpression(TextBlock.TextProperty)?.UpdateTarget();
+            await DesktopTestUi.DrainAsync();
             Equal("正在加载…", status.Text);
-            Check(shell.IsVisible && new WindowInteropHelper(shell).Handle != IntPtr.Zero &&
-                PresentationSource.FromVisual(f.Module.View) is not null &&
-                ReferenceEquals(PresentationSource.FromVisual(f.Module.View), PresentationSource.FromVisual(shell)),
+            Check(shell.IsVisible && WinRT.Interop.WindowNative.GetWindowHandle(shell) != IntPtr.Zero &&
+                f.Module.View.XamlRoot is not null &&
+                ReferenceEquals(f.Module.View.XamlRoot, DesktopTestUi.WindowRoot(shell).XamlRoot),
                 "normal Loaded exercises the module on a real non-activating shell surface");
 
             held.Release();
@@ -82,7 +84,7 @@ public static partial class MusicCatalogPersonalTests
             await f.Module.HomeRefresh.WaitAsync(HomeGuard);
             await f.Module.HomeInitialization.WaitAsync(HomeGuard);
             await Drain();
-            status.GetBindingExpression(TextBlock.TextProperty)?.UpdateTarget();
+            await DesktopTestUi.DrainAsync();
             AssertStartupInitialized(f);
             Equal(1, Calls(f, "music.library.list"));
             Check(!held.Cancelled.Task.IsCompleted, "shell initialization keeps its original local read");
@@ -92,9 +94,9 @@ public static partial class MusicCatalogPersonalTests
             Check(navigation.SelectedItem is ModuleSession { Current: { Value: "catalog-home" } } selected &&
                 ReferenceEquals(selected.Module, f.Module),
                 "the shell commits its normal first destination after full initialization");
-            Check(shell.IsVisible && new WindowInteropHelper(shell).Handle != IntPtr.Zero &&
-                PresentationSource.FromVisual(f.Module.View) is not null &&
-                ReferenceEquals(PresentationSource.FromVisual(f.Module.View), PresentationSource.FromVisual(shell)),
+            Check(shell.IsVisible && WinRT.Interop.WindowNative.GetWindowHandle(shell) != IntPtr.Zero &&
+                f.Module.View.XamlRoot is not null &&
+                ReferenceEquals(f.Module.View.XamlRoot, DesktopTestUi.WindowRoot(shell).XamlRoot),
                 "successful startup keeps the module on the real shell surface");
             AssertNoHomeCommit(f);
         }

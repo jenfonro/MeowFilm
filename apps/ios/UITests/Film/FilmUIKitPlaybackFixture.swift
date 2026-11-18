@@ -84,7 +84,7 @@ enum FilmUIKitPlaybackFixture {
             "target": target(kind: kind, provider: provider), "stage": .string(attemptID == nil ? "idle" : "pending"),
             "workInfo": .object(["provider": .string(provider.rawValue), "metadataId": .number(provider == .tmdb ? 19 : 0),
                 "kind": .string(kind == .movie ? "movie" : "tv"), "title": .string("星海航线"),
-                "summary": .string(""), "seasonCount": .null, "episodeCount": .null]),
+                "summary": .string(""), "seasonCount": .null, "episodeCount": .null, "metadata": .object([:])]),
             "entryTarget": target(kind: kind, provider: provider), "entryResolution": .null,
             "error": .null, "metadata": .object(["name": .string("星海航线"),
                 "seasons": .array([.object(["businessId": .string("fixture-season-1"), "playbackTarget": target(kind: kind, provider: provider),

@@ -1,75 +1,55 @@
-using System.Windows;
-using System.Windows.Media;
-using System.Windows.Threading;
-using System.Windows.Controls.Primitives;
+using Microsoft.UI.Xaml;
 
 namespace MeowFilm.Desktop;
 
-/// <summary>A nonvisual binding endpoint. Notifications belong to the window, not page layout.</summary>
+/// <summary>A tree-local notification endpoint. The shell owns the receiver, never a global event bus.</summary>
 public sealed class NoticeOutlet : FrameworkElement
 {
-    public static readonly RoutedEvent NoticeEvent = EventManager.RegisterRoutedEvent(
-        "Notice", RoutingStrategy.Bubble, typeof(EventHandler<DesktopNoticeEventArgs>), typeof(NoticeOutlet));
-    public static readonly DependencyProperty MessageProperty = DependencyProperty.Register(
-        nameof(Message), typeof(string), typeof(NoticeOutlet),
-        new PropertyMetadata("", (d, _) => ((NoticeOutlet)d).Queue()));
-    public string Message
+    private static readonly DependencyProperty ReceiverProperty = DependencyProperty.RegisterAttached("Receiver", typeof(Action<DesktopNoticeEventArgs>), typeof(NoticeOutlet), new PropertyMetadata(null));
+    public static void SetReceiver(FrameworkElement root, Action<DesktopNoticeEventArgs>? receiver) => root.SetValue(ReceiverProperty, receiver);
+    public static void Publish(FrameworkElement owner, DesktopNoticeEventArgs notice)
     {
-        get => (string)GetValue(MessageProperty);
-        set { if (Message == value) Queue(); else SetValue(MessageProperty, value); }
+        if (owner.XamlRoot?.Content is FrameworkElement root && root.GetValue(ReceiverProperty) is Action<DesktopNoticeEventArgs> receive) receive(notice);
     }
-    private FrameworkElement? parent;
-    private UIElement? root;
+    public static readonly DependencyProperty MessageProperty = DependencyProperty.Register(nameof(Message), typeof(string), typeof(NoticeOutlet), new PropertyMetadata("", (value, _) => ((NoticeOutlet)value).Queue()));
+    public string Message { get => (string)GetValue(MessageProperty); set { if (Message == value) Queue(); else SetValue(MessageProperty, value); } }
+    private FrameworkElement? root;
+    private IDisposable? visibility;
     private long generation;
     private bool pending;
     public NoticeOutlet()
     {
-        Visibility = Visibility.Collapsed;
-        Focusable = IsHitTestVisible = false;
+        IsHitTestVisible = false;
+        Width = Height = 0;
         Loaded += (_, _) =>
         {
-            parent = Parent as FrameworkElement ?? VisualTreeHelper.GetParent(this) as FrameworkElement;
-            root = this;
-            for (DependencyObject? node = this; node is not null; node = VisualTreeHelper.GetParent(node))
-                if (node is UIElement element) root = element;
-            // Popups have their own visual root, but their logical owner still
-            // identifies this window. Never locate a global/current window.
-            for (DependencyObject? node = this; node is not null;)
-            {
-                if (node is Window window) { root = window; break; }
-                node = node is Popup popup ? popup.PlacementTarget :
-                    LogicalTreeHelper.GetParent(node) ?? (node is Visual ? VisualTreeHelper.GetParent(node) : null);
-            }
-            if (parent is not null) parent.IsVisibleChanged += ParentVisibilityChanged;
-            Schedule();
+            root = XamlRoot?.Content as FrameworkElement;
+            visibility = DesktopVisual.ObserveVisibility(this, _ => Schedule());
         };
         Unloaded += (_, _) =>
         {
             generation++;
-            if (parent is not null) parent.IsVisibleChanged -= ParentVisibilityChanged;
-            Publish(""); parent = null; root = null;
+            visibility?.Dispose(); visibility = null;
+            Send(""); root = null;
         };
     }
-    private void ParentVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e) => Schedule();
-    public void Post(string message) => root?.RaiseEvent(new DesktopNoticeEventArgs(this, message, transient: true));
+    public void Post(string message) { if (root is not null) Publish(root, new(this, message, true)); }
     private void Queue() { pending = true; Schedule(); }
     private void Schedule()
     {
-        var ticket = ++generation;
-        if (!IsLoaded || Dispatcher.HasShutdownStarted) return;
-        _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+        long ticket = ++generation;
+        if (!IsLoaded) return;
+        DispatcherQueue.TryEnqueue(() =>
         {
             if (ticket != generation || !IsLoaded) return;
-            if (parent?.IsVisible != true) { Publish(""); return; }
+            if (!DesktopVisual.IsVisible(this)) { Send(""); return; }
             if (!pending) return;
-            pending = false;
-            Publish(Message);
-        }));
+            pending = false; Send(Message);
+        });
     }
-    private void Publish(string message) => root?.RaiseEvent(new DesktopNoticeEventArgs(this, message ?? ""));
+    private void Send(string message) { if (root is not null) Publish(root, new(this, message)); }
 }
-
-public sealed class DesktopNoticeEventArgs(NoticeOutlet source, string message, bool transient = false) : RoutedEventArgs(NoticeOutlet.NoticeEvent, source)
+public sealed class DesktopNoticeEventArgs(NoticeOutlet source, string message, bool transient = false) : EventArgs
 {
     public NoticeOutlet Outlet { get; } = source;
     public object Identity { get; } = transient ? new object() : source;

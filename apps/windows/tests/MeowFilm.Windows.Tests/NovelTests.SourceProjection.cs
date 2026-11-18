@@ -1,10 +1,14 @@
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
@@ -210,16 +214,15 @@ public static partial class NovelTests
         var settings = (NovelSettingsView)module.SettingsView;
         var root = new Grid(); root.Children.Add(module.SettingsView);
         var dialogs = new PlayerDialogHost(); root.Children.Add(dialogs);
-        var window = GeneralAppearanceTests.Window(root); NovelUi.Theme(window); dialogs.Attach(window); window.Show();
+        var window = GeneralAppearanceTests.Window(root); NovelUi.Theme(DesktopTestUi.WindowRoot(window)); dialogs.Attach(window); window.Show();
         try
         {
             await Until(() => Find<Button>(module.SettingsView).Any(button => AutomationProperties.GetName(button) == "编辑 书源a"));
             await settings.DrainAsync(); settings.Resume();
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await DesktopTestUi.DrainAsync();
             reads = runtime.SourceStore.Reads;
             runtime.Listing = _ => throw new IOException("native reload unavailable");
-            Find<Button>(module.SettingsView).Single(button => AutomationProperties.GetName(button) == "编辑 书源a")
-                .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            DesktopTestUi.Invoke(Find<Button>(module.SettingsView).Single(button => AutomationProperties.GetName(button) == "编辑 书源a"));
             await Until(() => Find<NovelSourceEditor>(dialogs).Any(candidate => candidate.IsLoaded));
             var editor = Find<NovelSourceEditor>(dialogs).Single();
             CheckSourceDefinition(editor.Draft.Definition(), definition.Definition);
@@ -229,11 +232,13 @@ public static partial class NovelTests
             Cancel();
             await Until(() => !dialogs.IsOpen);
             await settings.DrainAsync(); settings.Resume();
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await DesktopTestUi.DrainAsync();
             var create = Find<Button>(module.SettingsView).Single(button => AutomationProperties.GetName(button) == "添加书源")
-                .ContextMenu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "新建书源"));
-            Check(create.Items.Count == 0);
-            create.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                .ContextFlyout as MenuFlyout ?? throw new InvalidOperationException("Source menu absent");
+            var item = (MenuFlyoutItem)create.Items.Single(candidate => candidate is MenuFlyoutItem { Text: "新建书源" });
+            Check(create.Items.OfType<MenuFlyoutSubItem>().Count() == 0);
+            create.ShowAt(Find<Button>(module.SettingsView).Single(button => AutomationProperties.GetName(button) == "添加书源"));
+            await DesktopTestUi.DrainAsync(); MusicTestUi.Invoke(item);
             await Until(() => Find<NovelSourceEditor>(dialogs).Any(candidate => candidate.IsLoaded));
             editor = Find<NovelSourceEditor>(dialogs).Single();
             Field(editor, "bookSourceName").Text = "新源";
@@ -257,7 +262,7 @@ public static partial class NovelTests
         {
             Field(editor, "bookSourceName").Text = name;
             await Until(() => Find<Button>(dialogs).Any(button => Equals(button.Content, "保存") && button.IsEnabled));
-            Find<Button>(dialogs).Single(button => Equals(button.Content, "保存")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            DesktopTestUi.Invoke(Find<Button>(dialogs).Single(button => Equals(button.Content, "保存")));
             await Until(() => sources.Sources.Any(source => source.SourceUrl == url && source.Revision == revision) && notices == writes &&
                 !editor.Draft.HasInput &&
                 Find<Button>(dialogs).Any(button => Equals(button.Content, "保存") && button.IsEnabled));
@@ -279,7 +284,6 @@ public static partial class NovelTests
             CheckSourceDefinition(current.GetProperty("definition").GetString()!, saved.Definition);
             Check(NovelJson.Decode<NovelSource>(current.GetProperty("source")).Revision == revision);
         }
-        void Cancel() => Find<Button>(dialogs).Single(button => Equals(button.Content, "取消"))
-            .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        void Cancel() => DesktopTestUi.Invoke(Find<Button>(dialogs).Single(button => Equals(button.Content, "取消")));
     }
 }
