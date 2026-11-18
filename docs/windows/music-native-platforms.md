@@ -21,7 +21,7 @@
 
 KW／MG 集合 continuation 传完整 hop `{page,batch,index}`；QQ／KG 页保留实际 consumed offset，原生 UI 传回真实 continuation。目录登记跳过隐藏卡片，预览只使用实际展示的前三项 preview.song，排名预览投影当前仓库资料，不为卡片补发音频或跨平台搜索。
 
-`MusicHomeSnapshotStore` 使用 `music.home.v2` 保存当前首页展示；页面恢复与实时请求分离，实际图片由音乐专用共享 `ArtworkService` 处理。卡片页与个人目录 UI 见[目录](music-catalog.md)、[个人目录](music-catalog-personal-ui.md)。
+`MusicHomeSnapshotStore` 使用 `music.home.v3` 保存当前首页展示；页面恢复与实时请求分离，实际图片由音乐专用共享 `ArtworkService` 处理。卡片页与个人目录 UI 见[目录](music-catalog.md)、[个人目录](music-catalog-personal-ui.md)。
 
 ## 设置、生命周期与验证
 

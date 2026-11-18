@@ -45,7 +45,7 @@ public static class AppIdentity
     public static IReadOnlyList<string> CacheNamespaces { get; } = Array.AsReadOnly(new[]
     {
         "music.account-details.v2", "music.playback-sources.v2",
-        "music.playback-files.v2", "music.chorus.v2", "music.source-discovery.v1", "music.home.v2"
+        "music.playback-files.v2", "music.chorus.v2", "music.source-discovery.v1", "music.home.v3"
     });
     public static IReadOnlyList<string> CacheProtectedNamespaces { get; } =
         Array.AsReadOnly(new[] { "music.account-details.v2" });

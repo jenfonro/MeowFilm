@@ -177,8 +177,11 @@ public static class MusicCatalogLayoutTests
             var shade = (Border)card.FindName("BottomShade");
             Check(header.Visibility == (home ? Visibility.Visible : Visibility.Collapsed),
                 "only home labels occupy the upper title slot");
-            Check(caption.Text == (home ? model.Subtitle : model.Title), "the lower caption uses the fixed role");
+            Check(caption.Text == (home ? model.ContextText : model.Title), "the lower caption uses the fixed role");
             if (home) Check(Descendants<TextBlock>(header).Any(text => text.Text == model.Label), "home label is rendered");
+            if (!home) Check(((TextBlock)card.FindName("PlayCount")).Text == "0" &&
+                ((Grid)card.FindName("CoverInfo")).Visibility == Visibility.Visible &&
+                ((Border)card.FindName("TitleShade")).Visibility == Visibility.Visible, "zero plays has a protected cover label");
             Check(Descendants<TextBlock>(card).All(text => text.FontWeight == FontWeights.Normal),
                 "ordinary card typography remains regular");
             Check(CardMotion.GetProgress(surface) == 0 && shade.Visibility == Visibility.Visible &&
@@ -188,7 +191,25 @@ public static class MusicCatalogLayoutTests
             Check(mask.GradientStops.Select(stop => stop.Offset).SequenceEqual([.62, .82, 1d]) &&
                 mask.GradientStops.Select(stop => stop.Color.A).SequenceEqual(new byte[] { 0, 112, 255 }),
                 "the frozen alpha stops are not an animated hover effect");
+            if (home)
+            {
+                model.InitializePreview([new("Broken Ankle", "", "", 1, null), new("Maggie", "", "", 2, null), new("HONEYMOON", "", "", 3, null)]);
+                CardMotion.Transition(surface, true, false); await Drain(); scene.Layout(152);
+                var lines = Descendants<TextBlock>((Border)card.FindName("PreviewBlock")).ToArray();
+                var button = (Button)card.FindName("PlayButton");
+                Check(lines.Length == 3 && lines[0].ActualWidth > lines[^1].ActualWidth &&
+                    lines[0].TranslatePoint(new(0, lines[0].ActualHeight), surface).Y <= button.TranslatePoint(new(), surface).Y &&
+                    lines[^1].TranslatePoint(new(lines[^1].ActualWidth, 0), surface).X <= button.TranslatePoint(new(), surface).X,
+                    "preview rows use the unobstructed width above the play button");
+            }
         }
+        var fm = new MusicCatalogCard("fm", "24h不间断欧美频道 一键播放", "", "", "fm", "wy", CoverLabel: "欧美漫游");
+        var fmCard = new EntryCard { DataContext = fm, Width = 152 };
+        using var fmScene = new Scene(fmCard, 152);
+        await Drain(); fmScene.Layout(152);
+        Check(((TextBlock)fmCard.FindName("FMLabel")).Text == "欧美漫游" &&
+            ((TextBlock)fmCard.FindName("Caption")).Text == fm.Title && !fm.HasLabel,
+            "the FM cover marker is independent of the home category and lower caption");
     }
 
     private static async Task ArtworkVisibility()

@@ -1262,7 +1262,8 @@ public static partial class MusicCatalogPersonalTests
     }
     private static object DailyEntry(string id = "daily-default", string branch = "default", bool available = true) => new
     {
-        id, key = id, kind = "daily", title = "每日推荐", label = "每日推荐", subtitle = "从「合成歌曲」听起",
+        id, key = id, kind = "daily", title = "每日推荐", label = "每日推荐", subtitle = "符合你口味的新鲜好歌",
+        contextText = "每日推荐 | 从「合成歌曲」听起",
         dayOfMonth = 29, presentation = "preview", display = available,
         available, errorCode = available ? "" : "AUTH_REQUIRED", action = new { type = "daily", branch }
     };
@@ -1277,7 +1278,8 @@ public static partial class MusicCatalogPersonalTests
         Equal(3, cards.Length);
         f.Module.UpdateCatalogVisibleCards(f.Module.DisplayCatalogSections.SelectMany(section => section.Items));
         await f.Module.CatalogEntryInitialization;
-        Check(cards.All(card => card.DayOfMonth == 29 && card.Subtitle.Contains("合成歌曲", StringComparison.Ordinal)));
+        Check(cards.All(card => card.DayOfMonth == 29 && card.Label == "每日推荐" &&
+            card.Caption == "每日推荐 | 从「合成歌曲」听起" && card.Subtitle == "符合你口味的新鲜好歌"));
         Check(cards.All(card => card.PreviewTitles.SequenceEqual(["1 Track 1", "2 Track 2", "3 Track 3"])));
         Equal(2, f.Platform.Requests.OfType<MusicDailyRequest>().Count());
         Check(f.Platform.Requests.OfType<MusicDailyRequest>().Select(request => request.Branch)

@@ -677,7 +677,8 @@ public sealed partial class MusicCapability
             if (number > 1 && catalogPages.TryGetValue(catalogPage, out var previousPage))
                 state = state with { OptionalReads = previousPage.OptionalReads };
             if (operation == "playlist")
-                RememberCatalogCollectionCover(platform, MusicCatalogDto.Text(reply, "id"), state.Artwork);
+                RememberCatalogCollectionMetadata(platform, MusicCatalogDto.Text(reply, "id"), name, state.Artwork,
+                    MusicCatalogDto.LongNumber(reply, "playCount"));
             if (operation == "channels")
             {
                 ChannelTabs.Clear();

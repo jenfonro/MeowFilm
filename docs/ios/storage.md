@@ -13,7 +13,7 @@
 | 视频映射／选项／删除记录 | 普通文档 | `meowfilm/documents/film.video-sources.v1`，参与备份 |
 | 音乐脚本安装、源码与私有数据 | Node 私有文档 | Application Support 下 `meowfilm/script-runtime/music`，参与备份 |
 | 共享图片／歌词（`music.presentation-resources.v2`） | 原始字节文件 | Caches 下 `meowfilm/documents/music.presentation-resources.v2` |
-| 来源观察（`music.source-checks.v1`）、首页展示（`music.home.display.v1`）、官方音频定位（`music.platform.audio-locators.v1`） | 普通文档 | Caches 下 `meowfilm/documents` |
+| 来源观察（`music.source-checks.v1`）、首页展示（`music.home.display.v2`）、官方音频定位（`music.platform.audio-locators.v1`） | 普通文档 | Caches 下 `meowfilm/documents` |
 | 平台匿名协议状态 | Node 私有文档 | Application Support 下 `meowfilm/script-runtime/music-platform`，不保存原生账号凭据 |
 | 账号凭据（`<bundle>.music.platform.accounts.v1`） | `MeowAccounts` Keychain 凭据 | `afterFirstUnlockThisDeviceOnly`，不同步；bundle 使用稳定产品身份 |
 | 实际播放后的音频 | 音频文件缓存 | Caches 下 `meowfilm.music.audio-resources.v1`，Data Protection class C |

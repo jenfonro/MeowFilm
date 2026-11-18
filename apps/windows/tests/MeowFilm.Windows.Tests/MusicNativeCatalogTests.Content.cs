@@ -76,7 +76,8 @@ public static partial class MusicNativeCatalogTests
             if (operation == "home")
             {
                 var card = sections[0].Items[0];
-                Check(card.Label.Length > 0 && card.Caption == card.Subtitle && card.HasLabel);
+                Check(card.Label == "私人雷达" && card.Caption == "今日动态歌单" && card.HasLabel);
+                Check(card.PlayCount == 3031000 && card.PlayCountText == "303.1万");
             }
             else if (operation == "channels")
                 Check(sections[0].Items.Select(card => card.ChannelKind).SequenceEqual(

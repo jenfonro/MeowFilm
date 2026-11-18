@@ -199,7 +199,8 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
             return .init(id: item.id, title: title, subtitle: subtitle, artwork: artwork, content: content,
                 ranking: ranking, previewSongs: preview, recommendationReason: item.recommendationReason,
                 coverLabel: item.coverLabel, requiresAccount: item.requiresAccount,
-                kind: item.kind, label: item.label, presentation: item.presentation, coverRef: item.coverRef)
+                kind: item.kind, label: item.label, presentation: item.presentation, coverRef: item.coverRef,
+                contextText: item.contextText, playCount: item.playCount)
         }
     }
 }

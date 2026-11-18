@@ -33,11 +33,13 @@ public struct MusicPublicBrowseCollection: Codable, Sendable, Hashable, Identifi
     public let creator: String
     public let artwork: URL?
     public let count: Int?
+    public let playCount: Int?
     public var id: String { "\(platform.rawValue):\(kind.rawValue):\(nativeID)" }
     public init(platform: MusicPublicBrowsePlatform, nativeID: String, kind: Kind = .playlist,
-                title: String, creator: String = "", artwork: URL? = nil, count: Int? = nil) {
+                title: String, creator: String = "", artwork: URL? = nil, count: Int? = nil, playCount: Int? = nil) {
         self.platform = platform; self.nativeID = nativeID; self.kind = kind
         self.title = title; self.creator = creator; self.artwork = artwork; self.count = count
+        self.playCount = playCount
     }
 }
 
@@ -136,17 +138,21 @@ public struct MusicPublicBrowseItem: Sendable, Identifiable {
     /// Nil identifies a native song-list projection, rather than a runtime Card.
     public let kind: Kind?
     public let label: String
+    public let contextText: String
+    public let playCount: Int?
     public let presentation: String
     public let coverRef: CoverReference?
     public init(id: String, title: String, subtitle: String = "", artwork: URL? = nil, content: MusicPublicBrowseContent,
                 ranking: MusicPublicBrowseRanking? = nil, previewSongs: [MusicRemoteTrack] = [],
                 recommendationReason: String = "", coverLabel: String = "", requiresAccount: Bool = false,
-                kind: Kind? = nil, label: String = "", presentation: String = "", coverRef: CoverReference? = nil) {
+                kind: Kind? = nil, label: String = "", presentation: String = "", coverRef: CoverReference? = nil,
+                contextText: String = "", playCount: Int? = nil) {
         self.id = id; self.title = title; self.subtitle = subtitle; self.artwork = artwork; self.content = content
         self.ranking = ranking; self.previewSongs = Array(previewSongs.prefix(3))
         self.recommendationReason = recommendationReason
         self.coverLabel = coverLabel
         self.requiresAccount = requiresAccount
+        self.contextText = contextText; self.playCount = playCount
         self.kind = kind; self.label = label; self.presentation = presentation; self.coverRef = coverRef
     }
 }
