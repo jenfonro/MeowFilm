@@ -90,6 +90,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             {
                 document = candidate; revision = saved.Revision;
                 visibleSongs = new(store, cacheReads: false);
+                songPublication++;
             }
             if (officialSourcesLease is not null)
                 try { RefreshOfficialSources(candidate); }
@@ -163,6 +164,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             {
                 document = candidate.Published(); revision = result;
                 visibleSongs = new(store, cacheReads: false);
+                songPublication++;
             }
             if (owner == PendingOwner.OfficialSources) RefreshOfficialSources(candidate);
         }
@@ -292,18 +294,31 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     public async Task PrepareShutdownAsync(CancellationToken cancellationToken = default)
     {
         await EnterAsync(cancellationToken).ConfigureAwait(false);
-        try { LJ.Require(!closed, "CLOSED"); LJ.Require(pending is null && recommendationUnknown is null, pending?.Code ?? "PENDING_WRITE"); lock (repositoryGate) preparing = true; ClearRecommendations(); InvalidateOfficialSources(); }
+        try
+        {
+            LJ.Require(!closed, "CLOSED");
+            LJ.Require(pending is null && recommendationUnknown is null, pending?.Code ?? "PENDING_WRITE");
+            await SealSongSnapshots().ConfigureAwait(false);
+            lock (repositoryGate) preparing = true;
+            ClearRecommendations(); InvalidateOfficialSources();
+        }
         finally { gate.Release(); }
     }
     public async Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default)
     {
         await EnterAsync(cancellationToken).ConfigureAwait(false);
-        try { LJ.Require(!closed, "CLOSED"); lock (repositoryGate) preparing = false; } finally { gate.Release(); }
+        try { LJ.Require(!closed, "CLOSED"); lock (repositoryGate) preparing = false; lock (snapshotGate) snapshotSealed = false; } finally { gate.Release(); }
     }
     public async Task AbortAsync(CancellationToken cancellationToken = default)
     {
         await EnterAsync(cancellationToken).ConfigureAwait(false);
-        try { lock (repositoryGate) closed = true; ClearRecommendations(); InvalidateOfficialSources(); } finally { gate.Release(); }
+        try
+        {
+            await SealSongSnapshots().ConfigureAwait(false);
+            lock (repositoryGate) closed = true;
+            ClearRecommendations(); InvalidateOfficialSources();
+        }
+        finally { gate.Release(); }
         await PresentationCache.DisposeAsync().ConfigureAwait(false);
     }
     public async ValueTask DisposeAsync()

@@ -112,7 +112,8 @@ export const wyProvider = {
     if (!Array.isArray(ids)) fail('INVALID_REQUEST');
     const requested = ids.map(input), items = [];
     for (let at = 0; at < requested.length; at += 100) {
-      const data = await c.wy('/api/tag/tab/playlists', { ids: requested.slice(at, at + 100).join(',') });
+      const data = await c.wy('/api/tag/tab/playlists', { ids: requested.slice(at, at + 100).join(',') }, false,
+        { dataStatus: raw => first(raw.data) !== undefined || first(raw.playlists) === undefined });
       const source = first(data?.data, data?.playlists);
       c.observe('playlists', source);
       items.push(...array(source).map(row => collection('wy', row)));
@@ -124,7 +125,7 @@ export const wyProvider = {
     const data = await c.wy('/api/sub/artist/new/works/song-mv/list/v2', {
       limit: 10, sourceType: 1, firstRequest: before == null,
       startTimestamp: before == null ? c.clock() : input(before),
-    });
+    }, false, { dataStatus: true });
     const body = record(data?.data ?? data), works = array(body.newWorks).map(record);
     c.observe('newWorks', body.newWorks);
     const items = [], avatars = [];
@@ -166,7 +167,8 @@ export const wyProvider = {
   },
   async searchHotPlayback(c, { keywords }) {
     if (!Array.isArray(keywords)) fail('INVALID_REQUEST');
-    const data = await c.wy('/api/hot/search/relate/song/get', { keywords: JSON.stringify(keywords.map(input)) });
+    const data = await c.wy('/api/hot/search/relate/song/get', { keywords: JSON.stringify(keywords.map(input)) }, false,
+      { dataStatus: true });
     return { platform: 'wy', items: array(data?.data?.songs).map(row => wySong(row?.song)) };
   },
   home: wyHome,
@@ -213,7 +215,8 @@ export const wyProvider = {
     c.accountRequired();
     return c.cached(['daily', branch], async () => {
       const data = await c.xeapi(branch === 'style' ? '/api/homepage/category/daily/song/list' : '/api/v3/discovery/recommend/songs',
-        branch === 'style' ? {} : { ispush: false });
+        branch === 'style' ? {} : { ispush: false },
+        { dataStatus: raw => first(raw.data?.dailySongs, raw.data?.tags) !== undefined || first(raw.recommend) === undefined });
       const body = record(data?.data ?? data);
       const source = array(first(body.dailySongs, data?.recommend));
       c.observe('dailySongs', first(body.dailySongs, data?.recommend));
@@ -230,20 +233,21 @@ export const wyProvider = {
   async fm(c, { mode = 'default', submode = '', preview = false, ruleId = '', tabTagId = '', unplaySongIds = [] }) {
     if (ruleId || tabTagId) {
       const params = { ruleType: 1, ruleId, tabTagId, firstSongId: '', firstSongAlg: '', ...(preview ? {} : { limit: 5 }) };
-      const data = await c.wy(preview ? '/api/tag/tab/fm/cover' : '/api/tag/tab/fm/recommends', params);
+      const data = await c.wy(preview ? '/api/tag/tab/fm/cover' : '/api/tag/tab/fm/recommends', params, false,
+        { dataStatus: true });
       return preview ? { platform: 'wy', kind: 'fm-preview', preview: true, cover: image(data?.data?.cover),
         context: { provider: 'rule', ruleId, tabTagId } } : wyBatch(c, 'fm', array(data?.data), { provider: 'rule', ruleId, tabTagId });
     }
     const protocolMode = { default: 'DEFAULT', familiar: 'FAMILIAR', explore: 'EXPLORE', puzzle: 'PUZZLE_MODE_RCMD', scene: 'SCENE_RCMD' }[mode] ?? input(mode);
     const data = await c.wy('/api/v1/radio/get', { mode: protocolMode, subMode: submode, limit: preview ? '1' : '3',
-      openAidj: 'false', aidjReqTimes: '0', unplaySongIds: integerArray(unplaySongIds) });
+      openAidj: 'false', aidjReqTimes: '0', unplaySongIds: integerArray(unplaySongIds) }, false, { dataStatus: true });
     return wyBatch(c, 'fm', array(Array.isArray(data?.data) ? data.data : data?.data?.songs),
       { mode: protocolMode, submode, preview }, {}, {}, {}, 'userfm');
   },
   async similar(c, { sourceIds, sourceType = 'song', unplaySongIds = [] }) {
     if (!Array.isArray(sourceIds) || !sourceIds.length) fail('INVALID_REQUEST');
     const data = await c.wy('/api/v1/radio/get', { limit: '3', mode: 'SIMILAR', sourceType,
-      sourceIds: integerArray(sourceIds), unplaySonIds: integerArray(unplaySongIds) }, true);
+      sourceIds: integerArray(sourceIds), unplaySonIds: integerArray(unplaySongIds) }, true, { dataStatus: true });
     return wyBatch(c, 'similar', array(Array.isArray(data?.data) ? data.data : data?.data?.songs), { sourceIds, sourceType });
   },
   async heartbeat(c, { entry = 'favorites', songId, playlistId, continuation }) {
@@ -262,7 +266,7 @@ export const wyProvider = {
     if (!continuation) count = list.memberIds.length;
     const currentSong = input(songId ?? seed), fromHome = entry === 'favorites';
     const data = await c.wy('/api/playmode/intelligence/list', { songId: currentSong, playlistId: input(listId),
-      startMusicId: seed, count, type: fromHome ? 'fromPlayAll' : 'fromPlayOne' });
+      startMusicId: seed, count, type: fromHome ? 'fromPlayAll' : 'fromPlayOne' }, false, { dataStatus: true });
     c.observe('data', data?.data);
     const source = array(data?.data);
     const result = await wyBatch(c, 'heartbeat', source,
@@ -293,7 +297,7 @@ export const wyProvider = {
     offset = number(offset, 0, 'INVALID_REQUEST');
     const data = await c.wy('/api/homepage/scene/more/rcmd/song', { currentPlaySongId: input(seedSongId),
       songIds: integerArray([seedSongId]), songCount: '1', offset: scalar(offset),
-      source: 'curlist_more_rcmd', extJson: '{}' });
+      source: 'curlist_more_rcmd', extJson: '{}' }, false, { dataStatus: true });
     const map = value => {
       try { return typeof value === 'string' ? JSON.parse(value) : value; }
       catch { fail('INVALID_RESPONSE'); }
@@ -308,7 +312,8 @@ export const wyProvider = {
   },
   async chorus(c, { id, musicInfo = {} }) {
     id = input(first(id, musicInfo.songmid));
-    const data = await c.wy('/api/song/chorus', { ids: JSON.stringify([id]) }, false);
+    const data = await c.wy('/api/song/chorus', { ids: JSON.stringify([id]) }, false,
+      { dataStatus: raw => first(raw.chorus) === undefined });
     const list = first(data?.chorus, data?.data);
     const row = array(list)[0];
     const start = optionalNumber(row?.startTime), end = optionalNumber(row?.endTime);
@@ -329,7 +334,7 @@ export const wyProvider = {
     if (!Array.isArray(requested)) fail('INVALID_REQUEST');
     requested = requested.map(input);
     if (requested[0] !== '128k') {
-      const resources = await c.wy('/api/song/music/detail/get', { songId: id });
+      const resources = await c.wy('/api/song/music/detail/get', { songId: id }, false, { dataStatus: true });
       const fields = { '128k': 'l', '192k': 'm', '320k': 'h', flac: 'sq', flac24bit: 'hr',
         master: 'jm', jyeffect: 'je', dolby: 'db', sky: 'sk', vivid: 'vi' };
       quality = requested.find(value => resources.data?.[fields[value]] != null);
@@ -338,9 +343,9 @@ export const wyProvider = {
     const level = levelMap[quality];
     if (!level) fail('UNSUPPORTED');
     const data = quality === '128k'
-      ? await c.wy('/api/song/enhance/player/url', { ids: integerArray([id]), br: 128000 })
+      ? await c.wy('/api/song/enhance/player/url', { ids: integerArray([id]), br: 128000 }, false, { dataStatus: true })
       : await c.xeapi('/api/song/enhance/player/url/v1', { ids: integerArray([id]), level,
-        encodeType: level === 'vivid' ? 'mp3' : 'flac', ...(level === 'sky' ? { immerseType: 'c51' } : {}) });
+        encodeType: level === 'vivid' ? 'mp3' : 'flac', ...(level === 'sky' ? { immerseType: 'c51' } : {}) }, { dataStatus: true });
     const row = rows(data.data)[0];
     if (!row) fail('MEDIA_UNAVAILABLE');
     if (row.code != null && ![0, 200].includes(number(required(row.code)))) fail('UPSTREAM_ERROR');
@@ -358,7 +363,7 @@ export const wyProvider = {
   },
   async 'dailyStyle.get'(c) {
     c.accountRequired();
-    const root = await c.xeapi('/api/homepage/daily/song/config/get', {}), data = record(root?.data ?? root);
+    const root = await c.xeapi('/api/homepage/daily/song/config/get', {}, { dataStatus: true }), data = record(root?.data ?? root);
     return { categories: array(data.categorys).map(record).map(row => ({ id: scalar(row.categoryId), name: text(row.categoryName),
       tags: array(row.tagVOList).map(record).map(tag => ({ id: scalar(tag.tagId), name: text(tag.tagName) })) })) };
   },
@@ -370,7 +375,7 @@ export const wyProvider = {
     try {
       await c.xeapi('/api/homepage/daily/song/tag/save',
         { tags: encodeProtocolJSON({ categoryId: protocolInteger(categoryId), tagIds: tagIds.map(protocolInteger) }) },
-        { dispatched: () => { status = 'unknown'; }, rejected: () => { status = 'rejected'; } });
+        { dataStatus: true, dispatched: () => { status = 'unknown'; }, rejected: () => { status = 'rejected'; } });
       status = 'confirmed';
     } catch (failure) { if (failure.beforeSend) status = 'notSent'; error = c.errorCode(failure); }
     c.invalidateCache();

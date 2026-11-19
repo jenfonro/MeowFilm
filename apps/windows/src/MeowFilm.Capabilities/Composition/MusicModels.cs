@@ -34,9 +34,12 @@ public sealed record SongRow(JsonElement Raw, string? EntryId = null) : System.C
 {
     public JsonElement Raw { get; private set; } = Raw;
     public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
-    internal bool ApplyRepository(JsonElement? value)
+    internal long RepositoryPublication { get; private set; } = -1;
+    internal bool ApplyRepository(JsonElement? value, long publication = -1)
     {
-        if (value is not { } next || Raw.GetRawText() == next.GetRawText()) return false;
+        if (value is not { } next || publication < RepositoryPublication) return false;
+        RepositoryPublication = publication;
+        if (Raw.GetRawText() == next.GetRawText()) return false;
         Raw = next.Clone();
         foreach (var name in new[] { nameof(Raw), nameof(Title), nameof(Artist), nameof(Album),
             nameof(Cover), nameof(Duration), nameof(IsOnline) })

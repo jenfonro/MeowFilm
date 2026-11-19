@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
@@ -31,6 +32,13 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
     public MusicNativeCatalogOwner(IMusicPlatformCatalog catalog, MusicLibraryOwner library, TimeProvider? clock = null)
         => (this.catalog, this.library, this.clock) = (catalog ?? throw new ArgumentNullException(nameof(catalog)),
             library ?? throw new ArgumentNullException(nameof(library)), clock ?? TimeProvider.System);
+
+    private static string StorageCode(DocumentStoreException error) => error.Error switch
+    {
+        DocumentStoreError.Unavailable => "STORAGE_UNAVAILABLE",
+        DocumentStoreError.Corrupt or DocumentStoreError.UnsupportedVersion => "CORRUPT_STORAGE",
+        _ => "STORAGE"
+    };
 
     public Task<MusicDailyStyleEditor> OpenDailyStyleEditorAsync(CancellationToken cancellationToken = default) =>
         DailyStyleOperation((port, token) => port.OpenDailyStyleEditorAsync(token), cancellationToken);
@@ -70,10 +78,12 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
                 catch (OperationCanceledException) { return (T)(object)(receipt with { Readback = null, ErrorCode = "CANCELLED" }); }
                 catch (CatalogFailure error) { return (T)(object)(receipt with { Readback = null, ErrorCode = error.Code }); }
                 catch (MusicLibraryException error) { return (T)(object)(receipt with { Readback = null, ErrorCode = error.Code }); }
+                catch (DocumentStoreException error) { return (T)(object)(receipt with { Readback = null, ErrorCode = StorageCode(error) }); }
             }
             return result;
         }
         catch (CatalogFailure error) { throw new MusicPlatformException(error.Code); }
+        catch (DocumentStoreException error) { throw new MusicPlatformException(StorageCode(error)); }
         finally
         {
             request.Dispose();
@@ -253,6 +263,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable, IMusicDailyStyle
         catch (CatalogFailure error) { return Failed(error.Code); }
         catch (MusicPlatformException error) { return Failed(error.Code); }
         catch (MusicLibraryException error) { return Failed(error.Code); }
+        catch (DocumentStoreException error) { return Failed(StorageCode(error)); }
         catch { return Failed("INVALID_RESPONSE"); }
         finally
         {

@@ -144,7 +144,7 @@ async function rights(c) {
   const now = c.clock();
   try {
     if (c.platform === 'wy') {
-      const result = await c.wy('/api/music-vip-membership/client/vip/info', { userId: c.account.userId }, true);
+      const result = await c.wy('/api/music-vip-membership/client/vip/info', { userId: c.account.userId }, true, { dataStatus: true });
       return wyRights(object(result.data), now);
     }
     if (c.platform === 'tx') return txRights(await c.tx('VipLogin.VipLoginInter', 'vip_login_base', {}, false), now);
@@ -336,7 +336,8 @@ export function createAccountOperations() {
       c.signal.throwIfAborted();
       c.account = null;
       if (c.platform === 'wy') {
-        const data = await c.wy('/api/login/qrcode/unikey', { type: 3 });
+        const data = await c.wy('/api/login/qrcode/unikey', { type: 3 }, false,
+          { dataStatus: raw => first(raw.unikey) === undefined });
         key = required(first(data.unikey, data.data?.unikey));
         url = 'https://music.163.com/login?codekey=' + encodeURIComponent(key);
       } else if (c.platform === 'kg') {

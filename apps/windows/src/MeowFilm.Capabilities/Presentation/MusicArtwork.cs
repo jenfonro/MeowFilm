@@ -49,8 +49,6 @@ public sealed partial class MusicCapability
 
     private void RefreshCurrentArtwork()
     {
-        if (current is not null && application is MusicNativeApplication owner)
-            current.ApplyRepository(owner.SongSnapshot(current.Id));
         bool changedSong = artworkSongId != current?.Id;
         artworkSongId = current?.Id;
         if (changedSong) Changed(nameof(CurrentArtworkIdentity));
@@ -60,49 +58,72 @@ public sealed partial class MusicCapability
         Changed(nameof(CurrentArtwork));
     }
 
+    private static IEnumerable<MusicCatalogCard> RepositoryCards(IEnumerable<MusicCatalogSection> sections) =>
+        sections.SelectMany(section => section.Items.Concat(section.Action is { } action ? [action] : [])
+            .Concat(section.Tabs?.SelectMany(tab => tab.Items) ?? []));
+
     private void RepositorySongsChanged(IReadOnlySet<string> ids)
     {
         if (Presentation.Dispatcher.HasShutdownStarted || Presentation.Dispatcher.HasShutdownFinished) return;
         _ = Presentation.Dispatcher.InvokeAsync(() =>
         {
             if (stopping || disposed || application is not MusicNativeApplication owner) return;
-            var snapshots = new Dictionary<string, JsonElement?>(StringComparer.Ordinal);
-            JsonElement? Read(string id)
+            var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            loadDrains.Add(drained.Task);
+            _ = Refresh();
+            async Task Refresh()
             {
-                if (!ids.Contains(id)) return null;
-                if (!snapshots.TryGetValue(id, out var value)) snapshots[id] = value = owner.SongSnapshot(id);
-                return value;
+                try
+                {
+                    var snapshot = await owner.SongSnapshotsAsync(ids.ToArray(), lifetime.Token);
+                    if (stopping || disposed) return;
+                    JsonElement? Read(string id) => snapshot.Songs.GetValueOrDefault(id);
+                    foreach (var song in searchSongs.Concat(catalogSongs).Append(current).Append(selectedSong).OfType<SongRow>()
+                        .Where(song => ids.Contains(song.Id)))
+                        song.ApplyRepository(Read(song.Id), snapshot.Publication);
+                    var sections = homeSections.Concat(homeDisplaySections).Concat(channelSections).Concat(utilitySections)
+                        .Concat(searchSections.Values.SelectMany(value => value))
+                        .Concat(catalogPages.Values.SelectMany(page => page.Sections))
+                        .Concat(catalogLocations.Values.SelectMany(saved => saved.Pages.Values).SelectMany(page => page.Sections));
+                    var cards = RepositoryCards(sections)
+                        .Concat(searchCardCache.Values.SelectMany(value => value.Cards)).Concat(ChannelTabs)
+                        .Distinct<MusicCatalogCard>(ReferenceEqualityComparer.Instance);
+                    foreach (var card in cards)
+                    {
+                        if (card.Song is { } song && ids.Contains(song.Id)) card.RefreshSong(Read(song.Id), snapshot.Publication);
+                        if (card.PreviewSongs.Any(preview => preview.Song is { } song && ids.Contains(song.Id)))
+                            card.RefreshPreview(Read, snapshot.Publication);
+                    }
+                    foreach (var row in queueSurfaceRows.Where(row => ids.Contains(row.Song.Id))) row.RefreshSong(Read(row.Song.Id), snapshot.Publication);
+                    foreach (var row in RecommendationCandidates.Where(row => ids.Contains(row.Song.Id))) row.RefreshSong(Read(row.Song.Id), snapshot.Publication);
+                    foreach (var row in DiscoveryCharts.SelectMany(chart => chart.Songs).Where(row => ids.Contains(row.Song.Id)))
+                        row.RefreshSong(Read(row.Song.Id), snapshot.Publication);
+                    if (current is not null && ids.Contains(current.Id)) RefreshCurrentArtwork();
+                    RefreshBindings();
+                }
+                catch (OperationCanceledException) { }
+                catch (MusicOperationException error) when (stopping && error.Code == "CLOSED") { }
+                catch (Exception error) { if (!stopping) await Notify(ErrorText(error)); }
+                finally { loadDrains.Remove(drained.Task); drained.TrySetResult(); }
             }
-            foreach (var song in searchSongs.Concat(catalogSongs).Append(current).Append(selectedSong).OfType<SongRow>()
-                .Where(song => ids.Contains(song.Id)))
-                song.ApplyRepository(Read(song.Id));
-            var cards = homeSections.Concat(homeDisplaySections).Concat(channelSections).Concat(utilitySections)
-                .Concat(searchSections.Values.SelectMany(value => value))
-                .SelectMany(section => section.Items.Concat(section.Action is { } action ? [action] : []))
-                .Concat(searchCardCache.Values.SelectMany(value => value.Cards)).Concat(ChannelTabs)
-                .Distinct<MusicCatalogCard>(ReferenceEqualityComparer.Instance);
-            foreach (var card in cards)
-            {
-                if (card.Song is { } song && ids.Contains(song.Id)) card.RefreshSong(Read(song.Id));
-                if (card.PreviewSongs.Any(preview => preview.Song is { } song && ids.Contains(song.Id)))
-                    card.RefreshPreview(Read);
-            }
-            foreach (var row in queueSurfaceRows.Where(row => ids.Contains(row.Song.Id))) row.RefreshSong(Read(row.Song.Id));
-            foreach (var row in RecommendationCandidates.Where(row => ids.Contains(row.Song.Id))) row.RefreshSong(Read(row.Song.Id));
-            foreach (var row in DiscoveryCharts.SelectMany(chart => chart.Songs).Where(row => ids.Contains(row.Song.Id)))
-                row.RefreshSong(Read(row.Song.Id));
-            if (current is not null && ids.Contains(current.Id)) RefreshCurrentArtwork();
-            RefreshBindings();
         });
     }
 
-    private void RefreshCatalogSongs(IEnumerable<MusicCatalogCard> cards)
+    private async Task RefreshCatalogSongsAsync(IEnumerable<MusicCatalogCard> cards, CancellationToken token)
     {
         if (application is not MusicNativeApplication owner) return;
-        foreach (var card in cards)
+        var rows = cards.Distinct<MusicCatalogCard>(ReferenceEqualityComparer.Instance).ToArray();
+        var ids = rows.SelectMany(card => card.PreviewSongs.Select(preview => preview.Song).Append(card.Song))
+            .OfType<SongRow>().Select(song => song.Id).Distinct(StringComparer.Ordinal).ToArray();
+        if (ids.Length == 0) return;
+        var snapshot = await owner.SongSnapshotsAsync(ids, token);
+        token.ThrowIfCancellationRequested();
+        if (stopping || disposed) return;
+        JsonElement? Read(string id) => snapshot.Songs.GetValueOrDefault(id);
+        foreach (var card in rows)
         {
-            if (card.Song is { } song) card.RefreshSong(owner.SongSnapshot(song.Id));
-            card.RefreshPreview(owner.SongSnapshot);
+            if (card.Song is { } song) card.RefreshSong(Read(song.Id), snapshot.Publication);
+            card.RefreshPreview(Read, snapshot.Publication);
         }
     }
 }
