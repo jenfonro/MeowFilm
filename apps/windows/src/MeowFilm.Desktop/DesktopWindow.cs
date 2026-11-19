@@ -1,3 +1,4 @@
+using MeowFilm.Threading;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Windowing;
@@ -9,7 +10,7 @@ namespace MeowFilm.Desktop;
 /// <summary>A single WinUI top-level root. Native integration never owns a second content surface.</summary>
 public class DesktopWindow : Window
 {
-    public new System.Windows.Threading.Dispatcher Dispatcher { get; } = System.Windows.Threading.Dispatcher.CurrentDispatcher;
+    public new OwnerDispatcher Dispatcher { get; } = OwnerDispatcher.Current;
     public FrameworkElement Root => (FrameworkElement)Content;
     public ResourceDictionary Resources => Root.Resources;
     public nint Handle { get; }

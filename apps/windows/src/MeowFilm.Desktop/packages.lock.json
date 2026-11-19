@@ -197,6 +197,12 @@
           "MeowFilm.Core": "[1.0.0, )",
           "Microsoft.Data.Sqlite": "[10.0.15, 10.0.15]"
         }
+      },
+      "meowfilm.threading": {
+        "type": "Project",
+        "dependencies": {
+          "Microsoft.WindowsAppSDK": "[1.8.260921001, 1.8.260921001]"
+        }
       }
     },
     "net10.0-windows10.0.19041/win-x64": {

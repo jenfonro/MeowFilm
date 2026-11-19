@@ -33,6 +33,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     private string renderedRoute = "";
     private NovelBookSession? renderedSession;
     private DesktopWindow? attachedWindow;
+    private Microsoft.UI.Windowing.AppWindow? attachedAppWindow;
     private DesktopWindowState attachedState;
     private object? presentationStamp;
     private readonly Dictionary<string, double> scrollPositions = [];
@@ -61,7 +62,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
             else if (module.Route == NovelCapability.ReaderRoute)
                 module.RefreshReaderSettings();
         });
-        Loaded += (_, _) => { AttachWindow(); Present(); RestoreDiscoveryFocus(); }; Unloaded += (_, _) => { PauseReading(); DetachWindow(); };
+        Loaded += (_, _) => { AttachWindow(); Present(); RestoreDiscoveryFocus(); }; Unloaded += (_, _) => { ClearDiscoveryFocus(); PauseReading(); DetachWindow(); };
     }
     public DesktopHeaderContribution Header => new(module.Route == NovelCapability.HomeRoute ? "小说" : module.Route == NovelCapability.CategoriesRoute ? "分类" : "",
         SearchVisible: module.Route != NovelCapability.ReaderRoute) { SearchTargetId = "novel", SearchContextId = module.Route };
@@ -97,7 +98,8 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
             if (!Equals(stamp, presentationStamp) || ReferenceEquals(body.Content, reader))
             {
                 if (module.Route is NovelCapability.HomeRoute or NovelCapability.CategoriesRoute) RememberDiscoveryFocus();
-                else discoveryFocus = null;
+                else ClearDiscoveryFocus();
+                ParkDiscoveryFocus();
                 discoveryChannelBar?.Close(); discoveryChannelBar = null;
                 if (body.Content is ScrollViewer old) scrollPositions[renderedRoute] = old.VerticalOffset;
                 body.Content = module.Route switch
@@ -316,7 +318,12 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     private void AttachWindow()
     {
         DetachWindow(); attachedWindow = DesktopWindow.GetWindow(this);
-        if (attachedWindow is not null) { attachedState = attachedWindow.WindowState; attachedWindow.Deactivated += WindowDeactivated; attachedWindow.AppWindow.Changed += WindowChanged; }
+        if (attachedWindow is not null)
+        {
+            attachedAppWindow = attachedWindow.AppWindow; attachedState = attachedWindow.WindowState;
+            attachedWindow.Deactivated += WindowDeactivated; attachedWindow.Closed += WindowClosed;
+            attachedAppWindow.Changed += WindowChanged;
+        }
     }
     private void WindowChanged(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowChangedEventArgs args)
     {
@@ -324,9 +331,14 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         attachedState = attachedWindow.WindowState; WindowDeactivated(sender, EventArgs.Empty);
     }
     private void WindowDeactivated(object? sender, EventArgs e) { PauseReading(); module.RunUi(_ => SavePositionAsync()); }
+    private void WindowClosed(object sender, WindowEventArgs e) { PauseReading(); DetachWindow(); }
     private void DetachWindow()
     {
-        if (attachedWindow is not null) { attachedWindow.Deactivated -= WindowDeactivated; attachedWindow.AppWindow.Changed -= WindowChanged; attachedWindow = null; }
+        if (attachedAppWindow is not null) { attachedAppWindow.Changed -= WindowChanged; attachedAppWindow = null; }
+        if (attachedWindow is not null)
+        {
+            attachedWindow.Deactivated -= WindowDeactivated; attachedWindow.Closed -= WindowClosed; attachedWindow = null;
+        }
     }
     private sealed record SourceCandidate(NovelBook Book, string Label) { public override string ToString() => Label; }
     internal async Task DrainSavesAsync() { await automaticOperation; await saves.PauseAsync(); }

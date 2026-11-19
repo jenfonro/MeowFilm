@@ -13,7 +13,7 @@ App 工程把 WinUI 构建已解析的内容输出及应用 PRI 索引加入 `Re
 
 构建机需要使用 `scripts/script-host-native.json` 中 `build.node` 锁定的 Node 版本，以及 npm、Git、.NET SDK 10+、Python、Perl、NASM、CMake 3.20+ 和 MSVC x64 工具链。原生宿主构建应在 Visual Studio x64 Developer PowerShell / Command Prompt 中运行，使 `cl`、`nmake` 与 SDK 路径有效；不是只安装 .NET 即可。源码依赖首次按 `scripts/script-host-native.json` 下载并校验，下载归档与 node-gyp 头文件采用[构建依赖缓存](../common/dependency-cache.md)的共享路径；`tmp/build/runtime-native` 仍保存本副本源码与编译状态，不按测试轮次复制缓存。
 
-目标机只需完整 `build/windows/`，launcher 使用包内 `runtime/node.exe`，不查询 PATH 或借系统 Node。默认输出自带 .NET；`-FrameworkDependent` 版本另需匹配的 .NET Desktop Runtime。不能只复制 exe，也不需要目标机安装编译工具。
+目标机只需完整 `build/windows/`，launcher 使用包内 `runtime/node.exe`，不查询 PATH 或借系统 Node。默认输出自带 .NET；`-FrameworkDependent` 版本另需匹配的 .NET Runtime。发布闭包仅包含 `Microsoft.NETCore.App`：自包含配置使用 `includedFrameworks`，依赖系统运行时的配置接受 SDK 生成的单个 `framework` 或单项 `frameworks`。不能只复制 exe，也不需要目标机安装编译工具。
 
 ## Windows 安装与卸载
 
@@ -23,7 +23,7 @@ App 工程把 WinUI 构建已解析的内容输出及应用 PRI 索引加入 `Re
 
 该入口生成同一份完整应用及 `build/windows-installer/meowfilm-setup.exe`，安装包只支持 Release、自包含、win-x64；不接受 `-Configuration Debug` 或 `-FrameworkDependent`。构建机另外需要 [Inno Setup 6](https://jrsoftware.org/isinfo.php)：可将 `ISCC.exe` 放在 PATH，或安装到 Program Files／当前用户 `LocalAppData\Programs` 下的标准 `Inno Setup 6` 目录。普通应用构建不依赖 Inno Setup。安装器使用 Inno Setup 的原生安装／卸载引擎，保留其版权信息。
 
-安装包包含应用、.NET Desktop Runtime、Node、脚本运行器、原生库及许可；目标电脑无需安装构建工具。默认无需管理员权限，安装到 `%LOCALAPPDATA%\Programs\meowfilm`，创建开始菜单入口，可选择创建桌面快捷方式，并登记到 Windows“已安装的应用”。重复安装沿用产品身份及原安装位置，按原安装清单删除过时文件；遇到不属于原安装的同名目标文件时停止，需选择其他安装目录。升级前须关闭 meowfilm，不强制终止运行中的应用。
+安装包包含应用、.NET Runtime、Node、脚本运行器、原生库及许可；目标电脑无需安装构建工具。默认无需管理员权限，安装到 `%LOCALAPPDATA%\Programs\meowfilm`，创建开始菜单入口，可选择创建桌面快捷方式，并登记到 Windows“已安装的应用”。重复安装沿用产品身份及原安装位置，按原安装清单删除过时文件；遇到不属于原安装的同名目标文件时停止，需选择其他安装目录。升级前须关闭 meowfilm，不强制终止运行中的应用。
 
 用户数据固定存放于 `%LOCALAPPDATA%\meowfilm\aggregate`，与安装目录分离。交互卸载询问是否保留账号、设置、来源及缓存：默认保留，明确选择删除后才清理当前用户的数据；取消则不开始卸载。静默卸载保留数据。卸载只移除所属安装文件、快捷方式和系统登记，删除数据失败会报告；不会递归清理用户选择的整个安装目录或其他用户目录。
 
@@ -31,7 +31,7 @@ App 工程把 WinUI 构建已解析的内容输出及应用 PRI 索引加入 `Re
 
 ## 产品图标
 
-`apps/windows/app/Assets/AppIcon.ico` 是 Windows 编译输入，包含 16、24、32、48、64、128、256 像素七个尺寸；EXE、WPF 默认窗口图标及安装器共用该产品图标，快捷方式和卸载入口引用安装的 EXE。ICO 像素由既有正式产品图 `apps/ios/Assets.xcassets/AppIcon.appiconset/Icon-1024.png` 分别以 LANCZOS 缩放生成，未重绘或修改 iOS 资源。普通构建直接使用已提交 ICO，无需 Python、浏览器或图像工具。
+`apps/windows/app/Assets/AppIcon.ico` 是 Windows 编译输入，包含 16、24、32、48、64、128、256 像素七个尺寸；EXE、WinUI 窗口图标及安装器共用该产品图标，快捷方式和卸载入口引用安装的 EXE。ICO 像素由既有正式产品图 `apps/ios/Assets.xcassets/AppIcon.appiconset/Icon-1024.png` 分别以 LANCZOS 缩放生成，未重绘或修改 iOS 资源。普通构建直接使用已提交 ICO，无需 Python、浏览器或图像工具。
 
 ## 输入闭包与信任边界
 

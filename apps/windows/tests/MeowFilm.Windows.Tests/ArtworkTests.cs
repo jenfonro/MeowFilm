@@ -12,10 +12,8 @@ using Windows.Foundation;
 using Microsoft.UI.Dispatching;
 using MeowFilm.Desktop;
 using Color = Windows.UI.Color;
-using PixelFormats = System.Windows.Media.PixelFormats;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using System.Windows.Media.Imaging;
 using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Windows.Tests;
@@ -795,18 +793,15 @@ public static class ArtworkTests
         }));
         yield return new("Native artwork hidden retained page restores identical pixels and palettes without HTTP", () => Sta(async () =>
         {
-            var encoder = new PngBitmapEncoder();
             using var sample = new FakeLease();
             var colors = new byte[4]; sample.Image.CopyPixels(colors);
-            encoder.Frames.Add(BitmapFrame.Create(BitmapSource.Create(1, 1, 96, 96, PixelFormats.Pbgra32, null, colors, 4)));
-            using var encoded = new MemoryStream(); encoder.Save(encoded);
-            byte[] png = encoded.ToArray();
+            byte[] png = FixtureImages.Encode(1, 1, colors, premultiplied: true);
             var handler = new Handler((_, _) => Task.FromResult(Reply(png)));
             await using var service = new ArtworkService(handler);
             var host = new Grid { Width = 100, Height = 100 };
             var view = new ArtworkImage { Width = 60, Height = 60, Address = "https://art.example.test/retained" };
             ArtworkScope.SetLoader(host, service); host.Children.Add(view);
-            using var surface = Mount(host); Layout(host);
+            using var surface = Mount(host); Layout(host); await TestUiHost.LoadedAsync(view);
             using (await view.PrepareForPresentationAsync()) { }
             var pixels = ((Image)view.Children[0]).Source;
             var raw = view.RawPaletteBrush; var palette = view.PaletteBrush; var top = view.TopPaletteBrush;
@@ -1230,12 +1225,7 @@ public static class ArtworkTests
     {
         byte[] pixels = new byte[1200 * 1200 * 4];
         new Random(17).NextBytes(pixels);
-        var image = BitmapSource.Create(1200, 1200, 96, 96, PixelFormats.Bgra32, null, pixels, 1200 * 4);
-        var encoder = new PngBitmapEncoder();
-        encoder.Frames.Add(BitmapFrame.Create(image));
-        using var stream = new MemoryStream();
-        encoder.Save(stream);
-        byte[] bytes = stream.ToArray();
+        byte[] bytes = FixtureImages.Encode(1200, 1200, pixels);
         Check(bytes.Length > ArtworkService.MaximumCacheEntryBytes);
         return bytes;
     }
@@ -1281,9 +1271,7 @@ public static class ArtworkTests
     });
     internal static byte[] Encode(string kind, int width, int height)
     {
-        var source = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, new byte[width * height * 4], width * 4);
-        BitmapEncoder encoder = kind switch { "jpeg" => new JpegBitmapEncoder(), "gif" => new GifBitmapEncoder(), _ => new PngBitmapEncoder() };
-        encoder.Frames.Add(BitmapFrame.Create(source)); using var stream = new MemoryStream(); encoder.Save(stream); return stream.ToArray();
+        return FixtureImages.Encode(width, height, new byte[width * height * 4], kind);
     }
     private static void Layout(FrameworkElement view) { view.Measure(new Size(view.Width, view.Height)); view.Arrange(new Rect(0, 0, view.Width, view.Height)); view.UpdateLayout(); }
     private static DesktopTestUi.Host Mount(FrameworkElement root) =>

@@ -588,7 +588,7 @@ public static class MusicOfficialSelectionTests
     private sealed class Dialogs : IMusicDialogs
     {
         public bool Confirm(string message, string title) => true;
-        public string[]? SelectAudioFiles() => null;
+        public Task<string[]?> SelectAudioFilesAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.FromResult<string[]?>(null);
     }
     private sealed class Output : IMusicPlayback
     {

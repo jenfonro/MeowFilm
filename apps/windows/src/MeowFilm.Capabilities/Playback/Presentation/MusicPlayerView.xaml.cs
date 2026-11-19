@@ -360,7 +360,7 @@ public partial class MusicPlayerView : UserControl
         var content = new StackPanel { Spacing = 8 };
         if (scene) content.Children.Add(new MusicPlaybackIcon { Key = choice.Key, Width = 25, Height = 25, HorizontalAlignment = HorizontalAlignment.Center });
         content.Children.Add(new TextBlock { Text = choice.Name, TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap });
-        var button = new Button { Content = content, Tag = choice, MinHeight = scene ? 84 : 64, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center,
+        var button = new Button { Style = (Style)Resources["Player.Button"], Content = content, Tag = choice, MinHeight = scene ? 84 : 64, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center,
             BorderThickness = new Thickness(selected ? 2 : 1), Padding = new Thickness(8), FontWeight = Microsoft.UI.Text.FontWeights.Normal };
         AutomationProperties.SetName(button, choice.Name); AutomationProperties.SetItemStatus(button, selected ? "已选中" : "");
         button.Click += async (_, _) =>

@@ -5,7 +5,6 @@ using Microsoft.UI.Xaml;
 using Windows.Foundation;
 using Windows.System;
 using Microsoft.UI.Xaml.Controls;
-using System.Windows.Media;
 
 namespace MeowFilm.Capabilities;
 
@@ -27,7 +26,7 @@ internal sealed class NovelAppearanceEditor : StackPanel
         conversion = Select("简繁转换", new[] { "原文", "简体", "繁体" }, Array.IndexOf(new[] { "none", "simplified", "traditional" }, display.Conversion));
         mode.SelectionChanged += (_, _) => modeChanged = true;
         conversion.SelectionChanged += (_, _) => conversionChanged = true;
-        fonts = new ComboBox { IsEditable = true, Text = display.FontFamily, ItemsSource = Fonts.SystemFontFamilies.Select(f => f.Source).Order().ToArray() };
+        fonts = new ComboBox { IsEditable = true, Text = display.FontFamily, ItemsSource = NovelTextStyle.FontFamilies() };
         initialFont = display.FontFamily;
         fonts.UseResource(StyleProperty, "Novel.ComboBox");
         Children.Add(NovelUi.Field("字体", fonts));
@@ -69,20 +68,22 @@ internal sealed class NovelAppearanceEditor : StackPanel
         {
             if (!Edited(name)) return original;
             if (!double.TryParse(fields[name].Text, out double value) || !double.IsFinite(value) || value < 0 || positive && value == 0) throw new InvalidDataException("INVALID_APPEARANCE");
-            if (name == "字号" && (!System.Windows.Documents.TextElement.FontSizeProperty.IsValidValue(value) ||
-                !System.Windows.Documents.TextElement.FontSizeProperty.IsValidValue(value * 1.15))) throw new InvalidDataException("INVALID_APPEARANCE");
+            if (name == "字号" && !NovelTextStyle.ValidSize(value)) throw new InvalidDataException("INVALID_APPEARANCE");
             return value;
         }
-        string ReadColor(string name, string original) { if (!Edited(name)) return original; var value = fields[name].Text; _ = (Color)ColorConverter.ConvertFromString(value); return value; }
+        string ReadColor(string name, string original) { if (!Edited(name)) return original; var value = fields[name].Text; _ = NovelTextStyle.Color(value); return value; }
         double speed = Get("自动阅读速度（1–10）", initial.AutoSpeed);
         if (Edited("自动阅读速度（1–10）") && speed is < 1 or > 10) throw new InvalidDataException("INVALID_SPEED");
         string font = fonts.Text == initialFont ? initial.FontFamily : fonts.Text;
-        if (fonts.Text != initialFont) _ = new FontFamily(font);
+        if (fonts.Text != initialFont && !NovelTextStyle.ValidFamily(font)) throw new InvalidDataException("INVALID_FONT");
+        double fontSize = Get("字号", initial.FontSize), lineHeight = Get("行距倍数", initial.LineHeight);
+        if ((Edited("字号") || Edited("行距倍数")) && !NovelTextStyle.ValidLineHeight(fontSize, lineHeight))
+            throw new InvalidDataException("INVALID_APPEARANCE");
         return initial with
         {
             Mode = modeChanged ? new[] { "cover", "slide", "none", "scroll" }[mode.SelectedIndex] : initial.Mode,
             Conversion = conversionChanged ? new[] { "none", "simplified", "traditional" }[conversion.SelectedIndex] : initial.Conversion, FontFamily = font,
-            FontSize = Get("字号", initial.FontSize), Bold = bold.IsChecked == true, LineHeight = Get("行距倍数", initial.LineHeight), ParagraphSpacing = Get("段距", initial.ParagraphSpacing, false),
+            FontSize = fontSize, Bold = bold.IsChecked == true, LineHeight = lineHeight, ParagraphSpacing = Get("段距", initial.ParagraphSpacing, false),
             Margin = Get("页边距", initial.Margin, false), ContentWidth = Get("正文宽度", initial.ContentWidth), AutoSpeed = speed, Theme = themeChanged ? theme.SelectedIndex : initial.Theme,
             Background = ReadColor("背景颜色", initial.Background), Foreground = ReadColor("文字颜色", initial.Foreground), BackgroundImage = fields["背景图片"].Text
         };

@@ -28,6 +28,7 @@ public sealed class MusicLyricWordView : UserControl
     public Brush? Stroke { get => (Brush?)GetValue(StrokeProperty); set => SetValue(StrokeProperty, value); }
     public double StrokeThickness { get => (double)GetValue(StrokeThicknessProperty); set => SetValue(StrokeThicknessProperty, value); }
     private readonly TextBlock normal = new(), highlighted = new();
+    private readonly Border textSurface;
     private readonly MusicLyricOutline outline;
     private readonly InsetClip highlightClip;
     private MusicLyricList? presenter;
@@ -43,7 +44,9 @@ public sealed class MusicLyricWordView : UserControl
     public MusicLyricWordView()
     {
         IsTabStop = false; IsHitTestVisible = false;
-        var grid = new Grid(); outline = new(grid); grid.Children.Add(normal); grid.Children.Add(highlighted); Content = grid;
+        var grid = new Grid(); outline = new(grid);
+        textSurface = new Border { Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), Child = normal };
+        grid.Children.Add(textSurface); grid.Children.Add(highlighted); Content = grid;
         var visual = ElementCompositionPreview.GetElementVisual(highlighted);
         highlightClip = visual.Compositor.CreateInsetClip(); visual.Clip = highlightClip;
         foreach (var property in new[] { FontSizeProperty, FontFamilyProperty, ForegroundProperty, FlowDirectionProperty, LanguageProperty })
@@ -73,7 +76,7 @@ public sealed class MusicLyricWordView : UserControl
         var settings = new Windows.UI.ViewManagement.UISettings();
         normal.Foreground = contrast ? new SolidColorBrush(settings.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground)) : Foreground;
         highlighted.Foreground = contrast ? new SolidColorBrush(settings.GetColorValue(Windows.UI.ViewManagement.UIColorType.Accent)) : Highlight ?? MusicVisuals.Brush("#DC143C");
-        outline.Update(normal, contrast ? normal.Foreground : Stroke, StrokeThickness);
+        outline.Update(normal, textSurface, contrast ? normal.Foreground : Stroke, StrokeThickness);
         AutomationProperties.SetName(this, Word?.Text ?? "");
         RefreshPosition();
     }
@@ -96,6 +99,7 @@ public sealed class MusicLyricWordView : UserControl
         animation.InsertKeyFrame(1, 0, highlightClip.Compositor.CreateLinearEasingFunction());
         animation.Duration = TimeSpan.FromSeconds(remaining);
         animationSeconds = remaining; animationStart = Stopwatch.GetTimestamp(); animating = true;
+        highlighted.Visibility = Visibility.Visible;
         highlightClip.StartAnimation(FlowDirection == FlowDirection.RightToLeft ? "LeftInset" : "RightInset", animation);
         return true;
     }
@@ -106,6 +110,7 @@ public sealed class MusicLyricWordView : UserControl
     }
     private void ApplyClip(double value)
     {
+        highlighted.Visibility = value > 0 || animating ? Visibility.Visible : Visibility.Collapsed;
         highlightClip.LeftInset = FlowDirection == FlowDirection.RightToLeft ? (float)(ActualWidth * (1 - value)) : 0;
         highlightClip.RightInset = FlowDirection == FlowDirection.LeftToRight ? (float)(ActualWidth * (1 - value)) : 0;
     }

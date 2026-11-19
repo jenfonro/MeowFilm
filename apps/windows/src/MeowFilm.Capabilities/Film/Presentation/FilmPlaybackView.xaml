@@ -6,7 +6,6 @@
     <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/FilmShelfStyles.xaml" />
    </ResourceDictionary.MergedDictionaries>
    <local:FilmVisibilityConverter x:Key="Film.Visible" />
-   <local:FilmPlayerHeightConverter x:Key="Film.PlayerHeight" />
    <local:FilmScaleConverter x:Key="Film.Scale" />
    <local:FilmCurrentStatusConverter x:Key="Film.CurrentStatus" />
    <DataTemplate x:Key="Film.SourceLabel">
@@ -145,8 +144,9 @@
       <RowDefinition x:Name="HeroRowGutter" Height="0" />
       <RowDefinition Height="Auto" />
      </Grid.RowDefinitions>
-     <Grid x:Name="PlayerFrame" VerticalAlignment="Top" SizeChanged="Player_SizeChanged" AutomationProperties.Name="影片播放器">
-      <Grid x:Name="VideoPicture" Background="Black" Height="{Binding ActualWidth,ElementName=VideoPicture,Converter={StaticResource Film.PlayerHeight}}">
+     <local:AspectRatioDecorator x:Name="PlayerSlot" AspectRatio="16,9" VerticalAlignment="Top" SizeChanged="Player_SizeChanged">
+     <Grid x:Name="PlayerFrame" AutomationProperties.Name="影片播放器">
+      <Grid x:Name="VideoPicture" Background="Black">
        <ContentControl x:Name="VideoHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False" />
        <Grid x:Name="PlayerOverlay" RequestedTheme="Dark" Background="#01000000" Loaded="Overlay_Loaded" Unloaded="Overlay_Unloaded" SizeChanged="Overlay_SizeChanged" PointerMoved="Player_MouseMove" PointerEntered="Player_MouseEnter" PointerExited="Player_MouseLeave" KeyDown="Player_KeyDown" Tapped="Picture_Tapped" DoubleTapped="Picture_DoubleTapped">
         <Border x:Name="ShortVideoGesture" Background="Transparent" Visibility="{Binding ShortVideo,Converter={StaticResource Film.Visible}}" ManipulationCompleted="Swipe_Completed" AutomationProperties.Name="滑动切集" PointerPressed="Swipe_Begin" PointerReleased="Swipe_End" ManipulationMode="TranslateY" PointerWheelChanged="ShortVideo_Wheel" />
@@ -228,7 +228,7 @@
             </ListBox>
             <TextBlock Text="画面比例" Style="{StaticResource Film.PlayerSettingsTitle}" Margin="2,12,0,8" />
             <ListBox x:Name="AspectBox" Style="{StaticResource Film.PlayerOptions}" ItemContainerStyle="{StaticResource Film.PlayerOption}" SelectionChanged="Aspect_Changed" IsEnabled="{Binding HasOutput}" AutomationProperties.Name="画面比例">
-             <ListBoxItem Content="默认" Tag="" />
+             <ListBoxItem Content="默认" Tag="default" />
              <ListBoxItem Content="16:9" Tag="16:9" />
              <ListBoxItem Content="4:3" Tag="4:3" />
             </ListBox>
@@ -240,6 +240,7 @@
        </Grid>
       </Grid>
      </Grid>
+     </local:AspectRatioDecorator>
      <Grid x:Name="MetadataPanel" Grid.Column="2" local:CardClip.Radius="16">
       <ScrollViewer x:Name="MetadataScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
        <Grid x:Name="MetadataOverlay">

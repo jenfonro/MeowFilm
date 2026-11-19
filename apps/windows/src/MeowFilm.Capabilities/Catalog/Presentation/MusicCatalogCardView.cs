@@ -175,11 +175,14 @@ public sealed class MusicCatalogCardView : UserControl
     {
         var grid = new Grid(); grid.Children.Add(open);
         if (!card.CanPlay) return grid;
+        var shade = new Border { IsHitTestVisible = false, Opacity = 0 };
+        MeowFilm.Desktop.DesktopVisual.UseResource(shade, Border.BackgroundProperty, "Card.CoverHover");
+        artwork.Children.Add(shade);
         var play = Action("播放", owner => owner.PlayCatalogCardAsync(card));
         var glyph = new CardPlayGlyph { Foreground = MusicVisuals.Brush("#FFFFFF") }; MusicVisuals.Bind(glyph, CardPlayGlyph.IsBusyProperty, nameof(MusicCatalogCard.IsPreparing), card); play.Content = glyph;
         play.Width = play.Height = 44; play.HorizontalAlignment = HorizontalAlignment.Center; play.VerticalAlignment = VerticalAlignment.Center;
         play.Opacity = 0; play.IsHitTestVisible = false; artwork.Children.Add(play);
-        CardMotion.SetEnabled(grid, true); grid.RegisterPropertyChangedCallback(CardMotion.ProgressProperty, (_, _) => { play.Opacity = CardMotion.GetProgress(grid); play.IsHitTestVisible = play.Opacity > 0; });
+        CardMotion.SetEnabled(grid, true); grid.RegisterPropertyChangedCallback(CardMotion.ProgressProperty, (_, _) => { shade.Opacity = play.Opacity = CardMotion.GetProgress(grid); play.IsHitTestVisible = play.Opacity > 0; });
         return grid;
     }
     internal MenuFlyout? ShowMenu(FrameworkElement host, MusicCatalogCard card)

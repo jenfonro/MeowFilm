@@ -7,7 +7,7 @@ Desktop 只拥有原生 WinUI 3 壳、导航/历史、设置展示、窗口及�
 - `DesktopWindow` 继承 `Microsoft.UI.Xaml.Window`；`ShellWindow` 的 `WindowFrame`／`PresentationSurface` 是唯一应用内容根。能力、公共页、页头插槽、侧栏贡献及全局表面均返回 `Microsoft.UI.Xaml.FrameworkElement`。影视页的 `SwapChainPanel`、音乐完整播放器、队列、通知和确认层处于同一 WinUI／Composition 呈现树，遮挡由树内层级决定，不设置视频内容 HWND 或控制条追位窗口。
 - 窗口公开 `Handle`、`Root`、`Resources`、`Title`、`Show`／`Hide`／`Activate`／`Resize`、`WindowState`、可取消的 `Closing`、`Closed`、`Deactivated`、`VisibilityChanged` 及 `SessionEnding`。调用方设置 `Content` 后调用幂等的 `AttachRoot()`，绑定树内 owner 和公共字体；`DesktopWindow.GetWindow(view)` 只沿当前树解析所属窗口。
 - `NativeCaption` 使用 `AppWindow` 系统标题栏按钮和 `InputNonClientPointerSource` 的非客户区准入；布局坐标仅用于声明标题栏可拖动／交互区域，不搬运应用内容。普通 Win32 顶层窗口系统集成通过 `SetWindowSubclass` 接收消息，不保留 WPF `WindowChrome`／`HwndSource` 可视壳。
-- 现有请求 owner 的 `System.Windows.Threading.Dispatcher` 仅保留为同 STA 消息循环上的非可视调度器；XAML 窗口、控件、资源、输入和动画由 WinUI 持有，不创建第二个 WPF `Application` 或呈现根。
+- 请求 owner 通过 `MeowFilm.Threading.OwnerDispatcher` 使用同一 Windows App SDK `DispatcherQueue`；调度任务保留完成、异常、排队取消与关闭拒绝语义，计时器由所属队列创建。XAML 窗口、控件、资源、输入和动画由 WinUI 持有。
 
 ## 导航、页头与全局表面
 
@@ -79,7 +79,7 @@ Desktop 只拥有原生 WinUI 3 壳、导航/历史、设置展示、窗口及�
 ## 媒体快捷键设置
 
 - AppHost 先加载 `AppMediaControlSettings`，再通过 `ShellWindow` 构造器末尾的 `mediaControls` 参数注入；上游 `appearance`、`closePreferences` 及内部测试端口 `trayIconFactory` 保留原位置。壳只读 `MediaControls` 暴露同一 `IDesktopMediaControlSettings`，将其交给通用设置的“快捷键”区域和窗口附件；“窗口行为”继续使用同一关闭偏好 owner。Desktop 设置不依赖音乐能力，不创建播放器或全局键注册。
-- 原生文档独立为 `app.media-controls.v1`，严格字段为 `{schema:1, globalEnabled:true, systemMediaEnabled:true, bindings:[{action:"TogglePlayback",local:{key:"P",modifiers:2},global:{key:"P",modifiers:3}},…]}`。`action`／`key` 使用枚举名称，`modifiers` 使用 WPF `ModifierKeys` 位值；`null` 表示清除。八个动作各有一项，翻译的 `global` 必须为 `null`。不迁移或改写外观、音乐文档，不向脚本开放此命名空间。
+- 原生文档独立为 `app.media-controls.v1`，严格字段为 `{schema:1, globalEnabled:true, systemMediaEnabled:true, bindings:[{action:"TogglePlayback",local:{key:"P",modifiers:1},global:{key:"P",modifiers:3}},…]}`。`action` 使用媒体动作枚举名称，`key` 使用 `Windows.System.VirtualKey` 名称，`modifiers` 使用 `Windows.System.VirtualKeyModifiers` 位值（Control=1、Menu/Alt=2、Shift=4、Windows=8）；`null` 表示清除。八个动作各有一项，翻译的 `global` 必须为 `null`。不迁移或改写外观、音乐文档，不向脚本开放此命名空间。
 - 默认两开关开启，彼此独立。应用内键依次为 `Ctrl+P`、`Ctrl+Left`、`Ctrl+Right`、`Ctrl+Up`、`Ctrl+Down`、`Ctrl+L`、`Ctrl+D`、`Ctrl+T`，对应播放／暂停、上一首、下一首、音量加、音量减、喜欢歌曲、打开／关闭桌面歌词、源译文显隐；前七项的全局键在应用内键上增加 `Alt`，翻译全局列不提供编辑。
 - 缺失文档只采用默认值，不写盘。读取失败、损坏或未知版本撤销输入及编辑准入，保留原文档并通过 `NoticeOutlet` 通知，允许显式重新读取。保存按上次读取指纹 CAS；失败后权威重读，已接受写入的丢失回执可以恢复为成功，未接受的草稿不发布、不重放。偏好快照不可变；保存成功后才通知输入及系统媒体消费者。
 - 通用页沿用原有 32px 左右边距和设置滚动条。“功能说明／应用内快捷键／全局快捷键”展示八行；按钮可通过键盘及自动化访问，录制在当前 WinUI 根的 `PreviewKeyDown`／`PreviewKeyUp` 消费候选按下、长按与释放，并隔断 Shell 固定导航。纯修饰键不提交；Esc 取消、Tab 离开、Delete／Backspace 清除。候选可即时保存并结束视觉编辑，但同一 `IsRecording` 保持至所消费的候选／控制键全部释放，期间不恢复全局注册；候选保存中保留输入按钮的焦点资格，避免控件禁用导致提前失焦。失焦、隐藏、卸载、窗口停用或显式取消输入会话均可立即释放该状态，保存中同样可清理。内部不同动作跨局部／全局重复、`Ctrl+F`、`Alt+Left`、裸 Esc／Space 均拒绝保存，同一动作共享局部／全局组合允许。冲突就地显示并通过通知反馈，键位始终恢复权威值。

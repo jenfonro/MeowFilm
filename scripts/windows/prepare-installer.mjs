@@ -3,6 +3,7 @@ import { lstatSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { licenseFiles } from './package-licenses.mjs';
+import { verifyRuntimeConfiguration } from './verify-projects.mjs';
 
 const inventoryName = 'meowfilm-install-files.txt';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -73,7 +74,7 @@ export function prepareWindowsInstaller({ payload, output }) {
     'payload contains installer-owned metadata');
   const required = [
     'meowfilm.exe', 'meowfilm.dll', 'meowfilm.deps.json', 'meowfilm.runtimeconfig.json',
-    'coreclr.dll', 'hostfxr.dll', 'hostpolicy.dll', 'PresentationFramework.dll',
+    'coreclr.dll', 'hostfxr.dll', 'hostpolicy.dll',
     'runtime/node.exe', 'runtime/node-LICENSE.txt', 'runtime/runtime-manifest.json',
     'licenses/licenses-manifest.json', 'build-result.json',
   ];
@@ -84,12 +85,8 @@ export function prepareWindowsInstaller({ payload, output }) {
   need(result.application === 'meowfilm' && result.configuration === 'Release' &&
     result.selfContained === true && result.runtimeIdentifier === 'win-x64',
   'installers require a Release self-contained win-x64 publish');
-  const config = json(join(payload, 'meowfilm.runtimeconfig.json')).runtimeOptions;
-  const frameworks = config?.includedFrameworks;
-  need(!config?.frameworks && !config?.framework && Array.isArray(frameworks) &&
-    ['Microsoft.NETCore.App', 'Microsoft.WindowsDesktop.App'].every(name => frameworks.some(item => item.name === name)) &&
-    frameworks.every(item => item.version && item.version === frameworks[0].version),
-  'self-contained desktop framework closure is incomplete');
+  try { verifyRuntimeConfiguration(json(join(payload, 'meowfilm.runtimeconfig.json')), true); }
+  catch (error) { need(false, error.message); }
   const deps = json(join(payload, 'meowfilm.deps.json'));
   const targetName = deps.runtimeTarget?.name;
   need(targetName?.endsWith('/win-x64') && deps.targets?.[targetName], 'publish dependency target must be win-x64');

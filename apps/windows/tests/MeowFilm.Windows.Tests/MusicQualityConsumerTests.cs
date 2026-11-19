@@ -3,7 +3,8 @@ using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
@@ -108,7 +109,7 @@ public static class MusicQualityConsumerTests
         MusicTestStores.For(f.Fixture.Store).HoldCommit();
         var save = f.Module.SetPlaybackQualityRequestAsync("auto");
         await MusicTestStores.For(f.Fixture.Store).Entered!.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var close = f.Module.PrepareShutdownAsync(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        var close = f.Module.PrepareShutdownAsync(); await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
         Check(!save.IsCompleted && !close.IsCompleted, "physical durable write must still own input");
         MusicTestStores.For(f.Fixture.Store).Release?.TrySetResult(); await Task.WhenAll(save, close);
         Check(f.Module.QualityStatus.Length == 0 && f.Module.PlaybackQualityRequest == before &&
@@ -157,7 +158,7 @@ public static class MusicQualityConsumerTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         do
         {
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
             if (module.CanEditQuality) return;
             await Task.Delay(1, timeout.Token);
         } while (true);
@@ -338,7 +339,7 @@ public static class MusicQualityConsumerTests
     private sealed class Dialogs : IMusicDialogs
     {
         public bool Confirm(string message, string title) => true;
-        public string[]? SelectAudioFiles() => null;
+        public Task<string[]?> SelectAudioFilesAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.FromResult<string[]?>(null);
     }
     private class PlaybackOutput : IMusicPlayback
     {

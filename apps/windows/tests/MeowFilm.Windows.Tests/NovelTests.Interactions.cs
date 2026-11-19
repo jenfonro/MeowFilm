@@ -11,7 +11,8 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
@@ -92,7 +93,7 @@ public static partial class NovelTests
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await using var rules = new NovelRuleProgram(ruleRuntime);
         var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host));
-        host.Show();
+        host.Show(); await NovelTestUi.LoadedAsync(owner);
         try
         {
             await using var server = new WebFixture();
@@ -148,7 +149,7 @@ public static partial class NovelTests
     {
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await using var rules = new NovelRuleProgram(ruleRuntime);
-        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
+        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show(); await NovelTestUi.LoadedAsync(owner);
         var runtime = new Runtime(); var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync();
         await using var server = new WebFixture();
         bool physicallyClosed = false; bool entered = false;
@@ -417,11 +418,10 @@ public static partial class NovelTests
         finally { oldPixels.TrySetResult(retiredPixels); shutdownPixels.TrySetResult(retiredPixels); host.Close(); await sources.PrepareShutdownAsync(); }
         static byte[] Pixels(byte shade)
         {
-            byte[] pixels = [shade, shade, shade, 255, shade, shade, shade, 255,
-                shade, shade, shade, 255, shade, shade, shade, 255];
-            var bitmap = System.Windows.Media.Imaging.BitmapSource.Create(2, 2, 96, 96, System.Windows.Media.PixelFormats.Bgra32, null, pixels, 8);
-            var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder(); encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
-            using var output = new MemoryStream(); encoder.Save(output); return output.ToArray();
+            using var bitmap = new SkiaSharp.SKBitmap(2, 2, SkiaSharp.SKColorType.Bgra8888, SkiaSharp.SKAlphaType.Premul);
+            using var canvas = new SkiaSharp.SKCanvas(bitmap); canvas.Clear(new SkiaSharp.SKColor(shade, shade, shade, 255));
+            using var image = SkiaSharp.SKImage.FromBitmap(bitmap); using var data = image.Encode(SkiaSharp.SKEncodedImageFormat.Png, 100);
+            return data.ToArray();
         }
     }
     private static async Task ImageLifecycle()
@@ -432,6 +432,7 @@ public static partial class NovelTests
         var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync(); await using var rules = new NovelRuleProgram(ruleRuntime);
         var session = new NovelBookSession(sources, library, rules, new("image", "key", Book())); await session.ContinueAsync();
         var surface = new NovelReadingSurface(sources); var host = NovelTestUi.Window(surface); host.Show();
+        var retiredPixels = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
             surface.Present(session, new() { Mode = "scroll" }); DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
@@ -443,8 +444,38 @@ public static partial class NovelTests
             var anchor = surface.CaptureAnchor(); DesktopTestUi.ResizeWindow(host, 700, DesktopTestUi.WindowSize(host).Height); DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
             Check(surface.CaptureAnchor().BlockIndex == anchor.BlockIndex && surface.CaptureAnchor().Utf16Offset == anchor.Utf16Offset);
             await surface.DrainImagesAsync(); Check(runtime.ImageReferences.Count == 0 && runtime.Released >= 2);
+
+            var retiredStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var retiredCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            runtime.ReadImage = async (_, token) =>
+            {
+                using var registration = token.Register(() => retiredCancelled.TrySetResult());
+                retiredStarted.TrySetResult(); return await retiredPixels.Task;
+            };
+            surface.ResumeImages(); await retiredStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            int released = runtime.Released;
+            var drain = surface.DrainImagesAsync(); await retiredCancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(!drain.IsCompleted && runtime.Released == released && runtime.ImageReferences.Count == 1 &&
+                surface.Children.OfType<Image>().All(image => image.Source is null),
+                "Reader drain acknowledged the cancelled image before its physical completion.");
+            retiredPixels.TrySetResult(FixtureImages.Encode(1, 1, [224, 224, 224, 255])); await drain;
+            Check(runtime.Released == released + 1 && runtime.ImageReferences.Count == 0 &&
+                surface.Children.OfType<Image>().All(image => image.Source is null),
+                "Retired image pixels were published or their runtime lease was retained.");
+            runtime.ReadImage = (_, _) => Task.FromResult(FixtureImages.Encode(1, 1, [32, 32, 32, 255]));
+            surface.ResumeImages(); await Until(() => runtime.ImageReferences.Count == 1);
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (true)
+            {
+                await DesktopTestUi.DrainAsync();
+                var frame = await NativeDesktopCapture.CaptureAsync(surface);
+                var pixel = NovelTestUi.Pixel(frame, surface.ActualWidth / 2, 180);
+                if (pixel.R == 32 && pixel.G == 32 && pixel.B == 32) break;
+                Check(DateTime.UtcNow < deadline, "Resumed reader did not display only its fresh image pixels.");
+                await Task.Delay(20);
+            }
         }
-        finally { await surface.DrainImagesAsync(); surface.Dispose(); host.Close(); await sources.PrepareShutdownAsync(); }
+        finally { retiredPixels.TrySetCanceled(); await surface.DrainImagesAsync(); surface.Dispose(); host.Close(); await sources.PrepareShutdownAsync(); }
     }
     private static async Task Purchase()
     {

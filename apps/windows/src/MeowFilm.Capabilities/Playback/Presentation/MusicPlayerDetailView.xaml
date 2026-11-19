@@ -1,10 +1,16 @@
 <UserControl x:Class="MeowFilm.Capabilities.MusicPlayerDetailView"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
- xmlns:local="using:MeowFilm.Capabilities" x:Name="Root" Foreground="#EBEAED">
- <UserControl.Resources><local:MusicVisibilityConverter x:Key="Visible"/>
-  <Style x:Key="Player.LyricAdjust" TargetType="Button"><Setter Property="Width" Value="36"/><Setter Property="Height" Value="36"/><Setter Property="MinWidth" Value="0"/><Setter Property="MinHeight" Value="0"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,0,0,8"/><Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="#30FFFFFF"/><Setter Property="BorderThickness" Value="1"/><Setter Property="Foreground" Value="#EBEAED"/><Setter Property="CornerRadius" Value="18"/></Style>
-  <Style TargetType="Button"><Setter Property="FontWeight" Value="Normal"/><Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/><Setter Property="Foreground" Value="#EBEAED"/><Setter Property="CornerRadius" Value="12"/></Style>
- </UserControl.Resources>
+ xmlns:local="using:MeowFilm.Capabilities" x:Name="Root">
+ <UserControl.Resources><ResourceDictionary>
+  <ResourceDictionary.ThemeDictionaries><ResourceDictionary x:Key="HighContrast">
+   <SolidColorBrush x:Key="Player.DetailForeground" Color="{ThemeResource SystemColorWindowTextColor}"/>
+  </ResourceDictionary></ResourceDictionary.ThemeDictionaries>
+  <SolidColorBrush x:Key="Player.DetailForeground" Color="#EBEAED"/>
+  <local:MusicVisibilityConverter x:Key="Visible"/>
+  <Style x:Key="Player.LyricAdjust" TargetType="Button"><Setter Property="Width" Value="36"/><Setter Property="Height" Value="36"/><Setter Property="MinWidth" Value="0"/><Setter Property="MinHeight" Value="0"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,0,0,8"/><Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="#30FFFFFF"/><Setter Property="BorderThickness" Value="1"/><Setter Property="Foreground" Value="{ThemeResource Player.DetailForeground}"/><Setter Property="CornerRadius" Value="18"/></Style>
+  <Style TargetType="Button"><Setter Property="FontWeight" Value="Normal"/><Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/><Setter Property="Foreground" Value="{ThemeResource Player.DetailForeground}"/><Setter Property="CornerRadius" Value="12"/></Style>
+ </ResourceDictionary></UserControl.Resources>
+ <UserControl.Foreground><ThemeResource ResourceKey="Player.DetailForeground"/></UserControl.Foreground>
  <Grid>
   <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
   <Border x:Name="PageBackdrop" Grid.RowSpan="2" IsHitTestVisible="False"
@@ -38,15 +44,23 @@
    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
    <StackPanel>
-    <TextBlock x:Name="DetailTitle" Text="{Binding CurrentTitle}" FontSize="26" TextTrimming="CharacterEllipsis" Margin="0,0,0,10"/>
+    <TextBlock Foreground="{Binding Foreground,ElementName=Root}" x:Name="DetailTitle" Text="{Binding CurrentTitle}" FontSize="26" TextTrimming="CharacterEllipsis" Margin="0,0,0,10"/>
     <local:MusicWrapPanel Opacity=".68" Margin="0,0,0,18">
-     <StackPanel Orientation="Horizontal" Margin="0,0,18,0" Visibility="{Binding CurrentAlbum,Converter={StaticResource Visible}}"><TextBlock Text="专辑："/><TextBlock Text="{Binding CurrentAlbum}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
-     <StackPanel Orientation="Horizontal" Margin="0,0,18,0" Visibility="{Binding CurrentArtist,Converter={StaticResource Visible}}"><TextBlock Text="歌手："/><TextBlock Text="{Binding CurrentArtist}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
-     <StackPanel Orientation="Horizontal" Visibility="{Binding CurrentSource,Converter={StaticResource Visible}}"><TextBlock Text="来源："/><TextBlock Text="{Binding CurrentSource}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
+     <StackPanel Orientation="Horizontal" Margin="0,0,18,0" Visibility="{Binding CurrentAlbum,Converter={StaticResource Visible}}"><TextBlock Foreground="{Binding Foreground,ElementName=Root}" Text="专辑："/><TextBlock Foreground="{Binding Foreground,ElementName=Root}" Text="{Binding CurrentAlbum}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
+     <StackPanel Orientation="Horizontal" Margin="0,0,18,0" Visibility="{Binding CurrentArtist,Converter={StaticResource Visible}}"><TextBlock Foreground="{Binding Foreground,ElementName=Root}" Text="歌手："/><TextBlock Foreground="{Binding Foreground,ElementName=Root}" Text="{Binding CurrentArtist}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
+     <StackPanel Orientation="Horizontal" Visibility="{Binding CurrentSource,Converter={StaticResource Visible}}"><TextBlock Foreground="{Binding Foreground,ElementName=Root}" Text="来源："/><TextBlock Foreground="{Binding Foreground,ElementName=Root}" Text="{Binding CurrentSource}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
     </local:MusicWrapPanel>
    </StackPanel>
    <Border Grid.Row="1" Margin="0,0,0,8" Background="#0DFFFFFF" CornerRadius="16" HorizontalAlignment="Left">
-    <StackPanel Orientation="Horizontal"><RadioButton Content="歌词" IsChecked="True" FontWeight="Normal"/><RadioButton Content="相似推荐" IsHitTestVisible="False" FontWeight="Normal"/>
+    <Border.Resources><ResourceDictionary>
+     <ResourceDictionary.ThemeDictionaries><ResourceDictionary x:Key="HighContrast">
+      <SolidColorBrush x:Key="MeowFilm.Brush.Text" Color="{ThemeResource SystemColorWindowTextColor}"/>
+      <SolidColorBrush x:Key="MeowFilm.Brush.Muted" Color="{ThemeResource SystemColorWindowTextColor}"/>
+     </ResourceDictionary></ResourceDictionary.ThemeDictionaries>
+     <SolidColorBrush x:Key="MeowFilm.Brush.Text" Color="#EBEAED"/>
+     <SolidColorBrush x:Key="MeowFilm.Brush.Muted" Color="#EBEAED"/>
+    </ResourceDictionary></Border.Resources>
+    <StackPanel Orientation="Horizontal"><RadioButton x:Name="LyricsTab" Foreground="{Binding Foreground,ElementName=Root}" Content="歌词" IsChecked="True" FontWeight="Normal"/><RadioButton x:Name="SimilarTab" Foreground="{Binding Foreground,ElementName=Root}" Content="相似推荐" IsHitTestVisible="False" FontWeight="Normal"/>
      <Button Content="心动模式" Click="Heartbeat_Click" IsEnabled="{Binding CanHeartbeatCurrent}" Visibility="{Binding CanHeartbeatCurrent,Converter={StaticResource Visible}}" Padding="12,6" Margin="4,0" AutomationProperties.Name="从当前歌曲开始心动"/>
     </StackPanel>
    </Border>
@@ -61,10 +75,10 @@
     </Grid>
     <Border x:Name="LyricPreviewFrame" VerticalAlignment="Center" CornerRadius="12" Background="#12FFFFFF" BorderBrush="#48FFFFFF" BorderThickness="1" MinHeight="47" Visibility="{Binding HasLyricPreview,Converter={StaticResource Visible}}">
      <Button x:Name="ConfirmLyric" Padding="8,3" MinHeight="0" Height="24" MinWidth="0" CornerRadius="12" Background="#2AFFFFFF" Click="PlayLyric_Click" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="8,0,0,0" IsEnabled="{Binding CanConfirmLyricPreview}" AutomationProperties.Name="播放此处">
-      <StackPanel Orientation="Horizontal" Spacing="4"><FontIcon Glyph="&#xE768;" FontSize="9"/><TextBlock Text="{Binding LyricPreviewTime}" FontSize="12"/></StackPanel>
+      <StackPanel Orientation="Horizontal" Spacing="4"><FontIcon Glyph="&#xE768;" FontSize="9"/><TextBlock Foreground="{Binding Foreground,ElementName=Root}" Text="{Binding LyricPreviewTime}" FontSize="12"/></StackPanel>
      </Button>
     </Border>
-    <TextBlock x:Name="LyricState" Text="{Binding LyricStatus}" FontSize="20" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap"/>
+    <TextBlock Foreground="{Binding Foreground,ElementName=Root}" x:Name="LyricState" Text="{Binding LyricStatus}" FontSize="20" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap"/>
    </Grid>
    <StackPanel x:Name="LyricControlRail" Grid.Column="1" Grid.Row="2" Margin="12,16,0,0" VerticalAlignment="Top">
     <StackPanel x:Name="LyricTimingRail">

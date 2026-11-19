@@ -17,7 +17,8 @@ using WindowState = MeowFilm.Desktop.DesktopWindowState;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
@@ -342,14 +343,6 @@ public static partial class MusicOfficialPlaybackScopeTests
         internal bool Disposed;
         public void Dispose() => Disposed = true;
     }
-    private static System.Windows.Media.Imaging.BitmapSource ArtworkPixels(int size = 1)
-    {
-        var pixels = new byte[size * size * 4];
-        for (int i = 0; i < pixels.Length; i += 4)
-        { pixels[i] = 60; pixels[i + 1] = 120; pixels[i + 2] = 180; pixels[i + 3] = 255; }
-        var image = System.Windows.Media.Imaging.BitmapSource.Create(size, size, 96, 96, System.Windows.Media.PixelFormats.Bgra32, null, pixels, size * 4);
-        image.Freeze(); return image;
-    }
     private sealed class ArtworkHttpProbe(int size = 1) : HttpMessageHandler
     {
         internal readonly List<string> Addresses = [];
@@ -362,8 +355,10 @@ public static partial class MusicOfficialPlaybackScopeTests
         private readonly byte[] bytes = Encode(size);
         internal static byte[] Encode(int size = 1)
         {
-            var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder(); encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(ArtworkPixels(size)));
-            using var stream = new MemoryStream(); encoder.Save(stream); return stream.ToArray();
+            var pixels = new byte[size * size * 4];
+            for (int i = 0; i < pixels.Length; i += 4)
+            { pixels[i] = 60; pixels[i + 1] = 120; pixels[i + 2] = 180; pixels[i + 3] = 255; }
+            return FixtureImages.Encode(size, size, pixels);
         }
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {

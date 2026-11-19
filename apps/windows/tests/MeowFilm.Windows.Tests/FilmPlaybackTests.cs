@@ -214,9 +214,9 @@ public static class FilmPlaybackTests
                 double pageOffset = scroll.VerticalOffset;
                 Check(details.ScrollableHeight > 0, "wide metadata has its own vertical scroll range");
                 details.ChangeView(null, details.ScrollableHeight, null, true);
-                await Drain();
+                await FilmPlaybackFixture.Until(() => details.VerticalOffset > 0);
                 Check(details.VerticalOffset > 0 && Math.Abs(scroll.VerticalOffset - pageOffset) < .5,
-                    "scrolling metadata leaves the page viewport in place");
+                    $"scrolling metadata leaves the page viewport in place; metadata={details.VerticalOffset}/{details.ScrollableHeight}; page={pageOffset}->{scroll.VerticalOffset}");
                 await CheckSharedCanvas(view);
                 Click(Named<Button>(view, "OverviewToggle"));
                 await Drain();
@@ -230,7 +230,7 @@ public static class FilmPlaybackTests
         }
         Check(scroll.ScrollableHeight > 0, "narrow content scrolls vertically");
         scroll.ChangeView(null, scroll.ScrollableHeight, null, true);
-        await Drain();
+        await FilmPlaybackFixture.Until(() => scroll.VerticalOffset > 0);
         Check(scroll.VerticalOffset > 0, "the page scroll reaches content below the player");
         Click(Named<ToggleButton>(view, "ListLayout"));
         await Drain();

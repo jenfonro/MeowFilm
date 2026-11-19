@@ -9,6 +9,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Dispatching;
+using DispatcherQueuePriority = Microsoft.UI.Dispatching.DispatcherQueuePriority;
 using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
 
@@ -44,6 +45,8 @@ public partial class MusicPlayerDetailView : UserControl
         ArtworkScope.SetLoader(DetailRecord, module.ArtworkLoader);
         DetailRecord.SetBinding(MusicRecordView.ArtworkIdentityProperty, new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath(nameof(MusicCapability.CurrentArtworkIdentity)) });
         var footer = new MusicPlayerView(module, showArtwork: false);
+        footer.SetBinding(ForegroundProperty, new Microsoft.UI.Xaml.Data.Binding
+            { Source = this, Path = new PropertyPath(nameof(Foreground)) });
         DetailPlayerHost.Content = footer;
         DetailRecord.PaletteUpdated += (_, _) => module.RefreshPlayerAppearance(DetailRecord.PaletteBrush, animate: IsVisible);
         lyricResumeTimer.Tick += (_, _) =>
@@ -119,7 +122,7 @@ public partial class MusicPlayerDetailView : UserControl
     internal bool BrowseLyricWheel(int delta)
     {
         if (!IsVisible || Descendant<ScrollViewer>(LyricList) is not { } scroll) return false;
-        int lines = System.Windows.SystemParameters.WheelScrollLines;
+        int lines = MeowFilm.Desktop.DesktopSystemSettings.WheelScrollLines;
         double distance = lines < 0 ? scroll.ViewportHeight : lines * 24d;
         BrowseLyrics(scroll, -delta / 120d * distance); return true;
     }

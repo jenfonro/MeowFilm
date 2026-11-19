@@ -36,7 +36,18 @@ public sealed partial class NovelView
             if (!id.StartsWith("novel.discovery.", StringComparison.Ordinal)) continue;
             discoveryFocus = (id, focused); return;
         }
-        if (discoveryFocus is { } remembered && !CanRestoreDiscoveryFocus(remembered.Previous)) discoveryFocus = null;
+        if (discoveryFocus is { } remembered && !CanRestoreDiscoveryFocus(remembered.Previous)) ClearDiscoveryFocus();
+    }
+    private void ClearDiscoveryFocus()
+    {
+        discoveryFocus = null; body.IsTabStop = false;
+    }
+    private void ParkDiscoveryFocus()
+    {
+        if (discoveryFocus is null || !DesktopVisual.ContainsFocus(body)) return;
+        // Preserve focus on the stable owner while WinUI unloads the old
+        // selection controls instead of advancing it to an unrelated button.
+        body.IsTabStop = true; body.Focus(FocusState.Programmatic);
     }
     private bool CanRestoreDiscoveryFocus(DependencyObject? previous)
     {
@@ -47,10 +58,10 @@ public sealed partial class NovelView
     private void RestoreDiscoveryFocus()
     {
         if (discoveryFocus is not { } remembered) return;
-        if (!DesktopVisual.IsVisible(this) || !CanRestoreDiscoveryFocus(remembered.Previous)) { discoveryFocus = null; return; }
+        if (!DesktopVisual.IsVisible(this) || !CanRestoreDiscoveryFocus(remembered.Previous)) { ClearDiscoveryFocus(); return; }
         if (!IsLoaded || body.Content is not FrameworkElement { IsLoaded: true }) return;
-        discoveryFocus = null;
-        FindDiscoveryFocus(body, remembered.Id)?.Focus(FocusState.Programmatic);
+        var target = FindDiscoveryFocus(body, remembered.Id);
+        if (target is { IsLoaded: true } && target.Focus(FocusState.Programmatic)) ClearDiscoveryFocus();
     }
     private static Control? FindDiscoveryFocus(DependencyObject parent, string id)
     {
@@ -64,7 +75,19 @@ public sealed partial class NovelView
     {
         var text = NovelUi.Text(value, size, muted);
         text.Margin = new(0); text.TextWrapping = TextWrapping.NoWrap; text.TextTrimming = TextTrimming.CharacterEllipsis;
+        DesktopTheme.Observe(text, () => text.Foreground = DesktopTheme.GetIsHighContrast(text)
+            ? new SolidColorBrush(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText))
+            : (Brush)DesktopVisual.Resource(text, muted ? "MeowFilm.Brush.Muted" : "MeowFilm.Brush.Text"));
         return text;
+    }
+    private static void DiscoveryCanvas(Border card)
+    {
+        DesktopTheme.Observe(card, () =>
+        {
+            if (DesktopTheme.GetIsHighContrast(card))
+                card.Background = new SolidColorBrush(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Window));
+            else card.ClearValue(Border.BackgroundProperty);
+        });
     }
     private static Viewbox DiscoveryIcon(string data, double size = 14)
     {
@@ -139,6 +162,7 @@ public sealed partial class NovelView
             Width = 154, MaxDropDownHeight = 300, Margin = new(0, 0, 16, 0), VerticalAlignment = VerticalAlignment.Center };
         sources.UseResource(StyleProperty, "Novel.Discovery.Source");
         AutomationProperties.SetName(sources, "发现书源"); AutomationProperties.SetAutomationId(sources, "novel.discovery.source");
+        sources.Loaded += (_, _) => RestoreDiscoveryFocus();
         sources.SelectionChanged += (_, _) =>
         {
             if (sources.SelectedItem is NovelSource source && source != module.ExploreSource && NovelCapability.CanExplore(source))
@@ -171,6 +195,7 @@ public sealed partial class NovelView
         var tab = new RadioButton { Content = title, IsChecked = selected, GroupName = "novel.discovery.channels" };
         tab.UseResource(StyleProperty, "Novel.Discovery.Tab");
         AutomationProperties.SetName(tab, title); AutomationProperties.SetAutomationId(tab, id);
+        tab.Loaded += (_, _) => RestoreDiscoveryFocus();
         tab.Checked += (_, _) =>
         {
             if (kind.Url != module.ExploreKind?.Url)
@@ -286,6 +311,7 @@ public sealed partial class NovelView
             choice.UseResource(StyleProperty, "Novel.Discovery.Choice");
             AutomationProperties.SetName(choice, kind.Title);
             AutomationProperties.SetAutomationId(choice, "novel.discovery.kind:" + kind.Url);
+            choice.Loaded += (_, _) => RestoreDiscoveryFocus();
             choice.Checked += (_, _) =>
             {
                 if (kind.Url != module.ExploreKind?.Url)
@@ -327,6 +353,7 @@ public sealed partial class NovelView
     {
         var card = new Border { Height = 216, Padding = new(30, 22, 30, 22) };
         card.UseResource(StyleProperty, "Novel.Discovery.Feature");
+        DiscoveryCanvas(card);
         AutomationProperties.SetName(card, "选读");
         if (module.DiscoverBooks.FirstOrDefault() is not { } book) return card;
         var layout = new Grid(); layout.ColumnDefinitions.Add(new()); layout.ColumnDefinitions.Add(new() { Width = new(149) });
@@ -361,6 +388,7 @@ public sealed partial class NovelView
     {
         var card = new Border { Height = 216, Padding = new(20) };
         card.UseResource(StyleProperty, "Novel.Discovery.Surface");
+        DiscoveryCanvas(card);
         AutomationProperties.SetName(card, "继续阅读");
         var panel = new DockPanel(); card.Child = panel;
         var last = module.Library.Entries.Where(e => e.ReadAt is not null).OrderByDescending(e => e.ReadAt).FirstOrDefault();

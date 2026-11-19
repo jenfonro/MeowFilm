@@ -2,6 +2,8 @@ using System.Numerics;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Hosting;
+using MeowFilm.Desktop;
+using MeowFilm.Desktop.Artwork;
 using Windows.Foundation;
 
 namespace MeowFilm.Capabilities;
@@ -19,24 +21,41 @@ public sealed class MusicArtworkFade : FrameworkElement
     private CompositionLinearGradientBrush? mask;
     private CompositionMaskBrush? brush;
     private SpriteVisual? visual;
+    private IDisposable? visibility, artworkLease;
+    private ArtworkImage? demandedArtwork;
+    private CancellationTokenSource? preparation;
     internal CompositionLinearGradientBrush? Mask => mask;
     public MusicArtworkFade()
     {
         IsHitTestVisible = false;
-        Loaded += (_, _) => Refresh(); SizeChanged += (_, _) => Refresh(); Unloaded += (_, _) => Release();
+        Loaded += (_, _) => { visibility ??= DesktopVisual.ObserveVisibility(this, _ => Refresh()); Refresh(); };
+        SizeChanged += (_, _) => Refresh();
+        Unloaded += (_, _) => { visibility?.Dispose(); visibility = null; RetireArtwork(); Release(); };
     }
     private static void SourceChanged(DependencyObject owner, DependencyPropertyChangedEventArgs args)
     {
         var fade = (MusicArtworkFade)owner;
-        if (args.OldValue is FrameworkElement previous) { previous.SizeChanged -= fade.SourceResized; previous.Loaded -= fade.SourceLoaded; }
-        if (args.NewValue is FrameworkElement next) { next.SizeChanged += fade.SourceResized; next.Loaded += fade.SourceLoaded; }
+        if (args.OldValue is FrameworkElement previous) { previous.SizeChanged -= fade.SourceResized; previous.Loaded -= fade.SourceLoaded; previous.Unloaded -= fade.SourceUnloaded; }
+        if (args.NewValue is FrameworkElement next) { next.SizeChanged += fade.SourceResized; next.Loaded += fade.SourceLoaded; next.Unloaded += fade.SourceUnloaded; }
         fade.Refresh();
     }
     private void SourceLoaded(object sender, RoutedEventArgs e) => Refresh();
+    private void SourceUnloaded(object sender, RoutedEventArgs e) { RetireArtwork(); Release(); }
     private void SourceResized(object sender, SizeChangedEventArgs e) => Refresh();
     private void Refresh()
     {
-        if (!IsLoaded || Source is not { IsLoaded: true } source || ActualWidth <= 0 || ActualHeight <= 0) { Release(); return; }
+        if (!IsLoaded || !DesktopVisual.IsVisible(this) || Source is not { IsLoaded: true } source || ActualWidth <= 0 || ActualHeight <= 0)
+        { RetireArtwork(); Release(); return; }
+        var artwork = Decoration ? source as ArtworkImage : null;
+        if (!ReferenceEquals(artwork, demandedArtwork))
+        {
+            RetireArtwork(); demandedArtwork = artwork;
+            if (artwork is not null)
+            {
+                preparation = new CancellationTokenSource();
+                PrepareArtwork(artwork, preparation);
+            }
+        }
         var compositor = ElementCompositionPreview.GetElementVisual(this).Compositor;
         surface ??= compositor.CreateVisualSurface(); surface.SourceVisual = ElementCompositionPreview.GetElementVisual(source);
         var offset = TransformToVisual(source).TransformPoint(new Point());
@@ -51,6 +70,30 @@ public sealed class MusicArtworkFade : FrameworkElement
         brush ??= compositor.CreateMaskBrush(); brush.Source = sourceBrush; brush.Mask = mask;
         visual ??= compositor.CreateSpriteVisual(); visual.Brush = brush; visual.Size = surface.SourceSize;
         ElementCompositionPreview.SetElementChildVisual(this, visual);
+    }
+    private async void PrepareArtwork(ArtworkImage artwork, CancellationTokenSource current)
+    {
+        try
+        {
+            var acquired = await artwork.PrepareForPresentationAsync(current.Token);
+            if (ReferenceEquals(preparation, current) && ReferenceEquals(demandedArtwork, artwork) && !current.IsCancellationRequested)
+                artworkLease = acquired;
+            else acquired.Dispose();
+        }
+        // ArtworkImage also revokes preparation when its own loaded lifetime ends.
+        // That cancellation can complete before this consumer handles Unloaded.
+        catch (OperationCanceledException) when (current.IsCancellationRequested || !artwork.IsLoaded || !IsLoaded) { }
+        finally
+        {
+            if (ReferenceEquals(preparation, current)) preparation = null;
+            current.Dispose();
+        }
+    }
+    private void RetireArtwork()
+    {
+        var pending = preparation; preparation = null;
+        demandedArtwork = null; pending?.Cancel();
+        artworkLease?.Dispose(); artworkLease = null;
     }
     private void Release()
     {

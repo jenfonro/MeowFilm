@@ -1,4 +1,3 @@
-using SystemParameters = System.Windows.SystemParameters;
 using Color = global::Windows.UI.Color;
 using Colors = Microsoft.UI.Colors;
 using FontWeights = Microsoft.UI.Text.FontWeights;
@@ -13,6 +12,7 @@ using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Ellipse = Microsoft.UI.Xaml.Shapes.Ellipse;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
@@ -428,7 +428,7 @@ public static partial class MusicUiTests
             True(active[(12 * 400 + 200) * 4 + 2] > active[(24 * 400 + 200) * 4 + 2], "upper shade fades smoothly away from the rail");
             bar.PresentationKey = "hover-track"; bar.PlaybackRate = 1; bar.IsPlaying = true;
             double before = tip.HorizontalOffset; await Task.Delay(180); await Drain();
-            if (SystemParameters.ClientAreaAnimation) True(tip.HorizontalOffset > before, "the native presentation clock moves both head and capsule without new media ticks");
+            if (new global::Windows.UI.ViewManagement.UISettings().AnimationsEnabled) True(tip.HorizontalOffset > before, "the native presentation clock moves both head and capsule without new media ticks");
             Equal(25d, bar.Value);
             bar.BeginScrub(); bar.UpdateScrub(75); update.Invoke(bar, null);
             Equal("01:15 / 01:40", tip.Content as string);
@@ -573,7 +573,7 @@ public static partial class MusicUiTests
             var record = new MusicRecordView { Address = "fixture://record", Width = 60, Height = 60 };
             ArtworkScope.SetLoader(record, new PlayerArtworkFixture());
             using var source = new DesktopTestUi.Host(new Grid(), 400, 400);
-            source.Mount(record); Render(record, 60, 60); await Drain();
+            source.Mount(record); await TestUiHost.LoadedAsync(record); Render(record, 60, 60); await Drain();
             var cover = (ArtworkImage)record.FindName("Cover");
             await Until(() => ((Image)cover.Children[0]).Source is not null);
             var rotation = (RotateTransform)record.FindName("DiscRotation");
@@ -587,12 +587,19 @@ public static partial class MusicUiTests
                 True(((Image)cover.Children[0]).Stretch == Stretch.UniformToFill, "native cover preserves its actual image sampling allocation");
             }
             var grooves = (Grid)record.FindName("Grooves");
-            var small = grooves.Children.ToArray();
+            var layers = grooves.Children.ToArray();
+            var compact = grooves.Children.OfType<Grid>().Single(layer => layer.Visibility == Visibility.Visible);
+            var dense = grooves.Children.OfType<Grid>().Single(layer => layer.Visibility == Visibility.Collapsed);
+            True(compact.Children.Count <= 5 && compact.Children.OfType<Ellipse>().All(ring => ring.StrokeThickness == 4),
+                "small discs use sparse wide grooves instead of dense subpixel rings");
             record.Width = record.Height = 388; Render(record, 388, 388); await Drain();
-            var detail = grooves.Children.ToArray();
-            True(small.All(shape => !detail.Contains(shape)), "native disc changes its size-specific retained shapes");
-            True(small.Length <= 6 && detail.Length > 20,
-                "small discs omit subpixel dense rings while full-size detail keeps its original grooves");
+            True(compact.Visibility == Visibility.Collapsed && dense.Visibility == Visibility.Visible &&
+                dense.Children.Count > 20 && dense.Children.OfType<Ellipse>().All(ring => Math.Abs(ring.StrokeThickness - .65) < .0001),
+                $"full-size detail uses the original dense fine grooves: actual={record.ActualWidth}x{record.ActualHeight}; compact={compact.Visibility}; detail={dense.Visibility}; count={dense.Children.Count}; stroke={((Ellipse)dense.Children[0]).StrokeThickness:R}");
+            record.Width = record.Height = 60; Render(record, 60, 60); await Drain();
+            True(compact.Visibility == Visibility.Visible && dense.Visibility == Visibility.Collapsed &&
+                grooves.Children.SequenceEqual(layers),
+                "resizing back restores compact texture without replacing the retained visual tree during layout");
             source.Window.Content = null;
         });
         yield return Case("seek gesture isolates live ticks commits once and rejects a retired track", async () =>
@@ -641,7 +648,7 @@ public static partial class MusicUiTests
             True(next.Next && !previous.Next, "mirrored directions");
             next.SetPointerWithin(true);
             await Task.Delay(70); await Drain();
-            if (SystemParameters.ClientAreaAnimation) True(next.HasActiveAnimation, "native hover motion active");
+            if (new global::Windows.UI.ViewManagement.UISettings().AnimationsEnabled) True(next.HasActiveAnimation, "native hover motion active");
             Equal(0, f.Calls.Count("music.queue.next"));
             DesktopTestUi.Invoke(next); await Until(() => !f.Module.Busy);
             Equal(1, f.Calls.Count("music.queue.next"));
@@ -1221,16 +1228,15 @@ public static partial class MusicUiTests
         public Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var visual = new System.Windows.Media.DrawingVisual();
-            using (var dc = visual.RenderOpen())
+            var image = MusicTestUi.Pixels(256, 256, (x, y) =>
             {
-                dc.DrawRectangle(new System.Windows.Media.LinearGradientBrush(System.Windows.Media.Colors.SteelBlue, System.Windows.Media.Colors.DarkSalmon, 45), null, new System.Windows.Rect(0, 0, 256, 256));
-                dc.DrawEllipse(System.Windows.Media.Brushes.LightGoldenrodYellow, null, new System.Windows.Point(168, 86), 38, 38);
-                dc.DrawGeometry(System.Windows.Media.Brushes.DarkSlateBlue, null, System.Windows.Media.Geometry.Parse("M0,256 L0,200 86,105 175,210 256,135 256,256 Z"));
-            }
-            var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap(256, 256, 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
-            bitmap.Render(visual); bitmap.Freeze();
-            return Task.FromResult<IArtworkLease>(new PlayerArtworkLease(MusicTestUi.Pixels(bitmap)));
+                if ((x - 168) * (x - 168) + (y - 86) * (y - 86) < 38 * 38) return Colors.LightGoldenrodYellow;
+                if (y > 205 - 70 * Math.Sin(x * Math.PI / 128)) return Colors.DarkSlateBlue;
+                double amount = (x + y) / 510d;
+                byte Mix(byte first, byte second) => (byte)Math.Round(first + (second - first) * amount);
+                return Color.FromArgb(255, Mix(70, 233), Mix(130, 150), Mix(180, 122));
+            });
+            return Task.FromResult<IArtworkLease>(new PlayerArtworkLease(image));
         }
     }
     private sealed class PlayerArtworkLease(ArtworkPixels image) : IArtworkLease

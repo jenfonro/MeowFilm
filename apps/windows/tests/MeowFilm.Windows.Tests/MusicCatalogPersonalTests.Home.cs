@@ -1,4 +1,3 @@
-using SystemParameters = System.Windows.SystemParameters;
 using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Windows.Foundation;
@@ -523,7 +522,7 @@ public static partial class MusicCatalogPersonalTests
         f.Module.HomeSections.CollectionChanged += (_, _) =>
         {
             observedPublication = true;
-            bool animate = cached && SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast;
+            bool animate = cached && new global::Windows.UI.ViewManagement.UISettings().AnimationsEnabled && !new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast;
             Check((overlay.Source is BitmapSource) == animate,
                 "successful replacement retains the previous visible frame only when animation is appropriate");
             Check(!overlay.IsHitTestVisible, "the transition does not intercept the newly published cards");

@@ -1,7 +1,6 @@
 using System.IO;
 using System.Diagnostics;
 using System.Reflection;
-using System.Windows.Media.Imaging;
 using MeowFilm.Platform.Runtime;
 using System.Text;
 using System.Text.Json;
@@ -11,7 +10,6 @@ using Windows.System;
 using Window = MeowFilm.Desktop.DesktopWindow;
 using FontWeights = Microsoft.UI.Text.FontWeights;
 using Color = Windows.UI.Color;
-using PixelFormats = System.Windows.Media.PixelFormats;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities;
@@ -25,6 +23,8 @@ public static partial class NovelTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("novel resources: factory controls resolve owner styles before layout and loaded missing keys fail", () => Sta(NovelTestUi.ResourceOwnership));
+        yield return new("novel visibility: observing loaded owners preserves state and actual hide unload and disposal remain authoritative", () => Sta(NovelTestUi.VisibilityOwnership));
         yield return new("novel page raster: shared current buffer independent animation snapshot scale and retirement", () => Sta(NovelTestUi.RasterOwnership));
         yield return new("novel native library: independent shelf/history stable identity accepted write and corruption", Library);
         yield return new("novel native library: typed fields third-party values and UTF8 keys survive edits and reopen", LibraryRoundTrip);
@@ -279,7 +279,7 @@ public static partial class NovelTests
     private static async Task Layout()
     {
         await using var store = new MemoryStore(); var library = new NovelLibrary(store); await library.InitializeAsync();
-        var runtime = new Runtime { Text = string.Concat(Enumerable.Repeat("正文😀组合字é和汉字。", 800)) };
+        var runtime = new Runtime { Text = string.Concat(Enumerable.Repeat("正文😀组合字é和汉字。\r\n\n", 800)) };
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync(); await using var rules = new NovelRuleProgram(ruleRuntime);
         var session = new NovelBookSession(sources, library, rules, new("layout", "key", Book())); await session.ContinueAsync();
@@ -293,6 +293,12 @@ public static partial class NovelTests
             {
                 surface.Present(session, new() { Mode = mode }); host.Root.UpdateLayout(); await DesktopTestUi.DrainAsync();
                 await surface.TurnAsync(1); var before = surface.CaptureAnchor();
+                string text = session.Blocks[before.BlockIndex].Text;
+                Check(before.Utf16Offset > 0 && before.Utf16Offset < text.Length &&
+                    !char.IsLowSurrogate(text[before.Utf16Offset]) &&
+                    System.Globalization.CharUnicodeInfo.GetUnicodeCategory(text, before.Utf16Offset) != System.Globalization.UnicodeCategory.NonSpacingMark &&
+                    Math.Abs(before.Ratio - (double)before.Utf16Offset / text.Length) < .000001,
+                    "Reading position did not use a UTF-16 line boundary and content-weighted ratio.");
                 surface.Present(session, new() { Mode = mode, FontSize = 28, Margin = 48 });
                 host.Resize(760, 720); host.Root.UpdateLayout(); await DesktopTestUi.DrainAsync();
                 var after = surface.CaptureAnchor();
@@ -300,6 +306,18 @@ public static partial class NovelTests
                 Check(!string.IsNullOrEmpty(surface.PageStatus));
                 NovelTestUi.ReadingFrame(surface);
             }
+            string content = session.Blocks[0].Text;
+            int newline = content.IndexOf('\n', content.Length / 3) + 1;
+            surface.Seek((newline + .25) / content.Length); await DesktopTestUi.DrainAsync();
+            Check(surface.CaptureAnchor().Utf16Offset == newline,
+                "Explicit newlines or empty lines changed the restored UTF-16 position.");
+            DesktopTheme.SetIsHighContrast(host.Root, true); await DesktopTestUi.DrainAsync();
+            var contrast = await NativeDesktopCapture.CaptureAsync(surface);
+            var expected = new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Window);
+            var actual = NovelTestUi.Pixel(contrast, 8, 8);
+            Check(actual.R == expected.R && actual.G == expected.G && actual.B == expected.B,
+                "Reader pixels did not follow its ancestor's system high-contrast palette.");
+            DesktopTheme.SetIsHighContrast(host.Root, false); await DesktopTestUi.DrainAsync();
             var retained = surface.CaptureAnchor();
             await surface.DrainImagesAsync(); await DesktopTestUi.DrainAsync();
             Check(surface.Children.OfType<Image>().All(image => image.Source is null), "Resource drain must release both page rasters.");
@@ -368,7 +386,18 @@ public static partial class NovelTests
         internal byte[]? Bytes
         {
             get => Project(NovelStorageRecords.Library, "device") is { } value ? JsonSerializer.SerializeToUtf8Bytes(value) : null;
-            set => Seed(NovelStorageRecords.Library, System.Text.Json.Nodes.JsonNode.Parse(value!)!.AsObject(), "device");
+            set
+            {
+                if (value is not null)
+                    Seed(NovelStorageRecords.Library, System.Text.Json.Nodes.JsonNode.Parse(value)!.AsObject(), "device");
+                else Inner.WriteAsync(db =>
+                {
+                    NovelStorageRecords.Library.Save(db, null, NovelStorageRecords.Library.Read(db, ["device"]), ["device"]);
+                    db.Execute("DELETE FROM operation_receipts WHERE owner=$owner", ("$owner", NovelLibrary.DocumentNamespace));
+                    db.Execute("DELETE FROM owner_revisions WHERE owner=$owner", ("$owner", NovelLibrary.DocumentNamespace));
+                    return true;
+                }).GetAwaiter().GetResult();
+            }
         }
         public override Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
             int retainedBytes = 0, Action<Action>? commit = null) => base.WriteAsync(db =>
@@ -462,8 +491,7 @@ public static partial class NovelTests
                         int at = (y * width + x) * 4;
                         pixels[at] = pixels[at + 1] = pixels[at + 2] = (byte)(y * 255 / (height - 1)); pixels[at + 3] = 255;
                     }
-            var bitmap = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, pixels, width * 4);
-            var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap)); using var output = new MemoryStream(); encoder.Save(output); return output.ToArray();
+            return FixtureImages.Encode(width, height, pixels);
         }
         public Task<JsonElement> UploadSourceAsync(string module, string id, long revision, ReadOnlyMemory<byte> bytes, string? name = null, CancellationToken token = default) => throw new InvalidOperationException("Novel does not upload a second source installation");
     }

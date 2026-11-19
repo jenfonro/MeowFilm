@@ -23,17 +23,17 @@
 
 ## 应用内与全局组合键
 
-- `MediaShortcutWindowAttachment` 负责 WPF 应用内组合键与真实 `RegisterHotKey`／`WM_HOTKEY` 通道；默认 8 个应用内动作、7 个全局动作，译文显隐只有应用内键。
+- `MediaShortcutWindowAttachment` 负责 WinUI 应用内组合键与真实 `RegisterHotKey`／`WM_HOTKEY` 通道；默认 8 个应用内动作、7 个全局动作，译文显隐只有应用内键。
 - 全局开关关闭、录制或设置不可用时撤销注册并清除占用状态，不探测抢键；实际键位／全局开关变化和显式重新检测会真实重注册。仅 SMTC 开关、busy、Status、注册错误及值未改变的属性通知不打断注册或已排队请求。
 - 只有 `RegisterHotKey` 返回 1409 才显示“热键被占用”；拒绝访问、无效窗口／组合键、资源不足和其他失败分别映射固定错误，不暴露原始系统文本。释放失败保留真实所有权，宿主可重试清理。
 - 本地输入保护文本框、密码框、可编辑 ComboBox、菜单和 Popup。全局输入先用 `GetForegroundWindow` 与自有 HWND 判断归属，仅保护本 App 当前前台输入；后台遗留焦点以及其他程序的编辑状态不会阻断用户启用的全局控制。
-- 成功注册且同一动作的局部／全局组合键重叠时，由 `WM_HOTKEY` 唯一执行，WPF 只消费对应按键，消息先后顺序不产生双执行。本地按下／释放及 `IsRepeat`、全局 `MOD_NOREPEAT` 避免长按重复。
+- 成功注册且同一动作的局部／全局组合键重叠时，由 `WM_HOTKEY` 唯一执行，WinUI 只消费对应按键，消息先后顺序不产生双执行。本地按下／释放及 `KeyStatus.WasKeyDown`、全局 `MOD_NOREPEAT` 避免长按重复。
 - 注册 ID 按 DLL 的 Win32 全局 atom 范围分配；撤销后经窗口消息队列屏障才释放 ID。改绑、暂停或关闭后，旧消息不能命中新注册。
 
 ## 命令围栏
 
 - 每次发布都记录当前 owner、identity 和 generation。
-- WinRT 命令回到 WPF dispatcher 后再次核对同一身份；迟到命令不能操作新媒体。
+- WinRT 命令回到 `OwnerDispatcher` 所属的 DispatcherQueue 后再次核对同一身份；迟到命令不能操作新媒体。
 - 同时排队的系统请求最多 16 个。
 - play、next、previous 和 seek 经会话命令门串行。
 - pause 和 stop 先推进 interruption fence，使它们可以中断仍在等待 I/O 的旧 play／next 意图。

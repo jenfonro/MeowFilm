@@ -22,6 +22,7 @@ sealed partial class MusicDesktopLyricsWindow : Window
     private readonly DispatcherQueueTimer pointerObserver;
     private readonly MusicDesktopLyricsNative.SubclassProc hook;
     private readonly nint handle;
+    private readonly MusicDesktopLyricsInputRegion inputRegion;
     private readonly AccessibilitySettings accessibility = new();
     private readonly UISettings uiSettings = new();
     private MusicDesktopLyricsUnlockWindow? unlockWindow;
@@ -39,14 +40,17 @@ sealed partial class MusicDesktopLyricsWindow : Window
     {
         this.module = module; InitializeComponent(); LyricsFrame.DataContext = LineSurface.DataContext = module;
         handle = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        inputRegion = new(handle, LyricsFrame, () => HoverSurface.Visibility == Visibility.Visible || sizing);
         ExtendsContentIntoTitleBar = true;
         SystemBackdrop = new LyricsTransparentBackdrop();
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         { presenter.SetBorderAndTitleBar(false, false); presenter.IsAlwaysOnTop = true; presenter.IsMaximizable = false; presenter.IsMinimizable = false; }
         AppWindow.IsShownInSwitchers = false;
-        MusicDesktopLyricsNative.SetInputStyle(handle, false); MusicDesktopLyricsNative.SetResizableStyle(handle);
+        MusicDesktopLyricsNative.SetInputStyle(handle, false);
         hook = WindowMessage;
         if (!MusicDesktopLyricsNative.SetWindowSubclass(handle, hook, 1, 0)) throw new Win32Exception();
+        MusicDesktopLyricsNative.SetResizableStyle(handle);
+        LyricPresenter.SizeChanged += (_, _) => LineSurface.Height = LyricPresenter.ActualHeight;
         pointerObserver = DispatcherQueue.CreateTimer(); pointerObserver.Interval = TimeSpan.FromMilliseconds(100);
         pointerObserver.Tick += (_, _) => ObservePointer();
         module.PropertyChanged += ModuleChanged;
@@ -56,7 +60,7 @@ sealed partial class MusicDesktopLyricsWindow : Window
             if (args.DidPositionChange || args.DidSizeChange) QueueUnlockPlacement();
             if (!args.DidVisibilityChange) return;
             if (!AppWindow.IsVisible)
-            { pointerObserver.Stop(); ClosePopups(); unlockWindow?.Hide(); ShowHover(false); }
+            { pointerObserver.Stop(); ClosePopups(); unlockWindow?.Hide(); ShowHover(false); inputRegion.Refresh(); }
             else if (locked) { unlockWindow?.Show(); QueueUnlockPlacement(); }
             else if (LyricsFrame.IsLoaded) StartPointerObserver();
         };
@@ -64,6 +68,7 @@ sealed partial class MusicDesktopLyricsWindow : Window
         Closed += (_, _) =>
         {
             closed = true; pointerObserver.Stop(); ClosePopups(); unlockWindow?.Close(); unlockWindow = null;
+            inputRegion.Dispose();
             module.PropertyChanged -= ModuleChanged; uiSettings.ColorValuesChanged -= HighContrastChanged;
             MusicDesktopLyricsNative.RemoveWindowSubclass(handle, hook, 1); LyricsFrame.DataContext = LineSurface.DataContext = null;
         };
@@ -77,6 +82,7 @@ sealed partial class MusicDesktopLyricsWindow : Window
         }
         LyricsFrame.Loaded += (_, _) => { UpdatePresentation(); ApplyHighContrast(accessibility.HighContrast); StartPointerObserver(); };
     }
+    internal Task SynchronizeInputRegionAsync() => inputRegion.SynchronizeAsync();
     private double Dpi => MusicDesktopLyricsNative.GetDpiForWindow(handle) / 96d;
     internal void Show() { AppWindow.Show(false); StartPointerObserver(); }
     private void ModuleChanged(object? sender, PropertyChangedEventArgs e)
@@ -104,6 +110,10 @@ sealed partial class MusicDesktopLyricsWindow : Window
     }
     private nint WindowMessage(nint hwnd, uint message, nint wParam, nint lParam, nuint id, nuint data)
     {
+        // Keep the resize capability without restoring a native non-client
+        // frame around the transparent XAML surface. A window region otherwise
+        // reintroduces those frame insets when USER32 recalculates its shape.
+        if (message == 0x0083 && wParam != 0) return 0; // WM_NCCALCSIZE
         if (message == 0x0021) return 3;
         if (message == 0x0024 && lParam != 0)
         {
@@ -113,7 +123,7 @@ sealed partial class MusicDesktopLyricsWindow : Window
         }
         if (message == 0x0084 && !locked)
         { var hit = MusicDesktopLyricsNative.ResizeHitTest(hwnd, lParam); if (hit != 0) return hit; }
-        if (message == 0x0231) { sizing = true; geometryAtMove = TryCaptureGeometry(out var start) ? start : null; }
+        if (message == 0x0231) { sizing = true; inputRegion.Refresh(); geometryAtMove = TryCaptureGeometry(out var start) ? start : null; }
         else if (message == 0x0232 && sizing)
         {
             sizing = false;
@@ -124,6 +134,7 @@ sealed partial class MusicDesktopLyricsWindow : Window
             }
             else _ = module.Notify("桌面歌词位置和大小保存失败");
             geometryAtMove = null;
+            inputRegion.Refresh();
         }
         if (message == 0x02E0) QueueUnlockPlacement();
         return MusicDesktopLyricsNative.DefSubclassProc(hwnd, message, wParam, lParam);
@@ -195,7 +206,11 @@ sealed partial class MusicDesktopLyricsWindow : Window
         bool over = MusicDesktopLyricsNative.GetWindowRect(handle, out var rect) && point.X >= rect.Left && point.X < rect.Right && point.Y >= rect.Top && point.Y < rect.Bottom;
         ShowHover(over || sizing || settingsMenu is not null || colorWindow is not null);
     }
-    private void ShowHover(bool value) => HoverSurface.Visibility = Toolbar.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+    private void ShowHover(bool value)
+    {
+        HoverSurface.Visibility = Toolbar.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+        inputRegion.Refresh();
+    }
     private void Lyrics_PointerEntered(object sender, PointerRoutedEventArgs e) { if (!locked) ShowHover(true); }
     private void Lyrics_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
@@ -257,7 +272,8 @@ sealed partial class MusicDesktopLyricsWindow : Window
         else
         {
             MusicDesktopLyricsNative.SetInputStyle(handle, false); locked = false;
-            var unlock = unlockWindow; unlockWindow = null; unlock?.Close(); StartPointerObserver();
+            var unlock = unlockWindow; unlockWindow = null; unlock?.Close();
+            MusicDesktopLyricsNative.BringToTop(handle); StartPointerObserver();
         }
     }
     internal MusicDesktopLyricsWindowState CapturePresentationState()

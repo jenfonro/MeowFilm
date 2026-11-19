@@ -1,3 +1,5 @@
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
@@ -79,7 +81,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         files = new(store, [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
         Lyrics.CollectionChanged += OnLyricRowsChanged;
         InitializeLibrarySync();
-        vipPage = new(application, System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        vipPage = new(application, OwnerDispatcher.Current);
         InitializePlatformSettings();
         InitializeGlobalSurfaces();
         InitializeSearch();
@@ -483,8 +485,10 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         var selected = collection; var origin = loadGeneration;
         return RunAsync(async () =>
         {
-            if (selected is null || dialogs.SelectAudioFiles() is not { } paths) return;
+            if (selected is null || await dialogs.SelectAudioFilesAsync(View) is not { Length: > 0 } paths) return;
+            if (stopping || origin != loadGeneration || selected != collection) return;
             var grants = await files.GrantAsync(paths, lifetime.Token);
+            if (stopping || origin != loadGeneration || selected != collection) return;
             var songs = grants.Select(file => NativeMusicSong.CreateLocal(file.Id, file.Title)).ToArray();
             await Call("music.library.addSongs", new { id = selected.Id, ifRevision = selected.Revision, songs }, lifetime.Token);
             await RefreshAfterEdit(origin);

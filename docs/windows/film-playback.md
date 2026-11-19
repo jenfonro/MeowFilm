@@ -52,7 +52,7 @@ Shell 的公共搜索页用 `Destination.PageId` 进入与播放相同的历史�
 
 `IFilmNativeMedia.View`、`FilmPlaybackPage.MediaView` 和目录 `Presentation` 均使用 `Microsoft.UI.Xaml.FrameworkElement`。正式 `FilmVideoSurface` 是包含 `SwapChainPanel` 的 WinUI Grid；页面把唯一 `PlayerOverlay` 直接赋给它的 `Content`，画面、控制条与外壳覆盖使用同一 XAML 呈现树。没有 picture child HWND、外置控制窗口、`LayoutUpdated` 追位、屏幕坐标换算或复制裁剪；滚动、尺寸和层叠由共同树处理。普通测试 FrameworkElement 可直接挂到 `VideoHost`，不冒充原生 surface。
 
-页面加载后即挂载稳定 surface，不等待 `HasOutput` 才挂载；未挂载时不使用 parking 窗口。实际 Loaded／XamlRoot 可见性与提交等待、尺寸／合成缩放、swapchain 绑定和资源退休由 Media owner 负责。全屏／画中画移动同一 `PlayerFrame`、surface 和控件树，不新建播放实例、不重发媒体 commit；PiP 继续保留显式媒体 owner，关闭浮窗把同一树归还页面。此为当前代码接缝，真实缩放连续帧、应用覆盖及 HDR 输出尚须整合验证。Windows 外部播放器与 mpv 进程／IPC 调用链不在本实现内。
+页面加载后即挂载稳定 surface，不等待 `HasOutput` 才挂载；未挂载时不使用 parking 窗口。页面使用共享 `AspectRatioDecorator` 在布局测量中确定 16:9 画面尺寸，浮窗期间保留同尺寸的页面占位，避免内容高度坍塌改变浏览位置。实际 Loaded／XamlRoot 可见性与提交等待、尺寸／合成缩放、swapchain 绑定和资源退休由 Media owner 负责。全屏／画中画移动同一 `PlayerFrame`、surface 和控件树，不新建播放实例、不重发媒体 commit；PiP 继续保留显式媒体 owner，关闭浮窗把同一树归还页面。真实缩放连续帧、应用覆盖及 HDR 输出分别记录验证结果。Windows 外部播放器与 mpv 进程／IPC 调用链不在本实现内。
 
 鼠标进入／移动显示底栏；播放且非加载／缓冲、无打开菜单或键盘控件焦点时，静止 2200ms 后收起，离开画面立即收起。暂停、准备中或菜单展开时保持可操作。画面单击延迟 220ms 切换播放，双击只切换全屏；空格播放／暂停、左右键跳转 5 秒，控件自身键盘输入不被截走。进度拖动或进度条键盘调整只预览，释放才提交；失焦／捕获丢失取消，旧媒体身份不能跳转新片源。网盘／画质选择、换源和片源错误沿用准确业务命令；片源错误按服务器直接提交当前 attempt 的屏蔽与重匹配，忙碌时不重复提交，不再弹二次确认。倍速／比例失败恢复上次实际设置。
 

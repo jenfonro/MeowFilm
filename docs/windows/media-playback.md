@@ -21,13 +21,13 @@
 ## 电影核心：来源、构建与所有权
 
 - App 通过既有 `AppPlaybackCoordinator` 在音乐与电影实际提交之间互斥准入；等待准入不持有电影命令门。音乐实现见[独立音乐核心](music-audio-core.md)。
-- `FilmPlayback` 是 App 稳定持有的电影 owner，`FilmNativeMedia` 是影视业务适配。`FilmVideoSurface` 是 WinUI Grid，画面的 `SwapChainPanel` 与自定义控制内容同属该 Grid；全屏／画中画移动同一 surface，不创建另一套电影输出。
+- `FilmPlayback` 是 App 稳定持有的电影 owner，`FilmNativeMedia` 是影视业务适配。`FilmVideoSurface` 是 WinUI Grid，画面的 `SwapChainPanel` 与自定义控制内容同属该 Grid；全屏／画中画移动同一 surface，不创建另一套电影输出。挂载事件按当前 `IsLoaded`／`XamlRoot` 协调输出窗口与根订阅，旧窗口迟到的卸载通知不清空已归还页面的输出目标。
 - `apps/windows/native/FilmKernel` 将本项目 KSPlayer 派生 Apple 核心的解码／flush／有界帧队列机制移植为 Windows C/C++。上游 KSPlayer 固定为 `d0d063ab1f045735129b6617591ad2148d88d5db`，不直接构建官方 Apple Swift SDK，不编译其 UI、Demo 或 FFmpegKit shim。
 - [film-kernel.lock.json](../../apps/windows/native/FilmKernel/film-kernel.lock.json) 固定 Windows x86_64 UCRT 的 16 个源码来源、归档／树／许可证哈希和构建输入。FFmpeg 8.1.2、libplacebo 7.387.0、libass 0.17.4 与解码、字体、着色器和压缩依赖构成静态闭包；Jinja／MarkupSafe 是构建依赖，不是随 App 运行的 Python 服务。
 - `MeowFilm.Media.csproj` 经 `scripts/windows/build-film-kernel.ps1` 增量构建 `meowfilm_film_kernel.dll`、生成绑定身份及回执，复制到 `film-kernel/`。不手动替换 DLL，不将电影 DLL 放进 Node 载荷；音乐使用独立音频核心及其构建入口。
 - 电影 C ABI v2 暴露 owner、命令、轨道、快照及 composition surface，不暴露 FFmpeg 或 XAML 私有对象。`mfk_surface` 携带物理尺寸、合成 scale、可见性及仅用于显示能力查询的顶层 HWND；不使用视频 child HWND。每个候选有独立输入、解码和输出状态；prepare 可在未挂载页面时静默准备真实帧，只有同一 intent 的有效 commit 可发布当前输出。
 - `RuntimeMediaPlaybackIntent` 位于[独立意图文件](../../apps/windows/src/MeowFilm.Media/RuntimeMediaPlaybackIntent.cs)，保持 `MeowFilm.Media` namespace。同一实例绑定 prepare、commit 和 discard，`PreserveFrom` 指向准确同集 donor scope，不以新 attempt 身份推导旧输出。
-- `NativePlaybackScope` 的 `OwnerId = film`、`Identity` 和 generation 围住电影命令与结果。状态／事件回到所属 STA UI 线程；非可视 WPF Dispatcher 仅保留调度机制。原生线程只管理内核状态和受控回调，不反向调用父 owner 的命令门。
+- `NativePlaybackScope` 的 `OwnerId = film`、`Identity` 和 generation 围住电影命令与结果。状态／事件回到所属 STA UI 线程；非可视 DispatcherQueue 仅保留调度机制。原生线程只管理内核状态和受控回调，不反向调用父 owner 的命令门。
 
 ## 电影输入与网络边界
 
@@ -50,7 +50,7 @@
 
 ## 电影 D3D11 原生 HDR 与 Dolby Vision
 
-- D3D11VA 硬解与 libplacebo 共享 D3D11 设备／受保护 context；软件解码帧也映射到同一原生渲染链路。不经过 WPF 8-bit bitmap，也不以海报、10-bit 纹理或解码成功代替显示验收。
+- D3D11VA 硬解与 libplacebo 共享 D3D11 设备／受保护 context；软件解码帧也映射到同一原生渲染链路。不经过 8-bit bitmap，也不以海报、10-bit 纹理或解码成功代替显示验收。
 - 逐帧 DOVI RPU／mapping／颜色及扩展元数据参与 reshape 和颜色映射。Profile 7 所需的增强层按同一时间轴提取／解码／配对，非平凡 residual 经 NLQ 与基底合成；不能丢掉必要 EL 或只播 HDR10 基底冒充完整处理。
 - NAL-63 extraction 派生自 FFmpeg master `0834db516348d253b2c51f969188501d324c698d` 的 `dovi_split.c`，hvcE/RPU 本地修正适配锁定 8.1.2；不链接 master BSF ABI、mpv 或 libmpv。
 - composition swapchain 固定使用 `R16G16B16A16_FLOAT`／scRGB，交给同树 `SwapChainPanel`，不经过 8-bit 中转。实际显示能力、当前 Windows HDR 状态及 swapchain 支持必须满足输出要求。不自动开启显示器 HDR，不强制厂商 DV 模式。
@@ -66,7 +66,7 @@
 - 调用方取消、替换、撤权、停止、失败和关闭使旧代次失效并等待真实解码／呈现／音频线程、GPU 引用及 HTTP 回调退出。原生 release 返回前不得释放委托、transport 或租约；read/resource receipt 恰好退休一次。
 - `DisposeAsync` 在 UI 线程关闭前等待完成。commit 等待真实已加载且具有有效尺寸的 surface，取消仍使该等待结束；普通覆盖不取消媒体。准备／设备错误有稳定分类；公开错误不包含 URI、路径、请求头、密钥、响应正文或原生日志。
 - 固定来源、KSPlayer GPLv3 派生关系、FFmpeg LGPL、静态依赖的许可选择及 dovi_split 来源见 [NOTICE](../../LICENSES/NOTICE.md) 和 [电影内核补充声明](../../LICENSES/FilmKernel-THIRD-PARTY-NOTICES.txt)。Windows 打包复用既有正文并携带补充声明；静态链接的对应源码／重链接义务不因清单复制免除，`redistributionPermissionVerified` 仍为 false。
-- 电影核心此前已完成正式 Windows 编译；独立电影回归工程为 [MeowFilm.FilmKernel.Tests](../../apps/windows/tests/MeowFilm.FilmKernel.Tests/MeowFilm.FilmKernel.Tests.csproj)。本轮清理后的构建及测试须按实际执行结果记录，真实核心集成、WASAPI／renderer 的既有验证结果只覆盖各自执行范围。源码检查、许可证哈希、单元替身、独立 DLL、完整 App、桌面画面／字幕像素和真实业务 E2E 分别记录，不能互相外推。
+- 独立电影回归工程为 [MeowFilm.FilmKernel.Tests](../../apps/windows/tests/MeowFilm.FilmKernel.Tests/MeowFilm.FilmKernel.Tests.csproj)。构建及测试按实际执行结果记录，真实核心集成、WASAPI／renderer 的验证结果只覆盖各自执行范围。源码检查、许可证哈希、单元替身、独立 DLL、完整 App、桌面画面／字幕像素和真实业务 E2E 分别记录，不能互相外推。
 - 物理 HDR 输出尚未验收。Windows HDR 关闭的桌面上，已测真实 HDR/DV 输入 prepare 成功、attach 以 `FILM_HDR_DISPLAY_UNSUPPORTED` 拒绝，只验证准备路径与设备条件门，不证明实际 HDR 呈现。缺少用于连续播放及 seek 验收的合法长时 FEL 样本，不声明全 profile 兼容或长时 FEL 播放／seek 已验收。
 - 真实验收须覆盖硬解／软件解码、动态 RPU 与必要 EL、实际 HDR 色彩空间／位深和显示器状态、音高／设备消耗／音画同步、暂停／seek／倍速／尾帧、候选切换／取消／撤权／关闭，以及自定义 surface 挂载／裁剪。截图只核对布局／可见结果，不证明 HDR/DV 元数据、信号或完整 profile 兼容。
 

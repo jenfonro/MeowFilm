@@ -29,7 +29,7 @@
   </Border>
   <ScrollViewer x:Name="SettingsScroller" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
                 Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="通用设置">
-   <Grid Margin="0,0,12,0">
+   <Grid x:Name="SettingsPages" Margin="0,0,12,0">
     <StackPanel x:Name="AppearancePage">
     <Border Style="{StaticResource MeowFilm.SettingsSection}">
      <StackPanel>
@@ -60,7 +60,7 @@
       <StackPanel>
        <TextBlock Text="关闭主窗口时" Style="{StaticResource MeowFilm.SettingsSectionTitle}" Margin="0,0,0,8"/>
        <ComboBox x:Name="CloseBehaviorSelection" Width="190" HorizontalAlignment="Left"
-                 Style="{StaticResource MeowFilm.SettingsComboBox}" SelectedValuePath="Tag"
+                 Style="{StaticResource MeowFilm.SettingsComboBox}" UseSystemFocusVisuals="True"
                   IsEnabled="{Binding CanEdit}"
                  SelectionChanged="CloseBehavior_Changed" AutomationProperties.Name="关闭主窗口时">
         <ComboBoxItem Content="每次询问" Tag="Ask" AutomationProperties.Name="每次询问"/>

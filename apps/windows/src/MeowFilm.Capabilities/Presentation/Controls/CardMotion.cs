@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
+using System.Diagnostics;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Media.Animation;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -18,7 +19,7 @@ public sealed class CardMotion : DependencyObject
     private sealed class Motion
     {
         internal bool Pointer, Focus;
-        internal Storyboard? Storyboard;
+        internal EventHandler<object>? Rendering;
         internal IDisposable? Visibility;
     }
     private static readonly ConditionalWeakTable<FrameworkElement, Motion> Motions = new();
@@ -68,7 +69,7 @@ public sealed class CardMotion : DependencyObject
     internal static bool IsPointerActive(FrameworkElement element) =>
         Motions.TryGetValue(element, out var motion) && motion.Pointer;
     internal static bool HasActiveAnimation(FrameworkElement element) =>
-        Motions.TryGetValue(element, out var motion) && motion.Storyboard?.GetCurrentState() == ClockState.Active;
+        Motions.TryGetValue(element, out var motion) && motion.Rendering is not null;
     internal static void SetPointerActive(FrameworkElement element, bool active)
     {
         if (!Motions.TryGetValue(element, out var motion)) return;
@@ -83,21 +84,31 @@ public sealed class CardMotion : DependencyObject
             return;
         }
         double from = GetProgress(element), to = motion.Pointer || motion.Focus ? 1 : 0;
-        motion.Storyboard?.Stop(); motion.Storyboard = null; SetProgress(element, to);
+        Stop(motion);
         if (MusicVisuals.CanAnimate(element) && Math.Abs(from - to) > .001)
         {
-            Storyboard? animation = null;
-            animation = MusicVisuals.AnimateDouble(element, "(MeowFilm.Capabilities.CardMotion.Progress)", from, to,
-                TimeSpan.FromMilliseconds(to > 0 ? 220 : 160), () =>
-                {
-                    if (!ReferenceEquals(motion.Storyboard, animation)) return;
-                    motion.Storyboard?.Stop(); motion.Storyboard = null; SetProgress(element, to);
-                });
-            motion.Storyboard = animation;
+            long started = Stopwatch.GetTimestamp();
+            double duration = to > 0 ? .22 : .16;
+            // Progress drives several layout and brush properties on the UI thread.
+            // Use the render clock so no custom attached-property animation path is required.
+            motion.Rendering = (_, _) =>
+            {
+                double time = Math.Min(1, Stopwatch.GetElapsedTime(started).TotalSeconds / duration);
+                SetProgress(element, from + (to - from) * (1 - Math.Pow(1 - time, 3)));
+                if (time >= 1) Stop(motion);
+            };
+            CompositionTarget.Rendering += motion.Rendering;
         }
+        else SetProgress(element, to);
+    }
+    private static void Stop(Motion motion)
+    {
+        if (motion.Rendering is null) return;
+        CompositionTarget.Rendering -= motion.Rendering;
+        motion.Rendering = null;
     }
     private static void Reset(FrameworkElement element, Motion motion)
     {
-        motion.Storyboard?.Stop(); motion.Storyboard = null; SetProgress(element, 0);
+        Stop(motion); SetProgress(element, 0);
     }
 }

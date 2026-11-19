@@ -1,5 +1,6 @@
 using System.Text.Json;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 
 namespace MeowFilm.Windows.Tests;
@@ -251,25 +252,5 @@ public static class MusicSyncViewModelTests
         Check(model.CanEdit && model.Platforms[0].Favorites && !model.Platforms[1].Playlists);
     }
 
-    private static Task OnUi(Func<Task> action)
-    {
-        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(dispatcher));
-            _ = Run(); Dispatcher.Run();
-            async Task Run()
-            {
-                await Task.Yield();
-                try { await action(); completion.TrySetResult(); }
-                catch (Exception error) { completion.TrySetException(error); }
-                finally { dispatcher.InvokeShutdown(); }
-            }
-        });
-        thread.IsBackground = true;
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        return completion.Task;
-    }
+    private static Task OnUi(Func<Task> action) => TestUiHost.InvokeAsync(action);
 }

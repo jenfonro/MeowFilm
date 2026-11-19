@@ -4,7 +4,8 @@ using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
 using Windows.Foundation;
 using Windows.Graphics;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Media;
 using static MeowFilm.Windows.Tests.NativeMediaFixtures;
 using static MeowFilm.Windows.Tests.FFmpegVideoFixtures;
@@ -21,7 +22,7 @@ public static class FilmKernelIntegrationTests
             yield return Case("film kernel unmounted commit waits for actual " + completion, async () =>
             {
                 var kernel = new ObservedKernel();
-                var player = new FilmPlayback(Dispatcher.CurrentDispatcher, kernel);
+                var player = new FilmPlayback(OwnerDispatcher.Current, kernel);
                 Window? window = null;
                 try
                 {
@@ -497,7 +498,7 @@ public static class FilmKernelIntegrationTests
     private static async Task WithPlayer(Func<FilmPlayback, ObservedKernel, Task> body)
     {
         var kernel = new ObservedKernel();
-        var player = new FilmPlayback(Dispatcher.CurrentDispatcher, kernel) { Volume = 5 };
+        var player = new FilmPlayback(OwnerDispatcher.Current, kernel) { Volume = 5 };
         var window = new Window
         {
             Title = "Meowfilm film kernel validation", Content = player.VideoView

@@ -30,7 +30,7 @@ public sealed partial class ShellWindow
 
     private void OnPublicPageSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_suppressSelection || _isClosing || !ReferenceEquals(e.OriginalSource, PublicNavigationList)) return;
+        if (_suppressSelection || _isClosing || !ReferenceEquals(sender, PublicNavigationList)) return;
         if (PublicNavigationList.SelectedItem is IDesktopPage page)
             RunUiAction(() => ActivatePageAsync(_pages.Single(item => ReferenceEquals(item.Page, page))));
     }

@@ -1,6 +1,7 @@
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Recommendations;
 using MeowFilm.Platform.Storage;
@@ -51,7 +52,7 @@ public static partial class MusicRecommendationTests
 
         using var hold = new SynchronousRecommendationHold();
         store.NextWrite = hold;
-        var observation = hold.ObserveDispatcher(Dispatcher.CurrentDispatcher);
+        var observation = hold.ObserveDispatcher(OwnerDispatcher.Current);
         Task<JsonElement> step = Task.FromResult(default(JsonElement));
         try
         {
@@ -95,7 +96,7 @@ public static partial class MusicRecommendationTests
         };
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
-        var observation = hold.ObserveDispatcher(Dispatcher.CurrentDispatcher);
+        var observation = hold.ObserveDispatcher(OwnerDispatcher.Current);
         Task<bool> advance = Task.FromResult(false);
         try
         {
@@ -160,13 +161,13 @@ public static partial class MusicRecommendationTests
             WorkerThreadId = Environment.CurrentManagedThreadId;
             entered.Set(); release.Wait();
         }
-        internal Task<bool> ObserveDispatcher(Dispatcher dispatcher) => Task.Factory.StartNew(() =>
+        internal Task<bool> ObserveDispatcher(OwnerDispatcher dispatcher) => Task.Factory.StartNew(() =>
         {
             try
             {
                 if (!entered.Wait(TimeSpan.FromSeconds(10))) return false;
                 // Hang guards only: success requires actual dispatch while the synchronous work is still held.
-                return dispatcher.InvokeAsync(() => Volatile.Read(ref released) == 0, DispatcherPriority.Normal).Task
+                return dispatcher.EnqueueAsync(() => Volatile.Read(ref released) == 0, DispatcherQueuePriority.Normal)
                     .WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
             }
             catch (TimeoutException) { return false; }

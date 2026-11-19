@@ -116,20 +116,20 @@ public sealed record NovelAppearance
         static bool Nonnegative(double value) => double.IsFinite(value) && value >= 0;
         static string Color(string value, string fallback)
         {
-            try { _ = System.Windows.Media.ColorConverter.ConvertFromString(value); return value; }
+            try { _ = NovelTextStyle.Color(value); return value; }
             catch (Exception error) when (error is FormatException or ArgumentException or NotSupportedException) { return fallback; }
         }
         string font = FontFamily;
-        try { if (string.IsNullOrWhiteSpace(font)) font = fallback.FontFamily; _ = new System.Windows.Media.FontFamily(font); }
-        catch (ArgumentException) { font = fallback.FontFamily; }
-        double size = System.Windows.Documents.TextElement.FontSizeProperty.IsValidValue(FontSize) &&
-            System.Windows.Documents.TextElement.FontSizeProperty.IsValidValue(FontSize * 1.15) ? FontSize : fallback.FontSize;
+        if (!NovelTextStyle.ValidFamily(font)) font = fallback.FontFamily;
+        double size = NovelTextStyle.ValidSize(FontSize) ? FontSize : fallback.FontSize;
+        double lineHeight = NovelTextStyle.ValidLineHeight(size, LineHeight) ? LineHeight : fallback.LineHeight;
+        if (!NovelTextStyle.ValidLineHeight(size, lineHeight)) size = fallback.FontSize;
         return this with
         {
             Mode = Mode is "cover" or "slide" or "none" or "scroll" ? Mode : fallback.Mode,
             Conversion = ReadingConversion, Theme = Theme >= 0 && Theme < Themes.Length ? Theme : fallback.Theme,
             FontFamily = font, FontSize = size,
-            LineHeight = Positive(LineHeight) && Positive(size * LineHeight * 1.15) ? LineHeight : fallback.LineHeight,
+            LineHeight = lineHeight,
             ParagraphSpacing = Nonnegative(ParagraphSpacing) ? ParagraphSpacing : fallback.ParagraphSpacing,
             Margin = Nonnegative(Margin) && double.IsFinite(Margin * 2) ? Margin : fallback.Margin,
             ContentWidth = Positive(ContentWidth) ? ContentWidth : fallback.ContentWidth,

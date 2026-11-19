@@ -1,4 +1,5 @@
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Media;
 using static MeowFilm.Windows.Tests.AudioCoreFixtures;
 using FilmLease = MeowFilm.Windows.Tests.MediaResourceTests.Lease;
@@ -10,14 +11,14 @@ public static class AppPlaybackCoordinatorTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new("app.playback.native-owners-retire-before-opposite-output-start", () => Sta(Swap));
-        yield return new("app.playback.paused-music-preparation-does-not-stop-film", () => Sta(PausedPreparation));
-        yield return new("app.playback.held-music-admission-drains-queued-film-admission", () => Sta(QueuedAdmission));
+        yield return new("app.playback.native-owners-retire-before-opposite-output-start", () => TestUiHost.InvokeAsync(Swap));
+        yield return new("app.playback.paused-music-preparation-does-not-stop-film", () => TestUiHost.InvokeAsync(PausedPreparation));
+        yield return new("app.playback.held-music-admission-drains-queued-film-admission", () => TestUiHost.InvokeAsync(QueuedAdmission));
     }
 
     private static FilmPlayback Film(AppPlaybackCoordinator coordinator,
         Func<CancellationToken, Task<IDisposable>>? acquire = null) =>
-        new(Dispatcher.CurrentDispatcher, acquireOutput: acquire ?? coordinator.AcquireFilmAsync) { Volume = 0 };
+        new(OwnerDispatcher.Current, acquireOutput: acquire ?? coordinator.AcquireFilmAsync) { Volume = 0 };
 
     private static async Task StartFilm(FilmPlayback film, FilmLease lease, string identity = "film",
         CancellationToken token = default)

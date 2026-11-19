@@ -65,7 +65,7 @@ public sealed partial class ShellWindow
 
     private void OnModuleSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_suppressSelection || _isClosing || !ReferenceEquals(e.OriginalSource, ModuleNavigationList) ||
+        if (_suppressSelection || _isClosing || !ReferenceEquals(sender, ModuleNavigationList) ||
             ModuleNavigationList.SelectedItem is not ModuleSession session) return;
         RunUiAction(() => session.Module.Navigation.FirstOrDefault() is { } home
             ? NavigateFromUiAsync(session, home.Route)

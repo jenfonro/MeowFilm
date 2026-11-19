@@ -201,7 +201,8 @@ public sealed partial class MusicCapability
         return RunAsync(async () =>
         {
             if (epoch != lyricEpoch || selected != current || stopping) return;
-            if (dialogs.SelectLyricFile() is not { } path) return;
+            if (await dialogs.SelectLyricFileAsync(PlayerView) is not { } path) return;
+            if (epoch != lyricEpoch || selected != current || stopping) return;
             RetireLyrics(); epoch = lyricEpoch;
             using var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
             lyricCancellation = request; Changed(nameof(CanCancelLyrics));

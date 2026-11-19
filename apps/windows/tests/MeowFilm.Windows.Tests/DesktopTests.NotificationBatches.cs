@@ -4,7 +4,8 @@ using Windows.Foundation;
 using Windows.UI;
 using Windows.System;
 using Microsoft.UI.Xaml.Controls;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Windows.Tests;
@@ -34,8 +35,7 @@ public static partial class DesktopTests
 
             reads = view.Reads;
             enabled = true;
-            using (Dispatcher.CurrentDispatcher.DisableProcessing())
-                Task.Run(() =>
+                            Task.Run(() =>
                 {
                     for (int i = 0; i < 1000; i++) module.Notify("PositionSeconds");
                 }).WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();

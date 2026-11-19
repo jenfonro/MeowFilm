@@ -2,7 +2,9 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
 using Windows.System;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
+using DispatcherQueuePriority = Microsoft.UI.Dispatching.DispatcherQueuePriority;
 
 namespace MeowFilm.Desktop;
 
@@ -40,7 +42,7 @@ public sealed partial class ShellWindow
         try
         {
             // Do not change visibility or re-enter Close inside the native Closing callback.
-            await Dispatcher.Yield(DispatcherPriority.Background);
+            await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
             if (_isClosing || _isClosed || _sessionEnding) return;
             switch (_closePreferences!.Behavior)
             {

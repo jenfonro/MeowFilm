@@ -24,6 +24,36 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> SourcesSettingsCases()
     {
+        yield return Case("late script file picker result cannot import into a retired source settings owner", async () =>
+        {
+            await using var f = await Fixture.Create();
+            var settings = (MusicSettingsView)f.Module.SettingsView;
+            using var mount = new ReplicaMount(settings);
+            ReplicaAnchors(settings)[^1].IsChecked = true;
+            await Until(() => f.Module.Sources.Count > 0 && f.Module.CanEditScripts);
+            await Drain();
+            string path = Path.Combine(f.Root, "retired-picker-source.js");
+            await File.WriteAllTextAsync(path, TestScript(name: "不应安装"), new UTF8Encoding(false));
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var picked = new TaskCompletionSource<string[]?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            f.Dialogs.ScriptPicker = owner =>
+            {
+                True(ReferenceEquals(owner, settings), "script picker receives its source settings window owner");
+                entered.TrySetResult();
+                return picked.Task;
+            };
+            var importing = f.Module.ImportSourceAsync();
+            try
+            {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(8));
+                ReplicaAnchors(settings)[0].IsChecked = true;
+                await Drain();
+            }
+            finally { picked.TrySetResult([path]); await importing; }
+            Equal(0, (await f.Rpc("music.sources.list")).GetProperty("items").GetArrayLength());
+            True(f.Module.Sources.All(row => row.IsBuiltIn), "retired picker never installs or publishes a script");
+            Equal("", f.Module.Status);
+        });
         yield return Case("wrong-source form reads every queue page and persists an exact manual choice", async () =>
         {
             await using var f = await Fixture.Create();

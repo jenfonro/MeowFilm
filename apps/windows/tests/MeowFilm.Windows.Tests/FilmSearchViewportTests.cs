@@ -198,7 +198,7 @@ public static partial class MusicUiTests
     {
         int columns = ViewportColumns(f); double height = f.Panel.ItemHeight;
         var containers = ViewportContainers(f).ToArray();
-        // WinUI's native cache is measured in viewport lengths, not the removed WPF panel's row count.
+        // WinUI's native cache is measured in viewport lengths, independent of row count.
         double cache = f.Panel.CacheLength * f.Scroll.ViewportHeight;
         int bound = columns * ((int)Math.Ceiling((f.Scroll.ViewportHeight + 2 * cache) / height) + 2);
         True(containers.Length <= bound && containers.Length < f.Items.Items.Count,

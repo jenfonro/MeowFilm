@@ -1,3 +1,5 @@
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using System.ComponentModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -41,7 +43,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
     private readonly Func<CancellationToken, Task<RuntimeConnection>> capture;
     private readonly Func<FilmPlaybackPage, JsonElement, bool, CancellationToken, Task<FilmPlaybackOpen>>? prepareOpen;
     private readonly IFilmNativeMedia media;
-    private readonly System.Windows.Threading.Dispatcher dispatcher;
+    private readonly OwnerDispatcher dispatcher;
     private readonly SemaphoreSlim control = new(1, 1);
     private readonly SemaphoreSlim nativeWork = new(1, 1);
     private readonly SemaphoreSlim lifecycle = new(1, 1);
@@ -112,7 +114,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
         this.capture = capture;
         this.prepareOpen = prepareOpen;
         this.media = media;
-        dispatcher = System.Windows.Threading.Dispatcher.CurrentDispatcher;
+        dispatcher = OwnerDispatcher.Current;
         media.PropertyChanged += MediaChanged;
         media.Failed += MediaFailed;
         media.Ended += MediaEnded;
@@ -279,8 +281,8 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
             targetPage.FreezeSearchScope(FilmPlaybackOpen.OriginalSources(openParameters, searchScope));
             runtimeRevoke = captured.Revoked.Register(() =>
             {
-                if (!dispatcher.HasShutdownStarted)
-                    _ = dispatcher.BeginInvoke(new Action(() =>
+                if (!dispatcher.IsClosing)
+                    _ = dispatcher.EnqueueAsync(new Action(() =>
                     {
                         if (generation == ownerGeneration)
                         {
@@ -931,7 +933,7 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
             // Native publication changes several properties before its atomic
             // committed callback. Recheck this captured input after that turn,
             // not in the middle of a successful Film-to-Film handoff.
-            _ = dispatcher.BeginInvoke(new Action(() =>
+            _ = dispatcher.EnqueueAsync(new Action(() =>
             {
                 if (!ReferenceEquals(current, input) || HoldsNativeScope(input) ||
                     input.TerminalReported || input.Retiring || closing is not null) return;

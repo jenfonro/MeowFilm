@@ -135,8 +135,8 @@ public partial class FilmPlaybackView : UserControl
     {
         if (MetadataPanel is not null)
         {
-            MetadataPanel.Height = ActualWidth < 840 ? double.NaN : PlayerFrame.ActualHeight;
-            MetadataOverlay.MinHeight = ActualWidth < 840 ? 300 : PlayerFrame.ActualHeight;
+            MetadataPanel.Height = ActualWidth < 840 ? double.NaN : PlayerSlot.ActualHeight;
+            MetadataOverlay.MinHeight = ActualWidth < 840 ? 300 : PlayerSlot.ActualHeight;
         }
     }
 
@@ -294,7 +294,7 @@ public partial class FilmPlaybackView : UserControl
             rateIndex = RateBox.Items.Cast<ListBoxItem>().ToList().FindIndex(item =>
                 item.Tag is string value && double.Parse(value, CultureInfo.InvariantCulture) == rate);
             aspectIndex = AspectBox.Items.Cast<ListBoxItem>().ToList().FindIndex(item =>
-                Equals(item.Tag, boundPage?.PlaybackAspect ?? ""));
+                Equals(item.Tag, string.IsNullOrEmpty(boundPage?.PlaybackAspect) ? "default" : boundPage.PlaybackAspect));
             RateBox.SelectedIndex = rateIndex;
             AspectBox.SelectedIndex = aspectIndex;
         }
@@ -539,7 +539,7 @@ public partial class FilmPlaybackView : UserControl
         long ticket = ++aspectGeneration; string? identity = page.MediaIdentity;
         try
         {
-            await page.AspectAsync(text.Length == 0 ? null : text);
+            await page.AspectAsync(text == "default" ? null : text);
             if (ticket == aspectGeneration && ReferenceEquals(page, boundPage) && identity == page.MediaIdentity)
                 aspectIndex = selected;
         }
@@ -565,8 +565,7 @@ public partial class FilmPlaybackView : UserControl
     {
         if (boundPage is not { CanPlay: true } page || pictureInPicture && !page.HasOutput) return;
         ClosePlayerMenus(); playerWindow?.Close();
-        HeroGrid.Children.Remove(PlayerFrame);
-        VideoPicture.ClearValue(HeightProperty); PlayerFrame.VerticalAlignment = VerticalAlignment.Stretch;
+        PlayerSlot.Child = null;
         var host = new Grid { Background = new SolidColorBrush(Colors.Black), DataContext = page };
         host.Children.Add(PlayerFrame);
         var dialog = new FilmPlayerWindow(host) { Title = page.Title, MinWidth = 380, MinHeight = 214 };
@@ -579,13 +578,8 @@ public partial class FilmPlaybackView : UserControl
         {
             if (restored) return;
             restored = true; ClosePlayerMenus(); CancelPlayerInput();
-            host.Children.Remove(PlayerFrame); PlayerFrame.VerticalAlignment = VerticalAlignment.Top;
-            VideoPicture.SetBinding(HeightProperty, new Binding
-            {
-                Path = new PropertyPath("ActualWidth"), Source = VideoPicture,
-                Converter = new FilmPlayerHeightConverter()
-            });
-            HeroGrid.Children.Insert(0, PlayerFrame); page.RetainOwner(null);
+            host.Children.Remove(PlayerFrame);
+            PlayerSlot.Child = PlayerFrame; page.RetainOwner(null);
             if (ReferenceEquals(playerWindow, dialog)) { playerWindow = null; pip = false; }
             UpdatePlayerWindowState(); UpdateLayoutMode(); UpdateMedia(); ShowPlayerControls();
         }

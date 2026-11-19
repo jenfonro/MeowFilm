@@ -103,8 +103,8 @@ public sealed partial class MusicCapability
             int queued = 0;
             state.CacheProgress = () =>
             {
-                if (Presentation.Dispatcher.HasShutdownStarted || Interlocked.Exchange(ref queued, 1) != 0) return;
-                _ = Presentation.Dispatcher.InvokeAsync(() =>
+                if (Presentation.Dispatcher.IsClosing || Interlocked.Exchange(ref queued, 1) != 0) return;
+                _ = Presentation.Dispatcher.EnqueueAsync(() =>
                 {
                     Interlocked.Exchange(ref queued, 0);
                     if (CurrentRecovery(state) && ReferenceEquals(state.Media?.Bytes, source))

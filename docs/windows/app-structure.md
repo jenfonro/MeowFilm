@@ -11,7 +11,9 @@ Windows App
  ├─ AppHost → Desktop / Platform
  ├─ Capabilities → Desktop / Platform / Audio / Media
  └─ SystemMedia
-Audio / Media / Platform / Desktop → Core
+Audio / Media → Core / Threading
+Desktop / SystemMedia → Core / Threading
+Platform → Core
 ```
 
 Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口、一套导航与设置、一个原生播放协调、一个系统媒体会话。原生媒体基础设施由既有音频链和影视媒体共同使用；当前不装配下载能力。`SystemMedia` 只消费本模块的中性 `ISystemPlayback`／`ISystemMediaBackend`，项目不引用具体播放工程；音乐／电影 typed 投影由 App 装配。
@@ -38,7 +40,7 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 
 具体歌曲、歌词、音乐平台协议保留 `Music` 语义。跨多个职责的既有 partial 类型保持原公开 namespace，不为凑目录重新设计业务模型或复制 owner。中性控件包括 `CardMotion`、`EntryCard`、`Shelf`、`OverlayScrollChrome`、`SeekBar`、`SkipButton`；主题键为 `Capability.*`。WinUI 共享资源使用带库身份的 `ms-appx:///` URI，不靠移动后目录的相对搜索回退。
 
-Windows 呈现依赖精确锁定的 Windows App SDK，Shell、页面、播放器画面与覆盖内容处于同一 WinUI 合成树。保留的 WPF FrameworkReference 仅供非可视的调度与文字排版消费者，不承载另一个可视岛。播放器输出及绑定／解绑边界见[原生媒体实现](media-playback.md)；编译、控件测试和真实桌面呈现分别验收。
+Windows 呈现依赖精确锁定的 Windows App SDK，Shell、页面、播放器画面与覆盖内容处于同一 WinUI 合成树。`MeowFilm.Threading` 只封装 Windows App SDK `DispatcherQueue` 的 owner 调度，不依赖 XAML、Desktop 或业务。音视频核心仅依赖 Core 与该调度机制；阅读器的排版与绘制使用 Win2D／DirectWrite，不引用 WPF framework。播放器输出及绑定／解绑边界见[原生媒体实现](media-playback.md)；编译、控件测试和真实桌面呈现分别验收。
 
 ## 当前身份与唯一数据格式
 

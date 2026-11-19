@@ -1,7 +1,8 @@
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Media;
 using static MeowFilm.Windows.Tests.AudioCoreFixtures;
 
@@ -128,7 +129,7 @@ public static class AudioHandoffTests
 
     private static TestCase Test(string name, Func<Task> run) =>
         new("audio.handoff: " + name, () => Sta(run));
-    private static NativeAudioPlayback Player() => new(Dispatcher.CurrentDispatcher, audioOutput: NativeAudioOutput.Dummy);
+    private static NativeAudioPlayback Player() => new(OwnerDispatcher.Current, audioOutput: NativeAudioOutput.Dummy);
     private static Task Decoded(NativeAudioPlayback native) => AudioCoreFixtures.Until(() =>
     {
         if (native.LastErrorCode is { } error) throw new InvalidOperationException(error);

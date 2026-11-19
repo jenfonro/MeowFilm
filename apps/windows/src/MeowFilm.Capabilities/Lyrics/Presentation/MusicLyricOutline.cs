@@ -12,9 +12,10 @@ namespace MeowFilm.Capabilities;
 // compositor highlight remain native text, not shifted duplicate text layers.
 internal sealed class MusicLyricOutline
 {
-    private readonly Canvas layer = new() { IsHitTestVisible = false };
-    private readonly Image image = new() { IsHitTestVisible = false };
+    private readonly Canvas layer = new() { IsHitTestVisible = false, FlowDirection = FlowDirection.LeftToRight };
+    private readonly Image image = new() { IsHitTestVisible = false, Stretch = Stretch.Fill };
     private TextBlock? source;
+    private FrameworkElement? captureSurface;
     private SolidColorBrush? stroke;
     private double thickness;
     private long epoch;
@@ -27,7 +28,16 @@ internal sealed class MusicLyricOutline
         string Language, FlowDirection Direction, double Width, double Height,
         double ScaleX, double ScaleY, double PhaseX, double PhaseY, double Thickness);
     internal Task RenderWork { get; private set; } = Task.CompletedTask;
+    internal bool IsCurrent => CurrentKey() is not { } current || !queued && key == current;
+    internal Task EnsureCurrentAsync()
+    {
+        if (!IsCurrent) Queue();
+        return RenderWork;
+    }
     internal byte[]? Coverage => coverage;
+    internal readonly record struct InkSnapshot(FrameworkElement Surface, byte[] Alpha, int Width, int Height);
+    internal InkSnapshot? InputInk => key == CurrentKey() && inputInk is { } alpha ? new(image, alpha, width, height) : null;
+    private byte[]? inputInk;
 
     internal MusicLyricOutline(Grid host)
     {
@@ -36,7 +46,7 @@ internal sealed class MusicLyricOutline
         layer.Unloaded += (_, _) => Clear();
     }
 
-    internal void Update(TextBlock text, Brush? brush, double strokeThickness)
+    internal void Update(TextBlock text, FrameworkElement surface, Brush? brush, double strokeThickness)
     {
         if (!ReferenceEquals(source, text))
         {
@@ -44,8 +54,9 @@ internal sealed class MusicLyricOutline
             source = text; text.SizeChanged += SizeChanged; text.LayoutUpdated += LayoutChanged;
             key = null;
         }
+        captureSurface = surface;
         stroke = brush as SolidColorBrush; thickness = strokeThickness;
-        if (stroke is null || thickness <= 0) { Clear(); return; }
+        if (stroke is null || thickness <= 0 || string.IsNullOrWhiteSpace(text.Text)) { Clear(); return; }
         if (key == CurrentKey()) Paint();
         else Queue();
     }
@@ -57,38 +68,49 @@ internal sealed class MusicLyricOutline
     }
     private RasterKey? CurrentKey()
     {
-        if (source is not { IsLoaded: true, ActualWidth: > 0, ActualHeight: > 0, XamlRoot: { } root } text ||
-            !root.IsHostVisible || stroke is null || thickness <= 0) return null;
-        var transform = text.TransformToVisual(root.Content);
+        if (source is not { IsLoaded: true, XamlRoot: { } root } text ||
+            captureSurface is not { IsLoaded: true, ActualWidth: > 0, ActualHeight: > 0 } surface ||
+            !root.IsHostVisible || stroke is null || thickness <= 0 || string.IsNullOrWhiteSpace(text.Text)) return null;
+        var transform = surface.TransformToVisual(root.Content);
         var origin = transform.TransformPoint(new Point());
         var x = transform.TransformPoint(new Point(1, 0));
         var y = transform.TransformPoint(new Point(0, 1));
         double sx = Math.Sqrt(Math.Pow(x.X - origin.X, 2) + Math.Pow(x.Y - origin.Y, 2)) * root.RasterizationScale;
         double sy = Math.Sqrt(Math.Pow(y.X - origin.X, 2) + Math.Pow(y.Y - origin.Y, 2)) * root.RasterizationScale;
         return new(text.Text, text.FontFamily.Source, text.FontSize, text.Language, text.FlowDirection,
-            text.ActualWidth, text.ActualHeight, sx, sy,
+            surface.ActualWidth, surface.ActualHeight, sx, sy,
             origin.X * root.RasterizationScale % 1, origin.Y * root.RasterizationScale % 1, thickness);
     }
     private void Queue()
     {
         if (queued || !layer.IsLoaded || stroke is null || thickness <= 0) return;
         queued = true;
-        layer.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, async () =>
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        RenderWork = completion.Task;
+        if (!layer.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, async () =>
+        {
+            try
+            {
+                do { await RasterizeAsync(); }
+                while (layer.IsLoaded && CurrentKey() is { } current && key != current);
+                queued = false; completion.TrySetResult();
+            }
+            catch (Exception error) { queued = false; completion.TrySetException(error); throw; }
+        }))
         {
             queued = false;
-            RenderWork = RasterizeAsync();
-            await RenderWork;
-        });
+            completion.TrySetException(new InvalidOperationException("Lyric outline queue stopped."));
+        }
     }
     private async Task RasterizeAsync()
     {
-        if (CurrentKey() is not { } next || source is not { } text) return;
+        if (CurrentKey() is not { } next || source is not { } text) { Clear(); return; }
         if (key == next) { Paint(); return; }
         long request = ++epoch;
         var bitmap = new RenderTargetBitmap();
         int w = Math.Max(1, (int)Math.Ceiling(next.Width * next.ScaleX));
         int h = Math.Max(1, (int)Math.Ceiling(next.Height * next.ScaleY));
-        await bitmap.RenderAsync(text, w, h);
+        await bitmap.RenderAsync(captureSurface!, w, h);
         var buffer = await bitmap.GetPixelsAsync();
         if (request != epoch || !layer.IsLoaded || next != CurrentKey()) { Queue(); return; }
         byte[] pixels = new byte[buffer.Length];
@@ -105,6 +127,9 @@ internal sealed class MusicLyricOutline
             alpha[(y + padY) * width + x + padX] = opacity > 0
                 ? (byte)Math.Clamp(Math.Round(pixels[(y * bitmap.PixelWidth + x) * 4 + 3] / opacity), 0, 255) : (byte)0;
         coverage = Expand(alpha, width, height, next.Thickness * scaleX / 2, next.Thickness * scaleY / 2);
+        inputInk = new byte[alpha.Length];
+        for (int index = 0; index < alpha.Length; index++)
+            inputInk[index] = (byte)(alpha[index] + (coverage[index] * (255 - alpha[index]) + 127) / 255);
         image.Width = width / scaleX; image.Height = height / scaleY;
         Canvas.SetLeft(image, -padX / scaleX); Canvas.SetTop(image, -padY / scaleY);
         key = next; Paint();
@@ -153,6 +178,6 @@ internal sealed class MusicLyricOutline
     }
     internal void Clear()
     {
-        epoch++; queued = false; key = null; coverage = null; image.Source = null;
+        epoch++; key = null; coverage = inputInk = null; image.Source = null;
     }
 }

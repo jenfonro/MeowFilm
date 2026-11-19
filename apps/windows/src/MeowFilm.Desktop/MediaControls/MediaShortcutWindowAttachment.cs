@@ -2,8 +2,7 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
-using Key = System.Windows.Input.Key;
-using KeyInterop = System.Windows.Input.KeyInterop;
+using Key = Windows.System.VirtualKey;
 
 namespace MeowFilm.Desktop;
 
@@ -104,8 +103,8 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
                     errors[binding.Action] = "无法分配热键注册标识";
                     continue;
                 }
-                var result = native.Register(hwnd, allocation.Id, (uint)gesture.Modifiers | MediaShortcutNative.NoRepeat,
-                    (uint)KeyInterop.VirtualKeyFromKey(gesture.Key));
+                var result = native.Register(hwnd, allocation.Id, MediaShortcutInput.NativeModifiers(gesture.Modifiers) | MediaShortcutNative.NoRepeat,
+                    (uint)(int)(gesture.Key));
                 if (result.Success)
                 {
                     var registration = new Registration(allocation.Id, binding.Action, gesture);
@@ -178,8 +177,8 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
             handled = true;
             long packed = lParam.ToInt64();
             if (!stopped && settings.IsAvailable && !settings.IsRecording && settings.Preferences.GlobalEnabled &&
-                (uint)(packed & 0x0f) == (uint)registration.Gesture.Modifiers &&
-                ((packed >> 16) & 0xffff) == KeyInterop.VirtualKeyFromKey(registration.Gesture.Key) &&
+                (uint)(packed & 0xffff) == MediaShortcutInput.NativeModifiers(registration.Gesture.Modifiers) &&
+                ((packed >> 16) & 0xffff) == (int)(registration.Gesture.Key) &&
                 !MediaShortcutInput.ProtectsForeground(root, hwnd, native))
                 Start(registration.Action);
         }
@@ -198,7 +197,7 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
             MediaShortcutInput.Modifiers(), down: false, repeat: false)) args.Handled = true;
     }
 
-    internal bool ProcessKey(object? target, Key key, System.Windows.Input.ModifierKeys modifiers, bool down, bool repeat)
+    internal bool ProcessKey(object? target, Key key, Windows.System.VirtualKeyModifiers modifiers, bool down, bool repeat)
     {
         if (!down) return held.Remove(key);
         if (stopped || !settings.IsAvailable || settings.IsRecording ||

@@ -120,15 +120,18 @@ public static partial class FilmPlayerOverlayTests
             foreach (string action in new[] { "FullscreenButton", "PipButton" })
             {
                 Click(scene.Element<Button>(action));
-                await Until(() => scene.PlayerWindow is not null && overlay.IsLoaded);
+                await Until(() => scene.PlayerWindow is not null && overlay.IsLoaded && scene.Surface.Describe().Visible == 1);
                 var player = scene.PlayerWindow!;
                 Check(ReferenceEquals(scene.Surface.Content, overlay) && ReferenceEquals(overlay.XamlRoot, player.Root.XamlRoot) &&
                     DesktopVisual.Contains(player.Root, frame) && scene.Rig.Native.Scope == scope && scene.Rig.Native.Commits == 1 &&
-                    scene.Rig.Session.CanRetainMedia == (action == "PipButton"),
+                    scene.Rig.Session.CanRetainMedia == (action == "PipButton") &&
+                    scene.Surface.Describe().DisplayWindow == player.Handle,
                     "window presentation moves one stable media and control tree, retaining only explicit PiP");
                 player.Close();
-                await Until(() => scene.PlayerWindow is null && ReferenceEquals(overlay.XamlRoot, scene.View.XamlRoot));
-                Check(ReferenceEquals(scene.Surface.Content, overlay) && scene.Rig.Native.Stops == 0,
+                await Until(() => scene.PlayerWindow is null && ReferenceEquals(overlay.XamlRoot, scene.View.XamlRoot) &&
+                    scene.Surface.Describe().Visible == 1);
+                Check(ReferenceEquals(scene.Surface.Content, overlay) && scene.Rig.Native.Stops == 0 &&
+                    scene.Surface.Describe().DisplayWindow == scene.Window.Handle,
                     "returning to an active page neither retires nor recreates playback");
             }
     }
@@ -163,6 +166,9 @@ public static partial class FilmPlayerOverlayTests
         scene.Window.Close(); await Pump();
         Check(scene.Surface.Content is null && scene.Element<ContentControl>("VideoHost").Content is null,
             "unloaded page releases its presentation references before surface disposal");
+        scene.Surface.Dispose();
+        Check(scene.Surface.Describe() is { DisplayWindow: 0, Visible: 0 },
+            "a disposed surface cannot expose a retained XAML window as an output target");
         scene.Closed = true;
     }
 
@@ -175,11 +181,13 @@ public static partial class FilmPlayerOverlayTests
         Check(DesktopVisual.Contains(scene.Element<Grid>("PlayerChrome"), panel) && !Visible(panel) &&
             !Visible(rate) && !Visible(aspect), "rates and aspects live only in the initially closed picture menu");
         Check(rate.Items.Cast<ListBoxItem>().Select(item => (string)item.Tag).SequenceEqual(new[] { "0.5", "0.75", "1", "1.25", "1.5", "2" }) &&
-            aspect.Items.Cast<ListBoxItem>().Select(item => (string)item.Tag).SequenceEqual(new[] { "", "16:9", "4:3" }) &&
-            rate.SelectedIndex == 2 && aspect.SelectedIndex == 0,
+            aspect.Items.Cast<ListBoxItem>().Select(item => (string)item.Tag).SequenceEqual(new[] { "default", "16:9", "4:3" }),
             "the full supported control choices survive migration");
         int requests = scene.Rig.Runtime.Calls.Count, commands = scene.Rig.Native.Controls.Count;
         Click(scene.Element<Button>("SettingsButton")); await Pump();
+        await Until(() => rate.IsLoaded && aspect.IsLoaded);
+        Check(rate.SelectedIndex == 2 && aspect.SelectedIndex == 0,
+            $"the opened controls reflect the accepted default rate and aspect (rate={rate.SelectedIndex}, aspect={aspect.SelectedIndex})");
         Check(Visible(panel) && Visible(rate) && Visible(aspect) && DesktopVisual.Contains(panel, rate) &&
             DesktopVisual.Contains(panel, aspect) && scene.Rig.Runtime.Calls.Count == requests &&
             scene.Rig.Native.Controls.Count == commands &&
@@ -191,6 +199,12 @@ public static partial class FilmPlayerOverlayTests
             scene.Rig.Native.Controls.Count == commands + 2 && scene.Rig.Native.Commits == 1 &&
             scene.Rig.Native.SettledIdentity == "overlay" && scene.Rig.Native.Controls.Skip(commands).All(call => call.Scope == scene.Rig.Native.Scope),
             "settings only control the accepted occurrence");
+        aspect.SelectedIndex = 0;
+        await Until(() => string.IsNullOrEmpty(scene.Rig.Native.Aspect));
+        Check(string.IsNullOrEmpty(scene.Rig.Session.Aspect) && aspect.SelectedIndex == 0 &&
+            scene.Rig.Native.Controls.Count == commands + 3 && scene.Rig.Native.Commits == 1 &&
+            scene.Rig.Runtime.Calls.Count == requests && scene.Rig.Native.Controls[^1].Scope == scene.Rig.Native.Scope,
+            "the default aspect restores the accepted occurrence without a new business request or media commit");
         Click(scene.Element<Button>("SettingsButton")); await Pump();
         Check(!Visible(panel) && AutomationProperties.GetItemStatus(scene.Element<Button>("SettingsButton")) == "已收起",
             "the same settings menu closes in place with its collapsed accessible state");
@@ -259,7 +273,9 @@ public static partial class FilmPlayerOverlayTests
     private static async Task Buffering()
     {
         await using var scene = await Scene.Create(); await scene.Play();
-        var spinner = scene.Element<ProgressRing>("BufferSpinner"); int requests = scene.Rig.Runtime.Calls.Count;
+        var spinner = scene.Element<ProgressRing>("BufferSpinner");
+        var requests = scene.Rig.Runtime.Calls.Where(call => !IsProgress(call)).ToArray();
+        int reports = scene.ActionCount("media.progress");
         Check(!spinner.IsActive && !Visible(spinner), "settled output has no fabricated buffering");
         scene.Rig.Native.SetBuffering(true); await Until(() => spinner.IsActive);
         Check(!scene.Rig.Page.PlayerBusy && !spinner.IsHitTestVisible && DesktopVisual.Contains(scene.Surface, spinner),
@@ -267,8 +283,13 @@ public static partial class FilmPlayerOverlayTests
         await scene.Rig.Session.SetPausedAsync(true); await Until(() => !spinner.IsActive);
         await scene.Rig.Session.SetPausedAsync(false); await Until(() => spinner.IsActive);
         scene.Rig.Native.SetBuffering(false); await Until(() => !spinner.IsActive);
-        Check(scene.Rig.Runtime.Calls.Count == requests && scene.Rig.Native.Commits == 1,
+        Check(scene.Rig.Runtime.Calls.Where(call => !IsProgress(call)).SequenceEqual(requests) && scene.Rig.Native.Commits == 1,
             "buffering changes do not ask the runtime for data or replace media");
+        Check(scene.Rig.Runtime.Calls.Where(IsProgress).Skip(reports).All(call =>
+                FilmJson.Text(call.Parameters, "attemptId") == scene.Rig.Page.CurrentAttemptId),
+            "pause and resume report progress only for the accepted occurrence");
+        static bool IsProgress((string Method, System.Text.Json.JsonElement Parameters) call) =>
+            call.Method == "film.session.command" && FilmJson.Text(call.Parameters, "action") == "media.progress";
     }
 
     private static async Task NarrowWidths()
@@ -398,7 +419,8 @@ public static partial class FilmPlayerOverlayTests
             try { await scene.Rig.OpenAsync(); scene.View.DataContext = scene.Rig.Page; scene.Window.Show(); await Until(() => scene.Surface.IsLoaded); return scene; }
             catch { await scene.DisposeAsync(); throw; }
         }
-        internal T Element<T>(string name) where T : FrameworkElement => Named<T>(View, name);
+        // Generated x:Name fields retain the same elements across XamlRoot moves.
+        internal T Element<T>(string name) where T : FrameworkElement => Field<T>(View, name);
         internal Button Action(string name) => Visuals(View).OfType<Button>().Single(button => AutomationProperties.GetName(button) == name);
         internal DesktopWindow? PlayerWindow => DesktopWindow.GetWindow(Element<Grid>("PlayerFrame")) is { } owner && !ReferenceEquals(owner, Window) ? owner : null;
         internal int ActionCount(string action) => Rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == action);
@@ -412,9 +434,16 @@ public static partial class FilmPlayerOverlayTests
         }
         public async ValueTask DisposeAsync()
         {
-            PlayerWindow?.Close(); View.DataContext = null;
-            if (!Closed) Window.Close();
-            await Rig.DisposeAsync(); Surface.Dispose();
+            try { PlayerWindow?.Close(); }
+            finally
+            {
+                try { View.DataContext = null; }
+                finally
+                {
+                    try { if (!Closed) Window.Close(); }
+                    finally { try { await Rig.DisposeAsync(); } finally { Surface.Dispose(); } }
+                }
+            }
         }
     }
 }

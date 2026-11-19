@@ -20,7 +20,7 @@ public sealed partial class MusicCapability
     private readonly record struct AccountReadResult(long Epoch, long Observation, string? ErrorCode);
 
     // Selection identity is independent from hydrated account snapshots. Replacing
-    // a snapshot must not make WPF clear the selected platform mid-publication.
+    // a snapshot must not make WinUI clear the selected platform mid-publication.
     public IReadOnlyList<MusicCatalogPlatform> AccountPlatforms { get; } =
         [new("wy", "网易云音乐"), new("tx", "QQ 音乐"), new("kg", "酷狗音乐")];
     public string? SelectedAccountPlatform

@@ -46,8 +46,12 @@ internal class MediaShortcutNative
     public virtual nint ForegroundWindow => GetForegroundWindow();
     public virtual DependencyObject? FocusedElement(FrameworkElement root) => root.XamlRoot is { } xamlRoot
         ? FocusManager.GetFocusedElement(xamlRoot) as DependencyObject : null;
-    public virtual bool OwnsWindow(nint window, nint candidate) =>
-        candidate != 0 && (candidate == window || GetAncestor(candidate, 3) == window);
+    public virtual bool OwnsWindow(nint window, nint candidate)
+    {
+        for (nint current = candidate; current != 0; current = GetWindow(current, 4))
+            if (current == window) return true;
+        return false;
+    }
 
     public virtual bool HasMenuOrChildFocus(nint window, FrameworkElement root)
     {
@@ -96,7 +100,7 @@ internal class MediaShortcutNative
     [DllImport("user32.dll", ExactSpelling = true)]
     private static extern nint GetForegroundWindow();
     [DllImport("user32.dll", ExactSpelling = true)]
-    private static extern nint GetAncestor(nint hwnd, uint flags);
+    private static extern nint GetWindow(nint hwnd, uint command);
     [DllImport("user32.dll", ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);

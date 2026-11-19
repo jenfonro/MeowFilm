@@ -6,7 +6,7 @@
 
 分类入口沿用音乐频道的同一图标字形及 Shell 公共导航项模板。发现页正文、次要文字、操作按钮、选中标签及应用浮层标题复用公共基础样式，普通文字统一使用系统常规字体，层级只通过字号区分；不另建字体或文字配色。紧凑发现布局及封面比例仍由小说视图拥有。
 
-发现、书籍、设置、编辑器及阅读可视面使用 WinUI，普通控件、菜单和应用内确认层由同一 Shell 呈现树负责剪裁、层叠与命中，不保留 WPF 可视岛或独立窗口追位。保留的 WPF 能力限于正文 `TextFormatter`／离屏光栅、字体与颜色校验、图片解码等非可视工作；这不是把 WPF 排版称为 WinUI 排版，也不改变小说数据、规则或存储 owner。
+发现、书籍、设置、编辑器及阅读可视面使用 WinUI，普通控件、菜单和应用内确认层由同一 Shell 呈现树负责剪裁、层叠与命中，不保留 WPF 可视岛或独立窗口追位。正文排版与绘制使用 Win2D／DirectWrite，字体枚举使用 `CanvasTextFormat`，颜色使用 WinUI 类型转换，图片使用 SkiaSharp 解码；小说数据、规则或存储 owner 不变。
 
 ## 首页与分类
 
@@ -71,7 +71,7 @@
 
 已有正文时，显式目录刷新及来源 revision 变化触发的自动重载先准备候选 Book、identity 和目录，完成章节匹配与正文处理后才整体提交章、正文及锚点；失败或取消保留原活动组合。重排目录按旧目标章节匹配，继续跨章使用新索引；首次仅加载 metadata 不记历史。元数据保存保留持久历史的锚点和对应正文签名，进度保存再同步新签名。
 
-`NovelReadingSurface` 是 WinUI `Grid`，仍由非可视 WPF `TextFormatter`／`TextLine` 完成段落与 UTF-16 排版；当前页用 `DrawingVisual` 和 `RenderTargetBitmap` 离屏光栅化，再复制到普通树内的 WinUI `WriteableBitmap`／`Image`。排版只在正文或布局输入变化时重算，绘制请求在 UI dispatcher 合并，当前尺寸的像素缓冲复用；DPI 取 `XamlRoot.RasterizationScale`，尺寸、主题和系统高对比变化触发重排。覆盖与平移动画使用同树图像的 WinUI transform／storyboard，不移动其他窗口。提供无动画分页与上下滚动，保留指针、滚轮、键盘和自动阅读交互。页号不持久化；字号、窗口尺寸和图片尺寸变化重新从正文锚点定位。`ratio` 采用正文 UTF-16 长度、图片固定权重组成的逻辑进度，与 `blockIndex` 配合恢复图片内相对位置，不使用全章布局像素推算长图切片。只保留当前章节显示内容及当前视口的正文图片，图片离开视口取消并释放运行器引用，正文按显示宽度解码，不套用封面 512 像素缩略规则。小说与元数据受信二进制图片统一使用 `IRuntimeImageClient.ReadImageAsync(reference, cancellationToken)` 完整读取，已删除带 `maximumBytes` 的重载；公共HTTP和受信图片读取均不套用编码缓存的单项4MiB配额。原生 byte[] / MemoryStream 表示边界由类型本身处理，不用最大值模拟无限额。自动阅读在手动交互、离页、窗口失焦及末尾暂停。
+`NovelReadingSurface` 是 WinUI `Grid`，由 Win2D／DirectWrite `CanvasTextLayout` 完成段落与 UTF-16 排版；`NovelPageRaster` 将当前页绘制到复用的 `CanvasRenderTarget`，再写入普通树内 `Image` 的 `CanvasImageSource`，翻页快照持有独立表面。排版只在正文或布局输入变化时重算，绘制请求在 UI DispatcherQueue 合并，当前尺寸的 GPU 目标复用；DPI 取 `XamlRoot.RasterizationScale`，尺寸、主题和系统高对比变化触发重排。覆盖与平移动画使用同树图像的 WinUI transform／storyboard，不移动其他窗口。提供无动画分页与上下滚动，保留指针、滚轮、键盘和自动阅读交互。页号不持久化；字号、窗口尺寸和图片尺寸变化重新从正文锚点定位。`ratio` 采用正文 UTF-16 长度、图片固定权重组成的逻辑进度，与 `blockIndex` 配合恢复图片内相对位置，不使用全章布局像素推算长图切片。只保留当前章节显示内容及当前视口的正文图片，图片离开视口取消并释放运行器引用，正文按显示宽度解码，不套用封面 512 像素缩略规则。小说与元数据受信二进制图片统一使用 `IRuntimeImageClient.ReadImageAsync(reference, cancellationToken)` 完整读取，已删除带 `maximumBytes` 的重载；公共HTTP和受信图片读取均不套用编码缓存的单项4MiB配额。原生 byte[] / MemoryStream 表示边界由类型本身处理，不用最大值模拟无限额。自动阅读在手动交互、离页、窗口失焦及末尾暂停。
 
 布局完成通过 `LayoutCompleted` 刷新页码与章内比例标签，不发送 `PositionChanged` 或启动进度保存计时器。首页、分类及搜索封面同样按实际裁剪祖先和滚动视口取得需求；首屏外不获取，滚出清像素并取消、实际排空后释放来源引用，滚回重新获取，退休请求迟到不覆盖新封面。取消关闭后，来源 owner 的明确恢复通知重新接纳仍在视口内的封面，无需滚动或重建控件；通知随已加载且可见的布局观察订退，隐藏／卸载不获取。真实获取失败不因普通布局通知自动重试。
 
@@ -96,4 +96,4 @@ dotnet build apps/windows/app/MeowFilm.Windows.App.csproj --configuration Releas
 
 管理与导入行为、当前协议字段和净化表单遵循[共同管理契约](../common/novel/reading.md#书源与替换管理)。原生书源表单仅提供 Legado 和 QYSG；独立 Cat 输入不由该表单转换。净化导入只消费当前 `pattern/isEnabled/order` 等字段，旧别名只作为普通扩展保留，不回填或改变当前规则语义。
 
-`NovelSettingsView` 的书源与替换标签使用 Desktop 的 `ManagementList`、`ManagementForm`、`ManagementImportSelection`。列表为 WinUI 虚拟化 `ListView`，编辑器为禁用增删／拖动标签的原生 `TabView`／表单，行启用控件使用共享开关样式。设置编辑与网络导入由 `NovelUi.DialogAsync` 挂入 Shell 的 `PlayerDialogHost`，复用桌面浮层的主题边框／表面、输入行分隔并在应用窗口内居中。书源编辑器使用前述固定标题／操作区、协议下拉和未保存确认；普通导入与规则浮层保留原提交、取消及 Escape 语义。文件选择器显式绑定当前 `DesktopWindow.Handle`，剪贴板使用 Windows DataTransfer；这些平台能力不成为来源或配置 owner。二维码图片仍由非可视 WPF 图像解码配合锁定的 ZXing.Net 0.16.11 本地读取，Apache-2.0 许可随 Windows 清单发布。
+`NovelSettingsView` 的书源与替换标签使用 Desktop 的 `ManagementList`、`ManagementForm`、`ManagementImportSelection`。列表为 WinUI 虚拟化 `ListView`，编辑器为禁用增删／拖动标签的原生 `TabView`／表单，行启用控件使用共享开关样式。设置编辑与网络导入由 `NovelUi.DialogAsync` 挂入 Shell 的 `PlayerDialogHost`，复用桌面浮层的主题边框／表面、输入行分隔并在应用窗口内居中。书源编辑器使用前述固定标题／操作区、协议下拉和未保存确认；普通导入与规则浮层保留原提交、取消及 Escape 语义。文件选择器显式绑定当前 `DesktopWindow.Handle`，剪贴板使用 Windows DataTransfer；这些平台能力不成为来源或配置 owner。二维码图片由 SkiaSharp 解码，再由锁定的 ZXing.Net 0.16.11 本地读取，Apache-2.0 许可随 Windows 清单发布。

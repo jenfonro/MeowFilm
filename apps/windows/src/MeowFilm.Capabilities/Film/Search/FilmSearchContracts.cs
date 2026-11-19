@@ -69,7 +69,7 @@ internal static class FilmSearchJson
             if (unit.ValueKind != JsonValueKind.Number || !unit.TryGetUInt16(out ushort value)) return "";
             units[index++] = (char)value;
         }
-        // WPF text is a projection only; the original JSON remains the transport identity.
+        // WinUI text is a projection only; the original JSON remains the transport identity.
         return System.Text.Encoding.Unicode.GetString(System.Text.Encoding.Unicode.GetBytes(units));
     }
 }

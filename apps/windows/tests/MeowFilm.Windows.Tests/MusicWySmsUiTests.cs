@@ -6,7 +6,8 @@ using Microsoft.UI.Xaml;
 using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
@@ -20,7 +21,7 @@ public static class MusicWySmsUiTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("native-app-same-owner-send-login-reopen-state-logout-no-script", Flow);
-        yield return Case("real-WPF-explicit-send-submit-password-clear-and-phone-retained", Controls);
+        yield return Case("real-WinUI-explicit-send-submit-password-clear-and-phone-retained", Controls);
         yield return Case("visible-idle-and-countdown-never-send-or-poll", Idle);
         yield return Case("hide-send-unconfirmed-clears-input-no-commit-unknown", () => Hide("sms.send"));
         yield return Case("hide-identity-cancels-no-late-login", () => Hide("sms.login"));
@@ -294,7 +295,7 @@ public static class MusicWySmsUiTests
     private sealed class Dialogs : IMusicDialogs
     {
         public bool Confirm(string message, string title) => true;
-        public string[]? SelectAudioFiles() => null;
+        public Task<string[]?> SelectAudioFilesAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.FromResult<string[]?>(null);
     }
     private sealed class SmsScenario
     {

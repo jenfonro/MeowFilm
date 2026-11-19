@@ -1,5 +1,6 @@
 using System.Text.Json;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 
 namespace MeowFilm.Capabilities;
 
@@ -46,13 +47,13 @@ public sealed partial class MusicCapability
     private void UnsubscribeSearch() => application.SearchChanged -= SearchChanged;
     private void SearchChanged(JsonElement snapshot)
     {
-        if (Presentation.Dispatcher.HasShutdownStarted || Presentation.Dispatcher.HasShutdownFinished) return;
-        _ = Presentation.Dispatcher.InvokeAsync(() =>
+        if (Presentation.Dispatcher.IsClosing) return;
+        _ = Presentation.Dispatcher.EnqueueAsync(() =>
         {
             if (disposed || stopping) return;
             try { AcceptSearchSnapshot(snapshot); }
             catch { SearchStatus = "搜索结果格式无效"; SearchBindings(); }
-        }, DispatcherPriority.Background);
+        }, DispatcherQueuePriority.Low);
     }
     private void SearchBindings()
     {
@@ -298,11 +299,11 @@ public sealed partial class MusicCapability
         if (!restoreScroll) return;
         long generation = loadGeneration, epoch = searchEpoch;
         string view = searchView;
-        _ = Presentation.Dispatcher.InvokeAsync(() =>
+        _ = Presentation.Dispatcher.EnqueueAsync(() =>
         {
             if (!stopping && generation == loadGeneration && epoch == searchEpoch && IsSearchPage && view == searchView)
                 Presentation.RestoreScroll(scroll);
-        }, DispatcherPriority.Loaded);
+        }, DispatcherQueuePriority.Low);
     }
 
     private (bool Prefix, bool Changed) SearchSongDelta(SongRow[] next)

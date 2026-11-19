@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 
@@ -31,7 +32,7 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
     });
     private static readonly char[] InputWhitespace =
         "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff".ToCharArray();
-    private readonly Dispatcher dispatcher = Dispatcher.CurrentDispatcher;
+    private readonly OwnerDispatcher dispatcher = OwnerDispatcher.Current;
     private readonly HashSet<Task> pending = [];
     private CancellationTokenSource reads = new();
     private Task? preparation, disposal;

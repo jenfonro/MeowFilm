@@ -1,11 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
-    <UseWPF>true</UseWPF>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AudioKernelRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..\..\.cache\windows-audio-kernel'))</AudioKernelRoot>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../MeowFilm.Threading/MeowFilm.Threading.csproj" />
     <ProjectReference Include="../MeowFilm.Core/MeowFilm.Core.csproj" />
     <PackageReference Include="NAudio.Core" Version="[3.3.0]" />
     <PackageReference Include="NAudio.Wasapi" Version="[3.3.0]" />

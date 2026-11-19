@@ -21,9 +21,9 @@ export function installerFixture(t) {
     writeFileSync(join(payload, path), typeof content === 'object' ? JSON.stringify(content) : content);
   };
   for (const file of ['meowfilm.exe', 'meowfilm.dll', 'coreclr.dll', 'hostfxr.dll', 'hostpolicy.dll',
-    'PresentationFramework.dll', 'Example.dll', 'zh-Hans/Example.resources.dll', 'libSkiaSharp.dll']) write(file);
+    'Example.dll', 'zh-Hans/Example.resources.dll', 'libSkiaSharp.dll']) write(file);
   write('meowfilm.runtimeconfig.json', { runtimeOptions: {
-    includedFrameworks: ['Microsoft.NETCore.App', 'Microsoft.WindowsDesktop.App'].map(name => ({ name, version: '10.0.0' })),
+    includedFrameworks: ['Microsoft.NETCore.App'].map(name => ({ name, version: '10.0.0' })),
   } });
   write('meowfilm.deps.json', { runtimeTarget: { name: 'net10.0/win-x64' }, targets: {
     'net10.0/win-x64': { 'Example/1': {

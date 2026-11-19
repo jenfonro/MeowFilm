@@ -38,6 +38,8 @@ public static class MusicLyricOutlineTests
             {
                 f.Control.RenderTransform = new ScaleTransform { ScaleX = scale, ScaleY = scale };
                 Canvas.SetLeft(f.Control, 20 + phase); Canvas.SetTop(f.Control, 12 + phase);
+                await f.Outline.EnsureCurrentAsync();
+                Check(f.Outline.IsCurrent, "current transformed coverage is explicitly scheduled by its owner");
                 await f.Ready(); await VerifyFillAndStroke(f, scale);
             }
             var box = new Viewbox { Width = 105, Stretch = Stretch.Uniform, StretchDirection = StretchDirection.DownOnly };
@@ -55,16 +57,23 @@ public static class MusicLyricOutlineTests
                 () => { control.Text = "العربية"; control.FlowDirection = FlowDirection.RightToLeft; }
             })
             {
-                var before = f.Outline.Coverage; change(); await f.Ready();
+                var before = f.Outline.Coverage; change();
+                control.UpdateLayout();
+                await f.Outline.RenderWork;
+                Check(f.Outline.IsCurrent && f.Outline.InputInk is not null,
+                    "the work published at invalidation completes with current text and layout coverage");
+                await f.Ready();
                 Check(!ReferenceEquals(before, f.Outline.Coverage), "changed native text inputs refresh coverage");
                 Check(DesktopTestUi.Visuals(control).OfType<TextBlock>().All(text => text.FontWeight.Weight == 400),
                     "ordinary glyphs remain system regular text");
                 await VerifyFillAndStroke(f);
             }
             control.Text = "   "; await f.Ready();
+            Check(f.Outline.Coverage is null && f.Outline.InputInk is null, "whitespace releases old outline and input geometry");
             Check((await f.Capture()).Where((_, index) => index % 4 == 3).All(alpha => alpha == 0),
                 "whitespace has no outline rectangle");
             control.Text = ""; await f.Ready();
+            Check(f.Outline.Coverage is null && f.Outline.InputInk is null, "empty text retains no old glyph resources");
             Check((await f.Capture()).All(value => value == 0), "empty text is transparent");
         });
         yield return Case("colors high contrast and word progress reuse glyphs and outline while preserving clipping", async () =>
@@ -81,6 +90,12 @@ public static class MusicLyricOutlineTests
             word.Position = 2; await f.Ready(); var full = await f.Capture();
             Check(word.WordProgress == 1 && !normal.SequenceEqual(half) && !half.SequenceEqual(full),
                 "zero half and full progress paint different native foregrounds");
+            word.Position = 0; await f.Ready();
+            var reset = await f.Capture();
+            Check(normal.SequenceEqual(reset), "returning to zero fully removes the highlighted text pixels");
+            word.Position = 2; await f.Ready();
+            var restored = await f.Capture();
+            Check(full.SequenceEqual(restored), "returning to full restores the complete highlight");
             double clipX = 20 + word.ActualWidth / 2; int left = 0, right = 0;
             for (int y = 0; y < Fixture.Height; y++)
             for (int x = 0; x < Fixture.Width; x++)
@@ -194,9 +209,9 @@ public static class MusicLyricOutlineTests
     {
         internal const int Width = 900, Height = 160;
         internal Control Control { get; }
-        internal Canvas Surface { get; } = new() { Width = Width, Height = Height };
+        internal Canvas Surface { get; } = new() { Width = Width, Height = Height, Background = new SolidColorBrush(Colors.Transparent) };
         internal MusicLyricOutline Outline => Control is MusicDesktopLyricTextView plain ? plain.Outline : ((MusicLyricWordView)Control).Outline;
-        private readonly Canvas referenceCanvas = new() { Width = Width, Height = Height };
+        private readonly Canvas referenceCanvas = new() { Width = Width, Height = Height, Background = new SolidColorBrush(Colors.Transparent) };
         private readonly TextBlock reference = new();
         private readonly DesktopWindow window;
         private Viewbox? box, referenceBox;
@@ -228,8 +243,22 @@ public static class MusicLyricOutlineTests
             if (box is null) { Canvas.SetLeft(reference, Canvas.GetLeft(Control)); Canvas.SetTop(reference, Canvas.GetTop(Control)); }
             else referenceBox!.Width = box.Width;
             DesktopTestUi.WindowRoot(window).UpdateLayout(); await TestUiHost.LoadedAsync(DesktopTestUi.WindowRoot(window));
-            await DesktopTestUi.DrainAsync(); await Outline.RenderWork; await DesktopTestUi.DrainAsync();
-            DesktopTestUi.WindowRoot(window).UpdateLayout();
+            if (DesktopVisual.Contains(Surface, Control) && DesktopVisual.IsVisible(Control))
+            {
+                await TestUiHost.LoadedAsync(Control);
+                do
+                {
+                    DesktopTestUi.WindowRoot(window).UpdateLayout();
+                    await Outline.EnsureCurrentAsync();
+                    DesktopTestUi.WindowRoot(window).UpdateLayout();
+                    var rendered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    EventHandler<object> handler = (_, _) => rendered.TrySetResult();
+                    CompositionTarget.Rendering += handler;
+                    try { await rendered.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+                    finally { CompositionTarget.Rendering -= handler; }
+                } while (!Outline.IsCurrent);
+            }
+            else await DesktopTestUi.DrainAsync();
         }
         internal Task<byte[]> Capture() => DesktopTestUi.Pixels(Surface, Width, Height);
         internal Task<byte[]> ReferenceFrame() => DesktopTestUi.Pixels(referenceCanvas, Width, Height);

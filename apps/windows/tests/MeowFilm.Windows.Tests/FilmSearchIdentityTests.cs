@@ -4,7 +4,8 @@ using System.Text.Json.Nodes;
 using Microsoft.UI.Xaml;
 using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 
 namespace MeowFilm.Windows.Tests;
@@ -108,10 +109,10 @@ public static class FilmSearchIdentityTests
     private static async Task Status()
     {
         await using var f = new SearchFixture();
-        int mappings = 0; var owner = Dispatcher.CurrentDispatcher;
+        int mappings = 0; var owner = OwnerDispatcher.Current;
         await using var service = new FilmSearchService(f.Runtime.CaptureConnectionAsync, f.Sources, path =>
         {
-            Check(!owner.CheckAccess(), "image-path presentation mapping must not run on the Dispatcher");
+            Check(!owner.HasThreadAccess, "image-path presentation mapping must not run on the Dispatcher");
             Interlocked.Increment(ref mappings); return path;
         });
         var card = Tmdb("tmdb:tv:7", "/poster.jpg");
@@ -162,10 +163,10 @@ public static class FilmSearchIdentityTests
             await using var f = new SearchFixture();
             using var release = new ManualResetEventSlim();
             var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var owner = Dispatcher.CurrentDispatcher;
+            var owner = OwnerDispatcher.Current;
             await using var service = new FilmSearchService(f.Runtime.CaptureConnectionAsync, f.Sources, path =>
             {
-                Check(!owner.CheckAccess(), "JSON presentation mapping must stay off Dispatcher");
+                Check(!owner.HasThreadAccess, "JSON presentation mapping must stay off Dispatcher");
                 if (path == "/blocked.jpg") { entered.TrySetResult(); release.Wait(); }
                 return path;
             });

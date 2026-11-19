@@ -8,7 +8,9 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
+using DispatcherQueuePriority = Microsoft.UI.Dispatching.DispatcherQueuePriority;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
@@ -396,7 +398,7 @@ public static partial class NovelTests
         try
         {
             await module.NavigateAsync(NovelCapability.HomeRoute, default);
-            await Until(() => dialogs.IsOpen);
+            await Until(() => Find<Button>(dialogs).Any(button => Equals(button.Content, "重试") && button.IsLoaded));
             var surface = Find<Border>(dialogs).Single(b => AutomationProperties.GetName(b) == "发现加载失败");
             Check(module.Notice.Contains("发现加载失败") &&
                 !Find<TextBlock>(module.View).Any(t => t.Text.Contains("发现加载失败")),
@@ -411,7 +413,7 @@ public static partial class NovelTests
             Check(module.DiscoverBooks.Single().Name == "重试结果" && module.ExploreSource?.InstallationId == "a");
 
             fail = true; await module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, true);
-            await Until(() => dialogs.IsOpen);
+            await Until(() => Find<Button>(dialogs).Any(button => Equals(button.Content, "重试") && button.IsLoaded));
             hold = true;
             DesktopTestUi.Invoke(Find<Button>(dialogs).Single(b => Equals(b.Content, "重试")));
             await accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -442,6 +444,8 @@ public static partial class NovelTests
         var window = GeneralAppearanceTests.Window(module.View); window.Show();
         try
         {
+            await NovelTestUi.LoadedAsync(module.View);
+            await Until(() => Find<Button>(module.View).Any(button => AutomationProperties.GetName(button) == "加入书架" && button.IsLoaded));
             DesktopTestUi.Invoke(Find<Button>(module.View).Single(b => AutomationProperties.GetName(b) == "加入书架"));
             await Until(() => module.Notice == "已加入书架");
             Check(module.Library.Entries.Single() == saved && module.Session is null,
@@ -543,6 +547,7 @@ public static partial class NovelTests
         window.Show();
         try
         {
+            await NovelTestUi.LoadedAsync(module.SidebarView);
             var import = Find<Button>(module.SidebarView).Single(b => AutomationProperties.GetName(b) == "导入书源");
             DesktopTestUi.Invoke(import);
             await Until(() => dialogs.IsOpen && Find<TextBox>(dialogs).Any(t =>
@@ -568,7 +573,7 @@ public static partial class NovelTests
                 module.Sources.Sources.Single().InstallationId == "a" && emitted.Count == 0 && !server.HasConnection,
                 "Preview changed the native configuration or emitted an import receipt before confirmation.");
             var second = Find<CheckBox>(dialogs).Single(c => AutomationProperties.GetName(c) == "选择 书源c");
-            second.IsChecked = false; DesktopTestUi.Invoke(second);
+            DesktopTestUi.Invoke(second); Check(second.IsChecked == false);
             DesktopTestUi.Invoke(Find<Button>(dialogs).Single(b => Equals(b.Content, "确定导入")));
             await Until(() => !dialogs.IsOpen && runtime.SourceStore.Writes == 1 && emitted.Count == 1);
             var saved = JsonSerializer.Deserialize<NovelSourceConfigurationSnapshot>(runtime.SourceStore.Bytes!, NovelJson.Options)!;
@@ -656,7 +661,7 @@ public static partial class NovelTests
             Check(sourcePicker.Focus(FocusState.Programmatic), "The source selector could not receive keyboard focus.");
             sourcePicker.SelectedItem = module.Sources.Sources.Single(s => s.InstallationId == "a");
             await Until(() => !module.LoadingDiscovery && module.ExploreSource?.InstallationId == "a");
-            await Dispatcher.Yield(DispatcherPriority.Input);
+            await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
             Check(DesktopTestUi.HasFocus(Find<ComboBox>(module.View).Single(c => AutomationProperties.GetAutomationId(c) == "novel.discovery.source")),
                 "Changing source lost the source selector's keyboard focus.");
             Check(Find<RadioButton>(module.View).Where(r => r.GroupName == "novel.discovery.channels")
@@ -667,9 +672,11 @@ public static partial class NovelTests
             var filter = Find<Grid>(module.View).Single(g => AutomationProperties.GetName(g) == "当前频道筛选");
             var kindPicker = Find<RadioButton>(filter).Single(r =>
                 AutomationProperties.GetAutomationId(r) == "novel.discovery.kind:https://catalog.invalid/new");
-            Check(kindPicker.Focus(FocusState.Programmatic), "A source category could not receive keyboard focus."); kindPicker.IsChecked = true;
+            Check(kindPicker.Focus(FocusState.Programmatic), "A source category could not receive keyboard focus.");
+            await Until(() => DesktopTestUi.HasFocus(kindPicker));
+            kindPicker.IsChecked = true;
             await Until(() => !module.LoadingDiscovery && module.ExploreKind?.Title == "源站新作");
-            await Dispatcher.Yield(DispatcherPriority.Input);
+            await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
             Check(DesktopTestUi.HasFocus(Find<RadioButton>(module.View).Single(r => Equals(r.Content, "源站新作"))),
                 "Changing category lost the category control's keyboard focus.");
             await DesktopTestUi.DrainAsync(); root.UpdateLayout();
@@ -716,7 +723,7 @@ public static partial class NovelTests
             var search = new TextBox { Width = 160, Height = 32, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
             Grid.SetColumn(search, 1); root.Children.Add(search); Check(search.Focus(FocusState.Programmatic));
             await module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, true);
-            await Dispatcher.Yield(DispatcherPriority.Input);
+            await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
             Check(DesktopTestUi.HasFocus(search), "Discovery presentation stole focus from the surrounding search control.");
         }
         finally { host.Close(); }

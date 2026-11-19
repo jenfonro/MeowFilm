@@ -14,7 +14,8 @@ using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Input;
 using System.Globalization;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.PlaybackCache;
@@ -138,15 +139,13 @@ public static partial class MusicOfficialPlaybackScopeTests
             int uiThread = Environment.CurrentManagedThreadId, cancelledOn = 0, stops = f.Output.Stops;
             using var registration = playbackToken.Register(() =>
                 Volatile.Write(ref cancelledOn, Environment.CurrentManagedThreadId));
-            await WithDelayedAccountNotification(f, "wy", () =>
-            {
-                Check(!f.App.IsOfficialPlaybackCurrent("wy", "fixture", 7),
-                    "authority is revoked before its UI notification is dispatched");
-                Check(!playbackToken.IsCancellationRequested && Volatile.Read(ref cancelledOn) == 0 &&
-                    f.Output.HasMedia && f.Output.Stops == stops,
-                    "the publishing worker must not cancel or mutate UI-owned playback");
-                return Task.CompletedTask;
-            });
+            // Keep the owner thread occupied until the background event has returned.
+            Task.Run(() => f.App.Revoke("wy")).WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            Check(!f.App.IsOfficialPlaybackCurrent("wy", "fixture", 7),
+                "authority is revoked before its UI notification is dispatched");
+            Check(!playbackToken.IsCancellationRequested && Volatile.Read(ref cancelledOn) == 0 &&
+                f.Output.HasMedia && f.Output.Stops == stops,
+                "the publishing worker must not cancel or mutate UI-owned playback");
             await Until(() => !f.Output.HasMedia);
             Check(playbackToken.IsCancellationRequested && Volatile.Read(ref cancelledOn) == uiThread &&
                 f.Output.StopThread == uiThread && f.Output.Stops == stops + 1,
@@ -485,43 +484,10 @@ public static partial class MusicOfficialPlaybackScopeTests
     }
     private static async Task WithDelayedAccountNotification(Scene scene, string platform, Func<Task> whileQueued)
     {
-        var dispatcher = scene.Module.Presentation.Dispatcher;
-        var queued = new List<DispatcherOperation>();
-        int publishingThread = 0;
-        void Hold(object? sender, DispatcherHookEventArgs args)
-        {
-            if (Environment.CurrentManagedThreadId != Volatile.Read(ref publishingThread)) return;
-            args.Operation.Priority = DispatcherPriority.Inactive;
-            queued.Add(args.Operation);
-        }
-        try
-        {
-            // Pause dispatch while the worker posts, then retain its callbacks at
-            // Inactive priority so new playback can settle before the old notice.
-            using (dispatcher.DisableProcessing())
-            {
-                dispatcher.Hooks.OperationPosted += Hold;
-                try
-                {
-                    Task.Run(() =>
-                    {
-                        Check(!dispatcher.CheckAccess(), "the notification must originate off-dispatcher");
-                        Volatile.Write(ref publishingThread, Environment.CurrentManagedThreadId);
-                        try { scene.App.Revoke(platform); }
-                        finally { Volatile.Write(ref publishingThread, 0); }
-                    }).WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
-                }
-                finally { dispatcher.Hooks.OperationPosted -= Hold; }
-            }
-            Check(queued.Count > 0 && queued.All(operation => operation.Status == DispatcherOperationStatus.Pending),
-                "the real notification callbacks remain queued during the observed action");
-            await whileQueued();
-        }
-        finally
-        {
-            foreach (var operation in queued)
-                if (operation.Status == DispatcherOperationStatus.Pending) operation.Priority = DispatcherPriority.Normal;
-        }
+        // The authority is immediately fenced; event delivery can lag behind a new selection.
+        await Task.Run(() => scene.App.Revoke(platform, notify: false));
+        try { await whileQueued(); }
+        finally { await Task.Run(() => scene.App.NotifyRevoked(platform)); }
         await MusicTestUi.Drain();
     }
     private sealed class Scene : IAsyncDisposable
@@ -645,11 +611,12 @@ public static partial class MusicOfficialPlaybackScopeTests
             add { invalidated += value; Inner.AccountDetailsInvalidated += value; }
             remove { invalidated -= value; Inner.AccountDetailsInvalidated -= value; }
         }
-        internal void Revoke(string platform)
+        internal void Revoke(string platform, bool notify = true)
         {
             lock (authority) revoked.Add(platform);
-            invalidated?.Invoke(platform);
+            if (notify) NotifyRevoked(platform);
         }
+        internal void NotifyRevoked(string platform) => invalidated?.Invoke(platform);
         internal void Renew(string platform)
         {
             lock (authority)
@@ -904,6 +871,6 @@ public static partial class MusicOfficialPlaybackScopeTests
     private sealed class Dialogs : IMusicDialogs
     {
         public bool Confirm(string message, string title) => true;
-        public string[]? SelectAudioFiles() => null;
+        public Task<string[]?> SelectAudioFilesAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.FromResult<string[]?>(null);
     }
 }

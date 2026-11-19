@@ -3,7 +3,8 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
@@ -228,6 +229,19 @@ public static partial class NovelTests
             Check(reopened.Appearance.Mode == "cover" && reopened.Appearance.Conversion == "simplified" && reopened.Appearance.Theme == 1 &&
                 reopened.Appearance.Background == NovelAppearance.Themes[1].Background && reopened.Appearance.Foreground == NovelAppearance.Themes[1].Foreground);
             RawNumber(StoredLibrary(store).GetProperty("appearance"), "margin", "32");
+            foreach (var (field, value) in new[] { ("字号", "1e100"), ("字号", "1e-100"), ("行距倍数", "1e100"), ("文字颜色", "invalid-color") })
+            {
+                string previous = Input(field).Text; Input(field).Text = value;
+                try { _ = editor.Read(); throw new InvalidOperationException("Invalid reading typography was accepted: " + field); }
+                catch (Exception error) when (error is InvalidDataException or FormatException) { }
+                finally { Input(field).Text = previous; }
+            }
+            var invalid = new NovelAppearance { FontSize = double.Epsilon, LineHeight = 1e100,
+                FontFamily = "bad\0family", Background = "invalid-color", Foreground = "" }.ForReading();
+            var defaults = new NovelAppearance();
+            Check(invalid.FontSize == defaults.FontSize && invalid.LineHeight == defaults.LineHeight &&
+                invalid.FontFamily == defaults.FontFamily && invalid.Background == defaults.Background && invalid.Foreground == defaults.Foreground,
+                "Unrenderable persisted appearance was not projected to valid DirectWrite values.");
         }
         finally { host.Close(); await library.PrepareShutdownAsync(); }
     }
